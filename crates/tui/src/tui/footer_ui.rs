@@ -181,7 +181,7 @@ pub(crate) fn footer_working_label_frame(now_ms: u64, fancy_animations: bool) ->
 
 #[cfg(test)]
 mod tests {
-    use super::footer_working_label_frame;
+    use super::{footer_working_label_frame, one_line_summary};
 
     #[test]
     fn footer_working_label_frame_is_static_without_fancy_animations() {
@@ -189,6 +189,13 @@ mod tests {
         assert_eq!(footer_working_label_frame(399, false), 0);
         assert_eq!(footer_working_label_frame(1_600, false), 0);
         assert_eq!(footer_working_label_frame(1_600, true), 4);
+    }
+
+    #[test]
+    fn one_line_summary_strips_ansi_before_collapsing_text() {
+        let summary = one_line_summary("read \x1b[38;2;6;174;242mfile.rs\x1b[0m", 80);
+        assert_eq!(summary, "read file.rs");
+        assert!(!summary.contains("38;2"));
     }
 }
 

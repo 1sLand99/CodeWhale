@@ -286,4 +286,14 @@ mod tests {
         let label = concise_shell_command_label("cd /tmp/repo && cargo test --workspace", 80);
         assert_eq!(label, "cargo test --workspace");
     }
+
+    #[test]
+    fn concise_shell_command_label_strips_ansi_before_collapsing_text() {
+        let label = concise_shell_command_label(
+            "cd /repo && \x1b[38;2;6;174;242mcargo test\x1b[0m --workspace",
+            80,
+        );
+        assert_eq!(label, "cargo test --workspace");
+        assert!(!label.contains("38;2"));
+    }
 }

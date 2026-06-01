@@ -618,6 +618,12 @@ mod tests {
 /// are left untouched.
 pub fn sanitize_for_kimi(schema: &mut serde_json::Value) {
     if let Some(obj) = schema.as_object_mut() {
+        // Recurse first so a type injected into this object's alternatives is
+        // not immediately removed again by processing that freshly-mutated item.
+        for (_, v) in obj.iter_mut() {
+            sanitize_for_kimi(v);
+        }
+
         // If this object has `type` + `anyOf`/`oneOf`, push `type` into
         // each item and remove it from the parent. Otherwise leave it alone.
         let should_push =
@@ -634,10 +640,6 @@ pub fn sanitize_for_kimi(schema: &mut serde_json::Value) {
                     }
                 }
             }
-        }
-        // Recurse into all sub-objects and arrays
-        for (_, v) in obj.iter_mut() {
-            sanitize_for_kimi(v);
         }
     } else if let Some(arr) = schema.as_array_mut() {
         for v in arr.iter_mut() {
@@ -674,6 +676,50 @@ mod kimi_tests {
         let any_of = handle["anyOf"].as_array().unwrap();
         assert_eq!(any_of[0]["type"], "string");
         assert_eq!(any_of[1]["type"], "null");
+    }
+
+    #[test]
+    fn kimi_sanitize_injects_missing_anyof_item_types() {
+        let mut schema = json!({
+            "type": "object",
+            "anyOf": [
+                {"properties": {"path": {"type": "string"}}},
+                {"required": ["url"], "properties": {"url": {"type": "string"}}}
+            ]
+        });
+
+        sanitize_for_kimi(&mut schema);
+
+        assert!(
+            !schema.as_object().unwrap().contains_key("type"),
+            "parent type should be removed"
+        );
+        let any_of = schema["anyOf"].as_array().unwrap();
+        assert_eq!(any_of[0]["type"], "object");
+        assert_eq!(any_of[1]["type"], "object");
+    }
+
+    #[test]
+    fn kimi_sanitize_preserves_type_injected_into_nested_anyof_item() {
+        let mut schema = json!({
+            "type": "object",
+            "anyOf": [
+                {
+                    "anyOf": [
+                        {"properties": {"path": {"type": "string"}}}
+                    ]
+                }
+            ]
+        });
+
+        sanitize_for_kimi(&mut schema);
+
+        let outer_item = &schema["anyOf"][0];
+        assert_eq!(outer_item["type"], "object");
+        assert!(
+            !schema.as_object().unwrap().contains_key("type"),
+            "outer parent type should be removed"
+        );
     }
 
     #[test]

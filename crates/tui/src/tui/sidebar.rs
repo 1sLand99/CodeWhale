@@ -1955,7 +1955,8 @@ mod tests {
         AutoSidebarState, SidebarAgentRow, SidebarHoverSection, SidebarHoverState,
         SidebarSubagentSummary, SidebarToolRow, SidebarWorkChecklistItem, SidebarWorkStrategyStep,
         SidebarWorkSummary, ToolRowOrder, auto_sidebar_panels, editorial_tool_rows,
-        subagent_panel_lines, task_panel_lines, work_panel_empty_hint, work_panel_lines,
+        normalize_activity_text, subagent_panel_lines, task_panel_lines, work_panel_empty_hint,
+        work_panel_lines,
     };
     use crate::config::Config;
     use crate::palette::PaletteMode;
@@ -2031,6 +2032,13 @@ mod tests {
                 .any(|row| row.name == "gh issue create" && row.status == ToolStatus::Failed),
             "newest-first rows must keep a failure newer than a later-seen success: {rendered:?}"
         );
+    }
+
+    #[test]
+    fn normalize_activity_text_strips_ansi_before_collapsing_text() {
+        let text = normalize_activity_text("running \x1b[48;2;10;17;32mtool\x1b[0m now");
+        assert_eq!(text, "running tool now");
+        assert!(!text.contains("48;2"));
     }
 
     #[test]
