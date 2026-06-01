@@ -34,6 +34,10 @@ The entry applies only when the launched workspace path matches the table key.
 The legacy `[projects."/absolute/path/to/project"]` table is also accepted for
 this user-owned override.
 
+In interactive mode, the per-project overlay
+`<workspace>/.codewhale/config.toml` is applied after this user entry. A
+project-level `allow_shell = false` still takes precedence.
+
 ### Per-project overlay (#485)
 
 When the TUI starts in a workspace that contains a

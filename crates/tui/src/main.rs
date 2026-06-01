@@ -6906,6 +6906,20 @@ allow_shell = false
     }
 
     #[test]
+    fn user_workspace_overlay_accepts_legacy_projects_table() {
+        let tmp = tempdir().expect("tempdir");
+        let workspace = tmp.path().join("project");
+        fs::create_dir_all(&workspace).expect("mkdir workspace");
+        let raw = format!("[projects.'{}']\nallow_shell = true\n", workspace.display());
+        let doc: toml::Value = toml::from_str(&raw).expect("parse config");
+
+        let mut config = Config::default();
+        merge_user_workspace_config_from_doc(&mut config, &doc, &workspace);
+
+        assert_eq!(config.allow_shell, Some(true));
+    }
+
+    #[test]
     fn user_workspace_overlay_ignores_non_matching_workspace() {
         let tmp = tempdir().expect("tempdir");
         let configured_workspace = tmp.path().join("configured");
