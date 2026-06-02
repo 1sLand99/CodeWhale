@@ -15,8 +15,9 @@ machines running Windows.
 | 1 | Confirm Windows version: `winver` → 10 build 17763+ or 11 | ☐ |
 | 2 | Ensure the user account is a **standard user** (not a local admin). The installer does not require elevation. | ☐ |
 | 3 | Verify outbound HTTPS (port 443) is open to `api.openai.com` (or whichever LLM provider the course uses). | ☐ |
-| 4 | Obtain the installer: download `CodeWhaleSetup.exe` from the [latest release](https://github.com/Hmbown/CodeWhale/releases/latest) or from your department mirror. | ☐ |
-| 5 | (Optional) Verify SHA-256 hash matches the published manifest. | ☐ |
+| 4 | Obtain the installer: download `CodeWhaleSetup.exe` from a v0.8.50+ [release](https://github.com/Hmbown/CodeWhale/releases/latest) or from your department mirror. | ☐ |
+| 5 | Verify SHA-256 hash against `codewhale-artifacts-sha256.txt` before deploying. | ☐ |
+| 6 | Note that the public installer is currently unsigned and may trigger Windows SmartScreen unless your organization signs it before deployment. | ☐ |
 
 ---
 
@@ -25,7 +26,7 @@ machines running Windows.
 ### Option A — Silent install (recommended for imaging / SCCM / Intune)
 
 ```powershell
-# Run as admin or via deployment tool
+# Run as the target user or via a per-user deployment tool
 CodeWhaleSetup.exe /S
 ```
 
@@ -52,13 +53,15 @@ New-Item -ItemType Directory -Force -Path $binDir
 
 # 2. Download binaries (adjust URL to your mirror or release tag)
 $tag = (Invoke-RestMethod -Uri "https://api.github.com/repos/Hmbown/CodeWhale/releases/latest").tag_name
-Invoke-WebRequest -Uri "https://github.com/Hmbown/CodeWhale/releases/download/$tag/codewhale-x64.exe"     -OutFile "$binDir\codewhale.exe"
-Invoke-WebRequest -Uri "https://github.com/Hmbown/CodeWhale/releases/download/$tag/codewhale-tui-x64.exe" -OutFile "$binDir\codewhale-tui.exe"
+Invoke-WebRequest -Uri "https://github.com/Hmbown/CodeWhale/releases/download/$tag/codewhale-windows-x64.exe"     -OutFile "$binDir\codewhale.exe"
+Invoke-WebRequest -Uri "https://github.com/Hmbown/CodeWhale/releases/download/$tag/codewhale-tui-windows-x64.exe" -OutFile "$binDir\codewhale-tui.exe"
 
 # 3. Add to user PATH (persistent)
 $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if ($currentPath -notlike "*$binDir*") {
-    [Environment]::SetEnvironmentVariable("Path", "$currentPath;$binDir", "User")
+$pathParts = @($currentPath -split ";" | Where-Object { $_ })
+if ($pathParts -notcontains $binDir) {
+    $newPath = (@($pathParts) + $binDir) -join ";"
+    [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
 }
 
 # 4. Refresh current session PATH
@@ -78,6 +81,19 @@ Run these on **each machine** (or spot-check a sample):
 | 3 | `codewhale-tui --version` | Prints version string | ☐ |
 
 If `codewhale` is not found, the user may need to open a **new** terminal window for PATH changes to take effect.
+
+## Lab validation checklist
+
+Run this once on a clean lab machine, and again on a machine that already has a
+previous CodeWhale install:
+
+| # | Scenario | Expected result | Done? |
+|---|----------|-----------------|-------|
+| 1 | Install with no existing CodeWhale PATH entry | Adds exactly `%LOCALAPPDATA%\Programs\CodeWhale\bin` | ☐ |
+| 2 | Install twice | PATH is not duplicated | ☐ |
+| 3 | Install with a neighboring PATH entry such as `C:\Tools\CodeWhale\bin-extra` | Neighboring entry is preserved | ☐ |
+| 4 | Upgrade by installing a newer `CodeWhaleSetup.exe` over an older one | Apps & Features version and both `--version` outputs match the new build | ☐ |
+| 5 | Silent uninstall with `Uninstall.exe /S` | Files, uninstall registry entry, and only the exact installer PATH entry are removed | ☐ |
 
 ---
 
@@ -129,7 +145,7 @@ Remove-Item -Recurse -Force (Split-Path $binDir)
 
 # Remove from PATH
 $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
-$newPath = ($currentPath -split ";" | Where-Object { $_ -ne $binDir }) -join ";"
+$newPath = ($currentPath -split ";" | Where-Object { $_ -and ($_ -ne $binDir) }) -join ";"
 [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
 ```
 
@@ -175,4 +191,4 @@ If building a golden image (WIM/FFU):
 
 ---
 
-*Last updated: 2026-05-25*
+*Last updated: 2026-06-02*

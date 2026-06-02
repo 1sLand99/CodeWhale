@@ -11,11 +11,8 @@
 ;        codewhale.exe
 ;        codewhale-tui.exe
 ;   2. Build:
-;        makensis codewhale.nsi
+;        makensis /DVERSION=1.2.3 codewhale.nsi
 ;   3. Output: CodeWhaleSetup.exe (in current directory)
-;
-; You can override version at build time:
-;   makensis /DVERSION=1.2.3 codewhale.nsi
 
 ;--------------------------------
 ; Includes
@@ -83,11 +80,12 @@ Section "Install" SecInstall
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 
   ; Add to current-user PATH
-  ; Read existing PATH, append if not already present
+  ; Read existing PATH, append only when the exact entry is absent.
   ReadRegStr $0 HKCU "Environment" "Path"
-  ${StrStr} $1 $0 "$INSTDIR\bin"
+  StrCpy $2 ";$0;"
+  StrCpy $3 ";$INSTDIR\bin;"
+  ${StrStr} $1 $2 $3
   StrCmp $1 "" 0 path_already_set
-    ; Not found — append
     StrCmp $0 "" empty_path
       WriteRegExpandStr HKCU "Environment" "Path" "$0;$INSTDIR\bin"
       Goto path_done
@@ -128,9 +126,10 @@ Section "Uninstall"
 
   ; Remove from current-user PATH
   ReadRegStr $0 HKCU "Environment" "Path"
-  ${un.StrStr} $1 $0 "$INSTDIR\bin"
+  StrCpy $2 ";$0;"
+  StrCpy $3 ";$INSTDIR\bin;"
+  ${UnStrStr} $1 $2 $3
   StrCmp $1 "" path_clean_done
-    ; Remove the entry
     Push "$0"
     Push "$INSTDIR\bin"
     Call un.RemoveFromPath
@@ -145,7 +144,7 @@ Section "Uninstall"
 SectionEnd
 
 ;--------------------------------
-; Helper: Remove a directory from PATH (uninstaller version)
+; Helper: Remove exact directory entries from PATH (uninstaller version)
 ; Input: PATH string (on stack), directory to remove (on stack)
 ; Output: cleaned PATH (on stack)
 ;--------------------------------
@@ -153,48 +152,80 @@ Function un.RemoveFromPath
   Exch $R0 ; directory to remove
   Exch
   Exch $R1 ; original PATH
-  Push $R2 ; prefix
-  Push $R3 ; suffix
+  Push $R2 ; padded path
+  Push $R3 ; padded needle
   Push $R4 ; match result
+  Push $R5 ; prefix
+  Push $R6 ; suffix
+  Push $R7 ; offset/length
 
-  ${un.StrStr} $R4 $R1 $R0
-  StrCmp $R4 "" done
+  loop:
+    StrCmp $R1 "" done
+    StrCpy $R2 ";$R1;"
+    StrCpy $R3 ";$R0;"
+    ${UnStrStr} $R4 $R2 $R3
+    StrCmp $R4 "" done
 
-  ; Calculate prefix
-  StrLen $R2 $R1
-  StrLen $R3 $R4
-  IntOp $R3 $R2 - $R3 ; Match offset
-  StrCpy $R2 $R1 $R3   ; Prefix string
+    ; Prefix before the exact `;dir;` match in the padded PATH.
+    StrLen $R5 $R2
+    StrLen $R6 $R4
+    IntOp $R6 $R5 - $R6
+    StrCpy $R5 $R2 $R6
 
-  ; Calculate suffix
-  StrLen $R4 $R0
-  IntOp $R4 $R3 + $R4 ; Suffix offset = Match offset + Dir length
-  StrCpy $R3 $R1 "" $R4 ; Suffix string
+    ; Suffix after the exact `;dir;` match in the padded PATH.
+    StrLen $R7 $R3
+    IntOp $R7 $R6 + $R7
+    StrCpy $R6 $R2 "" $R7
 
-  ; Clean up semicolons
-  StrCpy $R4 $R3 1
-  StrCmp $R4 ";" 0 +2
-    StrCpy $R3 $R3 "" 1 ; Strip leading semicolon from suffix
+    Push $R5
+    Call un.TrimPathEdgeSemicolons
+    Pop $R5
+    Push $R6
+    Call un.TrimPathEdgeSemicolons
+    Pop $R6
 
-  StrLen $R4 $R2
-  IntOp $R4 $R4 - 1
-  StrCpy $R0 $R2 1 $R4
-  StrCmp $R0 ";" 0 +2
-    StrCpy $R2 $R2 $R4 ; Strip trailing semicolon from prefix
-
-  ; Concatenate
-  StrCmp $R2 "" 0 +3
-    StrCpy $R1 $R3
-    Goto done
-  StrCmp $R3 "" 0 +3
-    StrCpy $R1 $R2
-    Goto done
-  StrCpy $R1 "$R2;$R3"
+    StrCmp $R5 "" 0 +3
+      StrCpy $R1 $R6
+      Goto loop
+    StrCmp $R6 "" 0 +3
+      StrCpy $R1 $R5
+      Goto loop
+    StrCpy $R1 "$R5;$R6"
+    Goto loop
 
   done:
+    Pop $R7
+    Pop $R6
+    Pop $R5
     Pop $R4
     Pop $R3
     Pop $R2
     Pop $R0
     Exch $R1
+FunctionEnd
+
+Function un.TrimPathEdgeSemicolons
+  Exch $R9
+  Push $R8
+
+  trim_leading:
+    StrCpy $R8 $R9 1
+    StrCmp $R8 ";" 0 trim_trailing
+      StrCpy $R9 $R9 "" 1
+      Goto trim_leading
+
+  trim_trailing:
+    StrLen $R8 $R9
+    IntCmp $R8 0 trim_done
+    IntOp $R8 $R8 - 1
+    StrCpy $R8 $R9 1 $R8
+    StrCmp $R8 ";" 0 trim_done
+      StrLen $R8 $R9
+      IntOp $R8 $R8 - 1
+      StrCpy $R9 $R9 $R8
+      Goto trim_trailing
+
+  trim_done:
+    Pop $R8
+    Exch $R9
 FunctionEnd
