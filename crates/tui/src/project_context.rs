@@ -53,9 +53,10 @@ const REPO_CONSTITUTION_RELATIVE_PATH: &[&str] = &[".codewhale", "constitution.j
 const SUPPORTED_CONSTITUTION_SCHEMA: u32 = 1;
 
 /// User-level project instructions loaded as a fallback when the workspace and
-/// its parents do not define project context. `.codewhale/` takes priority
-/// over vendor-neutral `.agents/`, which takes priority over legacy
-/// `.deepseek/`, for both WHALE.md and AGENTS.md.
+/// its parents do not define project context. Any global AGENTS.md takes
+/// priority over any deprecated global WHALE.md; within each file name,
+/// `.codewhale/` takes priority over vendor-neutral `.agents/`, which takes
+/// priority over legacy `.deepseek/`.
 const GLOBAL_AGENTS_RELATIVE_PATH: &[&str] = &[".codewhale", "AGENTS.md"];
 const GLOBAL_AGENTS_VENDOR_NEUTRAL_PATH: &[&str] = &[".agents", "AGENTS.md"];
 const GLOBAL_AGENTS_LEGACY_PATH: &[&str] = &[".deepseek", "AGENTS.md"];
@@ -759,17 +760,17 @@ fn load_global_agents_context(workspace: &Path, home_dir: Option<&Path>) -> Opti
 
     // Priority order (AGENTS.md preferred over the now-deprecated WHALE.md):
     // 1. ~/.codewhale/AGENTS.md     (canonical)
-    // 2. ~/.codewhale/WHALE.md      (deprecated, legacy fallback)
-    // 3. ~/.agents/AGENTS.md        (vendor-neutral fallback)
-    // 4. ~/.agents/WHALE.md         (deprecated, vendor-neutral legacy)
-    // 5. ~/.deepseek/AGENTS.md      (legacy fallback)
+    // 2. ~/.agents/AGENTS.md        (vendor-neutral fallback)
+    // 3. ~/.deepseek/AGENTS.md      (legacy fallback)
+    // 4. ~/.codewhale/WHALE.md      (deprecated, legacy fallback)
+    // 5. ~/.agents/WHALE.md         (deprecated, vendor-neutral legacy)
     // 6. ~/.deepseek/WHALE.md       (deprecated, legacy)
     let candidates: &[&[&str]] = &[
         GLOBAL_AGENTS_RELATIVE_PATH,
-        GLOBAL_WHALE_RELATIVE_PATH,
         GLOBAL_AGENTS_VENDOR_NEUTRAL_PATH,
-        GLOBAL_WHALE_VENDOR_NEUTRAL_PATH,
         GLOBAL_AGENTS_LEGACY_PATH,
+        GLOBAL_WHALE_RELATIVE_PATH,
+        GLOBAL_WHALE_VENDOR_NEUTRAL_PATH,
         GLOBAL_WHALE_LEGACY_PATH,
     ];
 
@@ -1490,6 +1491,71 @@ mod tests {
             "lower-priority .agents file should be skipped:\n{instructions}"
         );
         assert_eq!(ctx.source_path, Some(codewhale_agents));
+    }
+
+    #[test]
+    fn test_global_agents_wins_over_global_whale_across_paths() {
+        let workspace = tempdir().expect("workspace tempdir");
+        let home = tempdir().expect("home tempdir");
+
+        let codewhale_dir = home.path().join(".codewhale");
+        fs::create_dir(&codewhale_dir).expect("mkdir .codewhale");
+        fs::write(codewhale_dir.join("WHALE.md"), "Global WHALE legacy")
+            .expect("write codewhale whale");
+
+        let agents_dir = home.path().join(".agents");
+        fs::create_dir(&agents_dir).expect("mkdir .agents");
+        let global_agents = agents_dir.join("AGENTS.md");
+        fs::write(&global_agents, "Global AGENTS canonical").expect("write global agents");
+
+        let ctx = load_project_context_with_parents_and_home(workspace.path(), Some(home.path()));
+
+        assert!(ctx.has_instructions());
+        let instructions = ctx.instructions.as_ref().unwrap();
+        assert!(
+            instructions.contains("Global AGENTS canonical"),
+            "global AGENTS.md should win:\n{instructions}"
+        );
+        assert!(
+            !instructions.contains("Global WHALE legacy"),
+            "global WHALE.md content should be skipped when any global AGENTS.md exists:\n{instructions}"
+        );
+        assert!(
+            !ctx.warnings
+                .iter()
+                .any(|warning| warning.contains("WHALE.md is deprecated")),
+            "losing WHALE.md should not emit deprecation warning: {:?}",
+            ctx.warnings
+        );
+        assert_eq!(ctx.source_path, Some(global_agents));
+    }
+
+    #[test]
+    fn test_global_whale_fallback_warns_when_no_global_agents_exists() {
+        let workspace = tempdir().expect("workspace tempdir");
+        let home = tempdir().expect("home tempdir");
+
+        let codewhale_dir = home.path().join(".codewhale");
+        fs::create_dir(&codewhale_dir).expect("mkdir .codewhale");
+        let global_whale = codewhale_dir.join("WHALE.md");
+        fs::write(&global_whale, "Global WHALE legacy").expect("write codewhale whale");
+
+        let ctx = load_project_context_with_parents_and_home(workspace.path(), Some(home.path()));
+
+        assert!(ctx.has_instructions());
+        let instructions = ctx.instructions.as_ref().unwrap();
+        assert!(
+            instructions.contains("Global WHALE legacy"),
+            "legacy WHALE.md must still be read when no global AGENTS.md exists:\n{instructions}"
+        );
+        assert!(
+            ctx.warnings
+                .iter()
+                .any(|warning| warning.contains("WHALE.md is deprecated")),
+            "expected global WHALE.md deprecation warning, got {:?}",
+            ctx.warnings
+        );
+        assert_eq!(ctx.source_path, Some(global_whale));
     }
 
     #[test]
