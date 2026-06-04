@@ -365,6 +365,30 @@ Select a profile with:
 
 If a profile is selected but missing, codewhale exits with an error listing available profiles.
 
+## Harness Profiles
+
+v0.9 adds a config data model for model-specific harness posture. This is a
+preview schema: it can be parsed and tested, but runtime provider/model
+selection and prompt/tool behavior are wired in later v0.9 slices.
+
+```toml
+[[harness_profiles]]
+provider_route = "deepseek"
+model_pattern = "deepseek-v4.*"
+
+[harness_profiles.posture]
+kind = "cache-heavy"          # standard | cache-heavy | lean | custom
+max_subagents = 10            # 0 means runtime default
+prefer_codebase_search = false
+compaction_strategy = "prefix-cache" # default | prefix-cache | aggressive
+tool_surface = "full"              # full | read-only | auto
+safety_posture = "standard"        # standard | strict | permissive
+```
+
+Unknown posture names or unknown keys inside a harness profile fail config
+deserialization instead of silently becoming `custom`. That is intentional:
+once runtime wiring consumes these profiles, a typo should be visible.
+
 ## Environment Variables
 
 Most runtime environment variables override config values. API-key variables are

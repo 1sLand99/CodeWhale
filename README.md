@@ -626,8 +626,10 @@ Current v0.9 track credits:
 - **[HUQIANTAO](https://github.com/HUQIANTAO)** — `web_run` cache-state
   lock-splitting, turn-metadata prefix-cache stability, and project-context
   cache work (#2502, #2517, #2636)
-- **[idling11](https://github.com/idling11)** — PlanArtifact continuity and
-  dense tool-call transcript collapse direction (#2733, #2738, #2692)
+- **[idling11](https://github.com/idling11)** — PlanArtifact continuity,
+  dense tool-call transcript collapse, sidebar detail popovers, and
+  HarnessPosture provider/model policy direction (#2733, #2738, #2734,
+  #2741, #2692, #2694, #2693)
 - **[h3c-hexin](https://github.com/h3c-hexin)** — sub-agent model inheritance,
   configured `skills_dir` discovery, and prompt-environment stability work
   (#2736, #2737)

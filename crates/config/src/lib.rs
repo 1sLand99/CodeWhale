@@ -306,6 +306,138 @@ impl ProvidersToml {
     }
 }
 
+/// Kinds of built-in harness postures.
+///
+/// A posture names the runtime strategy CodeWhale should use for a
+/// provider/model route: how much context to preload, how aggressively to lean
+/// on sub-agents, and how to balance prompt-cache stability against quick
+/// exploration. Runtime selection is wired in later v0.9 slices; this config
+/// model intentionally keeps the policy data explicit first.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum HarnessPostureKind {
+    /// Full-featured default: rich constitution, broad tool catalog, and normal
+    /// sub-agent posture.
+    #[default]
+    Standard,
+    /// Cache-heavy: deeper prompt layering and prefix-cache-oriented context.
+    CacheHeavy,
+    /// Lean: smaller starting context, faster compaction, and stronger
+    /// exploration/delegation bias.
+    Lean,
+    /// User-defined posture assembled from explicit knobs below.
+    Custom,
+}
+
+/// How this posture should approach compaction and prompt-cache stability.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum HarnessCompactionStrategy {
+    #[default]
+    Default,
+    PrefixCache,
+    Aggressive,
+}
+
+/// Which tool catalog shape this posture prefers.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum HarnessToolSurface {
+    #[default]
+    Full,
+    ReadOnly,
+    Auto,
+}
+
+/// Safety posture applied when the runtime consumes a harness profile.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum HarnessSafetyPosture {
+    #[default]
+    Standard,
+    Strict,
+    Permissive,
+}
+
+/// A concrete harness posture with policy knobs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessPosture {
+    /// Named posture kind.
+    #[serde(default)]
+    pub kind: HarnessPostureKind,
+    /// Maximum number of concurrent sub-agents (0 = runtime default).
+    #[serde(default)]
+    pub max_subagents: usize,
+    /// Prefer search-based/on-demand context over always-on documentation.
+    #[serde(default)]
+    pub prefer_codebase_search: bool,
+    /// Compaction and prompt-cache strategy.
+    #[serde(default)]
+    pub compaction_strategy: HarnessCompactionStrategy,
+    /// Preferred tool catalog shape.
+    #[serde(default)]
+    pub tool_surface: HarnessToolSurface,
+    /// Safety posture for runtime consumers.
+    #[serde(default)]
+    pub safety_posture: HarnessSafetyPosture,
+}
+
+impl Default for HarnessPosture {
+    fn default() -> Self {
+        Self {
+            kind: HarnessPostureKind::Standard,
+            max_subagents: 0,
+            prefer_codebase_search: false,
+            compaction_strategy: HarnessCompactionStrategy::default(),
+            tool_surface: HarnessToolSurface::default(),
+            safety_posture: HarnessSafetyPosture::default(),
+        }
+    }
+}
+
+impl HarnessPosture {
+    /// A cache-heavy posture tuned for DeepSeek V4 / MiMo-style models.
+    #[must_use]
+    pub fn cache_heavy() -> Self {
+        Self {
+            kind: HarnessPostureKind::CacheHeavy,
+            max_subagents: 10,
+            prefer_codebase_search: false,
+            compaction_strategy: HarnessCompactionStrategy::PrefixCache,
+            tool_surface: HarnessToolSurface::Full,
+            safety_posture: HarnessSafetyPosture::Standard,
+        }
+    }
+
+    /// A lean posture for smaller-context or weaker tool-use models.
+    #[must_use]
+    pub fn lean() -> Self {
+        Self {
+            kind: HarnessPostureKind::Lean,
+            max_subagents: 20,
+            prefer_codebase_search: true,
+            compaction_strategy: HarnessCompactionStrategy::Aggressive,
+            tool_surface: HarnessToolSurface::Full,
+            safety_posture: HarnessSafetyPosture::Standard,
+        }
+    }
+}
+
+/// A harness profile binds a posture to a provider route and model pattern.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessProfile {
+    /// Provider route this profile applies to, e.g. "deepseek" or
+    /// "xiaomi-mimo".
+    pub provider_route: String,
+    /// Regex or glob pattern for model names, e.g. "deepseek-v4.*".
+    pub model_pattern: String,
+    /// The posture to apply.
+    #[serde(default)]
+    pub posture: HarnessPosture,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConfigToml {
     /// TUI-compatible DeepSeek API key. Kept at the root so both `deepseek`
@@ -349,6 +481,10 @@ pub struct ConfigToml {
     /// applies the defaults documented in [`LspConfigToml`].
     #[serde(default)]
     pub lsp: Option<LspConfigToml>,
+    /// Per-model harness profiles (#2693). Runtime wiring lands in follow-up
+    /// v0.9 slices; this is the durable config data model.
+    #[serde(default)]
+    pub harness_profiles: Vec<HarnessProfile>,
     /// App-server hook sink configuration. Kept separate from the TUI
     /// lifecycle `[hooks]` table so config rewrites preserve existing hooks.
     #[serde(default)]
@@ -5086,5 +5222,136 @@ model = "mimo-v2.5-pro"
         let resolved = ConfigToml::default().resolve_runtime_options_with_secrets(&cli, &secrets);
         assert_eq!(resolved.api_key.as_deref(), Some("cli-key"));
         assert_eq!(resolved.api_key_source, Some(RuntimeApiKeySource::Cli));
+    }
+
+    #[test]
+    fn harness_posture_default_is_standard() {
+        let posture = HarnessPosture::default();
+
+        assert_eq!(
+            posture,
+            HarnessPosture {
+                kind: HarnessPostureKind::Standard,
+                max_subagents: 0,
+                prefer_codebase_search: false,
+                compaction_strategy: HarnessCompactionStrategy::Default,
+                tool_surface: HarnessToolSurface::Full,
+                safety_posture: HarnessSafetyPosture::Standard,
+            }
+        );
+    }
+
+    #[test]
+    fn harness_posture_factories_are_typed() {
+        assert_eq!(
+            HarnessPosture::cache_heavy(),
+            HarnessPosture {
+                kind: HarnessPostureKind::CacheHeavy,
+                max_subagents: 10,
+                prefer_codebase_search: false,
+                compaction_strategy: HarnessCompactionStrategy::PrefixCache,
+                tool_surface: HarnessToolSurface::Full,
+                safety_posture: HarnessSafetyPosture::Standard,
+            }
+        );
+        assert_eq!(
+            HarnessPosture::lean(),
+            HarnessPosture {
+                kind: HarnessPostureKind::Lean,
+                max_subagents: 20,
+                prefer_codebase_search: true,
+                compaction_strategy: HarnessCompactionStrategy::Aggressive,
+                tool_surface: HarnessToolSurface::Full,
+                safety_posture: HarnessSafetyPosture::Standard,
+            }
+        );
+    }
+
+    #[test]
+    fn harness_profile_serde_round_trips_as_a_whole_struct() {
+        let profile = HarnessProfile {
+            provider_route: "deepseek".to_string(),
+            model_pattern: "deepseek-v4.*".to_string(),
+            posture: HarnessPosture::cache_heavy(),
+        };
+
+        let json = serde_json::to_string(&profile).expect("serialize profile");
+        let round_tripped: HarnessProfile =
+            serde_json::from_str(&json).expect("deserialize profile");
+
+        assert_eq!(round_tripped, profile);
+    }
+
+    #[test]
+    fn config_toml_accepts_harness_profiles() {
+        let config: ConfigToml = toml::from_str(
+            r#"
+provider = "deepseek"
+model = "deepseek-v4-pro"
+
+[[harness_profiles]]
+provider_route = "deepseek"
+model_pattern = "deepseek-v4.*"
+
+[harness_profiles.posture]
+kind = "cache-heavy"
+max_subagents = 10
+compaction_strategy = "prefix-cache"
+tool_surface = "read-only"
+safety_posture = "strict"
+"#,
+        )
+        .expect("parse harness profiles");
+
+        assert_eq!(
+            config.harness_profiles,
+            vec![HarnessProfile {
+                provider_route: "deepseek".to_string(),
+                model_pattern: "deepseek-v4.*".to_string(),
+                posture: HarnessPosture {
+                    kind: HarnessPostureKind::CacheHeavy,
+                    max_subagents: 10,
+                    prefer_codebase_search: false,
+                    compaction_strategy: HarnessCompactionStrategy::PrefixCache,
+                    tool_surface: HarnessToolSurface::ReadOnly,
+                    safety_posture: HarnessSafetyPosture::Strict,
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn harness_posture_kind_rejects_unknown_values() {
+        let err = toml::from_str::<ConfigToml>(
+            r#"
+[[harness_profiles]]
+provider_route = "deepseek"
+model_pattern = "deepseek-v4.*"
+
+[harness_profiles.posture]
+kind = "cahce-heavy"
+"#,
+        )
+        .expect_err("misspelled kind should not deserialize as custom");
+
+        assert!(err.to_string().contains("cahce-heavy"));
+    }
+
+    #[test]
+    fn harness_posture_rejects_unknown_policy_keys() {
+        let err = toml::from_str::<ConfigToml>(
+            r#"
+[[harness_profiles]]
+provider_route = "deepseek"
+model_pattern = "deepseek-v4.*"
+
+[harness_profiles.posture]
+kind = "custom"
+unknown_policy = "surprise"
+"#,
+        )
+        .expect_err("unknown posture keys should not be ignored");
+
+        assert!(err.to_string().contains("unknown_policy"));
     }
 }

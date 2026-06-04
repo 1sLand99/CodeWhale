@@ -107,6 +107,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for OpenAI-compatible gateways that accept `/chat/completions` but reject
   `/v1/chat/completions`, while making clear that model listing and DeepSeek
   beta routes keep their built-in paths (#1874).
+- The config crate now carries the v0.9 HarnessPosture data model:
+  `HarnessPosture`, `HarnessProfile`, and typed posture/compaction/tool/safety
+  enums. The schema rejects misspelled posture names or unknown profile keys
+  instead of silently falling back to `custom`; runtime provider/model posture
+  selection remains a follow-up (#2693, #2741).
 
 ### Community
 
@@ -120,9 +125,10 @@ settings-path migration work (#2730), **@gaord** for the runtime thread
 workspace update and completed-thread save APIs (#2640, #2639),
 **@shenjackyuanjie** for the
 HarmonyOS/OpenHarmony port and MatePad Edge validation trail (#2634),
-**@idling11** for the PlanArtifact direction in Plan mode (#2733) and the
-dense tool-call transcript collapse/sidebar detail direction (#2738, #2734,
-#2692, #2694), and
+**@idling11** for the PlanArtifact direction in Plan mode (#2733), the dense
+tool-call transcript collapse/sidebar detail direction (#2738, #2734, #2692,
+#2694), and the HarnessPosture config model for provider/model posture (#2741,
+#2693), and
 **@h3c-hexin** for the tool-agent model inheritance and configured
 `skills_dir` fixes (#2736, #2737). Thanks also to **@qiyuanlicn** for the
 checkpoint/resume report that shaped the sub-agent recovery slice (#2029),
