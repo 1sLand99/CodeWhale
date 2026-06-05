@@ -112,25 +112,36 @@ agent runtime.
 ### Setup
 
 ```bash
-git clone https://github.com/pinchbench/skill.git /tmp/pinchbench
-cd /tmp/pinchbench
-uv venv && source .venv/bin/activate
-uv pip install -e .
+./scripts/benchmarks/run-pinchbench.sh --install
 ```
 
-### Run
+### Run (MiMo v2.5 Pro — default)
 
 ```bash
-# Via the convenience script
-./scripts/benchmarks/run-pinchbench.sh \
-  --model deepseek/deepseek-chat \
-  --suite all
+# MiMo v2.5 Pro via OpenRouter (default)
+./scripts/benchmarks/run-pinchbench.sh
 
-# Or directly
-cd /tmp/pinchbench && ./scripts/run.sh \
-  --model deepseek/deepseek-chat \
-  --suite all
+# MiMo v2.5 Pro via direct Xiaomi API
+./scripts/benchmarks/run-pinchbench.sh --direct-mimo
+
+# Specific tasks
+./scripts/benchmarks/run-pinchbench.sh --suite task_calendar,task_stock
 ```
+
+### Run (other models)
+
+```bash
+./scripts/benchmarks/run-pinchbench.sh --model openrouter/deepseek/deepseek-v4-pro
+```
+
+### MiMo v2.5 notes
+
+PinchBench routes through OpenRouter by default. MiMo models are available as
+`openrouter/xiaomi/mimo-v2.5-pro` (Pro) and `openrouter/xiaomi/mimo-v2.5`
+(Omni). For direct Xiaomi API access, use `--direct-mimo` with
+`XIAOMI_MIMO_API_KEY` set.
+
+See `scripts/benchmarks/run-pinchbench.sh --help` for full option reference.
 
 ## Reproducibility checklist
 

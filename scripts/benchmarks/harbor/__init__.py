@@ -52,6 +52,12 @@ class CodeWhaleAgent(BaseInstalledAgent):
             type="str",
             default="high",
         ),
+        CliFlag(
+            "provider",
+            cli="--provider",
+            type="str",
+            default=None,
+        ),
     ]
 
     @staticmethod
