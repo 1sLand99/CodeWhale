@@ -2005,7 +2005,7 @@ impl ToolSpec for ExecShellTool {
     }
 
     fn description(&self) -> &'static str {
-        "Execute a shell command in the workspace directory. Foreground mode is for bounded commands; use background=true or task_shell_start for long-running work, then poll/wait."
+        "Execute a shell command in the workspace directory. Foreground mode is for bounded commands; use background=true or task_shell_start for work expected to take >5 seconds, then poll/wait."
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -2022,7 +2022,7 @@ impl ToolSpec for ExecShellTool {
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "Run in background and return task_id (default: false). Prefer true for commands that may run for minutes; poll with exec_shell_wait or task_shell_wait."
+                    "description": "Run in background and return task_id (default: false). Prefer task_shell_start or background=true for commands expected to take >5 seconds, including builds, test suites, servers, CI polling, sleep, or other long-running work; poll with exec_shell_wait or task_shell_wait."
                 },
                 "interactive": {
                     "type": "boolean",

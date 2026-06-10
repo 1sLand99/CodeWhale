@@ -643,6 +643,17 @@ async fn test_exec_shell_foreground_timeout_guides_background_rerun() {
     );
 }
 
+#[test]
+fn test_exec_shell_schema_guides_gt_five_second_work_to_background() {
+    let schema = ExecShellTool.input_schema();
+    let description = schema["properties"]["background"]["description"]
+        .as_str()
+        .expect("background description");
+    assert!(description.contains(">5 seconds"), "{description}");
+    assert!(description.contains("task_shell_start"), "{description}");
+    assert!(description.contains("exec_shell_wait"), "{description}");
+}
+
 #[tokio::test]
 async fn test_exec_shell_foreground_cancel_kills_process() {
     let tmp = tempdir().expect("tempdir");
