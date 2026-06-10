@@ -298,6 +298,7 @@ fn word_cursor_modifier_accepts_control_and_alt() {
     assert!(!is_word_cursor_modifier(KeyModifiers::SHIFT));
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn normalize_macos_modifiers_maps_super_to_control() {
     use crate::tui::composer_ui::normalize_macos_modifiers;
@@ -307,6 +308,7 @@ fn normalize_macos_modifiers_maps_super_to_control() {
     assert!(!normalized.contains(KeyModifiers::SUPER));
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn normalize_macos_modifiers_preserves_existing_control() {
     use crate::tui::composer_ui::normalize_macos_modifiers;
