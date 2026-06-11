@@ -1430,6 +1430,11 @@ async fn run_event_loop(
                         break;
                     }
                 };
+                // #3033: remember whether an EARLIER event in this drain batch
+                // already requested a redraw. The AgentProgress throttle below
+                // may opt the current event out of repainting, but it must not
+                // cancel redraws owed to other events in the same batch.
+                let redraw_requested_before_event = received_engine_event;
                 received_engine_event = true;
                 if app.suppress_stream_events_until_turn_complete {
                     if matches!(event, EngineEvent::TurnStarted { .. }) {
@@ -2326,15 +2331,14 @@ async fn run_event_loop(
                         // status-animation timer (80ms cadence) provides a guaranteed
                         // floor for sidebar updates.  Data is still recorded immediately;
                         // the sidebar picks it up on the next permitted redraw.
-                        let now = Instant::now();
-                        if let Some(last) = app.last_agent_progress_redraw {
-                            if now.duration_since(last) < Duration::from_millis(100) {
-                                received_engine_event = false;
-                            } else {
-                                app.last_agent_progress_redraw = Some(now);
-                            }
-                        } else {
-                            app.last_agent_progress_redraw = Some(now);
+                        if !agent_progress_redraw_permitted(
+                            &mut app.last_agent_progress_redraw,
+                            Instant::now(),
+                        ) {
+                            // Restore the pre-event accumulator value: a
+                            // throttled progress event contributes no redraw of
+                            // its own, but earlier events' redraws survive.
+                            received_engine_event = redraw_requested_before_event;
                         }
                     }
                     EngineEvent::AgentComplete { id, result } => {
@@ -4666,6 +4670,21 @@ fn reconcile_turn_liveness(app: &mut App, now: Instant, has_running_agents: bool
     }
 
     false
+}
+
+/// #3033: gate progress-driven repaints to at most one per 100ms.
+///
+/// Returns whether the current `AgentProgress` event may request a redraw,
+/// updating the last-redraw timestamp when it may. Data updates are never
+/// throttled — only the repaint request is.
+fn agent_progress_redraw_permitted(last_redraw: &mut Option<Instant>, now: Instant) -> bool {
+    match *last_redraw {
+        Some(last) if now.duration_since(last) < Duration::from_millis(100) => false,
+        _ => {
+            *last_redraw = Some(now);
+            true
+        }
+    }
 }
 
 fn recover_engine_event_disconnect(app: &mut App) -> bool {
