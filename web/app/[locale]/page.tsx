@@ -21,6 +21,7 @@ const FALLBACK_STATS: RepoStats = {
 };
 
 const RELEASE_CONTRIBUTORS = [
+  "@1Git2Clone",
   "@cy2311",
   "@LING71671",
   "@axobase001",
@@ -80,6 +81,92 @@ const RELEASE_HELPERS = [
   "@nbiish",
 ];
 
+const RELEASE_FEATURES = [
+  {
+    area: "Fleet runs",
+    title: "Agent Fleet real-run cutover",
+    zhTitle: "Agent Fleet 真实执行切换",
+    tag: "#3154 / #3096",
+    blurb:
+      "fleet run now launches durable workers through the headless exec stream instead of the old local simulator, with lease-freeing events so queued work can keep moving.",
+    zhBlurb:
+      "fleet run 现在通过 headless exec 流启动持久 worker，不再走本地模拟器；终端 worker 事件会释放租约，让排队任务继续推进。",
+    prompt:
+      "Tell us whether the fleet task started, which worker/lease state looked wrong, and paste the fleet run output or event stream if you can.",
+  },
+  {
+    area: "Read-only shell parallelism",
+    title: "Read-only shell parallelism",
+    zhTitle: "只读 Shell 并行执行",
+    tag: "#2983",
+    blurb:
+      "conservative read-only shell calls can run in parallel, while writes, stdin, pipes, redirects, command substitution, TTY work, and follow-mode tails stay serial.",
+    zhBlurb:
+      "保守的只读 shell 调用可以并行执行；写入、stdin、管道、重定向、命令替换、TTY 和 follow-mode tail 仍保持串行。",
+    prompt:
+      "Tell us the exact command, whether it should have been parallel or serial, and whether CodeWhale asked for approval at the right time.",
+  },
+  {
+    area: "WhaleFlow JS/TS authoring",
+    title: "Declarative JS/TS WhaleFlow authoring",
+    zhTitle: "声明式 JS/TS WhaleFlow 编写",
+    tag: "#3097",
+    blurb:
+      "workflow({...}) authoring now compiles JavaScript or TypeScript into the existing WorkflowSpec validator without executing user JavaScript.",
+    zhBlurb:
+      "workflow({...}) 写法现在可以把 JavaScript 或 TypeScript 编译到现有 WorkflowSpec 校验器，不执行用户 JavaScript。",
+    prompt:
+      "Paste the workflow({...}) snippet, the validation error, and what you expected the compiled WorkflowSpec to contain.",
+  },
+  {
+    area: "Terminal interaction polish",
+    title: "TUI/provider polish",
+    zhTitle: "TUI 与 provider 细节修复",
+    tag: "#3196 / #2743",
+    blurb:
+      "slash-menu Ctrl+P/Ctrl+N navigation, nonblocking sub-agent eval, Z.ai GLM thinking traces, and Claude-style skill archive handling are smoother.",
+    zhBlurb:
+      "slash 菜单 Ctrl+P/Ctrl+N、非阻塞 sub-agent eval、Z.ai GLM thinking trace，以及 Claude 风格 skill 压缩包处理都更顺。",
+    prompt:
+      "Tell us which interaction failed, your terminal/provider/model, and the shortest reproduction you have.",
+  },
+];
+
+const LATEST_RELEASE_CREDITS = [
+  {
+    handle: "@1Git2Clone",
+    note: "slash-menu Ctrl+P/Ctrl+N navigation",
+    zhNote: "slash 菜单 Ctrl+P/Ctrl+N 导航",
+  },
+  {
+    handle: "@AiurArtanis",
+    note: "Claude-style skill archive compatibility request",
+    zhNote: "Claude 风格 skill 压缩包兼容性请求",
+  },
+];
+
+function releaseIssueHref(area: string, prompt: string): string {
+  const body = [
+    `## Area`,
+    area,
+    ``,
+    `## What happened?`,
+    ``,
+    `## What did you expect?`,
+    ``,
+    `## Useful detail`,
+    prompt,
+    ``,
+    `## Version`,
+    `0.8.60`,
+  ].join("\n");
+  const params = new URLSearchParams({
+    title: `[0.8.60] ${area}: `,
+    body,
+  });
+  return `https://github.com/Hmbown/CodeWhale/issues/new?${params.toString()}`;
+}
+
 const FALLBACK_DISPATCH_EN: CuratedDispatch = {
   generatedAt: new Date().toISOString(),
   headline: "Quiet release week — install paths and contributor guides up to date.",
@@ -133,6 +220,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
   }
 
   const highlights = isZh && dispatch.highlightsZh ? dispatch.highlightsZh : dispatch.highlights;
+  const releaseVersion = facts.version ?? "0.8.60";
 
   return (
     <>
@@ -240,6 +328,75 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
       </section>
 
       <StatGrid stats={stats} />
+
+      {/* LATEST RELEASE */}
+      <section id="latest" className="mx-auto max-w-[1400px] px-6 py-14">
+        <div className="grid lg:grid-cols-12 gap-10 items-start">
+          <div className="lg:col-span-4">
+            <div className="flex items-baseline gap-4 mb-5">
+              <Seal char="新" />
+              <div className="eyebrow">
+                {isZh ? `最新版本 · v${releaseVersion}` : `New in v${releaseVersion}`}
+              </div>
+            </div>
+            <h2 className="font-display text-3xl leading-tight">
+              {isZh ? "更可靠的长任务执行，更清楚的反馈入口。" : "Durable long-running work, clearer feedback paths."}
+            </h2>
+            <p className={`mt-5 text-ink-soft ${isZh ? "leading-[1.9] tracking-wide" : "leading-relaxed"}`}>
+              {isZh
+                ? "0.8.60 的主线是让 CodeWhale 更像一个可继承的维护者工具：fleet worker 真正运行，只读证据可以并行收集，workflow 可以用 JS/TS 声明式编写，终端交互和 provider trace 更稳定。"
+                : "0.8.60 is about making CodeWhale easier to hand off and verify: fleet workers actually run, read-only evidence can be gathered in parallel, workflows can be authored in JS/TS, and terminal/provider edges are less sticky."}
+            </p>
+            <div className="mt-6 flex flex-wrap gap-3">
+              <Link href="https://github.com/Hmbown/CodeWhale/blob/main/CHANGELOG.md#0860---2026-06-13" className="px-4 py-2 bg-ink text-paper font-mono text-sm uppercase tracking-wider hover:bg-indigo transition-colors">
+                {isZh ? "完整 changelog →" : "Full changelog →"}
+              </Link>
+              <Link href="#release-credits" className="px-4 py-2 font-mono text-sm uppercase tracking-wider text-ink-mute hover:text-indigo transition-colors">
+                {isZh ? "贡献者 →" : "Credits →"}
+              </Link>
+            </div>
+            <div className="mt-6 hairline-t pt-4">
+              <div className="eyebrow mb-3">{isZh ? "0.8.60 直接致谢" : "Direct 0.8.60 credits"}</div>
+              <div className="space-y-2">
+                {LATEST_RELEASE_CREDITS.map((credit) => (
+                  <Link
+                    key={credit.handle}
+                    href={`https://github.com/${credit.handle.slice(1)}`}
+                    className="block text-sm text-ink-soft hover:text-indigo"
+                  >
+                    <span className="font-mono text-xs text-indigo">{credit.handle}</span>
+                    <span className={isZh ? "ml-2 leading-[1.8]" : "ml-2"}>{isZh ? credit.zhNote : credit.note}</span>
+                  </Link>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="lg:col-span-8 hairline-t hairline-b hairline-l hairline-r bg-paper">
+            <div className="grid md:grid-cols-2 gap-0 col-rule">
+              {RELEASE_FEATURES.map((feature) => (
+                <div key={feature.area} className="p-5">
+                  <div className="flex items-baseline justify-between gap-4 mb-3">
+                    <div className="eyebrow text-indigo">{feature.tag}</div>
+                    <Link
+                      href={releaseIssueHref(feature.area, feature.prompt)}
+                      className="font-mono text-[0.68rem] uppercase tracking-widest text-ink-mute hover:text-indigo"
+                    >
+                      {isZh ? "报告问题 →" : "Report →"}
+                    </Link>
+                  </div>
+                  <h3 className="font-display text-xl mb-2">
+                    {isZh ? feature.zhTitle : feature.title}
+                  </h3>
+                  <p className={`text-sm text-ink-soft ${isZh ? "leading-[1.9] tracking-wide" : "leading-relaxed"}`}>
+                    {isZh ? feature.zhBlurb : feature.blurb}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </section>
  
       {/* SEE HOW IT DECIDES — real reasoning traces prove the constitution operates */}
       <section className="bg-paper-deep hairline-t hairline-b">
@@ -502,7 +659,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
       </section>
 
       {/* RELEASE CREDITS */}
-      <section className="mx-auto max-w-[1400px] px-6 py-14">
+      <section id="release-credits" className="mx-auto max-w-[1400px] px-6 py-14">
         <div className="flex items-baseline gap-4 mb-5 hairline-b pb-4">
           <Seal char="谢" />
           <div>
@@ -519,7 +676,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
                 ? "这一版合并和吸收了来自社区的大量工作。完整条目在 CHANGELOG 中；这里保留最新发布的公开致谢入口。"
                 : "This release merged and harvested a large community tranche. The full notes live in the changelog; this keeps the latest public credit surface easy to find."}
             </p>
-            <Link href="https://github.com/Hmbown/CodeWhale/blob/main/CHANGELOG.md#0856---2026-06-09" className="inline-block mt-4 font-mono text-xs uppercase tracking-wider text-indigo hover:underline">
+            <Link href="https://github.com/Hmbown/CodeWhale/blob/main/CHANGELOG.md#0860---2026-06-13" className="inline-block mt-4 font-mono text-xs uppercase tracking-wider text-indigo hover:underline">
               {isZh ? "查看完整 changelog →" : "Full changelog →"}
             </Link>
           </div>
