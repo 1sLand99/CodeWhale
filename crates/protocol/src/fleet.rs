@@ -195,6 +195,13 @@ pub enum FleetHostSpec {
         user: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         identity: Option<PathBuf>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        working_directory: Option<PathBuf>,
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        env_allowlist: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        codewhale_binary: Option<String>,
     },
     Docker {
         image: String,
@@ -517,6 +524,33 @@ mod tests {
         let back: FleetArtifactRef = serde_json::from_str(&json).unwrap();
         assert_eq!(back.kind, artifact.kind);
         assert_eq!(back.size_bytes, Some(1024));
+    }
+
+    #[test]
+    fn ssh_host_spec_accepts_minimal_legacy_json() {
+        let json = r#"{"kind":"ssh","host":"builder.example.test"}"#;
+        let host: FleetHostSpec = serde_json::from_str(json).unwrap();
+
+        match host {
+            FleetHostSpec::Ssh {
+                host,
+                port,
+                user,
+                identity,
+                working_directory,
+                env_allowlist,
+                codewhale_binary,
+            } => {
+                assert_eq!(host, "builder.example.test");
+                assert_eq!(port, None);
+                assert_eq!(user, None);
+                assert_eq!(identity, None);
+                assert_eq!(working_directory, None);
+                assert!(env_allowlist.is_empty());
+                assert_eq!(codewhale_binary, None);
+            }
+            other => panic!("expected ssh host spec, got {other:?}"),
+        }
     }
 
     #[test]
