@@ -3128,14 +3128,25 @@ fn apply_goal_snapshot_updates_visible_goal_status() {
         objective: Some("Ship the release lane".to_string()),
         status: "complete".to_string(),
         token_budget: Some(10_000),
+        tokens_used: 12_345,
+        time_used_seconds: 12,
+        continuation_count: 2,
         elapsed_seconds: Some(12),
         evidence: Some("focused tests passed".to_string()),
         blocker: None,
+        completion_verification: Some(crate::tools::goal::GoalCompletionVerification {
+            status: "passed".to_string(),
+            check: "cargo test".to_string(),
+            summary: "focused tests passed".to_string(),
+        }),
     };
 
     assert!(apply_goal_snapshot_to_app(&mut app, &completed));
     assert_eq!(app.hunt.quarry.as_deref(), Some("Ship the release lane"));
     assert_eq!(app.hunt.token_budget, Some(10_000));
+    assert_eq!(app.hunt.tokens_used, 12_345);
+    assert_eq!(app.hunt.time_used_seconds, 12);
+    assert_eq!(app.hunt.continuation_count, 2);
     assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Hunted);
     assert_eq!(app.hunt.started_at, Some(started_at));
 
@@ -3143,14 +3154,21 @@ fn apply_goal_snapshot_updates_visible_goal_status() {
         objective: Some("Different objective".to_string()),
         status: "blocked".to_string(),
         token_budget: None,
+        tokens_used: 12_345,
+        time_used_seconds: 13,
+        continuation_count: 3,
         elapsed_seconds: Some(1),
         evidence: None,
         blocker: Some("needs user approval".to_string()),
+        completion_verification: None,
     };
 
     assert!(apply_goal_snapshot_to_app(&mut app, &blocked));
     assert_eq!(app.hunt.quarry.as_deref(), Some("Different objective"));
     assert_eq!(app.hunt.token_budget, None);
+    assert_eq!(app.hunt.tokens_used, 12_345);
+    assert_eq!(app.hunt.time_used_seconds, 13);
+    assert_eq!(app.hunt.continuation_count, 3);
     assert_eq!(app.hunt.verdict, crate::tui::app::HuntVerdict::Escaped);
     assert!(app.hunt.started_at.is_some());
 }

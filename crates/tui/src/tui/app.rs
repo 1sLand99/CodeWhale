@@ -1189,6 +1189,9 @@ impl HuntVerdict {
 pub struct HuntState {
     pub quarry: Option<String>,
     pub token_budget: Option<u32>,
+    pub tokens_used: u64,
+    pub time_used_seconds: u64,
+    pub continuation_count: u32,
     pub started_at: Option<Instant>,
     pub verdict: HuntVerdict,
 }

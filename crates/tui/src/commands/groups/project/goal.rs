@@ -12,6 +12,9 @@ pub fn hunt(app: &mut App, arg: Option<&str>) -> CommandResult {
         Some("clear") | Some("reset") => {
             app.hunt.quarry = None;
             app.hunt.token_budget = None;
+            app.hunt.tokens_used = 0;
+            app.hunt.time_used_seconds = 0;
+            app.hunt.continuation_count = 0;
             app.hunt.started_at = None;
             app.hunt.verdict = HuntVerdict::default();
             CommandResult::message("Goal cleared.")
@@ -31,6 +34,9 @@ pub fn hunt(app: &mut App, arg: Option<&str>) -> CommandResult {
             }
             app.hunt.quarry = Some(objective.clone());
             app.hunt.token_budget = budget;
+            app.hunt.tokens_used = 0;
+            app.hunt.time_used_seconds = 0;
+            app.hunt.continuation_count = 0;
             app.hunt.started_at = Some(std::time::Instant::now());
             app.hunt.verdict = HuntVerdict::Hunting;
             let budget_str = budget
@@ -45,16 +51,30 @@ pub fn hunt(app: &mut App, arg: Option<&str>) -> CommandResult {
             if let Some(ref obj) = app.hunt.quarry {
                 let elapsed = app
                     .hunt
-                    .started_at
-                    .map(|t| crate::tui::notifications::humanize_duration(t.elapsed()))
+                    .time_used_seconds
+                    .gt(&0)
+                    .then(|| {
+                        crate::tui::notifications::humanize_duration(
+                            std::time::Duration::from_secs(app.hunt.time_used_seconds),
+                        )
+                    })
+                    .or_else(|| {
+                        app.hunt
+                            .started_at
+                            .map(|t| crate::tui::notifications::humanize_duration(t.elapsed()))
+                    })
                     .unwrap_or_else(|| "unknown".to_string());
                 let budget_str = app
                     .hunt
                     .token_budget
                     .map(|b| {
-                        let used = app.session.total_conversation_tokens;
+                        let used = if app.hunt.tokens_used > 0 {
+                            app.hunt.tokens_used
+                        } else {
+                            u64::from(app.session.total_conversation_tokens)
+                        };
                         let pct = if b > 0 {
-                            (used as f64 / b as f64 * 100.0).min(100.0)
+                            (used as f64 / f64::from(b) * 100.0).min(100.0)
                         } else {
                             0.0
                         };
@@ -68,7 +88,8 @@ pub fn hunt(app: &mut App, arg: Option<&str>) -> CommandResult {
                     HuntVerdict::Escaped => "[BLOCKED]",
                 };
                 CommandResult::message(format!(
-                    "Goal {verdict_label}: \"{obj}\" - elapsed: {elapsed}{budget_str}"
+                    "Goal {verdict_label}: \"{obj}\" - elapsed: {elapsed}{budget_str} | continuations: {}",
+                    app.hunt.continuation_count
                 ))
             } else {
                 CommandResult::message(goal_usage())
@@ -208,7 +229,11 @@ fn write_trophy_card(app: &App, verdict: HuntVerdict) -> Result<std::path::PathB
         HuntVerdict::Wounded => "paused",
         HuntVerdict::Escaped => "blocked",
     };
-    let tokens = app.session.total_conversation_tokens;
+    let tokens = if app.hunt.tokens_used > 0 {
+        u32::try_from(app.hunt.tokens_used).unwrap_or(u32::MAX)
+    } else {
+        app.session.total_conversation_tokens
+    };
     let budget_str = app
         .hunt
         .token_budget
@@ -344,9 +369,15 @@ mod tests {
         let mut app = create_test_app();
         app.hunt.quarry = Some("test".to_string());
         app.hunt.token_budget = Some(100);
+        app.hunt.tokens_used = 5;
+        app.hunt.time_used_seconds = 3;
+        app.hunt.continuation_count = 1;
         let _ = hunt(&mut app, Some("clear"));
         assert!(app.hunt.quarry.is_none());
         assert!(app.hunt.token_budget.is_none());
+        assert_eq!(app.hunt.tokens_used, 0);
+        assert_eq!(app.hunt.time_used_seconds, 0);
+        assert_eq!(app.hunt.continuation_count, 0);
         assert_eq!(
             app.hunt.verdict.goal_status(),
             crate::tools::goal::GoalStatus::Active
