@@ -275,6 +275,7 @@ impl HotbarAction for AppHotbarAction {
                     .push(CommandPaletteView::new(build_command_palette_entries(
                         app.ui_locale,
                         &app.skills_dir,
+                        app.skills_scan_codewhale_only,
                         &app.workspace,
                         &app.mcp_config_path,
                         app.mcp_snapshot.as_ref(),

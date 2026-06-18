@@ -44,6 +44,9 @@ pub struct PromptSessionContext<'a> {
     /// Optional output-verbosity mode. `concise` appends a short output
     /// discipline block; unset keeps the normal conversational prompt.
     pub verbosity: Option<&'a str>,
+    /// Restrict skill discovery to CodeWhale-owned roots plus explicit
+    /// `skills_dir` configuration.
+    pub skills_scan_codewhale_only: bool,
 }
 
 impl Default for PromptSessionContext<'_> {
@@ -58,6 +61,7 @@ impl Default for PromptSessionContext<'_> {
             context_window_override: None,
             show_thinking: true,
             verbosity: None,
+            skills_scan_codewhale_only: false,
         }
     }
 }
@@ -1011,6 +1015,7 @@ pub fn system_prompt_for_mode_with_context_and_skills(
             context_window_override: None,
             show_thinking: true,
             verbosity: None,
+            skills_scan_codewhale_only: false,
         },
     )
 }
@@ -1109,19 +1114,28 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
         );
     }
 
-    // 3. Skills block. #432: walks every candidate workspace
-    // skills directory (`.agents/skills`, `skills`,
-    // `.opencode/skills`, `.claude/skills`, `.cursor/skills`) plus global
-    // `~/.agents/skills` / `~/.deepseek/skills` so skills installed for any
-    // AI-tool convention show up in the catalogue. When an explicit
+    // 3. Skills block. #432: default discovery walks every compatible
+    // workspace/global skill directory so skills installed for other AI-tool
+    // conventions show up in the catalogue. Users can opt into a CodeWhale-only
+    // scan with `[skills] scan_codewhale_only = true`. When an explicit
     // `skills_dir` is configured, union it with the workspace view instead of
     // treating it as a fallback; the workspace view often returns Some and
     // would otherwise shadow the configured directory entirely.
+    let skill_discovery_mode = crate::skills::SkillDiscoveryMode::from_codewhale_only(
+        session_context.skills_scan_codewhale_only,
+    );
     let skills_block = match skills_dir {
         Some(dir) => {
-            crate::skills::render_available_skills_context_for_workspace_and_dir(workspace, dir)
+            crate::skills::render_available_skills_context_for_workspace_and_dir_with_mode(
+                workspace,
+                dir,
+                skill_discovery_mode,
+            )
         }
-        None => crate::skills::render_available_skills_context_for_workspace(workspace),
+        None => crate::skills::render_available_skills_context_for_workspace_with_mode(
+            workspace,
+            skill_discovery_mode,
+        ),
     };
     if let Some(block) = skills_block {
         full_prompt = format!("{full_prompt}\n\n{block}");
@@ -1894,6 +1908,7 @@ mod tests {
                 context_window_override: None,
                 show_thinking: true,
                 verbosity: None,
+                skills_scan_codewhale_only: false,
             },
         ) {
             SystemPrompt::Text(text) => text,
@@ -1965,6 +1980,7 @@ mod tests {
                 context_window_override: None,
                 show_thinking: true,
                 verbosity: None,
+                skills_scan_codewhale_only: false,
             },
         ) {
             SystemPrompt::Text(text) => text,
@@ -2009,6 +2025,7 @@ mod tests {
                 context_window_override: None,
                 show_thinking: false,
                 verbosity: None,
+                skills_scan_codewhale_only: false,
             },
         ) {
             SystemPrompt::Text(text) => text,
@@ -2063,6 +2080,7 @@ mod tests {
                 context_window_override: None,
                 show_thinking: true,
                 verbosity: None,
+                skills_scan_codewhale_only: false,
             },
         ) {
             SystemPrompt::Text(text) => text,
@@ -2168,6 +2186,7 @@ mod tests {
                 context_window_override: None,
                 show_thinking: true,
                 verbosity: None,
+                skills_scan_codewhale_only: false,
             },
         ) {
             SystemPrompt::Text(text) => text,
@@ -2206,6 +2225,7 @@ mod tests {
                 context_window_override: None,
                 show_thinking: true,
                 verbosity: None,
+                skills_scan_codewhale_only: false,
             },
         ) {
             SystemPrompt::Text(text) => text,
@@ -2236,6 +2256,7 @@ mod tests {
                 context_window_override: None,
                 show_thinking: true,
                 verbosity: None,
+                skills_scan_codewhale_only: false,
             },
         ) {
             SystemPrompt::Text(text) => text,
@@ -2295,6 +2316,7 @@ mod tests {
                 context_window_override: None,
                 show_thinking: true,
                 verbosity: None,
+                skills_scan_codewhale_only: false,
             },
         ) {
             SystemPrompt::Text(text) => text,
@@ -2325,6 +2347,7 @@ mod tests {
                 context_window_override: None,
                 show_thinking: true,
                 verbosity: None,
+                skills_scan_codewhale_only: false,
             },
         ) {
             SystemPrompt::Text(text) => text,
@@ -2596,6 +2619,7 @@ mod tests {
                 context_window_override: None,
                 show_thinking: true,
                 verbosity: None,
+                skills_scan_codewhale_only: false,
             },
         ) {
             SystemPrompt::Text(text) => text,
@@ -2632,6 +2656,7 @@ mod tests {
                 context_window_override: None,
                 show_thinking: true,
                 verbosity: None,
+                skills_scan_codewhale_only: false,
             },
         ) {
             SystemPrompt::Text(text) => text,
@@ -3179,6 +3204,7 @@ mod tests {
                 context_window_override: None,
                 show_thinking: true,
                 verbosity: Some(" Concise "),
+                skills_scan_codewhale_only: false,
             },
         ) {
             SystemPrompt::Text(text) => text,

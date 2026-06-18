@@ -252,6 +252,9 @@ pub struct EngineConfig {
     pub mcp_config_path: PathBuf,
     /// Directory containing discoverable skills.
     pub skills_dir: PathBuf,
+    /// Restrict skill discovery to CodeWhale-owned roots plus explicit
+    /// `skills_dir` configuration.
+    pub skills_scan_codewhale_only: bool,
     /// Sources injected as `<instructions source="…">` blocks in the system
     /// prompt (#454). Each entry is either a disk path (read at render time)
     /// or an inline string. Loaded in declared order from the user's
@@ -392,6 +395,7 @@ impl Default for EngineConfig {
             notes_path: PathBuf::from("notes.txt"),
             mcp_config_path: PathBuf::from("mcp.json"),
             skills_dir: crate::skills::default_skills_dir(),
+            skills_scan_codewhale_only: false,
             instructions: Vec::new(),
             project_context_pack_enabled: true,
             translation_enabled: false,
@@ -797,6 +801,7 @@ impl Engine {
                     ),
                     show_thinking: config.show_thinking,
                     verbosity: config.verbosity.as_deref(),
+                    skills_scan_codewhale_only: config.skills_scan_codewhale_only,
                 },
             );
         let stable_prompt = Some(system_prompt);
@@ -2638,6 +2643,10 @@ impl Engine {
         .with_features(self.config.features.clone())
         .with_shell_manager(self.shell_manager.clone())
         .with_runtime_services(self.config.runtime_services.clone())
+        .with_skills_config(
+            self.config.skills_dir.clone(),
+            self.config.skills_scan_codewhale_only,
+        )
         .with_session_objects(crate::rlm::session::SessionObjectSnapshot::new(
             self.session.id.clone(),
             self.session.model.clone(),
@@ -2869,6 +2878,7 @@ impl Engine {
                 ),
                 show_thinking: self.config.show_thinking,
                 verbosity: self.config.verbosity.as_deref(),
+                skills_scan_codewhale_only: self.config.skills_scan_codewhale_only,
             },
         );
         let mut stable_prompt =

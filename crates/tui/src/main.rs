@@ -6318,6 +6318,7 @@ async fn run_exec_agent(
         notes_path: execution_config.notes_path(),
         mcp_config_path: execution_config.mcp_config_path(),
         skills_dir: execution_config.skills_dir(),
+        skills_scan_codewhale_only: execution_config.skills_config().scan_codewhale_only(),
         instructions: {
             let mut instrs: Vec<crate::prompts::InstructionSource> = execution_config
                 .instructions_paths()

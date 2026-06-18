@@ -42,6 +42,28 @@ pub fn agents_global_skills_dir() -> Option<PathBuf> {
 
 // === Types ===
 
+/// Session-time skill discovery scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillDiscoveryMode {
+    /// Preserve the existing broad compatibility scan across CodeWhale,
+    /// agentskills.io, Claude, OpenCode, Cursor, and legacy DeepSeek roots.
+    Compatible,
+    /// Scan only CodeWhale-owned roots. Callers that also pass an explicit
+    /// `skills_dir` still get that directory because it is user configuration.
+    CodeWhaleOnly,
+}
+
+impl SkillDiscoveryMode {
+    #[must_use]
+    pub fn from_codewhale_only(value: bool) -> Self {
+        if value {
+            Self::CodeWhaleOnly
+        } else {
+            Self::Compatible
+        }
+    }
+}
+
 /// Parsed representation of a SKILL.md definition.
 #[derive(Debug, Clone)]
 pub struct Skill {
@@ -455,29 +477,59 @@ impl SkillRegistry {
 /// need to filter further. Returns an empty vec when nothing is
 /// installed (the system-prompt skills block is then suppressed).
 #[must_use]
+#[allow(dead_code)]
 pub fn skills_directories(workspace: &Path) -> Vec<PathBuf> {
-    let home = dirs::home_dir();
-    skills_directories_with_home(workspace, home.as_deref())
+    skills_directories_for_mode(workspace, SkillDiscoveryMode::Compatible)
 }
 
-fn skills_directories_with_home(workspace: &Path, home_dir: Option<&Path>) -> Vec<PathBuf> {
-    let mut candidates = vec![
-        workspace.join(".agents").join("skills"),
-        workspace.join("skills"),
-        workspace.join(".opencode").join("skills"),
-        workspace.join(".claude").join("skills"),
-        workspace.join(".cursor").join("skills"),
-        workspace.join(".codewhale").join("skills"),
-    ];
+#[must_use]
+pub fn skills_directories_for_mode(workspace: &Path, mode: SkillDiscoveryMode) -> Vec<PathBuf> {
+    let home = dirs::home_dir();
+    skills_directories_with_home_and_mode(workspace, home.as_deref(), mode)
+}
+
+fn skills_directories_with_home_and_mode(
+    workspace: &Path,
+    home_dir: Option<&Path>,
+    mode: SkillDiscoveryMode,
+) -> Vec<PathBuf> {
+    let mut candidates = match mode {
+        SkillDiscoveryMode::Compatible => vec![
+            workspace.join(".agents").join("skills"),
+            workspace.join("skills"),
+            workspace.join(".opencode").join("skills"),
+            workspace.join(".claude").join("skills"),
+            workspace.join(".cursor").join("skills"),
+            workspace.join(".codewhale").join("skills"),
+        ],
+        SkillDiscoveryMode::CodeWhaleOnly => codewhale_workspace_skills_dir(workspace)
+            .into_iter()
+            .collect(),
+    };
     if let Some(home) = home_dir {
-        candidates.push(home.join(".agents").join("skills"));
-        candidates.push(home.join(".claude").join("skills"));
-        candidates.push(home.join(".codewhale").join("skills"));
-        candidates.push(home.join(".deepseek").join("skills"));
+        match mode {
+            SkillDiscoveryMode::Compatible => {
+                candidates.push(home.join(".agents").join("skills"));
+                candidates.push(home.join(".claude").join("skills"));
+                candidates.push(home.join(".codewhale").join("skills"));
+                candidates.push(home.join(".deepseek").join("skills"));
+            }
+            SkillDiscoveryMode::CodeWhaleOnly => {
+                candidates.push(home.join(".codewhale").join("skills"));
+            }
+        }
     } else {
         candidates.push(PathBuf::from("/tmp/codewhale/skills"));
     }
     existing_skill_dirs(candidates)
+}
+
+pub(crate) fn codewhale_workspace_skills_dir(workspace: &Path) -> Option<PathBuf> {
+    let skills_dir = workspace.join(".codewhale").join("skills");
+    let canonical_workspace = fs::canonicalize(workspace).ok()?;
+    let canonical_skills = fs::canonicalize(&skills_dir).ok()?;
+    (canonical_skills.is_dir() && canonical_skills.starts_with(canonical_workspace))
+        .then_some(skills_dir)
 }
 
 fn existing_skill_dirs(candidates: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
@@ -504,8 +556,16 @@ fn existing_skill_dirs(candidates: impl IntoIterator<Item = PathBuf>) -> Vec<Pat
 /// load.
 #[must_use]
 pub fn discover_in_workspace(workspace: &Path) -> SkillRegistry {
+    discover_in_workspace_with_mode(workspace, SkillDiscoveryMode::Compatible)
+}
+
+#[must_use]
+pub fn discover_in_workspace_with_mode(
+    workspace: &Path,
+    mode: SkillDiscoveryMode,
+) -> SkillRegistry {
     let mut merged = SkillRegistry::default();
-    for dir in skills_directories(workspace) {
+    for dir in skills_directories_for_mode(workspace, mode) {
         let registry = SkillRegistry::discover(&dir);
         for skill in registry.skills {
             if !merged.skills.iter().any(|s| s.name == skill.name) {
@@ -525,10 +585,30 @@ pub fn discover_in_workspace(workspace: &Path) -> SkillRegistry {
 /// outside that set so explicit configuration cannot be buried by large global
 /// libraries.
 #[must_use]
+#[allow(dead_code)]
 pub fn discover_for_workspace_and_dir(workspace: &Path, skills_dir: &Path) -> SkillRegistry {
-    let mut dirs = skills_directories(workspace);
-    insert_configured_skills_dir(&mut dirs, workspace, skills_dir);
+    discover_for_workspace_and_dir_with_mode(workspace, skills_dir, SkillDiscoveryMode::Compatible)
+}
+
+#[must_use]
+pub fn discover_for_workspace_and_dir_with_mode(
+    workspace: &Path,
+    skills_dir: &Path,
+    mode: SkillDiscoveryMode,
+) -> SkillRegistry {
+    let dirs = skill_directories_for_workspace_and_dir(workspace, skills_dir, mode);
     discover_from_directories(dirs)
+}
+
+#[must_use]
+pub fn skill_directories_for_workspace_and_dir(
+    workspace: &Path,
+    skills_dir: &Path,
+    mode: SkillDiscoveryMode,
+) -> Vec<PathBuf> {
+    let mut dirs = skills_directories_for_mode(workspace, mode);
+    insert_configured_skills_dir(&mut dirs, workspace, skills_dir);
+    dirs
 }
 
 fn insert_configured_skills_dir(dirs: &mut Vec<PathBuf>, workspace: &Path, skills_dir: &Path) {
@@ -579,7 +659,22 @@ pub(crate) fn discover_for_workspace_and_dir_with_home(
     skills_dir: &Path,
     home_dir: Option<&Path>,
 ) -> SkillRegistry {
-    let mut dirs = skills_directories_with_home(workspace, home_dir);
+    discover_for_workspace_and_dir_with_home_and_mode(
+        workspace,
+        skills_dir,
+        home_dir,
+        SkillDiscoveryMode::Compatible,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn discover_for_workspace_and_dir_with_home_and_mode(
+    workspace: &Path,
+    skills_dir: &Path,
+    home_dir: Option<&Path>,
+    mode: SkillDiscoveryMode,
+) -> SkillRegistry {
+    let mut dirs = skills_directories_with_home_and_mode(workspace, home_dir, mode);
     insert_configured_skills_dir(&mut dirs, workspace, skills_dir);
     discover_from_directories(dirs)
 }
@@ -591,6 +686,15 @@ pub(crate) fn discover_for_workspace_and_dir_with_home(
 #[must_use]
 pub fn render_available_skills_context_for_workspace(workspace: &Path) -> Option<String> {
     let registry = discover_in_workspace(workspace);
+    render_skills_block(&registry)
+}
+
+#[must_use]
+pub fn render_available_skills_context_for_workspace_with_mode(
+    workspace: &Path,
+    mode: SkillDiscoveryMode,
+) -> Option<String> {
+    let registry = discover_in_workspace_with_mode(workspace, mode);
     render_skills_block(&registry)
 }
 
@@ -615,7 +719,20 @@ pub fn render_available_skills_context_for_workspace_and_dir(
     workspace: &Path,
     skills_dir: &Path,
 ) -> Option<String> {
-    let registry = discover_for_workspace_and_dir(workspace, skills_dir);
+    render_available_skills_context_for_workspace_and_dir_with_mode(
+        workspace,
+        skills_dir,
+        SkillDiscoveryMode::Compatible,
+    )
+}
+
+#[must_use]
+pub fn render_available_skills_context_for_workspace_and_dir_with_mode(
+    workspace: &Path,
+    skills_dir: &Path,
+    mode: SkillDiscoveryMode,
+) -> Option<String> {
+    let registry = discover_for_workspace_and_dir_with_mode(workspace, skills_dir, mode);
     render_skills_block(&registry)
 }
 
@@ -1135,6 +1252,107 @@ mod tests {
         let rendered =
             super::render_available_skills_context_for_workspace(workspace).expect("non-empty");
         assert!(rendered.contains("from-claude"));
+    }
+
+    #[test]
+    fn codewhale_only_mode_ignores_cross_tool_skill_dirs() {
+        let tmpdir = TempDir::new().unwrap();
+        let workspace = tmpdir.path().join("workspace");
+        let home = tmpdir.path().join("home");
+        let configured_dir = home.join(".codewhale").join("skills");
+        std::fs::create_dir_all(&workspace).unwrap();
+        write_skill(
+            &workspace.join(".claude").join("skills"),
+            "from-claude",
+            "claude-style skill",
+            "body",
+        );
+        write_skill(
+            &workspace.join(".codewhale").join("skills"),
+            "from-codewhale",
+            "codewhale skill",
+            "body",
+        );
+        write_skill(
+            &home.join(".agents").join("skills"),
+            "from-agents",
+            "agents skill",
+            "body",
+        );
+        write_skill(
+            &configured_dir,
+            "configured-codewhale",
+            "configured skill",
+            "body",
+        );
+
+        let registry = super::discover_for_workspace_and_dir_with_home_and_mode(
+            &workspace,
+            &configured_dir,
+            Some(&home),
+            super::SkillDiscoveryMode::CodeWhaleOnly,
+        );
+        let names: Vec<&str> = registry.list().iter().map(|s| s.name.as_str()).collect();
+
+        assert!(names.contains(&"from-codewhale"));
+        assert!(names.contains(&"configured-codewhale"));
+        assert!(
+            !names.contains(&"from-claude") && !names.contains(&"from-agents"),
+            "CodeWhale-only mode must not import cross-tool skills: {names:?}"
+        );
+    }
+
+    #[test]
+    fn codewhale_only_mode_still_honors_explicit_configured_dir() {
+        let tmpdir = TempDir::new().unwrap();
+        let workspace = tmpdir.path().join("workspace");
+        let home = tmpdir.path().join("home");
+        let configured_dir = tmpdir.path().join("my-skills");
+        std::fs::create_dir_all(&workspace).unwrap();
+        write_skill(
+            &configured_dir,
+            "configured-skill",
+            "explicit configured skill",
+            "body",
+        );
+
+        let registry = super::discover_for_workspace_and_dir_with_home_and_mode(
+            &workspace,
+            &configured_dir,
+            Some(&home),
+            super::SkillDiscoveryMode::CodeWhaleOnly,
+        );
+        let names: Vec<&str> = registry.list().iter().map(|s| s.name.as_str()).collect();
+
+        assert_eq!(names, vec!["configured-skill"]);
+    }
+
+    #[test]
+    fn codewhale_only_mode_rejects_workspace_codewhale_symlink_escape() {
+        let tmpdir = TempDir::new().unwrap();
+        let workspace = tmpdir.path().join("workspace");
+        let home = tmpdir.path().join("home");
+        let escape_target = tmpdir.path().join("escape-target");
+        std::fs::create_dir_all(workspace.join(".codewhale")).unwrap();
+        write_skill(&escape_target, "escaped-skill", "escaped skill", "body");
+
+        let link_path = workspace.join(".codewhale").join("skills");
+        if let Err(err) = create_dir_symlink(&escape_target, &link_path) {
+            eprintln!("skipping symlink escape assertion: {err}");
+            return;
+        }
+
+        let registry = super::discover_for_workspace_and_dir_with_home_and_mode(
+            &workspace,
+            &tmpdir.path().join("missing-configured-skills"),
+            Some(&home),
+            super::SkillDiscoveryMode::CodeWhaleOnly,
+        );
+
+        assert!(
+            registry.get("escaped-skill").is_none(),
+            "CodeWhale-only mode must not follow workspace .codewhale/skills outside the workspace"
+        );
     }
 
     #[test]

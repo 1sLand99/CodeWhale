@@ -49,6 +49,7 @@ pub struct CommandPaletteView {
 pub fn build_entries(
     locale: Locale,
     skills_dir: &Path,
+    skills_scan_codewhale_only: bool,
     workspace: &Path,
     mcp_config_path: &Path,
     mcp_snapshot: Option<&crate::mcp::McpManagerSnapshot>,
@@ -114,7 +115,11 @@ pub fn build_entries(
         }
     });
 
-    let skills = skills::discover_for_workspace_and_dir(workspace, skills_dir);
+    let skills = skills::discover_for_workspace_and_dir_with_mode(
+        workspace,
+        skills_dir,
+        skills::SkillDiscoveryMode::from_codewhale_only(skills_scan_codewhale_only),
+    );
     for skill in skills.list() {
         entries.push(CommandPaletteEntry {
             section: PaletteSection::Skill,
@@ -1167,6 +1172,7 @@ mod tests {
         let entries = build_entries(
             Locale::En,
             configured_dir.as_path(),
+            false,
             workspace.as_path(),
             Path::new("mcp.json"),
             None,
@@ -1182,10 +1188,54 @@ mod tests {
     }
 
     #[test]
+    fn command_palette_skills_respect_codewhale_only_scan() {
+        let tmp = TempDir::new().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        let claude_skill_dir = workspace
+            .join(".claude")
+            .join("skills")
+            .join("claude-skill");
+        std::fs::create_dir_all(&claude_skill_dir).expect("create claude skill dir");
+        std::fs::write(
+            claude_skill_dir.join("SKILL.md"),
+            "---\nname: claude-skill\ndescription: Claude skill\n---\nbody",
+        )
+        .expect("write claude skill");
+        let codewhale_skill_dir = workspace
+            .join(".codewhale")
+            .join("skills")
+            .join("codewhale-skill");
+        std::fs::create_dir_all(&codewhale_skill_dir).expect("create codewhale skill dir");
+        std::fs::write(
+            codewhale_skill_dir.join("SKILL.md"),
+            "---\nname: codewhale-skill\ndescription: CodeWhale skill\n---\nbody",
+        )
+        .expect("write codewhale skill");
+
+        let entries = build_entries(
+            Locale::En,
+            workspace.join(".codewhale").join("skills").as_path(),
+            true,
+            workspace.as_path(),
+            Path::new("mcp.json"),
+            None,
+        );
+        let skill_labels: Vec<&str> = entries
+            .iter()
+            .filter(|entry| entry.section == PaletteSection::Skill)
+            .map(|entry| entry.label.as_str())
+            .collect();
+
+        assert!(skill_labels.contains(&"$codewhale-skill"));
+        assert!(!skill_labels.contains(&"$claude-skill"));
+    }
+
+    #[test]
     fn command_palette_command_entries_include_links_and_config_but_not_removed_commands() {
         let entries = build_entries(
             Locale::En,
             Path::new("."),
+            false,
             Path::new("."),
             Path::new("mcp.json"),
             None,
@@ -1310,6 +1360,7 @@ mod tests {
         let entries = build_entries(
             Locale::En,
             skills_dir.as_path(),
+            false,
             tmp.path(),
             mcp_config_path.as_path(),
             None,
@@ -1374,6 +1425,7 @@ mod tests {
         let entries = build_entries(
             Locale::En,
             Path::new("."),
+            false,
             Path::new("."),
             Path::new("mcp.json"),
             None,
@@ -1395,6 +1447,7 @@ mod tests {
         let entries = build_entries(
             Locale::En,
             Path::new("."),
+            false,
             Path::new("."),
             Path::new("mcp.json"),
             None,
@@ -1456,6 +1509,7 @@ mod tests {
         let entries = build_entries(
             Locale::En,
             Path::new("."),
+            false,
             Path::new("."),
             Path::new("mcp.json"),
             Some(&snapshot),
@@ -1510,6 +1564,7 @@ mod tests {
         let entries = build_entries(
             Locale::En,
             Path::new("."),
+            false,
             Path::new("."),
             Path::new("mcp.json"),
             Some(&snapshot),

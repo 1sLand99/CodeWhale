@@ -1852,7 +1852,11 @@ async fn list_skills(
     State(state): State<RuntimeApiState>,
 ) -> Result<Json<SkillsResponse>, ApiError> {
     let skills_dir = resolve_skills_dir(&state.config, &state.workspace);
-    let (registry, directories) = discover_skills_for_runtime_api(&state.workspace, &skills_dir);
+    let mode = crate::skills::SkillDiscoveryMode::from_codewhale_only(
+        state.config.skills_config().scan_codewhale_only(),
+    );
+    let (registry, directories) =
+        discover_skills_for_runtime_api(&state.workspace, &skills_dir, mode);
     let skill_state = state.skill_state.lock().await;
     let skills = registry
         .list()
@@ -1879,7 +1883,11 @@ async fn set_skill_enabled(
     Json(req): Json<SetSkillEnabledRequest>,
 ) -> Result<Json<SetSkillEnabledResponse>, ApiError> {
     let skills_dir = resolve_skills_dir(&state.config, &state.workspace);
-    let (registry, directories) = discover_skills_for_runtime_api(&state.workspace, &skills_dir);
+    let mode = crate::skills::SkillDiscoveryMode::from_codewhale_only(
+        state.config.skills_config().scan_codewhale_only(),
+    );
+    let (registry, directories) =
+        discover_skills_for_runtime_api(&state.workspace, &skills_dir, mode);
     let exists = registry.list().iter().any(|skill| skill.name == name);
     if !exists {
         return Err(ApiError::not_found(format!(
@@ -2950,6 +2958,18 @@ fn current_git_head(workspace: &std::path::Path) -> Option<String> {
 }
 
 fn resolve_skills_dir(config: &Config, workspace: &std::path::Path) -> PathBuf {
+    if config.skills_config().scan_codewhale_only() {
+        if config.skills_dir.is_some() {
+            return config.skills_dir();
+        }
+        if let Some(codewhale_skills_dir) = crate::skills::codewhale_workspace_skills_dir(workspace)
+            && let Ok(canonical_skills) = fs::canonicalize(&codewhale_skills_dir)
+        {
+            return canonical_skills;
+        }
+        return config.skills_dir();
+    }
+
     // Canonicalize the workspace once so the symlink-containment check below
     // compares like-for-like. If the workspace can't be canonicalized at all
     // (e.g. it doesn't exist on disk yet) fall back to the configured global
@@ -2976,19 +2996,20 @@ fn resolve_skills_dir(config: &Config, workspace: &std::path::Path) -> PathBuf {
     config.skills_dir()
 }
 
-fn skills_search_directories(workspace: &FsPath, skills_dir: &FsPath) -> Vec<PathBuf> {
-    let mut directories = crate::skills::skills_directories(workspace);
-    if skills_dir.is_dir() && !directories.iter().any(|path| path == skills_dir) {
-        directories.push(skills_dir.to_path_buf());
-    }
-    directories
+fn skills_search_directories(
+    workspace: &FsPath,
+    skills_dir: &FsPath,
+    mode: crate::skills::SkillDiscoveryMode,
+) -> Vec<PathBuf> {
+    crate::skills::skill_directories_for_workspace_and_dir(workspace, skills_dir, mode)
 }
 
 fn discover_skills_for_runtime_api(
     workspace: &FsPath,
     skills_dir: &FsPath,
+    mode: crate::skills::SkillDiscoveryMode,
 ) -> (crate::skills::SkillRegistry, Vec<PathBuf>) {
-    let directories = skills_search_directories(workspace, skills_dir);
+    let directories = skills_search_directories(workspace, skills_dir, mode);
     let registry = crate::skills::discover_from_directories(directories.clone());
     (registry, directories)
 }
@@ -6474,6 +6495,50 @@ mod tests {
     }
 
     #[test]
+    fn resolve_skills_dir_respects_codewhale_only_scan() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path();
+        let agents_skills = workspace.join(".agents").join("skills");
+        let codewhale_skills = workspace.join(".codewhale").join("skills");
+        fs::create_dir_all(&agents_skills).expect("create agents skills dir");
+        fs::create_dir_all(&codewhale_skills).expect("create codewhale skills dir");
+
+        let config = Config {
+            skills: Some(crate::config::SkillsConfig {
+                scan_codewhale_only: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let resolved = resolve_skills_dir(&config, workspace);
+
+        let expected = fs::canonicalize(&codewhale_skills).expect("canonical codewhale skills");
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn resolve_skills_dir_preserves_explicit_dir_in_codewhale_only_scan() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        let codewhale_skills = workspace.join(".codewhale").join("skills");
+        let configured_skills = tmp.path().join("configured-skills");
+        fs::create_dir_all(&codewhale_skills).expect("create codewhale skills dir");
+        fs::create_dir_all(&configured_skills).expect("create configured skills dir");
+
+        let config = Config {
+            skills_dir: Some(configured_skills.to_string_lossy().into_owned()),
+            skills: Some(crate::config::SkillsConfig {
+                scan_codewhale_only: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let resolved = resolve_skills_dir(&config, &workspace);
+
+        assert_eq!(resolved, configured_skills);
+    }
+
+    #[test]
     fn skills_search_directories_includes_custom_skills_dir() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let workspace = tmp.path().join("workspace");
@@ -6481,7 +6546,11 @@ mod tests {
         fs::create_dir_all(&workspace).expect("create workspace");
         fs::create_dir_all(&custom_skills).expect("create custom skills");
 
-        let directories = skills_search_directories(&workspace, &custom_skills);
+        let directories = skills_search_directories(
+            &workspace,
+            &custom_skills,
+            crate::skills::SkillDiscoveryMode::Compatible,
+        );
 
         assert!(
             directories.iter().any(|dir| dir == &custom_skills),
@@ -6569,6 +6638,41 @@ mod tests {
             resolved,
             config.skills_dir(),
             "with no valid in-workspace skills dir, resolution should fall back to config"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_skills_dir_rejects_codewhale_only_symlink_escaping_workspace() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let workspace_root = tmp.path().join("workspace");
+        let escape_target = tmp.path().join("escape_target");
+        fs::create_dir_all(&workspace_root).expect("create workspace");
+        fs::create_dir_all(&escape_target).expect("create escape target");
+
+        let dotcodewhale = workspace_root.join(".codewhale");
+        fs::create_dir_all(&dotcodewhale).expect("create .codewhale");
+        let bad_link = dotcodewhale.join("skills");
+        std::os::unix::fs::symlink(&escape_target, &bad_link).expect("symlink");
+
+        let config = Config {
+            skills: Some(crate::config::SkillsConfig {
+                scan_codewhale_only: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let resolved = resolve_skills_dir(&config, &workspace_root);
+
+        let canon_escape = fs::canonicalize(&escape_target).expect("canon escape");
+        assert_ne!(
+            resolved, canon_escape,
+            "CodeWhale-only symlink escaping workspace must not be resolved as skills dir"
+        );
+        assert_eq!(
+            resolved,
+            config.skills_dir(),
+            "with no valid in-workspace CodeWhale skills dir, resolution should fall back to config"
         );
     }
 }

@@ -1010,6 +1010,11 @@ If you are upgrading from older releases:
   documents, presentations, spreadsheets, PDFs, and Feishu/Lark. See
   [CLAUDE_PLUGIN_COMPAT.md](CLAUDE_PLUGIN_COMPAT.md) for the supported boundary
   between portable `SKILL.md` bundles and Claude Code plugin runtimes.
+- `[skills].scan_codewhale_only` (bool, default `false`): when `true`, session
+  skill discovery ignores cross-tool roots such as `.claude/skills`,
+  `.opencode/skills`, `.cursor/skills`, and `~/.agents/skills`. CodeWhale still
+  scans `<workspace>/.codewhale/skills`, `~/.codewhale/skills`, and any explicit
+  `skills_dir` override.
 - `mcp_config_path` (string, optional): defaults to `~/.codewhale/mcp.json`, with
   legacy `~/.deepseek/mcp.json` fallback when the CodeWhale path is absent.
   It is visible in `/config` and can be changed from the TUI. The new path is

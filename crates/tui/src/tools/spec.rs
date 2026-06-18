@@ -127,6 +127,10 @@ pub struct ToolContext {
     /// MCP configuration path
     #[allow(dead_code)]
     pub mcp_config_path: PathBuf,
+    /// Explicit skills directory used for model-visible skill discovery.
+    pub skills_dir: Option<PathBuf>,
+    /// Restrict skill discovery to CodeWhale-owned roots plus `skills_dir`.
+    pub skills_scan_codewhale_only: bool,
     /// Elevated sandbox policy override (used when retrying after sandbox denial).
     /// This overrides the default sandbox behavior for shell commands.
     pub elevated_sandbox_policy: Option<crate::sandbox::SandboxPolicy>,
@@ -222,6 +226,8 @@ impl ToolContext {
             sandbox_policy: SandboxPolicy::None,
             notes_path,
             mcp_config_path,
+            skills_dir: None,
+            skills_scan_codewhale_only: false,
             elevated_sandbox_policy: None,
             shell_network_denied_hint: None,
             auto_approve: false,
@@ -262,6 +268,8 @@ impl ToolContext {
             sandbox_policy: SandboxPolicy::None,
             notes_path: notes_path.into(),
             mcp_config_path: mcp_config_path.into(),
+            skills_dir: None,
+            skills_scan_codewhale_only: false,
             elevated_sandbox_policy: None,
             shell_network_denied_hint: None,
             auto_approve: false,
@@ -302,6 +310,8 @@ impl ToolContext {
             sandbox_policy: SandboxPolicy::None,
             notes_path: notes_path.into(),
             mcp_config_path: mcp_config_path.into(),
+            skills_dir: None,
+            skills_scan_codewhale_only: false,
             elevated_sandbox_policy: None,
             shell_network_denied_hint: None,
             auto_approve,
@@ -336,6 +346,19 @@ impl ToolContext {
     #[must_use]
     pub fn with_runtime_services(mut self, runtime: RuntimeToolServices) -> Self {
         self.runtime = runtime;
+        self
+    }
+
+    /// Attach skill discovery settings for tools that need to resolve
+    /// model-visible skills by name.
+    #[must_use]
+    pub fn with_skills_config(
+        mut self,
+        skills_dir: impl Into<PathBuf>,
+        scan_codewhale_only: bool,
+    ) -> Self {
+        self.skills_dir = Some(skills_dir.into());
+        self.skills_scan_codewhale_only = scan_codewhale_only;
         self
     }
 

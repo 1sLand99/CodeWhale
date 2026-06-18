@@ -1067,6 +1067,7 @@ fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         notes_path: config.notes_path(),
         mcp_config_path: config.mcp_config_path(),
         skills_dir: app.skills_dir.clone(),
+        skills_scan_codewhale_only: app.skills_scan_codewhale_only,
         instructions: config
             .instructions_paths()
             .into_iter()
@@ -3610,6 +3611,7 @@ async fn run_event_loop(
                     .push(CommandPaletteView::new(build_command_palette_entries(
                         app.ui_locale,
                         &app.skills_dir,
+                        app.skills_scan_codewhale_only,
                         &app.workspace,
                         &app.mcp_config_path,
                         app.mcp_snapshot.as_ref(),
@@ -6084,6 +6086,7 @@ async fn dispatch_user_message(
                 ),
                 show_thinking: app.show_thinking,
                 verbosity: app.verbosity.as_deref(),
+                skills_scan_codewhale_only: app.skills_scan_codewhale_only,
             },
         ),
     );
@@ -7433,6 +7436,7 @@ fn apply_workspace_runtime_state(app: &mut App, config: &Config, workspace: Path
         workspace.clone(),
     );
     app.skills_dir = crate::tui::app::resolve_skills_dir(&workspace, &config.skills_dir(), config);
+    app.skills_scan_codewhale_only = config.skills_config().scan_codewhale_only();
     app.refresh_skill_cache();
     app.workspace_context = None;
     if let Ok(mut cell) = app.workspace_context_cell.lock() {

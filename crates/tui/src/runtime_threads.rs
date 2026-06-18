@@ -2149,6 +2149,7 @@ impl RuntimeThreadManager {
             notes_path: self.config.notes_path(),
             mcp_config_path: self.config.mcp_config_path(),
             skills_dir: self.config.skills_dir(),
+            skills_scan_codewhale_only: self.config.skills_config().scan_codewhale_only(),
             instructions: self
                 .config
                 .instructions_paths()

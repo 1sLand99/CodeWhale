@@ -590,6 +590,7 @@ max_subagents = 10 # optional (1-20)
 # [skills]
 # registry_url = "https://raw.githubusercontent.com/Hmbown/deepseek-skills/main/index.json"
 # max_install_size_bytes = 5_242_880
+# scan_codewhale_only = false # true: ignore Claude/OpenCode/Cursor/agentskills.io skill dirs
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # TUI

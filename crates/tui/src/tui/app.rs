@@ -69,6 +69,17 @@ pub(crate) fn resolve_skills_dir(
     global_skills_dir: &Path,
     config: &Config,
 ) -> PathBuf {
+    if config.skills_config().scan_codewhale_only() {
+        if config.skills_dir.is_some() {
+            return global_skills_dir.to_path_buf();
+        }
+        if let Some(codewhale_skills_dir) = crate::skills::codewhale_workspace_skills_dir(workspace)
+        {
+            return codewhale_skills_dir;
+        }
+        return global_skills_dir.to_path_buf();
+    }
+
     let agents_skills_dir = workspace.join(".agents").join("skills");
     if agents_skills_dir.exists() {
         return agents_skills_dir;
@@ -1460,6 +1471,7 @@ pub struct App {
     pub config_profile: Option<String>,
     pub mcp_config_path: PathBuf,
     pub skills_dir: PathBuf,
+    pub skills_scan_codewhale_only: bool,
     /// Path to the user-memory file (#489). Always populated; only
     /// consulted when `use_memory` is `true`.
     pub memory_path: PathBuf,
@@ -2267,8 +2279,10 @@ impl App {
         // Initialize plan state
         let plan_state = new_shared_plan_state();
 
+        let skills_scan_codewhale_only = config.skills_config().scan_codewhale_only();
         let skills_dir = resolve_skills_dir(&workspace, &global_skills_dir, config);
-        let cached_skills = Self::discover_cached_skills(&workspace, &skills_dir);
+        let cached_skills =
+            Self::discover_cached_skills(&workspace, &skills_dir, skills_scan_codewhale_only);
 
         let input_history = crate::composer_history::load_history();
         let (initial_input_text, initial_input_cursor, auto_submit_initial_input) =
@@ -2358,6 +2372,7 @@ impl App {
             config_profile,
             mcp_config_path: mcp_config_path.clone(),
             skills_dir,
+            skills_scan_codewhale_only,
             memory_path,
             use_memory,
             use_alt_screen,
@@ -2560,17 +2575,26 @@ impl App {
     fn discover_cached_skills(
         workspace: &std::path::Path,
         skills_dir: &std::path::Path,
+        scan_codewhale_only: bool,
     ) -> Vec<(String, String)> {
-        crate::skills::discover_for_workspace_and_dir(workspace, skills_dir)
-            .list()
-            .iter()
-            .map(|s| (s.name.clone(), s.description.clone()))
-            .collect()
+        crate::skills::discover_for_workspace_and_dir_with_mode(
+            workspace,
+            skills_dir,
+            crate::skills::SkillDiscoveryMode::from_codewhale_only(scan_codewhale_only),
+        )
+        .list()
+        .iter()
+        .map(|s| (s.name.clone(), s.description.clone()))
+        .collect()
     }
 
     pub fn refresh_skill_cache(&mut self) {
         let skills_dir = self.skills_dir.clone();
-        self.cached_skills = Self::discover_cached_skills(&self.workspace, &skills_dir);
+        self.cached_skills = Self::discover_cached_skills(
+            &self.workspace,
+            &skills_dir,
+            self.skills_scan_codewhale_only,
+        );
     }
 
     pub fn submit_api_key(&mut self) -> Result<SavedCredential, ApiKeyError> {
@@ -5669,6 +5693,16 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    fn create_dir_symlink(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn create_dir_symlink(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_dir(target, link)
+    }
+
     #[test]
     fn initial_input_prefill_waits_for_manual_submit() {
         let mut options = test_options(false);
@@ -6586,6 +6620,89 @@ mod tests {
     }
 
     #[test]
+    fn cached_skills_respect_codewhale_only_scan_config() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+
+        let claude_dir = workspace
+            .join(".claude")
+            .join("skills")
+            .join("claude-skill");
+        std::fs::create_dir_all(&claude_dir).expect("claude skill dir");
+        std::fs::write(
+            claude_dir.join("SKILL.md"),
+            "---\nname: claude-skill\ndescription: Claude skill\n---\nbody\n",
+        )
+        .expect("write claude skill");
+
+        let codewhale_dir = workspace
+            .join(".codewhale")
+            .join("skills")
+            .join("codewhale-skill");
+        std::fs::create_dir_all(&codewhale_dir).expect("codewhale skill dir");
+        std::fs::write(
+            codewhale_dir.join("SKILL.md"),
+            "---\nname: codewhale-skill\ndescription: CodeWhale skill\n---\nbody\n",
+        )
+        .expect("write codewhale skill");
+
+        let mut options = test_options(false);
+        options.workspace = workspace.clone();
+        options.skills_dir = tmp.path().join("global-skills");
+        let app = App::new(
+            options,
+            &Config {
+                skills: Some(crate::config::SkillsConfig {
+                    scan_codewhale_only: Some(true),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(app.skills_dir, workspace.join(".codewhale").join("skills"));
+        assert!(
+            app.cached_skills
+                .iter()
+                .any(|(name, _)| name == "codewhale-skill"),
+            "CodeWhale skill should be cached: {:?}",
+            app.cached_skills
+        );
+        assert!(
+            !app.cached_skills
+                .iter()
+                .any(|(name, _)| name == "claude-skill"),
+            "strict scan should not cache Claude skills: {:?}",
+            app.cached_skills
+        );
+    }
+
+    #[test]
+    fn resolve_skills_dir_requires_codewhale_skills_to_be_directory() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join(".codewhale")).expect("codewhale dir");
+        std::fs::write(
+            workspace.join(".codewhale").join("skills"),
+            "not a directory",
+        )
+        .expect("skills file");
+
+        let global_skills_dir = tmp.path().join("global-skills");
+        let config = Config {
+            skills: Some(crate::config::SkillsConfig {
+                scan_codewhale_only: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let resolved = resolve_skills_dir(&workspace, &global_skills_dir, &config);
+
+        assert_eq!(resolved, global_skills_dir);
+    }
+
+    #[test]
     fn cached_skills_include_configured_directory() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let workspace = tmp.path().join("workspace");
@@ -6614,6 +6731,104 @@ mod tests {
                 .any(|(name, description)| name == "configured-skill"
                     && description == "Configured skill"),
             "configured skill dir should be merged: {:?}",
+            app.cached_skills
+        );
+    }
+
+    #[test]
+    fn cached_skills_preserve_configured_directory_in_codewhale_only_scan() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+
+        let codewhale_skill_dir = workspace
+            .join(".codewhale")
+            .join("skills")
+            .join("workspace-codewhale");
+        std::fs::create_dir_all(&codewhale_skill_dir).expect("workspace codewhale skill dir");
+        std::fs::write(
+            codewhale_skill_dir.join("SKILL.md"),
+            "---\nname: workspace-codewhale\ndescription: Workspace CodeWhale skill\n---\nbody\n",
+        )
+        .expect("write workspace codewhale skill");
+
+        let configured_dir = tmp.path().join("configured-skills");
+        let configured_skill_dir = configured_dir.join("configured-skill");
+        std::fs::create_dir_all(&configured_skill_dir).expect("configured skill dir");
+        std::fs::write(
+            configured_skill_dir.join("SKILL.md"),
+            "---\nname: configured-skill\ndescription: Configured skill\n---\nbody\n",
+        )
+        .expect("write configured skill");
+
+        let mut options = test_options(false);
+        options.workspace = workspace.clone();
+        options.skills_dir = configured_dir.clone();
+        let config = Config {
+            skills_dir: Some(configured_dir.to_string_lossy().into_owned()),
+            skills: Some(crate::config::SkillsConfig {
+                scan_codewhale_only: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let app = App::new(options, &config);
+
+        assert_eq!(app.skills_dir, configured_dir);
+        assert!(
+            app.cached_skills
+                .iter()
+                .any(|(name, _)| name == "workspace-codewhale"),
+            "workspace CodeWhale skill should still be cached: {:?}",
+            app.cached_skills
+        );
+        assert!(
+            app.cached_skills
+                .iter()
+                .any(|(name, _)| name == "configured-skill"),
+            "explicit configured skills_dir should still be cached: {:?}",
+            app.cached_skills
+        );
+    }
+
+    #[test]
+    fn cached_skills_reject_codewhale_only_workspace_symlink_escape() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let workspace = tmp.path().join("workspace");
+        let escape_target = tmp.path().join("escape-target");
+        let escaped_skill_dir = escape_target.join("escaped-skill");
+        std::fs::create_dir_all(workspace.join(".codewhale")).expect("codewhale dir");
+        std::fs::create_dir_all(&escaped_skill_dir).expect("escaped skill dir");
+        std::fs::write(
+            escaped_skill_dir.join("SKILL.md"),
+            "---\nname: escaped-skill\ndescription: Escaped skill\n---\nbody\n",
+        )
+        .expect("write escaped skill");
+
+        let link_path = workspace.join(".codewhale").join("skills");
+        if let Err(err) = create_dir_symlink(&escape_target, &link_path) {
+            eprintln!("skipping symlink escape assertion: {err}");
+            return;
+        }
+
+        let global_skills_dir = tmp.path().join("global-skills");
+        let mut options = test_options(false);
+        options.workspace = workspace.clone();
+        options.skills_dir = global_skills_dir.clone();
+        let config = Config {
+            skills: Some(crate::config::SkillsConfig {
+                scan_codewhale_only: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let app = App::new(options, &config);
+
+        assert_eq!(app.skills_dir, global_skills_dir);
+        assert!(
+            !app.cached_skills
+                .iter()
+                .any(|(name, _)| name == "escaped-skill"),
+            "strict app cache must not follow escaped workspace CodeWhale symlinks: {:?}",
             app.cached_skills
         );
     }

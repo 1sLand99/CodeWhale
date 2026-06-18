@@ -2108,6 +2108,11 @@ pub struct SkillsConfig {
     /// this limit are rejected during validation. Defaults to 5 MiB.
     #[serde(default)]
     pub max_install_size_bytes: Option<u64>,
+    /// When true, skill discovery scans only CodeWhale-owned skill roots
+    /// (plus any explicit `skills_dir`) instead of importing compatible
+    /// directories from other AI tools such as Claude, OpenCode, or Cursor.
+    #[serde(default, alias = "scanCodewhaleOnly")]
+    pub scan_codewhale_only: Option<bool>,
 }
 
 impl SkillsConfig {
@@ -2124,6 +2129,13 @@ impl SkillsConfig {
     pub fn max_install_size_bytes(&self) -> u64 {
         self.max_install_size_bytes
             .unwrap_or(crate::skills::install::DEFAULT_MAX_SIZE_BYTES)
+    }
+
+    /// Resolve whether session-time discovery should ignore cross-tool skill
+    /// directories. Defaults to the compatibility-preserving broad scan.
+    #[must_use]
+    pub fn scan_codewhale_only(&self) -> bool {
+        self.scan_codewhale_only.unwrap_or(false)
     }
 }
 
@@ -3323,6 +3335,12 @@ impl Config {
     #[must_use]
     pub fn snapshots_config(&self) -> SnapshotsConfig {
         self.snapshots.clone().unwrap_or_default()
+    }
+
+    /// Resolve community skill settings with defaults applied.
+    #[must_use]
+    pub fn skills_config(&self) -> SkillsConfig {
+        self.skills.clone().unwrap_or_default()
     }
 
     /// Resolve startup update-check settings with defaults applied.
@@ -4941,7 +4959,7 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         features: merge_features(base.features, override_cfg.features),
         notifications: override_cfg.notifications.or(base.notifications),
         network: override_cfg.network.or(base.network),
-        skills: override_cfg.skills.or(base.skills),
+        skills: merge_skills_config(base.skills, override_cfg.skills),
         snapshots: override_cfg.snapshots.or(base.snapshots),
         search: override_cfg.search.or(base.search),
         memory: override_cfg.memory.or(base.memory),
@@ -5009,6 +5027,26 @@ fn load_sibling_exec_policy_engine(config_path: Option<&Path>) -> Result<ExecPol
         Ok(ExecPolicyEngine::new(Vec::new(), Vec::new()))
     } else {
         Ok(ExecPolicyEngine::with_rulesets(vec![permissions.ruleset()]))
+    }
+}
+
+fn merge_skills_config(
+    base: Option<SkillsConfig>,
+    override_cfg: Option<SkillsConfig>,
+) -> Option<SkillsConfig> {
+    match (base, override_cfg) {
+        (None, None) => None,
+        (Some(base), None) => Some(base),
+        (None, Some(override_cfg)) => Some(override_cfg),
+        (Some(base), Some(override_cfg)) => Some(SkillsConfig {
+            registry_url: override_cfg.registry_url.or(base.registry_url),
+            max_install_size_bytes: override_cfg
+                .max_install_size_bytes
+                .or(base.max_install_size_bytes),
+            scan_codewhale_only: override_cfg
+                .scan_codewhale_only
+                .or(base.scan_codewhale_only),
+        }),
     }
 }
 
@@ -8179,6 +8217,21 @@ api_key = "old-openrouter-key"
     }
 
     #[test]
+    fn skills_scan_codewhale_only_defaults_false_and_parses_true() -> Result<()> {
+        assert!(!Config::default().skills_config().scan_codewhale_only());
+
+        let config: Config = toml::from_str(
+            r#"
+[skills]
+scan_codewhale_only = true
+"#,
+        )?;
+
+        assert!(config.skills_config().scan_codewhale_only());
+        Ok(())
+    }
+
+    #[test]
     fn test_load_uses_tilde_expanded_deepseek_config_path() -> Result<()> {
         let _lock = lock_test_env();
         let nanos = SystemTime::now()
@@ -8888,6 +8941,41 @@ api_key = "old-openrouter-key"
 
         let merged = apply_profile(config, Some("work")).expect("profile");
         assert_eq!(merged.context.enabled, Some(true));
+    }
+
+    #[test]
+    fn profile_skills_config_merges_individual_fields() {
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "strict".to_string(),
+            Config {
+                skills: Some(SkillsConfig {
+                    scan_codewhale_only: Some(true),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let config = ConfigFile {
+            base: Config {
+                skills: Some(SkillsConfig {
+                    registry_url: Some("https://registry.example/skills.json".to_string()),
+                    max_install_size_bytes: Some(1234),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            profiles: Some(profiles),
+        };
+
+        let merged = apply_profile(config, Some("strict")).expect("profile");
+        let skills = merged.skills.expect("merged skills config");
+        assert_eq!(
+            skills.registry_url.as_deref(),
+            Some("https://registry.example/skills.json")
+        );
+        assert_eq!(skills.max_install_size_bytes, Some(1234));
+        assert_eq!(skills.scan_codewhale_only, Some(true));
     }
 
     #[test]

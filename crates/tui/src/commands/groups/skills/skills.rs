@@ -21,20 +21,31 @@ thread_local! {
 
 #[cfg(not(test))]
 fn discover_visible_skills(app: &App) -> SkillRegistry {
-    crate::skills::discover_for_workspace_and_dir(&app.workspace, &app.skills_dir)
+    crate::skills::discover_for_workspace_and_dir_with_mode(
+        &app.workspace,
+        &app.skills_dir,
+        crate::skills::SkillDiscoveryMode::from_codewhale_only(app.skills_scan_codewhale_only),
+    )
 }
 
 #[cfg(test)]
 fn discover_visible_skills(app: &App) -> SkillRegistry {
+    let mode =
+        crate::skills::SkillDiscoveryMode::from_codewhale_only(app.skills_scan_codewhale_only);
     TEST_HOME_DIR.with(|home| {
         if let Some(home) = home.borrow().as_deref() {
-            crate::skills::discover_for_workspace_and_dir_with_home(
+            crate::skills::discover_for_workspace_and_dir_with_home_and_mode(
                 &app.workspace,
                 &app.skills_dir,
                 Some(home),
+                mode,
             )
         } else {
-            crate::skills::discover_for_workspace_and_dir(&app.workspace, &app.skills_dir)
+            crate::skills::discover_for_workspace_and_dir_with_mode(
+                &app.workspace,
+                &app.skills_dir,
+                mode,
+            )
         }
     })
 }
@@ -956,6 +967,43 @@ mod tests {
 
         assert!(msg.contains("/workspace-skill"), "got: {msg}");
         assert!(msg.contains("/configured-skill"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_list_skills_respects_codewhale_only_scan() {
+        let tmpdir = TempDir::new().unwrap();
+        let _home = IsolatedHome::new(&tmpdir);
+        let claude_skill_dir = tmpdir
+            .path()
+            .join(".claude")
+            .join("skills")
+            .join("claude-skill");
+        std::fs::create_dir_all(&claude_skill_dir).unwrap();
+        std::fs::write(
+            claude_skill_dir.join("SKILL.md"),
+            "---\nname: claude-skill\ndescription: Claude skill\n---\nbody",
+        )
+        .unwrap();
+        let codewhale_skill_dir = tmpdir
+            .path()
+            .join(".codewhale")
+            .join("skills")
+            .join("codewhale-skill");
+        std::fs::create_dir_all(&codewhale_skill_dir).unwrap();
+        std::fs::write(
+            codewhale_skill_dir.join("SKILL.md"),
+            "---\nname: codewhale-skill\ndescription: CodeWhale skill\n---\nbody",
+        )
+        .unwrap();
+
+        let mut app = create_test_app_with_tmpdir(&tmpdir);
+        app.skills_dir = tmpdir.path().join(".codewhale").join("skills");
+        app.skills_scan_codewhale_only = true;
+        let result = list_skills(&mut app, None);
+        let msg = result.message.unwrap();
+
+        assert!(msg.contains("/codewhale-skill"), "got: {msg}");
+        assert!(!msg.contains("/claude-skill"), "got: {msg}");
     }
 
     #[test]
