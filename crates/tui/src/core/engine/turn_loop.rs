@@ -2058,12 +2058,12 @@ impl Engine {
                         // Per-tool snapshot for surgical undo (#384): capture workspace
                         // state before file-modifying tools execute so `/undo` can
                         // revert the most recent write_file/edit_file/apply_patch.
-                        if result_override.is_none()
-                            && matches!(
-                                tool_name.as_str(),
-                                "write_file" | "edit_file" | "apply_patch"
-                            )
-                        {
+                        // See `should_pre_tool_snapshot` for the gating rationale (#3292).
+                        if should_pre_tool_snapshot(
+                            self.config.snapshots_enabled,
+                            result_override.is_some(),
+                            tool_name.as_str(),
+                        ) {
                             let ws = self.session.workspace.clone();
                             let tid = tool_id.clone();
                             let cap = self.config.snapshots_max_workspace_bytes;
@@ -2487,6 +2487,25 @@ fn stream_chunk_timeout_budget(config: &EngineConfig) -> (u64, Duration) {
     (secs, Duration::from_secs(secs))
 }
 
+/// Whether a per-tool pre-execution snapshot should be taken before running
+/// `tool_name` (#384).
+///
+/// Gated on `snapshots.enabled` (#3292) so that disabling snapshots suppresses
+/// the per-tool `tool:<call_id>` commits, matching the pre/post-turn snapshot
+/// call sites which already honor the same flag. A tool whose result is already
+/// overridden (denied, hook-supplied, or otherwise short-circuited) never
+/// executes a file write, so it is skipped too. Only the file-modifying tools
+/// produce undoable workspace changes worth snapshotting.
+fn should_pre_tool_snapshot(
+    snapshots_enabled: bool,
+    has_result_override: bool,
+    tool_name: &str,
+) -> bool {
+    snapshots_enabled
+        && !has_result_override
+        && matches!(tool_name, "write_file" | "edit_file" | "apply_patch")
+}
+
 /// Synthesize the tool result recorded for a tool call that never executed
 /// because the turn was cancelled mid-batch (#3216 / #2211).
 ///
@@ -2518,6 +2537,49 @@ mod cancel_batch_tests {
             "interrupted result should explain the cancellation: {:?}",
             result.content
         );
+    }
+}
+
+#[cfg(test)]
+mod pre_tool_snapshot_gate_tests {
+    use super::*;
+
+    // #3292: disabling snapshots must suppress the per-tool `tool:<call_id>`
+    // commits, just like the pre/post-turn snapshot sites.
+    #[test]
+    fn disabled_snapshots_suppress_per_tool_snapshot() {
+        for tool in ["write_file", "edit_file", "apply_patch"] {
+            assert!(
+                !should_pre_tool_snapshot(false, false, tool),
+                "snapshots.enabled=false must skip per-tool snapshot for {tool}"
+            );
+        }
+    }
+
+    #[test]
+    fn enabled_snapshots_snapshot_file_modifying_tools() {
+        for tool in ["write_file", "edit_file", "apply_patch"] {
+            assert!(
+                should_pre_tool_snapshot(true, false, tool),
+                "snapshots.enabled=true must snapshot {tool} before it runs"
+            );
+        }
+    }
+
+    #[test]
+    fn overridden_result_skips_snapshot() {
+        // A denied/short-circuited tool never executes a write, so no snapshot.
+        assert!(!should_pre_tool_snapshot(true, true, "write_file"));
+    }
+
+    #[test]
+    fn non_modifying_tools_are_never_snapshotted() {
+        for tool in ["read_file", "shell", "grep", "list_dir"] {
+            assert!(
+                !should_pre_tool_snapshot(true, false, tool),
+                "{tool} does not modify the workspace and must not be snapshotted"
+            );
+        }
     }
 }
 
