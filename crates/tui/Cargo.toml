@@ -13,6 +13,7 @@ tui = ["dep:schemaui", "schemaui/tui", "json", "toml"]
 web = ["dep:schemaui", "schemaui/web", "json", "toml"]
 json = ["schemaui/json"]
 toml = ["schemaui/toml"]
+long-running-tests = []
 
 [[bin]]
 name = "codewhale-tui"

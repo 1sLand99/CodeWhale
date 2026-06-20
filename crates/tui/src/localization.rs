@@ -302,6 +302,7 @@ pub enum MessageId {
     CmdFeedbackDescription,
     CmdHfDescription,
     CmdHelpDescription,
+    CmdProfileDescription,
     CmdHomeDescription,
     CmdHooksDescription,
     CmdAgentDescription,
@@ -742,6 +743,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::CmdFeedbackDescription,
     MessageId::CmdHfDescription,
     MessageId::CmdHelpDescription,
+    MessageId::CmdProfileDescription,
     MessageId::CmdHomeDescription,
     MessageId::CmdHooksDescription,
     MessageId::CmdAgentDescription,
@@ -1380,6 +1382,7 @@ fn english(id: MessageId) -> &'static str {
         MessageId::CmdFeedbackDescription => "Generate a GitHub feedback URL",
         MessageId::CmdHfDescription => "Inspect Hugging Face MCP setup and concepts",
         MessageId::CmdHelpDescription => "Show help information",
+        MessageId::CmdProfileDescription => "Switch to a named config profile",
         MessageId::CmdHomeDescription => "Show home dashboard with stats and quick actions",
         MessageId::CmdHooksDescription => "List configured lifecycle hooks (read-only)",
         MessageId::CmdAgentDescription => {
@@ -1987,6 +1990,7 @@ fn vietnamese(id: MessageId) -> Option<&'static str> {
         MessageId::CmdFeedbackDescription => "Tạo một URL để gửi phản hồi trên GitHub",
         MessageId::CmdHfDescription => "Kiểm tra thiết lập và khái niệm Hugging Face MCP",
         MessageId::CmdHelpDescription => "Hiển thị thông tin trợ giúp",
+        MessageId::CmdProfileDescription => "Chuyển sang profile cấu hình đã đặt tên",
         MessageId::CmdHomeDescription => {
             "Hiển thị bảng điều khiển trang chủ với số liệu thống kê và hành động nhanh"
         }
@@ -2796,6 +2800,7 @@ fn japanese(id: MessageId) -> Option<&'static str> {
         MessageId::CmdFeedbackDescription => "GitHub フィードバック URL を生成",
         MessageId::CmdHfDescription => "Hugging Face MCP の設定と概念を確認",
         MessageId::CmdHelpDescription => "ヘルプを表示",
+        MessageId::CmdProfileDescription => "名前付き設定プロファイルに切り替え",
         MessageId::CmdHomeDescription => "統計とクイックアクション付きのホームダッシュボードを表示",
         MessageId::CmdHooksDescription => {
             "設定済みのライフサイクルフックを一覧表示（読み取り専用）"
@@ -3382,6 +3387,7 @@ fn chinese_simplified(id: MessageId) -> Option<&'static str> {
         MessageId::CmdFeedbackDescription => "生成 GitHub 反馈链接",
         MessageId::CmdHfDescription => "检查 Hugging Face MCP 设置和概念",
         MessageId::CmdHelpDescription => "显示帮助信息",
+        MessageId::CmdProfileDescription => "切换到命名配置配置文件",
         MessageId::CmdHomeDescription => "显示主页面板，含统计与快捷操作",
         MessageId::CmdHooksDescription => "列出已配置的生命周期钩子（只读）",
         MessageId::CmdAgentDescription => "打开持久子代理会话：/agent [0-3] <task>",
@@ -3918,6 +3924,7 @@ fn portuguese_brazil(id: MessageId) -> Option<&'static str> {
         MessageId::CmdFeedbackDescription => "Gerar uma URL de feedback no GitHub",
         MessageId::CmdHfDescription => "Inspecionar configuracao e conceitos do Hugging Face MCP",
         MessageId::CmdHelpDescription => "Exibir informações de ajuda",
+        MessageId::CmdProfileDescription => "Alternar para um perfil de configuracao nomeado",
         MessageId::CmdHomeDescription => "Exibir o painel inicial com estatísticas e ações rápidas",
         MessageId::CmdHooksDescription => {
             "Listar hooks de ciclo de vida configurados (somente leitura)"
@@ -4540,6 +4547,7 @@ fn spanish_latin_america(id: MessageId) -> Option<&'static str> {
         MessageId::CmdFeedbackDescription => "Generar una URL de feedback en GitHub",
         MessageId::CmdHfDescription => "Inspeccionar configuracion y conceptos de Hugging Face MCP",
         MessageId::CmdHelpDescription => "Mostrar información de ayuda",
+        MessageId::CmdProfileDescription => "Cambiar a un perfil de configuración con nombre",
         MessageId::CmdHomeDescription => {
             "Mostrar el panel inicial con estadísticas y acciones rápidas"
         }
