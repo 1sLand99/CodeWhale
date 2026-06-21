@@ -753,7 +753,7 @@ fn agent_description_explains_background_child_and_transcript_handle() {
     let tool = AgentTool::new(manager, stub_runtime());
     let description = tool.description();
 
-    assert!(description.contains("Start one focused child agent task"));
+    assert!(description.contains("Start, inspect, peek at, or cancel focused child agent tasks"));
     assert!(description.contains("runs or queues"));
     assert!(description.contains("provider rate-limit"));
     assert!(description.contains("background"));
