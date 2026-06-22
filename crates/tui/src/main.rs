@@ -4409,7 +4409,7 @@ fn run_review_receipt_check(diff: &str, args: &ReviewArgs) -> Result<()> {
             serde_json::to_string_pretty(&serde_json::json!({
                 "mode": "review_receipt_check",
                 "success": validation.passed,
-                "validation": validation,
+                "validation": review_receipt_validation_public_json(&validation),
             }))?
         );
     } else if validation.passed {
@@ -4420,6 +4420,49 @@ fn run_review_receipt_check(diff: &str, args: &ReviewArgs) -> Result<()> {
         bail!("Review receipt check failed: {}", validation.reason);
     }
     Ok(())
+}
+
+fn review_receipt_validation_public_json(
+    validation: &crate::tools::review::ReviewReceiptValidation,
+) -> serde_json::Value {
+    let unresolved_risk = validation.unresolved_risk.as_ref();
+    serde_json::json!({
+        "passed": validation.passed,
+        "status": review_receipt_validation_status(validation),
+        "diff_fingerprint": validation.diff_fingerprint.as_str(),
+        "receipt_fingerprint": validation.receipt_fingerprint.as_deref(),
+        "unresolved": unresolved_risk.is_some_and(|risk| risk.unresolved),
+        "risk_level": unresolved_risk.map(|risk| risk.level.as_str()),
+    })
+}
+
+fn review_receipt_validation_status(
+    validation: &crate::tools::review::ReviewReceiptValidation,
+) -> &'static str {
+    if validation.passed {
+        "valid"
+    } else if validation
+        .receipt_fingerprint
+        .as_deref()
+        .is_some_and(|fingerprint| fingerprint != validation.diff_fingerprint.as_str())
+    {
+        "diff_mismatch"
+    } else if validation
+        .unresolved_risk
+        .as_ref()
+        .is_some_and(|risk| risk.unresolved)
+    {
+        "unresolved_risk"
+    } else if validation
+        .reason
+        .starts_with("unsupported review receipt schema version")
+    {
+        "unsupported_schema"
+    } else if validation.reason.starts_with("review receipt check ") {
+        "check_failed"
+    } else {
+        "invalid"
+    }
 }
 
 /// `codewhale pr <N>` (#451) — fetch a GitHub PR via `gh`, format
@@ -6000,20 +6043,24 @@ fn emit_exec_stream_event(event: &ExecStreamEvent) -> Result<()> {
     Ok(())
 }
 
-fn exec_resume_command(session_id: &str) -> String {
-    if session_id.trim().is_empty() {
-        String::new()
-    } else {
-        format!("codewhale exec --resume {session_id}")
-    }
-}
-
 fn exec_saved_session_line(session_id: &str) -> String {
     format!("session: {}", truncate_id(session_id))
 }
 
 fn exec_resumed_session_line(session_id: &str) -> String {
     format!("resumed session: {}", truncate_id(session_id))
+}
+
+fn exec_stream_session_ref(session_id: &str) -> String {
+    crate::utils::redacted_identifier_for_log(session_id)
+}
+
+fn exec_stream_resume_hint(session_id: &str) -> String {
+    if session_id.trim().is_empty() {
+        String::new()
+    } else {
+        "codewhale exec --resume <redacted-session-id>".to_string()
+    }
 }
 
 fn persist_exec_session(
@@ -6525,7 +6572,7 @@ async fn run_exec_agent(
                 if output_format == ExecOutputFormat::StreamJson {
                     if let Some(id) = saved_session_id.as_ref() {
                         emit_exec_stream_event(&ExecStreamEvent::SessionCapture {
-                            content: id.clone(),
+                            content: exec_stream_session_ref(id),
                         })?;
                     }
                     emit_exec_stream_event(&ExecStreamEvent::Metadata {
@@ -6535,9 +6582,12 @@ async fn run_exec_agent(
                             output_tokens: usage.output_tokens,
                             resume_command: saved_session_id
                                 .as_deref()
-                                .map(exec_resume_command)
+                                .map(exec_stream_resume_hint)
                                 .unwrap_or_default(),
-                            session_id: saved_session_id.unwrap_or_default(),
+                            session_id: saved_session_id
+                                .as_deref()
+                                .map(exec_stream_session_ref)
+                                .unwrap_or_default(),
                             workspace: latest_workspace.display().to_string(),
                             message_count: latest_messages.len(),
                             status: summary.status.clone(),
@@ -7252,14 +7302,15 @@ mod terminal_mode_tests {
     }
 
     #[test]
-    fn exec_stream_metadata_includes_resume_breadcrumbs() {
+    fn exec_stream_metadata_redacts_resume_breadcrumbs() {
+        let raw_session_id = "abc123fullsecret";
         let event = ExecStreamEvent::Metadata {
             meta: ExecStreamMeta {
                 model: "deepseek-v4-flash".to_string(),
                 input_tokens: 123,
                 output_tokens: 45,
-                session_id: "abc123".to_string(),
-                resume_command: exec_resume_command("abc123"),
+                session_id: exec_stream_session_ref(raw_session_id),
+                resume_command: exec_stream_resume_hint(raw_session_id),
                 workspace: "/tmp/work".to_string(),
                 message_count: 4,
                 status: Some("completed".to_string()),
@@ -7268,15 +7319,57 @@ mod terminal_mode_tests {
 
         let json = serde_json::to_string(&event).expect("serializes");
         assert!(!json.contains('\n'));
+        assert!(!json.contains(raw_session_id));
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
         assert_eq!(parsed["type"], "metadata");
-        assert_eq!(parsed["meta"]["session_id"], "abc123");
+        assert_ne!(parsed["meta"]["session_id"], raw_session_id);
+        assert!(
+            parsed["meta"]["session_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("<redacted:")
+        );
         assert_eq!(
             parsed["meta"]["resume_command"],
-            "codewhale exec --resume abc123"
+            "codewhale exec --resume <redacted-session-id>"
         );
         assert_eq!(parsed["meta"]["workspace"], "/tmp/work");
         assert_eq!(parsed["meta"]["message_count"], 4);
+
+        let capture = ExecStreamEvent::SessionCapture {
+            content: exec_stream_session_ref(raw_session_id),
+        };
+        let capture_json = serde_json::to_string(&capture).expect("serializes");
+        assert!(!capture_json.contains(raw_session_id));
+        let parsed_capture: serde_json::Value =
+            serde_json::from_str(&capture_json).expect("valid json");
+        assert_eq!(parsed_capture["type"], "session_capture");
+        assert_ne!(parsed_capture["content"], raw_session_id);
+    }
+
+    #[test]
+    fn review_receipt_check_public_json_omits_private_details() {
+        let validation = crate::tools::review::ReviewReceiptValidation {
+            passed: false,
+            reason: "secret reason with /tmp/private/receipt.json".to_string(),
+            diff_fingerprint: "sha256:current".to_string(),
+            receipt_fingerprint: Some("sha256:current".to_string()),
+            receipt_path: Some(PathBuf::from("/tmp/private/receipt.json")),
+            unresolved_risk: Some(crate::tools::review::ReviewReceiptRisk {
+                unresolved: true,
+                level: "error".to_string(),
+                summary: "secret summary".to_string(),
+            }),
+        };
+
+        let public = review_receipt_validation_public_json(&validation);
+        let encoded = serde_json::to_string(&public).expect("public json");
+
+        assert_eq!(public["passed"], false);
+        assert_eq!(public["status"], "unresolved_risk");
+        assert_eq!(public["risk_level"], "error");
+        assert!(!encoded.contains("secret"));
+        assert!(!encoded.contains("/tmp/private"));
     }
 
     #[test]
