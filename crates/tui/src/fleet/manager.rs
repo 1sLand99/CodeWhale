@@ -21,6 +21,7 @@ use super::executor::{
 };
 use super::host::FleetHostErrorKind;
 use super::ledger::{FleetLedger, FleetLedgerState, FleetTaskLedgerStatus, FleetTaskState};
+use super::scheduler::{FleetScheduler, FleetSchedulerPolicy};
 use super::task_spec::{
     FleetTaskSpecDocument, FleetTaskVerificationInput, load_task_spec_document,
     record_verification_receipt, validate_task_spec_document, verify_task_result,
@@ -97,6 +98,24 @@ pub struct FleetStatusSnapshot {
     pub cancelled: usize,
     pub stale: usize,
     pub workers: BTreeMap<String, FleetWorkerStatus>,
+}
+
+/// Outcome of resuming a fleet run from durable ledger state after a manager
+/// restart. The counts reflect the reconciliation pass; `status` is the
+/// post-resume inspectable snapshot.
+#[derive(Debug, Clone)]
+pub struct FleetResumeReport {
+    pub run_id: FleetRunId,
+    /// Orphaned in-flight leases detected as stale and reclaimed.
+    pub reclaimed_stale: usize,
+    /// Stale leases retried within their retry budget.
+    pub restarted: usize,
+    /// Stale leases that exhausted their retry budget and were failed.
+    pub failed: usize,
+    /// Escalation alerts emitted for exhausted tasks.
+    pub escalated: usize,
+    /// Inspectable run status after the resume pass.
+    pub status: FleetStatusSnapshot,
 }
 
 #[derive(Debug, Clone)]
@@ -318,6 +337,49 @@ impl FleetManager {
     pub fn run_has_open_work(&self, run_id: &FleetRunId) -> Result<bool> {
         let status = self.run_status(run_id)?;
         Ok(status.queued + status.running + status.stale > 0)
+    }
+
+    /// Resume a run from durable ledger state after a manager restart.
+    ///
+    /// A crashed or detached manager can leave in-flight tasks `Leased` to
+    /// workers whose processes are gone. Resume rebuilds run state from the
+    /// ledger, reconciles those orphaned/stale leases through the shared
+    /// scheduler recovery semantics (retry within budget, else fail and
+    /// escalate), records every decision durably, and returns an inspectable
+    /// status. It launches no new work and does not re-process tasks that
+    /// already reached a terminal state, so it is safe to call repeatedly.
+    pub fn resume_run(&self, run_id: &FleetRunId) -> Result<FleetResumeReport> {
+        self.resume_run_at(run_id, Utc::now())
+    }
+
+    /// Resume reconciliation at an explicit instant. This is the deterministic
+    /// seam behind [`resume_run`]'s wall clock: stale detection compares the
+    /// last heartbeat against `now`.
+    pub(crate) fn resume_run_at(
+        &self,
+        run_id: &FleetRunId,
+        now: DateTime<Utc>,
+    ) -> Result<FleetResumeReport> {
+        // Reuse the shared scheduler recovery engine over the same ledger so
+        // resume and steady-state supervision converge on one store and one
+        // retry/escalation policy. The manager's `stale_after` becomes the
+        // scheduler's heartbeat timeout so both surfaces agree on staleness.
+        let policy = FleetSchedulerPolicy {
+            heartbeat_timeout: self.stale_after,
+            ..FleetSchedulerPolicy::default()
+        };
+        let mut scheduler = FleetScheduler::open(&self.workspace, policy)?;
+        scheduler.set_now(now);
+        let report = scheduler.resume_run(run_id)?;
+        let status = self.run_status(run_id)?;
+        Ok(FleetResumeReport {
+            run_id: run_id.clone(),
+            reclaimed_stale: report.marked_stale,
+            restarted: report.restarted,
+            failed: report.failed,
+            escalated: report.alerts,
+            status,
+        })
     }
 
     pub async fn run_to_completion(
@@ -1494,6 +1556,314 @@ mod tests {
                 .await
                 .unwrap()
         })
+    }
+
+    const RESUME_T0: &str = "2026-06-13T01:00:00Z";
+
+    fn role_task_with_retry(id: &str, role: &str, max_attempts: u32) -> FleetTaskSpec {
+        let mut spec = task(id);
+        spec.worker = Some(FleetTaskWorkerProfile {
+            agent_profile: None,
+            role: Some(role.to_string()),
+            loadout: None,
+            model_class: None,
+            tool_profile: None,
+            tools: Vec::new(),
+            capabilities: Vec::new(),
+        });
+        spec.retry_policy = Some(FleetRetryPolicy {
+            max_attempts,
+            ..FleetRetryPolicy::default()
+        });
+        spec
+    }
+
+    fn resume_worker_spec(id: &str) -> FleetWorkerSpec {
+        FleetWorkerSpec {
+            id: id.to_string(),
+            name: id.to_string(),
+            host: FleetHostSpec::Local,
+            trust_level: Some(FleetTrustLevel::Local),
+            labels: BTreeMap::new(),
+            capabilities: vec!["local".to_string()],
+            max_concurrent_tasks: Some(1),
+        }
+    }
+
+    fn resume_now(offset_secs: i64) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(RESUME_T0)
+            .unwrap()
+            .with_timezone(&Utc)
+            + chrono::Duration::seconds(offset_secs)
+    }
+
+    /// Seed the durable ledger with the state a crashed manager would leave: a
+    /// running run whose `completed` task ids finished with receipts, and whose
+    /// `orphaned` (task_id, worker_id) pairs are still `Leased` to workers that
+    /// last heartbeat at `heartbeat_ts` — stale once the resume clock advances
+    /// past `stale_after`.
+    fn seed_crashed_run(
+        ledger: &FleetLedger,
+        run_id: &FleetRunId,
+        tasks: &[FleetTaskSpec],
+        workers: &[FleetWorkerSpec],
+        completed: &[&str],
+        orphaned: &[(&str, &str)],
+        heartbeat_ts: &str,
+    ) {
+        ledger
+            .create_run(&FleetRun {
+                id: run_id.clone(),
+                name: "resume smoke".to_string(),
+                status: FleetRunStatus::Running,
+                task_specs: tasks.to_vec(),
+                worker_specs: workers.to_vec(),
+                labels: BTreeMap::new(),
+                security_policy: None,
+                created_at: heartbeat_ts.to_string(),
+                updated_at: Some(heartbeat_ts.to_string()),
+                completed_at: None,
+            })
+            .unwrap();
+        for spec in tasks {
+            ledger
+                .enqueue(FleetInboxEntry {
+                    run_id: run_id.clone(),
+                    task_id: spec.id.clone(),
+                    priority: 0,
+                    enqueued_at: heartbeat_ts.to_string(),
+                    lease_deadline: None,
+                    attempts: 0,
+                })
+                .unwrap();
+        }
+        for (idx, &task_id) in completed.iter().enumerate() {
+            let worker_id = format!("done-worker-{idx}");
+            ledger
+                .lease_task(run_id, task_id, &worker_id, heartbeat_ts, None)
+                .unwrap();
+            ledger
+                .mark_task_terminal_status(
+                    run_id,
+                    task_id,
+                    Some(worker_id.as_str()),
+                    heartbeat_ts,
+                    FleetTaskLedgerStatus::Completed,
+                )
+                .unwrap();
+            ledger
+                .record_receipt(FleetReceipt {
+                    run_id: run_id.clone(),
+                    task_id: task_id.to_string(),
+                    worker_id,
+                    completed_at: heartbeat_ts.to_string(),
+                    result: FleetTaskResult::Pass,
+                    failure_kind: None,
+                    artifacts: Vec::new(),
+                    score: None,
+                })
+                .unwrap();
+        }
+        for &(task_id, worker_id) in orphaned {
+            ledger
+                .lease_task(run_id, task_id, worker_id, heartbeat_ts, None)
+                .unwrap();
+            ledger
+                .heartbeat(worker_id, heartbeat_ts, None, None)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn fleet_resume_reconciles_orphaned_lease_and_retries_within_budget() {
+        let tmp = TempDir::new().unwrap();
+        let ledger = FleetLedger::open(tmp.path()).unwrap();
+        let run_id = FleetRunId::from("resume-run");
+        // Three roles, three workers; scout and verifier finished, builder is
+        // orphaned mid-flight (its worker stopped heartbeating at the crash).
+        let tasks = vec![
+            role_task_with_retry("scout-1", "read-only", 3),
+            role_task_with_retry("build-1", "builder", 3),
+            role_task_with_retry("verify-1", "smoke-runner", 3),
+        ];
+        let workers = vec![
+            resume_worker_spec("w-scout"),
+            resume_worker_spec("w-build"),
+            resume_worker_spec("w-verify"),
+        ];
+        seed_crashed_run(
+            &ledger,
+            &run_id,
+            &tasks,
+            &workers,
+            &["scout-1", "verify-1"],
+            &[("build-1", "w-build")],
+            RESUME_T0,
+        );
+
+        // Restart: a fresh manager over the same workspace resumes from ledger.
+        let manager = FleetManager::open(tmp.path())
+            .unwrap()
+            .with_stale_after(Duration::from_secs(5));
+        let outcome = manager.resume_run_at(&run_id, resume_now(30)).unwrap();
+
+        assert_eq!(
+            outcome.reclaimed_stale, 1,
+            "orphaned builder lease detected stale"
+        );
+        assert_eq!(outcome.restarted, 1, "builder retried within budget");
+        assert_eq!(outcome.failed, 0);
+        assert_eq!(outcome.escalated, 0);
+        assert_eq!(
+            outcome.status.completed, 2,
+            "pre-crash completions preserved"
+        );
+        assert_eq!(outcome.status.restarted, 1);
+
+        let state = manager.rebuild_state().unwrap();
+        assert_eq!(state.receipts.len(), 2, "pre-crash receipts survive resume");
+        let builder = &state.tasks["resume-run:build-1"];
+        assert_eq!(builder.status, FleetTaskLedgerStatus::Leased);
+        assert_eq!(builder.entry.attempts, 2, "retry leased a second attempt");
+
+        let text = std::fs::read_to_string(manager.ledger_path()).unwrap();
+        assert!(
+            text.contains("\"state\":\"stale\""),
+            "stale event durably recorded"
+        );
+        assert!(
+            text.contains("\"state\":\"restarted\""),
+            "restart durably recorded"
+        );
+    }
+
+    #[test]
+    fn fleet_resume_exhausted_retry_fails_and_escalates_idempotently() {
+        let tmp = TempDir::new().unwrap();
+        let ledger = FleetLedger::open(tmp.path()).unwrap();
+        let run_id = FleetRunId::from("resume-run");
+        let mut builder = role_task_with_retry("build-1", "builder", 1);
+        builder.alert_policy = Some(FleetAlertPolicy {
+            events: vec![FleetAlertEventClass::RestartExhausted],
+            channels: vec![FleetAlertChannel::Slack {
+                webhook: FleetAlertEndpoint::inline("https://hooks.slack.invalid/secret"),
+            }],
+            after_attempts: Some(1),
+            after_minutes_stale: Some(1),
+        });
+        let tasks = vec![builder];
+        let workers = vec![resume_worker_spec("w-build")];
+        seed_crashed_run(
+            &ledger,
+            &run_id,
+            &tasks,
+            &workers,
+            &[],
+            &[("build-1", "w-build")],
+            RESUME_T0,
+        );
+
+        let manager = FleetManager::open(tmp.path())
+            .unwrap()
+            .with_stale_after(Duration::from_secs(5));
+        let outcome = manager.resume_run_at(&run_id, resume_now(30)).unwrap();
+
+        assert_eq!(outcome.reclaimed_stale, 1);
+        assert_eq!(outcome.restarted, 0);
+        assert_eq!(outcome.failed, 1, "exhausted retry budget fails the task");
+        assert_eq!(
+            outcome.escalated, 1,
+            "exhaustion escalates per alert policy"
+        );
+        assert_eq!(outcome.status.failed, 1);
+        assert_eq!(outcome.status.escalated, 1);
+
+        let text = std::fs::read_to_string(manager.ledger_path()).unwrap();
+        assert!(text.contains("\"state\":\"failed\""));
+        assert!(text.contains("\"state\":\"escalated\""));
+        assert!(text.contains("\"record\":\"alert_sent\""));
+        assert!(
+            !text.contains("hooks.slack.invalid/secret"),
+            "secret webhook redacted in ledger"
+        );
+
+        // Resuming again must not resurrect or re-escalate a terminal failure.
+        let again = manager.resume_run_at(&run_id, resume_now(30)).unwrap();
+        assert_eq!(again.reclaimed_stale, 0);
+        assert_eq!(again.failed, 0);
+        assert_eq!(again.escalated, 0);
+        assert_eq!(
+            manager.run_status(&run_id).unwrap().escalated,
+            1,
+            "no duplicate escalation across resumes"
+        );
+    }
+
+    #[test]
+    fn fleet_resume_retry_is_idempotent_at_same_instant() {
+        let tmp = TempDir::new().unwrap();
+        let ledger = FleetLedger::open(tmp.path()).unwrap();
+        let run_id = FleetRunId::from("resume-run");
+        let tasks = vec![role_task_with_retry("build-1", "builder", 3)];
+        let workers = vec![resume_worker_spec("w-build")];
+        seed_crashed_run(
+            &ledger,
+            &run_id,
+            &tasks,
+            &workers,
+            &[],
+            &[("build-1", "w-build")],
+            RESUME_T0,
+        );
+
+        let manager = FleetManager::open(tmp.path())
+            .unwrap()
+            .with_stale_after(Duration::from_secs(5));
+        let first = manager.resume_run_at(&run_id, resume_now(30)).unwrap();
+        assert_eq!(first.restarted, 1);
+
+        // Re-leased at the resume instant, the task is no longer stale, so a
+        // second resume at the same instant is a no-op (no double retry).
+        let second = manager.resume_run_at(&run_id, resume_now(30)).unwrap();
+        assert_eq!(second.reclaimed_stale, 0);
+        assert_eq!(second.restarted, 0);
+        assert_eq!(
+            manager.rebuild_state().unwrap().tasks["resume-run:build-1"]
+                .entry
+                .attempts,
+            2,
+            "attempts did not double on the second resume"
+        );
+    }
+
+    #[test]
+    fn fleet_resume_uses_wall_clock_for_stale_detection() {
+        let tmp = TempDir::new().unwrap();
+        let ledger = FleetLedger::open(tmp.path()).unwrap();
+        let run_id = FleetRunId::from("resume-run");
+        let tasks = vec![role_task_with_retry("build-1", "builder", 3)];
+        let workers = vec![resume_worker_spec("w-build")];
+        // Heartbeat an hour in the past so it is reliably stale under the real
+        // wall clock used by the production `resume_run` entrypoint.
+        let stale_ts = (Utc::now() - chrono::Duration::seconds(3600))
+            .to_rfc3339_opts(SecondsFormat::Secs, true);
+        seed_crashed_run(
+            &ledger,
+            &run_id,
+            &tasks,
+            &workers,
+            &[],
+            &[("build-1", "w-build")],
+            &stale_ts,
+        );
+
+        let manager = FleetManager::open(tmp.path())
+            .unwrap()
+            .with_stale_after(Duration::from_secs(5));
+        let outcome = manager.resume_run(&run_id).unwrap();
+
+        assert_eq!(outcome.reclaimed_stale, 1);
+        assert_eq!(outcome.restarted, 1);
     }
 
     #[test]

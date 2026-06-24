@@ -993,6 +993,77 @@ mod tests {
     }
 
     #[test]
+    fn fleet_route_parity_uses_shared_router_candidates() {
+        use crate::config::ApiProvider;
+        use crate::model_routing::{RouterCandidates, provider_router_candidates};
+
+        // Fleet emits the SAME `ModelRoute` seam the sub-agent assignment path
+        // consumes (`SubAgentModelStrength::model_route`: fast -> Faster,
+        // same/inherit -> Inherit). No fleet-specific provider/model table is
+        // involved — only the shared enum.
+        assert_eq!(
+            fleet_model_route_for_loadout("auto", &codewhale_config::FleetLoadout::Fast),
+            ModelRoute::Faster,
+        );
+        assert_eq!(
+            fleet_model_route_for_loadout("auto", &codewhale_config::FleetLoadout::Inherit),
+            ModelRoute::Inherit,
+        );
+        assert_eq!(
+            fleet_model_route_for_loadout("auto", &codewhale_config::FleetLoadout::Strong),
+            ModelRoute::Auto,
+        );
+        // An explicit model always pins to a Fixed route, regardless of loadout.
+        assert_eq!(
+            fleet_model_route_for_loadout(
+                "deepseek-v4-flash",
+                &codewhale_config::FleetLoadout::Strong
+            ),
+            ModelRoute::Fixed("deepseek-v4-flash".to_string()),
+        );
+
+        // The sub-agent runtime resolves a `ModelRoute` to a concrete model via
+        // `provider_router_candidates` (see `worker_profile_subagent_assignment_route`):
+        //   Fixed(m)      -> m
+        //   Faster | Auto -> candidates.cheap (else parent)
+        //   Inherit       -> parent
+        // A fleet worker hands its `ModelRoute` to that same resolution, so a
+        // fleet "fast" loadout lands on the provider's cheap sibling.
+        let parent = "deepseek-v4-pro";
+        let resolve = |route: &ModelRoute, candidates: &RouterCandidates| match route {
+            ModelRoute::Fixed(model) => model.clone(),
+            ModelRoute::Faster | ModelRoute::Auto => candidates
+                .cheap
+                .clone()
+                .unwrap_or_else(|| parent.to_string()),
+            ModelRoute::Inherit => parent.to_string(),
+        };
+
+        let deepseek = provider_router_candidates(ApiProvider::Deepseek, parent);
+        assert_eq!(
+            resolve(
+                &fleet_model_route_for_loadout("auto", &codewhale_config::FleetLoadout::Fast),
+                &deepseek,
+            ),
+            "deepseek-v4-flash",
+            "fleet fast loadout resolves to the provider cheap sibling via the shared router",
+        );
+
+        // A provider with no known fast sibling must keep children on the parent
+        // model rather than fabricating a cloud id (#3166 route assertion).
+        let no_sibling = provider_router_candidates(ApiProvider::Anthropic, parent);
+        assert_eq!(no_sibling.cheap, None);
+        assert_eq!(
+            resolve(
+                &fleet_model_route_for_loadout("auto", &codewhale_config::FleetLoadout::Fast),
+                &no_sibling,
+            ),
+            parent,
+            "fast with no provider sibling stays on the parent/default model",
+        );
+    }
+
+    #[test]
     fn exec_hardening_caps_max_steps_to_max_turns() {
         let spec = AgentWorkerSpec {
             worker_id: "w1".to_string(),

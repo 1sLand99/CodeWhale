@@ -410,6 +410,14 @@ enum FleetCommand {
         /// Worker id printed by `codewhale fleet run`
         worker_id: String,
     },
+    /// Resume a run from durable ledger state, reconciling orphaned/stale leases
+    Resume {
+        /// Run id printed by `codewhale fleet run`
+        run_id: String,
+        /// Seconds without heartbeat before a leased task is treated as stale
+        #[arg(long, default_value_t = 300)]
+        stale_after_seconds: u64,
+    },
     /// Stop all queued and running fleet work
     Stop {
         /// Confirm stopping all queued and running fleet tasks
@@ -1719,6 +1727,23 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
         FleetCommand::Restart { worker_id } => {
             let inspection = manager.restart_worker(&worker_id)?;
             print_inspection(&inspection);
+            Ok(())
+        }
+        FleetCommand::Resume {
+            run_id,
+            stale_after_seconds,
+        } => {
+            let manager = manager.with_stale_after(Duration::from_secs(stale_after_seconds.max(1)));
+            let report = manager.resume_run(&FleetRunId::from(run_id))?;
+            println!(
+                "fleet resume: {} reclaimed_stale={} restarted={} failed={} escalated={}",
+                report.run_id.0,
+                report.reclaimed_stale,
+                report.restarted,
+                report.failed,
+                report.escalated
+            );
+            print_status(&report.status);
             Ok(())
         }
         FleetCommand::Stop { all } => {

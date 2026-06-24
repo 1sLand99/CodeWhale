@@ -73,6 +73,22 @@ impl FleetScheduler {
         Ok(report)
     }
 
+    /// Resume reconciliation after a manager restart: detect orphaned/stale
+    /// in-flight leases left by a prior process and apply retry/escalation
+    /// policy, then recompute run status.
+    ///
+    /// Unlike [`tick_run`], this launches no new queued work and does not
+    /// re-process tasks that already reached a terminal state, so it is safe
+    /// and idempotent to call on a fresh process: a task re-leased by an
+    /// earlier resume is no longer stale at the same instant, and a terminally
+    /// failed task is never failed or escalated twice.
+    pub fn resume_run(&self, run_id: &FleetRunId) -> Result<FleetSchedulerReport> {
+        let mut report = FleetSchedulerReport::default();
+        self.reconcile_stale_leases(run_id, &mut report)?;
+        self.refresh_run_status(run_id)?;
+        Ok(report)
+    }
+
     pub fn cancel_run(&self, run_id: &FleetRunId, reason: &str) -> Result<FleetSchedulerReport> {
         let state = self.ledger.rebuild_state()?;
         let mut report = FleetSchedulerReport::default();
@@ -167,6 +183,52 @@ impl FleetScheduler {
                 }
                 _ => {}
             }
+        }
+        Ok(())
+    }
+
+    /// Reconcile only orphaned/stale in-flight leases (the restart-recovery
+    /// subset of [`recover_unhealthy_work`]): a `Leased` task whose worker has
+    /// stopped heartbeating is marked stale and routed through the shared
+    /// retry/escalation budget. Terminal and healthy tasks are left untouched,
+    /// which keeps [`resume_run`] idempotent.
+    fn reconcile_stale_leases(
+        &self,
+        run_id: &FleetRunId,
+        report: &mut FleetSchedulerReport,
+    ) -> Result<()> {
+        let state = self.ledger.rebuild_state()?;
+        for task in state
+            .tasks
+            .values()
+            .filter(|task| task.entry.run_id == *run_id)
+        {
+            if !matches!(task.status, FleetTaskLedgerStatus::Leased)
+                || !self.task_is_stale(task, &state)
+            {
+                continue;
+            }
+            let Some(task_spec) = task_spec_for(&state, task) else {
+                continue;
+            };
+            let worker_id = task
+                .leased_to
+                .clone()
+                .unwrap_or_else(|| "fleet-scheduler".to_string());
+            self.append_worker_event(
+                &task.entry.run_id,
+                &worker_id,
+                &task.entry.task_id,
+                FleetWorkerEventPayload::Stale {
+                    last_heartbeat_at: state
+                        .heartbeats
+                        .get(&worker_id)
+                        .map(|heartbeat| heartbeat.timestamp.clone()),
+                },
+            )?;
+            report.marked_stale += 1;
+            self.retry_or_fail(task, &task_spec, &worker_id, report)
+                .with_context(|| format!("resuming stale task {}", task.entry.task_id))?;
         }
         Ok(())
     }

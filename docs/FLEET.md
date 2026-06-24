@@ -21,8 +21,16 @@ codewhale fleet logs <worker-id>
 codewhale fleet artifacts <worker-id>
 codewhale fleet interrupt <worker-id>
 codewhale fleet restart <worker-id>
+codewhale fleet resume <run-id>
 codewhale fleet stop --all
 ```
+
+`codewhale fleet resume <run-id>` is the restart-recovery verb: it replays the
+ledger, reconciles any in-flight lease whose worker stopped heartbeating
+(retrying within the task's budget, else failing and escalating per the alert
+policy), and prints the post-resume status. It launches no new work and is
+idempotent, so it is safe to run after a manager exit, laptop sleep, or runtime
+restart.
 
 Fleet state is stored under the workspace in `.codewhale/fleet.jsonl`. Worker
 logs and adapter logs are stored under `.codewhale/fleet/` and
