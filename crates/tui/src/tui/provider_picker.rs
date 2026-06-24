@@ -412,7 +412,10 @@ impl ProviderDashboardRow {
     fn compact_hint(&self) -> String {
         // Self-hosted providers carry a local/private posture; surface it next
         // to the base URL so the row reads correctly without a key (#3083).
-        let self_hosted = if self.auth_status == ProviderAuthStatus::Local {
+        let self_hosted = if matches!(
+            self.auth_status,
+            ProviderAuthStatus::Local | ProviderAuthStatus::Optional
+        ) {
             " (self-hosted)"
         } else {
             ""
@@ -685,6 +688,7 @@ fn default_reasoning_stream_visibility(provider: ApiProvider) -> ProviderReasoni
         | ApiProvider::Arcee
         | ApiProvider::Minimax
         | ApiProvider::Sglang
+        | ApiProvider::Vllm
         | ApiProvider::Zai
         | ApiProvider::Moonshot => ProviderReasoningStreamVisibility::StructuredThinking,
         _ => ProviderReasoningStreamVisibility::Unknown,
@@ -1618,6 +1622,27 @@ mod tests {
             row.compact_hint().contains("(self-hosted)"),
             "self-hosted hint missing: {}",
             row.compact_hint()
+        );
+
+        let sglang =
+            ProviderDashboardRow::from_config(ApiProvider::Sglang, ApiProvider::Sglang, &config);
+        assert_eq!(sglang.auth_status, ProviderAuthStatus::Optional);
+        assert!(
+            sglang.compact_hint().contains("(self-hosted)"),
+            "self-hosted hint missing for SGLang: {}",
+            sglang.compact_hint()
+        );
+    }
+
+    #[test]
+    fn self_hosted_reasoning_visibility_covers_vllm() {
+        assert_eq!(
+            default_reasoning_stream_visibility(ApiProvider::Sglang),
+            ProviderReasoningStreamVisibility::StructuredThinking
+        );
+        assert_eq!(
+            default_reasoning_stream_visibility(ApiProvider::Vllm),
+            ProviderReasoningStreamVisibility::StructuredThinking
         );
     }
 
