@@ -1822,6 +1822,13 @@ impl ModalView for SubAgentsView {
             KeyCode::Enter | KeyCode::Char('r') | KeyCode::Char('R') => {
                 ViewAction::Emit(ViewEvent::SubAgentsRefresh)
             }
+            KeyCode::Char('f') | KeyCode::Char('F') => {
+                ViewAction::EmitAndClose(ViewEvent::CommandPaletteSelected {
+                    action: CommandPaletteAction::ExecuteCommand {
+                        command: "/fleet".to_string(),
+                    },
+                })
+            }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.scroll = self.scroll.saturating_sub(1);
                 ViewAction::None
@@ -1864,8 +1871,12 @@ impl ModalView for SubAgentsView {
 
         if self.agents.is_empty() {
             lines.push(Line::from(Span::styled(
-                "No agents running.",
+                "No Fleet workers running.",
                 Style::default().fg(palette::TEXT_MUTED),
+            )));
+            lines.push(Line::from(Span::styled(
+                "Use /fleet to configure role profiles and launch posture.",
+                Style::default().fg(palette::TEXT_DIM),
             )));
         } else {
             let mut running = Vec::new();
@@ -1894,8 +1905,12 @@ impl ModalView for SubAgentsView {
             ];
 
             lines.push(Line::from(Span::styled(
-                "Sub-agents",
+                "Fleet workers",
                 Style::default().fg(palette::DEEPSEEK_SKY).bold(),
+            )));
+            lines.push(Line::from(Span::styled(
+                "Sub-agent roles are Fleet worker roles.",
+                Style::default().fg(palette::TEXT_DIM),
             )));
 
             let mut summary_parts = Vec::new();
@@ -1992,12 +2007,13 @@ impl ModalView for SubAgentsView {
             .block(
                 Block::default()
                     .title(Line::from(vec![Span::styled(
-                        " Sub-agents ",
+                        " Fleet workers ",
                         Style::default().fg(palette::WHALE_ACCENT_PRIMARY).bold(),
                     )]))
                     .title_bottom(Line::from(vec![
                         Span::styled(" Esc to close ", Style::default().fg(palette::TEXT_MUTED)),
                         Span::styled(" R to refresh ", Style::default().fg(palette::TEXT_MUTED)),
+                        Span::styled(" F setup ", Style::default().fg(palette::TEXT_MUTED)),
                         Span::styled(scroll_indicator, Style::default().fg(palette::DEEPSEEK_SKY)),
                     ]))
                     .borders(Borders::ALL)
@@ -2195,6 +2211,7 @@ mod tests {
     };
     use crate::tui::app::{App, TuiOptions};
     use crate::tui::history::{HistoryCell, SubAgentCell};
+    use crate::tui::views::{CommandPaletteAction, SubAgentsView};
     use crate::tui::widgets::agent_card::{AgentLifecycle, FanoutCard};
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -2375,6 +2392,20 @@ mod tests {
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].agent_type, SubAgentType::Explore);
         assert_eq!(agents[0].assignment.objective, "read the docs");
+    }
+
+    #[test]
+    fn fleet_worker_status_view_can_jump_to_fleet_setup() {
+        let mut view = SubAgentsView::new(Vec::new());
+
+        let action = view.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+
+        match action {
+            ViewAction::EmitAndClose(ViewEvent::CommandPaletteSelected {
+                action: CommandPaletteAction::ExecuteCommand { command },
+            }) => assert_eq!(command, "/fleet"),
+            other => panic!("expected /fleet jump action, got {other:?}"),
+        }
     }
 
     fn visible_section_labels(view: &ConfigView) -> Vec<&'static str> {

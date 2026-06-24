@@ -251,7 +251,7 @@ impl ModalView for FleetSetupView {
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let popup_width = area.width.saturating_sub(4).clamp(72, 116).min(area.width);
-        let popup_height = area.height.saturating_sub(4).clamp(18, 32).min(area.height);
+        let popup_height = area.height.saturating_sub(4).clamp(18, 38).min(area.height);
         let popup_area = Rect {
             x: area.x + area.width.saturating_sub(popup_width) / 2,
             y: area.y + area.height.saturating_sub(popup_height) / 2,
@@ -292,9 +292,9 @@ impl ModalView for FleetSetupView {
             Direction::Vertical
         };
         let constraints = if direction == Direction::Horizontal {
-            vec![Constraint::Percentage(25); self.lanes.len()]
+            vec![Constraint::Ratio(1, self.lanes.len() as u32); self.lanes.len()]
         } else {
-            vec![Constraint::Length(6); self.lanes.len()]
+            vec![Constraint::Length(5); self.lanes.len()]
         };
         let areas = Layout::default()
             .direction(direction)
@@ -320,19 +320,25 @@ fn build_lanes(snapshot: &FleetSetupSnapshot) -> Vec<FleetSetupLane> {
     vec![
         FleetSetupLane {
             title: "1 Role",
-            subtitle: "what the worker does",
+            subtitle: "role and persona",
             rows: vec![
                 FleetSetupRow::new("manager", "plan/split", "coordinates queued Fleet work"),
                 FleetSetupRow::new("scout", "read-first", "research and repo reconnaissance"),
                 FleetSetupRow::new("builder", "write", "implements bounded changes"),
                 FleetSetupRow::new("reviewer", "read-only", "checks regressions and tests"),
                 FleetSetupRow::new("verifier", "test-runner", "runs focused validation"),
-                FleetSetupRow::new("summarizer", "reduce", "turns receipts into handoff state"),
+                FleetSetupRow::new("synthesizer", "reduce", "turns receipts into handoff state"),
+                FleetSetupRow::new(
+                    "custom",
+                    "agent profile",
+                    "workspace TOML can define posture",
+                )
+                .tone(RowTone::Current),
             ],
         },
         FleetSetupLane {
-            title: "2 Profile",
-            subtitle: "persona and prompt",
+            title: "2 Model",
+            subtitle: "class and route intent",
             rows: vec![
                 FleetSetupRow::new(
                     "current route",
@@ -340,6 +346,45 @@ fn build_lanes(snapshot: &FleetSetupSnapshot) -> Vec<FleetSetupLane> {
                     format!("reasoning {}", snapshot.reasoning),
                 )
                 .tone(RowTone::Current),
+                FleetSetupRow::new("inherit", "session route", "reuse active provider/model"),
+                FleetSetupRow::new("fast", "scout", "low-latency fanout and summaries"),
+                FleetSetupRow::new("balanced", "default", "normal build/review work")
+                    .tone(RowTone::Ready),
+                FleetSetupRow::new("strong", "hard", "security, release, architecture"),
+                FleetSetupRow::new("deep-reasoning", "debug", "higher reasoning when supported"),
+                FleetSetupRow::new("tool-heavy", "operator", "shell and artifact workflows"),
+            ],
+        },
+        FleetSetupLane {
+            title: "3 Permission",
+            subtitle: "authority posture",
+            rows: vec![
+                FleetSetupRow::new(
+                    "parent envelope",
+                    "inherit+narrow",
+                    "children cannot widen approval, trust, or secrets",
+                )
+                .tone(RowTone::Ready),
+                FleetSetupRow::new("reviewer", "read-only", "default for review/plan/scout")
+                    .tone(RowTone::Ready),
+                FleetSetupRow::new("builder", "scoped write", "write only inside task bounds"),
+                FleetSetupRow::new(
+                    "approval",
+                    "required",
+                    "profiles cannot disable required approvals",
+                )
+                .tone(RowTone::Ready),
+                FleetSetupRow::new(
+                    "custom profile",
+                    "no grants",
+                    "TOML may narrow posture but not expand it",
+                ),
+            ],
+        },
+        FleetSetupLane {
+            title: "4 Tools",
+            subtitle: "capability loadout",
+            rows: vec![
                 FleetSetupRow::new("workspace files", profile_value, profile_detail)
                     .tone(RowTone::Ready),
                 FleetSetupRow::new(
@@ -348,28 +393,27 @@ fn build_lanes(snapshot: &FleetSetupSnapshot) -> Vec<FleetSetupLane> {
                     "Enter inserts a safe authoring prompt",
                 )
                 .tone(RowTone::Current),
-            ],
-        },
-        FleetSetupLane {
-            title: "3 Loadout",
-            subtitle: "model class intent",
-            rows: vec![
-                FleetSetupRow::new("inherit", "session route", "reuse active provider/model"),
-                FleetSetupRow::new("fast", "scout", "low-latency fanout and summaries"),
-                FleetSetupRow::new("balanced", "default", "normal build/review work")
+                FleetSetupRow::new("read tools", "default", "search, inspect, summarize")
                     .tone(RowTone::Ready),
-                FleetSetupRow::new("deep-reasoning", "hard", "debugging and architecture"),
-                FleetSetupRow::new("code", "builder", "implementation-heavy tasks"),
-                FleetSetupRow::new("review", "reviewer", "regression and test analysis"),
-                FleetSetupRow::new("tool-heavy", "operator", "shell and artifact workflows"),
+                FleetSetupRow::new(
+                    "write tools",
+                    "builder only",
+                    "edit/apply patch after scope",
+                ),
+                FleetSetupRow::new("shell", "policy gated", "allowed by parent/runtime posture"),
+                FleetSetupRow::new(
+                    "artifacts",
+                    "receipts",
+                    "logs and handoff data stay inspectable",
+                ),
             ],
         },
         FleetSetupLane {
-            title: "4 Policy",
-            subtitle: "runtime and recursion",
+            title: "5 Depth",
+            subtitle: "fanout and recursion",
             rows: vec![
                 FleetSetupRow::new(
-                    "sub-agents",
+                    "role workers",
                     if snapshot.subagents_enabled {
                         "enabled"
                     } else {
@@ -395,12 +439,6 @@ fn build_lanes(snapshot: &FleetSetupSnapshot) -> Vec<FleetSetupLane> {
                 )
                 .tone(RowTone::Ready),
                 FleetSetupRow::new(
-                    "child safety",
-                    "intersection",
-                    "children narrow permissions, shell, tools, and depth",
-                )
-                .tone(RowTone::Ready),
-                FleetSetupRow::new(
                     "budget",
                     token_budget,
                     format!(
@@ -408,12 +446,36 @@ fn build_lanes(snapshot: &FleetSetupSnapshot) -> Vec<FleetSetupLane> {
                         snapshot.api_timeout_secs, snapshot.heartbeat_timeout_secs
                     ),
                 ),
+                FleetSetupRow::new("retry/ledger", "Fleet", "durable receipts and inspection"),
+            ],
+        },
+        FleetSetupLane {
+            title: "6 Review",
+            subtitle: "check and run",
+            rows: vec![
                 FleetSetupRow::new(
-                    "execution",
-                    "Fleet -> agent",
-                    "Fleet workers convert into AgentWorkerSpec",
+                    "runtime",
+                    "Fleet -> exec",
+                    "durable workers launch the headless runtime",
                 )
                 .tone(RowTone::Current),
+                FleetSetupRow::new(
+                    "status",
+                    "/fleet status",
+                    "legacy /subagents opens the same worker view",
+                )
+                .tone(RowTone::Ready),
+                FleetSetupRow::new(
+                    "inspect",
+                    "ledger",
+                    "route, receipt, artifact, terminal state",
+                ),
+                FleetSetupRow::new(
+                    "run spec",
+                    "review first",
+                    "confirm role/profile/loadout before launch",
+                ),
+                FleetSetupRow::new("handoff", "bounded", "summaries over raw transcript replay"),
             ],
         },
     ]
@@ -517,7 +579,7 @@ fn profile_file_status(workspace: &Path) -> (String, String) {
 
 fn profile_authoring_prompt(snapshot: &FleetSetupSnapshot) -> String {
     format!(
-        "Create a safe CodeWhale Fleet persona file for this workspace.\n\n\
+        "Create a safe CodeWhale Fleet agent profile file for this workspace.\n\n\
          Target path: {PROFILE_DIR}/reviewer.toml\n\
          Current route context only: provider = {provider}, model = {model}, reasoning = {reasoning}\n\n\
          Write TOML using only this schema:\n\
@@ -529,7 +591,7 @@ fn profile_authoring_prompt(snapshot: &FleetSetupSnapshot) -> String {
          - [instructions].text\n\
          - [tools].posture = \"read-only\"\n\n\
          Do not include provider, model, base_url, api_key, auth, secrets, trust, allow_shell, or approval_required=false.\n\
-         Keep the profile permission-narrowing and compatible with recursive Fleet/sub-agent workers.",
+         Keep the profile permission-narrowing and compatible with recursive Fleet role workers.",
         provider = snapshot.provider,
         model = snapshot.model,
         reasoning = snapshot.reasoning
@@ -614,7 +676,7 @@ mod tests {
             view.lanes
                 .iter()
                 .flat_map(|lane| lane.rows.iter())
-                .any(|row| row.value == "Fleet -> agent")
+                .any(|row| row.value == "Fleet -> exec")
         );
         view.render(Rect::new(0, 0, 120, 32), &mut buf);
         let rendered = buf

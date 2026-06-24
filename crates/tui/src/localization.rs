@@ -1487,8 +1487,8 @@ fn english(id: MessageId) -> &'static str {
         }
         MessageId::CmdStatusDescription => "Show runtime session status",
         MessageId::CmdStatuslineDescription => "Configure which items appear in the footer",
-        MessageId::CmdFleetDescription => "Open Fleet setup and loadout planner",
-        MessageId::CmdSubagentsDescription => "List sub-agent status",
+        MessageId::CmdFleetDescription => "Open Fleet setup or worker status",
+        MessageId::CmdSubagentsDescription => "Compatibility shortcut for /fleet status",
         MessageId::CmdSwarmDescription => {
             "Run a multi-agent fanout turn (sequential | mixture | distill | deliberate)"
         }
@@ -1645,7 +1645,7 @@ fn english(id: MessageId) -> &'static str {
         MessageId::LinksTip => {
             "Tip: Use the env var shown for your provider, or save the key with `codewhale auth set --provider <id>`."
         }
-        MessageId::SubagentsFetching => "Fetching sub-agent status...",
+        MessageId::SubagentsFetching => "Fetching Fleet worker status...",
         MessageId::HelpUnknownCommand => "Unknown command: {topic}",
         MessageId::HomeDashboardTitle => "codewhale Home Dashboard",
         MessageId::HomeModel => "Model:",
@@ -1654,7 +1654,7 @@ fn english(id: MessageId) -> &'static str {
         MessageId::HomeHistory => "History:",
         MessageId::HomeTokens => "Tokens:",
         MessageId::HomeQueued => "Queued:",
-        MessageId::HomeSubagents => "Sub-agents:",
+        MessageId::HomeSubagents => "Fleet workers:",
         MessageId::HomeSkill => "Skill:",
         MessageId::HomeQuickActions => "Quick Actions",
         MessageId::HomeQuickLinks => "/links      - Dashboard & API links",
@@ -1662,7 +1662,7 @@ fn english(id: MessageId) -> &'static str {
         MessageId::HomeQuickConfig => "/config      - Open interactive configuration editor",
         MessageId::HomeQuickSettings => "/settings    - Show persistent settings",
         MessageId::HomeQuickModel => "/model       - Switch or view model",
-        MessageId::HomeQuickSubagents => "/subagents   - List sub-agent status",
+        MessageId::HomeQuickSubagents => "/fleet status - Fleet worker status",
         MessageId::HomeQuickTaskList => "/task list   - Show background task queue",
         MessageId::HomeQuickHelp => "/help        - Show help",
         MessageId::HomeModeTips => "Mode Tips",
@@ -2128,8 +2128,8 @@ fn vietnamese(id: MessageId) -> Option<&'static str> {
         MessageId::CmdStatuslineDescription => {
             "Cấu hình các mục hiển thị ở thanh trạng thái dưới cùng"
         }
-        MessageId::CmdFleetDescription => "Open Fleet setup and loadout planner",
-        MessageId::CmdSubagentsDescription => "Liệt kê trạng thái của các sub-agent",
+        MessageId::CmdFleetDescription => "Mở thiết lập Fleet hoặc trạng thái worker",
+        MessageId::CmdSubagentsDescription => "Lối tắt tương thích cho /fleet status",
         MessageId::CmdSwarmDescription => {
             "Khởi chạy chế độ đa agent (sequential | mixture | distill | deliberate)"
         }
@@ -2293,7 +2293,7 @@ fn vietnamese(id: MessageId) -> Option<&'static str> {
         MessageId::LinksTip => {
             "Mẹo: Dùng biến môi trường được hiển thị cho nhà cung cấp, hoặc lưu khóa bằng `codewhale auth set --provider <id>`."
         }
-        MessageId::SubagentsFetching => "Đang lấy trạng thái của các sub-agent...",
+        MessageId::SubagentsFetching => "Đang lấy trạng thái Fleet worker...",
         MessageId::HelpUnknownCommand => "Lệnh không xác định: {topic}",
         MessageId::HomeDashboardTitle => "Bảng Điều Khiển Trang Chủ codewhale",
         MessageId::HomeModel => "Mô hình:",
@@ -2302,7 +2302,7 @@ fn vietnamese(id: MessageId) -> Option<&'static str> {
         MessageId::HomeHistory => "Lịch sử:",
         MessageId::HomeTokens => "Token:",
         MessageId::HomeQueued => "Trong hàng đợi:",
-        MessageId::HomeSubagents => "Sub-agent:",
+        MessageId::HomeSubagents => "Fleet worker:",
         MessageId::HomeSkill => "Kỹ năng:",
         MessageId::HomeQuickActions => "Hành động nhanh",
         MessageId::HomeQuickLinks => "/links      - Các liên kết đến Dashboard & API",
@@ -2310,7 +2310,7 @@ fn vietnamese(id: MessageId) -> Option<&'static str> {
         MessageId::HomeQuickConfig => "/config     - Mở trình chỉnh sửa cấu hình tương tác",
         MessageId::HomeQuickSettings => "/settings    - Hiển thị các cài đặt liên tục",
         MessageId::HomeQuickModel => "/model       - Xem hoặc chuyển đổi mô hình",
-        MessageId::HomeQuickSubagents => "/subagents   - Liệt kê trạng thái sub-agent",
+        MessageId::HomeQuickSubagents => "/fleet status - Trạng thái Fleet worker",
         MessageId::HomeQuickTaskList => "/task list   - Hiển thị hàng đợi nhiệm vụ ngầm",
         MessageId::HomeQuickHelp => "/help        - Hiển thị trợ giúp",
         MessageId::HomeModeTips => "Mẹo về Chế độ",
@@ -2957,8 +2957,8 @@ fn japanese(id: MessageId) -> Option<&'static str> {
         }
         MessageId::CmdStatusDescription => "実行中のセッション状態を表示",
         MessageId::CmdStatuslineDescription => "フッターに表示する項目を設定",
-        MessageId::CmdFleetDescription => "Open Fleet setup and loadout planner",
-        MessageId::CmdSubagentsDescription => "サブエージェントの状態を一覧表示",
+        MessageId::CmdFleetDescription => "Fleet設定またはワーカー状態を開く",
+        MessageId::CmdSubagentsDescription => "/fleet status の互換ショートカット",
         MessageId::CmdSwarmDescription => {
             "マルチエージェントのファンアウトターンを実行（sequential | mixture | distill | deliberate）"
         }
@@ -3112,7 +3112,7 @@ fn japanese(id: MessageId) -> Option<&'static str> {
         MessageId::LinksTip => {
             "ヒント: 表示されたプロバイダー用の環境変数を使うか、`codewhale auth set --provider <id>` でキーを保存してください。"
         }
-        MessageId::SubagentsFetching => "サブエージェントの状態を取得中...",
+        MessageId::SubagentsFetching => "Fleetワーカー状態を取得中...",
         MessageId::HelpUnknownCommand => "不明なコマンド: {topic}",
         MessageId::HomeDashboardTitle => "codewhale ホームダッシュボード",
         MessageId::HomeModel => "モデル：",
@@ -3121,7 +3121,7 @@ fn japanese(id: MessageId) -> Option<&'static str> {
         MessageId::HomeHistory => "履歴：",
         MessageId::HomeTokens => "トークン：",
         MessageId::HomeQueued => "キュー：",
-        MessageId::HomeSubagents => "サブエージェント：",
+        MessageId::HomeSubagents => "Fleetワーカー：",
         MessageId::HomeSkill => "スキル：",
         MessageId::HomeQuickActions => "クイックアクション",
         MessageId::HomeQuickLinks => "/links      - ダッシュボードと API リンク",
@@ -3129,7 +3129,7 @@ fn japanese(id: MessageId) -> Option<&'static str> {
         MessageId::HomeQuickConfig => "/config      - インタラクティブな設定エディタを開く",
         MessageId::HomeQuickSettings => "/settings    - 永続化された設定を表示",
         MessageId::HomeQuickModel => "/model       - モデルを切り替え・確認",
-        MessageId::HomeQuickSubagents => "/subagents   - サブエージェントの状態を一覧",
+        MessageId::HomeQuickSubagents => "/fleet status - Fleetワーカー状態",
         MessageId::HomeQuickTaskList => "/task list   - バックグラウンドタスクキューを表示",
         MessageId::HomeQuickHelp => "/help        - ヘルプを表示",
         MessageId::HomeModeTips => "モードヒント",
@@ -3547,8 +3547,8 @@ fn chinese_simplified(id: MessageId) -> Option<&'static str> {
         MessageId::CmdStashDescription => "暂存或恢复输入草稿（Ctrl+S 暂存，/stash list|pop）",
         MessageId::CmdStatusDescription => "显示当前运行状态",
         MessageId::CmdStatuslineDescription => "配置底栏要显示哪些条目",
-        MessageId::CmdFleetDescription => "Open Fleet setup and loadout planner",
-        MessageId::CmdSubagentsDescription => "列出子代理状态",
+        MessageId::CmdFleetDescription => "打开 Fleet 设置或工作器状态",
+        MessageId::CmdSubagentsDescription => "/fleet status 的兼容快捷方式",
         MessageId::CmdSwarmDescription => {
             "运行多代理扇出轮次（sequential | mixture | distill | deliberate）"
         }
@@ -3682,7 +3682,7 @@ fn chinese_simplified(id: MessageId) -> Option<&'static str> {
         MessageId::LinksTip => {
             "提示：使用所显示服务商的环境变量，或通过 `codewhale auth set --provider <id>` 保存密钥。"
         }
-        MessageId::SubagentsFetching => "正在获取子代理状态...",
+        MessageId::SubagentsFetching => "正在获取 Fleet 工作器状态...",
         MessageId::HelpUnknownCommand => "未知命令：{topic}",
         MessageId::HomeDashboardTitle => "codewhale 主面板",
         MessageId::HomeModel => "模型：",
@@ -3691,7 +3691,7 @@ fn chinese_simplified(id: MessageId) -> Option<&'static str> {
         MessageId::HomeHistory => "历史：",
         MessageId::HomeTokens => "令牌：",
         MessageId::HomeQueued => "队列：",
-        MessageId::HomeSubagents => "子代理：",
+        MessageId::HomeSubagents => "Fleet 工作器：",
         MessageId::HomeSkill => "技能：",
         MessageId::HomeQuickActions => "快捷操作",
         MessageId::HomeQuickLinks => "/links      - 控制台与 API 链接",
@@ -3699,7 +3699,7 @@ fn chinese_simplified(id: MessageId) -> Option<&'static str> {
         MessageId::HomeQuickConfig => "/config      - 打开交互式配置编辑器",
         MessageId::HomeQuickSettings => "/settings    - 显示持久化设置",
         MessageId::HomeQuickModel => "/model       - 切换或查看模型",
-        MessageId::HomeQuickSubagents => "/subagents   - 列出子代理状态",
+        MessageId::HomeQuickSubagents => "/fleet status - Fleet 工作器状态",
         MessageId::HomeQuickTaskList => "/task list   - 显示后台任务队列",
         MessageId::HomeQuickHelp => "/help        - 显示帮助",
         MessageId::HomeModeTips => "模式提示",
@@ -4125,8 +4125,8 @@ fn portuguese_brazil(id: MessageId) -> Option<&'static str> {
         }
         MessageId::CmdStatusDescription => "Exibir o status da sessão em execução",
         MessageId::CmdStatuslineDescription => "Configurar quais itens aparecem no rodapé",
-        MessageId::CmdFleetDescription => "Open Fleet setup and loadout planner",
-        MessageId::CmdSubagentsDescription => "Listar o status dos sub-agentes",
+        MessageId::CmdFleetDescription => "Abrir configuração Fleet ou status dos workers",
+        MessageId::CmdSubagentsDescription => "Atalho compatível para /fleet status",
         MessageId::CmdSwarmDescription => {
             "Executar turno fanout multi-agente (sequential | mixture | distill | deliberate)"
         }
@@ -4288,7 +4288,7 @@ fn portuguese_brazil(id: MessageId) -> Option<&'static str> {
         MessageId::LinksTip => {
             "Dica: use a variável de ambiente mostrada para seu provedor ou salve a chave com `codewhale auth set --provider <id>`."
         }
-        MessageId::SubagentsFetching => "Buscando status dos sub-agentes...",
+        MessageId::SubagentsFetching => "Buscando status dos workers Fleet...",
         MessageId::HelpUnknownCommand => "Comando desconhecido: {topic}",
         MessageId::HomeDashboardTitle => "Painel Inicial do codewhale",
         MessageId::HomeModel => "Modelo:",
@@ -4297,7 +4297,7 @@ fn portuguese_brazil(id: MessageId) -> Option<&'static str> {
         MessageId::HomeHistory => "Histórico:",
         MessageId::HomeTokens => "Tokens:",
         MessageId::HomeQueued => "Enfileirado:",
-        MessageId::HomeSubagents => "Sub-agentes:",
+        MessageId::HomeSubagents => "Workers Fleet:",
         MessageId::HomeSkill => "Skill:",
         MessageId::HomeQuickActions => "Ações Rápidas",
         MessageId::HomeQuickLinks => "/links      - Links do painel e API",
@@ -4305,7 +4305,7 @@ fn portuguese_brazil(id: MessageId) -> Option<&'static str> {
         MessageId::HomeQuickConfig => "/config      - Abrir editor interativo de configuração",
         MessageId::HomeQuickSettings => "/settings    - Exibir configurações persistentes",
         MessageId::HomeQuickModel => "/model       - Alternar ou visualizar modelo",
-        MessageId::HomeQuickSubagents => "/subagents   - Listar status dos sub-agentes",
+        MessageId::HomeQuickSubagents => "/fleet status - Status dos workers Fleet",
         MessageId::HomeQuickTaskList => "/task list   - Exibir fila de tarefas em segundo plano",
         MessageId::HomeQuickHelp => "/help        - Exibir ajuda",
         MessageId::HomeModeTips => "Dicas de Modo",
@@ -4773,8 +4773,8 @@ fn spanish_latin_america(id: MessageId) -> Option<&'static str> {
         MessageId::CmdStatuslineDescription => {
             "Configurar qué elementos aparecen en el pie de página"
         }
-        MessageId::CmdFleetDescription => "Open Fleet setup and loadout planner",
-        MessageId::CmdSubagentsDescription => "Listar el estado de los sub-agentes",
+        MessageId::CmdFleetDescription => "Abrir configuración Fleet o estado de workers",
+        MessageId::CmdSubagentsDescription => "Atajo compatible para /fleet status",
         MessageId::CmdSwarmDescription => {
             "Ejecutar turno fanout multi-agente (sequential | mixture | distill | deliberate)"
         }
@@ -4940,7 +4940,7 @@ fn spanish_latin_america(id: MessageId) -> Option<&'static str> {
         MessageId::LinksTip => {
             "Tip: usa la variable de entorno mostrada para tu proveedor o guarda la clave con `codewhale auth set --provider <id>`."
         }
-        MessageId::SubagentsFetching => "Obteniendo estado de los sub-agentes...",
+        MessageId::SubagentsFetching => "Obteniendo estado de workers Fleet...",
         MessageId::HelpUnknownCommand => "Comando desconocido: {topic}",
         MessageId::HomeDashboardTitle => "Panel Inicial de codewhale",
         MessageId::HomeModel => "Modelo:",
@@ -4949,7 +4949,7 @@ fn spanish_latin_america(id: MessageId) -> Option<&'static str> {
         MessageId::HomeHistory => "Historial:",
         MessageId::HomeTokens => "Tokens:",
         MessageId::HomeQueued => "En cola:",
-        MessageId::HomeSubagents => "Sub-agentes:",
+        MessageId::HomeSubagents => "Workers Fleet:",
         MessageId::HomeSkill => "Skill:",
         MessageId::HomeQuickActions => "Acciones Rápidas",
         MessageId::HomeQuickLinks => "/links      - Enlaces del panel y API",
@@ -4957,7 +4957,7 @@ fn spanish_latin_america(id: MessageId) -> Option<&'static str> {
         MessageId::HomeQuickConfig => "/config      - Abrir editor interactivo de configuración",
         MessageId::HomeQuickSettings => "/settings    - Mostrar configuraciones persistentes",
         MessageId::HomeQuickModel => "/model       - Alternar o visualizar modelo",
-        MessageId::HomeQuickSubagents => "/subagents   - Listar estado de los sub-agentes",
+        MessageId::HomeQuickSubagents => "/fleet status - Estado de workers Fleet",
         MessageId::HomeQuickTaskList => "/task list   - Mostrar fila de tareas en segundo plano",
         MessageId::HomeQuickHelp => "/help        - Mostrar ayuda",
         MessageId::HomeModeTips => "Tips de Modo",

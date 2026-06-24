@@ -2461,8 +2461,9 @@ pub fn subagent_panel_lines(
 }
 
 /// Build the Agents panel lines together with a parallel per-line
-/// click-action vector (#3028). Agent label rows open the agents view via
-/// `/subagents`; header, role-mix, detail, and RLM lines are not clickable.
+/// click-action vector (#3028). Agent label rows open the Fleet worker status
+/// view via `/fleet status`; header, role-mix, detail, and RLM lines are not
+/// clickable.
 fn subagent_panel_rows(
     summary: &SidebarSubagentSummary,
     rows: &[SidebarAgentRow],
@@ -2538,7 +2539,7 @@ fn subagent_panel_rows(
             truncate_line_to_width(&label, content_width.max(1)),
             Style::default().fg(color),
         )));
-        actions.push(Some("/subagents".to_string()));
+        actions.push(Some("/fleet status".to_string()));
 
         // Auto-collapse finished sub-agents: hide detail lines for completed
         // agents so the sidebar stays compact when work is done.
@@ -4414,7 +4415,7 @@ mod tests {
             .iter()
             .position(|line| line.contains("investigator"))
             .expect("agent label row");
-        assert_eq!(actions[agent_idx].as_deref(), Some("/subagents"));
+        assert_eq!(actions[agent_idx].as_deref(), Some("/fleet status"));
         assert!(
             actions[agent_idx + 1].is_none(),
             "agent detail row has no action"
@@ -4425,7 +4426,7 @@ mod tests {
     fn subagent_panel_actions_skip_role_mix_slot_for_progress_only_agents() {
         // Progress-only agents have no cached role counts, so there is no
         // role-mix line — the first agent row sits directly under the count
-        // header and must still resolve to /subagents (#3028 audit fix).
+        // header and must still resolve to /fleet status (#3028 audit fix).
         let summary = SidebarSubagentSummary {
             progress_only_count: 1,
             ..SidebarSubagentSummary::default()
@@ -4457,7 +4458,7 @@ mod tests {
             agent_idx, 1,
             "no role-mix line should be emitted without role counts: {text:?}"
         );
-        assert_eq!(actions[agent_idx].as_deref(), Some("/subagents"));
+        assert_eq!(actions[agent_idx].as_deref(), Some("/fleet status"));
     }
 
     #[test]

@@ -1264,7 +1264,7 @@ mod tests {
                 hover_row(4, None),
                 hover_row(5, Some("/jobs show shell_x")),
                 hover_row(6, Some("/jobs cancel shell_x")),
-                hover_row(7, Some("/subagents")),
+                hover_row(7, Some("/fleet status")),
             ],
         });
 
@@ -1280,8 +1280,8 @@ mod tests {
         );
         assert_eq!(
             sidebar_click_action(&app, left_click(60, 7)).as_deref(),
-            Some("/subagents"),
-            "agent row opens the agents view"
+            Some("/fleet status"),
+            "agent row opens the Fleet worker status view"
         );
         assert_eq!(
             sidebar_click_action(&app, left_click(65, 4)),

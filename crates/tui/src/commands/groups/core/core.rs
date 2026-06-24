@@ -227,7 +227,7 @@ pub fn models(_app: &mut App) -> CommandResult {
     CommandResult::action(AppAction::FetchModels)
 }
 
-/// List sub-agent status from the engine
+/// List Fleet worker status from the engine.
 pub fn subagents(app: &mut App) -> CommandResult {
     if app.view_stack.top_kind() != Some(ModalKind::SubAgents) {
         let agents = subagent_view_agents(app, &app.subagent_cache);
@@ -552,7 +552,7 @@ pub fn home_dashboard(app: &mut App) -> CommandResult {
         );
     }
 
-    // Sub-agents
+    // Fleet role workers
     let subagent_count = app.subagent_cache.len();
     if subagent_count > 0 {
         let _ = writeln!(
@@ -1256,7 +1256,7 @@ mod tests {
         assert_eq!(app.view_stack.top_kind(), Some(ModalKind::SubAgents));
         assert_eq!(
             app.status_message,
-            Some("Fetching sub-agent status...".to_string())
+            Some("Fetching Fleet worker status...".to_string())
         );
     }
 
