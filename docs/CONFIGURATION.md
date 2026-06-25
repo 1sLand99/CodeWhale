@@ -137,10 +137,10 @@ Supported keys in the project overlay (top-level fields only):
 The overlay is intentionally narrow — it covers the fields a repo
 maintainer is most likely to want to standardize across contributors.
 Credential, endpoint, provider-selection, MCP config, hooks, skills, capacity,
-retry, and `instructions = [...]` settings stay user-global. If a repo-local
-config declares `api_key`, `base_url`, `provider`, `mcp_config_path`,
-`allow_shell = true`, or `instructions`, CodeWhale ignores that key and keeps
-the user's global setting.
+retry, hotbar bindings, and `instructions = [...]` settings stay user-global.
+If a repo-local config declares `api_key`, `base_url`, `provider`,
+`mcp_config_path`, `hotbar`, `allow_shell = true`, or `instructions`,
+CodeWhale ignores that key and keeps the user's global setting.
 
 The `codewhale` facade and `codewhale-tui` binary share the same config file for
 DeepSeek auth and model defaults. `codewhale auth set --provider deepseek` (and
@@ -1056,6 +1056,30 @@ If you are upgrading from older releases:
   can be added manually and are matched at runtime, but the approval UI does
   not save file rules yet. This intentionally does not accept typed allow/deny
   records or glob expansion.
+- `[[hotbar]]` (array of tables, optional): user-owned 1-8 slot bindings for
+  the TUI hotbar. Each entry has `slot`, `action`, and optional `label`.
+  Omitting `hotbar` uses the built-in default eight slots. Setting
+  `hotbar = []` disables all default slots. When one or more `[[hotbar]]`
+  tables are present, that list replaces the defaults; missing slots stay
+  empty. Invalid slots outside `1..=8` are skipped with a warning, duplicate
+  slots use the later entry, and unknown action IDs are kept so the UI can show
+  a disabled/unknown cell instead of silently deleting user config. Trusted
+  user config, profiles, and managed config replace the whole list; project
+  overlays cannot change hotbar bindings. Setup or wizard flows that persist
+  hotbar bindings write this same schema to the resolved `~/.codewhale/config.toml`
+  path, preserving legacy `~/.deepseek/config.toml` only when that fallback file
+  is already the active config.
+
+  ```toml
+  [[hotbar]]
+  slot = 1
+  action = "mode.plan"
+  label = "Plan"
+
+  [[hotbar]]
+  slot = 2
+  action = "session.compact"
+  ```
 - `[auto_review]` (table, optional): deterministic tool-call review policy.
   This layer sits on top of existing approval modes; it can force a prompt or
   block a tool call, but it is not an auto-push, auto-merge, or hosted review

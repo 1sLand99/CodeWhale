@@ -155,6 +155,21 @@ fn hotbar_defaults_when_config_is_absent() {
 }
 
 #[test]
+fn hotbar_empty_array_disables_default_slots() {
+    let config: ConfigToml = toml::from_str("hotbar = []\n").expect("parse empty hotbar array");
+
+    let resolved = config.resolve_hotbar_bindings(&DEFAULT_HOTBAR_ACTIONS);
+
+    assert_eq!(resolved.warnings, Vec::new());
+    assert_eq!(resolved.bindings, Vec::new());
+
+    let serialized = toml::to_string_pretty(&config).expect("serialize config");
+    let round_tripped: ConfigToml =
+        toml::from_str(&serialized).expect("deserialize serialized config");
+    assert_eq!(round_tripped.hotbar, Some(Vec::new()));
+}
+
+#[test]
 fn hotbar_tables_parse_and_round_trip() {
     let config: ConfigToml = toml::from_str(
         r#"
@@ -1877,6 +1892,37 @@ fn project_merge_forwards_all_provider_model_overrides() {
             "provider {key} should merge repo-local model override"
         );
     }
+}
+
+#[test]
+fn project_merge_does_not_replace_user_hotbar_bindings() {
+    let mut base = ConfigToml {
+        hotbar: Some(vec![HotbarBindingToml {
+            slot: 1,
+            action: "mode.plan".to_string(),
+            label: Some("Plan".to_string()),
+        }]),
+        ..ConfigToml::default()
+    };
+    let project = ConfigToml {
+        hotbar: Some(vec![HotbarBindingToml {
+            slot: 1,
+            action: "mode.yolo".to_string(),
+            label: Some("Yolo".to_string()),
+        }]),
+        ..ConfigToml::default()
+    };
+
+    base.merge_project_overrides(project);
+
+    assert_eq!(
+        base.hotbar,
+        Some(vec![HotbarBindingToml {
+            slot: 1,
+            action: "mode.plan".to_string(),
+            label: Some("Plan".to_string()),
+        }])
+    );
 }
 
 #[test]

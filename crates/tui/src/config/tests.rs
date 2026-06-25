@@ -495,6 +495,84 @@ action = "session.compact"
 }
 
 #[test]
+fn tui_config_empty_hotbar_array_disables_defaults() {
+    let parsed: ConfigFile = toml::from_str("hotbar = []\n").expect("parse empty hotbar");
+
+    let resolved = parsed
+        .base
+        .resolve_hotbar_bindings(&["mode.plan", "session.compact"]);
+
+    assert_eq!(resolved.warnings, Vec::new());
+    assert_eq!(resolved.bindings, Vec::new());
+}
+
+#[test]
+fn profile_hotbar_override_replaces_entire_user_list() {
+    let mut profiles = HashMap::new();
+    profiles.insert(
+        "compact".to_string(),
+        Config {
+            hotbar: Some(vec![codewhale_config::HotbarBindingToml {
+                slot: 2,
+                action: "session.compact".to_string(),
+                label: Some("Compact".to_string()),
+            }]),
+            ..Config::default()
+        },
+    );
+    let config = ConfigFile {
+        base: Config {
+            hotbar: Some(vec![codewhale_config::HotbarBindingToml {
+                slot: 1,
+                action: "mode.plan".to_string(),
+                label: Some("Plan".to_string()),
+            }]),
+            ..Config::default()
+        },
+        profiles: Some(profiles),
+    };
+
+    let merged = apply_profile(config, Some("compact")).expect("profile");
+
+    assert_eq!(
+        merged.hotbar,
+        Some(vec![codewhale_config::HotbarBindingToml {
+            slot: 2,
+            action: "session.compact".to_string(),
+            label: Some("Compact".to_string()),
+        }])
+    );
+}
+
+#[test]
+fn profile_without_hotbar_keeps_base_hotbar() {
+    let mut profiles = HashMap::new();
+    profiles.insert("work".to_string(), Config::default());
+    let config = ConfigFile {
+        base: Config {
+            hotbar: Some(vec![codewhale_config::HotbarBindingToml {
+                slot: 1,
+                action: "mode.plan".to_string(),
+                label: None,
+            }]),
+            ..Config::default()
+        },
+        profiles: Some(profiles),
+    };
+
+    let merged = apply_profile(config, Some("work")).expect("profile");
+
+    assert_eq!(
+        merged.hotbar,
+        Some(vec![codewhale_config::HotbarBindingToml {
+            slot: 1,
+            action: "mode.plan".to_string(),
+            label: None,
+        }])
+    );
+}
+
+#[test]
 fn update_config_defaults_to_enabled_without_uri() {
     let config = Config::default();
     assert_eq!(config.update, None);
