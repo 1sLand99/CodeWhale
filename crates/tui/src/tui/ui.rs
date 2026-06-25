@@ -3155,7 +3155,7 @@ async fn run_event_loop(
         }
         if app.needs_redraw && draw_wait.is_none() {
             let was_full_repaint = force_terminal_repaint;
-            draw_app_frame_inner(terminal, app, force_terminal_repaint)?;
+            draw_app_frame_inner(terminal, app, config, force_terminal_repaint)?;
             force_terminal_repaint = false;
             if was_full_repaint {
                 draws_since_last_full_repaint = 0;
@@ -3385,7 +3385,7 @@ async fn run_event_loop(
                     backend.force_size(new_size);
                     backend.set_terminal_size(new_size);
                 }
-                draw_app_frame_inner(terminal, app, true)?;
+                draw_app_frame_inner(terminal, app, config, true)?;
                 draws_since_last_full_repaint = 0;
                 {
                     let backend = terminal.backend_mut();
@@ -8273,7 +8273,7 @@ fn build_pending_input_preview(app: &App) -> PendingInputPreview {
     preview
 }
 
-fn render(f: &mut Frame, app: &mut App) {
+fn render(f: &mut Frame, app: &mut App, config: &Config) {
     let size = f.area();
 
     // Clear entire area with the configured app background.
@@ -8496,7 +8496,7 @@ fn render(f: &mut Frame, app: &mut App) {
             app.last_sidebar_area = Some(sidebar_area);
 
             // Render sidebar
-            super::sidebar::render_sidebar(f, sidebar_area, app);
+            super::sidebar::render_sidebar(f, sidebar_area, app, config);
 
             // Paint resize handle (1-col draggable bar) on the left edge of
             // the sidebar, over the sidebar content. Mouse drag on this strip
@@ -8709,6 +8709,7 @@ fn render(f: &mut Frame, app: &mut App) {
 fn draw_app_frame_inner(
     terminal: &mut AppTerminal,
     app: &mut App,
+    config: &Config,
     full_repaint: bool,
 ) -> Result<()> {
     terminal.backend_mut().set_palette_mode(app.ui_theme.mode);
@@ -8732,7 +8733,7 @@ fn draw_app_frame_inner(
             terminal.backend_mut().write_all(TERMINAL_ORIGIN_RESET)?;
             terminal.clear()?;
         }
-        terminal.draw(|f| render(f, app))?;
+        terminal.draw(|f| render(f, app, config))?;
         Ok(())
     })();
 

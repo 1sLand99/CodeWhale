@@ -4,9 +4,11 @@
 //! the chat transcript when the available width allows it. Each section
 //! reads from `App` snapshots; mutation lives in the main app loop.
 
+use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::time::{Duration, Instant};
 
+use crate::config::Config;
 use crate::tui::app::HuntVerdict;
 
 use ratatui::{
@@ -42,8 +44,10 @@ const ACTIVE_TOOL_COMPLETED_ROW_TTL: Duration = Duration::from_secs(8);
 const ACTIVE_TOOL_STALE_RUNNING_ROW_TTL: Duration = Duration::from_secs(600);
 const TASK_STOP_TARGET_LABEL: &str = "[x]";
 const TASK_STOP_TARGET_SUFFIX: &str = " [x]";
+const HOTBAR_PANEL_HEIGHT: u16 = 4;
+const HOTBAR_ROW_COLUMNS: usize = 4;
 
-pub fn render_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
+pub fn render_sidebar(f: &mut Frame, area: Rect, app: &mut App, config: &Config) {
     // Clear hover state at the start of each render
     app.sidebar_hover = SidebarHoverState::default();
     if area.width < 24 || area.height < 8 {
@@ -55,16 +59,37 @@ pub fn render_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    match app.sidebar_focus {
-        SidebarFocus::Auto => render_sidebar_auto(f, area, app),
-        SidebarFocus::Pinned => render_sidebar_pinned(f, area, app),
-        SidebarFocus::Tasks => render_sidebar_tasks(f, area, app),
-        SidebarFocus::Agents => render_sidebar_subagents(f, area, app),
-        SidebarFocus::Context => render_context_panel(f, area, app),
-        SidebarFocus::Hidden => Block::default()
+    if app.sidebar_focus == SidebarFocus::Hidden {
+        Block::default()
             .style(Style::default().bg(app.ui_theme.surface_bg))
-            .render(area, f.buffer_mut()),
+            .render(area, f.buffer_mut());
+        return;
     }
+
+    let (main_area, hotbar_area) = split_sidebar_hotbar_area(area);
+    match app.sidebar_focus {
+        SidebarFocus::Auto => render_sidebar_auto(f, main_area, app),
+        SidebarFocus::Pinned => render_sidebar_pinned(f, main_area, app),
+        SidebarFocus::Tasks => render_sidebar_tasks(f, main_area, app),
+        SidebarFocus::Agents => render_sidebar_subagents(f, main_area, app),
+        SidebarFocus::Context => render_context_panel(f, main_area, app),
+        SidebarFocus::Hidden => unreachable!("hidden sidebar returned before render dispatch"),
+    }
+    if let Some(hotbar_area) = hotbar_area {
+        render_hotbar_panel(f, hotbar_area, app, config);
+    }
+}
+
+fn split_sidebar_hotbar_area(area: Rect) -> (Rect, Option<Rect>) {
+    if area.height < HOTBAR_PANEL_HEIGHT.saturating_add(3) {
+        return (area, None);
+    }
+
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(HOTBAR_PANEL_HEIGHT)])
+        .split(area);
+    (sections[0], Some(sections[1]))
 }
 
 /// Build the Auto-mode panel stack. Empty panels collapse to zero height so
@@ -195,6 +220,193 @@ fn auto_sidebar_panels(state: AutoSidebarState) -> Vec<AutoSidebarPanel> {
     }
 
     visible
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HotbarSlotState {
+    Empty,
+    Inactive,
+    Active,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HotbarPanelSlot {
+    slot: u8,
+    label: String,
+    full_text: String,
+    state: HotbarSlotState,
+}
+
+fn render_hotbar_panel(f: &mut Frame, area: Rect, app: &mut App, config: &Config) {
+    let slots = hotbar_panel_slots(app, config);
+    let content_width = area.width.saturating_sub(4) as usize;
+    render_sidebar_section(
+        f,
+        area,
+        "Hotbar",
+        hotbar_panel_lines(&slots, content_width, &app.ui_theme),
+        hotbar_panel_hover_texts(&slots),
+        Vec::new(),
+        app,
+    );
+}
+
+fn hotbar_panel_slots(app: &App, config: &Config) -> Vec<HotbarPanelSlot> {
+    let known_action_ids = app
+        .hotbar_actions
+        .iter()
+        .map(|action| action.id())
+        .collect::<Vec<_>>();
+    let mut bindings = config
+        .resolve_hotbar_bindings(&known_action_ids)
+        .bindings
+        .into_iter()
+        .map(|binding| (binding.slot, binding))
+        .collect::<BTreeMap<_, _>>();
+
+    (1..=codewhale_config::HOTBAR_SLOT_COUNT)
+        .map(|slot| {
+            let Some(binding) = bindings.remove(&slot) else {
+                return HotbarPanelSlot {
+                    slot,
+                    label: "-".to_string(),
+                    full_text: format!("Slot {slot}: empty"),
+                    state: HotbarSlotState::Empty,
+                };
+            };
+
+            let Some(action) = app.hotbar_actions.get(&binding.action) else {
+                let label = hotbar_configured_label(binding.label.as_deref())
+                    .unwrap_or_else(|| "unknown".to_string());
+                return HotbarPanelSlot {
+                    slot,
+                    label,
+                    full_text: format!("Slot {slot}: unknown action {}", binding.action),
+                    state: HotbarSlotState::Unknown,
+                };
+            };
+
+            let label = hotbar_configured_label(binding.label.as_deref())
+                .unwrap_or_else(|| action.short_label().to_string());
+            let active = action.is_active(app);
+            let state = if active {
+                HotbarSlotState::Active
+            } else {
+                HotbarSlotState::Inactive
+            };
+            let status = if active { " active" } else { "" };
+            HotbarPanelSlot {
+                slot,
+                label: label.clone(),
+                full_text: format!(
+                    "Slot {slot}: {label}{status} ({}: {})",
+                    action.category(),
+                    action.id()
+                ),
+                state,
+            }
+        })
+        .collect()
+}
+
+fn hotbar_configured_label(label: Option<&str>) -> Option<String> {
+    label
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .map(str::to_string)
+}
+
+fn hotbar_panel_lines(
+    slots: &[HotbarPanelSlot],
+    content_width: usize,
+    theme: &palette::UiTheme,
+) -> Vec<Line<'static>> {
+    let gap_count = HOTBAR_ROW_COLUMNS.saturating_sub(1);
+    let cell_width = content_width.saturating_sub(gap_count) / HOTBAR_ROW_COLUMNS;
+    let cell_width = cell_width.max(1);
+
+    slots
+        .chunks(HOTBAR_ROW_COLUMNS)
+        .map(|row| {
+            let mut spans = Vec::with_capacity(row.len().saturating_mul(2));
+            for (idx, slot) in row.iter().enumerate() {
+                if idx > 0 {
+                    spans.push(Span::raw(" "));
+                }
+                spans.push(Span::styled(
+                    hotbar_slot_cell_text(slot, cell_width),
+                    hotbar_slot_style(slot, theme),
+                ));
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn hotbar_panel_hover_texts(slots: &[HotbarPanelSlot]) -> Vec<String> {
+    slots
+        .chunks(HOTBAR_ROW_COLUMNS)
+        .map(|row| {
+            row.iter()
+                .map(|slot| slot.full_text.as_str())
+                .collect::<Vec<_>>()
+                .join(" | ")
+        })
+        .collect()
+}
+
+fn hotbar_slot_cell_text(slot: &HotbarPanelSlot, cell_width: usize) -> String {
+    let marker = match slot.state {
+        HotbarSlotState::Empty => "-",
+        HotbarSlotState::Inactive => "",
+        HotbarSlotState::Active => "*",
+        HotbarSlotState::Unknown => "?",
+    };
+    let text = if marker.is_empty() {
+        format!("{}:{}", slot.slot, slot.label)
+    } else if slot.state == HotbarSlotState::Empty {
+        format!("{}:{marker}", slot.slot)
+    } else {
+        format!("{}:{marker}{}", slot.slot, slot.label)
+    };
+    pad_to_display_width(clip_line_to_width(&text, cell_width), cell_width)
+}
+
+fn hotbar_slot_style(slot: &HotbarPanelSlot, theme: &palette::UiTheme) -> Style {
+    match slot.state {
+        HotbarSlotState::Empty => Style::default().fg(theme.text_dim),
+        HotbarSlotState::Inactive => Style::default().fg(theme.text_body),
+        HotbarSlotState::Active => Style::default()
+            .fg(theme.accent_primary)
+            .add_modifier(ratatui::style::Modifier::BOLD),
+        HotbarSlotState::Unknown => Style::default().fg(theme.error_fg),
+    }
+}
+
+fn clip_line_to_width(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in text.chars() {
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width > max_width {
+            break;
+        }
+        out.push(ch);
+        width += ch_width;
+    }
+    out
+}
+
+fn pad_to_display_width(mut text: String, target_width: usize) -> String {
+    let width = unicode_width::UnicodeWidthStr::width(text.as_str());
+    if width < target_width {
+        text.push_str(&" ".repeat(target_width - width));
+    }
+    text
 }
 
 #[derive(Debug, Clone)]
@@ -3026,11 +3238,12 @@ fn sidebar_hover_rows(
 mod tests {
     use super::{
         ACTIVE_TOOL_COMPLETED_ROW_TTL, ACTIVE_TOOL_STALE_RUNNING_ROW_TTL, AutoSidebarPanel,
-        AutoSidebarState, SidebarAgentRow, SidebarFocus, SidebarHoverRow, SidebarHoverSection,
-        SidebarHoverState, SidebarSubagentSummary, SidebarToolRow, SidebarWorkChecklistItem,
-        SidebarWorkStrategyStep, SidebarWorkSummary, ToolRowOrder, agent_row_hover_text,
-        auto_sidebar_panels, background_task_spinner_prefix, context_panel_cost_line,
-        editorial_tool_rows, normalize_activity_text, render_sidebar, sidebar_agent_rows,
+        AutoSidebarState, HotbarSlotState, SidebarAgentRow, SidebarFocus, SidebarHoverRow,
+        SidebarHoverSection, SidebarHoverState, SidebarSubagentSummary, SidebarToolRow,
+        SidebarWorkChecklistItem, SidebarWorkStrategyStep, SidebarWorkSummary, ToolRowOrder,
+        agent_row_hover_text, auto_sidebar_panels, background_task_spinner_prefix,
+        context_panel_cost_line, editorial_tool_rows, hotbar_panel_hover_texts, hotbar_panel_lines,
+        hotbar_panel_slots, normalize_activity_text, render_sidebar, sidebar_agent_rows,
         sidebar_hover_rows, sidebar_work_summary, sort_sidebar_agent_rows_as_tree,
         subagent_panel_hover_texts, subagent_panel_lines, subagent_panel_rows,
         task_panel_hover_texts, task_panel_lines, task_panel_rows, work_panel_empty_hint,
@@ -3043,7 +3256,8 @@ mod tests {
     use crate::tools::todo::TodoStatus;
     use crate::tui::active_cell::ActiveCell;
     use crate::tui::app::{
-        AgentProgressMeta, App, HuntVerdict, TaskPanelEntry, TaskPanelEntryKind, TuiOptions,
+        AgentProgressMeta, App, AppMode, HuntVerdict, TaskPanelEntry, TaskPanelEntryKind,
+        TuiOptions,
     };
     use crate::tui::history::{
         ExecCell, ExecSource, GenericToolCell, HistoryCell, ToolCell, ToolStatus,
@@ -3214,6 +3428,150 @@ mod tests {
     }
 
     #[test]
+    fn hotbar_panel_slots_resolve_default_bindings_and_active_state() {
+        let mut app = create_test_app();
+        app.mode = AppMode::Agent;
+        app.sidebar_focus = SidebarFocus::Pinned;
+
+        let slots = hotbar_panel_slots(&app, &Config::default());
+
+        assert_eq!(slots.len(), 8);
+        assert_eq!(slots[0].slot, 1);
+        assert_eq!(slots[0].label, "voice");
+        assert_eq!(slots[0].state, HotbarSlotState::Inactive);
+        assert_eq!(slots[3].label, "agent");
+        assert_eq!(slots[3].state, HotbarSlotState::Active);
+        assert!(slots[3].full_text.contains("mode.agent"));
+        assert!(slots[3].full_text.contains("active"));
+        assert_eq!(
+            slots[6].state,
+            HotbarSlotState::Active,
+            "sidebar toggle should be marked active when the sidebar is visible"
+        );
+        assert!(
+            slots.iter().all(|slot| !matches!(
+                slot.state,
+                HotbarSlotState::Empty | HotbarSlotState::Unknown
+            )),
+            "default config should fill all eight slots: {slots:?}"
+        );
+    }
+
+    #[test]
+    fn hotbar_panel_slots_handle_empty_partial_and_unknown_config() {
+        let app = create_test_app();
+        let empty_config = Config {
+            hotbar: Some(Vec::new()),
+            ..Config::default()
+        };
+
+        let empty_slots = hotbar_panel_slots(&app, &empty_config);
+
+        assert!(
+            empty_slots
+                .iter()
+                .all(|slot| slot.state == HotbarSlotState::Empty),
+            "explicit empty hotbar config should leave all slots empty: {empty_slots:?}"
+        );
+
+        let partial_config = Config {
+            hotbar: Some(vec![
+                codewhale_config::HotbarBindingToml {
+                    slot: 2,
+                    action: "mode.plan".to_string(),
+                    label: Some("Plan!".to_string()),
+                },
+                codewhale_config::HotbarBindingToml {
+                    slot: 5,
+                    action: "plugin.missing".to_string(),
+                    label: Some("Ghost".to_string()),
+                },
+            ]),
+            ..Config::default()
+        };
+
+        let partial_slots = hotbar_panel_slots(&app, &partial_config);
+
+        assert_eq!(partial_slots[0].state, HotbarSlotState::Empty);
+        assert_eq!(partial_slots[1].state, HotbarSlotState::Inactive);
+        assert_eq!(partial_slots[1].label, "Plan!");
+        assert_eq!(partial_slots[4].state, HotbarSlotState::Unknown);
+        assert_eq!(partial_slots[4].label, "Ghost");
+        assert!(
+            partial_slots[4]
+                .full_text
+                .contains("unknown action plugin.missing"),
+            "unknown action should remain inspectable: {partial_slots:?}"
+        );
+    }
+
+    #[test]
+    fn hotbar_panel_lines_keep_two_fixed_rows_and_hover_status() {
+        let mut app = create_test_app();
+        app.mode = AppMode::Agent;
+        app.sidebar_focus = SidebarFocus::Pinned;
+        let slots = hotbar_panel_slots(&app, &Config::default());
+
+        let lines = hotbar_panel_lines(&slots, 20, &app.ui_theme);
+        let text = lines_to_text(&lines);
+        let hover = hotbar_panel_hover_texts(&slots);
+
+        assert_eq!(text.len(), 2);
+        assert!(
+            text.iter()
+                .all(|line| unicode_width::UnicodeWidthStr::width(line.as_str()) <= 20),
+            "hotbar lines must stay within the sidebar content width: {text:?}"
+        );
+        assert!(
+            text[0].contains("1:vo"),
+            "first row should show slot 1: {text:?}"
+        );
+        assert!(
+            text[0].contains("4:*a"),
+            "active slot should be visibly marked in the fixed grid: {text:?}"
+        );
+        assert_eq!(hover.len(), 2);
+        assert!(
+            hover[0].contains("Slot 4: agent active"),
+            "row hover text should expose active status: {hover:?}"
+        );
+    }
+
+    #[test]
+    fn sidebar_hotbar_render_smoke_paints_default_slots() {
+        let mut app = create_test_app();
+        app.sidebar_focus = SidebarFocus::Pinned;
+        app.mode = AppMode::Agent;
+        let config = Config::default();
+
+        let backend = TestBackend::new(44, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| render_sidebar(frame, frame.area(), &mut app, &config))
+            .expect("draw sidebar");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(
+            rendered.contains("Hotbar"),
+            "hotbar panel title missing: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("1:voice"),
+            "slot 1 default binding should render: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("4:*agent"),
+            "active agent-mode slot should render distinctly: {rendered:?}"
+        );
+    }
+
+    #[test]
     fn pinned_sidebar_renders_agents_section_when_subagents_are_active() {
         let mut app = create_test_app();
         app.sidebar_focus = SidebarFocus::Pinned;
@@ -3226,8 +3584,9 @@ mod tests {
 
         let backend = TestBackend::new(72, 18);
         let mut terminal = Terminal::new(backend).expect("terminal");
+        let config = Config::default();
         terminal
-            .draw(|frame| render_sidebar(frame, frame.area(), &mut app))
+            .draw(|frame| render_sidebar(frame, frame.area(), &mut app, &config))
             .expect("draw sidebar");
         let rendered = terminal
             .backend()
