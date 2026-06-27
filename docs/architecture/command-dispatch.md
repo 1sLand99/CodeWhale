@@ -110,16 +110,16 @@ final closure evidence.
 Phase 6 focused-command-surface and acceptance-runner evidence, collected
 during current validation:
 
-- AT-001: `cargo test -p codewhale-tui --test epic_acceptance_harness` — pass
-- AT-002: `every_registered_command_dispatches_to_a_handler` — pass
-- AT-003: `every_command_alias_dispatches_to_a_handler` — pass
-- AT-004: Help (test), palette (21 tests), slash completion (18 tests) — pass
-- AT-005: `dispatch_prefers_user_command_over_builtin_with_same_name` — pass
-- AT-006: `hidden_user_commands_still_dispatch_directly` — pass
-- AT-007: `unknown_command_suggests_nearest_match` — pass
-- AT-008: `command_registry_has_unique_names_and_aliases` — pass
-- AT-009: `command_ownership_contract_is_enforced` — pass
-- AT-010: Cleanup inventory verified — no undocumented migration paths remain
+- AT-001: `cargo test -p codewhale-tui --test epic_acceptance_harness` — draft
+- AT-002: `every_registered_command_dispatches_to_a_handler` — draft
+- AT-003: `every_command_alias_dispatches_to_a_handler` — draft
+- AT-004: Help (test), palette (21 tests), slash completion (18 tests) — draft
+- AT-005: `dispatch_prefers_user_command_over_builtin_with_same_name` — draft
+- AT-006: `hidden_user_commands_still_dispatch_directly` — draft
+- AT-007: `unknown_command_suggests_nearest_match` — draft
+- AT-008: `command_registry_has_unique_names_and_aliases` — draft
+- AT-009: `command_ownership_contract_is_enforced` — draft
+- AT-010: Cleanup inventory verified — no undocumented migration paths remain — draft
 - AT-011: Final evidence — draft collected, subject to Phase 8 final gate
 
 ## Replay Status (EPIC-001)

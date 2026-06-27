@@ -4,10 +4,11 @@
 //! success for a shell command after Layer 4.4 registry cleanup. Follows the
 //! proven `core_session_command_extraction.rs` pattern.
 //!
-//! NOTE: This is an eval smoke test, not a command-surface verification test.
-//! It confirms the binary starts and runs eval correctly. For command-surface
-//! coverage (help, palette, completion), see the focused unit tests in
-//! command_palette.rs, widgets/mod.rs, and commands/mod.rs.
+//! NOTE: This is an eval smoke test, not a command-surface verification
+//! (AT-004) test. It confirms the binary starts and runs eval correctly.
+//! For AT-004 command-surface coverage (help, palette, completion), see the
+//! focused unit tests in command_palette.rs, widgets/mod.rs, and
+//! commands/mod.rs.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -16,27 +17,27 @@ use cucumber::{World as _, given, then, when, writer::Stats as _};
 use serde_json::Value;
 use tempfile::TempDir;
 
-const FEATURE_NAME: &str = "Eval smoke test";
+const FEATURE_NAME: &str = "Eval smoke test (binary load and eval step reporting)";
 const FEATURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/tests/features/command_surfaces.feature"
+    "/tests/features/eval_smoke.feature"
 );
 const SMOKE_SCENARIO: &str =
     "Binary loads and reports step-level success via eval";
 
 #[derive(Debug, Default, cucumber::World)]
-struct CommandSurfacesWorld {
+struct EvalSmokeWorld {
     _record_dir: Option<TempDir>,
     report: Option<Value>,
 }
 
 #[given("a clean CodeWhale evaluation workspace")]
-fn clean_codewhale_evaluation_workspace(world: &mut CommandSurfacesWorld) {
+fn clean_codewhale_evaluation_workspace(world: &mut EvalSmokeWorld) {
     world._record_dir = Some(TempDir::new().expect("evaluation TempDir"));
 }
 
 #[when("the evaluation harness runs a shell command")]
-fn eval_harness_runs_shell_command(world: &mut CommandSurfacesWorld) {
+fn eval_harness_runs_shell_command(world: &mut EvalSmokeWorld) {
     let record_dir = world
         ._record_dir
         .as_ref()
@@ -66,7 +67,7 @@ fn eval_harness_runs_shell_command(world: &mut CommandSurfacesWorld) {
 }
 
 #[then("the binary exits successfully")]
-fn binary_exits_successfully(world: &mut CommandSurfacesWorld) {
+fn binary_exits_successfully(world: &mut EvalSmokeWorld) {
     let report = world.report.as_ref().expect("eval report should exist");
     // The eval harness may report metrics.success as false (its own scoring),
     // but the key assertion is that the binary ran and produced a valid report
@@ -82,7 +83,7 @@ fn binary_exits_successfully(world: &mut CommandSurfacesWorld) {
 }
 
 #[then("the JSON report contains execution steps")]
-fn json_report_contains_execution_steps(world: &mut CommandSurfacesWorld) {
+fn json_report_contains_execution_steps(world: &mut EvalSmokeWorld) {
     let report = world.report.as_ref().expect("eval report should exist");
     let steps = report
         .get("steps")
@@ -116,7 +117,7 @@ fn json_report_contains_execution_steps(world: &mut CommandSurfacesWorld) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn eval_smoke_binary_loads_and_reports_steps() {
-    let writer = CommandSurfacesWorld::cucumber()
+    let writer = EvalSmokeWorld::cucumber()
         .fail_on_skipped()
         .with_default_cli()
         .filter_run(FEATURE_PATH, move |feature, _, scenario| {
