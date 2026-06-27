@@ -1130,11 +1130,13 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
                 workspace,
                 dir,
                 skill_discovery_mode,
+                session_context.locale_tag,
             )
         }
         None => crate::skills::render_available_skills_context_for_workspace_with_mode(
             workspace,
             skill_discovery_mode,
+            session_context.locale_tag,
         ),
     };
     if let Some(block) = skills_block {
@@ -2205,6 +2207,18 @@ mod tests {
         assert!(MEMORY_GUIDANCE.contains(" ✓"));
         assert!(MEMORY_GUIDANCE.contains(" ✗"));
         assert!(MEMORY_GUIDANCE.contains("Imperative"));
+    }
+
+    #[test]
+    fn memory_guidance_does_not_claim_moraine_tools_are_always_available() {
+        assert!(!MEMORY_GUIDANCE.contains("You have access to Moraine MCP tools"));
+        assert!(MEMORY_GUIDANCE.contains("When a `moraine-mcp` server is configured"));
+        assert!(MEMORY_GUIDANCE.contains("current tool catalog exposes"));
+        assert!(MEMORY_GUIDANCE.contains("search_sessions"));
+        assert!(
+            !MEMORY_GUIDANCE.contains("searchsessions"),
+            "Moraine search tool spelling must stay consistent"
+        );
     }
 
     #[test]

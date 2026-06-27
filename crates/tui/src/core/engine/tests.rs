@@ -1,7 +1,7 @@
 use super::*;
 
 use super::context::{COMPACTION_SUMMARY_MARKER, TURN_MAX_OUTPUT_TOKENS};
-use super::turn_loop::registered_tool_approval_required;
+use super::turn_loop::{registered_tool_approval_required, tool_error_degradation_runtime_hint};
 use crate::config::ApiProvider;
 use crate::models::{SystemBlock, Usage};
 use crate::test_support::{EnvVarGuard, lock_test_env};
@@ -1327,6 +1327,56 @@ fn tool_error_messages_include_actionable_hints() {
     assert!(
         formatted.contains("Adjust approval mode or request permission"),
         "{formatted}"
+    );
+}
+
+#[test]
+fn transient_tool_errors_include_fallback_hint() {
+    let search_error = ToolError::execution_failed("Web search request failed: timeout");
+    let formatted = format_tool_error(&search_error, "web_search");
+
+    assert!(
+        formatted.contains("Fallback: after one retry"),
+        "{formatted}"
+    );
+    assert!(formatted.contains("direct URL"), "{formatted}");
+    assert!(formatted.contains("instead of repeating"), "{formatted}");
+}
+
+#[test]
+fn tool_errors_with_specific_recovery_do_not_get_generic_fallback() {
+    let message = "edit_file search string not found. Recovery: call read_file first.";
+    let formatted = format_tool_error(&ToolError::execution_failed(message), "edit_file");
+
+    assert_eq!(formatted, message);
+}
+
+#[test]
+fn repeated_tool_errors_wait_until_degradation_threshold() {
+    let tools = vec!["web_search".to_string()];
+
+    assert!(tool_error_degradation_runtime_hint(1, &tools, &[ErrorCategory::Tool]).is_none());
+}
+
+#[test]
+fn repeated_tool_errors_emit_model_visible_degradation_hint() {
+    let tools = vec!["web_search".to_string(), "web_search".to_string()];
+    let hint = tool_error_degradation_runtime_hint(2, &tools, &[ErrorCategory::Tool])
+        .expect("second consecutive tool-error step should emit a runtime hint");
+
+    assert!(hint.contains("2 consecutive"), "{hint}");
+    assert!(hint.contains("web_search"), "{hint}");
+    assert!(hint.contains("do not repeat"), "{hint}");
+    assert!(hint.contains("alternate tool"), "{hint}");
+    assert!(hint.contains("narrow the request"), "{hint}");
+}
+
+#[test]
+fn repeated_authorization_errors_do_not_emit_degradation_hint() {
+    let tools = vec!["exec_shell".to_string()];
+
+    assert!(
+        tool_error_degradation_runtime_hint(2, &tools, &[ErrorCategory::Authorization]).is_none()
     );
 }
 

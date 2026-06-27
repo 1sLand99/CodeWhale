@@ -21,12 +21,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added the native `codew` shim to release archives, Windows installer inputs,
   local release-asset preparation, and checksum verification so manual installs
   receive the same short command that Cargo installs build.
+- Added OpenModel as a first-class Anthropic Messages provider, with config,
+  CLI, provider picker, docs, and registry coverage. Harvested from #3585 by
+  @noaft.
+- Added WeCom Bridge deployment and security documentation, with shipped
+  runtime/bridge commands and approval-timeout environment guidance. Harvested
+  from #3640 by @pkeging.
 
 ### Changed
 
 - Clarified the Fleet setup surface and docs so Fleet is treated as the durable
   sub-agent configuration layer while WhaleFlow is the agent-authored
   orchestration plan that selects and monitors Fleet slots.
+
+### Fixed
+
+- Hardened the OHOS dependency drift check against transient Cargo registry EOFs
+  by retrying the dependency graph probe before failing CI.
+- Updated the `/links` provider fallback to the current CodeWhale docs URL and
+  added a Baidu Qianfan docs link. Harvested from #3621 by @noaft.
 
 ## [0.8.65] - 2026-06-24
 

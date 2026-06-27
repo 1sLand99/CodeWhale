@@ -1098,6 +1098,54 @@ fn is_memory_quick_add(input: &str) -> bool {
     !trimmed.trim_start_matches('#').trim().is_empty()
 }
 
+fn should_intercept_memory_quick_add(config: &Config, input: &str) -> bool {
+    config.memory_enabled() && !config.moraine_fallback() && is_memory_quick_add(input)
+}
+
+#[cfg(test)]
+mod memory_quick_add_tests {
+    use super::should_intercept_memory_quick_add;
+    use crate::config::Config;
+
+    #[test]
+    fn memory_quick_add_interception_respects_moraine_fallback() {
+        let enabled: Config = toml::from_str(
+            r#"
+            [memory]
+            enabled = true
+            "#,
+        )
+        .expect("parse enabled memory config");
+        assert!(should_intercept_memory_quick_add(
+            &enabled,
+            "# remember this"
+        ));
+
+        let moraine: Config = toml::from_str(
+            r#"
+            [memory]
+            enabled = true
+            moraine_fallback = true
+            "#,
+        )
+        .expect("parse moraine memory config");
+        assert!(!should_intercept_memory_quick_add(
+            &moraine,
+            "# remember this"
+        ));
+
+        let disabled: Config = Config::default();
+        assert!(!should_intercept_memory_quick_add(
+            &disabled,
+            "# remember this"
+        ));
+        assert!(!should_intercept_memory_quick_add(
+            &enabled,
+            "## Markdown heading"
+        ));
+    }
+}
+
 /// Persist a `# foo` quick-add to the memory file and surface a status
 /// note to the user. Errors land in the same status channel so a missing
 /// memory directory becomes visible without crashing the composer.
@@ -1188,6 +1236,7 @@ fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         ),
         prefer_bwrap: config.prefer_bwrap.unwrap_or(false),
         memory_enabled: config.memory_enabled(),
+        moraine_fallback: config.moraine_fallback(),
         memory_path: config.memory_path(),
         speech_output_dir: config.speech_output_dir(),
         vision_config: config.vision_model_config(),
@@ -4619,7 +4668,8 @@ async fn run_event_loop(
                         // appended to the user memory file and the input
                         // is consumed without firing a turn. Disabled
                         // behaviour falls through to normal turn submit.
-                        if config.memory_enabled() && is_memory_quick_add(&input) {
+                        // TODO(v0.8.71): remove legacy quick-add when Moraine recall stable; see #3490, #3495
+                        if should_intercept_memory_quick_add(config, &input) {
                             handle_memory_quick_add(app, &input, config);
                             continue;
                         }
@@ -8410,6 +8460,7 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
             crate::config::ApiProvider::NvidiaNim => Some("NIM"),
             crate::config::ApiProvider::Openai => Some("OpenAI"),
             crate::config::ApiProvider::Anthropic => Some("Claude"),
+            crate::config::ApiProvider::Openmodel => None,
             crate::config::ApiProvider::Atlascloud => Some("Atlas"),
             crate::config::ApiProvider::WanjieArk => Some("Wanjie"),
             crate::config::ApiProvider::Volcengine => Some("Volc"),
@@ -9644,6 +9695,7 @@ async fn apply_provider_picker_api_key(
             ApiProvider::Qianfan => &mut providers.qianfan,
             ApiProvider::OpenaiCodex => &mut providers.openai_codex,
             ApiProvider::Anthropic => &mut providers.anthropic,
+            ApiProvider::Openmodel => &mut providers.openmodel,
             ApiProvider::Zai => &mut providers.zai,
             ApiProvider::Stepfun => &mut providers.stepfun,
             ApiProvider::Minimax => &mut providers.minimax,
@@ -9722,6 +9774,7 @@ fn set_provider_auth_mode_in_memory(config: &mut Config, provider: ApiProvider, 
         ApiProvider::Qianfan => &mut providers.qianfan,
         ApiProvider::OpenaiCodex => &mut providers.openai_codex,
         ApiProvider::Anthropic => &mut providers.anthropic,
+        ApiProvider::Openmodel => &mut providers.openmodel,
         ApiProvider::Zai => &mut providers.zai,
         ApiProvider::Stepfun => &mut providers.stepfun,
         ApiProvider::Minimax => &mut providers.minimax,

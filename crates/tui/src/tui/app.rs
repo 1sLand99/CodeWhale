@@ -436,6 +436,8 @@ impl ToolCollapseMode {
         match value.trim().to_ascii_lowercase().as_str() {
             "expanded" | "off" | "none" => Self::Expanded,
             "calm" | "calm-mode" | "calm_only" | "calm-only" => Self::Calm,
+            // `collapsed`/`collapse` are issue #3256's preferred names for the
+            // default; treat them like the canonical `compact`.
             _ => Self::Compact,
         }
     }
@@ -1646,9 +1648,13 @@ pub struct App {
     pub memory_path: PathBuf,
     /// Whether the user-memory feature is enabled (#489). Mirrors
     /// `Config::memory_enabled()` at app boot. Used by the `# foo`
-    /// composer interception, the `/memory` slash command, and tool
-    /// registration for `remember`.
+    /// composer interception (also gated by `moraine_fallback`),
+    /// the `/memory` slash command, and tool registration for
+    /// `remember`.
     pub use_memory: bool,
+    /// True when legacy memory push/inject behavior should stay disabled
+    /// because Moraine pull/recall is the configured memory backend.
+    pub moraine_fallback: bool,
     pub use_alt_screen: bool,
     pub use_mouse_capture: bool,
     /// When true, plain Up/Down on an empty composer scroll the transcript
@@ -2605,6 +2611,7 @@ impl App {
             skills_scan_codewhale_only,
             memory_path,
             use_memory,
+            moraine_fallback: config.moraine_fallback(),
             use_alt_screen,
             use_mouse_capture,
             use_bracketed_paste,

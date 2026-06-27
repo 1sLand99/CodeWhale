@@ -51,6 +51,10 @@ pub(crate) fn shell_policy_for_mode(mode: AppMode, allow_shell: bool) -> ShellPo
     }
 }
 
+fn should_register_remember_tool(memory_enabled: bool, moraine_fallback: bool) -> bool {
+    memory_enabled && !moraine_fallback
+}
+
 impl Engine {
     pub(super) fn build_turn_tool_registry_builder(
         &self,
@@ -122,7 +126,8 @@ impl Engine {
         // Register the `remember` tool only when the user has opted in to
         // user-memory (#489). Without that opt-in the tool would always
         // fail; surfacing it would just waste catalog slots.
-        if self.config.memory_enabled {
+        // TODO(v0.8.71): remove when Moraine recall stable; see #3490, #3495
+        if should_register_remember_tool(self.config.memory_enabled, self.config.moraine_fallback) {
             builder = builder.with_remember_tool();
         }
 
@@ -140,5 +145,17 @@ impl Engine {
         builder = builder.with_notify_tool();
 
         builder
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_register_remember_tool;
+
+    #[test]
+    fn remember_tool_registration_respects_moraine_fallback() {
+        assert!(should_register_remember_tool(true, false));
+        assert!(!should_register_remember_tool(false, false));
+        assert!(!should_register_remember_tool(true, true));
     }
 }
