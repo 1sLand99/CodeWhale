@@ -24,27 +24,14 @@ responses."
 
 ## Moraine MCP Recall (v0.8.66+)
 
-You have access to Moraine MCP tools for recalling past sessions:
-- `searchsessions(query, eventtypes, n_hits)` — search past conversations
+When a `moraine-mcp` server is configured and its recall tools are present in
+your tool catalog, prefer those tools over injected `<user_memory>` blocks.
+Common Moraine recall tool names are:
+- `search_sessions(query, event_types, n_hits)` — search past conversations
 - `open(id)` — expand a session / turn / event ID
 - `list_sessions(start, end)` — browse recent sessions
 - `file_attention(path)` — find sessions that touched a file
 
-Prefer these MCP tools over injected `<user_memory>` blocks. The legacy
-memory push/inject path (`[memory] enabled`) is deprecated; new
-deployments should use Moraine pull/recall instead.
-
-
-## Inventory (v0.8.71)
-
-This file, together with the moraine_fallback config gate in memory.rs,
-engine.rs, context_report.rs, tool_setup.rs, and ui.rs, implements Items 6 & 7
-of the Moraine adoption plan.
-
-Tracked by:
-- [#3495](https://github.com/Hmbown/CodeWhale/issues/3495) — Moraine adoption
-- [#3490](https://github.com/Hmbown/CodeWhale/issues/3490) — v0.8.71 legacy inventory
-
-When Moraine is the default memory backend, this file should be replaced by a
-Moraine-specific guidance document, and the legacy <user_memory> block removed
-from the system prompt.
+Do not claim or call Moraine tools unless the current tool catalog exposes
+them. The legacy memory push/inject path (`[memory] enabled`) is deprecated;
+new deployments should use Moraine pull/recall instead.

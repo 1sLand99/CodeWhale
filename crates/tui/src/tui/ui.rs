@@ -1098,6 +1098,54 @@ fn is_memory_quick_add(input: &str) -> bool {
     !trimmed.trim_start_matches('#').trim().is_empty()
 }
 
+fn should_intercept_memory_quick_add(config: &Config, input: &str) -> bool {
+    config.memory_enabled() && !config.moraine_fallback() && is_memory_quick_add(input)
+}
+
+#[cfg(test)]
+mod memory_quick_add_tests {
+    use super::should_intercept_memory_quick_add;
+    use crate::config::Config;
+
+    #[test]
+    fn memory_quick_add_interception_respects_moraine_fallback() {
+        let enabled: Config = toml::from_str(
+            r#"
+            [memory]
+            enabled = true
+            "#,
+        )
+        .expect("parse enabled memory config");
+        assert!(should_intercept_memory_quick_add(
+            &enabled,
+            "# remember this"
+        ));
+
+        let moraine: Config = toml::from_str(
+            r#"
+            [memory]
+            enabled = true
+            moraine_fallback = true
+            "#,
+        )
+        .expect("parse moraine memory config");
+        assert!(!should_intercept_memory_quick_add(
+            &moraine,
+            "# remember this"
+        ));
+
+        let disabled: Config = Config::default();
+        assert!(!should_intercept_memory_quick_add(
+            &disabled,
+            "# remember this"
+        ));
+        assert!(!should_intercept_memory_quick_add(
+            &enabled,
+            "## Markdown heading"
+        ));
+    }
+}
+
 /// Persist a `# foo` quick-add to the memory file and surface a status
 /// note to the user. Errors land in the same status channel so a missing
 /// memory directory becomes visible without crashing the composer.
@@ -4621,10 +4669,7 @@ async fn run_event_loop(
                         // is consumed without firing a turn. Disabled
                         // behaviour falls through to normal turn submit.
                         // TODO(v0.8.71): remove legacy quick-add when Moraine recall stable; see #3490, #3495
-                        if config.memory_enabled()
-                            && !config.moraine_fallback()
-                            && is_memory_quick_add(&input)
-                        {
+                        if should_intercept_memory_quick_add(config, &input) {
                             handle_memory_quick_add(app, &input, config);
                             continue;
                         }

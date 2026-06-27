@@ -2208,6 +2208,18 @@ mod tests {
     }
 
     #[test]
+    fn memory_guidance_does_not_claim_moraine_tools_are_always_available() {
+        assert!(!MEMORY_GUIDANCE.contains("You have access to Moraine MCP tools"));
+        assert!(MEMORY_GUIDANCE.contains("When a `moraine-mcp` server is configured"));
+        assert!(MEMORY_GUIDANCE.contains("current tool catalog exposes"));
+        assert!(MEMORY_GUIDANCE.contains("search_sessions"));
+        assert!(
+            !MEMORY_GUIDANCE.contains("searchsessions"),
+            "Moraine search tool spelling must stay consistent"
+        );
+    }
+
+    #[test]
     fn memory_guidance_absent_when_no_memory_block() {
         let tmp = tempdir().expect("tempdir");
         let prompt = match system_prompt_for_mode_with_context_skills_and_session(

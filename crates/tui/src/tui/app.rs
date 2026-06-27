@@ -1650,6 +1650,9 @@ pub struct App {
     /// the `/memory` slash command, and tool registration for
     /// `remember`.
     pub use_memory: bool,
+    /// True when legacy memory push/inject behavior should stay disabled
+    /// because Moraine pull/recall is the configured memory backend.
+    pub moraine_fallback: bool,
     pub use_alt_screen: bool,
     pub use_mouse_capture: bool,
     /// When true, plain Up/Down on an empty composer scroll the transcript
@@ -2606,6 +2609,7 @@ impl App {
             skills_scan_codewhale_only,
             memory_path,
             use_memory,
+            moraine_fallback: config.moraine_fallback(),
             use_alt_screen,
             use_mouse_capture,
             use_bracketed_paste,
