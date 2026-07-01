@@ -74,7 +74,7 @@ use crate::task_manager::{
 use crate::tools::goal::{GoalSnapshot, GoalStatus};
 use crate::tools::shell::{ShellJobSnapshot, ShellStatus};
 use crate::tools::spec::{RuntimeToolServices, ToolResult};
-use crate::tools::subagent::SubAgentStatus;
+use crate::tools::subagent::{MailboxMessage, SubAgentStatus};
 use crate::tui::auto_router;
 use crate::tui::color_compat::ColorCompatBackend;
 use crate::tui::command_palette::{
@@ -108,9 +108,9 @@ use crate::tui::streaming_thinking;
 #[cfg(test)]
 use crate::tui::subagent_routing::reconcile_subagent_activity_state_at;
 use crate::tui::subagent_routing::{
-    format_task_list, handle_subagent_mailbox, open_task_pager, reconcile_subagent_activity_state,
-    running_agent_count, sort_subagents_in_place, subagent_message_refreshes_workspace_context,
-    task_mode_label, task_summary_to_panel_entry,
+    apply_subagent_terminal_projection, format_task_list, handle_subagent_mailbox, open_task_pager,
+    reconcile_subagent_activity_state, running_agent_count, sort_subagents_in_place,
+    subagent_message_refreshes_workspace_context, task_mode_label, task_summary_to_panel_entry,
 };
 #[cfg(test)]
 use crate::tui::tool_routing::exploring_label;
@@ -1125,6 +1125,53 @@ fn subagent_completion_status(result: &str) -> Option<String> {
     }
 }
 
+fn subagent_status_from_completion_result(result: &str) -> SubAgentStatus {
+    let reason = result
+        .lines()
+        .find_map(|line| {
+            let trimmed = line.trim();
+            (!trimmed.is_empty() && !trimmed.starts_with("<codewhale:subagent.done>"))
+                .then_some(trimmed.to_string())
+        })
+        .unwrap_or_else(|| "sub-agent finished".to_string());
+    match subagent_completion_status(result).as_deref() {
+        Some("completed") => SubAgentStatus::Completed,
+        Some("cancelled" | "canceled") => SubAgentStatus::Cancelled,
+        Some("failed") => SubAgentStatus::Failed(reason),
+        Some("interrupted") => SubAgentStatus::Interrupted(reason),
+        Some("budget_exhausted") => SubAgentStatus::BudgetExhausted,
+        _ => SubAgentStatus::Completed,
+    }
+}
+
+fn subagent_terminal_projection_from_mailbox(
+    message: &MailboxMessage,
+) -> Option<(&str, SubAgentStatus, Option<String>)> {
+    match message {
+        MailboxMessage::Completed { agent_id, summary } => Some((
+            agent_id.as_str(),
+            SubAgentStatus::Completed,
+            Some(summary.clone()),
+        )),
+        MailboxMessage::Failed { agent_id, error } => Some((
+            agent_id.as_str(),
+            SubAgentStatus::Failed(error.clone()),
+            Some(error.clone()),
+        )),
+        MailboxMessage::Interrupted { agent_id, reason } => Some((
+            agent_id.as_str(),
+            SubAgentStatus::Interrupted(reason.clone()),
+            Some(reason.clone()),
+        )),
+        MailboxMessage::Cancelled { agent_id } => Some((
+            agent_id.as_str(),
+            SubAgentStatus::Cancelled,
+            Some("cancelled".to_string()),
+        )),
+        _ => None,
+    }
+}
+
 struct TerminalCleanupGuard {
     use_alt_screen: bool,
     use_mouse_capture: bool,
@@ -1762,6 +1809,8 @@ async fn run_event_loop(
         }
         app.balance_initiated = true;
     }
+
+    let mut pending_subagent_list_refresh = false;
 
     loop {
         // Drain the version-check handle once; re-assign None so we
@@ -2879,6 +2928,13 @@ async fn run_event_loop(
                                 });
                         app.agent_progress.remove(&id);
                         app.agent_progress_meta.remove(&id);
+                        let terminal_status = subagent_status_from_completion_result(&result);
+                        apply_subagent_terminal_projection(
+                            app,
+                            &id,
+                            terminal_status,
+                            Some(summarize_tool_output(&result)),
+                        );
                         // #3030: stable label with raw-id fallback.
                         let label = app.agent_display_label(&id);
                         app.status_message = Some(format!(
@@ -2939,6 +2995,12 @@ async fn run_event_loop(
                         let should_refresh_subagents =
                             subagent_message_refreshes_workspace_context(&message);
                         let updated_transcript = handle_subagent_mailbox(app, seq, &message);
+                        if let Some((agent_id, status, result)) =
+                            subagent_terminal_projection_from_mailbox(&message)
+                        {
+                            apply_subagent_terminal_projection(app, agent_id, status, result);
+                            subagent_list_refresh_requested = true;
+                        }
                         if should_refresh_subagents {
                             subagent_list_refresh_requested = true;
                         }
@@ -3182,13 +3244,28 @@ async fn run_event_loop(
         if received_engine_event {
             app.needs_redraw = true;
         }
+        if subagent_list_refresh_requested {
+            pending_subagent_list_refresh = true;
+        }
         // #freeze: one trailing-edge sub-agent list refresh per drain, no
         // matter how many spawn/complete/mailbox events arrived this batch.
-        // #3802: non-blocking send — ListSubAgents is a refresh op that can
-        // be dropped when the op channel is full; the next drain cycle
-        // will re-request.
-        if subagent_list_refresh_requested {
-            let _ = engine_handle.try_send(Op::ListSubAgents);
+        // #3837: keep a sticky pending bit when the op channel is full so a
+        // terminal lifecycle event cannot permanently lose the authoritative
+        // ListSubAgents refresh.
+        if pending_subagent_list_refresh {
+            match engine_handle.try_send(Op::ListSubAgents) {
+                Ok(()) => pending_subagent_list_refresh = false,
+                Err(err) => {
+                    if err
+                        .downcast_ref::<tokio::sync::mpsc::error::TrySendError<Op>>()
+                        .is_some_and(|send_err| {
+                            matches!(send_err, tokio::sync::mpsc::error::TrySendError::Closed(_))
+                        })
+                    {
+                        pending_subagent_list_refresh = false;
+                    }
+                }
+            }
         }
 
         if let Some(next) = queued_to_send {

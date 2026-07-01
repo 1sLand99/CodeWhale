@@ -4822,6 +4822,100 @@ fn subagent_completion_status_reads_summary_fallbacks() {
 }
 
 #[test]
+fn subagent_status_from_completion_result_maps_terminal_sentinels() {
+    let failed = r#"Tool timed out
+<codewhale:subagent.done>{"agent_id":"agent_x","status":"failed"}</codewhale:subagent.done>"#;
+    match subagent_status_from_completion_result(failed) {
+        crate::tools::subagent::SubAgentStatus::Failed(reason) => {
+            assert_eq!(reason, "Tool timed out")
+        }
+        status => panic!("expected failed status, got {status:?}"),
+    }
+
+    let interrupted = r#"Waiting for follow-up
+<codewhale:subagent.done>{"agent_id":"agent_x","status":"interrupted"}</codewhale:subagent.done>"#;
+    match subagent_status_from_completion_result(interrupted) {
+        crate::tools::subagent::SubAgentStatus::Interrupted(reason) => {
+            assert_eq!(reason, "Waiting for follow-up")
+        }
+        status => panic!("expected interrupted status, got {status:?}"),
+    }
+
+    let budget = r#"Token budget exhausted
+<codewhale:subagent.done>{"agent_id":"agent_x","status":"budget_exhausted"}</codewhale:subagent.done>"#;
+    assert_eq!(
+        subagent_status_from_completion_result(budget),
+        crate::tools::subagent::SubAgentStatus::BudgetExhausted
+    );
+
+    let cancelled = r#"Cancelled
+<codewhale:subagent.done>{"agent_id":"agent_x","status":"cancelled"}</codewhale:subagent.done>"#;
+    assert_eq!(
+        subagent_status_from_completion_result(cancelled),
+        crate::tools::subagent::SubAgentStatus::Cancelled
+    );
+
+    assert_eq!(
+        subagent_status_from_completion_result("plain successful summary"),
+        crate::tools::subagent::SubAgentStatus::Completed
+    );
+}
+
+#[test]
+fn subagent_terminal_projection_from_mailbox_maps_terminal_messages() {
+    let completed = crate::tools::subagent::MailboxMessage::Completed {
+        agent_id: "agent_done".to_string(),
+        summary: "all set".to_string(),
+    };
+    let (agent_id, status, result) =
+        subagent_terminal_projection_from_mailbox(&completed).expect("completed projection");
+    assert_eq!(agent_id, "agent_done");
+    assert_eq!(status, crate::tools::subagent::SubAgentStatus::Completed);
+    assert_eq!(result.as_deref(), Some("all set"));
+
+    let failed = crate::tools::subagent::MailboxMessage::Failed {
+        agent_id: "agent_fail".to_string(),
+        error: "tool failed".to_string(),
+    };
+    let (_, status, result) =
+        subagent_terminal_projection_from_mailbox(&failed).expect("failed projection");
+    assert_eq!(result.as_deref(), Some("tool failed"));
+    assert!(matches!(
+        status,
+        crate::tools::subagent::SubAgentStatus::Failed(ref reason)
+            if reason == "tool failed"
+    ));
+
+    let interrupted = crate::tools::subagent::MailboxMessage::Interrupted {
+        agent_id: "agent_wait".to_string(),
+        reason: "needs input".to_string(),
+    };
+    let (_, status, result) =
+        subagent_terminal_projection_from_mailbox(&interrupted).expect("interrupted projection");
+    assert_eq!(result.as_deref(), Some("needs input"));
+    assert!(matches!(
+        status,
+        crate::tools::subagent::SubAgentStatus::Interrupted(ref reason)
+            if reason == "needs input"
+    ));
+
+    let cancelled = crate::tools::subagent::MailboxMessage::Cancelled {
+        agent_id: "agent_stop".to_string(),
+    };
+    let (_, status, result) =
+        subagent_terminal_projection_from_mailbox(&cancelled).expect("cancelled projection");
+    assert_eq!(status, crate::tools::subagent::SubAgentStatus::Cancelled);
+    assert_eq!(result.as_deref(), Some("cancelled"));
+
+    assert!(
+        subagent_terminal_projection_from_mailbox(
+            &crate::tools::subagent::MailboxMessage::progress("agent_live", "step 1/2")
+        )
+        .is_none()
+    );
+}
+
+#[test]
 fn running_agent_count_unions_cache_and_progress() {
     let mut app = create_test_app();
     app.subagent_cache = vec![
