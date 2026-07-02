@@ -1185,15 +1185,17 @@ impl<'a> ApprovalWidget<'a> {
     /// dimmed backdrop region always agree.
     fn build_inline_content(&self, area: Rect) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
         let risk = self.request.risk;
+        let stakes = self.request.stakes();
         let locale = self.view.locale();
-        let palette_colors = approval_palette(risk);
+        let palette_colors = approval_palette(stakes);
+        let critical = matches!(stakes, crate::tui::approval::ApprovalStakes::Critical);
 
         let mut body: Vec<Line<'static>> = Vec::with_capacity(16);
         // Header: stakes badge + tool identifier.
         body.push(Line::from(vec![
             Span::raw("  "),
             Span::styled(
-                format!(" {} ", risk_badge_text(risk, locale)),
+                format!(" {} ", stakes_badge_text(stakes, locale)),
                 Style::default()
                     .fg(palette::DEEPSEEK_INK)
                     .bg(palette_colors.accent)
@@ -1287,40 +1289,50 @@ impl<'a> ApprovalWidget<'a> {
             }
         }
 
-        // Destructive policy / cancel semantics.
-        if matches!(risk, RiskLevel::Destructive) {
+        // Destructive policy / cancel semantics — critical stakes only. For
+        // routine and elevated work the controls speak for themselves; the
+        // extra policy prose was noise that made every edit read like an
+        // emergency.
+        if critical {
             push_destructive_approval_semantics(&mut body, locale, false);
         }
 
-        // Secondary context: what it is and what it touches.
-        body.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(label_about(locale), Style::default().fg(palette::TEXT_HINT)),
-            Span::styled(
-                self.request.description_for_locale(locale),
-                Style::default().fg(palette::TEXT_BODY),
-            ),
-        ]));
-        for impact in self.request.impacts_for_locale(locale).into_iter().take(4) {
+        // Secondary context: what it is and what it touches. Only critical
+        // prompts carry the full about/impact/category dossier by default —
+        // everything stays one `v` away in the details pager. Keep a single
+        // About line as fallback context when nothing else was rendered.
+        if critical || details.is_empty() {
             body.push(Line::from(vec![
                 Span::raw("  "),
+                Span::styled(label_about(locale), Style::default().fg(palette::TEXT_HINT)),
                 Span::styled(
-                    label_impact(locale),
-                    Style::default().fg(palette::TEXT_HINT),
+                    self.request.description_for_locale(locale),
+                    Style::default().fg(palette::TEXT_BODY),
                 ),
-                Span::styled(impact, Style::default().fg(palette::TEXT_BODY)),
             ]));
         }
-        // Category line — localized risk category.
-        let (cat_label, cat_color) = category_label_for(self.request.category, locale);
-        body.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(label_type(locale), Style::default().fg(palette::TEXT_HINT)),
-            Span::styled(
-                cat_label,
-                Style::default().fg(cat_color).add_modifier(Modifier::BOLD),
-            ),
-        ]));
+        if critical {
+            for impact in self.request.impacts_for_locale(locale).into_iter().take(4) {
+                body.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        label_impact(locale),
+                        Style::default().fg(palette::TEXT_HINT),
+                    ),
+                    Span::styled(impact, Style::default().fg(palette::TEXT_BODY)),
+                ]));
+            }
+            // Category line — localized risk category.
+            let (cat_label, cat_color) = category_label_for(self.request.category, locale);
+            body.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(label_type(locale), Style::default().fg(palette::TEXT_HINT)),
+                Span::styled(
+                    cat_label,
+                    Style::default().fg(cat_color).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
 
         // Preview of the persistent ask-rule the `[s]` shortcut would save
         // (#3766). Informational, so it lives in the (scrollable) body.
@@ -1378,12 +1390,12 @@ impl Renderable for ApprovalWidget<'_> {
             let bar_area = Rect::new(area.x, bar_y, area.width, 1);
             Clear.render(bar_area, buf);
 
-            let risk = self.request.risk;
-            let palette_colors = approval_palette(risk);
+            let stakes = self.request.stakes();
+            let palette_colors = approval_palette(stakes);
             let summary = format!(
                 " {} — {}  [Tab to expand] ",
                 self.request.tool_name,
-                risk_badge_text(risk, self.view.locale()),
+                stakes_badge_text(stakes, self.view.locale()),
             );
             let line = Line::from(Span::styled(
                 summary,
@@ -1396,8 +1408,7 @@ impl Renderable for ApprovalWidget<'_> {
             return;
         }
 
-        let risk = self.request.risk;
-        let palette_colors = approval_palette(risk);
+        let palette_colors = approval_palette(self.request.stakes());
         let (body, controls) = self.build_inline_content(area);
         let region = inline_region_for(area, &body, &controls);
         if region.width == 0 || region.height == 0 {
@@ -1476,7 +1487,10 @@ impl Renderable for ApprovalWidget<'_> {
             .wrap(Wrap { trim: false })
             .render(control_rect, buf);
 
-        if matches!(risk, RiskLevel::Destructive) {
+        if matches!(
+            self.request.stakes(),
+            crate::tui::approval::ApprovalStakes::Critical
+        ) {
             paint_left_rail(region, buf, palette_colors.accent);
         }
     }
@@ -1649,14 +1663,21 @@ struct ApprovalColors {
     shortcut: Color,
 }
 
-fn approval_palette(risk: RiskLevel) -> ApprovalColors {
-    match risk {
-        RiskLevel::Benign => ApprovalColors {
+fn approval_palette(stakes: crate::tui::approval::ApprovalStakes) -> ApprovalColors {
+    use crate::tui::approval::ApprovalStakes;
+    match stakes {
+        ApprovalStakes::Routine => ApprovalColors {
             border: palette::BORDER_COLOR,
             accent: palette::DEEPSEEK_SKY,
             shortcut: palette::DEEPSEEK_SKY,
         },
-        RiskLevel::Destructive => ApprovalColors {
+        // Ordinary state-touching work: a calm ask, not an alarm.
+        ApprovalStakes::Elevated => ApprovalColors {
+            border: palette::BORDER_COLOR,
+            accent: palette::STATUS_WARNING,
+            shortcut: palette::DEEPSEEK_SKY,
+        },
+        ApprovalStakes::Critical => ApprovalColors {
             border: palette::DEEPSEEK_RED,
             accent: palette::DEEPSEEK_RED,
             shortcut: palette::STATUS_WARNING,
@@ -1679,10 +1700,15 @@ fn approval_option_style(is_selected: bool, color: Color) -> Style {
     }
 }
 
-fn risk_badge_text(risk: RiskLevel, locale: Locale) -> Cow<'static, str> {
-    match risk {
-        RiskLevel::Benign => tr(locale, MessageId::ApprovalRiskReview),
-        RiskLevel::Destructive => tr(locale, MessageId::ApprovalRiskDestructive),
+fn stakes_badge_text(
+    stakes: crate::tui::approval::ApprovalStakes,
+    locale: Locale,
+) -> Cow<'static, str> {
+    use crate::tui::approval::ApprovalStakes;
+    match stakes {
+        ApprovalStakes::Routine => tr(locale, MessageId::ApprovalRiskReview),
+        ApprovalStakes::Elevated => tr(locale, MessageId::ApprovalRiskElevated),
+        ApprovalStakes::Critical => tr(locale, MessageId::ApprovalRiskDestructive),
     }
 }
 
@@ -1694,6 +1720,7 @@ fn category_label_for(category: ToolCategory, locale: Locale) -> (Cow<'static, s
         ToolCategory::Network => tr(locale, MessageId::ApprovalCategoryNetwork),
         ToolCategory::McpRead => tr(locale, MessageId::ApprovalCategoryMcpRead),
         ToolCategory::McpAction => tr(locale, MessageId::ApprovalCategoryMcpAction),
+        ToolCategory::Agent => tr(locale, MessageId::ApprovalCategoryAgent),
         ToolCategory::Unknown => tr(locale, MessageId::ApprovalCategoryUnknown),
     };
     let color = match category {
@@ -1703,6 +1730,7 @@ fn category_label_for(category: ToolCategory, locale: Locale) -> (Cow<'static, s
         ToolCategory::Network => palette::STATUS_WARNING,
         ToolCategory::McpRead => palette::DEEPSEEK_SKY,
         ToolCategory::McpAction => palette::STATUS_WARNING,
+        ToolCategory::Agent => palette::DEEPSEEK_SKY,
         ToolCategory::Unknown => palette::STATUS_ERROR,
     };
     (label, color)

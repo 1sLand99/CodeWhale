@@ -680,6 +680,7 @@ pub enum MessageId {
 
     // Approval dialog — risk badges, category labels, field labels, options.
     ApprovalRiskReview,
+    ApprovalRiskElevated,
     ApprovalRiskDestructive,
     ApprovalCategorySafe,
     ApprovalCategoryFileWrite,
@@ -687,6 +688,7 @@ pub enum MessageId {
     ApprovalCategoryNetwork,
     ApprovalCategoryMcpRead,
     ApprovalCategoryMcpAction,
+    ApprovalCategoryAgent,
     ApprovalCategoryUnknown,
     ApprovalFieldType,
     ApprovalFieldAbout,
@@ -1245,6 +1247,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::VimModeInsert,
     MessageId::VimModeVisual,
     MessageId::ApprovalRiskReview,
+    MessageId::ApprovalRiskElevated,
     MessageId::ApprovalRiskDestructive,
     MessageId::ApprovalCategorySafe,
     MessageId::ApprovalCategoryFileWrite,
@@ -1252,6 +1255,7 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::ApprovalCategoryNetwork,
     MessageId::ApprovalCategoryMcpRead,
     MessageId::ApprovalCategoryMcpAction,
+    MessageId::ApprovalCategoryAgent,
     MessageId::ApprovalCategoryUnknown,
     MessageId::ApprovalFieldType,
     MessageId::ApprovalFieldAbout,

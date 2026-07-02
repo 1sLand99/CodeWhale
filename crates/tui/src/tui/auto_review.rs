@@ -66,6 +66,7 @@ pub enum ToolActionKind {
     Secret,
     Publish,
     Destructive,
+    Agent,
     Unknown,
 }
 
@@ -84,6 +85,7 @@ impl ToolActionKind {
             Self::Secret => "secret",
             Self::Publish => "publish",
             Self::Destructive => "destructive",
+            Self::Agent => "agent",
             Self::Unknown => "unknown",
         }
     }
@@ -130,6 +132,7 @@ impl ToolActionKind {
             ToolCategory::Network => Self::Network,
             ToolCategory::McpRead => Self::McpRead,
             ToolCategory::McpAction => Self::McpAction,
+            ToolCategory::Agent => Self::Agent,
             ToolCategory::Unknown => Self::Unknown,
         }
     }
@@ -550,6 +553,7 @@ fn tool_category_label(category: ToolCategory) -> &'static str {
         ToolCategory::Network => "network",
         ToolCategory::McpRead => "mcp_read",
         ToolCategory::McpAction => "mcp_action",
+        ToolCategory::Agent => "agent",
         ToolCategory::Unknown => "unknown",
     }
 }
