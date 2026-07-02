@@ -462,6 +462,62 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
         </div>
       </section>
 
+      {/* WHAT IT DOESN'T DO — the boundaries, stated plainly */}
+      <section className="mx-auto max-w-[1400px] px-6 py-14">
+        <div className="flex items-baseline gap-4 mb-5 hairline-b pb-4">
+          <Seal char="非" />
+          <h2 className="font-display">{isZh ? "CodeWhale 不做什么" : "What CodeWhale doesn't do"}</h2>
+        </div>
+        <p className={`mb-8 text-ink-soft max-w-2xl ${isZh ? "leading-[1.9] tracking-wide" : "text-sm leading-relaxed"}`}>
+          {isZh
+            ? "有些边界值得写清楚。下面每一条都对这份代码库为真，可以在源码里核对——不是营销措辞。"
+            : "Some boundaries are worth stating outright. Each line below is true of this codebase and checkable in the source — not a marketing turn of phrase."}
+        </p>
+        <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-0 col-rule hairline-t hairline-b">
+          {(isZh
+            ? [
+                { t: "不需要云账号", d: "在你的机器上本地运行，无需注册 CodeWhale 账号。本地 vLLM / Ollama 模型连密钥都不用。" },
+                { t: "不收集你的代码", d: "你的代码和使用数据都留在本机，没有任何分析上报。唯一自发的网络请求是一个可关闭的新版本检查，不发送任何代码。" },
+                { t: "不加推理差价", d: "自带密钥，请求直连你配置的提供商，按提供商的价格计费。没有中间代理，没有加价。" },
+                { t: "不要求 CLA", d: "贡献即 MIT 进、MIT 出。没有贡献者许可协议，也不需要签署版权转让。" },
+                { t: "不悄悄换模型", d: "你选的模型就是运行的模型。切换是显式命令；自动路由需手动开启，并会显示所选路由。" },
+                { t: "法典越不过运行时控制", d: "审批、沙箱、网络与信任由代码强制执行。任何法典文本——内置的、你的、或仓库的——都无法放松它们。" },
+              ]
+            : [
+                { t: "No cloud account", d: "It runs locally on your machine — no CodeWhale account, no sign-up. A local vLLM or Ollama model needs no key at all." },
+                { t: "No code telemetry", d: "Your code and usage stay on your machine; nothing is sent for analytics. The only call it makes on its own is an opt-out check for a newer release, which sends no code." },
+                { t: "No inference markup", d: "Bring your own key. Requests go straight to the provider you configured, at the provider's price. No proxy, no margin." },
+                { t: "No CLA", d: "Contributing is MIT in, MIT out. There is no contributor license agreement and no copyright assignment to sign." },
+                { t: "No silent model switching", d: "The model you pick is the model that runs. Switching is an explicit command; automatic routing is opt-in and shown." },
+                { t: "Constitution can't override runtime controls", d: "Approval, sandbox, network, and trust are enforced in code. No constitution text — bundled, yours, or a repo's — can loosen them." },
+              ]
+          ).map((item) => (
+            <div key={item.t} className="p-6">
+              <div className="flex items-baseline gap-2 mb-2">
+                <span className="font-mono text-xs text-ink-mute shrink-0 mt-0.5">✗</span>
+                <h3 className="font-display text-lg leading-snug">{item.t}</h3>
+              </div>
+              <p className={`text-sm text-ink-soft pl-5 ${isZh ? "leading-[1.9] tracking-wide" : "leading-relaxed"}`}>
+                {item.d}
+              </p>
+            </div>
+          ))}
+        </div>
+        <p className="mt-5 text-xs text-ink-mute leading-relaxed max-w-xl">
+          {isZh ? (
+            <>
+              最后一条是根本性的，而且可验证——由执行框架的代码强制生效。{" "}
+              <Link href={isZh ? "/zh/constitution" : "/constitution"} className="text-indigo hover:underline">阅读宪法 →</Link>
+            </>
+          ) : (
+            <>
+              The last one is load-bearing and verifiable — enforced in the harness code, not the prose.{" "}
+              <Link href={isZh ? "/zh/constitution" : "/constitution"} className="text-indigo hover:underline">Read the constitution →</Link>
+            </>
+          )}
+        </p>
+      </section>
+
       {/* JOIN IN — the project is the point */}
       <section className="bg-ink text-paper">
         <div className="mx-auto max-w-[1400px] px-6 py-20 grid lg:grid-cols-12 gap-10 items-center">

@@ -21,6 +21,7 @@ const EN_COLS = [
     title: "Community",
     cn: "社区",
     items: [
+      { label: "Community hub", href: "/en/community" },
       { label: "Issues", href: "https://github.com/Hmbown/CodeWhale/issues" },
       { label: "Pull Requests", href: "https://github.com/Hmbown/CodeWhale/pulls" },
       { label: "Discussions", href: "https://github.com/Hmbown/CodeWhale/discussions" },
@@ -60,6 +61,7 @@ const ZH_COLS = [
   {
     title: "社区",
     items: [
+      { label: "社区中心", href: "/zh/community" },
       { label: "议题", href: "https://github.com/Hmbown/CodeWhale/issues" },
       { label: "合并请求", href: "https://github.com/Hmbown/CodeWhale/pulls" },
       { label: "讨论区", href: "https://github.com/Hmbown/CodeWhale/discussions" },
