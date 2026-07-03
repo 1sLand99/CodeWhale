@@ -632,6 +632,7 @@ mod tests {
     struct EnvGuard {
         home: Option<OsString>,
         userprofile: Option<OsString>,
+        codewhale_home: Option<OsString>,
         codewhale_config_path: Option<OsString>,
         deepseek_config_path: Option<OsString>,
         _lock: std::sync::MutexGuard<'static, ()>,
@@ -645,6 +646,7 @@ mod tests {
             let config_str = OsString::from(config_path.as_os_str());
             let home_prev = env::var_os("HOME");
             let userprofile_prev = env::var_os("USERPROFILE");
+            let codewhale_home_prev = env::var_os("CODEWHALE_HOME");
             let codewhale_config_prev = env::var_os("CODEWHALE_CONFIG_PATH");
             let deepseek_config_prev = env::var_os("DEEPSEEK_CONFIG_PATH");
 
@@ -652,6 +654,7 @@ mod tests {
             unsafe {
                 env::set_var("HOME", &home_str);
                 env::set_var("USERPROFILE", &home_str);
+                env::remove_var("CODEWHALE_HOME");
                 env::remove_var("CODEWHALE_CONFIG_PATH");
                 env::set_var("DEEPSEEK_CONFIG_PATH", &config_str);
             }
@@ -659,6 +662,7 @@ mod tests {
             Self {
                 home: home_prev,
                 userprofile: userprofile_prev,
+                codewhale_home: codewhale_home_prev,
                 codewhale_config_path: codewhale_config_prev,
                 deepseek_config_path: deepseek_config_prev,
                 _lock: lock,
@@ -689,6 +693,18 @@ mod tests {
                 // Safety: test-only environment mutation guarded by a global mutex.
                 unsafe {
                     env::remove_var("USERPROFILE");
+                }
+            }
+
+            if let Some(value) = self.codewhale_home.take() {
+                // Safety: test-only environment mutation guarded by a global mutex.
+                unsafe {
+                    env::set_var("CODEWHALE_HOME", value);
+                }
+            } else {
+                // Safety: test-only environment mutation guarded by a global mutex.
+                unsafe {
+                    env::remove_var("CODEWHALE_HOME");
                 }
             }
 
