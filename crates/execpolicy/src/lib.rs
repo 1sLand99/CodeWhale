@@ -1543,6 +1543,176 @@ mod tests {
     }
 
     #[test]
+    fn file_path_deny_wins_over_ask_and_allow_for_same_tool_and_path() {
+        let engine = engine_with_ask_rules(vec![
+            path_rule("write_file", "src/secrets.rs", PermissionAction::Allow),
+            path_rule("write_file", "src/secrets.rs", PermissionAction::Ask),
+            path_rule("write_file", "src/secrets.rs", PermissionAction::Deny),
+        ]);
+
+        let d = engine
+            .check(file_ctx(
+                "write_file",
+                "/workspace/src/secrets.rs",
+                "/workspace",
+                OnRequest,
+            ))
+            .unwrap();
+
+        assert!(!d.allow);
+        assert!(!d.requires_approval);
+        assert_eq!(d.matched_action, Some(PermissionAction::Deny));
+        assert_eq!(
+            d.matched_rule.as_deref(),
+            Some("tool=write_file path=src/secrets.rs")
+        );
+    }
+
+    #[test]
+    fn file_path_specificity_selects_path_rule_when_action_ties() {
+        let engine = engine_with_ask_rules(vec![
+            tool_rule("write_file", PermissionAction::Allow),
+            path_rule("write_file", "src/secrets.rs", PermissionAction::Allow),
+        ]);
+
+        let d = engine
+            .check(file_ctx(
+                "write_file",
+                "/workspace/src/secrets.rs",
+                "/workspace",
+                OnRequest,
+            ))
+            .unwrap();
+
+        assert!(d.allow);
+        assert!(!d.requires_approval);
+        assert_eq!(d.matched_action, Some(PermissionAction::Allow));
+        assert_eq!(
+            d.matched_rule.as_deref(),
+            Some("tool=write_file path=src/secrets.rs")
+        );
+    }
+
+    #[test]
+    fn file_action_precedence_outranks_path_specificity() {
+        let engine = engine_with_ask_rules(vec![
+            tool_rule("write_file", PermissionAction::Deny),
+            path_rule("write_file", "src/secrets.rs", PermissionAction::Allow),
+        ]);
+
+        let d = engine
+            .check(file_ctx(
+                "write_file",
+                "/workspace/src/secrets.rs",
+                "/workspace",
+                OnRequest,
+            ))
+            .unwrap();
+
+        assert!(!d.allow, "less-specific deny must beat path-specific allow");
+        assert!(!d.requires_approval);
+        assert_eq!(d.matched_action, Some(PermissionAction::Deny));
+        assert_eq!(d.matched_rule.as_deref(), Some("tool=write_file"));
+    }
+
+    #[test]
+    fn file_action_precedence_uses_workspace_relative_normalization() {
+        for (deny_path, allow_path, invocation_path) in [
+            ("src/a.rs", "/workspace/src/a.rs", "/workspace/src/a.rs"),
+            ("/workspace/src/a.rs", "src/a.rs", "src/a.rs"),
+        ] {
+            let engine = engine_with_ask_rules(vec![
+                path_rule("write_file", allow_path, PermissionAction::Allow),
+                path_rule("write_file", deny_path, PermissionAction::Deny),
+            ]);
+
+            let d = engine
+                .check(file_ctx(
+                    "write_file",
+                    invocation_path,
+                    "/workspace",
+                    OnRequest,
+                ))
+                .unwrap();
+
+            assert!(
+                !d.allow,
+                "deny path {deny_path:?} should beat allow path {allow_path:?} for invocation {invocation_path:?}"
+            );
+            assert_eq!(d.matched_action, Some(PermissionAction::Deny));
+        }
+    }
+
+    #[test]
+    fn file_action_precedence_normalizes_windows_separators() {
+        let engine = engine_with_ask_rules(vec![
+            path_rule("write_file", r"src\a.rs", PermissionAction::Allow),
+            path_rule("write_file", "src/a.rs", PermissionAction::Deny),
+        ]);
+
+        let d = engine
+            .check(file_ctx(
+                "write_file",
+                r"C:\workspace\src\a.rs",
+                r"C:\workspace",
+                OnRequest,
+            ))
+            .unwrap();
+
+        assert!(!d.allow);
+        assert_eq!(d.matched_action, Some(PermissionAction::Deny));
+        assert_eq!(
+            d.matched_rule.as_deref(),
+            Some("tool=write_file path=src/a.rs")
+        );
+    }
+
+    #[test]
+    fn file_path_actions_are_scoped_by_tool_for_read_write_and_apply_patch() {
+        let engine = engine_with_ask_rules(vec![
+            path_rule("read_file", "src/shared.rs", PermissionAction::Deny),
+            path_rule("write_file", "src/shared.rs", PermissionAction::Ask),
+            path_rule("apply_patch", "src/shared.rs", PermissionAction::Allow),
+        ]);
+
+        let read = engine
+            .check(file_ctx(
+                "read_file",
+                "/workspace/src/shared.rs",
+                "/workspace",
+                OnRequest,
+            ))
+            .unwrap();
+        assert!(!read.allow);
+        assert!(!read.requires_approval);
+        assert_eq!(read.matched_action, Some(PermissionAction::Deny));
+
+        let write = engine
+            .check(file_ctx(
+                "write_file",
+                "/workspace/src/shared.rs",
+                "/workspace",
+                OnFailure,
+            ))
+            .unwrap();
+        assert!(write.allow);
+        assert!(write.requires_approval);
+        assert_eq!(write.matched_action, Some(PermissionAction::Ask));
+
+        let patch = engine
+            .check(file_ctx(
+                "apply_patch",
+                "/workspace/src/shared.rs",
+                "/workspace",
+                OnRequest,
+            ))
+            .unwrap();
+        assert!(patch.allow);
+        assert!(!patch.requires_approval);
+        assert_eq!(patch.matched_action, Some(PermissionAction::Allow));
+    }
+
+    #[test]
     fn deny_via_prefixes_wins_over_allow_via_prefixes() {
         // denied_prefixes checked first, before trusted_prefixes.
         let engine = ExecPolicyEngine::new(vec!["sed".into()], vec!["sed".into()]);
@@ -1738,8 +1908,44 @@ mod tests {
     // ── helpers ───────────────────────────────────────────────────────────
 
     fn engine_with_ask_rule(rule: ToolAskRule) -> ExecPolicyEngine {
-        ExecPolicyEngine::with_rulesets(vec![
-            Ruleset::user(vec![], vec![]).with_ask_rules(vec![rule]),
-        ])
+        engine_with_ask_rules(vec![rule])
+    }
+
+    fn engine_with_ask_rules(rules: Vec<ToolAskRule>) -> ExecPolicyEngine {
+        ExecPolicyEngine::with_rulesets(vec![Ruleset::user(vec![], vec![]).with_ask_rules(rules)])
+    }
+
+    fn tool_rule(tool: &str, action: PermissionAction) -> ToolAskRule {
+        ToolAskRule {
+            tool: tool.to_string(),
+            command: None,
+            path: None,
+            action,
+        }
+    }
+
+    fn path_rule(tool: &str, path: &str, action: PermissionAction) -> ToolAskRule {
+        ToolAskRule {
+            tool: tool.to_string(),
+            command: None,
+            path: Some(path.to_string()),
+            action,
+        }
+    }
+
+    fn file_ctx<'a>(
+        tool: &'a str,
+        path: &'a str,
+        cwd: &'a str,
+        ask_for_approval: AskForApproval,
+    ) -> ExecPolicyContext<'a> {
+        ExecPolicyContext {
+            command: "",
+            cwd,
+            tool: Some(tool),
+            path: Some(path),
+            ask_for_approval,
+            sandbox_mode: Some("workspace-write"),
+        }
     }
 }
