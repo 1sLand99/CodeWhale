@@ -49,6 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   homepage, models page generated from the provider registry, docs dark mode
   and full SEO metadata/sitemap coverage, terminal player for real
   constitution traces, and a live star badge and version.
+- Added Meituan LongCat as a first-class OpenAI-compatible provider
+  (`longcat`, with `long-cat`, `meituan-longcat`, and `meituan` aliases),
+  `LONGCAT_API_KEY` discovery, the `LongCat-2.0` default model, provider
+  picker wiring, model completions, provider docs, and web provider facts.
 
 ### Changed
 
@@ -113,8 +117,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   helpers on one contract (#3924), removed misleading success toasts,
   issue-number leaks, and dead-end empty states, and repaired the onboarding
   trust and api-key keys.
+- Fixed the onboarding Trust step so plain Enter no longer silently grants
+  workspace trust; users must choose the explicit trust or exit keys.
+- Fixed same-root skill-name collisions being silently shadowed; duplicate
+  normalized skill names now warn while keeping discovery deterministic
+  (#3919).
 - Normalized discovered skill names, removed unenforced trust copy, and
   surfaced the gated constitution override in prompts.
+- Fixed a parallel `subagent::` suite flake where one test's process-wide
+  `Retry-After` pause could strand unrelated budget-capped workers for the
+  full stale window; requests now re-poll the global pause in bounded slices
+  and the rate-limit test clears the window on drop.
 - Suppressed dead_code warnings in the unused plugin registry module and
   fixed formatting across the command-group files. Contributed by Paulo Aboim
   Pinto (@aboimpinto).
