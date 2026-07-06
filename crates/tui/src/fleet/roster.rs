@@ -310,9 +310,10 @@ mod tests {
             assert!(member.description.is_some(), "{}", member.id);
         }
         assert_eq!(members[0].profile.slot, FleetSlot::Manager);
-        assert_eq!(members[1].profile.loadout, FleetLoadout::Fast);
-        assert_eq!(members[5].profile.slot, FleetSlot::Summarizer);
-        assert_eq!(members[5].profile.loadout, FleetLoadout::Fast);
+        assert_eq!(members[1].profile.slot, FleetSlot::Operator);
+        assert_eq!(members[2].profile.loadout, FleetLoadout::Fast);
+        assert_eq!(members[6].profile.slot, FleetSlot::Summarizer);
+        assert_eq!(members[6].profile.loadout, FleetLoadout::Fast);
     }
 
     #[test]
