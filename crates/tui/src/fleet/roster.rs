@@ -121,6 +121,12 @@ impl FleetRoster {
                 "Coordinates a run: plans the work, splits it into bounded tasks, and dispatches workers.",
             ),
             (
+                "operator",
+                FleetSlot::Operator,
+                FleetLoadout::Inherit,
+                "Preferred helm for workflow coordination: plans, routes, reviews outputs, and calls other Fleet slots.",
+            ),
+            (
                 "scout",
                 FleetSlot::Scout,
                 FleetLoadout::Fast,
