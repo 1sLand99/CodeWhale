@@ -102,7 +102,7 @@ impl FleetRoster {
 
         // Built-ins keep their canonical slot order (overrides included);
         // config/workspace-only extras follow alphabetically.
-        extras.sort_by(|a, b| a.id.to_lowercase().cmp(&b.id.to_lowercase()));
+        extras.sort_by_key(|a| a.id.to_lowercase());
         let mut members = built_ins;
         members.extend(extras);
         Self { members }

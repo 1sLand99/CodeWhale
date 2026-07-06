@@ -887,20 +887,18 @@ fn sanitize_retained_messages(mut messages: Vec<Message>) -> Vec<Message> {
                         *content_blocks = None;
                     }
                 }
+                // Signed thinking must stay byte-for-byte valid for providers that
+                // verify replay signatures. Unsigned thinking is local memory pressure
+                // and can be capped once compaction has summarized the old turn.
                 ContentBlock::Thinking {
                     thinking,
                     signature,
-                } => {
-                    // Signed thinking must stay byte-for-byte valid for providers that
-                    // verify replay signatures. Unsigned thinking is local memory pressure
-                    // and can be capped once compaction has summarized the old turn.
-                    if signature.is_none() {
-                        truncate_retained_block(
-                            "thinking block",
-                            thinking,
-                            RETAINED_THINKING_MAX_CHARS,
-                        );
-                    }
+                } if signature.is_none() => {
+                    truncate_retained_block(
+                        "thinking block",
+                        thinking,
+                        RETAINED_THINKING_MAX_CHARS,
+                    );
                 }
                 _ => {}
             }
