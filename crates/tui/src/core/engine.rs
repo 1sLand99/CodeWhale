@@ -1918,10 +1918,21 @@ impl Engine {
             self.active_route_limits,
             input_tokens,
         ) {
+            let usage_percent = budget.usage_percent();
+            let escalation = if usage_percent
+                >= crate::tui::context_inspector::CONTEXT_CRITICAL_THRESHOLD_PERCENT
+            {
+                " — CRITICAL: stop expanding scope; run /compact immediately or finish the current task"
+            } else if usage_percent
+                >= crate::tui::context_inspector::CONTEXT_WARNING_THRESHOLD_PERCENT
+            {
+                " — ESCALATED: prefer /compact, narrow scope, or finish the current task"
+            } else {
+                ""
+            };
             lines.push(format!(
-                "Context pressure: {} ({:.1}% used, {} / {} tokens; {} input tokens available)",
+                "Context pressure: {} ({usage_percent:.1}% used, {} / {} tokens; {} input tokens available){escalation}",
                 budget.pressure.label(),
-                budget.usage_percent(),
                 budget.input_tokens,
                 budget.window_tokens,
                 budget.available_input_tokens,

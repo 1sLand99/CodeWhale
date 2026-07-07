@@ -5054,6 +5054,59 @@ fn turn_metadata_surfaces_context_and_resource_usage() {
 }
 
 #[test]
+fn turn_metadata_escalates_context_pressure_at_warning_threshold() {
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        model: "deepseek-v4-flash".to_string(),
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (engine, _handle) = Engine::new(config, &Config::default());
+
+    // Fabricate high context usage by stuffing the session with a large user message.
+    let large = "x".repeat(900_000);
+    engine.session.messages.push_back(Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::Text {
+            text: large,
+            cache_control: None,
+        }],
+    });
+
+    let user_msg = engine.user_text_message_with_turn_metadata("wrap up".to_string());
+    let last_block = user_msg.content.last().expect("turn metadata block");
+    let ContentBlock::Text { text, .. } = last_block else {
+        panic!("expected text metadata block");
+    };
+
+    if text.contains("Context pressure:") {
+        let usage_line = text
+            .lines()
+            .find(|line| line.starts_with("Context pressure:"))
+            .expect("context pressure line");
+        if usage_line.contains('%') {
+            let percent = usage_line
+                .split('(')
+                .nth(1)
+                .and_then(|rest| rest.split('%').next())
+                .and_then(|value| value.trim().parse::<f64>().ok())
+                .unwrap_or(0.0);
+            if percent >= crate::tui::context_inspector::CONTEXT_WARNING_THRESHOLD_PERCENT {
+                assert!(
+                    usage_line.contains("ESCALATED"),
+                    "expected escalation copy at >=85%: {usage_line}"
+                );
+            } else {
+                assert!(
+                    !usage_line.contains("ESCALATED"),
+                    "below 85% should stay informational: {usage_line}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn runtime_turn_metadata_marks_non_authoritative_input() {
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
