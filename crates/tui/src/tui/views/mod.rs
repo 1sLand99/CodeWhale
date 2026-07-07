@@ -1757,7 +1757,7 @@ fn experimental_config_rows(config: &Config) -> Vec<ConfigRow> {
     rows.push(ConfigRow {
         section: ConfigSection::Experimental,
         key: "workflow".to_string(),
-        value: "preview overlay for workflow/fleet runs (not stable)".to_string(),
+        value: "transcript run cards live; live overlay still experimental".to_string(),
         editable: false,
         scope: ConfigScope::Saved,
     });
@@ -3213,7 +3213,7 @@ mod tests {
     #[test]
     fn subagent_view_agents_includes_live_fanout_workers_when_cache_is_empty() {
         let mut app = create_test_app();
-        let mut card = FanoutCard::new("rlm", app.ui_locale).with_workers(["chunk_1", "chunk_2"]);
+        let mut card = FanoutCard::new("rlm").with_workers(["chunk_1", "chunk_2"]);
         card.upsert_worker("chunk_1", AgentLifecycle::Completed);
         card.upsert_worker("chunk_2", AgentLifecycle::Running);
         app.add_message(HistoryCell::SubAgent(SubAgentCell::Fanout(card)));

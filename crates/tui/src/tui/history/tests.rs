@@ -82,6 +82,83 @@ fn render_spillover_annotation_omitted_in_transcript_mode() {
 }
 
 #[test]
+fn workflow_tool_renders_run_card_instead_of_generic_oneliner() {
+    let output = serde_json::json!({
+        "run_id": "workflow_2400c600",
+        "status": "completed",
+        "workflow_goal": "audit the FLEET and WORKFLOW docs",
+        "child_ids": ["a1", "a2", "a3"],
+        "progress": ["phase: Scan", "log: 3 findings"],
+        "schema_errors": [],
+    })
+    .to_string();
+    let cell = GenericToolCell {
+        name: "workflow".to_string(),
+        status: ToolStatus::Success,
+        input_summary: Some("action: run".to_string()),
+        output: Some(output),
+        prompts: None,
+        spillover_path: None,
+        output_summary: None,
+        is_diff: false,
+    };
+    let joined: String = cell
+        .lines_with_mode(120, true, super::RenderMode::Live)
+        .iter()
+        .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+        .collect();
+    assert!(joined.contains("workflow_2400c600"), "run_id: {joined:?}");
+    // Copy dedupe (Wave 5c #7): the header owns the lifecycle label; the body
+    // no longer repeats it as a `status:` KV row.
+    assert!(joined.contains("done"), "header lifecycle: {joined:?}");
+    assert!(
+        !joined.contains("status:"),
+        "body must not repeat the header lifecycle: {joined:?}"
+    );
+    assert!(joined.contains("audit the FLEET"), "goal: {joined:?}");
+    assert!(joined.contains("children: 3"), "child count: {joined:?}");
+    assert!(
+        joined.contains("log: 3 findings"),
+        "last progress: {joined:?}"
+    );
+}
+
+#[test]
+fn workflow_tool_renders_status_list_card() {
+    let output = serde_json::json!({
+        "action": "status",
+        "count": 2,
+        "runs": [
+            {"run_id": "workflow_aaa", "status": "running", "child_count": 4},
+            {"run_id": "workflow_bbb", "status": "completed", "child_count": 1},
+        ],
+    })
+    .to_string();
+    let cell = GenericToolCell {
+        name: "workflow".to_string(),
+        status: ToolStatus::Success,
+        input_summary: Some("action: status".to_string()),
+        output: Some(output),
+        prompts: None,
+        spillover_path: None,
+        output_summary: None,
+        is_diff: false,
+    };
+    let joined: String = cell
+        .lines_with_mode(120, true, super::RenderMode::Live)
+        .iter()
+        .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+        .collect();
+    assert!(joined.contains("2 run(s)"), "count header: {joined:?}");
+    assert!(joined.contains("workflow_aaa"), "first run row: {joined:?}");
+    assert!(joined.contains("running"), "run status: {joined:?}");
+    assert!(
+        joined.contains("workflow_bbb"),
+        "second run row: {joined:?}"
+    );
+}
+
+#[test]
 fn render_spillover_annotation_omitted_when_no_path_set() {
     // The common case: most tool results don't trigger spillover.
     let cell = GenericToolCell {
@@ -1161,8 +1238,36 @@ fn exec_cell_header_includes_compact_command_summary() {
         .collect::<String>();
     assert!(visible.contains("run running"));
     assert!(
-        visible.contains("cargo test --workspace --all-features"),
-        "header should expose command target: {visible:?}"
+        visible.contains("Ctrl+B"),
+        "foreground wait header should expose Ctrl+B hint, not command: {visible:?}"
+    );
+    assert!(
+        !visible.contains("cargo test"),
+        "foreground wait live header must not repeat command target: {visible:?}"
+    );
+
+    let transcript_visible: String = HistoryCell::Tool(ToolCell::Exec(ExecCell {
+        command: "cargo test --workspace --all-features".to_string(),
+        status: ToolStatus::Running,
+        output: None,
+        live_output: None,
+        shell_task_id: None,
+        owner_agent_id: None,
+        owner_agent_name: None,
+        started_at: None,
+        duration_ms: None,
+        source: ExecSource::Assistant,
+        interaction: None,
+        output_summary: None,
+    }))
+    .transcript_lines(80)[0]
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect::<String>();
+    assert!(
+        transcript_visible.contains("cargo test --workspace --all-features"),
+        "transcript header should expose command target: {transcript_visible:?}"
     );
 }
 
@@ -1538,12 +1643,22 @@ fn exec_cell_renders_live_shell_output_before_final_output() {
         output_summary: None,
     };
 
-    let text = lines_text(&cell.lines_with_motion(80, true));
+    let live_text = lines_text(&cell.lines_with_motion(80, true));
+    assert!(
+        !live_text.contains("running line 1"),
+        "foreground shell live output belongs in sidebar/jobs, not main transcript: {live_text}"
+    );
+    assert!(
+        live_text.contains("Ctrl+B"),
+        "compact foreground wait must keep Ctrl+B hint: {live_text}"
+    );
+    assert!(!live_text.contains("command:"));
+    assert!(!live_text.contains("Ctrl+B backgrounds this command"));
+    assert!(!live_text.contains("Ctrl+B moves this shell wait to /jobs"));
 
-    assert!(text.contains("running line 1"));
-    assert!(text.contains("running line 2"));
-    assert!(!text.contains("Ctrl+B backgrounds this command"));
-    assert!(!text.contains("Ctrl+B moves this shell wait to /jobs"));
+    let transcript_text = lines_text(&HistoryCell::Tool(ToolCell::Exec(cell)).transcript_lines(80));
+    assert!(transcript_text.contains("running line 1"));
+    assert!(transcript_text.contains("command:"));
 }
 
 #[test]

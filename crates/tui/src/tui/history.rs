@@ -34,9 +34,9 @@ use checklist::{
 #[cfg(test)]
 use checklist::{ChecklistChange, ChecklistItemSnapshot, ChecklistSnapshot};
 use constants::{
-    ASSISTANT_GLYPH, TOOL_CARD_SUMMARY_LINES, TOOL_COMMAND_LINE_LIMIT, TOOL_DONE_SYMBOL,
-    TOOL_FAILED_SYMBOL, TOOL_HEADER_SUMMARY_LIMIT, TOOL_OUTPUT_LINE_LIMIT, TRANSCRIPT_RAIL,
-    USER_GLYPH,
+    ASSISTANT_GLYPH, FOREGROUND_SHELL_WAIT_HINT, TOOL_CARD_SUMMARY_LINES, TOOL_COMMAND_LINE_LIMIT,
+    TOOL_DONE_SYMBOL, TOOL_FAILED_SYMBOL, TOOL_HEADER_SUMMARY_LIMIT, TOOL_OUTPUT_LINE_LIMIT,
+    TRANSCRIPT_RAIL, USER_GLYPH,
 };
 #[cfg(test)]
 use constants::{TOOL_RUNNING_SYMBOLS, TOOL_STATUS_SYMBOL_MS};
@@ -656,6 +656,13 @@ impl ExecCell {
         self.render(width, low_motion, RenderMode::Live)
     }
 
+    /// Foreground `exec_shell` blocking the turn — eligible for Ctrl+B detach.
+    fn is_foreground_shell_wait(&self) -> bool {
+        self.status == ToolStatus::Running
+            && self.source == ExecSource::Assistant
+            && self.interaction.is_none()
+    }
+
     pub(super) fn render(
         &self,
         width: u16,
@@ -664,10 +671,14 @@ impl ExecCell {
     ) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
         let command_summary = command_header_summary(&self.command);
-        let header_summary = self
-            .interaction
-            .as_deref()
-            .or(Some(command_summary.as_str()));
+        let compact_foreground_wait = mode == RenderMode::Live && self.is_foreground_shell_wait();
+        let header_summary = if compact_foreground_wait {
+            Some(FOREGROUND_SHELL_WAIT_HINT)
+        } else {
+            self.interaction
+                .as_deref()
+                .or(Some(command_summary.as_str()))
+        };
         lines.push(render_tool_header_with_summary(
             "Shell",
             header_summary,
@@ -676,6 +687,14 @@ impl ExecCell {
             self.started_at,
             low_motion,
         ));
+
+        // Foreground shell waits block the turn but do not need a verbose
+        // transcript card — spinner + running badge + Ctrl+B hint only.
+        // Command, live output, and artifact paths belong in the Tasks sidebar
+        // and `/jobs` detail surfaces.
+        if compact_foreground_wait {
+            return wrap_card_rail(lines);
+        }
 
         // A successful shell call is rarely worth its full body — collapse it
         // to the single header line in live mode. The bottom shell strip owns
@@ -806,14 +825,18 @@ impl ExploringCell {
             ToolStatus::Running
         };
         let header_summary = exploring_header_summary(&self.entries);
+        let multi_entry = self.entries.len() > 1;
+        let header_state = if multi_entry {
+            ""
+        } else if all_done {
+            tool_status_label(status)
+        } else {
+            "running"
+        };
         lines.push(render_tool_header_with_summary(
             "Workspace",
             header_summary.as_deref(),
-            if all_done {
-                tool_status_label(status)
-            } else {
-                "running"
-            },
+            header_state,
             status,
             None,
             low_motion,
@@ -854,18 +877,27 @@ impl ExploringCell {
         }
 
         for entry in &self.entries {
-            let prefix = match entry.status {
-                ToolStatus::Running => "live",
-                ToolStatus::Success => "done",
-                ToolStatus::Hydrated => "loaded",
-                ToolStatus::Failed => "issue",
-            };
-            lines.extend(render_compact_kv(
-                prefix,
-                &entry.label,
-                tool_value_style(),
-                width,
-            ));
+            if multi_entry {
+                lines.extend(render_card_detail_line(
+                    None,
+                    &entry.label,
+                    tool_value_style(),
+                    width,
+                ));
+            } else {
+                let prefix = match entry.status {
+                    ToolStatus::Running => "live",
+                    ToolStatus::Success => "done",
+                    ToolStatus::Hydrated => "loaded",
+                    ToolStatus::Failed => "issue",
+                };
+                lines.extend(render_compact_kv(
+                    prefix,
+                    &entry.label,
+                    tool_value_style(),
+                    width,
+                ));
+            }
         }
         lines
     }
@@ -1272,6 +1304,13 @@ impl GenericToolCell {
             return lines;
         }
 
+        // #4038: give the `workflow` tool a purpose-built run card (run_id,
+        // status, goal, children, progress) instead of collapsing to a
+        // one-line generic header or dumping raw JSON.
+        if let Some(lines) = self.try_render_as_workflow(width, low_motion) {
+            return lines;
+        }
+
         // Sub-agent launch already gets a dedicated `DelegateCard`
         // that owns the live action tree, status, and final summary. The
         // generic tool block for the same call duplicates that signal at
@@ -1448,6 +1487,150 @@ impl GenericToolCell {
             low_motion,
             mode,
         ))
+    }
+
+    /// Render the `workflow` tool as a compact run card rather than the generic
+    /// one-line header (live) or a large JSON dump (transcript).
+    fn try_render_as_workflow(&self, width: u16, low_motion: bool) -> Option<Vec<Line<'static>>> {
+        if self.name != "workflow" {
+            return None;
+        }
+        let output = self.output.as_ref()?;
+        let value: serde_json::Value = serde_json::from_str(output).ok()?;
+        let is_status_list =
+            value.get("action").and_then(serde_json::Value::as_str) == Some("status");
+        if value.get("run_id").is_none() && !is_status_list {
+            return None;
+        }
+        let family = crate::tui::widgets::tool_card::tool_family_for_name("workflow");
+        let mut lines = Vec::new();
+
+        if is_status_list {
+            let runs = value.get("runs").and_then(serde_json::Value::as_array);
+            let count = value
+                .get("count")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_else(|| runs.map(|r| r.len() as u64).unwrap_or(0));
+            let header = format!("{count} run(s)");
+            lines.push(render_tool_header_with_family_and_summary(
+                family,
+                Some(header.as_str()),
+                tool_status_label(self.status),
+                self.status,
+                None,
+                low_motion,
+            ));
+            if let Some(runs) = runs {
+                for run in runs {
+                    let run_id = run
+                        .get("run_id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("?");
+                    let status = run
+                        .get("status")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("?");
+                    let children = run
+                        .get("child_count")
+                        .and_then(serde_json::Value::as_u64)
+                        .or_else(|| {
+                            run.get("child_ids")
+                                .and_then(serde_json::Value::as_array)
+                                .map(|a| a.len() as u64)
+                        })
+                        .unwrap_or(0);
+                    lines.extend(render_card_detail_line(
+                        None,
+                        &format!("{run_id} · {status} · {children} child(ren)"),
+                        tool_value_style(),
+                        width,
+                    ));
+                }
+            }
+            return Some(wrap_card_rail(lines));
+        }
+
+        let run_id = value
+            .get("run_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("workflow");
+        lines.push(render_tool_header_with_family_and_summary(
+            family,
+            Some(run_id),
+            tool_status_label(self.status),
+            self.status,
+            None,
+            low_motion,
+        ));
+        if let Some(goal) = value
+            .get("workflow_goal")
+            .and_then(serde_json::Value::as_str)
+            && !goal.trim().is_empty()
+        {
+            lines.extend(render_card_detail_line(
+                Some("goal"),
+                &truncate_text(goal.trim(), 200),
+                tool_value_style(),
+                width,
+            ));
+        }
+        let child_count = value
+            .get("child_ids")
+            .and_then(serde_json::Value::as_array)
+            .map(|a| a.len())
+            .unwrap_or(0);
+        lines.extend(render_compact_kv(
+            "children",
+            &child_count.to_string(),
+            tool_value_style(),
+            width,
+        ));
+        if let Some(progress) = value.get("progress").and_then(serde_json::Value::as_array)
+            && let Some(last) = progress.last().and_then(serde_json::Value::as_str)
+        {
+            lines.extend(render_card_detail_line(
+                Some("progress"),
+                &format!("{} ({} events)", truncate_text(last, 160), progress.len()),
+                tool_value_style(),
+                width,
+            ));
+        }
+        if let Some(verification) = value.get("verification")
+            && let Some(summary) = verification
+                .get("summary")
+                .and_then(serde_json::Value::as_str)
+        {
+            lines.extend(render_card_detail_line(
+                Some("verification"),
+                &truncate_text(summary, 200),
+                tool_value_style(),
+                width,
+            ));
+        }
+        let schema_error_count = value
+            .get("schema_errors")
+            .and_then(serde_json::Value::as_array)
+            .map(|a| a.len())
+            .unwrap_or(0);
+        if schema_error_count > 0 {
+            lines.extend(render_card_detail_line(
+                Some("schema errors"),
+                &schema_error_count.to_string(),
+                tool_value_style(),
+                width,
+            ));
+        }
+        if let Some(error) = value.get("error").and_then(serde_json::Value::as_str)
+            && !error.trim().is_empty()
+        {
+            lines.extend(render_card_detail_line(
+                Some("error"),
+                &truncate_text(error.trim(), 200),
+                tool_value_style(),
+                width,
+            ));
+        }
+        Some(wrap_card_rail(lines))
     }
 }
 
