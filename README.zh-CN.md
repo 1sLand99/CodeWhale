@@ -57,9 +57,10 @@ brew tap Hmbown/deepseek-tui
 brew install deepseek-tui
 ```
 
-各平台的预编译归档——包括 Linux riscv64——都附在
-[GitHub Releases](https://github.com/Hmbown/CodeWhale/releases)。校验和、
-中国大陆镜像、Windows 细节与故障排查见 [docs/INSTALL.md](docs/INSTALL.md)。
+Linux x64/arm64、macOS x64/arm64 和 Windows x64 的预编译归档都附在
+[GitHub Releases](https://github.com/Hmbown/CodeWhale/releases)。Linux riscv64
+预编译归档暂时暂停，等待上游 QuickJS 绑定支持。校验和、中国大陆镜像、
+Windows 细节与故障排查见 [docs/INSTALL.md](docs/INSTALL.md)。
 
 ## 第一次运行
 

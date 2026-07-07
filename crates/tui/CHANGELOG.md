@@ -127,6 +127,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changelog and retro-ledger entries keep the old name as a record.
 - Documented the Homebrew rollout strategy and added a distribution-channel
   check to the release checklist. Harvested from #3760 by @idling11 (#3489).
+- Paused Linux RISC-V prebuilt release and nightly artifacts because
+  `rquickjs-sys` 0.12.0 does not ship `riscv64gc-unknown-linux-gnu` bindings;
+  installers, docs, and update paths now treat RISC-V as unsupported until
+  upstream bindings or a bindgen-enabled build lands.
 - Made the approval prompt calm, compact, and honest, and centered the
   first-run follow-up on the constitution; first-run onboarding now hands off
   into the setup wizard, and the language picker offers every shipped locale

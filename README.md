@@ -70,9 +70,10 @@ brew tap Hmbown/deepseek-tui
 brew install deepseek-tui
 ```
 
-Prebuilt archives for every platform — including Linux riscv64 — are attached
-to [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases). Checksums,
-China mirrors, Windows specifics, and troubleshooting live in
+Prebuilt archives for Linux x64/arm64, macOS x64/arm64, and Windows x64 are
+attached to [GitHub Releases](https://github.com/Hmbown/CodeWhale/releases).
+Linux riscv64 prebuilts are temporarily paused while upstream QuickJS bindings
+catch up. Checksums, China mirrors, Windows specifics, and troubleshooting live in
 [docs/INSTALL.md](docs/INSTALL.md).
 
 **Upgrading from the legacy `deepseek-tui` package?** Your config, sessions,
