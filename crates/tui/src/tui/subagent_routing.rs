@@ -852,4 +852,55 @@ mod tests {
             cell => panic!("expected delegate card, got {cell:?}"),
         }
     }
+
+    #[test]
+    fn completion_before_started_allocates_recovery_delegate_card() {
+        let mut app = App::new(test_options(), &Config::default());
+        let completed = MailboxMessage::Completed {
+            agent_id: "agent_early".to_string(),
+            summary: "recovered after early completion".to_string(),
+        };
+        assert!(
+            handle_subagent_mailbox(&mut app, 1, &completed),
+            "completion-first delivery must still open a card"
+        );
+        assert!(app.subagent_card_index.contains_key("agent_early"));
+
+        let started = MailboxMessage::started("agent_early", SubAgentType::General);
+        assert!(handle_subagent_mailbox(&mut app, 2, &started));
+        match app.history.last() {
+            Some(HistoryCell::SubAgent(SubAgentCell::Delegate(card))) => {
+                assert_eq!(card.agent_id, "agent_early");
+                assert_ne!(card.agent_type, "…");
+            }
+            other => panic!("expected delegate card, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fanout_completion_burst_preserves_started_to_done_ordering() {
+        let mut app = App::new(test_options(), &Config::default());
+        app.pending_subagent_dispatch = Some("rlm_eval".to_string());
+        for (seq, id) in ["agent_a", "agent_b"].into_iter().enumerate() {
+            assert!(handle_subagent_mailbox(
+                &mut app,
+                seq as u64 + 1,
+                &MailboxMessage::started(id, SubAgentType::Explore),
+            ));
+        }
+        assert!(handle_subagent_mailbox(
+            &mut app,
+            3,
+            &MailboxMessage::Completed {
+                agent_id: "agent_a".to_string(),
+                summary: "a done".to_string(),
+            },
+        ));
+        let Some(HistoryCell::SubAgent(SubAgentCell::Fanout(card))) = app.history.last() else {
+            panic!("expected fanout card");
+        };
+        assert_eq!(card.workers.len(), 2);
+        assert_eq!(card.workers[0].status, AgentLifecycle::Completed);
+        assert_eq!(card.workers[1].status, AgentLifecycle::Running);
+    }
 }

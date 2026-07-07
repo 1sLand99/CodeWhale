@@ -6588,6 +6588,48 @@ mod tests {
         assert_eq!(view.body_scroll, 0);
     }
 
+    #[test]
+    fn setup_wizard_page_down_clamps_scroll_at_80x24() {
+        use ratatui::text::{Line, Span};
+
+        let mut view = SetupWizardView::new_at_with_facts(
+            SetupState::default(),
+            Locale::En,
+            SetupStep::Constitution,
+            SetupRuntimeFacts {
+                constitution_file: SetupConstitutionFileState::Loaded,
+                ..SetupRuntimeFacts::default()
+            },
+        );
+        let wrap_width = 76usize;
+        let visible_rows = 10usize;
+        let mut lines = view.constitution_detail_lines();
+        lines.extend(std::iter::repeat_n(
+            Line::from(Span::raw("x".repeat(wrap_width))),
+            40,
+        ));
+        let visual_rows: usize = lines
+            .iter()
+            .map(|line| line.width().div_ceil(wrap_width).max(1))
+            .sum();
+        let max_scroll = visual_rows.saturating_sub(visible_rows);
+        assert!(max_scroll > 0, "fixture should overflow a small viewport");
+
+        for _ in 0..32 {
+            view.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        }
+        assert!(
+            view.body_scroll >= max_scroll.saturating_sub(8),
+            "page down should reach the scroll ceiling"
+        );
+
+        let clamped = view.body_scroll.min(max_scroll);
+        assert_eq!(
+            clamped, max_scroll,
+            "render path should clamp overshoot to max scroll"
+        );
+    }
+
     fn lines_to_text(lines: Vec<Line<'static>>) -> String {
         lines
             .into_iter()

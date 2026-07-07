@@ -5326,6 +5326,46 @@ fn nested_tool_runtime_routes_child_completions_to_local_inbox() {
 }
 
 #[test]
+fn subagent_completion_from_result_surfaces_step_limit_not_silent_success() {
+    let snap = make_snapshot(SubAgentStatus::Failed(
+        "child reached its step limit (12 steps) without returning a final summary".to_string(),
+    ));
+    let completion = subagent_completion_from_result(&snap);
+    assert!(completion.payload.contains("step limit"), "{completion:?}");
+    assert!(!completion.payload.contains("Completed (no output)"));
+}
+
+#[test]
+fn subagent_completion_from_result_preserves_missing_final_summary_diagnostic() {
+    let snap = make_snapshot(SubAgentStatus::Completed);
+    let completion = subagent_completion_from_result(&snap);
+    assert!(
+        completion.payload.contains("no final summary"),
+        "{completion:?}"
+    );
+}
+
+#[test]
+fn subagent_budget_exhaustion_completion_carries_budget_exhausted_sentinel() {
+    let mut snap = make_snapshot(SubAgentStatus::BudgetExhausted);
+    snap.result = Some("partial findings from step 2".to_string());
+    let completion = subagent_completion_from_result(&snap);
+    assert!(
+        completion.payload.contains("partial output preserved"),
+        "{completion:?}"
+    );
+    let inner = completion
+        .payload
+        .split("<codewhale:subagent.done>")
+        .nth(1)
+        .and_then(|chunk| chunk.split("</codewhale:subagent.done>").next())
+        .expect("sentinel json");
+    let parsed: serde_json::Value = serde_json::from_str(inner).expect("sentinel parses");
+    assert_eq!(parsed["status"], "budget_exhausted");
+    assert_eq!(parsed["summary_location"], "previous_line");
+}
+
+#[test]
 fn subagent_completion_inlines_evidence_before_sentinel() {
     let mut snap = make_snapshot(SubAgentStatus::Completed);
     snap.result = Some(

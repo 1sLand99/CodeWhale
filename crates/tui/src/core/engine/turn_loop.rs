@@ -1587,7 +1587,7 @@ impl Engine {
                 let mut read_only = false;
                 let mut detached_start = false;
                 let mut blocked_error: Option<ToolError> = None;
-                let mut guard_result: Option<ToolResult> = None;
+                let guard_result: Option<ToolResult> = None;
                 // #3026: set by a hook `ask` decision; applied AFTER the
                 // registry-based approval computation below so it cannot be
                 // clobbered by it.

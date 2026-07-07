@@ -1866,6 +1866,22 @@ fn tool_search_reports_known_core_action_tool_when_current_catalog_omits_it() {
 }
 
 #[test]
+fn tools_always_load_overrides_mcp_deferral() {
+    let always_load = HashSet::from(["mcp_server_write".to_string()]);
+    let catalog = build_model_tool_catalog(
+        vec![api_tool("read_file")],
+        vec![api_tool("mcp_server_write")],
+        AppMode::Agent,
+        &always_load,
+    );
+    let mcp = catalog
+        .iter()
+        .find(|tool| tool.name == "mcp_server_write")
+        .expect("mcp tool");
+    assert_eq!(mcp.defer_loading, Some(false));
+}
+
+#[test]
 fn tools_always_load_overrides_default_native_deferral() {
     let always_load = HashSet::from(["git_blame".to_string()]);
     assert!(!should_default_defer_tool("git_blame", &always_load));
@@ -5061,11 +5077,11 @@ fn turn_metadata_escalates_context_pressure_at_warning_threshold() {
         workspace: tmp.path().to_path_buf(),
         ..Default::default()
     };
-    let (engine, _handle) = Engine::new(config, &Config::default());
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
 
     // Fabricate high context usage by stuffing the session with a large user message.
     let large = "x".repeat(900_000);
-    engine.session.messages.push_back(Message {
+    engine.session.messages.push(Message {
         role: "user".to_string(),
         content: vec![ContentBlock::Text {
             text: large,
