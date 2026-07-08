@@ -414,6 +414,31 @@ pub(crate) fn handle_mouse_event(app: &mut App, mouse: MouseEvent) -> Vec<ViewEv
                         app.needs_redraw = true;
                         return Vec::new();
                     }
+                    SidebarRowAction::OpenAgentDetail { agent_id } => {
+                        // #2889 slice / dogfood A3: drill from the expanded
+                        // dossier into the child's transcript card (action
+                        // tree, status, summary) in the detail pager.
+                        let cell_index = app.history.iter().position(|cell| {
+                            matches!(
+                                cell,
+                                HistoryCell::SubAgent(
+                                    crate::tui::history::SubAgentCell::Delegate(card)
+                                ) if card.agent_id == agent_id
+                            )
+                        });
+                        match cell_index {
+                            Some(cell_index) => {
+                                open_details_pager_for_cell(app, cell_index);
+                            }
+                            None => {
+                                app.status_message = Some(format!(
+                                    "No transcript card for {agent_id} yet — use handle_read agent:{agent_id}/full_transcript"
+                                ));
+                            }
+                        }
+                        app.needs_redraw = true;
+                        return Vec::new();
+                    }
                     SidebarRowAction::CancelAgent { agent_id } => {
                         return vec![ViewEvent::SidebarAgentCancel { agent_id }];
                     }

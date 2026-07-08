@@ -1453,8 +1453,18 @@ pub struct SidebarHoverState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidebarRowAction {
     Command(String),
-    ToggleAgentDetails { agent_id: String },
-    CancelAgent { agent_id: String },
+    ToggleAgentDetails {
+        agent_id: String,
+    },
+    /// Drill into the child's transcript card (action tree, status, summary)
+    /// in the detail pager — registered on the expanded dossier rows (#2889
+    /// slice, dogfood A3).
+    OpenAgentDetail {
+        agent_id: String,
+    },
+    CancelAgent {
+        agent_id: String,
+    },
 }
 
 impl SidebarRowAction {
@@ -1462,7 +1472,9 @@ impl SidebarRowAction {
     pub fn as_command(&self) -> Option<&str> {
         match self {
             Self::Command(command) => Some(command.as_str()),
-            Self::ToggleAgentDetails { .. } | Self::CancelAgent { .. } => None,
+            Self::ToggleAgentDetails { .. }
+            | Self::OpenAgentDetail { .. }
+            | Self::CancelAgent { .. } => None,
         }
     }
 
@@ -1471,7 +1483,7 @@ impl SidebarRowAction {
         match self {
             Self::Command(command) => command.contains(" cancel "),
             Self::CancelAgent { .. } => true,
-            Self::ToggleAgentDetails { .. } => false,
+            Self::ToggleAgentDetails { .. } | Self::OpenAgentDetail { .. } => false,
         }
     }
 }

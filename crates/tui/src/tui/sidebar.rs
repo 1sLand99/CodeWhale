@@ -2940,7 +2940,12 @@ fn subagent_panel_rows(
             indented_detail_line("  ", &detail_parts.join(" \u{00B7} "), content_width.max(1)),
             Style::default().fg(theme.text_dim),
         )));
-        actions.push(None);
+        // Clicking the expanded dossier drills into the child's transcript
+        // card in the detail pager (#2889 slice, dogfood A3). The label row
+        // above keeps its expand/collapse toggle.
+        actions.push(Some(SidebarRowAction::OpenAgentDetail {
+            agent_id: row.id.clone(),
+        }));
 
         // #4094: hand the user a copyable handle to the worker's *full* output
         // transcript instead of dumping it inline — the inline dump is this
@@ -2960,7 +2965,9 @@ fn subagent_panel_rows(
                 ),
                 Style::default().fg(theme.text_muted),
             )));
-            actions.push(None);
+            actions.push(Some(SidebarRowAction::OpenAgentDetail {
+                agent_id: row.id.clone(),
+            }));
         }
     }
 
@@ -3443,7 +3450,9 @@ fn agent_stop_action_for_click(action: &SidebarRowAction) -> Option<SidebarRowAc
         SidebarRowAction::ToggleAgentDetails { agent_id } => Some(SidebarRowAction::CancelAgent {
             agent_id: agent_id.clone(),
         }),
-        SidebarRowAction::Command(_) | SidebarRowAction::CancelAgent { .. } => None,
+        SidebarRowAction::Command(_)
+        | SidebarRowAction::OpenAgentDetail { .. }
+        | SidebarRowAction::CancelAgent { .. } => None,
     }
 }
 
@@ -5169,8 +5178,11 @@ mod tests {
         );
         assert_eq!(
             actions[agent_idx + 1],
-            None,
-            "expanded detail row is informational; the stop target is on the label row"
+            Some(SidebarRowAction::OpenAgentDetail {
+                agent_id: "agent_0123456789".to_string(),
+            }),
+            "expanded detail row drills into the child's transcript card (#2889); \
+             the stop target stays on the label row"
         );
     }
 
@@ -6148,6 +6160,51 @@ mod tests {
     }
 
     #[test]
+    fn subagent_expanded_dossier_rows_register_open_agent_detail() {
+        // #2889 slice / dogfood A3: the expanded dossier rows must be
+        // clickable drill-ins to the child's transcript card, while the
+        // label row keeps its expand/collapse toggle.
+        let summary = SidebarSubagentSummary {
+            cached_total: 1,
+            cached_running: 1,
+            ..SidebarSubagentSummary::default()
+        };
+        let rows = vec![SidebarAgentRow {
+            id: "agent_drill".to_string(),
+            parent_run_id: None,
+            spawn_depth: 1,
+            name: "scout".to_string(),
+            role: "worker".to_string(),
+            model: Some("deepseek-v4-flash".to_string()),
+            status: "running".to_string(),
+            objective: Some("map the repo".to_string()),
+            git_branch: None,
+            progress: Some("step 3".to_string()),
+            steps_taken: 3,
+            duration_ms: Some(2_000),
+            expanded: true,
+        }];
+
+        let (lines, actions) =
+            subagent_panel_rows(&summary, &rows, Locale::En, 72, 8, &palette::UI_THEME);
+        assert_eq!(lines.len(), actions.len());
+        assert!(
+            actions.iter().any(|action| matches!(
+                action,
+                Some(SidebarRowAction::ToggleAgentDetails { agent_id }) if agent_id == "agent_drill"
+            )),
+            "label row keeps the toggle action"
+        );
+        assert!(
+            actions.iter().any(|action| matches!(
+                action,
+                Some(SidebarRowAction::OpenAgentDetail { agent_id }) if agent_id == "agent_drill"
+            )),
+            "expanded dossier rows should register the drill-in action: {actions:?}"
+        );
+    }
+
+    #[test]
     fn subagent_expanded_detail_never_blank_for_sparse_worker() {
         // #4094: expanding a running worker must show real activity, not a
         // bare status string. A freshly-spawned worker with an objective and
@@ -6545,16 +6602,19 @@ mod tests {
                 .any(|line| line.contains("Audit TUI input path")),
             "bounded preview of the summary must remain: {text:?}"
         );
-        // Lines and actions stay parallel with the extra handle line, and the
-        // handle line itself is not clickable (no row action).
+        // Lines and actions stay parallel with the extra handle line; the
+        // handle line doubles as the drill-in affordance (#2889 slice).
         assert_eq!(lines.len(), actions.len());
         let handle_idx = text
             .iter()
             .position(|line| line.contains("handle_read"))
             .unwrap();
-        assert!(
-            actions[handle_idx].is_none(),
-            "handle line must not be a clickable row action"
+        assert_eq!(
+            actions[handle_idx],
+            Some(SidebarRowAction::OpenAgentDetail {
+                agent_id: "agent_7f3c".to_string(),
+            }),
+            "handle line should open the child's detail card on click"
         );
     }
 
