@@ -781,6 +781,9 @@ impl ToolSpec for PrAttemptPreflightTool {
         })
         .await
         .map_err(|join_err| {
+            // Surface the otherwise-discarded join error for debugging; the
+            // returned ToolError (and thus user-facing behavior) is unchanged.
+            tracing::debug!(error = %join_err, "git apply --check spawn_blocking task failed to join");
             ToolError::execution_failed(format!("git apply --check panicked: {join_err}"))
         })?
         .map_err(|e| ToolError::execution_failed(format!("git apply --check failed: {e}")))?;
@@ -856,7 +859,12 @@ async fn write_runtime_artifact(
         Ok::<(), std::io::Error>(())
     })
     .await
-    .map_err(|e| ToolError::execution_failed(format!("artifact write task panicked: {e}")))?
+    .map_err(|e| {
+        // Surface the otherwise-discarded join error for debugging; the
+        // returned ToolError (and thus user-facing behavior) is unchanged.
+        tracing::debug!(error = %e, "artifact write spawn_blocking task failed to join");
+        ToolError::execution_failed(format!("artifact write task panicked: {e}"))
+    })?
     .map_err(|e| ToolError::execution_failed(format!("write artifact: {e}")))?;
     Ok(Some(
         absolute
@@ -942,7 +950,12 @@ async fn git_output(workspace: &Path, args: &[&str]) -> Result<String, ToolError
         crate::dependencies::Git::output(&arg_refs, &cwd)
     })
     .await
-    .map_err(|e| ToolError::execution_failed(format!("git task panicked: {e}")))?
+    .map_err(|e| {
+        // Surface the otherwise-discarded join error for debugging; the
+        // returned ToolError (and thus user-facing behavior) is unchanged.
+        tracing::debug!(error = %e, "git spawn_blocking task failed to join");
+        ToolError::execution_failed(format!("git task panicked: {e}"))
+    })?
     .map_err(|e| ToolError::execution_failed(format!("failed to run git: {e}")))?;
     if !out.status.success() {
         return Err(ToolError::execution_failed(format!(
