@@ -1,33 +1,23 @@
 #!/usr/bin/env python3
 """Models.dev catalog refresh / snapshot automation for CodeWhale (#4117).
 
-Fetches the public Models.dev combined catalog and writes a *secret-free*
-JSON document suitable for:
-
-- offline bundled seed checks (`snapshot`)
-- local disk-cache dogfood (`refresh --write-cache`)
-
-This tool never accepts, prints, or persists API keys / auth headers.
+Fetches the public Models.dev combined catalog, validates offline bundled seed
+shape, and supports OpenRouter public-listing inspection. The automation is
+intentionally validate/dry-run only: it never accepts, prints, or persists API
+keys / auth headers, and it does not write fetched JSON to disk.
 
 Usage examples:
 
   # Dry-run: fetch + validate, print counts (no write)
   scripts/catalog_models_dev.py refresh
 
-  # Write secret-free cache for local dogfood
-  scripts/catalog_models_dev.py refresh --write-cache /tmp/models-dev.cache.json
-
   # Validate the in-repo offline seed still parses as Models.dev-shaped JSON
   scripts/catalog_models_dev.py snapshot --check \\
       crates/config/assets/models_dev.bundled.json
 
-  # Replace the offline seed (intentional maintainer action — large!)
-  scripts/catalog_models_dev.py snapshot --write \\
-      crates/config/assets/models_dev.bundled.json
-
-  # OpenRouter public /models listing (no key) into a cache file
+  # OpenRouter public /models listing (no key), dry-run only
   scripts/catalog_models_dev.py refresh --provider openrouter \\
-      --sort newest --limit 100 --write-cache /tmp/openrouter.models.json
+      --sort newest --limit 100
 
 Environment:
   CODEWHALE_MODELS_DEV_URL   Override Models.dev catalog URL
@@ -340,12 +330,12 @@ def build_parser() -> argparse.ArgumentParser:
     refresh.add_argument(
         "--write-cache",
         metavar="PATH",
-        help="Write secret-free JSON cache to PATH",
+        help="Deprecated/unsupported: validate-only automation never writes fetched JSON",
     )
     refresh.add_argument(
         "--write",
         metavar="PATH",
-        help="Alias of --write-cache for Models.dev payloads",
+        help="Deprecated/unsupported alias of --write-cache",
     )
     refresh.set_defaults(func=cmd_refresh)
 
@@ -367,12 +357,12 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot.add_argument(
         "--write",
         action="store_true",
-        help="Write a freshly fetched Models.dev catalog to path",
+        help="Deprecated/unsupported: validate-only automation never writes snapshots",
     )
     snapshot.add_argument(
         "--force-full",
         action="store_true",
-        help="Allow overwriting the compact offline seed with a full live dump",
+        help="Deprecated/unsupported with --write; retained for clear failure messages",
     )
     snapshot.set_defaults(func=cmd_snapshot)
     return p
