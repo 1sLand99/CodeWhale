@@ -476,4 +476,66 @@ mod tests {
         assert_eq!(label, "cargo test --workspace");
         assert!(!label.contains("38;2"));
     }
+
+    // --- New #3488 fixtures: CJK/wide-glyph truncation on selector-style rows.
+    // truncate_line_to_width is the production helper behind sidebar (file_tree),
+    // statusline (footer_ui), hotbar, and picker (mouse_ui) row rendering, so
+    // these exercise the same truncation path those surfaces use.
+
+    #[test]
+    fn truncate_line_to_width_full_width_cjk_lands_on_glyph_boundary() {
+        // Each Han glyph is two columns. With an odd budget the truncation must
+        // land on a whole-glyph boundary (reserving three columns for the
+        // ellipsis), never leaving a half-rendered wide cell or emitting U+FFFD.
+        let title = "项目报告结果"; // 6 glyphs, 12 columns
+        let out = truncate_line_to_width(title, 7);
+        // Budget 7 -> limit 4 columns -> two glyphs fit, then the ellipsis.
+        assert_eq!(out, "项目...");
+        assert_eq!(text_display_width(&out), 7);
+        // The kept prefix is composed only of whole wide glyphs (each 2 cols),
+        // proving the boundary glyph was dropped whole, not split.
+        let prefix = out.strip_suffix("...").expect("ellipsis present");
+        assert!(prefix.chars().all(|c| char_display_width(c) == 2));
+        assert!(!out.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn truncate_line_to_width_mixed_ascii_cjk_row_keeps_ellipsis_within_budget() {
+        // A sidebar/selector row mixing an ASCII label with a CJK title, wider
+        // than the column budget, must truncate with a trailing ellipsis that
+        // still fits by display width and must not split a wide glyph.
+        let row = "Task: 数据库迁移任务 done"; // ASCII label + 7 Han glyphs
+        let budget = 12;
+        let out = truncate_line_to_width(row, budget);
+        assert!(out.ends_with("..."), "expected ellipsis, got {out:?}");
+        // Ellipsis-and-content fit within the budget by *display* width.
+        assert!(text_display_width(&out) <= budget);
+        // The non-ellipsis prefix stays within budget-minus-ellipsis, so the
+        // wide glyph on the boundary was dropped whole rather than half-drawn.
+        let prefix = out.strip_suffix("...").expect("ellipsis present");
+        assert!(text_display_width(prefix) <= budget - 3);
+        assert!(!out.contains('\u{FFFD}'));
+        // The semantic ASCII prefix survives truncation.
+        assert!(out.starts_with("Task:"));
+    }
+
+    #[test]
+    fn truncate_line_to_width_dense_cjk_selector_row_survives_narrow_widths() {
+        // Picker/selector rows degrade through truncate_line_to_width when the
+        // terminal is narrow. A dense row with a leading marker glyph and CJK
+        // content must stay within budget at tiny widths, without panicking or
+        // emitting a replacement char from a mid-glyph byte split.
+        let row = "▸ 中文项目 · main"; // marker + CJK + separator + branch
+        for width in [1usize, 2, 3, 4, 6, 8] {
+            let out = truncate_line_to_width(row, width);
+            assert!(
+                text_display_width(&out) <= width,
+                "width={width}: {out:?} exceeds budget"
+            );
+            assert!(
+                !out.contains('\u{FFFD}'),
+                "width={width}: truncation split a wide glyph"
+            );
+        }
+    }
 }

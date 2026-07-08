@@ -1991,4 +1991,135 @@ mod tests {
         // Any output is acceptable (the path is degenerate); assert no panic.
         let _ = rendered;
     }
+
+    fn rendered_text(rendered: &[Line<'static>]) -> String {
+        rendered
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect()
+    }
+
+    fn assert_rendered_widths_fit(rendered: &[Line<'static>], width: usize, label: &str) {
+        for line_width in rendered_widths(rendered) {
+            assert!(
+                line_width <= width,
+                "{label} width={width}: rendered line width {line_width} exceeds budget"
+            );
+        }
+    }
+
+    // ── Unicode / CJK / emoji / combining-char width QA (#3488) ────────────
+
+    #[test]
+    fn paragraph_wrap_keeps_unicode_runs_within_qa_widths() {
+        let cases = [
+            ("cjk", "界".repeat(300)),
+            ("emoji", "😀".repeat(200)),
+            ("mixed-cjk-emoji", "界😀世🚀".repeat(90)),
+        ];
+
+        for (label, text) in cases {
+            for &width in &[80usize, 100, 120] {
+                let rendered = render_paragraph_for_test(&text, width);
+                assert_rendered_widths_fit(&rendered, width, label);
+                assert_eq!(
+                    rendered_text(&rendered),
+                    text,
+                    "{label} width={width}: content changed while wrapping"
+                );
+
+                let min_lines = text.width().div_ceil(width);
+                assert!(
+                    rendered.len() >= min_lines,
+                    "{label} width={width}: expected at least {min_lines} lines, got {}",
+                    rendered.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn paragraph_wrap_preserves_mixed_unicode_and_ascii_fragments() {
+        let cjk = "这是一个测试字符串".repeat(10); // 80 Han chars = 160 cols
+        let emoji = "🚀".repeat(12);
+        let text = format!("Note: {cjk} done {emoji}");
+
+        for &width in &[80usize, 100, 120] {
+            let rendered = render_paragraph_for_test(&text, width);
+            assert_rendered_widths_fit(&rendered, width, "mixed unicode/ascii");
+
+            let visible = visible_lines(&rendered).join("\n");
+            for fragment in ["Note:", "测试", "done"] {
+                assert!(
+                    visible.contains(fragment),
+                    "width={width}: fragment {fragment:?} missing from output:\n{visible}"
+                );
+            }
+            assert_eq!(
+                visible.matches('🚀').count(),
+                12,
+                "width={width}: emoji content lost"
+            );
+        }
+    }
+
+    #[test]
+    fn lower_level_wrap_text_keeps_unicode_runs_within_qa_widths() {
+        let cases = [
+            ("cjk", "中".repeat(140)),
+            ("emoji", "😀".repeat(110)),
+            ("combining", "e\u{301}".repeat(140)),
+        ];
+
+        for (label, input) in cases {
+            for &width in &[80usize, 100, 120] {
+                let lines = wrap_text(&input, width);
+                for line in &lines {
+                    assert!(
+                        line.width() <= width,
+                        "{label} width={width}: wrap_text line {line:?} exceeds budget"
+                    );
+                }
+                let combined: String = lines.join("");
+                assert_eq!(
+                    combined, input,
+                    "{label} width={width}: wrap_text changed content"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn table_render_keeps_cjk_cells_within_qa_widths() {
+        let cjk = "界".repeat(80);
+        let src = format!("| Name | Value |\n|---|---|\n| CJK | {cjk} |\n");
+
+        for &width in &[80usize, 100, 120] {
+            let rendered = render_markdown(&src, width as u16, Style::default());
+            assert_rendered_widths_fit(&rendered, width, "table cjk");
+            assert_eq!(
+                rendered_text(&rendered).matches('界').count(),
+                80,
+                "width={width}: CJK table cell content lost"
+            );
+        }
+    }
+
+    #[test]
+    fn paragraph_wrap_keeps_cjk_transcript_within_narrow_widths() {
+        // The seed cases cover 80/100/120; narrow terminals (resize / small
+        // panes) are the other half of #3488's terminal-width lane. A CJK
+        // transcript paragraph must still wrap inside tiny windows without
+        // overflowing the border or dropping content.
+        let text = "实时输出结果显示正常".repeat(6); // 60 Han glyphs, 120 cols
+        for &width in &[20usize, 40] {
+            let rendered = render_paragraph_for_test(&text, width);
+            assert_rendered_widths_fit(&rendered, width, "narrow cjk transcript");
+            assert_eq!(
+                rendered_text(&rendered),
+                text,
+                "width={width}: CJK transcript content changed while wrapping"
+            );
+        }
+    }
 }
