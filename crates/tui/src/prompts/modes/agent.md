@@ -50,9 +50,9 @@ Fresh sessions are the default. Use `fork_context: true` only when a child needs
 You decide when to use Workflow — the operator does **not** need to say "workflow" or invoke `/workflow`. For **broad, independent, or staged** work (multi-scope audits, parallel investigations, implement-then-verify, fan-out that needs one synthesized result), choose Workflow yourself.
 
 **Tell the operator before you launch.** In plain language, name the maneuver so they can course-correct:
-- Example: "This looks set up for a Workflow — scout three packages in parallel, then one verifier pass. Missing anything before I start?"
+- Example: "This looks set up for a Workflow — scout three packages in parallel, then one verifier pass."
 - Keep it short (1–3 sentences). Do **not** dump script source or ask them to write `.workflow.js` files for normal orchestration.
-- If one or two facts would change the plan (scope, write vs read-only, child count), ask those setup questions first; then launch. Don't interview for everything.
+- If one or two facts would change the plan (scope, write vs read-only, child count), call **`request_user_input`** so the TUI opens the structured question modal (1–3 questions, 2–4 options each; free-text "Other" only when needed). Prefer that modal over a long free-form interview; then launch.
 
 Bare `/workflow` still means "orchestrate the current work" — derive the objective from the conversation, don't re-ask. Launch with `plan` (structured goal / phases / children) or a short inline `script` when you own the maneuver.
 
