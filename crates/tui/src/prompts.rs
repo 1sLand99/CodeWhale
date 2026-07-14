@@ -419,7 +419,7 @@ static PROMPT_OVERRIDE_NOTICES: LazyLock<Mutex<Vec<String>>> =
 /// Context passed to an embedder-provided static prompt composer.
 ///
 /// This hook only replaces the byte-stable base/personality prompt segment.
-/// Mode deltas, approval policy, tool taxonomy, Context Management, and the
+/// Mode deltas, approval policy, tool taxonomy, Core Execution, and the
 /// Compaction Relay stay owned by CodeWhale's system prompt assembly.
 #[non_exhaustive]
 #[derive(Debug)]
@@ -506,8 +506,8 @@ pub fn set_static_prompt_composer_override(
 // custom embedder build.
 //
 // Scope is deliberately narrow: only the byte-stable base prompt segment is
-// user-overridable. Mode deltas, approval policy, tool taxonomy, Context
-// Management, and the Compaction Relay stay owned by the runtime assembly (see
+// user-overridable. Mode deltas, approval policy, tool taxonomy, Core
+// Execution, and the Compaction Relay stay owned by the runtime assembly (see
 // `StaticPromptCtx`), so an override cannot strip safety-relevant guidance.
 // A missing or empty file is a no-op — the bundled constant is used — so this
 // is fully backward compatible.
@@ -909,8 +909,8 @@ pub const GOAL_CONTINUATION_PROMPT: &str = include_str!("prompts/continuation.md
 /// can override the user's current request (#725).
 pub const MEMORY_GUIDANCE: &str = include_str!("prompts/memory_guidance.md");
 
-/// Candidate lean execution layer for Core-profile A/B trials. It is not
-/// enabled by default until paired task evidence selects a profile.
+/// Lean execution layer shared by the default agent runtime. Product/UI
+/// tutorials remain outside the model-facing coding contract.
 pub const CORE_EXECUTION_PROFILE_PROMPT: &str = include_str!("prompts/core_execution.md");
 
 // ── Legacy prompt constants (kept for backwards compatibility) ────────
@@ -1112,7 +1112,7 @@ pub fn system_prompt_for_mode_with_context(
 ///   1. mode prompt (compile-time constant)
 ///   2. project context / fallback (workspace-static)
 ///   3. skills block (skills-dir-static)
-///   4. `## Context Management` (compile-time constant, Agent/Yolo only)
+///   4. `## Core Execution` (compile-time constant)
 ///   5. compaction relay template (compile-time constant)
 ///   6. relay block — file-backed; rewritten by `/compact` and on exit
 ///
@@ -1274,25 +1274,11 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
         full_prompt = format!("{full_prompt}\n\n{block}");
     }
 
-    // 4. Context Management — included in all modes.
-    {
-        full_prompt.push_str(
-            "\n\n## Context Management\n\n\
-             When the conversation gets long (you'll see a context usage indicator), you can:\n\
-             1. Use `/compact` to summarize earlier context and free up space\n\
-             2. The system will preserve important information (files you're working on, recent messages, tool results)\n\
-             3. After compaction, you'll see a summary of what was discussed and can continue seamlessly\n\n\
-             If you notice context is getting long (>60% during sustained work), proactively suggest using `/compact` or Ctrl+L to the user. If auto_compact is enabled, the engine can compact before the next send once the configured threshold is crossed.\n\n\
-             ### Prompt-cache awareness\n\n\
-             DeepSeek caches the longest *byte-stable prefix* of every request and charges roughly 100× less for cache-hit tokens than miss tokens. The system prompt above is layered most-static-first specifically so the prefix stays stable turn-over-turn. To keep cache hits high:\n\
-             - **Working set location:** the current repo working set is stored on new user messages inside a `<turn_meta>` block. Treat it as high-priority turn metadata, not as a stable system-prompt section.\n\
-             - **Append, don't reorder.** New context goes at the end (latest user / tool messages). Reshuffling earlier messages or rewriting their content invalidates the cache for everything after the change.\n\
-             - **Don't paraphrase quoted content.** If you've already read a file, refer to it by path or line range instead of re-quoting it with different formatting.\n\
-             - **Use `/compact` as a hard reset, not a tweak.** Compaction is meant for when the cache is already losing — it intentionally rewrites the prefix to a shorter summary. Don't trigger it for small wins.\n\
-             - **Read once, refer back.** Re-reading the same file produces a different tool-result envelope than the prior read; it's cheaper to scroll back than to re-fetch.\n\
-             - **Footer chip:** the `cache hit %` chip turns red below 40% and yellow below 80%. If it's been red for several turns, that's a signal to consolidate."
-        );
-    }
+    // 4. Lean, runtime-only coding discipline. Context pressure, prompt-cache
+    // accounting, footer presentation, and automatic compaction are host
+    // responsibilities; teaching their UI to the model dilutes the task.
+    full_prompt.push_str("\n\n");
+    full_prompt.push_str(CORE_EXECUTION_PROFILE_PROMPT.trim());
 
     // 5. Compaction relay template — so the model knows the format to use
     //    when writing `.codewhale/handoff.md` on exit / `/compact`.
@@ -3515,7 +3501,7 @@ mod tests {
     #[test]
     fn handoff_appears_after_static_blocks_without_working_set() {
         // Cache-prefix invariant: the relay block must come after static
-        // `## Context Management` and the compaction relay template
+        // `## Core Execution` and the compaction relay template
         // (`## Compaction Relay`). Working-set metadata is per-turn user
         // metadata now, not a system-prompt tail block.
         let tmp = tempdir().expect("tempdir");
@@ -3530,9 +3516,9 @@ mod tests {
             Some(summary),
         ));
 
-        let context_pos = prompt
-            .find("## Context Management")
-            .expect("Context Management section present in Agent mode");
+        let execution_pos = prompt
+            .find("## Core Execution")
+            .expect("Core Execution section present in Agent mode");
         let compact_pos = prompt
             .find("## Compaction Relay")
             .expect("compaction relay template present");
@@ -3545,8 +3531,8 @@ mod tests {
         );
 
         assert!(
-            context_pos < handoff_pos,
-            "## Context Management must precede the relay block"
+            execution_pos < handoff_pos,
+            "## Core Execution must precede the relay block"
         );
         assert!(
             compact_pos < handoff_pos,
@@ -3774,8 +3760,8 @@ mod tests {
             "constitution block must stay marker-free for prefix cache stability"
         );
         assert!(
-            blocks[0].text.contains("## Context Management"),
-            "constitution retains static context-management guidance"
+            blocks[0].text.contains("## Core Execution"),
+            "constitution retains static core execution guidance"
         );
 
         let flat = system_prompt_flat_text(&SystemPrompt::Blocks(blocks.clone()));
@@ -3885,7 +3871,15 @@ fn core_execution_profile_is_runtime_only() {
     ] {
         assert!(CORE_EXECUTION_PROFILE_PROMPT.contains(required));
     }
-    for forbidden in ["footer", "color", "hotbar", "panel", "OpenHands"] {
+    for forbidden in [
+        "footer",
+        "color",
+        "hotbar",
+        "panel",
+        "Fleet",
+        "Workflow",
+        "OpenHands",
+    ] {
         assert!(!CORE_EXECUTION_PROFILE_PROMPT.contains(forbidden));
     }
 }

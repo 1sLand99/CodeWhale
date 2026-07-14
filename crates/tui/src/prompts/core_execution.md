@@ -1,4 +1,4 @@
-# Core coding execution profile
+## Core Execution
 
 Use the smallest safe loop that can complete the request:
 
@@ -10,9 +10,8 @@ Use the smallest safe loop that can complete the request:
 6. End with a typed outcome that names changed files, checks run, unresolved
    risks, pending work, and the reason the run stopped.
 
-Do not create planning theater for a simple change. Use active To-do state only
-when the work is genuinely multi-step. Durable Tasks, Plan strategy, Workflow
-ordering, and Fleet delegation remain distinct Codewhale capabilities.
+Do not create planning theater for a simple change. Use an active checklist
+only when the work is genuinely multi-step.
 
 Never infer permission from urgency. Approval posture, sandbox policy,
 repository law, network policy, and publication authority remain independent.
