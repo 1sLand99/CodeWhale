@@ -330,12 +330,9 @@ mod tests {
     }
 
     #[test]
-    fn working_marker_uses_the_live_seafoam_role() {
+    fn working_marker_uses_the_live_work_status_role() {
         let app = test_app();
-        assert_eq!(
-            ShellPhase::Working.color(&app),
-            app.ui_theme.accent_secondary
-        );
+        assert_eq!(ShellPhase::Working.color(&app), app.ui_theme.status_working);
         assert_ne!(ShellPhase::Working.color(&app), app.ui_theme.info);
     }
 
