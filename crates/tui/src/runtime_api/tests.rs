@@ -606,6 +606,14 @@ async fn spawn_test_server_with_root_token_mobile_workspace(
     .await
 }
 
+#[derive(Default)]
+struct TestServerOverrides {
+    sub_agent_manager: Option<SharedSubAgentManager>,
+    fleet_codewhale_binary: Option<String>,
+    config_path: Option<PathBuf>,
+    config_profile: Option<String>,
+}
+
 async fn spawn_test_server_with_root_token_mobile_workspace_and_subagents(
     root: PathBuf,
     sessions_dir: PathBuf,
@@ -621,28 +629,28 @@ async fn spawn_test_server_with_root_token_mobile_workspace_and_subagents(
         tokio::task::JoinHandle<()>,
     )>,
 > {
-    spawn_test_server_with_root_token_mobile_workspace_subagents_and_config_path(
+    spawn_test_server_with_root_token_mobile_workspace_and_overrides(
         root,
         sessions_dir,
         runtime_token,
         mobile_enabled,
         workspace,
-        sub_agent_manager,
-        fleet_codewhale_binary,
-        (None, None),
+        TestServerOverrides {
+            sub_agent_manager,
+            fleet_codewhale_binary,
+            ..TestServerOverrides::default()
+        },
     )
     .await
 }
 
-async fn spawn_test_server_with_root_token_mobile_workspace_subagents_and_config_path(
+async fn spawn_test_server_with_root_token_mobile_workspace_and_overrides(
     root: PathBuf,
     sessions_dir: PathBuf,
     runtime_token: Option<String>,
     mobile_enabled: bool,
     workspace: PathBuf,
-    sub_agent_manager: Option<SharedSubAgentManager>,
-    fleet_codewhale_binary: Option<String>,
-    config_source: (Option<PathBuf>, Option<String>),
+    overrides: TestServerOverrides,
 ) -> Result<
     Option<(
         SocketAddr,
@@ -650,7 +658,6 @@ async fn spawn_test_server_with_root_token_mobile_workspace_subagents_and_config
         tokio::task::JoinHandle<()>,
     )>,
 > {
-    let (config_path, config_profile) = config_source;
     let _ = rustls::crypto::ring::default_provider().install_default();
     fs::create_dir_all(&sessions_dir)?;
     fs::create_dir_all(&workspace)?;
@@ -688,8 +695,9 @@ async fn spawn_test_server_with_root_token_mobile_workspace_subagents_and_config
     runtime_threads.attach_automation_manager(automations.clone());
 
     let auth_required = runtime_token.is_some();
-    let sub_agent_manager =
-        sub_agent_manager.unwrap_or_else(|| runtime_api_sub_agent_manager(&workspace, 2));
+    let sub_agent_manager = overrides
+        .sub_agent_manager
+        .unwrap_or_else(|| runtime_api_sub_agent_manager(&workspace, 2));
     let state = RuntimeApiState {
         config: Arc::new(parking_lot::RwLock::new(config)),
         workspace,
@@ -697,8 +705,8 @@ async fn spawn_test_server_with_root_token_mobile_workspace_subagents_and_config
         runtime_threads: runtime_threads.clone(),
         cors_origins: Vec::new(),
         sessions_dir,
-        config_path: config_path.clone(),
-        config_profile,
+        config_path: overrides.config_path.clone(),
+        config_profile: overrides.config_profile,
         mcp_pool: Arc::new(Mutex::new(None)),
         automations,
         sub_agent_manager,
@@ -710,7 +718,9 @@ async fn spawn_test_server_with_root_token_mobile_workspace_subagents_and_config
         bind_host: "127.0.0.1".to_string(),
         bind_port: 0,
         mobile_enabled,
-        fleet_codewhale_binary: fleet_codewhale_binary.unwrap_or_else(configured_codewhale_binary),
+        fleet_codewhale_binary: overrides
+            .fleet_codewhale_binary
+            .unwrap_or_else(configured_codewhale_binary),
     };
     let app = build_router(state);
     let listener = match TcpListener::bind("127.0.0.1:0").await {
@@ -750,15 +760,16 @@ async fn spawn_test_server_with_config_path(
     let sessions_dir = root.join("sessions");
     let workspace = root.join("workspace");
     fs::create_dir_all(&root)?;
-    spawn_test_server_with_root_token_mobile_workspace_subagents_and_config_path(
+    spawn_test_server_with_root_token_mobile_workspace_and_overrides(
         root,
         sessions_dir,
         None,
         false,
         workspace,
-        None,
-        None,
-        (Some(config_path), None),
+        TestServerOverrides {
+            config_path: Some(config_path),
+            ..TestServerOverrides::default()
+        },
     )
     .await
 }
@@ -777,15 +788,17 @@ async fn spawn_test_server_with_config_path_and_profile(
     let sessions_dir = root.join("sessions");
     let workspace = root.join("workspace");
     fs::create_dir_all(&root)?;
-    spawn_test_server_with_root_token_mobile_workspace_subagents_and_config_path(
+    spawn_test_server_with_root_token_mobile_workspace_and_overrides(
         root,
         sessions_dir,
         None,
         false,
         workspace,
-        None,
-        None,
-        (Some(config_path), Some(config_profile)),
+        TestServerOverrides {
+            config_path: Some(config_path),
+            config_profile: Some(config_profile),
+            ..TestServerOverrides::default()
+        },
     )
     .await
 }
