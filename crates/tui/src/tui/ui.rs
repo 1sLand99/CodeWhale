@@ -256,7 +256,7 @@ fn is_session_denied_for_key(app: &App, approval_key: &str) -> bool {
 }
 
 fn session_denied_notice(app: &App, tool_name: &str) -> String {
-    app.tr(MessageId::ApprovalSessionDeniedCached)
+    app.tr(MessageId::ApprovalAutoDeniedSession)
         .replace("{tool}", tool_name)
 }
 
@@ -290,6 +290,25 @@ fn surface_session_denied_notice(app: &mut App, tool_name: &str) {
             app.add_message(receipt);
         }
     }
+}
+
+async fn auto_deny_session_approval(
+    app: &mut App,
+    engine_handle: &EngineHandle,
+    id: &str,
+    tool_name: &str,
+    approval_key: &str,
+) {
+    log_sensitive_event(
+        "tool.approval.auto_deny_session",
+        serde_json::json!({
+            "tool_name": tool_name,
+            "approval_key": approval_key,
+            "session_id": app.current_session_id,
+        }),
+    );
+    let _ = engine_handle.deny_tool_call(id.to_string()).await;
+    surface_session_denied_notice(app, tool_name);
 }
 
 fn should_auto_approve_approval_request(
@@ -3473,20 +3492,18 @@ async fn run_event_loop(
                     } => {
                         let session_denied = is_session_denied_for_key(app, &approval_key);
                         if session_denied {
-                            // The user already said no to this exact tool /
-                            // approval key in this session; auto-deny so the
+                            // The user already denied a matching approval key
+                            // during this process; auto-deny so the
                             // model's retry loop doesn't keep re-prompting
                             // (#360).
-                            log_sensitive_event(
-                                "tool.approval.auto_deny_session",
-                                serde_json::json!({
-                                    "tool_name": tool_name,
-                                    "approval_key": approval_key,
-                                    "session_id": app.current_session_id,
-                                }),
-                            );
-                            let _ = engine_handle.deny_tool_call(id.clone()).await;
-                            surface_session_denied_notice(app, &tool_name);
+                            auto_deny_session_approval(
+                                app,
+                                &engine_handle,
+                                &id,
+                                &tool_name,
+                                &approval_key,
+                            )
+                            .await;
                         } else if should_auto_approve_approval_request(
                             app,
                             &tool_name,
