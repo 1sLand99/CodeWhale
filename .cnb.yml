@@ -54,7 +54,9 @@
     - name: linux npm wrapper smoke
       script: |
         set -eu
-        cargo build --release --locked -p codewhale-cli -p codewhale-tui
+        # The release profile uses full LTO and one codegen unit. Bound Cargo's
+        # parallelism so the final links cannot exhaust a shared CNB runner.
+        cargo build --jobs 2 --release --locked -p codewhale-cli -p codewhale-tui
         export PATH="$PWD/target/release:$PATH"
         node scripts/release/npm-wrapper-smoke.js
         ./target/release/codewhale --version
@@ -87,7 +89,9 @@
     - name: release binary smoke
       script: |
         set -eu
-        cargo build --release --locked -p codewhale-cli -p codewhale-tui
+        # Keep the production release profile intact while avoiding a burst of
+        # concurrent rustc/linker processes on the shared release runner.
+        cargo build --jobs 2 --release --locked -p codewhale-cli -p codewhale-tui
         export PATH="$PWD/target/release:$PATH"
         node scripts/release/npm-wrapper-smoke.js
         ./target/release/codewhale --version
@@ -122,7 +126,7 @@ $:
 
             ./scripts/release/check-versions.sh
             ./scripts/release/check-ohos-deps.sh
-            cargo build --release --locked \
+            cargo build --jobs 2 --release --locked \
               --target x86_64-unknown-linux-musl \
               -p codewhale-cli -p codewhale-tui
 
