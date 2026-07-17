@@ -7,13 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- Preserve Solarized Light's canonical Base3 (`#fdf6e3`) shell background
-  instead of tinting it green-grey through the default underwater Ombre
-  treatment, while retaining foreground ambient life (#4457 by
-  @AiurArtanis).
-
 ## [0.9.1] - 2026-07-20
 
 Codewhale v0.9.1 ships a first-class local web client over the Runtime API,
@@ -65,6 +58,32 @@ site's draft, feed, login, and content-watch boundaries.
 
 ### Fixed
 
+- Make doctor and setup output distinguish static configuration, command
+  availability, MCP protocol readiness, and backend health instead of
+  presenting configured routes as live-healthy. Ordinary doctor runs no
+  longer wake loopback/self-hosted providers unless `--probe-local` is
+  explicitly requested (#4485; partial #4406).
+- Serialize test-only configuration-path readers with temporary environment
+  redirects so the Windows provider-persistence matrix cannot observe another
+  test's transient `CODEWHALE_HOME` or config path (#4483, closing #4463).
+- Restore direct Moonshot `kimi-k3` to its documented 1,048,576-token
+  context window and 131,072-token output limit instead of treating the live
+  model as an unknown legacy 128K route. The existing Kimi Code tiered `k3`
+  route and credential reuse remain unchanged (#4481).
+- Keep read-before-edit snapshots in the engine session so a file read remains
+  valid across turns and context compaction, while a new session still starts
+  with an empty tracker (#4475 by @Angel-Hair).
+- Make `apply_patch` expose the canonical `replace` operation while continuing
+  to accept deprecated `changes` payloads through one validation path. Mixed
+  patch, replace, and compatibility modes now fail before any write (#4476 by
+  @Angel-Hair).
+- Show the prompt-cache hit rate in the phase strip when the Cache status item
+  is enabled, using overflow-safe rounded integer math and leaving compact or
+  disabled status layouts unchanged (#4474 by @dmitri-0).
+- Preserve Solarized Light's canonical Base3 (`#fdf6e3`) shell background
+  instead of tinting it green-grey through the default underwater Ombre
+  treatment, while retaining foreground ambient life (#4457 by
+  @AiurArtanis; PR #4471 by @nightt5879).
 - Fail closed on legacy Kimi CLI credential imports: remove Codewhale's
   hard-coded first-party-client impersonation and refresh request, never
   auto-enable or rewrite imported credentials, and label the compatibility
@@ -172,9 +191,20 @@ Thank you to the contributors whose code, reports, and reviews shaped v0.9.1:
   report that exposed lossy high-bit process-status handling (#4100).
 - [@w1w218](https://github.com/w1w218) — the Windows ARM64 release request and
   real-device motivation (#4267).
-- [@SparkofSpike](https://github.com/SparkofSpike) — the Windows Ctrl+O
   reproduction that exposed pre-pager result truncation and conflicting composer
   shortcut routing (#4482).
+- [@Angel-Hair](https://github.com/Angel-Hair) — session-owned read-before-edit
+  tracking and the explicit, backwards-compatible `apply_patch` replacement
+  contract (PRs #4475 and #4476).
+- [@dmitri-0](https://github.com/dmitri-0) — configurable cache-hit visibility
+  in the phase strip (PR #4474).
+  reproduction and verification that the v0.9.1 input path already contains
+  the needed global binding (PR #4477).
+- [@SparkofSpike](https://github.com/SparkofSpike) — the Windows Ctrl+O
+  reproduction that exposed pre-pager result truncation and conflicting composer
+  shortcut routing (#4482), and the exact Vim-space regression reproduction
+  verifying the v0.9.1 input path already contains the needed global binding
+  (PR #4477).
 
 ## [0.9.0] - 2026-07-16
 
