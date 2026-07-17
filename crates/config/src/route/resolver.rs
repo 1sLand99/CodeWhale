@@ -208,13 +208,20 @@ impl RouteResolver {
                 super::capabilities::CapabilityState::Unknown;
         }
 
+        let protocol = descriptor
+            .protocol_for_endpoint(&selected.endpoint_key)
+            .ok_or_else(|| RouteError::UnsupportedModelProtocol {
+                provider: provider_id.clone(),
+                model: selected.wire_model_id.as_str().to_string(),
+                endpoint_key: selected.endpoint_key.clone(),
+            })?;
         let endpoint = ResolvedEndpoint {
             base_url: req
                 .base_url_override
                 .clone()
                 .unwrap_or_else(|| descriptor.default_base_url().to_string()),
             endpoint_key: selected.endpoint_key,
-            protocol: descriptor.protocol(),
+            protocol,
         };
 
         // Advisory validation (#1519): a non-loopback `http://` endpoint sends
@@ -250,7 +257,7 @@ impl RouteResolver {
             // The resolver never inspects credentials: auth is honestly
             // `Unresolved` at resolution time, not a claimed `Missing`.
             ResolvedAuthSource::Unresolved,
-            descriptor.protocol(),
+            protocol,
             limits,
             selected.capabilities,
             // #3085: honest pricing projected from the matched offering (the
