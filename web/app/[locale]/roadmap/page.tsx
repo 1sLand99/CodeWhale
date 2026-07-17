@@ -36,6 +36,7 @@ const tracksEn = [
     title: "Underway",
     items: [
       { title: "VS Code extension", note: "The repository ships a Phase 0 local-runtime companion: terminal launch, health checks, read-only thread summaries, and restore-point browsing. Full chat and editor actions are not part of this slice." },
+      { title: "Local web client", note: "`codewhale web` — an embedded, loopback-only browser client over the Runtime API behind a one-time bootstrap session boundary; approvals and user input recover across page reloads (#4423)" },
       { title: "Managed app preview and optional accounts", note: "A separate managed app and control plane are in development. They use a separate sign-in and do not make an account a requirement for the local runtime; launch readiness is tracked separately." },
       { title: "Memory typed store", note: "SQLite + FTS5 backend with graph-structured agent memory and multi-signal recall (#534–#536)" },
       { title: "Feishu / Lark bot", note: "First long-connection bridge over the runtime API shipped; richer chat features underway (#757)" },
@@ -46,7 +47,7 @@ const tracksEn = [
   {
     title: "Considered",
     items: [
-      { title: "Web UI / share-link mode", note: "Local web interface over serve --http; curated, generated static share links (#471, #481)" },
+      { title: "Workrooms", note: "Durable, addressable agent-work threads over the Runtime API and user surfaces (#3209, docs/WORKROOM_ARCHITECTURE.md)" },
       { title: "Exa web-search backend", note: "Bundled alternative to the existing DDG + Bing path (#431)" },
       { title: "Homebrew core formula", note: "Tap exists; pursuing homebrew-core inclusion" },
       { title: "Native Windows installer", note: "MSI / WinGet; Scoop manifest already ships" },
@@ -60,6 +61,7 @@ const tracksEn = [
       { title: "Mandatory hosted relay for local sessions", note: "The local runtime and bring-your-own-provider routes continue to work without sending sessions through a Codewhale service" },
       { title: "Required account for the local runtime", note: "Managed features may use an account, but installing and running Codewhale locally does not" },
       { title: "Sponsored model promotion", note: "Model picker stays neutral — no paid placement" },
+      { title: "Public share links for local sessions", note: "The retired share-link direction (#471/#481) is not coming back; any future sharing design starts fresh. The separate managed app preview above is unaffected and tracked on its own." },
     ],
   },
   {
@@ -93,6 +95,7 @@ const tracksZh = [
     title: "进行中",
     items: [
       { title: "VS Code 扩展", note: "仓库已提供 Phase 0 本地 Runtime 配套扩展：终端启动、健康检查、只读线程摘要和还原点浏览；完整聊天与编辑器操作尚未包含在此版本中。" },
+      { title: "本地 Web 客户端", note: "`codewhale web`——基于 Runtime API 的内嵌浏览器客户端，仅监听回环地址，通过一次性引导会话边界鉴权；审批与用户输入在页面刷新后可恢复（#4423）" },
       { title: "托管应用预览与可选账户", note: "独立的托管应用和控制平面正在开发中。它们使用单独登录，不会让本地 Runtime 必须注册账户；正式上线准备情况另行跟踪。" },
       { title: "记忆类型化存储", note: "SQLite + FTS5 后端，图结构 Agent 记忆，多信号召回（#534–#536）" },
       { title: "飞书 / Lark 机器人", note: "基于 runtime API 的长连接桥接已发布首版；更丰富的对话能力进行中（#757）" },
@@ -103,7 +106,7 @@ const tracksZh = [
   {
     title: "考虑中",
     items: [
-      { title: "Web 界面 / 分享链接模式", note: "通过 serve --http 提供本地 Web 界面；精选静态分享链接（#471、#481）" },
+      { title: "Workrooms 工作间", note: "基于 Runtime API 与用户界面的持久、可寻址 Agent 工作线程（#3209，docs/WORKROOM_ARCHITECTURE.md）" },
       { title: "Exa 网页搜索后端", note: "内建替代 DDG + Bing 的搜索路由（#431）" },
       { title: "Homebrew 核心仓库", note: "Tap 已有；正在争取进入 homebrew-core" },
       { title: "Windows 原生安装器", note: "MSI / WinGet；Scoop 清单已发布" },
@@ -117,6 +120,7 @@ const tracksZh = [
       { title: "本地会话强制经过托管中继", note: "本地 Runtime 与自带提供商路由继续工作，无需把会话发送到 Codewhale 服务" },
       { title: "本地 Runtime 强制注册账户", note: "托管功能可以使用账户，但本地安装和运行 Codewhale 不需要账户" },
       { title: "赞助商模型推广", note: "模型选择器保持中立——无付费推荐位" },
+      { title: "本地会话的公开分享链接", note: "已停用的分享链接方向（#471/#481）不会恢复；未来的分享设计将重新开始。上文独立的托管应用预览不受影响，单独跟踪。" },
     ],
   },
   {
