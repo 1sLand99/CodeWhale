@@ -2582,7 +2582,7 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Stepfun => {}
             ApiProvider::Sakana => {}
             ApiProvider::LongCat => {}
-            ApiProvider::OpencodeGo => {}
+            ApiProvider::OpencodeGo | ApiProvider::OpencodeZen => {}
             ApiProvider::Meta => {}
             ApiProvider::Xai => {}
         },
@@ -2680,7 +2680,7 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Stepfun => {}
             ApiProvider::Sakana => {}
             ApiProvider::LongCat => {}
-            ApiProvider::OpencodeGo => {}
+            ApiProvider::OpencodeGo | ApiProvider::OpencodeZen => {}
             ApiProvider::Meta => {}
             ApiProvider::Xai => {}
         },
@@ -2758,7 +2758,7 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Stepfun => {}
             ApiProvider::Sakana => {}
             ApiProvider::LongCat => {}
-            ApiProvider::OpencodeGo => {}
+            ApiProvider::OpencodeGo | ApiProvider::OpencodeZen => {}
             ApiProvider::Meta => {}
             ApiProvider::Xai => {}
         },

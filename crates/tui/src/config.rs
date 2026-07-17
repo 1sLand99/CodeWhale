@@ -70,6 +70,7 @@ pub enum ApiProvider {
     Sakana,
     LongCat,
     OpencodeGo,
+    OpencodeZen,
     Meta,
     Xai,
     /// Jiangsu Telecom TokenHub — OpenAI-compatible AI gateway.
@@ -229,7 +230,7 @@ impl ApiProvider {
 
     /// `ApiProvider` discriminant → `ProviderKind` lookup.
     /// Index 1 is `None` for the legacy `DeepseekCN` variant.
-    const KIND_LOOKUP: [Option<codewhale_config::ProviderKind>; 37] = [
+    const KIND_LOOKUP: [Option<codewhale_config::ProviderKind>; 38] = [
         Some(codewhale_config::ProviderKind::Deepseek),
         None, // DeepseekCN
         Some(codewhale_config::ProviderKind::DeepseekAnthropic),
@@ -263,6 +264,7 @@ impl ApiProvider {
         Some(codewhale_config::ProviderKind::Sakana),
         Some(codewhale_config::ProviderKind::LongCat),
         Some(codewhale_config::ProviderKind::OpencodeGo),
+        Some(codewhale_config::ProviderKind::OpencodeZen),
         Some(codewhale_config::ProviderKind::Meta),
         Some(codewhale_config::ProviderKind::Xai),
         Some(codewhale_config::ProviderKind::Telecomjs),
@@ -270,7 +272,7 @@ impl ApiProvider {
     ];
 
     /// `ProviderKind` discriminant → `ApiProvider` lookup.
-    const FROM_KIND_LOOKUP: [Self; 36] = [
+    const FROM_KIND_LOOKUP: [Self; 37] = [
         Self::Deepseek,
         Self::DeepseekAnthropic,
         Self::NvidiaNim,
@@ -303,6 +305,7 @@ impl ApiProvider {
         Self::Sakana,
         Self::LongCat,
         Self::OpencodeGo,
+        Self::OpencodeZen,
         Self::Meta,
         Self::Xai,
         Self::Telecomjs,
@@ -402,6 +405,10 @@ fn subagent_provider_key_matches(key: &str, provider: ApiProvider) -> bool {
         ApiProvider::OpencodeGo => {
             matches!(normalized.as_str(), "opencode_go" | "opencodego")
         }
+        ApiProvider::OpencodeZen => matches!(
+            normalized.as_str(),
+            "opencode_zen" | "opencodezen" | "zen" | "opencode"
+        ),
         ApiProvider::Meta => matches!(
             normalized.as_str(),
             "meta" | "meta_ai" | "meta_model_api" | "muse" | "muse_spark"
@@ -1308,6 +1315,7 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
         ApiProvider::Sakana => vec![DEFAULT_SAKANA_MODEL, SAKANA_FUGU_ULTRA_MODEL],
         ApiProvider::LongCat => vec![DEFAULT_LONGCAT_MODEL],
         ApiProvider::OpencodeGo => OPENCODE_GO_CHAT_MODELS.to_vec(),
+        ApiProvider::OpencodeZen => vec![DEFAULT_OPENCODE_ZEN_MODEL],
         ApiProvider::Meta => vec![DEFAULT_META_MODEL],
         ApiProvider::Xai => vec![
             DEFAULT_XAI_MODEL,
@@ -2911,6 +2919,14 @@ pub struct ProvidersConfig {
     pub opencode_go: ProviderConfig,
     #[serde(
         default,
+        alias = "opencode-zen",
+        alias = "opencodezen",
+        alias = "zen",
+        alias = "opencode"
+    )]
+    pub opencode_zen: ProviderConfig,
+    #[serde(
+        default,
         alias = "meta-ai",
         alias = "meta_ai",
         alias = "meta-model-api",
@@ -2981,6 +2997,7 @@ impl ProvidersConfig {
             ("providers.minimax_anthropic", &self.minimax_anthropic),
             ("providers.sakana", &self.sakana),
             ("providers.opencode_go", &self.opencode_go),
+            ("providers.opencode_zen", &self.opencode_zen),
             ("providers.meta", &self.meta),
             ("providers.xai", &self.xai),
         ];
@@ -4277,6 +4294,7 @@ impl Config {
             ApiProvider::Sakana => &providers.sakana,
             ApiProvider::LongCat => &providers.longcat,
             ApiProvider::OpencodeGo => &providers.opencode_go,
+            ApiProvider::OpencodeZen => &providers.opencode_zen,
             ApiProvider::Meta => &providers.meta,
             ApiProvider::Xai => &providers.xai,
             ApiProvider::Telecomjs => &providers.telecomjs,
@@ -4343,6 +4361,7 @@ impl Config {
             ApiProvider::Sakana => &mut providers.sakana,
             ApiProvider::LongCat => &mut providers.longcat,
             ApiProvider::OpencodeGo => &mut providers.opencode_go,
+            ApiProvider::OpencodeZen => &mut providers.opencode_zen,
             ApiProvider::Meta => &mut providers.meta,
             ApiProvider::Xai => &mut providers.xai,
             ApiProvider::Telecomjs => &mut providers.telecomjs,
@@ -4677,6 +4696,7 @@ impl Config {
             ApiProvider::Sakana => DEFAULT_SAKANA_MODEL,
             ApiProvider::LongCat => DEFAULT_LONGCAT_MODEL,
             ApiProvider::OpencodeGo => DEFAULT_OPENCODE_GO_MODEL,
+            ApiProvider::OpencodeZen => DEFAULT_OPENCODE_ZEN_MODEL,
             ApiProvider::Meta => DEFAULT_META_MODEL,
             ApiProvider::Xai => DEFAULT_XAI_MODEL,
             ApiProvider::Telecomjs => DEFAULT_TELECOMJS_MODEL,
@@ -4736,6 +4756,7 @@ impl Config {
             | ApiProvider::Sakana
             | ApiProvider::LongCat
             | ApiProvider::OpencodeGo
+            | ApiProvider::OpencodeZen
             | ApiProvider::Meta
             | ApiProvider::Xai
             | ApiProvider::Telecomjs => None,
@@ -4802,6 +4823,7 @@ impl Config {
                         ApiProvider::Sakana => DEFAULT_SAKANA_BASE_URL,
                         ApiProvider::LongCat => DEFAULT_LONGCAT_BASE_URL,
                         ApiProvider::OpencodeGo => DEFAULT_OPENCODE_GO_BASE_URL,
+                        ApiProvider::OpencodeZen => DEFAULT_OPENCODE_ZEN_BASE_URL,
                         ApiProvider::Meta => DEFAULT_META_BASE_URL,
                         ApiProvider::Xai => DEFAULT_XAI_BASE_URL,
                         ApiProvider::Telecomjs => DEFAULT_TELECOMJS_BASE_URL,
@@ -5291,6 +5313,9 @@ impl Config {
                 );
             }
             ApiProvider::Anthropic | ApiProvider::Openmodel => {
+                anyhow::bail!("{}", missing_provider_api_key_message(provider)?)
+            }
+            ApiProvider::OpencodeZen => {
                 anyhow::bail!("{}", missing_provider_api_key_message(provider)?)
             }
             ApiProvider::OpenaiCodex => anyhow::bail!("{}", crate::oauth::missing_auth_message()),
@@ -6198,6 +6223,7 @@ fn provider_env_base_url_override(provider: ApiProvider) -> Option<String> {
         ApiProvider::Xai => &["XAI_BASE_URL"],
         ApiProvider::Telecomjs => &["TELECOMJS_BASE_URL"],
         ApiProvider::OpencodeGo => &["OPENCODE_GO_BASE_URL"],
+        ApiProvider::OpencodeZen => &["OPENCODE_ZEN_BASE_URL"],
         ApiProvider::Deepseek
         | ApiProvider::DeepseekCN
         | ApiProvider::DeepseekAnthropic
@@ -6485,6 +6511,13 @@ fn apply_env_overrides_unlocked(config: &mut Config) {
                     .providers
                     .get_or_insert_with(ProvidersConfig::default)
                     .opencode_go
+                    .base_url = Some(value);
+            }
+            ApiProvider::OpencodeZen => {
+                config
+                    .providers
+                    .get_or_insert_with(ProvidersConfig::default)
+                    .opencode_zen
                     .base_url = Some(value);
             }
             ApiProvider::Meta => {
@@ -6776,6 +6809,7 @@ fn apply_env_overrides_unlocked(config: &mut Config) {
                 ApiProvider::Sakana => &mut providers.sakana,
                 ApiProvider::LongCat => &mut providers.longcat,
                 ApiProvider::OpencodeGo => &mut providers.opencode_go,
+                ApiProvider::OpencodeZen => &mut providers.opencode_zen,
                 ApiProvider::Meta => &mut providers.meta,
                 ApiProvider::Xai => &mut providers.xai,
                 ApiProvider::Telecomjs => &mut providers.telecomjs,
@@ -6973,6 +7007,16 @@ fn apply_env_overrides_unlocked(config: &mut Config) {
             .telecomjs
             .model = Some(value);
     }
+    if matches!(config.api_provider(), ApiProvider::OpencodeZen)
+        && let Ok(value) = std::env::var("OPENCODE_ZEN_MODEL")
+        && !value.trim().is_empty()
+    {
+        config
+            .providers
+            .get_or_insert_with(ProvidersConfig::default)
+            .opencode_zen
+            .model = Some(value);
+    }
     if let Some(value) = codewhale_env_var("CODEWHALE_MODEL", "DEEPSEEK_MODEL")
         .ok()
         .or_else(|| {
@@ -7048,6 +7092,7 @@ fn apply_env_overrides_unlocked(config: &mut Config) {
                 ApiProvider::Sakana => &mut providers.sakana,
                 ApiProvider::LongCat => &mut providers.longcat,
                 ApiProvider::OpencodeGo => &mut providers.opencode_go,
+                ApiProvider::OpencodeZen => &mut providers.opencode_zen,
                 ApiProvider::Meta => &mut providers.meta,
                 ApiProvider::Xai => &mut providers.xai,
                 ApiProvider::Telecomjs => &mut providers.telecomjs,
@@ -8071,6 +8116,7 @@ fn merge_providers(
             sakana: merge_provider_config(base.sakana, override_cfg.sakana),
             longcat: merge_provider_config(base.longcat, override_cfg.longcat),
             opencode_go: merge_provider_config(base.opencode_go, override_cfg.opencode_go),
+            opencode_zen: merge_provider_config(base.opencode_zen, override_cfg.opencode_zen),
             meta: merge_provider_config(base.meta, override_cfg.meta),
             xai: merge_provider_config(base.xai, override_cfg.xai),
             telecomjs: merge_provider_config(base.telecomjs, override_cfg.telecomjs),

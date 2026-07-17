@@ -318,6 +318,15 @@ pub struct ProvidersToml {
     #[serde(
         default,
         skip_serializing_if = "ProviderConfigToml::is_empty",
+        alias = "opencode-zen",
+        alias = "opencodezen",
+        alias = "zen",
+        alias = "opencode"
+    )]
+    pub opencode_zen: ProviderConfigToml,
+    #[serde(
+        default,
+        skip_serializing_if = "ProviderConfigToml::is_empty",
         alias = "meta-ai",
         alias = "meta_ai",
         alias = "meta-model-api",
@@ -457,6 +466,7 @@ impl ProvidersToml {
             ProviderKind::Sakana => &self.sakana,
             ProviderKind::LongCat => &self.longcat,
             ProviderKind::OpencodeGo => &self.opencode_go,
+            ProviderKind::OpencodeZen => &self.opencode_zen,
             ProviderKind::Meta => &self.meta,
             ProviderKind::Xai => &self.xai,
             ProviderKind::Telecomjs => &self.telecomjs,
@@ -498,6 +508,7 @@ impl ProvidersToml {
             ProviderKind::Sakana => &mut self.sakana,
             ProviderKind::LongCat => &mut self.longcat,
             ProviderKind::OpencodeGo => &mut self.opencode_go,
+            ProviderKind::OpencodeZen => &mut self.opencode_zen,
             ProviderKind::Meta => &mut self.meta,
             ProviderKind::Xai => &mut self.xai,
             ProviderKind::Telecomjs => &mut self.telecomjs,
@@ -2476,6 +2487,7 @@ impl ConfigToml {
                 ProviderKind::Sakana => DEFAULT_SAKANA_BASE_URL.to_string(),
                 ProviderKind::LongCat => DEFAULT_LONGCAT_BASE_URL.to_string(),
                 ProviderKind::OpencodeGo => DEFAULT_OPENCODE_GO_BASE_URL.to_string(),
+                ProviderKind::OpencodeZen => DEFAULT_OPENCODE_ZEN_BASE_URL.to_string(),
                 ProviderKind::Meta => DEFAULT_META_BASE_URL.to_string(),
                 ProviderKind::Xai => DEFAULT_XAI_BASE_URL.to_string(),
                 ProviderKind::Telecomjs => DEFAULT_TELECOMJS_BASE_URL.to_string(),
@@ -3388,6 +3400,7 @@ fn default_model_for_provider(provider: ProviderKind) -> &'static str {
         ProviderKind::Sakana => DEFAULT_SAKANA_MODEL,
         ProviderKind::LongCat => DEFAULT_LONGCAT_MODEL,
         ProviderKind::OpencodeGo => DEFAULT_OPENCODE_GO_MODEL,
+        ProviderKind::OpencodeZen => DEFAULT_OPENCODE_ZEN_MODEL,
         ProviderKind::Meta => DEFAULT_META_MODEL,
         ProviderKind::Xai => DEFAULT_XAI_MODEL,
         ProviderKind::Telecomjs => DEFAULT_TELECOMJS_MODEL,
@@ -3430,6 +3443,7 @@ fn default_base_url_for_provider(provider: ProviderKind) -> &'static str {
         ProviderKind::Sakana => DEFAULT_SAKANA_BASE_URL,
         ProviderKind::LongCat => DEFAULT_LONGCAT_BASE_URL,
         ProviderKind::OpencodeGo => DEFAULT_OPENCODE_GO_BASE_URL,
+        ProviderKind::OpencodeZen => DEFAULT_OPENCODE_ZEN_BASE_URL,
         ProviderKind::Meta => DEFAULT_META_BASE_URL,
         ProviderKind::Xai => DEFAULT_XAI_BASE_URL,
         ProviderKind::Telecomjs => DEFAULT_TELECOMJS_BASE_URL,
@@ -5150,6 +5164,8 @@ struct EnvRuntimeOverrides {
     longcat_model: Option<String>,
     opencode_go_base_url: Option<String>,
     opencode_go_model: Option<String>,
+    opencode_zen_base_url: Option<String>,
+    opencode_zen_model: Option<String>,
     meta_base_url: Option<String>,
     meta_model: Option<String>,
     xai_base_url: Option<String>,
@@ -5422,6 +5438,12 @@ impl EnvRuntimeOverrides {
             opencode_go_model: std::env::var("OPENCODE_GO_MODEL")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
+            opencode_zen_base_url: std::env::var("OPENCODE_ZEN_BASE_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            opencode_zen_model: std::env::var("OPENCODE_ZEN_MODEL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
             meta_base_url: std::env::var("META_MODEL_API_BASE_URL")
                 .ok()
                 .filter(|v| !v.trim().is_empty())
@@ -5504,6 +5526,7 @@ impl EnvRuntimeOverrides {
             ProviderKind::Sakana => self.sakana_base_url.clone(),
             ProviderKind::LongCat => self.longcat_base_url.clone(),
             ProviderKind::OpencodeGo => self.opencode_go_base_url.clone(),
+            ProviderKind::OpencodeZen => self.opencode_zen_base_url.clone(),
             ProviderKind::Meta => self.meta_base_url.clone(),
             ProviderKind::Xai => self.xai_base_url.clone(),
             ProviderKind::Telecomjs => self.telecomjs_base_url.clone(),
@@ -5539,6 +5562,7 @@ impl EnvRuntimeOverrides {
             ProviderKind::Sakana => self.sakana_model.clone(),
             ProviderKind::LongCat => self.longcat_model.clone(),
             ProviderKind::OpencodeGo => self.opencode_go_model.clone(),
+            ProviderKind::OpencodeZen => self.opencode_zen_model.clone(),
             ProviderKind::Meta => self.meta_model.clone(),
             ProviderKind::Xai => self.xai_model.clone(),
             ProviderKind::Telecomjs => self.telecomjs_model.clone(),
