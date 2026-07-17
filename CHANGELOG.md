@@ -199,6 +199,10 @@ surface.
   of this narrow route until Codewhale supports per-model wire selection
   (#1481 by @seanthefuturegorilla; implementation harvested from PR #773 by
   @zhangweiii and PR #1050 by @sternelee).
+- Add OpenCode Zen as a separate model-aware API-key provider. Its curated
+  model catalog selects Responses, Anthropic Messages, or Chat Completions per
+  model; unsupported Gemini and unknown models fail closed, and Zen missing
+  credentials never fall through to ChatGPT/Codex OAuth guidance.
 - Add TelecomJS TokenHub as a first-class Chat Completions provider with
   `[providers.telecomjs]`, `TELECOMJS_API_KEY`, and a key-scoped live
   `/v1/models` refresh. Models.dev and provider-specific catalogs remain in
