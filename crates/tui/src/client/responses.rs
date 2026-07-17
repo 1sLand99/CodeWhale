@@ -83,7 +83,12 @@ impl DeepSeekClient {
         request: MessageRequest,
     ) -> Result<StreamEventBox> {
         let body = build_responses_body(&request);
-        let url = format!("{}{}", self.base_url, CODEX_RESPONSES_PATH);
+        let is_codex = self.api_provider == crate::config::ApiProvider::OpenaiCodex;
+        let url = if is_codex {
+            format!("{}{}", self.base_url, CODEX_RESPONSES_PATH)
+        } else {
+            api_url(&self.base_url, "responses")
+        };
 
         // The bearer Authorization header is already installed as a default
         // header on both the dual and the HTTP/1.1 twin client (resolved from
@@ -117,11 +122,14 @@ impl DeepSeekClient {
                     let mut builder = client
                         .post(&url)
                         .header("Content-Type", "application/json")
-                        .header("Accept", "text/event-stream")
-                        .header("OpenAI-Beta", "responses=experimental")
-                        .header("originator", "codex_cli_rs");
-                    if let Some(account_id) = &account_id {
-                        builder = builder.header("chatgpt-account-id", account_id);
+                        .header("Accept", "text/event-stream");
+                    if is_codex {
+                        builder = builder
+                            .header("OpenAI-Beta", "responses=experimental")
+                            .header("originator", "codex_cli_rs");
+                        if let Some(account_id) = &account_id {
+                            builder = builder.header("chatgpt-account-id", account_id);
+                        }
                     }
                     builder.body(request_body.clone())
                 })
