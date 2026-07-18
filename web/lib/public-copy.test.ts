@@ -24,16 +24,16 @@ describe("public website copy contracts", () => {
     expect(search).not.toContain("40+ Markdown documents");
   });
 
-  it("does not rule out the managed app or make it a requirement for local use", () => {
+  it("keeps unreleased managed-product surfaces out of public copy", () => {
     const roadmap = pageSource("roadmap/page.tsx");
     const footer = readFileSync(new URL("../components/footer.tsx", import.meta.url), "utf8");
 
-    expect(roadmap).toContain("Managed app preview and optional accounts");
     expect(roadmap).toContain("Required account for the local runtime");
+    expect(roadmap).not.toContain("Managed app preview");
     expect(roadmap).not.toContain("Hosted SaaS dashboard");
     expect(roadmap).not.toContain("Required login / accounts");
-    expect(footer).toContain("App preview");
-    expect(footer).toContain("https://app.codewhale.net");
+    expect(footer).not.toContain("App preview");
+    expect(footer).not.toContain("app.codewhale.net");
     expect(footer).not.toMatch(/Create account|Sign up/);
   });
 

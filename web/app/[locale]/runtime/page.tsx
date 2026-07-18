@@ -106,8 +106,8 @@ export default async function RuntimePage({ params }: { params: Promise<{ locale
             <strong className="text-ink">{isZh ? "本地优先" : "Local-first"}</strong>
             <p className="mt-1">
               {isZh
-                ? "Runtime API 默认仅监听 127.0.0.1。本地运行时不需要 Codewhale 账户或托管中继；可选托管应用使用独立登录。"
-                : "The Runtime API binds 127.0.0.1 by default. The local runtime does not require a Codewhale account or hosted relay; the optional managed app uses a separate sign-in."}
+                ? "Runtime API 默认仅监听 127.0.0.1。本地运行时不需要 Codewhale 账户或托管中继。"
+                : "The Runtime API binds 127.0.0.1 by default. The local runtime does not require a Codewhale account or hosted relay."}
             </p>
           </div>
           <div>
