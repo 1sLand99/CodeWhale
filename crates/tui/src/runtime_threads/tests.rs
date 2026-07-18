@@ -1796,6 +1796,89 @@ async fn store_open_does_not_discard_newline_terminated_malformed_event() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[tokio::test]
+async fn event_replay_is_bounded_and_tail_cursor_skips_only_omitted_history() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread_id = "thr_bounded_replay";
+    let path = manager.store.events_path(thread_id)?;
+    let mut encoded = Vec::new();
+    for seq in 1_u64..=600 {
+        let event = RuntimeEventRecord {
+            schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
+            seq,
+            timestamp: Utc::now(),
+            thread_id: thread_id.to_string(),
+            turn_id: None,
+            item_id: None,
+            event: "test.event".to_string(),
+            payload: json!({ "seq": seq }),
+        };
+        serde_json::to_writer(&mut encoded, &event)?;
+        encoded.push(b'\n');
+    }
+    std::fs::write(path, encoded)?;
+
+    let mut full = manager.replay_events(thread_id, None, None).await?;
+    assert_eq!(full.base_seq, 0);
+    let mut full_sequences = Vec::new();
+    while let Some(batch) = full.batches.recv().await {
+        let batch = batch.map_err(anyhow::Error::msg)?;
+        assert!(
+            batch.len() <= RUNTIME_EVENT_REPLAY_BATCH_SIZE,
+            "replay batch exceeded its memory bound"
+        );
+        full_sequences.extend(batch.into_iter().map(|event| event.seq));
+    }
+    assert_eq!(full_sequences, (1_u64..=600).collect::<Vec<_>>());
+
+    let mut tail = manager.replay_events(thread_id, None, Some(10)).await?;
+    assert_eq!(tail.base_seq, 590);
+    let mut tail_sequences = Vec::new();
+    while let Some(batch) = tail.batches.recv().await {
+        tail_sequences.extend(
+            batch
+                .map_err(anyhow::Error::msg)?
+                .into_iter()
+                .map(|event| event.seq),
+        );
+    }
+    assert_eq!(tail_sequences, (591_u64..=600).collect::<Vec<_>>());
+
+    let mut empty_tail = manager.replay_events(thread_id, None, Some(0)).await?;
+    assert_eq!(empty_tail.base_seq, 600);
+    assert!(empty_tail.batches.recv().await.is_none());
+    assert!(
+        manager
+            .replay_events(
+                thread_id,
+                None,
+                Some(MAX_RUNTIME_EVENT_REPLAY_TAIL.saturating_add(1)),
+            )
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn event_reader_ignores_an_unterminated_live_append_tail() -> Result<()> {
+    let dir = test_runtime_dir();
+    let store = RuntimeThreadStore::open(dir.clone())?;
+    let committed = store
+        .append_event("thr_live_tail", None, None, "committed", json!({}))
+        .await?;
+    let path = store.events_path("thr_live_tail")?;
+    let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
+    std::io::Write::write_all(&mut file, br#"{"schema_version":2,"seq":999"#)?;
+    std::io::Write::flush(&mut file)?;
+
+    let replay = store.events_since("thr_live_tail", None)?;
+    assert_eq!(replay.len(), 1);
+    assert_eq!(replay[0].seq, committed.seq);
+    let _ = std::fs::remove_dir_all(dir);
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn store_open_rejects_symlinked_state_file() {

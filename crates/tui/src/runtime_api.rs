@@ -49,10 +49,10 @@ use crate::mcp::McpPool;
 #[cfg(test)]
 pub(super) use crate::models::{ContentBlock, Message};
 use crate::runtime_threads::{
-    CompactThreadRequest, CreateThreadRequest, ExternalApprovalDecision, RuntimeThreadManager,
-    RuntimeThreadManagerConfig, SharedRuntimeThreadManager, StartTurnRequest, SteerTurnRequest,
-    ThreadDetail, ThreadListFilter, ThreadRecord, TurnItemKind, TurnRecord, UpdateThreadRequest,
-    UsageGroupBy,
+    CompactThreadRequest, CreateThreadRequest, ExternalApprovalDecision,
+    MAX_RUNTIME_EVENT_REPLAY_TAIL, RuntimeThreadManager, RuntimeThreadManagerConfig,
+    SharedRuntimeThreadManager, StartTurnRequest, SteerTurnRequest, ThreadDetail, ThreadListFilter,
+    ThreadRecord, TurnItemKind, TurnRecord, UpdateThreadRequest, UsageGroupBy,
 };
 #[cfg(test)]
 pub(super) use crate::runtime_threads::{RuntimeTurnStatus, TurnItemLifecycleStatus};
@@ -2130,24 +2130,25 @@ async fn stream_thread_events(
     // is loaded is then present in both places (and deduped below) or queued
     // live, never in an uncovered handoff window.
     let live = state.runtime_threads.subscribe_events();
-    let mut backlog = state
-        .runtime_threads
-        .events_since(&id, query.since_seq)
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-    let mut replay_cursor = query.since_seq.unwrap_or(0);
-    if let Some(limit) = query.replay_limit
-        && backlog.len() > limit
+    if query
+        .replay_limit
+        .is_some_and(|limit| limit > MAX_RUNTIME_EVENT_REPLAY_TAIL)
     {
-        let split_at = backlog.len() - limit;
-        replay_cursor = backlog[split_at - 1].seq;
-        backlog = backlog.split_off(split_at);
+        return Err(ApiError::bad_request(format!(
+            "replay_limit cannot exceed {MAX_RUNTIME_EVENT_REPLAY_TAIL}"
+        )));
     }
+    let replay = state
+        .runtime_threads
+        .replay_events(&id, query.since_seq, query.replay_limit)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let stream = replay_live_thread_events(
         state.runtime_threads.clone(),
         id,
-        replay_cursor,
-        backlog,
+        replay.base_seq,
+        replay.batches,
         live,
     );
 
@@ -2162,24 +2163,40 @@ fn replay_live_thread_events(
     runtime_threads: SharedRuntimeThreadManager,
     thread_id: String,
     mut last_seq: u64,
-    backlog: Vec<crate::runtime_threads::RuntimeEventRecord>,
+    mut backlog: tokio::sync::mpsc::Receiver<
+        std::result::Result<Vec<crate::runtime_threads::RuntimeEventRecord>, String>,
+    >,
     mut live: tokio::sync::broadcast::Receiver<crate::runtime_threads::RuntimeEventRecord>,
 ) -> impl futures_util::Stream<Item = Result<SseEvent, Infallible>> {
     stream! {
-        for event in backlog {
-            if event.thread_id != thread_id || event.seq <= last_seq {
-                continue;
+        while let Some(batch) = backlog.recv().await {
+            let events = match batch {
+                Ok(events) => events,
+                Err(error) => {
+                    tracing::warn!(
+                        thread_id = %thread_id,
+                        last_seq,
+                        %error,
+                        "Failed to replay Runtime web event stream from durable history"
+                    );
+                    return;
+                }
+            };
+            for event in events {
+                if event.thread_id != thread_id || event.seq <= last_seq {
+                    continue;
+                }
+                let previous_seq = last_seq;
+                last_seq = event.seq;
+                let event_name = event.event.clone();
+                yield Ok(sse_json(
+                    &event_name,
+                    runtime_event_payload_with_previous(event, previous_seq),
+                ));
             }
-            let previous_seq = last_seq;
-            last_seq = event.seq;
-            let event_name = event.event.clone();
-            yield Ok(sse_json(
-                &event_name,
-                runtime_event_payload_with_previous(event, previous_seq),
-            ));
         }
 
-        loop {
+        'live: loop {
             match live.recv().await {
                 Ok(event) => {
                     if event.thread_id != thread_id || event.seq <= last_seq {
@@ -2197,8 +2214,11 @@ fn replay_live_thread_events(
                     // Broadcast is only a wake-up path; durable history remains
                     // authoritative. Catch up from the last delivered cursor so
                     // receiver pressure cannot turn into a silent prompt loss.
-                    let recovered = match runtime_threads.events_since(&thread_id, Some(last_seq)) {
-                        Ok(events) => events,
+                    let mut recovered = match runtime_threads
+                        .replay_events(&thread_id, Some(last_seq), None)
+                        .await
+                    {
+                        Ok(replay) => replay.batches,
                         Err(error) => {
                             tracing::warn!(
                                 thread_id = %thread_id,
@@ -2207,20 +2227,35 @@ fn replay_live_thread_events(
                                 %error,
                                 "Failed to recover lagged Runtime web event stream from durable history"
                             );
-                            break;
+                            break 'live;
                         }
                     };
-                    for event in recovered {
-                        if event.thread_id != thread_id || event.seq <= last_seq {
-                            continue;
+                    while let Some(batch) = recovered.recv().await {
+                        let events = match batch {
+                            Ok(events) => events,
+                            Err(error) => {
+                                tracing::warn!(
+                                    thread_id = %thread_id,
+                                    last_seq,
+                                    skipped,
+                                    %error,
+                                    "Failed to recover lagged Runtime web event stream from durable history"
+                                );
+                                break 'live;
+                            }
+                        };
+                        for event in events {
+                            if event.thread_id != thread_id || event.seq <= last_seq {
+                                continue;
+                            }
+                            let previous_seq = last_seq;
+                            last_seq = event.seq;
+                            let event_name = event.event.clone();
+                            yield Ok(sse_json(
+                                &event_name,
+                                runtime_event_payload_with_previous(event, previous_seq),
+                            ));
                         }
-                        let previous_seq = last_seq;
-                        last_seq = event.seq;
-                        let event_name = event.event.clone();
-                        yield Ok(sse_json(
-                            &event_name,
-                            runtime_event_payload_with_previous(event, previous_seq),
-                        ));
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -2324,9 +2359,10 @@ async fn stream_turn(
             .map_err(|_| ApiError::internal("Compatibility stream test hook dropped resume"))?;
     }
 
-    let backlog = state
+    let mut backlog = state
         .runtime_threads
-        .events_since(&thread.id, None)
+        .replay_events(&thread.id, None, None)
+        .await
         .map_err(|e| ApiError::internal(format!("Failed to load stream backlog: {e}")))?;
 
     #[cfg(test)]
@@ -2353,21 +2389,38 @@ async fn stream_turn(
             "workspace": workspace,
         })));
 
-        for event in backlog {
-            let Some((mapped, terminal)) = take_compat_turn_event(
-                &event,
-                &thread_id,
-                &turn_id,
-                &mut last_seq,
-            ) else {
-                continue;
+        while let Some(batch) = backlog.batches.recv().await {
+            let events = match batch {
+                Ok(events) => events,
+                Err(error) => {
+                    tracing::warn!(
+                        thread_id = %thread_id,
+                        turn_id = %turn_id,
+                        %error,
+                        "Failed to replay compatibility stream from durable history"
+                    );
+                    yield Ok(sse_json("error", json!({
+                        "message": "failed to replay durable event stream",
+                    })));
+                    return;
+                }
             };
-            if let Some(mapped) = mapped {
-                yield Ok(mapped);
-            }
-            if terminal {
-                yield Ok(sse_json("done", json!({})));
-                return;
+            for event in events {
+                let Some((mapped, terminal)) = take_compat_turn_event(
+                    &event,
+                    &thread_id,
+                    &turn_id,
+                    &mut last_seq,
+                ) else {
+                    continue;
+                };
+                if let Some(mapped) = mapped {
+                    yield Ok(mapped);
+                }
+                if terminal {
+                    yield Ok(sse_json("done", json!({})));
+                    return;
+                }
             }
         }
 
@@ -2391,11 +2444,11 @@ async fn stream_turn(
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    let recovered = match state.runtime_threads.events_since(
-                        &thread_id,
-                        Some(last_seq),
-                    ) {
-                        Ok(events) => events,
+                    let mut recovered = match state.runtime_threads
+                        .replay_events(&thread_id, Some(last_seq), None)
+                        .await
+                    {
+                        Ok(replay) => replay.batches,
                         Err(error) => {
                             tracing::warn!(
                                 thread_id = %thread_id,
@@ -2411,21 +2464,40 @@ async fn stream_turn(
                             return;
                         }
                     };
-                    for event in recovered {
-                        let Some((mapped, terminal)) = take_compat_turn_event(
-                            &event,
-                            &thread_id,
-                            &turn_id,
-                            &mut last_seq,
-                        ) else {
-                            continue;
+                    while let Some(batch) = recovered.recv().await {
+                        let events = match batch {
+                            Ok(events) => events,
+                            Err(error) => {
+                                tracing::warn!(
+                                    thread_id = %thread_id,
+                                    turn_id = %turn_id,
+                                    last_seq,
+                                    skipped,
+                                    %error,
+                                    "Failed to recover lagged compatibility stream from durable history"
+                                );
+                                yield Ok(sse_json("error", json!({
+                                    "message": "failed to recover lagged event stream",
+                                })));
+                                return;
+                            }
                         };
-                        if let Some(mapped) = mapped {
-                            yield Ok(mapped);
-                        }
-                        if terminal {
-                            yield Ok(sse_json("done", json!({})));
-                            return;
+                        for event in events {
+                            let Some((mapped, terminal)) = take_compat_turn_event(
+                                &event,
+                                &thread_id,
+                                &turn_id,
+                                &mut last_seq,
+                            ) else {
+                                continue;
+                            };
+                            if let Some(mapped) = mapped {
+                                yield Ok(mapped);
+                            }
+                            if terminal {
+                                yield Ok(sse_json("done", json!({})));
+                                return;
+                            }
                         }
                     }
                 }

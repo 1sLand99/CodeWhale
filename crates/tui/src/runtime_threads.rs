@@ -22,9 +22,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-#[cfg(test)]
-use tokio::sync::mpsc;
-use tokio::sync::{Mutex, broadcast, oneshot, watch};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -55,6 +53,8 @@ use codewhale_protocol::runtime::{
 };
 
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
+pub(crate) const RUNTIME_EVENT_REPLAY_BATCH_SIZE: usize = 256;
+pub(crate) const MAX_RUNTIME_EVENT_REPLAY_TAIL: usize = 4096;
 const MAX_ACTIVE_THREADS_DEFAULT: usize = 8;
 const MAX_PENDING_DYNAMIC_TOOL_CALLS: usize = 128;
 const SUMMARY_LIMIT: usize = 280;
@@ -504,6 +504,21 @@ pub struct RuntimeEventRecord {
     pub item_id: Option<String>,
     pub event: String,
     pub payload: Value,
+}
+
+pub(crate) struct RuntimeEventReplay {
+    /// Cursor immediately before the first replayed event. For a tail-limited
+    /// replay this advances past omitted history so continuity remains exact.
+    pub(crate) base_seq: u64,
+    /// Filesystem parsing happens on the blocking pool and publishes bounded
+    /// chunks through this small channel, applying backpressure instead of
+    /// allocating an unbounded backlog on a Tokio worker.
+    pub(crate) batches: mpsc::Receiver<std::result::Result<Vec<RuntimeEventRecord>, String>>,
+}
+
+enum RuntimeEventMatch {
+    TurnCompleted { turn_id: String },
+    DynamicTerminal { turn_id: String, call_id: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -964,15 +979,9 @@ impl RuntimeThreadStore {
         }
         let file =
             File::open(&path).with_context(|| format!("Failed to open {}", path.display()))?;
-        let reader = BufReader::new(file);
+        let mut reader = BufReader::new(file);
         let mut out = Vec::new();
-        for line in reader.lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            let event: RuntimeEventRecord = serde_json::from_str(&line)
-                .with_context(|| format!("Failed to parse event line in {}", path.display()))?;
+        while let Some(event) = read_complete_event(&mut reader, &path)? {
             if let Some(since) = since_seq
                 && event.seq <= since
             {
@@ -981,6 +990,158 @@ impl RuntimeThreadStore {
             out.push(event);
         }
         Ok(out)
+    }
+
+    fn publish_event_replay(
+        &self,
+        thread_id: &str,
+        since_seq: Option<u64>,
+        tail_limit: Option<usize>,
+        base_tx: oneshot::Sender<std::result::Result<u64, String>>,
+        batch_tx: mpsc::Sender<std::result::Result<Vec<RuntimeEventRecord>, String>>,
+    ) {
+        let mut base_tx = Some(base_tx);
+        let result = match tail_limit {
+            Some(limit) => {
+                self.publish_tail_event_replay(thread_id, since_seq, limit, &mut base_tx, &batch_tx)
+            }
+            None => self.publish_full_event_replay(thread_id, since_seq, &mut base_tx, &batch_tx),
+        };
+        if let Err(error) = result {
+            let message = format!("{error:#}");
+            if let Some(base_tx) = base_tx.take() {
+                let _ = base_tx.send(Err(message));
+            } else {
+                let _ = batch_tx.blocking_send(Err(message));
+            }
+        }
+    }
+
+    fn open_event_reader(&self, thread_id: &str) -> Result<Option<BufReader<File>>> {
+        let path = self.events_path(thread_id)?;
+        reject_symlinked_store_dir(&self.events_dir)?;
+        reject_symlinked_store_file(&path)?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        let file =
+            File::open(&path).with_context(|| format!("Failed to open {}", path.display()))?;
+        Ok(Some(BufReader::new(file)))
+    }
+
+    fn contains_event(&self, thread_id: &str, expected: &RuntimeEventMatch) -> Result<bool> {
+        let Some(mut reader) = self.open_event_reader(thread_id)? else {
+            return Ok(false);
+        };
+        let path = self.events_path(thread_id)?;
+        while let Some(event) = read_complete_event(&mut reader, &path)? {
+            let matches = match expected {
+                RuntimeEventMatch::TurnCompleted { turn_id } => {
+                    event.event == "turn.completed"
+                        && event.turn_id.as_deref() == Some(turn_id.as_str())
+                }
+                RuntimeEventMatch::DynamicTerminal { turn_id, call_id } => {
+                    matches!(
+                        event.event.as_str(),
+                        "tool_call.resolved" | "tool_call.canceled" | "tool_call.timeout"
+                    ) && event.turn_id.as_deref() == Some(turn_id.as_str())
+                        && event.payload.get("call_id").and_then(Value::as_str)
+                            == Some(call_id.as_str())
+                }
+            };
+            if matches {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn publish_full_event_replay(
+        &self,
+        thread_id: &str,
+        since_seq: Option<u64>,
+        base_tx: &mut Option<oneshot::Sender<std::result::Result<u64, String>>>,
+        batch_tx: &mpsc::Sender<std::result::Result<Vec<RuntimeEventRecord>, String>>,
+    ) -> Result<()> {
+        let Some(mut reader) = self.open_event_reader(thread_id)? else {
+            if let Some(base_tx) = base_tx.take() {
+                let _ = base_tx.send(Ok(since_seq.unwrap_or(0)));
+            }
+            return Ok(());
+        };
+        if base_tx
+            .take()
+            .is_some_and(|base_tx| base_tx.send(Ok(since_seq.unwrap_or(0))).is_err())
+        {
+            return Ok(());
+        }
+
+        let path = self.events_path(thread_id)?;
+        let mut batch = Vec::with_capacity(RUNTIME_EVENT_REPLAY_BATCH_SIZE);
+        while let Some(event) = read_complete_event(&mut reader, &path)? {
+            if since_seq.is_some_and(|since| event.seq <= since) {
+                continue;
+            }
+            batch.push(event);
+            if batch.len() == RUNTIME_EVENT_REPLAY_BATCH_SIZE {
+                if batch_tx.blocking_send(Ok(batch)).is_err() {
+                    return Ok(());
+                }
+                batch = Vec::with_capacity(RUNTIME_EVENT_REPLAY_BATCH_SIZE);
+            }
+        }
+        if !batch.is_empty() {
+            let _ = batch_tx.blocking_send(Ok(batch));
+        }
+        Ok(())
+    }
+
+    fn publish_tail_event_replay(
+        &self,
+        thread_id: &str,
+        since_seq: Option<u64>,
+        tail_limit: usize,
+        base_tx: &mut Option<oneshot::Sender<std::result::Result<u64, String>>>,
+        batch_tx: &mpsc::Sender<std::result::Result<Vec<RuntimeEventRecord>, String>>,
+    ) -> Result<()> {
+        let Some(mut reader) = self.open_event_reader(thread_id)? else {
+            if let Some(base_tx) = base_tx.take() {
+                let _ = base_tx.send(Ok(since_seq.unwrap_or(0)));
+            }
+            return Ok(());
+        };
+        let path = self.events_path(thread_id)?;
+        let mut base_seq = since_seq.unwrap_or(0);
+        let mut tail = VecDeque::with_capacity(tail_limit.min(RUNTIME_EVENT_REPLAY_BATCH_SIZE));
+        while let Some(event) = read_complete_event(&mut reader, &path)? {
+            if since_seq.is_some_and(|since| event.seq <= since) {
+                continue;
+            }
+            if tail_limit == 0 {
+                base_seq = event.seq;
+                continue;
+            }
+            tail.push_back(event);
+            if tail.len() > tail_limit
+                && let Some(omitted) = tail.pop_front()
+            {
+                base_seq = omitted.seq;
+            }
+        }
+        if base_tx
+            .take()
+            .is_some_and(|base_tx| base_tx.send(Ok(base_seq)).is_err())
+        {
+            return Ok(());
+        }
+        while !tail.is_empty() {
+            let take = tail.len().min(RUNTIME_EVENT_REPLAY_BATCH_SIZE);
+            let batch = tail.drain(..take).collect::<Vec<_>>();
+            if batch_tx.blocking_send(Ok(batch)).is_err() {
+                return Ok(());
+            }
+        }
+        Ok(())
     }
 
     pub async fn current_seq(&self) -> u64 {
@@ -2343,15 +2504,12 @@ impl RuntimeThreadManager {
         recovered: bool,
     ) -> Result<bool> {
         let _emit_order = self.event_emit.lock().await;
-        if self
-            .store
-            .events_since(&turn.thread_id, None)?
-            .iter()
-            .any(|event| {
-                event.event == "turn.completed"
-                    && event.turn_id.as_deref() == Some(turn.id.as_str())
-            })
-        {
+        if self.store.contains_event(
+            &turn.thread_id,
+            &RuntimeEventMatch::TurnCompleted {
+                turn_id: turn.id.clone(),
+            },
+        )? {
             return Ok(false);
         }
         let mut payload = json!({ "turn": turn });
@@ -2374,19 +2532,13 @@ impl RuntimeThreadManager {
         params: &DynamicToolCallParams,
     ) -> Result<bool> {
         let _emit_order = self.event_emit.lock().await;
-        if self
-            .store
-            .events_since(&params.thread_id, None)?
-            .iter()
-            .any(|event| {
-                matches!(
-                    event.event.as_str(),
-                    "tool_call.resolved" | "tool_call.canceled" | "tool_call.timeout"
-                ) && event.turn_id.as_deref() == Some(params.turn_id.as_str())
-                    && event.payload.get("call_id").and_then(Value::as_str)
-                        == Some(params.call_id.as_str())
-            })
-        {
+        if self.store.contains_event(
+            &params.thread_id,
+            &RuntimeEventMatch::DynamicTerminal {
+                turn_id: params.turn_id.clone(),
+                call_id: params.call_id.clone(),
+            },
+        )? {
             return Ok(false);
         }
         let mut payload =
@@ -3163,19 +3315,25 @@ impl RuntimeThreadManager {
         // lock. Do not call `get_thread` here: a receipt queued between that
         // flush and this read would re-enter recovery and wait forever on the
         // projection lock held by this snapshot.
-        let thread = self
-            .store
-            .load_thread(id)
-            .with_context(|| format!("Thread not found: {id}"))?;
-        let turns = self.store.list_turns_for_thread(id)?;
-        let turn_ids: Vec<String> = turns.iter().map(|turn| turn.id.clone()).collect();
-        let mut items_by_turn = self.store.list_items_for_turns_map(&turn_ids)?;
-        let mut items = Vec::new();
-        for turn in &turns {
-            if let Some(mut turn_items) = items_by_turn.remove(&turn.id) {
-                items.append(&mut turn_items);
+        let store = self.store.clone();
+        let snapshot_thread_id = id.to_string();
+        let (thread, turns, items) = tokio::task::spawn_blocking(move || {
+            let thread = store
+                .load_thread(&snapshot_thread_id)
+                .with_context(|| format!("Thread not found: {snapshot_thread_id}"))?;
+            let turns = store.list_turns_for_thread(&snapshot_thread_id)?;
+            let turn_ids: Vec<String> = turns.iter().map(|turn| turn.id.clone()).collect();
+            let mut items_by_turn = store.list_items_for_turns_map(&turn_ids)?;
+            let mut items = Vec::new();
+            for turn in &turns {
+                if let Some(mut turn_items) = items_by_turn.remove(&turn.id) {
+                    items.append(&mut turn_items);
+                }
             }
-        }
+            Ok::<_, anyhow::Error>((thread, turns, items))
+        })
+        .await
+        .context("Runtime thread projection task failed")??;
         let (pending_approvals, pending_user_inputs) = self.pending_requests_for_thread(id);
         let pending_dynamic_tool_calls = self.pending_dynamic_tool_calls_for_thread(id);
         Ok(ThreadDetail {
@@ -3207,7 +3365,7 @@ impl RuntimeThreadManager {
         id: &str,
     ) -> Result<(ThreadRecord, Vec<AgentRebindHint>)> {
         let thread = self.resume_thread(id).await?;
-        let events = self.store.events_since(&thread.id, None)?;
+        let events = self.events_since_offloaded(&thread.id, None).await?;
         let hints = collect_agent_rebind_hints(&events);
         Ok((thread, hints))
     }
@@ -4629,6 +4787,41 @@ impl RuntimeThreadManager {
         self.store.events_since(thread_id, since_seq)
     }
 
+    async fn events_since_offloaded(
+        &self,
+        thread_id: &str,
+        since_seq: Option<u64>,
+    ) -> Result<Vec<RuntimeEventRecord>> {
+        let store = self.store.clone();
+        let thread_id = thread_id.to_string();
+        tokio::task::spawn_blocking(move || store.events_since(&thread_id, since_seq))
+            .await
+            .context("Runtime event history task failed")?
+    }
+
+    pub(crate) async fn replay_events(
+        &self,
+        thread_id: &str,
+        since_seq: Option<u64>,
+        tail_limit: Option<usize>,
+    ) -> Result<RuntimeEventReplay> {
+        if tail_limit.is_some_and(|limit| limit > MAX_RUNTIME_EVENT_REPLAY_TAIL) {
+            bail!("Runtime event replay_limit cannot exceed {MAX_RUNTIME_EVENT_REPLAY_TAIL}");
+        }
+        let (base_tx, base_rx) = oneshot::channel();
+        let (batch_tx, batches) = mpsc::channel(2);
+        let store = self.store.clone();
+        let thread_id = thread_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            store.publish_event_replay(&thread_id, since_seq, tail_limit, base_tx, batch_tx);
+        });
+        let base_seq = base_rx
+            .await
+            .context("Runtime event replay worker ended before initialization")?
+            .map_err(anyhow::Error::msg)?;
+        Ok(RuntimeEventReplay { base_seq, batches })
+    }
+
     async fn ensure_engine_loaded(&self, thread_hint: &ThreadRecord) -> Result<EngineHandle> {
         {
             let mut active = self.active.lock().await;
@@ -5673,6 +5866,8 @@ impl RuntimeThreadManager {
                     // Register before sequencing the event. A snapshot racing
                     // this branch therefore either contains the request or
                     // subscribes from an older cursor that will replay it.
+                    let projection_lock = self.projection_lock(&thread_id);
+                    let projection = projection_lock.lock().await;
                     let rx = self.register_pending_approval(&thread_id, pending_request);
                     if let Err(err) = self
                         .emit_event(
@@ -5691,9 +5886,11 @@ impl RuntimeThreadManager {
                         .await
                     {
                         self.cancel_pending_approval(&id);
+                        drop(projection);
                         let _ = engine.deny_tool_call(&id).await;
                         return Err(err);
                     }
+                    drop(projection);
                     let approval_timeout = approval_decision_timeout();
                     match tokio::time::timeout(approval_timeout, rx).await {
                         Ok(Ok(ExternalApprovalDecision::Allow { remember })) => {
@@ -5805,6 +6002,8 @@ impl RuntimeThreadManager {
                     }
                 }
                 EngineEvent::UserInputRequired { id, request } => {
+                    let projection_lock = self.projection_lock(&thread_id);
+                    let projection = projection_lock.lock().await;
                     self.register_pending_user_input(
                         &thread_id,
                         PendingUserInputRequest {
@@ -5827,9 +6026,11 @@ impl RuntimeThreadManager {
                         .await
                     {
                         self.discard_pending_user_input_registration(&thread_id, &id);
+                        drop(projection);
                         let _ = engine.cancel_user_input(&id).await;
                         return Err(err);
                     }
+                    drop(projection);
                 }
                 EngineEvent::Status { message } => {
                     let item = TurnItemRecord {
@@ -6361,6 +6562,8 @@ impl crate::tools::spec::DynamicToolExecutor for RuntimeThreadManager {
             tool: name.clone(),
             arguments: input,
         };
+        let projection_lock = self.projection_lock(&thread_id);
+        let projection = projection_lock.lock().await;
         let mut rx = self
             .register_pending_dynamic_tool(params.clone())
             .map_err(|err| crate::tools::spec::ToolError::execution_failed(err.to_string()))?;
@@ -6375,10 +6578,12 @@ impl crate::tools::spec::DynamicToolExecutor for RuntimeThreadManager {
             .await
         {
             self.remove_pending_dynamic_tool(&thread_id, &turn_id, &call_id);
+            drop(projection);
             return Err(crate::tools::spec::ToolError::execution_failed(format!(
                 "failed to emit runtime dynamic tool request for '{name}': {err}"
             )));
         }
+        drop(projection);
 
         let result_timeout = dynamic_tool_result_timeout();
         match tokio::time::timeout(result_timeout, &mut rx).await {
@@ -6744,6 +6949,32 @@ fn reject_symlinked_store_dir(path: &Path) -> Result<()> {
 fn ensure_runtime_store_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path).with_context(|| format!("Failed to create {}", path.display()))?;
     reject_symlinked_store_dir(path)
+}
+
+fn read_complete_event(
+    reader: &mut BufReader<File>,
+    path: &Path,
+) -> Result<Option<RuntimeEventRecord>> {
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line)? == 0 {
+            return Ok(None);
+        }
+        // A concurrent append can be visible before write_all finishes. The
+        // subscribed broadcast path will deliver that event after its durable
+        // append completes, so stop at an unterminated live tail instead of
+        // misclassifying it as durable corruption. Store startup separately
+        // truncates an unterminated tail left by a dead process.
+        if !line.ends_with('\n') {
+            return Ok(None);
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event = serde_json::from_str(&line)
+            .with_context(|| format!("Failed to parse event line in {}", path.display()))?;
+        return Ok(Some(event));
+    }
 }
 
 /// Remove only an unterminated final JSONL fragment left by a process or

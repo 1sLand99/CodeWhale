@@ -457,6 +457,13 @@ accepted the result, that call is terminal and a duplicate result returns 404.
 **Events** (SSE replay + live stream)
 - `GET /v1/threads/{id}/events?since_seq=<u64>`
 
+Durable history parsing runs off the async server workers and reaches SSE in
+bounded batches of at most 256 events through a backpressured channel. Broadcast
+delivery is only a wake-up optimization: a lagged receiver opens the same
+bounded durable replay from its last accepted cursor. Optional `replay_limit`
+returns the newest requested tail and may not exceed 4096; `previous_seq` on
+the first returned event advances past exactly the omitted history.
+
 **Snapshots** (read-only side-git restore point listing)
 - `GET /v1/snapshots?limit=20`
 

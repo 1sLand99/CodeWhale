@@ -2996,6 +2996,12 @@ async fn event_handoff_replays_and_dedupes_interaction_prompts_without_a_gap() -
         )
         .await?;
     let backlog = runtime_threads.events_since(&thread.id, Some(initial_seq))?;
+    let (backlog_tx, backlog_rx) = mpsc::channel(1);
+    backlog_tx
+        .send(Ok(backlog))
+        .await
+        .map_err(|_| anyhow::anyhow!("failed to seed replay backlog"))?;
+    drop(backlog_tx);
 
     // This request lands after the replay read and is therefore live-only.
     let input = runtime_threads
@@ -3020,7 +3026,7 @@ async fn event_handoff_replays_and_dedupes_interaction_prompts_without_a_gap() -
         runtime_threads.clone(),
         thread.id.clone(),
         initial_seq,
-        backlog,
+        backlog_rx,
         live,
     )
     .take(2);
