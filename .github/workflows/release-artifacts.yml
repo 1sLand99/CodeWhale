@@ -98,24 +98,26 @@ jobs:
             tui_artifact: codewhale-tui-windows-arm64.exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ inputs.source_sha }}
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master 2026-07-18
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
-      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
         id: sccache
         continue-on-error: true
       - name: Enable sccache
         if: steps.sccache.outcome == 'success'
         shell: bash
         run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "${GITHUB_ENV}"
-          echo "RUSTC_WRAPPER=sccache" >> "${GITHUB_ENV}"
-          echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1" >> "${GITHUB_ENV}"
-      - uses: Swatinem/rust-cache@v2
+          {
+            echo "SCCACHE_GHA_ENABLED=true"
+            echo "RUSTC_WRAPPER=sccache"
+            echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1"
+          } >> "${GITHUB_ENV}"
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-bin: false
       - name: Install Linux ARM64 system dependencies
@@ -173,12 +175,14 @@ jobs:
             echo "Android archiver not found: ${ar}" >&2
             exit 1
           fi
-          echo "ANDROID_NDK_ROOT=${ndk}" >> "${GITHUB_ENV}"
-          echo "ANDROID_NDK_HOME=${ndk}" >> "${GITHUB_ENV}"
-          echo "CC_aarch64_linux_android=${linker}" >> "${GITHUB_ENV}"
-          echo "AR_aarch64_linux_android=${ar}" >> "${GITHUB_ENV}"
-          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${linker}" >> "${GITHUB_ENV}"
-          echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=--target=aarch64-linux-android24 --sysroot=${ndk}/toolchains/llvm/prebuilt/linux-x86_64/sysroot" >> "${GITHUB_ENV}"
+          {
+            echo "ANDROID_NDK_ROOT=${ndk}"
+            echo "ANDROID_NDK_HOME=${ndk}"
+            echo "CC_aarch64_linux_android=${linker}"
+            echo "AR_aarch64_linux_android=${ar}"
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${linker}"
+            echo "BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=--target=aarch64-linux-android24 --sysroot=${ndk}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          } >> "${GITHUB_ENV}"
       - name: Build
         if: matrix.target != 'x86_64-unknown-linux-musl'
         shell: bash
@@ -212,21 +216,21 @@ jobs:
           stage_binary "${{ matrix.cli_binary }}" "${{ matrix.cli_artifact }}"
           stage_binary "${{ matrix.shim_binary }}" "${{ matrix.shim_artifact }}"
           stage_binary "${{ matrix.tui_binary }}" "${{ matrix.tui_artifact }}"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.cli_artifact }}
           path: ${{ matrix.cli_artifact }}
           if-no-files-found: error
           retention-days: ${{ inputs.retention_days }}
           overwrite: true
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.shim_artifact }}
           path: ${{ matrix.shim_artifact }}
           if-no-files-found: error
           retention-days: ${{ inputs.retention_days }}
           overwrite: true
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.tui_artifact }}
           path: ${{ matrix.tui_artifact }}
@@ -239,17 +243,17 @@ jobs:
     if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ inputs.source_sha }}
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts
           pattern: '*'
       - name: Create and checksum platform archives
         shell: bash
         run: bash scripts/release/create-release-bundles.sh artifacts bundles
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: codewhale-bundles
           path: |
@@ -265,10 +269,10 @@ jobs:
     if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ inputs.source_sha }}
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts
           pattern: '*windows-x64.exe'
@@ -295,7 +299,7 @@ jobs:
           if (!(Test-Path "scripts\installer\CodeWhaleSetup.exe")) {
             throw "CodeWhaleSetup.exe was not produced"
           }
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: CodeWhaleSetup.exe
           path: scripts/installer/CodeWhaleSetup.exe
@@ -308,19 +312,19 @@ jobs:
     if: ${{ !cancelled() && needs.bundle.result == 'success' && needs.windows-installer.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ inputs.source_sha }}
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 20
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: intermediate-artifacts
           pattern: '*'
       - name: Assemble exact authoritative release inventory
         run: node scripts/release/assemble-release-assets.js intermediate-artifacts release-assets
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: codewhale-release-assets
           path: release-assets/*
@@ -334,13 +338,13 @@ jobs:
     if: ${{ !cancelled() && needs.assemble.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ inputs.source_sha }}
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 20
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: codewhale-release-assets
           path: release-assets

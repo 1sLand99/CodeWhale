@@ -79,6 +79,24 @@ for (const [label, workflow] of [
   }
 }
 
+for (const [label, workflow] of [
+  ["release candidate", candidate],
+  ["shared artifact", artifacts],
+  ["public release", release],
+]) {
+  const remoteActions = [...workflow.matchAll(/^\s+(?:-\s+)?uses:\s+([^@\s]+)@([^#\s]+)/gm)]
+    .map((match) => ({ action: match[1], ref: match[2] }))
+    .filter(({ action }) => !action.startsWith("./"));
+  assert.ok(remoteActions.length > 0, `${label} workflow must exercise pinned actions`);
+  for (const { action, ref } of remoteActions) {
+    assert.match(
+      ref,
+      /^[0-9a-f]{40}$/,
+      `${label} action ${action} must use an audited full commit SHA`,
+    );
+  }
+}
+
 assert.match(artifacts, /^  workflow_call:/m);
 assert.match(artifacts, /^permissions:\n  contents: read$/m);
 const expectedTargets = [
