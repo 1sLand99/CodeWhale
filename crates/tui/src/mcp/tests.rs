@@ -149,6 +149,48 @@ fn reviewed_plugin_redirects_are_exact_normalized_origin_only() {
 }
 
 #[test]
+fn reviewed_plugin_remote_proxy_policy_never_reads_ambient_environment() {
+    let reads = std::cell::Cell::new(0_u32);
+    let builder = configure_mcp_proxy(crate::tls::reqwest_client_builder(), true, |_| {
+        reads.set(reads.get() + 1);
+        Ok("http://127.0.0.1:9999".to_string())
+    });
+
+    assert_eq!(
+        reads.get(),
+        0,
+        "reviewed remotes must not read proxy values"
+    );
+    builder
+        .build()
+        .expect("explicit no-proxy client must remain buildable");
+}
+
+#[test]
+fn user_authored_mcp_proxy_policy_keeps_environment_support() {
+    let requested = std::cell::RefCell::new(Vec::new());
+    let builder = configure_mcp_proxy(crate::tls::reqwest_client_builder(), false, |name| {
+        requested.borrow_mut().push(name.to_string());
+        match name {
+            "HTTPS_PROXY" => Ok("http://127.0.0.1:8080".to_string()),
+            _ => Err(std::env::VarError::NotPresent),
+        }
+    });
+
+    assert_eq!(
+        requested.into_inner(),
+        vec![
+            "HTTPS_PROXY".to_string(),
+            "NO_PROXY".to_string(),
+            "no_proxy".to_string(),
+        ]
+    );
+    builder
+        .build()
+        .expect("user-authored proxy client must remain buildable");
+}
+
+#[test]
 fn test_mcp_config_parse() {
     let json = r#"{
         "timeouts": {

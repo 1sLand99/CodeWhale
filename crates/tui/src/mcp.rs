@@ -1815,44 +1815,10 @@ impl McpConnection {
                         }
                     }));
             }
-            let environment = config
-                .reviewed_plugin
-                .as_ref()
-                .map(|source| source.host_environment.as_ref());
-            let read_environment =
-                |name: &str| environment.map_or_else(|| std::env::var(name), |env| env.var(name));
-            let env_proxy_url = read_environment("HTTPS_PROXY")
-                .or_else(|_| read_environment("https_proxy"))
-                .or_else(|_| read_environment("HTTP_PROXY"))
-                .or_else(|_| read_environment("http_proxy"))
-                .ok()
-                .filter(|s| !s.trim().is_empty());
-            if let Some(proxy_url) = env_proxy_url {
-                match reqwest::Proxy::all(&proxy_url) {
-                    Ok(proxy) => {
-                        let no_proxy = read_environment("NO_PROXY")
-                            .or_else(|_| read_environment("no_proxy"))
-                            .ok()
-                            .and_then(|value| reqwest::NoProxy::from_string(&value));
-                        let proxy = proxy.no_proxy(no_proxy);
-                        client_builder = client_builder.proxy(proxy);
-                    }
-                    Err(err) => {
-                        // Redact userinfo (the `username[:password]@…`
-                        // portion of the URL) before logging so an
-                        // HTTPS_PROXY that embeds credentials
-                        // (common in corporate setups) doesn't leak the
-                        // password to the on-disk `~/.deepseek/logs/`.
-                        let proxy_redacted = redact_proxy_userinfo(&proxy_url);
-                        tracing::warn!(
-                            target: "mcp",
-                            ?err,
-                            proxy = %proxy_redacted,
-                            "ignoring malformed HTTP(S)_PROXY env var; MCP connection will bypass proxy"
-                        );
-                    }
-                }
-            }
+            client_builder =
+                configure_mcp_proxy(client_builder, config.reviewed_plugin.is_some(), |name| {
+                    std::env::var(name)
+                });
             let client = client_builder.build()?;
             let oauth_runtime = if config.reviewed_plugin.is_some() {
                 None
@@ -2580,6 +2546,62 @@ impl McpConnection {
         }
         Err(error)
     }
+}
+
+/// Apply the ambient proxy policy for MCP HTTP transports.
+///
+/// User-authored MCP configuration keeps the long-standing corporate-proxy
+/// behavior. Reviewed plugin bundles deliberately do not: proxy URLs can carry
+/// credentials and proxy processes can observe request metadata, neither of
+/// which is part of the v1 reviewed remote authority. Return before consulting
+/// the environment so even reading ambient proxy credentials is impossible on
+/// that path, and call `no_proxy` explicitly to keep this invariant stable if
+/// reqwest's defaults change.
+fn configure_mcp_proxy<F>(
+    mut client_builder: reqwest::ClientBuilder,
+    reviewed_plugin: bool,
+    mut read_environment: F,
+) -> reqwest::ClientBuilder
+where
+    F: FnMut(&str) -> std::result::Result<String, std::env::VarError>,
+{
+    if reviewed_plugin {
+        return client_builder.no_proxy();
+    }
+
+    let env_proxy_url = read_environment("HTTPS_PROXY")
+        .or_else(|_| read_environment("https_proxy"))
+        .or_else(|_| read_environment("HTTP_PROXY"))
+        .or_else(|_| read_environment("http_proxy"))
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    if let Some(proxy_url) = env_proxy_url {
+        match reqwest::Proxy::all(&proxy_url) {
+            Ok(proxy) => {
+                let no_proxy = read_environment("NO_PROXY")
+                    .or_else(|_| read_environment("no_proxy"))
+                    .ok()
+                    .and_then(|value| reqwest::NoProxy::from_string(&value));
+                let proxy = proxy.no_proxy(no_proxy);
+                client_builder = client_builder.proxy(proxy);
+            }
+            Err(err) => {
+                // Redact userinfo (the `username[:password]@…`
+                // portion of the URL) before logging so an
+                // HTTPS_PROXY that embeds credentials
+                // (common in corporate setups) doesn't leak the
+                // password to the on-disk `~/.deepseek/logs/`.
+                let proxy_redacted = redact_proxy_userinfo(&proxy_url);
+                tracing::warn!(
+                    target: "mcp",
+                    ?err,
+                    proxy = %proxy_redacted,
+                    "ignoring malformed HTTP(S)_PROXY env var; MCP connection will bypass proxy"
+                );
+            }
+        }
+    }
+    client_builder
 }
 
 impl Drop for McpConnection {

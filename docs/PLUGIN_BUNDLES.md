@@ -69,7 +69,11 @@ are rejected: authentication must name a source environment variable through
 the normalized host set used by its endpoints in
 `capabilities.network_hosts`; endpoint scheme, normalized host, port, and path
 remain bound to the review. Redirects are limited and must retain that exact
-normalized origin.
+normalized origin. Reviewed remote transports use an explicit no-proxy HTTP
+client: v1 bundles never read or use ambient `HTTP_PROXY`, `HTTPS_PROXY`, or
+`NO_PROXY` values, because proxy credentials and proxy observation are outside
+the reviewed authority. User-authored MCP configuration keeps its existing
+explicit proxy support.
 
 Local stdio environment entries must use exact `${SOURCE_ENV}` references.
 The review shows destination and source names, but never reads or prints their

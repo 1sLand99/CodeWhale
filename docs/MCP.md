@@ -48,6 +48,8 @@ unknown fields and ambiguous transports fail closed; stdio environment values
 must be exact environment-source references; remote literal headers and
 secret-bearing URLs are rejected; declared network hosts must exactly match
 the normalized endpoint host set; and redirects remain on the reviewed origin.
+Reviewed plugin remotes also bypass ambient HTTP proxy configuration entirely;
+proxy credentials and proxy-observed traffic are not part of the v1 review.
 The plugin review discloses local host-user authority, structural argv,
 environment provenance, endpoint, auth source names, scopes, and tool filters
 without reading or printing secret values.
