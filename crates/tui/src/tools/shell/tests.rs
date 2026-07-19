@@ -1794,6 +1794,10 @@ fn killed_shell_does_not_wait_for_blocked_reader_threads() {
         windows_job: None,
         stdout_thread: Some(stdout_thread),
         stderr_thread: None,
+        work_lifecycle: None,
+        lifecycle_seq: 0,
+        last_lifecycle_status: None,
+        last_lifecycle_bytes: 0,
     };
 
     let started = std::time::Instant::now();
