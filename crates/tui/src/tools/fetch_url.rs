@@ -15,6 +15,9 @@ use super::web::extract::{DocumentKind, ExtractedDocument, extract_document};
 use super::web::fetch::{
     DEFAULT_MAX_BYTES, DEFAULT_TIMEOUT, FetchOptions, HARD_MAX_BYTES, HARD_MAX_TIMEOUT, fetch,
 };
+use super::web::overflow::bound_text as bound_web_text;
+#[cfg(test)]
+use super::web::overflow::inline_char_budget;
 use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -164,33 +167,45 @@ impl ToolSpec for FetchUrlTool {
         )
         .await?;
         let is_success = (200..300).contains(&fetched.status);
-        let body_text = String::from_utf8_lossy(&fetched.bytes).into_owned();
-        let fields = project_json_fields(&body_text, &fetched.content_type, &requested_fields)?;
+        let mut body_text = (!requested_fields.is_empty())
+            .then(|| String::from_utf8_lossy(&fetched.bytes).into_owned());
+        let fields = match body_text.as_deref() {
+            Some(body) => project_json_fields(body, &fetched.content_type, &requested_fields)?,
+            None => None,
+        };
         let extracted =
             match extract_document(&fetched.url, Some(&fetched.content_type), &fetched.bytes) {
                 Ok(document) => document,
                 Err(_error)
                     if format == Format::Raw && is_declared_textual(&fetched.content_type) =>
                 {
+                    let body_text = body_text
+                        .get_or_insert_with(|| String::from_utf8_lossy(&fetched.bytes).into_owned())
+                        .clone();
                     ExtractedDocument {
                         kind: DocumentKind::Text,
                         title: None,
                         text: body_text.clone(),
-                        markdown: body_text.clone(),
+                        markdown: body_text,
                         cleaned_html: None,
                         pdf_pages: None,
                         media_extension: None,
                     }
                 }
-                Err(_error) if !is_success => ExtractedDocument {
-                    kind: DocumentKind::Text,
-                    title: None,
-                    text: body_text.clone(),
-                    markdown: body_text.clone(),
-                    cleaned_html: None,
-                    pdf_pages: None,
-                    media_extension: None,
-                },
+                Err(_error) if !is_success => {
+                    let body_text = body_text
+                        .get_or_insert_with(|| String::from_utf8_lossy(&fetched.bytes).into_owned())
+                        .clone();
+                    ExtractedDocument {
+                        kind: DocumentKind::Text,
+                        title: None,
+                        text: body_text.clone(),
+                        markdown: body_text,
+                        cleaned_html: None,
+                        pdf_pages: None,
+                        media_extension: None,
+                    }
+                }
                 Err(error) => return Err(error),
             };
 
@@ -306,70 +321,25 @@ fn render_extracted(
     bound_text(url, content, context)
 }
 
-fn web_inline_char_budget(context: &ToolContext) -> usize {
-    context
-        .route_context_window
-        .map(|tokens| {
-            let chars = u64::from(tokens).saturating_mul(4).saturating_mul(3) / 100;
-            usize::try_from(chars).unwrap_or(100_000)
-        })
-        .unwrap_or(100_000)
-        .clamp(1, 100_000)
-}
-
 fn bound_text(
     url: &str,
     content: String,
     context: &ToolContext,
 ) -> Result<(String, Option<ArtifactWrite>), ToolError> {
-    let budget = web_inline_char_budget(context);
-    if content.chars().count() <= budget {
-        return Ok((content, None));
-    }
-
-    let artifact = write_text_artifact(url, &content, context)?;
-    let relative = crate::artifacts::format_artifact_relative_path(&artifact.relative_path);
-    let mut head = content
-        .chars()
-        .take(budget.saturating_sub(256))
-        .collect::<String>();
-    let mut footer = fetch_overflow_footer(&relative, head.len(), content.len());
-    let allowed_head = budget.saturating_sub(footer.chars().count());
-    head = content.chars().take(allowed_head).collect();
-    footer = fetch_overflow_footer(&relative, head.len(), content.len());
-    while !head.is_empty() && head.chars().count() + footer.chars().count() > budget {
-        head.pop();
-        footer = fetch_overflow_footer(&relative, head.len(), content.len());
-    }
-    Ok((format!("{head}{footer}"), Some(artifact)))
-}
-
-fn fetch_overflow_footer(relative: &str, head_bytes: usize, total_bytes: usize) -> String {
-    format!(
-        "\n\n[Content overflow: first {head_bytes} of {total_bytes} bytes shown; full page saved to {relative}. Recovery: call retrieve_tool_result with ref={relative}.]"
-    )
-}
-
-fn write_text_artifact(
-    url: &str,
-    content: &str,
-    context: &ToolContext,
-) -> Result<ArtifactWrite, ToolError> {
-    let artifact_id = fetch_artifact_id(url, content.as_bytes());
-    let (absolute_path, relative_path) =
-        crate::artifacts::write_session_artifact(&context.state_namespace, &artifact_id, content)
-            .map_err(|error| {
-            ToolError::execution_failed(format!(
-                "failed to preserve fetched content artifact: {error}"
-            ))
-        })?;
-    Ok(ArtifactWrite {
-        session_id: context.state_namespace.clone(),
-        absolute_path,
-        relative_path,
-        byte_size: content.len() as u64,
-        preview: content.chars().take(200).collect(),
-    })
+    let bounded = bound_web_text(
+        content,
+        context,
+        |body| fetch_artifact_id(url, body.as_bytes()),
+        "page",
+    )?;
+    let artifact = bounded.artifact.map(|artifact| ArtifactWrite {
+        session_id: artifact.session_id,
+        absolute_path: artifact.absolute_path,
+        relative_path: artifact.relative_path,
+        byte_size: artifact.byte_size,
+        preview: artifact.preview,
+    });
+    Ok((bounded.content, artifact))
 }
 
 fn write_binary_artifact(
@@ -512,7 +482,7 @@ mod tests {
         let artifact = artifact.expect("overflow artifact");
 
         assert!(inline.contains("retrieve_tool_result"));
-        assert!(inline.chars().count() <= web_inline_char_budget(&context));
+        assert!(inline.chars().count() <= inline_char_budget(&context));
         assert_eq!(
             std::fs::read_to_string(artifact.absolute_path).unwrap(),
             full

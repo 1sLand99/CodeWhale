@@ -13,6 +13,9 @@ use super::web::fetch::fetch_with_initial_pin;
 use super::web::fetch::{FetchOptions, HARD_MAX_BYTES, fetch};
 #[cfg(test)]
 use super::web::guard::DnsPin;
+use super::web::overflow::bound_text as bound_web_text;
+#[cfg(test)]
+use super::web::overflow::inline_char_budget;
 use async_trait::async_trait;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -1114,73 +1117,36 @@ fn page_from_fetched(
     }
 }
 
-fn web_inline_char_budget(context: &ToolContext) -> usize {
-    context
-        .route_context_window
-        .map(|tokens| {
-            let chars = u64::from(tokens).saturating_mul(4).saturating_mul(3) / 100;
-            usize::try_from(chars).unwrap_or(100_000)
-        })
-        .unwrap_or(100_000)
-        .clamp(1, 100_000)
-}
-
 fn bounded_web_run_result(
     output: &WebRunOutput,
     context: &ToolContext,
 ) -> Result<ToolResult, ToolError> {
     let full = serde_json::to_string_pretty(output)
         .map_err(|error| ToolError::execution_failed(error.to_string()))?;
-    let budget = web_inline_char_budget(context);
-    if full.chars().count() <= budget {
-        return Ok(ToolResult {
-            content: full,
-            success: true,
-            metadata: None,
-        });
-    }
-
-    let digest = crate::hashing::sha256_hex(full.as_bytes());
-    let artifact_id = format!("web_run_{}", &digest[..16]);
-    let (absolute_path, relative_path) =
-        crate::artifacts::write_session_artifact(&context.state_namespace, &artifact_id, &full)
-            .map_err(|error| {
-                ToolError::execution_failed(format!(
-                    "failed to preserve web.run result artifact: {error}"
-                ))
-            })?;
-    let relative = crate::artifacts::format_artifact_relative_path(&relative_path);
-    let mut head = full
-        .chars()
-        .take(budget.saturating_sub(256))
-        .collect::<String>();
-    let mut footer = web_run_overflow_footer(&relative, head.len(), full.len());
-    let allowed_head = budget.saturating_sub(footer.chars().count());
-    head = full.chars().take(allowed_head).collect();
-    footer = web_run_overflow_footer(&relative, head.len(), full.len());
-    while !head.is_empty() && head.chars().count() + footer.chars().count() > budget {
-        head.pop();
-        footer = web_run_overflow_footer(&relative, head.len(), full.len());
-    }
-    let preview = full.chars().take(200).collect::<String>();
+    let bounded = bound_web_text(
+        full,
+        context,
+        |body| {
+            let digest = crate::hashing::sha256_hex(body.as_bytes());
+            format!("web_run_{}", &digest[..16])
+        },
+        "web.run result",
+    )?;
+    let metadata = bounded.artifact.map(|artifact| {
+        json!({
+            "spillover_path": artifact.absolute_path.display().to_string(),
+            "artifact_session_id": artifact.session_id,
+            "artifact_relative_path": crate::artifacts::format_artifact_relative_path(&artifact.relative_path),
+            "artifact_byte_size": artifact.byte_size,
+            "artifact_preview": artifact.preview,
+        })
+    });
 
     Ok(ToolResult {
-        content: format!("{head}{footer}"),
+        content: bounded.content,
         success: true,
-        metadata: Some(json!({
-            "spillover_path": absolute_path.display().to_string(),
-            "artifact_session_id": context.state_namespace,
-            "artifact_relative_path": relative,
-            "artifact_byte_size": full.len() as u64,
-            "artifact_preview": preview,
-        })),
+        metadata,
     })
-}
-
-fn web_run_overflow_footer(relative: &str, head_bytes: usize, total_bytes: usize) -> String {
-    format!(
-        "\n\n[Content overflow: first {head_bytes} of {total_bytes} bytes shown; full web.run result saved to {relative}. Recovery: call retrieve_tool_result with ref={relative}.]"
-    )
 }
 
 fn render_view(
@@ -1597,7 +1563,7 @@ mod tests {
         let full = std::fs::read_to_string(path).unwrap();
 
         assert!(result.content.contains("retrieve_tool_result"));
-        assert!(result.content.chars().count() <= web_inline_char_budget(&context));
+        assert!(result.content.chars().count() <= inline_char_budget(&context));
         assert_eq!(
             serde_json::from_str::<Value>(&full).unwrap()["warnings"][0],
             output.warnings[0]
