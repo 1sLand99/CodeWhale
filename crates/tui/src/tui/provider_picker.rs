@@ -2002,7 +2002,7 @@ impl ProviderPickerView {
             let is_selected = *idx == self.selected_idx;
             debug_assert_eq!(is_selected, pos == selected_pos);
             let is_active = row.is_active;
-            let arrow = if is_selected { "▸" } else { " " };
+            let arrow = crate::tui::glyphs::selection_marker(is_selected);
             let active_dot = if is_active { " *" } else { "  " };
             let spacer_style = if is_selected {
                 Self::selected_row_bg_style()
@@ -2414,7 +2414,7 @@ impl ProviderPickerView {
         );
         let selected = self.external_consent_choice;
         let row = |choice, label: Cow<'static, str>, detail: Cow<'static, str>| {
-            let marker = if selected == choice { "▸" } else { " " };
+            let marker = crate::tui::glyphs::selection_marker(selected == choice);
             Line::from(vec![
                 Span::styled(
                     format!("{marker} {label}"),
@@ -2559,7 +2559,7 @@ impl ProviderPickerView {
             .take(visible_rows)
         {
             let is_selected = idx == self.model_selected_idx;
-            let arrow = if is_selected { "▸" } else { " " };
+            let arrow = crate::tui::glyphs::selection_marker(is_selected);
             let label_style = if is_selected {
                 Self::selected_row_style(palette::TEXT_PRIMARY)
             } else {
@@ -2743,7 +2743,7 @@ impl ProviderPickerView {
         placeholder: &str,
     ) {
         let selected = self.custom_provider_field == field;
-        let marker = if selected { "▸" } else { " " };
+        let marker = crate::tui::glyphs::selection_marker(selected);
         let value = self.custom_form_field_value(field);
         let display = if value.is_empty() { placeholder } else { value };
         let value_style = if selected {

@@ -681,7 +681,7 @@ impl ModelPickerView {
                 idx,
             ));
             let is_selected = idx == state.selected;
-            let marker = if is_selected { "▸" } else { " " };
+            let marker = crate::tui::glyphs::selection_marker(is_selected);
             let label_style = if is_selected {
                 Style::default()
                     .fg(palette::SELECTION_TEXT)
