@@ -187,7 +187,9 @@ pub struct JobRecord {
 ///
 /// Pure projection of the record as persisted: unknown budgets stay unset and
 /// nothing is fabricated. `updated_at` (epoch seconds) provides the terminal
-/// timestamp because the job manager records no separate end time.
+/// timestamp because the job manager records no separate end time. The
+/// free-form job detail is intentionally omitted because this owner does not
+/// classify it as safe for a cross-surface read model.
 #[must_use]
 pub fn job_record_to_agent_run(
     record: &JobRecord,
@@ -211,7 +213,7 @@ pub fn job_record_to_agent_run(
                 Some(TerminalSummary {
                     outcome,
                     ended_at_ms: record.updated_at.checked_mul(1000),
-                    detail: record.detail.clone(),
+                    detail: None,
                 }),
             )
         }
@@ -2996,7 +2998,7 @@ mod tests {
     }
 
     #[test]
-    fn job_record_to_agent_run_maps_terminal_states_without_fabricating_budget() {
+    fn job_record_to_agent_run_maps_terminal_states_without_fabricating_fields() {
         use codewhale_protocol::agent_run::{RunState, TerminalOutcome};
 
         let cases = [
@@ -3016,7 +3018,7 @@ mod tests {
             let terminal = snapshot.terminal.expect("terminal summary");
             assert_eq!(terminal.outcome, outcome);
             assert_eq!(terminal.ended_at_ms, Some(1_700_000_042_000));
-            assert_eq!(terminal.detail.as_deref(), detail);
+            assert_eq!(terminal.detail, None);
             assert_eq!(
                 snapshot.budget,
                 codewhale_protocol::agent_run::BudgetSummary::default()
@@ -3024,6 +3026,16 @@ mod tests {
             assert!(snapshot.refs.is_empty());
             assert_eq!(snapshot.parent, None);
         }
+    }
+
+    #[test]
+    fn job_record_to_agent_run_does_not_export_unclassified_detail() {
+        let record = sample_job_record(JobStatus::Failed, Some("owner-private diagnostic"));
+        let snapshot = job_record_to_agent_run(&record);
+        let terminal = snapshot.terminal.as_ref().expect("terminal summary");
+        assert_eq!(terminal.detail, None);
+        let serialized = serde_json::to_string(&snapshot).expect("serialize snapshot");
+        assert!(!serialized.contains("owner-private diagnostic"));
     }
 
     #[test]
