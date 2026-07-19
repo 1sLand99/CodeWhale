@@ -120,6 +120,15 @@ codewhale doctor --json
 If the doctor command reports that a rejected key came from the environment,
 remove or replace that environment variable before testing saved config again.
 
+Both `doctor` and `doctor --json` also include a session-recovery diagnostic
+that compares legacy session filenames against the current store and reports
+one of `isolated`, `no_legacy_sessions`, `migration_pending`,
+`migration_incomplete`, `migration_complete`, or `scan_failed`; it never reads
+session contents. Use `migration_pending` or `migration_incomplete` as your
+cue to finish moving sessions from `~/.deepseek` to `~/.codewhale`, the same
+legacy-path migration described above. Setting an explicit `CODEWHALE_HOME`
+suppresses this ambient inspection.
+
 Next: [INSTALL.md](INSTALL.md) covers platform-specific install paths,
 [CONFIGURATION.md](CONFIGURATION.md) covers config resolution, and
 [PROVIDERS.md](PROVIDERS.md) covers provider IDs and credentials.
