@@ -159,7 +159,10 @@ fn initial_onboarding_state(
     }
 
     if was_onboarded && needs_api_key {
-        OnboardingState::ApiKey
+        // Missing-key recovery uses the canonical provider picker so it can
+        // preserve the configured provider, endpoint, and model route before
+        // asking for a replacement secret.
+        OnboardingState::Provider
     } else if was_onboarded && needs_workspace_trust {
         OnboardingState::TrustDirectory
     } else {
@@ -2141,6 +2144,10 @@ pub struct App {
     pub onboarding_needs_api_key: bool,
     pub onboarding_provider: ApiProvider,
     pub onboarding_workspace_trust_gate: bool,
+    /// True when onboarding opened only because a returning user's configured
+    /// provider is missing its key. Esc then exits to the offline composer
+    /// instead of walking back through first-run steps.
+    pub onboarding_missing_key_recovery: bool,
     pub api_key_env_only: bool,
     pub api_key_input: String,
     pub api_key_cursor: usize,
@@ -3021,6 +3028,7 @@ impl App {
             needs_api_key,
             needs_workspace_trust,
         );
+        let onboarding_missing_key_recovery = !skip_onboarding && was_onboarded && needs_api_key;
         let onboarding_workspace_trust_gate = onboarding_is_workspace_trust_gate(
             skip_onboarding,
             was_onboarded,
@@ -3320,6 +3328,7 @@ impl App {
             onboarding_needs_api_key: needs_api_key,
             onboarding_provider: provider,
             onboarding_workspace_trust_gate,
+            onboarding_missing_key_recovery,
             api_key_env_only,
             api_key_input: String::new(),
             api_key_cursor: 0,
@@ -6772,6 +6781,17 @@ impl App {
         self.active_route_base_url = base_url.into();
         self.set_active_route_limits(limits);
         self.active_context_window_source = context_window_source;
+    }
+
+    /// Whether the currently selected onboarding route is Kimi Code's
+    /// membership-plan `k3` endpoint. The check is deliberately exact: the
+    /// Moonshot public API must never inherit Kimi Code plan guidance.
+    pub fn onboarding_uses_kimi_code_plan(&self) -> bool {
+        crate::config::is_exact_kimi_code_k3_route(
+            self.onboarding_provider,
+            &self.active_route_base_url,
+            &self.model,
+        )
     }
 
     pub fn set_active_context_window_override(&mut self, context_window: Option<u32>) {

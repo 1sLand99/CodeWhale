@@ -27,7 +27,24 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
         )),
     ];
     let credential_help = provider.credential_help();
-    if let Some(url) = credential_help.credential_url {
+    if app.onboarding_uses_kimi_code_plan() {
+        lines.push(Line::from(Span::styled(
+            app.tr(MessageId::KimiCodePlanApiKeyHint).replace(
+                "{console}",
+                crate::config::KIMI_CODE_MEMBERSHIP_PLAN_CONSOLE_URL,
+            ),
+            Style::default().fg(palette::TEXT_MUTED),
+        )));
+        lines.push(Line::from(Span::styled(
+            app.tr(MessageId::KimiCodePlanRouteHint)
+                .replace("{route}", crate::config::DEFAULT_KIMI_CODE_BASE_URL),
+            Style::default().fg(palette::TEXT_MUTED),
+        )));
+        lines.push(Line::from(Span::styled(
+            app.tr(MessageId::KimiCodePlanNoImportHint),
+            Style::default().fg(palette::TEXT_MUTED),
+        )));
+    } else if let Some(url) = credential_help.credential_url {
         lines.push(Line::from(Span::styled(
             url.to_string(),
             Style::default().fg(palette::TEXT_MUTED),
@@ -297,5 +314,25 @@ mod tests {
         assert!(body.contains("paste key here if required"));
         assert!(!body.contains("OAuth"));
         assert!(!body.contains("device login"));
+    }
+
+    #[test]
+    fn kimi_code_plan_onboarding_uses_membership_key_guidance() {
+        let mut app = test_app_with_locale(Locale::En);
+        app.api_provider = ApiProvider::Moonshot;
+        app.onboarding_provider = ApiProvider::Moonshot;
+        app.active_route_base_url = crate::config::DEFAULT_KIMI_CODE_BASE_URL.to_string();
+        app.model = crate::config::KIMI_CODE_K3_MODEL.to_string();
+        let body = lines(&app)
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(body.contains("https://www.kimi.com/code/console"));
+        assert!(body.contains("api.kimi.com/coding/v1"));
+        assert!(body.contains("does not import Kimi CLI credentials"));
+        assert!(!body.contains("https://platform.kimi.ai/console/api-keys"));
+        assert!(!body.contains("OAuth"));
     }
 }

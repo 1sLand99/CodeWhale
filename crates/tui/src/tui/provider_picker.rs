@@ -1311,13 +1311,16 @@ impl ProviderPickerView {
         runtime_status: Option<ProviderRuntimeStatus>,
         memory: Option<&crate::tui::app::ProviderPickerMemory>,
     ) -> Self {
-        // Present providers in the shared metadata display order (#3076). The
-        // active provider is highlighted via `selected_idx` below, so it is
-        // never lost in the list.
+        // Build the setup/catalog universe directly from ApiProvider::all so
+        // first-run and recovery use the same canonical provider surface as
+        // the runtime, not a historical onboarding shortlist. The active
+        // provider is highlighted via `selected_idx` below, so it is never
+        // lost in the list.
         let runtime_status = runtime_status.as_ref();
         let custom_rows = custom_provider_dashboard_rows(active, config, runtime_status);
-        let mut rows: Vec<ProviderDashboardRow> = ApiProvider::sorted_for_display()
-            .into_iter()
+        let mut rows: Vec<ProviderDashboardRow> = ApiProvider::all()
+            .iter()
+            .copied()
             .filter(|provider| *provider != ApiProvider::Custom || custom_rows.is_empty())
             .map(|p| {
                 ProviderDashboardRow::from_config_with_runtime_status(
@@ -1684,11 +1687,30 @@ impl ProviderPickerView {
     fn enter_model_pick(&mut self) {
         self.stage = Stage::ModelPick;
         let provider = self.selected_provider();
-        let preferred = self.rows[self.selected_idx]
-            .default_route
-            .logical_model
-            .clone();
+        let route = &self.rows[self.selected_idx].default_route;
+        let kimi_code_k3 = crate::config::is_exact_kimi_code_k3_route(
+            provider,
+            &self.rows[self.selected_idx].base_url,
+            &route.wire_model,
+        );
+        // Recovery must restore the configured wire route, not replace bare
+        // K3 with whichever generic Moonshot catalog entry happens to sort
+        // first. Keep this route-local; `k3` is intentionally not added to
+        // the global Moonshot catalog.
+        let preferred = if kimi_code_k3 {
+            route.wire_model.clone()
+        } else {
+            route.logical_model.clone()
+        };
         let mut models = crate::provider_lake::all_catalog_models_for_provider(provider);
+        if kimi_code_k3
+            && !preferred.trim().is_empty()
+            && !models
+                .iter()
+                .any(|model| model.eq_ignore_ascii_case(preferred.trim()))
+        {
+            models.push(preferred.clone());
+        }
         if models.is_empty() && !preferred.trim().is_empty() {
             models.push(preferred.clone());
         }
@@ -2299,14 +2321,37 @@ impl ProviderPickerView {
             ))]
         };
         if !oauth_provider {
-            let help = row.provider.credential_help();
-            hint_lines.push(Line::from(Span::styled(
-                help.credential_url.map_or_else(
-                    || format!("Credentials: {}", help.guidance),
-                    |url| format!("Credentials: {url}"),
-                ),
-                Style::default().fg(palette::TEXT_MUTED),
-            )));
+            if row.provider == ApiProvider::Moonshot
+                && crate::config::moonshot_base_url_is_exact_kimi_code(&row.base_url)
+            {
+                hint_lines.extend([
+                    Line::from(Span::styled(
+                        self.tr(MessageId::KimiCodePlanApiKeyHint).replace(
+                            "{console}",
+                            crate::config::KIMI_CODE_MEMBERSHIP_PLAN_CONSOLE_URL,
+                        ),
+                        Style::default().fg(palette::TEXT_MUTED),
+                    )),
+                    Line::from(Span::styled(
+                        self.tr(MessageId::KimiCodePlanRouteHint)
+                            .replace("{route}", crate::config::DEFAULT_KIMI_CODE_BASE_URL),
+                        Style::default().fg(palette::TEXT_MUTED),
+                    )),
+                    Line::from(Span::styled(
+                        self.tr(MessageId::KimiCodePlanNoImportHint),
+                        Style::default().fg(palette::TEXT_MUTED),
+                    )),
+                ]);
+            } else {
+                let help = row.provider.credential_help();
+                hint_lines.push(Line::from(Span::styled(
+                    help.credential_url.map_or_else(
+                        || format!("Credentials: {}", help.guidance),
+                        |url| format!("Credentials: {url}"),
+                    ),
+                    Style::default().fg(palette::TEXT_MUTED),
+                )));
+            }
         };
 
         if let Some(ref error) = self.key_entry_error {
@@ -2316,7 +2361,7 @@ impl ProviderPickerView {
             )));
         }
 
-        let hint_height = hint_lines.len().clamp(1, 3) as u16;
+        let hint_height = hint_lines.len().clamp(1, 5) as u16;
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -3131,7 +3176,18 @@ impl ModalView for ProviderPickerView {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let preferred_height = match self.stage {
             Stage::List => (self.rows.len() as u16).saturating_add(2),
-            Stage::KeyEntry => 10,
+            Stage::KeyEntry => {
+                let row = &self.rows[self.selected_idx];
+                // The Kimi Code membership route renders two extra hint lines
+                // (plan console + no-credential-import); keep them visible.
+                if row.provider == ApiProvider::Moonshot
+                    && crate::config::moonshot_base_url_is_exact_kimi_code(&row.base_url)
+                {
+                    12
+                } else {
+                    10
+                }
+            }
             Stage::ExternalConsentChoice => 12,
             Stage::ExternalConsentConfirm => 13,
             Stage::ModelPick => 12,
@@ -3609,6 +3665,121 @@ mod tests {
         assert!(rendered.contains("paste key here"));
         assert!(!rendered.contains("OAuth"));
         assert!(!rendered.contains("device login"));
+    }
+
+    #[test]
+    fn kimi_code_plan_key_entry_uses_membership_route_guidance() {
+        let config = Config {
+            provider: Some("moonshot".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                moonshot: crate::config::ProviderConfig {
+                    base_url: Some(crate::config::DEFAULT_KIMI_CODE_BASE_URL.to_string()),
+                    model: Some(crate::config::KIMI_CODE_K3_MODEL.to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut picker = ProviderPickerView::new(ApiProvider::Moonshot, &config);
+        assert_eq!(picker.selected_provider(), ApiProvider::Moonshot);
+        picker.handle_key(key(KeyCode::Enter));
+
+        let rendered = render_text(&picker, 120, 24);
+
+        assert!(rendered.contains("https://www.kimi.com/code/console"));
+        assert!(rendered.contains("api.kimi.com/coding/v1"));
+        assert!(rendered.contains("does not import Kimi CLI credentials"));
+        assert!(!rendered.contains("https://platform.kimi.ai/console/api-keys"));
+        assert!(!rendered.contains("OAuth"));
+    }
+
+    #[test]
+    fn recovery_picker_keeps_active_route_and_esc_makes_no_change() {
+        let config = Config {
+            provider: Some("moonshot".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                moonshot: crate::config::ProviderConfig {
+                    base_url: Some(crate::config::DEFAULT_KIMI_CODE_BASE_URL.to_string()),
+                    model: Some(crate::config::KIMI_CODE_K3_MODEL.to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut picker = ProviderPickerView::new(ApiProvider::Moonshot, &config);
+
+        assert_eq!(picker.stage, Stage::List);
+        assert_eq!(picker.selected_provider(), ApiProvider::Moonshot);
+        assert!(matches!(
+            picker.handle_key(key(KeyCode::Esc)),
+            ViewAction::EmitAndClose(ViewEvent::ProviderPickerDismissed { .. })
+        ));
+        assert_eq!(config.provider.as_deref(), Some("moonshot"));
+        assert_eq!(
+            config
+                .provider_config_for(ApiProvider::Moonshot)
+                .and_then(|entry| entry.base_url.as_deref()),
+            Some(crate::config::DEFAULT_KIMI_CODE_BASE_URL)
+        );
+    }
+
+    #[test]
+    fn recovery_model_pick_restores_exact_kimi_code_k3_without_catalog_leakage() {
+        let mut config = Config {
+            provider: Some("moonshot".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                moonshot: crate::config::ProviderConfig {
+                    base_url: Some(crate::config::DEFAULT_KIMI_CODE_BASE_URL.to_string()),
+                    model: Some(crate::config::KIMI_CODE_K3_MODEL.to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let picker = ProviderPickerView::new_for_model_pick_after_validation(
+            ApiProvider::Moonshot,
+            ApiProvider::Moonshot,
+            &config,
+            None,
+            "validated-key".to_string(),
+        )
+        .expect("Kimi route row");
+
+        assert_eq!(picker.selected_model.as_deref(), Some("k3"));
+        assert_eq!(
+            picker
+                .model_options
+                .iter()
+                .filter(|model| model.eq_ignore_ascii_case("k3"))
+                .count(),
+            1,
+            "the current wire model must be appended once, case-insensitively"
+        );
+
+        config
+            .providers
+            .as_mut()
+            .expect("providers")
+            .moonshot
+            .base_url = Some(crate::config::DEFAULT_MOONSHOT_BASE_URL.to_string());
+        let generic = ProviderPickerView::new_for_model_pick_after_validation(
+            ApiProvider::Moonshot,
+            ApiProvider::Moonshot,
+            &config,
+            None,
+            "validated-key".to_string(),
+        )
+        .expect("generic Moonshot row");
+        assert!(
+            !generic
+                .model_options
+                .iter()
+                .any(|model| model.eq_ignore_ascii_case("k3")),
+            "bare K3 stays route-local and must not be added to generic Moonshot"
+        );
     }
 
     #[test]
@@ -4900,6 +5071,20 @@ mod tests {
         assert_eq!(picker.stage, Stage::List);
         assert_eq!(picker.view, ProviderListView::Catalog);
         assert_eq!(picker.visible_row_count(), picker.rows.len());
+        let mut listed = picker
+            .rows
+            .iter()
+            .map(|row| row.provider)
+            .collect::<Vec<_>>();
+        // With no configured custom providers, the catalog keeps the Custom
+        // entry so a custom endpoint can still be created from setup.
+        let mut expected = ApiProvider::all().to_vec();
+        listed.sort_by_key(|provider| provider.as_str());
+        expected.sort_by_key(|provider| provider.as_str());
+        assert_eq!(
+            listed, expected,
+            "setup must use the canonical provider universe"
+        );
     }
 
     #[test]

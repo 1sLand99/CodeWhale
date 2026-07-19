@@ -1029,7 +1029,7 @@ fn composer_keeps_legitimate_closing_bracket_digit_text() {
 
 // initial_onboarding_state tests
 // These pin the logic that decides whether the TUI shows the
-// onboarding flow (Welcome → Language → ApiKey → …) or goes
+// onboarding flow (Welcome → Language → Provider setup → …) or goes
 // straight to the chat view.  Getting this wrong either locks
 // first-run users out of the API-key prompt or nags returning
 // users whose key is already configured.
@@ -1055,15 +1055,15 @@ fn fully_configured_returning_user_skips_onboarding() {
 }
 
 #[test]
-fn returning_user_missing_api_key_goes_to_api_key_screen() {
+fn returning_user_missing_api_key_goes_to_canonical_provider_setup() {
     assert_eq!(
         initial_onboarding_state(false, true, true, false),
-        OnboardingState::ApiKey
+        OnboardingState::Provider
     );
     // workspace trust doesn't affect the api-key gate
     assert_eq!(
         initial_onboarding_state(false, true, true, true),
-        OnboardingState::ApiKey
+        OnboardingState::Provider
     );
 }
 

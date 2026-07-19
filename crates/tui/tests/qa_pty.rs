@@ -231,6 +231,138 @@ fn smoke_boot_paints_composer() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Returning users with a missing hosted-provider key must enter the normal
+/// provider picker rather than a dead-end key screen. This runs with a sealed
+/// HOME and no API key, so opening the picker is also proof that recovery does
+/// not require a live provider request. Esc must not rewrite the configured
+/// Kimi Code route.
+#[test]
+fn returning_missing_kimi_code_key_opens_picker() -> anyhow::Result<()> {
+    let _guard = qa_pty_test_lock();
+    let ws = make_sealed_workspace()?;
+    let config_path = ws.home().join(".codewhale").join("config.toml");
+    let config_before = r#"provider = "moonshot"
+
+[providers.moonshot]
+base_url = "https://api.kimi.com/coding/v1"
+model = "k3"
+"#;
+    std::fs::write(&config_path, config_before)?;
+    std::fs::write(ws.home().join(".codewhale").join(".onboarded"), "")?;
+    // This is a returning user who has already settled the independent setup
+    // checkpoint. Keep that checkpoint out of the scenario so the assertion is
+    // about missing-key recovery rather than a constitution-update modal.
+    let mut setup_state = codewhale_config::SetupState::default();
+    for step in [
+        codewhale_config::SetupStep::Language,
+        codewhale_config::SetupStep::TrustSandbox,
+        codewhale_config::SetupStep::Constitution,
+    ] {
+        setup_state.set_step(
+            step,
+            codewhale_config::StepEntry::new(
+                codewhale_config::StepStatus::Verified,
+                true,
+                "0.8.67",
+            ),
+        );
+    }
+    setup_state.set_step(
+        codewhale_config::SetupStep::ProviderModel,
+        codewhale_config::StepEntry::new(codewhale_config::StepStatus::NeedsAction, true, "0.8.67"),
+    );
+    setup_state.runtime_posture_source = codewhale_config::RuntimePostureSource::Confirmed;
+    setup_state
+        .complete_constitution_checkpoint("0.8.67", codewhale_config::ConstitutionChoice::Bundled);
+    setup_state.constitution_source = codewhale_config::ConstitutionSource::Bundled;
+    setup_state.save_to(
+        &ws.home()
+            .join(".codewhale")
+            .join(codewhale_config::setup_state::SETUP_STATE_FILE_NAME),
+    )?;
+    std::fs::create_dir_all(ws.workspace().join(".deepseek"))?;
+    std::fs::write(ws.workspace().join(".deepseek").join("trusted"), "")?;
+
+    let mut h = Harness::builder(Harness::cargo_bin("codewhale-tui"))
+        .cwd(ws.workspace())
+        .clear_env()
+        .seal_home(ws.home())
+        .env("NO_ANIMATIONS", "1")
+        .env("RUST_LOG", "warn")
+        .args([
+            "--workspace",
+            ws.workspace().to_str().expect("utf-8 workspace path"),
+            "--no-project-config",
+        ])
+        .size(40, 160)
+        .spawn()?;
+
+    h.wait_for_text("Moonshot/Kimi", BOOT_TIMEOUT)?;
+    h.wait_for_text("api.kimi.com", BOOT_TIMEOUT)?;
+    h.wait_for_text("does not import Kimi CLI credentials", BOOT_TIMEOUT)?;
+
+    // The picker rendered without mutating the configured route.
+    assert_eq!(
+        std::fs::read_to_string(&config_path)?,
+        config_before,
+        "opening recovery must leave the configured route unchanged"
+    );
+
+    let _ = h.shutdown();
+    Ok(())
+}
+
+/// Esc from missing-key recovery must return a returning user to the offline
+/// composer without mutating the saved route. The state transition is covered
+/// by `back_from_provider_onboarding` unit behavior; this end-to-end leg is
+/// ignored because the qa PTY harness exhibits input starvation during the
+/// recovery boot window: instrumentation shows `run_event_loop` entered and
+/// the terminal input pump spawned, yet `event::poll` never surfaces any byte
+/// written to the PTY in this scenario (the same harness delivers input to
+/// the composer/trust flows). Needs a dedicated investigation of boot-time
+/// terminal queries vs. the non-responding test PTY.
+#[test]
+#[ignore = "qa PTY input starvation during recovery boot; see doc comment"]
+fn returning_missing_kimi_code_key_esc_preserves_route() -> anyhow::Result<()> {
+    let _guard = qa_pty_test_lock();
+    let ws = make_sealed_workspace()?;
+    let config_path = ws.home().join(".codewhale").join("config.toml");
+    let config_before = r#"provider = "moonshot"
+
+[providers.moonshot]
+base_url = "https://api.kimi.com/coding/v1"
+model = "k3"
+"#;
+    std::fs::write(&config_path, config_before)?;
+    std::fs::write(ws.home().join(".codewhale").join(".onboarded"), "")?;
+
+    let mut h = Harness::builder(Harness::cargo_bin("codewhale-tui"))
+        .cwd(ws.workspace())
+        .clear_env()
+        .seal_home(ws.home())
+        .env("NO_ANIMATIONS", "1")
+        .env("RUST_LOG", "warn")
+        .args([
+            "--workspace",
+            ws.workspace().to_str().expect("utf-8 workspace path"),
+            "--no-project-config",
+        ])
+        .size(40, 160)
+        .spawn()?;
+
+    h.wait_for_text("api.kimi.com", BOOT_TIMEOUT)?;
+    h.send(keys::key::esc())?;
+    h.wait_for_text(COMPOSER_READY_TEXT, KEY_TIMEOUT)?;
+    assert_eq!(
+        std::fs::read_to_string(&config_path)?,
+        config_before,
+        "Esc from recovery must leave the configured route unchanged"
+    );
+
+    let _ = h.shutdown();
+    Ok(())
+}
+
 /// Regression for v0.8.61 startup: the dispatcher-side config writer produced
 /// camelCase keys plus `[features.enabled]`, while the TUI config reader only
 /// accepted snake_case and flat `[features]` booleans. That failed before the

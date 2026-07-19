@@ -770,8 +770,24 @@ fn back_from_api_key_onboarding(app: &mut App) {
 }
 
 fn back_from_provider_onboarding(app: &mut App) {
+    if app.onboarding_missing_key_recovery {
+        // A returning user declined missing-key recovery: leave onboarding
+        // for the offline composer without mutating the saved route.
+        app.onboarding = OnboardingState::None;
+        app.status_message = None;
+        app.needs_redraw = true;
+        return;
+    }
     app.onboarding = OnboardingState::Language;
     app.status_message = None;
+}
+
+fn complete_provider_picker_onboarding(app: &mut App, provider: ApiProvider) {
+    app.onboarding_provider = provider;
+    app.onboarding_needs_api_key = false;
+    app.api_key_env_only = false;
+    app.offline_mode = false;
+    onboarding::advance_onboarding_after_api_key(app);
 }
 
 async fn submit_keyless_onboarding_provider(
@@ -1180,6 +1196,13 @@ pub async fn run_tui(
             persistence_actor::init_actor(handle.clone());
             (handle, task)
         });
+
+    // Returning users with a missing key begin directly in the same canonical
+    // provider setup picker as first-run. Focus their persisted route so
+    // recovery does not silently replace a Kimi Code bare-K3 endpoint.
+    if app.onboarding == OnboardingState::Provider {
+        open_onboarding_provider_picker(&mut app, config, &engine_handle, true).await;
+    }
 
     submit_initial_input_if_ready(&mut app, config, &engine_handle).await?;
 
@@ -4507,6 +4530,41 @@ async fn run_event_loop(
                 continue;
             }
 
+            // Provider onboarding is a real ProviderPickerView, not a
+            // parallel ten-provider key handler. Route its keys before the
+            // legacy onboarding switch so List/Key/Model/Confirm retain the
+            // same behavior as `/provider` and `/setup`.
+            if app.onboarding == OnboardingState::Provider
+                && app.view_stack.top_kind() == Some(ModalKind::ProviderPicker)
+            {
+                if key.code == KeyCode::Esc {
+                    // Onboarding has no committed provider choice yet. A
+                    // single Escape always abandons the whole setup modal and
+                    // returns to Language; do not let an inner key/model
+                    // stage mutate config or mark onboarding complete.
+                    app.view_stack.pop();
+                    back_from_provider_onboarding(app);
+                    app.needs_redraw = true;
+                    continue;
+                }
+                let events = app.view_stack.handle_key(key);
+                app.needs_redraw = true;
+                if handle_view_events_boxed(
+                    terminal,
+                    app,
+                    config,
+                    &task_manager,
+                    &mut engine_handle,
+                    &mut web_config_session,
+                    events,
+                )
+                .await?
+                {
+                    return Ok(());
+                }
+                continue;
+            }
+
             // Handle onboarding flow
             if app.onboarding != OnboardingState::None {
                 match key.code {
@@ -4545,6 +4603,13 @@ async fn run_event_loop(
                                         Some(2_500),
                                     );
                                     onboarding::advance_onboarding_after_language(app);
+                                    open_onboarding_provider_picker(
+                                        app,
+                                        config,
+                                        &engine_handle,
+                                        false,
+                                    )
+                                    .await;
                                 }
                                 Err(err) => {
                                     app.status_message =
@@ -4552,22 +4617,6 @@ async fn run_event_loop(
                                 }
                             }
                         }
-                    }
-                    KeyCode::Char(c)
-                        if app.onboarding == OnboardingState::Provider && c.is_ascii_digit() =>
-                    {
-                        if let Some((_, provider)) = onboarding::ONBOARDING_PROVIDER_OPTIONS
-                            .iter()
-                            .find(|(hotkey, _)| *hotkey == c)
-                        {
-                            onboarding::select_onboarding_provider(app, *provider);
-                        }
-                    }
-                    KeyCode::Up if app.onboarding == OnboardingState::Provider => {
-                        onboarding::move_onboarding_provider_selection(app, -1);
-                    }
-                    KeyCode::Down if app.onboarding == OnboardingState::Provider => {
-                        onboarding::move_onboarding_provider_selection(app, 1);
                     }
                     KeyCode::Enter => match app.onboarding {
                         OnboardingState::Welcome => {
@@ -4577,9 +4626,12 @@ async fn run_event_loop(
                             // Enter without a digit pick keeps the existing
                             // setting (which defaults to "auto").
                             onboarding::advance_onboarding_after_language(app);
+                            open_onboarding_provider_picker(app, config, &engine_handle, false)
+                                .await;
                         }
                         OnboardingState::Provider => {
-                            onboarding::advance_onboarding_from_provider(app);
+                            open_onboarding_provider_picker(app, config, &engine_handle, false)
+                                .await;
                         }
                         OnboardingState::ApiKey => {
                             let key = app.api_key_input.trim().to_string();
@@ -7150,7 +7202,7 @@ pub(crate) fn apply_engine_error_to_app(
     {
         app.offline_mode = true;
         app.onboarding_needs_api_key = true;
-        app.onboarding = OnboardingState::ApiKey;
+        app.onboarding = OnboardingState::Provider;
         app.status_message = Some(
             "The API key from DEEPSEEK_API_KEY was rejected. Paste a valid key to save it to ~/.codewhale/config.toml, or update the environment variable.".to_string(),
         );
@@ -9041,6 +9093,35 @@ async fn query_provider_runtime_status(
     .and_then(|result| result.ok())
 }
 
+/// Open the one canonical provider setup surface for onboarding.  Fresh
+/// onboarding starts at the full catalog; missing-key recovery focuses the
+/// current route so an exact Kimi Code K3 configuration can expose its plan
+/// route before a secret is entered.
+async fn open_onboarding_provider_picker(
+    app: &mut App,
+    config: &Config,
+    engine_handle: &EngineHandle,
+    focus_current_route: bool,
+) {
+    if app.onboarding != OnboardingState::Provider
+        || app.view_stack.top_kind() == Some(ModalKind::ProviderPicker)
+    {
+        return;
+    }
+    let runtime_status = query_provider_runtime_status(engine_handle).await;
+    app.view_stack.push(
+        crate::tui::provider_picker::ProviderPickerView::new_for_setup(
+            app.api_provider,
+            focus_current_route.then_some(app.onboarding_provider),
+            config,
+            runtime_status,
+        )
+        .with_locale(app.ui_locale)
+        .with_provider_health(&app.provider_health),
+    );
+    app.needs_redraw = true;
+}
+
 fn open_text_pager(app: &mut App, title: String, content: String) {
     let width = app
         .viewport
@@ -10893,6 +10974,13 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
     // Show onboarding screen if needed
     if app.onboarding != OnboardingState::None {
         onboarding::render(f, size, app);
+        // The provider step hosts the canonical setup picker as a modal on
+        // top of the onboarding backdrop; without this the pushed view is
+        // invisible and recovery appears to hang on an empty legacy screen.
+        if app.onboarding == OnboardingState::Provider && !app.view_stack.is_empty() {
+            let buf = f.buffer_mut();
+            app.view_stack.render(size, buf);
+        }
         return;
     }
 
@@ -12297,13 +12385,20 @@ async fn handle_view_events(
                 catalog_view,
                 selected_provider_id,
             } => {
-                // A picker preview must never become route authority. Restore
-                // Config from the committed App identity on every dismissal.
-                sync_config_provider_from_app(config, app);
+                let onboarding_provider_picker = app.onboarding == OnboardingState::Provider;
+                // A picker preview must never become route authority. During
+                // onboarding Esc is deliberately non-mutating: it returns to
+                // Language without touching config or the onboarding marker.
+                if !onboarding_provider_picker {
+                    sync_config_provider_from_app(config, app);
+                }
                 app.provider_picker_memory = Some(crate::tui::app::ProviderPickerMemory {
                     catalog_view,
                     selected_provider_id,
                 });
+                if onboarding_provider_picker {
+                    back_from_provider_onboarding(app);
+                }
             }
             ViewEvent::ProviderPickerApplied {
                 provider,
@@ -12313,7 +12408,11 @@ async fn handle_view_events(
                     set_active_custom_provider_in_memory(config, &provider_id);
                 }
                 let model_override = provider_picker_model_override(app, config, provider);
-                switch_provider(app, engine_handle, config, provider, model_override).await;
+                let switched =
+                    switch_provider(app, engine_handle, config, provider, model_override).await;
+                if switched && app.onboarding == OnboardingState::Provider {
+                    complete_provider_picker_onboarding(app, provider);
+                }
                 refresh_config_view_if_open(app, "provider");
             }
             ViewEvent::ProviderPickerApiKeySubmitted {
@@ -12334,7 +12433,7 @@ async fn handle_view_events(
             } => {
                 let identity = picker_provider_identity(config, provider, provider_id.as_deref())
                     .map_err(anyhow::Error::msg)?;
-                apply_provider_picker_setup_confirmed(
+                let completed = apply_provider_picker_setup_confirmed(
                     app,
                     engine_handle,
                     config,
@@ -12343,6 +12442,9 @@ async fn handle_view_events(
                     model,
                 )
                 .await;
+                if completed && app.onboarding == OnboardingState::Provider {
+                    complete_provider_picker_onboarding(app, provider);
+                }
                 refresh_config_view_if_open(app, "provider");
             }
             ViewEvent::ProviderPickerCustomProviderSubmitted {
@@ -13246,7 +13348,7 @@ async fn apply_provider_picker_setup_confirmed(
     identity: crate::config::ProviderIdentity,
     api_key: String,
     model: String,
-) {
+) -> bool {
     use crate::config::{save_api_key_for_identity, save_provider_model_for_identity};
 
     let provider = identity.provider;
@@ -13259,7 +13361,7 @@ async fn apply_provider_picker_setup_confirmed(
                 provider.as_str()
             ),
         });
-        return;
+        return false;
     }
 
     // Persist key first via the existing comment-preserving path, then pin the
@@ -13291,14 +13393,14 @@ async fn apply_provider_picker_setup_confirmed(
                     provider.as_str()
                 ),
             });
-            return;
+            return false;
         }
     }
 
     config.provider = Some(identity.key);
     mirror_saved_api_key_in_config(config, provider, api_key);
     mirror_saved_model_in_config(config, provider, model.clone());
-    switch_provider(app, engine_handle, config, provider, Some(model)).await;
+    switch_provider(app, engine_handle, config, provider, Some(model)).await
 }
 
 fn mirror_saved_model_in_config(config: &mut Config, provider: ApiProvider, model: String) {

@@ -14667,7 +14667,7 @@ fn non_recoverable_engine_error_enters_offline_mode() {
 }
 
 #[test]
-fn env_only_auth_failure_reopens_api_key_onboarding() {
+fn env_only_auth_failure_reopens_provider_onboarding() {
     use crate::error_taxonomy::ErrorEnvelope;
     let mut app = create_test_app();
     app.api_key_env_only = true;
@@ -14682,8 +14682,8 @@ fn env_only_auth_failure_reopens_api_key_onboarding() {
     assert!(app.offline_mode);
     assert_eq!(
         app.onboarding,
-        crate::tui::app::OnboardingState::ApiKey,
-        "env-only auth failures should prompt for a saved config key"
+        crate::tui::app::OnboardingState::Provider,
+        "env-only auth failures reopen the canonical provider setup picker"
     );
     assert!(app.onboarding_needs_api_key);
     assert!(app.turn_error_posted, "turn_error_posted must be set");
