@@ -2733,6 +2733,9 @@ async fn run_event_loop(
                         }
                         handle_tool_call_started(app, &id, &name, &input);
                     }
+                    // Liveness only. `record_turn_activity` above consumes the
+                    // pulse; it must not alter transcript or status copy.
+                    EngineEvent::ToolCallHeartbeat => {}
                     EngineEvent::ToolCallComplete { id, name, result } => {
                         if name == "update_plan" {
                             app.plan_tool_used_in_turn = true;
@@ -13536,6 +13539,7 @@ fn suppress_engine_event_after_local_cancel(event: &EngineEvent) -> bool {
             | EngineEvent::ThinkingDelta { .. }
             | EngineEvent::ThinkingComplete { .. }
             | EngineEvent::ToolCallStarted { .. }
+            | EngineEvent::ToolCallHeartbeat
             | EngineEvent::ToolCallComplete { .. }
             | EngineEvent::ApprovalRequired { .. }
             | EngineEvent::UserInputRequired { .. }
@@ -13554,6 +13558,7 @@ fn ignore_stale_stream_event_while_idle(event: &EngineEvent) -> bool {
             | EngineEvent::ThinkingDelta { .. }
             | EngineEvent::ThinkingComplete { .. }
             | EngineEvent::ToolCallStarted { .. }
+            | EngineEvent::ToolCallHeartbeat
             | EngineEvent::ToolCallComplete { .. }
             | EngineEvent::ApprovalRequired { .. }
             | EngineEvent::UserInputRequired { .. }

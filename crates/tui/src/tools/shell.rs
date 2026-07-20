@@ -3091,6 +3091,9 @@ pub struct ShellWaitTool {
     name: &'static str,
 }
 
+/// Maximum deliberate dependency-barrier wait accepted by `exec_shell_wait`.
+pub(crate) const EXEC_SHELL_WAIT_MAX_TIMEOUT_MS: u64 = 600_000;
+
 impl ShellWaitTool {
     pub const fn new(name: &'static str) -> Self {
         Self { name }
@@ -3207,7 +3210,7 @@ async fn wait_for_shell_delta_cancellable(
     task_id: &str,
     timeout_ms: u64,
 ) -> Result<(ShellDeltaResult, bool), ToolError> {
-    let timeout_ms = timeout_ms.clamp(1000, 600_000);
+    let timeout_ms = timeout_ms.clamp(1000, EXEC_SHELL_WAIT_MAX_TIMEOUT_MS);
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     let mut stdout_accum = String::new();
     let mut stderr_accum = String::new();
