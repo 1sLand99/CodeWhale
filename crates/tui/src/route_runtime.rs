@@ -608,8 +608,8 @@ mod tests {
         // Bare `k3` membership context is plan-tier dependent (256K on lower
         // tiers, up to 1M on higher ones), so the static route baseline stays
         // the safe floor. Higher entitlements come from an explicit provider
-        // `context_window` override or the documented `k3[1m]` id — never
-        // from assuming the top tier, and never from the 128K legacy default.
+        // `context_window` override — never from assuming the top tier, and
+        // never from the 128K legacy default.
         let candidate = resolve_route_candidate(
             ApiProvider::Moonshot,
             Some("k3"),
@@ -745,6 +745,16 @@ mod tests {
         )
         .expect("Kimi Code K3 route");
 
+        assert_eq!(
+            candidate.wire_model_id().as_str(),
+            crate::config::KIMI_CODE_K3_MODEL,
+            "the 1M entitlement changes limits, never the provider wire id"
+        );
+        assert!(crate::config::is_exact_kimi_code_k3_route(
+            ApiProvider::Moonshot,
+            &candidate.endpoint().base_url,
+            candidate.wire_model_id().as_str(),
+        ));
         assert_eq!(candidate.limits().context_tokens, Some(1_048_576));
     }
 

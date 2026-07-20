@@ -6055,19 +6055,66 @@ fn provider_capability_report(config: &Config) -> serde_json::Value {
     use serde_json::json;
 
     let provider = config.api_provider();
-    let model = config.default_model();
-
-    let cap = crate::config::provider_capability(provider, &model);
+    let configured_model = config.default_model();
+    let route =
+        crate::route_runtime::resolve_runtime_route(config, provider, Some(&configured_model)).ok();
+    let resolved_model = route
+        .as_ref()
+        .map_or(configured_model.as_str(), |route| route.model.as_str());
+    let cap = crate::config::provider_capability(provider, resolved_model);
+    let route_profile = route.as_ref().map(|route| {
+        crate::model_profile::resolved_capability_profile_for_route(
+            provider,
+            resolved_model,
+            route.candidate.capabilities(),
+            route.candidate.limits(),
+        )
+    });
+    let context_window = route
+        .as_ref()
+        .map_or(cap.context_window, |route| route.context_window.tokens);
+    let context_window_source = route.as_ref().map_or(
+        crate::route_runtime::ContextWindowSource::Fallback.label(),
+        |route| route.context_window.source.label(),
+    );
+    let max_output = route_profile
+        .as_ref()
+        .and_then(|profile| profile.max_output)
+        .unwrap_or(cap.max_output);
+    let is_exact_kimi_code_k3 = route.as_ref().is_some_and(|route| {
+        crate::config::is_exact_kimi_code_k3_route(
+            provider,
+            &route.candidate.endpoint().base_url,
+            route.candidate.wire_model_id().as_str(),
+        )
+    });
+    let thinking_supported = is_exact_kimi_code_k3
+        || route_profile
+            .as_ref()
+            .map_or(cap.thinking_supported, |profile| {
+                profile.supports_reasoning()
+            });
+    let cache_telemetry_supported = route_profile
+        .as_ref()
+        .map_or(cap.cache_telemetry_supported, |profile| {
+            profile.prompt_caching.is_supported()
+        });
+    let request_payload_mode = route_profile
+        .as_ref()
+        .map_or(cap.request_payload_mode, |profile| {
+            profile.request_payload_mode
+        });
     let alias_deprecation = config.active_deepseek_alias_deprecation();
 
     json!({
         "resolved_provider": config.provider_identity_for(provider),
-        "resolved_model": cap.resolved_model,
-        "context_window": cap.context_window,
-        "max_output": cap.max_output,
-        "thinking_supported": cap.thinking_supported,
-        "cache_telemetry_supported": cap.cache_telemetry_supported,
-        "request_payload_mode": serde_json::to_value(cap.request_payload_mode).unwrap_or_default(),
+        "resolved_model": resolved_model,
+        "context_window": context_window,
+        "context_window_source": context_window_source,
+        "max_output": max_output,
+        "thinking_supported": thinking_supported,
+        "cache_telemetry_supported": cache_telemetry_supported,
+        "request_payload_mode": serde_json::to_value(request_payload_mode).unwrap_or_default(),
         "alias_deprecation": alias_deprecation,
     })
 }
@@ -12188,6 +12235,89 @@ mod doctor_endpoint_tests {
             "static Kimi Code safe floor"
         );
         assert!(!serialized.contains("kimi-plan-secret"));
+    }
+
+    #[test]
+    fn provider_capability_report_uses_exact_kimi_code_route_facts() {
+        let config = Config {
+            provider: Some("moonshot".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                moonshot: crate::config::ProviderConfig {
+                    api_key: Some("kimi-plan-secret".to_string()),
+                    base_url: Some(crate::config::DEFAULT_KIMI_CODE_BASE_URL.to_string()),
+                    model: Some(crate::config::KIMI_CODE_K3_MODEL.to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let report = provider_capability_report(&config);
+
+        assert_eq!(report["resolved_model"], crate::config::KIMI_CODE_K3_MODEL);
+        assert_eq!(report["context_window"], 262_144);
+        assert_eq!(
+            report["context_window_source"],
+            "static Kimi Code safe floor"
+        );
+        assert_eq!(report["max_output"], 131_072);
+        assert_eq!(report["thinking_supported"], true);
+    }
+
+    #[test]
+    fn provider_capability_report_honors_kimi_code_context_override() {
+        let config = Config {
+            provider: Some("moonshot".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                moonshot: crate::config::ProviderConfig {
+                    api_key: Some("kimi-plan-secret".to_string()),
+                    base_url: Some(crate::config::DEFAULT_KIMI_CODE_BASE_URL.to_string()),
+                    model: Some(crate::config::KIMI_CODE_K3_MODEL.to_string()),
+                    context_window: Some(1_048_576),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let report = provider_capability_report(&config);
+
+        assert_eq!(
+            report["resolved_model"],
+            crate::config::KIMI_CODE_K3_MODEL,
+            "the configured window must preserve Kimi Code's bare wire id"
+        );
+        assert_eq!(report["context_window"], 1_048_576);
+        assert_eq!(report["context_window_source"], "configured");
+        assert_eq!(report["max_output"], 131_072);
+        assert_eq!(report["thinking_supported"], true);
+    }
+
+    #[test]
+    fn provider_capability_report_keeps_direct_moonshot_k3_catalog_facts() {
+        let config = Config {
+            provider: Some("moonshot".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                moonshot: crate::config::ProviderConfig {
+                    api_key: Some("moonshot-secret".to_string()),
+                    base_url: Some(crate::config::DEFAULT_MOONSHOT_BASE_URL.to_string()),
+                    model: Some("kimi-k3".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let report = provider_capability_report(&config);
+
+        assert_eq!(report["resolved_model"], "kimi-k3");
+        assert_eq!(report["context_window"], 1_048_576);
+        assert_eq!(report["context_window_source"], "catalog");
+        assert_eq!(report["max_output"], 131_072);
+        assert_eq!(report["thinking_supported"], true);
     }
 
     #[test]

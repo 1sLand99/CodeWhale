@@ -8,18 +8,16 @@ pub const LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS: u32 = 128_000;
 pub const DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS: u32 = 1_000_000;
 /// Conservative Kimi Code K3 context baseline. The membership route's real
 /// context is plan-tier dependent (verified 2026-07-20 from
-/// https://www.kimi.com/code/docs/en/kimi-code/models): Moderato/Starter get
-/// 256K, Allegretto/Explorer and above get up to 1M, and the documented
-/// `k3[1m]` id forces the 1M contract. Bare `k3` therefore keeps this safe
-/// floor everywhere; higher plan entitlements must come from an explicit
-/// provider `context_window` configuration, fresh provider facts, or the
-/// explicit `k3[1m]` id.
+/// https://www.kimi.com/code/docs/en/kimi-code/models): Moderato gets 256K,
+/// while Allegretto and above get up to 1M. Bare `k3` therefore keeps this
+/// safe floor everywhere; higher plan entitlements must come from an explicit
+/// provider `context_window` configuration or fresh provider facts while
+/// preserving the `k3` wire id.
 pub const KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS: u32 = 262_144;
-/// Kimi K3 context window on the open platform (`kimi-k3` pay-as-you-go and
-/// the explicit Kimi Code `k3[1m]` id). Verified 2026-07-20 from
-/// https://platform.kimi.ai/docs/pricing/chat-k3 (1,048,576 tokens) and
-/// models.dev `moonshotai/kimi-k3`. Max output is a separate fact below and
-/// must never be conflated with this window.
+/// Kimi K3 context window on the open platform (`kimi-k3` pay-as-you-go).
+/// Verified 2026-07-20 from https://platform.kimi.ai/docs/pricing/chat-k3
+/// (1,048,576 tokens) and models.dev `moonshotai/kimi-k3`. Max output is a
+/// separate fact below and must never be conflated with this window.
 pub const KIMI_K3_CONTEXT_WINDOW_TOKENS: u32 = 1_048_576;
 /// Documented K3 default max generation tokens (`max_completion_tokens`
 /// defaults to 131,072 per the Kimi K3 quickstart). Never use this as a
@@ -318,9 +316,8 @@ fn known_context_window_for_model(model_lower: &str) -> Option<u32> {
         | "tencent/hy3-preview" => Some(262_144),
         // Official Kimi K3 platform pricing (2026-07-20):
         // https://platform.kimi.ai/docs/pricing/chat-k3 — 1,048,576 context
-        // for the open platform, and `k3[1m]` is the documented Kimi Code id
-        // that forces the same 1M contract.
-        "moonshotai/kimi-k3" | "kimi-k3" | "opencode-go/kimi-k3" | "k3[1m]" => {
+        // for the open platform.
+        "moonshotai/kimi-k3" | "kimi-k3" | "opencode-go/kimi-k3" => {
             Some(KIMI_K3_CONTEXT_WINDOW_TOKENS)
         }
         // Bare `k3` is the Kimi Code membership route id whose context is
@@ -399,7 +396,7 @@ pub fn max_output_tokens_for_model(model: &str) -> Option<u32> {
         // Kimi K3's documented default max generation is 131K, distinct from
         // its context window. Keep them separate so UI/budget code never
         // treats max output as the context window.
-        "moonshotai/kimi-k3" | "kimi-k3" | "k3" | "opencode-go/kimi-k3" | "k3[1m]" => {
+        "moonshotai/kimi-k3" | "kimi-k3" | "k3" | "opencode-go/kimi-k3" => {
             Some(KIMI_K3_MAX_OUTPUT_TOKENS)
         }
         // Kimi K2.7 Code has a 256K context window but its documented default
@@ -1019,21 +1016,18 @@ mod tests {
 
     #[test]
     fn k3_route_ids_use_verified_contracts_not_legacy_128k() {
-        // Open-platform K3 and the documented `k3[1m]` forcing id carry the
-        // verified 1M contract.
+        // Open-platform K3 carries the verified 1M contract.
         assert_eq!(context_window_for_model("kimi-k3"), Some(1_048_576));
         assert_eq!(
             context_window_for_model("opencode-go/kimi-k3"),
             Some(1_048_576)
         );
-        assert_eq!(context_window_for_model("k3[1m]"), Some(1_048_576));
         // Bare `k3` (Kimi Code membership) is plan-tier dependent, so it
         // keeps the documented safe floor — and must never fall through to
         // the 128K legacy default.
         assert_eq!(context_window_for_model("k3"), Some(262_144));
         assert_eq!(max_output_tokens_for_model("k3"), Some(131_072));
         assert_eq!(max_output_tokens_for_model("kimi-k3"), Some(131_072));
-        assert_eq!(max_output_tokens_for_model("k3[1m]"), Some(131_072));
         // Never project max output as the context window.
         assert_ne!(
             context_window_for_model("k3"),
