@@ -6439,6 +6439,52 @@ fn turn_liveness_does_not_abort_running_tool_with_recent_heartbeat() {
 }
 
 #[test]
+fn turn_liveness_keeps_max_duration_exec_shell_wait_alive_with_heartbeat() {
+    // `exec_shell_wait` accepts exactly 600_000ms. Before the heartbeat was
+    // restored, that supported boundary raced the identically timed tool-hang
+    // watchdog and falsely made the UI idle while the engine still owned the
+    // turn.
+    const EXEC_SHELL_WAIT_MAX: Duration =
+        Duration::from_millis(crate::tools::shell::EXEC_SHELL_WAIT_MAX_TIMEOUT_MS);
+    assert_eq!(TOOL_HANG_WATCHDOG_TIMEOUT, EXEC_SHELL_WAIT_MAX);
+
+    let mut app = create_test_app();
+    let started_at = Instant::now();
+    let wait_deadline = started_at + EXEC_SHELL_WAIT_MAX;
+    let now = wait_deadline + Duration::from_secs(1);
+    app.is_loading = true;
+    app.runtime_turn_status = Some("in_progress".to_string());
+    app.runtime_turn_id = Some("max-shell-wait-turn".to_string());
+    app.turn_started_at = Some(started_at);
+    app.turn_last_activity_at = Some(started_at);
+    let mut active = ActiveCell::new();
+    active.push_tool(
+        "shell-wait",
+        HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
+            name: "exec_shell_wait".to_string(),
+            status: ToolStatus::Running,
+            input_summary: Some("task_id: shell-test, wait: true, timeout_ms: 600000".to_string()),
+            output: None,
+            prompts: None,
+            spillover_path: None,
+            output_summary: None,
+            is_diff: false,
+        })),
+    );
+    app.active_cell = Some(active);
+
+    record_turn_activity(&mut app, &EngineEvent::ToolCallHeartbeat, wait_deadline);
+    let recovered = reconcile_turn_liveness(&mut app, now, false);
+
+    assert!(!recovered);
+    assert!(app.is_loading);
+    assert_eq!(app.runtime_turn_status.as_deref(), Some("in_progress"));
+    assert_eq!(app.runtime_turn_id.as_deref(), Some("max-shell-wait-turn"));
+    assert!(app.status_message.is_none());
+    assert!(app.status_toasts.is_empty());
+}
+
+#[test]
 fn turn_liveness_respects_stream_idle_budget_for_quiet_model_waits() {
     let mut app = create_test_app();
     let started_at = Instant::now();

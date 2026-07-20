@@ -89,6 +89,13 @@ pub enum Event {
         input: Value,
     },
 
+    /// Best-effort liveness pulse while a tool future remains pending.
+    ///
+    /// This carries no output and must not change user-visible status or the
+    /// transcript. It only prevents the TUI from declaring a healthy,
+    /// deliberately long-running tool turn stale.
+    ToolCallHeartbeat,
+
     /// Tool call completed
     ToolCallComplete {
         id: String,
