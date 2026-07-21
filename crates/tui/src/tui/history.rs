@@ -422,26 +422,6 @@ impl HistoryCell {
             HistoryCell::ArchivedContext { .. } => render_archived_context(self, width, true),
         }
     }
-
-    /// Whether this cell is the continuation of a streaming assistant message.
-    #[must_use]
-    pub fn is_stream_continuation(&self) -> bool {
-        matches!(
-            self,
-            HistoryCell::Assistant {
-                streaming: true,
-                ..
-            }
-        )
-    }
-
-    #[must_use]
-    pub fn is_conversational(&self) -> bool {
-        matches!(
-            self,
-            HistoryCell::User { .. } | HistoryCell::Assistant { .. } | HistoryCell::Thinking { .. }
-        )
-    }
 }
 
 /// Convert a message into history cells for rendering.
@@ -557,6 +537,20 @@ pub enum ToolCell {
 }
 
 impl ToolCell {
+    /// Whether this tool cell projects durable Work state rather than a
+    /// transient action receipt. Transcript rhythm uses this semantic split
+    /// to keep plans, checklists, and workflows legible without teaching the
+    /// renderer about individual tool payloads.
+    #[must_use]
+    pub(crate) fn is_durable_work_receipt(&self) -> bool {
+        matches!(self, ToolCell::PlanUpdate(_))
+            || matches!(
+                self,
+                ToolCell::Generic(cell)
+                    if cell.name == "workflow" || is_checklist_tool_name(&cell.name)
+            )
+    }
+
     /// Status for cells that have a concrete lifecycle state.
     pub fn status(&self) -> Option<ToolStatus> {
         match self {

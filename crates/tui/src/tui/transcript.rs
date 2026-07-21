@@ -59,24 +59,55 @@ struct CachedCell {
     /// Whether this cell's rendered output was empty (e.g. Thinking hidden).
     /// Cached so we can skip empty cells without re-rendering.
     is_empty: bool,
-    /// Whether this cell is a stream continuation. Determines spacer rules.
-    /// Cached because `is_stream_continuation` is cheap but reading via the
-    /// cache lets us decide spacers without touching the cell.
-    is_stream_continuation: bool,
-    /// Whether this cell is conversational (User/Assistant/Thinking). Used
-    /// for spacer calculations.
-    is_conversational: bool,
-    /// Whether this cell is model reasoning. Thinking and the answer that
-    /// follows are one response unit, so they should not acquire the same
-    /// full turn gap used between user and assistant messages.
-    is_thinking: bool,
-    /// Whether this cell is assistant prose. Kept separate from the broader
-    /// conversational flag so spacer policy can join it to adjacent thinking.
-    is_assistant: bool,
-    /// Whether this cell is a System or Tool cell (affects spacer rules).
-    is_system_or_tool: bool,
+    /// Semantic role used by the transcript's explicit boundary matrix.
+    /// Keeping the role in the cache makes spacing independent of rendered
+    /// strings, theme colors, terminal depth, and animation state.
+    kind: TranscriptBlockKind,
     /// Whether this cell participates in the compact tool-card rail group.
     is_tool_groupable: bool,
+}
+
+/// Visual role of one transcript cell.
+///
+/// Approval, question, Work-panel, and composer surfaces live outside the
+/// transcript cache and already own bounded panels/edges. This enum covers
+/// every in-transcript seam, including durable Work receipts emitted by plan,
+/// checklist, and workflow tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TranscriptBlockKind {
+    User,
+    Reasoning,
+    Answer,
+    ToolAction,
+    DurableWork,
+    Notice,
+}
+
+impl TranscriptBlockKind {
+    fn for_cell(cell: &HistoryCell) -> Self {
+        match cell {
+            HistoryCell::User { .. } => Self::User,
+            HistoryCell::Thinking { .. } => Self::Reasoning,
+            HistoryCell::Assistant { .. } => Self::Answer,
+            HistoryCell::Tool(tool) if tool.is_durable_work_receipt() => Self::DurableWork,
+            HistoryCell::Tool(_) | HistoryCell::SubAgent(_) => Self::ToolAction,
+            HistoryCell::System { .. }
+            | HistoryCell::Error { .. }
+            | HistoryCell::ArchivedContext { .. } => Self::Notice,
+        }
+    }
+}
+
+/// Strength of a visible boundary. These three levels are the complete
+/// transcript spacing vocabulary: no blanket per-cell padding is added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TranscriptBoundary {
+    /// Two cells are one response/activity group.
+    Joined,
+    /// Compact transition into or out of tools, Work, or notices.
+    Activity,
+    /// A human turn boundary; always visible, even at compact density.
+    Turn,
 }
 
 /// Cache of rendered transcript lines for the current viewport.
@@ -302,18 +333,7 @@ impl TranscriptViewCache {
                 copy_separators: Arc::new(copy_separators),
                 copy_prefix_widths: Arc::new(copy_prefix_widths),
                 is_empty,
-                is_stream_continuation: cell.is_stream_continuation(),
-                is_conversational: cell.is_conversational(),
-                is_thinking: matches!(cell, HistoryCell::Thinking { .. }),
-                is_assistant: matches!(cell, HistoryCell::Assistant { .. }),
-                is_system_or_tool: matches!(
-                    cell,
-                    HistoryCell::System { .. }
-                        | HistoryCell::Error { .. }
-                        | HistoryCell::Tool(_)
-                        | HistoryCell::SubAgent(_)
-                        | HistoryCell::ArchivedContext { .. }
-                ),
+                kind: TranscriptBlockKind::for_cell(cell),
                 is_tool_groupable,
             });
             idx += 1;
@@ -327,11 +347,22 @@ impl TranscriptViewCache {
             return;
         }
 
-        let rebuild_from = if layout_changed {
+        let mut rebuild_from = if layout_changed {
             0
         } else {
             first_dirty.unwrap_or(0).saturating_sub(1)
         };
+        // A hidden cell has no line at which `flatten_from` can truncate.
+        // Walk back to the nearest visible predecessor so a cell appearing,
+        // disappearing, or changing kind cannot leave a stale spacer behind.
+        while rebuild_from > 0
+            && self
+                .per_cell
+                .get(rebuild_from)
+                .is_some_and(|cell| cell.is_empty)
+        {
+            rebuild_from -= 1;
+        }
         self.flatten_from(options.spacing, rebuild_from);
     }
 
@@ -412,7 +443,7 @@ impl TranscriptViewCache {
                 });
             }
 
-            if let Some(next) = self.per_cell.get(cell_index + 1) {
+            if let Some(next) = next_visible_cell(&self.per_cell, cell_index) {
                 let spacer_rows = spacer_rows_between(cached, next, spacing);
                 for _ in 0..spacer_rows {
                     self.lines.push(Line::from(""));
@@ -481,44 +512,73 @@ fn spacer_rows_between(
     next: &CachedCell,
     spacing: TranscriptSpacing,
 ) -> usize {
-    if current.is_stream_continuation {
-        return 0;
+    spacer_rows_for_boundary(
+        transcript_boundary(
+            current.kind,
+            next.kind,
+            current.is_tool_groupable && next.is_tool_groupable,
+        ),
+        spacing,
+    )
+}
+
+fn transcript_boundary(
+    current: TranscriptBlockKind,
+    next: TranscriptBlockKind,
+    adjacent_tool_cells: bool,
+) -> TranscriptBoundary {
+    if adjacent_tool_cells {
+        return TranscriptBoundary::Joined;
     }
 
-    if current.is_tool_groupable && next.is_tool_groupable {
-        return 0;
+    // A user block is the only unambiguous turn delimiter available to the
+    // renderer. Keep it distinct from direct tool execution too: models may
+    // legitimately move from a prompt straight into a tool without first
+    // emitting answer prose.
+    if current == TranscriptBlockKind::User || next == TranscriptBlockKind::User {
+        return TranscriptBoundary::Turn;
     }
 
-    // Reasoning and answer prose are two states of one model response, not
-    // separate turns. Keep that bundle visually continuous; whitespace then
-    // marks the actual handoff between the user and Codewhale and avoids the
-    // stacked-card rhythm seen at compact release sizes.
-    if (current.is_thinking && (next.is_thinking || next.is_assistant))
-        || (current.is_assistant && next.is_thinking)
-    {
-        return 0;
+    // Reasoning and answer prose are phases of one model response. Joining
+    // them also keeps the row budget stable when streaming reasoning settles
+    // into the final answer.
+    if matches!(
+        (current, next),
+        (
+            TranscriptBlockKind::Reasoning | TranscriptBlockKind::Answer,
+            TranscriptBlockKind::Reasoning | TranscriptBlockKind::Answer
+        )
+    ) {
+        return TranscriptBoundary::Joined;
     }
 
-    let conversational_gap = match spacing {
-        // Compact still separates distinct people/turn blocks. It removes
-        // secondary chrome and tool gaps, not the boundary between a user and
-        // an assistant; without this floor dense 89-column transcripts read
-        // as one uninterrupted paragraph.
-        TranscriptSpacing::Compact | TranscriptSpacing::Comfortable => 1,
-        TranscriptSpacing::Spacious => 2,
-    };
-    let secondary_gap = match spacing {
-        TranscriptSpacing::Compact => 0,
-        TranscriptSpacing::Comfortable | TranscriptSpacing::Spacious => 1,
-    };
+    TranscriptBoundary::Activity
+}
 
-    if current.is_conversational && next.is_conversational {
-        conversational_gap
-    } else if current.is_system_or_tool || next.is_system_or_tool {
-        secondary_gap
-    } else {
-        0
+const fn spacer_rows_for_boundary(
+    boundary: TranscriptBoundary,
+    spacing: TranscriptSpacing,
+) -> usize {
+    match (boundary, spacing) {
+        (TranscriptBoundary::Joined, _) => 0,
+        (TranscriptBoundary::Activity, TranscriptSpacing::Compact) => 0,
+        (TranscriptBoundary::Activity, _) => 1,
+        (TranscriptBoundary::Turn, TranscriptSpacing::Compact | TranscriptSpacing::Comfortable) => {
+            1
+        }
+        (TranscriptBoundary::Turn, TranscriptSpacing::Spacious) => 2,
     }
+}
+
+fn previous_visible_cell(cells: &[CachedCell], cell_index: usize) -> Option<&CachedCell> {
+    cells[..cell_index].iter().rev().find(|cell| !cell.is_empty)
+}
+
+fn next_visible_cell(cells: &[CachedCell], cell_index: usize) -> Option<&CachedCell> {
+    cells
+        .get(cell_index + 1..)?
+        .iter()
+        .find(|cell| !cell.is_empty)
 }
 
 fn tool_group_rail(
@@ -532,13 +592,10 @@ fn tool_group_rail(
         return None;
     }
 
-    let previous_is_tool = cell_index
-        .checked_sub(1)
-        .and_then(|idx| cells.get(idx))
-        .is_some_and(|cell| cell.is_tool_groupable && !cell.is_empty);
-    let next_is_tool = cells
-        .get(cell_index + 1)
-        .is_some_and(|cell| cell.is_tool_groupable && !cell.is_empty);
+    let previous_is_tool =
+        previous_visible_cell(cells, cell_index).is_some_and(|cell| cell.is_tool_groupable);
+    let next_is_tool =
+        next_visible_cell(cells, cell_index).is_some_and(|cell| cell.is_tool_groupable);
     let first_line_in_group = !previous_is_tool && line_in_cell == 0;
     let last_line_in_group = !next_is_tool && line_in_cell + 1 == rendered_line_count;
 
@@ -712,7 +769,10 @@ fn truncate_spans_to_width(spans: Vec<Span<'static>>, max_width: usize) -> Vec<S
 mod tests {
     use super::*;
     use crate::palette;
-    use crate::tui::history::{ExecCell, ExecSource, HistoryCell, ToolCell, ToolStatus};
+    use crate::tools::plan::PlanSnapshot;
+    use crate::tui::history::{
+        ExecCell, ExecSource, HistoryCell, PlanUpdateCell, ToolCell, ToolStatus,
+    };
 
     fn plain_lines(cache: &TranscriptViewCache) -> Vec<String> {
         cache
@@ -755,6 +815,30 @@ mod tests {
             interaction: None,
             output_summary: None,
         }))
+    }
+
+    fn durable_work_cell() -> HistoryCell {
+        HistoryCell::Tool(ToolCell::PlanUpdate(PlanUpdateCell {
+            snapshot: PlanSnapshot::default(),
+            status: ToolStatus::Running,
+        }))
+    }
+
+    fn spacer_rows_after_cell(cache: &TranscriptViewCache, target_cell: usize) -> usize {
+        let mut saw_target = false;
+        let mut spacer_rows = 0;
+        for meta in cache.line_meta() {
+            match meta {
+                TranscriptLineMeta::CellLine { cell_index, .. } if *cell_index == target_cell => {
+                    saw_target = true;
+                    spacer_rows = 0;
+                }
+                TranscriptLineMeta::Spacer if saw_target => spacer_rows += 1,
+                TranscriptLineMeta::CellLine { .. } if saw_target => break,
+                TranscriptLineMeta::Spacer | TranscriptLineMeta::CellLine { .. } => {}
+            }
+        }
+        spacer_rows
     }
 
     #[test]
@@ -1104,6 +1188,73 @@ mod tests {
     }
 
     #[test]
+    fn semantic_boundary_matrix_has_three_deliberate_rhythm_levels() {
+        use TranscriptBlockKind::{Answer, DurableWork, Notice, Reasoning, ToolAction, User};
+        use TranscriptBoundary::{Activity, Joined, Turn};
+
+        let cases = [
+            (User, Answer, false, Turn),
+            (User, ToolAction, false, Turn),
+            (DurableWork, User, false, Turn),
+            (Reasoning, Answer, false, Joined),
+            (Answer, Reasoning, false, Joined),
+            (Answer, Answer, false, Joined),
+            (Answer, ToolAction, false, Activity),
+            (ToolAction, Reasoning, false, Activity),
+            (Notice, DurableWork, false, Activity),
+            (ToolAction, DurableWork, true, Joined),
+        ];
+
+        for (current, next, grouped_tools, expected) in cases {
+            assert_eq!(
+                transcript_boundary(current, next, grouped_tools),
+                expected,
+                "{current:?} -> {next:?}"
+            );
+        }
+
+        assert_eq!(
+            spacer_rows_for_boundary(Turn, TranscriptSpacing::Compact),
+            1
+        );
+        assert_eq!(
+            spacer_rows_for_boundary(Turn, TranscriptSpacing::Comfortable),
+            1
+        );
+        assert_eq!(
+            spacer_rows_for_boundary(Turn, TranscriptSpacing::Spacious),
+            2
+        );
+        assert_eq!(
+            spacer_rows_for_boundary(Activity, TranscriptSpacing::Compact),
+            0
+        );
+        assert_eq!(
+            spacer_rows_for_boundary(Activity, TranscriptSpacing::Comfortable),
+            1
+        );
+        assert_eq!(
+            spacer_rows_for_boundary(Activity, TranscriptSpacing::Spacious),
+            1
+        );
+    }
+
+    #[test]
+    fn durable_work_tools_have_an_explicit_semantic_role() {
+        let plan = durable_work_cell();
+        let tool = exec_tool_cell("cargo test --locked");
+
+        assert_eq!(
+            TranscriptBlockKind::for_cell(&plan),
+            TranscriptBlockKind::DurableWork
+        );
+        assert_eq!(
+            TranscriptBlockKind::for_cell(&tool),
+            TranscriptBlockKind::ToolAction
+        );
+    }
+
+    #[test]
     fn compact_spacing_keeps_conversation_blocks_separate() {
         let cells = vec![
             user_cell("Please verify the release."),
@@ -1123,6 +1274,27 @@ mod tests {
             lines.iter().any(String::is_empty),
             "compact density still needs one user/assistant boundary: {lines:?}"
         );
+    }
+
+    #[test]
+    fn compact_spacing_keeps_direct_user_tool_turns_separate() {
+        let cells = vec![
+            user_cell("Inspect the repository."),
+            exec_tool_cell("git status --short"),
+            user_cell("Now summarize the result."),
+        ];
+        let revisions = vec![1u64, 1, 1];
+        let options = TranscriptRenderOptions {
+            spacing: TranscriptSpacing::Compact,
+            low_motion: true,
+            ..TranscriptRenderOptions::default()
+        };
+        let mut cache = TranscriptViewCache::new();
+
+        cache.ensure(&cells, &revisions, 80, options);
+
+        assert_eq!(spacer_rows_after_cell(&cache, 0), 1);
+        assert_eq!(spacer_rows_after_cell(&cache, 1), 1);
     }
 
     #[test]
@@ -1149,6 +1321,168 @@ mod tests {
             !lines.iter().any(String::is_empty),
             "reasoning and its answer should read as one response block: {lines:?}"
         );
+    }
+
+    #[test]
+    fn hidden_reasoning_keeps_visible_rhythm_without_phantom_tail_rows() {
+        let cells = vec![
+            user_cell("Verify the release."),
+            HistoryCell::Thinking {
+                content: "Check the exact receipts.".to_string(),
+                streaming: false,
+                duration_secs: Some(0.4),
+            },
+            assistant_cell("The receipts are green.", false),
+        ];
+        let revisions = vec![1u64, 1, 1];
+        let hidden = TranscriptRenderOptions {
+            show_thinking: false,
+            low_motion: true,
+            ..TranscriptRenderOptions::default()
+        };
+        let mut cache = TranscriptViewCache::new();
+
+        cache.ensure(&cells, &revisions, 80, hidden);
+        let hidden_lines = plain_lines(&cache);
+        assert_eq!(spacer_rows_after_cell(&cache, 0), 1);
+        assert!(
+            hidden_lines.last().is_some_and(|line| !line.is_empty()),
+            "hidden cells must not leave a trailing blank row: {hidden_lines:?}"
+        );
+
+        let visible = TranscriptRenderOptions {
+            show_thinking: true,
+            ..hidden
+        };
+        cache.ensure(&cells, &revisions, 80, visible);
+        cache.ensure(&cells, &revisions, 80, hidden);
+        assert_eq!(plain_lines(&cache), hidden_lines);
+
+        let trailing_hidden = &cells[..2];
+        let mut tail_cache = TranscriptViewCache::new();
+        tail_cache.ensure(trailing_hidden, &revisions[..2], 80, hidden);
+        assert!(
+            plain_lines(&tail_cache)
+                .last()
+                .is_some_and(|line| !line.is_empty()),
+            "a hidden final cell must not reserve a phantom spacer"
+        );
+    }
+
+    #[test]
+    fn transcript_rhythm_is_width_and_reduced_motion_invariant() {
+        let cells = vec![
+            user_cell("Please inspect the release candidate and verify all receipts."),
+            HistoryCell::Thinking {
+                content: "I will inspect the source, run the checks, and compare the receipts."
+                    .to_string(),
+                streaming: true,
+                duration_secs: Some(0.8),
+            },
+            assistant_cell("I will start with the locked test suite.", false),
+            exec_tool_cell("cargo test -p codewhale-tui --bins --locked"),
+            durable_work_cell(),
+            assistant_cell("The focused checks passed.", false),
+            user_cell("Proceed to the final verification."),
+        ];
+        let revisions = vec![1u64; cells.len()];
+        let expected = [1, 0, 1, 0, 1, 1, 0];
+
+        for width in [40, 80, 100, 140] {
+            for low_motion in [false, true] {
+                let options = TranscriptRenderOptions {
+                    low_motion,
+                    spacing: TranscriptSpacing::Comfortable,
+                    ..TranscriptRenderOptions::default()
+                };
+                let mut cache = TranscriptViewCache::new();
+                cache.ensure(&cells, &revisions, width, options);
+
+                let actual =
+                    std::array::from_fn::<_, 7, _>(|index| spacer_rows_after_cell(&cache, index));
+                assert_eq!(actual, expected, "width={width} low_motion={low_motion}");
+                assert!(
+                    cache
+                        .lines()
+                        .iter()
+                        .all(|line| line.width() <= usize::from(width)),
+                    "render exceeded width={width} low_motion={low_motion}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_state_transitions_do_not_move_neighbor_boundaries() {
+        let mut cells = vec![
+            user_cell("Inspect the candidate."),
+            HistoryCell::Thinking {
+                content: "Inspecting the candidate now.".to_string(),
+                streaming: true,
+                duration_secs: None,
+            },
+            exec_tool_cell("git status --short"),
+            user_cell("Summarize the receipt."),
+        ];
+        let mut revisions = vec![1u64; cells.len()];
+        let options = TranscriptRenderOptions {
+            low_motion: true,
+            ..TranscriptRenderOptions::default()
+        };
+        let mut cache = TranscriptViewCache::new();
+
+        let boundary_rows = |cache: &TranscriptViewCache| {
+            [
+                spacer_rows_after_cell(cache, 0),
+                spacer_rows_after_cell(cache, 1),
+                spacer_rows_after_cell(cache, 2),
+            ]
+        };
+
+        cache.ensure(&cells, &revisions, 80, options);
+        assert_eq!(boundary_rows(&cache), [1, 1, 1]);
+
+        cells[1] = assistant_cell("I inspected the candidate.", true);
+        revisions[1] += 1;
+        cache.ensure(&cells, &revisions, 80, options);
+        assert_eq!(boundary_rows(&cache), [1, 1, 1]);
+
+        cells[1] = assistant_cell("I inspected the candidate.", false);
+        revisions[1] += 1;
+        cache.ensure(&cells, &revisions, 80, options);
+        assert_eq!(boundary_rows(&cache), [1, 1, 1]);
+
+        let HistoryCell::Tool(ToolCell::Exec(exec)) = &mut cells[2] else {
+            unreachable!("fixture is an exec tool")
+        };
+        exec.status = ToolStatus::Success;
+        revisions[2] += 1;
+        cache.ensure(&cells, &revisions, 80, options);
+        assert_eq!(boundary_rows(&cache), [1, 1, 1]);
+    }
+
+    #[test]
+    fn resize_round_trip_rebuilds_the_same_semantic_rows() {
+        let cells = vec![
+            user_cell("A long prompt that wraps when the terminal narrows considerably."),
+            exec_tool_cell("printf 'a tool receipt with a deliberately long summary'"),
+            assistant_cell("A stable answer after the tool receipt.", false),
+        ];
+        let revisions = vec![1u64; cells.len()];
+        let options = TranscriptRenderOptions {
+            low_motion: true,
+            ..TranscriptRenderOptions::default()
+        };
+        let mut cache = TranscriptViewCache::new();
+
+        cache.ensure(&cells, &revisions, 140, options);
+        let wide = plain_lines(&cache);
+        cache.ensure(&cells, &revisions, 40, options);
+        cache.ensure(&cells, &revisions, 140, options);
+
+        assert_eq!(plain_lines(&cache), wide);
+        assert_eq!(cache.lines().len(), cache.line_meta().len());
+        assert_eq!(cache.lines().len(), cache.line_links().len());
     }
 
     #[test]
