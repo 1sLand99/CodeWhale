@@ -1,7 +1,7 @@
 //! The sole producer of [`ReadyRouteCandidate`] (#3384).
 //!
 //! [`RouteResolver::resolve`] is the ONLY caller of
-//! [`ReadyRouteCandidate::new`]. It resolves a [`RouteRequest`] into an
+//! `ReadyRouteCandidate::new`. It resolves a [`RouteRequest`] into an
 //! executable route using:
 //!
 //! 1. provider from `explicit_provider` ONLY (no base-URL / prefix sniffing);

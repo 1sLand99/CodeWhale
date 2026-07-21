@@ -4,7 +4,7 @@
 //! reason?" was answered by several hard-coded sites:
 //!
 //! * [`crate::models::context_window_for_model`] /
-//!   [`crate::models::known_context_window_for_model`] for context windows,
+//!   the models module's context-window lookup for context windows,
 //! * [`crate::models::max_output_tokens_for_model`] for output caps,
 //! * [`crate::models::model_supports_reasoning`] for the reasoning flag,
 //! * the `DEFAULT_*` model-id constants in `crates/config/src/lib.rs` for the
@@ -23,7 +23,7 @@
 //! `crate::models` functions, so the registry can never silently disagree with
 //! `models.rs`. The canonical model ids come from the same provider defaults
 //! the config crate ships (see [`SEED_MODEL_IDS`]). The
-//! [`tests::registry_context_window_matches_models_rs`] drift guard then
+//! The `registry_context_window_matches_models_rs` drift guard then
 //! re-asserts the equivalence for a sample so that if a future change replaces
 //! a seed with a hard-coded literal, CI catches the drift immediately.
 //!
@@ -117,7 +117,7 @@ impl ModelMetadata {
 ///
 /// These mirror the provider defaults shipped by `crates/config/src/lib.rs`
 /// (the `DEFAULT_*_MODEL` constants) plus the explicitly-enumerated models in
-/// [`crate::models::known_context_window_for_model`]. Keep this list curated:
+/// the models module's context-window lookup. Keep this list curated:
 /// it is the set of models we make first-class promises about. Unknown ids are
 /// still answered by [`lookup`] via the `models.rs` heuristics, they just are
 /// not pre-seeded here.

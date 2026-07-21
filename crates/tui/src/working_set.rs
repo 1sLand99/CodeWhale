@@ -764,7 +764,7 @@ fn add_all_local_reference_completions(
 }
 
 /// Rank pre-collected completion candidates for `partial` the same way
-/// [`Workspace::completions`] ranks live walk hits: case-insensitive prefix
+/// `Workspace::completions` ranks live walk hits: case-insensitive prefix
 /// matches first, then substring matches, each bucket alphabetical, truncated
 /// to `limit` (#3757).
 #[must_use]

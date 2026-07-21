@@ -132,7 +132,7 @@ pub(crate) fn branch_from_context(context: &str) -> Option<&str> {
 /// The identity is sourced from workspace/git detection only — never from
 /// model narration or config text. `name` is the workspace basename, `branch`
 /// is `Some` only when the workspace is a git repository (carrying the cached
-/// "detached:<hash>" form for detached HEAD), and `is_git` distinguishes a
+/// `"detached:<hash>"` form for detached HEAD), and `is_git` distinguishes a
 /// real repo from a plain directory so the footer can show an explicit
 /// non-repo state instead of an empty `Repo:` label.
 #[derive(Debug, Clone, PartialEq, Eq)]

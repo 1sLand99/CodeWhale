@@ -260,10 +260,10 @@ pub const REDACTED: &str = "[redacted]";
 ///
 /// 1. **Keyed assignments.** Lines shaped like `key = value`, `key: value`, or
 ///    `key=value` whose key (case-insensitively, ignoring quotes) contains a
-///    [`SENSITIVE_KEY_HINTS`] substring have their value replaced with
+///    `SENSITIVE_KEY_HINTS` substring have their value replaced with
 ///    [`REDACTED`].
 /// 2. **Bare tokens.** Whitespace-delimited words beginning with a known
-///    [`SECRET_TOKEN_PREFIXES`] are replaced wholesale.
+///    `SECRET_TOKEN_PREFIXES` are replaced wholesale.
 ///
 /// The goal is defense in depth: setup state and reports are built from safe
 /// summaries that never include secrets in the first place, and this is the

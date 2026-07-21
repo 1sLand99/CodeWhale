@@ -932,12 +932,12 @@ struct SpeechArgs {
     #[arg(value_name = "TEXT")]
     text: String,
 
-    /// Output audio path. Defaults to speech.<format> in --output-dir,
-    /// [speech].output_dir, or the current directory.
+    /// Output audio path. Defaults to `speech.<format>` in `--output-dir`,
+    /// `[speech].output_dir`, or the current directory.
     #[arg(short, long, value_name = "FILE")]
     output: Option<PathBuf>,
 
-    /// Directory for the default speech.<format> output file when -o/--output is omitted.
+    /// Directory for the default `speech.<format>` output file when `-o`/`--output` is omitted.
     #[arg(long = "output-dir", value_name = "DIR")]
     output_dir: Option<PathBuf>,
 

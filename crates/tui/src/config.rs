@@ -8271,7 +8271,7 @@ reasoning_effort = "max"
 /// The default secret store is file-backed and prompt-free. An OS credential
 /// store is queried only when the user explicitly selects the system backend.
 ///
-/// Used by [`crate::tui::app::App::new`] to decide whether to gate
+/// Used by the TUI app constructor to decide whether to gate
 /// the user behind the in-TUI api-key onboarding screen — getting
 /// this wrong made users get prompted for credentials in situations
 /// where normal env/config auth was already available.

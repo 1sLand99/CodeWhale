@@ -735,7 +735,7 @@ impl ToolRegistryBuilder {
     /// (#4625 pattern, piagent phase B).
     ///
     /// Shell-related task tools (`task_shell_start`, `task_shell_wait`) are
-    /// *not* included here — use [`with_runtime_task_shell_tools`] to register
+    /// *not* included here — use `with_runtime_task_shell_tools` to register
     /// them when `allow_shell` is true.
     #[must_use]
     pub fn with_runtime_task_tools(self) -> Self {

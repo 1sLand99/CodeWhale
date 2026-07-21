@@ -209,7 +209,7 @@ pub struct ToolCatalogCache {
 }
 
 /// One entry in [`ToolCatalogCache`]. Stores the joined JSON catalog plus
-/// the pre-computed SHA-256 hex digest so [`PrefixFingerprint::compute`]
+/// the pre-computed SHA-256 hex digest so `PrefixFingerprint::compute`
 /// does not need to re-hash on the hot path.
 #[derive(Debug, Clone)]
 pub struct CachedCatalog {
@@ -378,7 +378,7 @@ fn hash_json_value<H: Hasher>(value: &serde_json::Value, state: &mut H) {
     }
 }
 
-/// Process-local fallback cache used by [`PrefixFingerprint::compute`]
+/// Process-local fallback cache used by `PrefixFingerprint::compute`
 /// (when available). Callers that maintain their own cache (e.g.
 /// [`PrefixStabilityManager`]) should prefer
 /// [`PrefixFingerprint::compute_with_tool_cache`] and pass the cache in

@@ -29,7 +29,7 @@ pub struct ProviderInfo {
     pub slug: String,
     /// Human-readable display name, e.g. `"DeepSeek"`.
     pub display: String,
-    /// The provider's own API-key env var, e.g. `"DEEPSEEK_API_KEY"` (env_keys[0]).
+    /// The provider's own API-key env var, e.g. `"DEEPSEEK_API_KEY"` (`env_keys[0]`).
     pub key_var: String,
     /// Provider default model, used as a comment hint in the bundle.
     pub default_model: String,
@@ -61,7 +61,7 @@ pub struct BundleInputs {
     pub provider: ProviderInfo,
     /// Model id to write (default `"auto"`).
     pub model: String,
-    /// Generated runtime token shared by runtime.env and <bridge>.env.
+    /// Generated runtime token shared by `runtime.env` and `<bridge>.env`.
     pub runtime_token: String,
     /// Provider API-key value (placeholder unless the user supplied one).
     pub provider_key_value: String,

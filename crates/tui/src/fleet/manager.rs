@@ -437,7 +437,7 @@ impl FleetManager {
     }
 
     /// Resume reconciliation at an explicit instant. This is the deterministic
-    /// seam behind [`resume_run`]'s wall clock: stale detection compares the
+    /// seam behind `resume_run`'s wall clock: stale detection compares the
     /// last heartbeat against `now`.
     pub(crate) fn resume_run_at(
         &self,

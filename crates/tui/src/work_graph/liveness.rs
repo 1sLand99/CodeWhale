@@ -1,7 +1,7 @@
 //! Owner-facing lifecycle adapter vocabulary.
 //!
 //! Owners keep their existing registries, ledgers, and process handles. They
-//! translate those records into this small vocabulary; [`WorkRuntime`]
+//! translate those records into this small vocabulary; `WorkRuntime`
 //! persists the resulting observation through the graph reducer. No adapter
 //! infers liveness from UI state.
 

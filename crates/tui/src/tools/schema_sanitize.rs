@@ -1155,7 +1155,7 @@ pub enum KimiParameterSchemaError {
 /// closed with a non-secret diagnostic instead of being sent to Moonshot.
 ///
 /// MFJS differences from JSON Schema:
-/// https://github.com/MoonshotAI/walle/blob/main/docs/mfjs-walle-vs-draft-2020-12.md
+/// <https://github.com/MoonshotAI/walle/blob/main/docs/mfjs-walle-vs-draft-2020-12.md>
 pub fn sanitize_for_kimi_parameters(
     parameters: &mut Value,
 ) -> Result<Option<String>, KimiParameterSchemaError> {

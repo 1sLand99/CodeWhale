@@ -237,7 +237,7 @@ impl PasteBurst {
     /// # Panics
     ///
     /// Panics in debug builds if `buffer` is non-empty — the caller must flush
-    /// via [`flush_before_modified_input`] first.
+    /// via `flush_before_modified_input` first.
     pub fn deactivate_keep_window(&mut self) {
         debug_assert!(
             self.buffer.is_empty(),

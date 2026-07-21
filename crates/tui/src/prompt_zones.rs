@@ -323,7 +323,7 @@ impl TurnScratch {
 /// A composed three-zone request ready for DeepSeek API serialization.
 ///
 /// **Phase 1 scaffolding** — not yet wired into the engine request path.
-/// Currently the engine continues to use [`MessageRequest`] directly.
+/// Currently the engine continues to use `MessageRequest` directly.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ThreeZoneRequest<'a> {

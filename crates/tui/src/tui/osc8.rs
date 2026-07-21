@@ -14,7 +14,7 @@
 //!
 //! # Architecture (#3029)
 //!
-//! Link targets never enter `Span::content` or a ratatui [`Buffer`]. Markdown
+//! Link targets never enter `Span::content` or a ratatui `Buffer`. Markdown
 //! wrapping produces plain visible spans plus parallel [`LineLink`] metadata.
 //! Transcript surfaces translate those relative columns into absolute
 //! [`LinkRegion`]s for the current viewport. `ColorCompatBackend::draw` then

@@ -9,8 +9,8 @@
 //! Migration guide: use Moraine MCP tools (`search_sessions`, `open`,
 //! `list_sessions`, `file_attention`) instead of `<user_memory>` injection.
 //!
-//! Ref: https://github.com/Hmbown/CodeWhale/issues/3495 (Moraine adoption)
-//! Ref: https://github.com/Hmbown/CodeWhale/issues/3490 (v0.8.71 dead-code inventory)
+//! Ref: <https://github.com/Hmbown/CodeWhale/issues/3495> (Moraine adoption)
+//! Ref: <https://github.com/Hmbown/CodeWhale/issues/3490> (v0.8.71 dead-code inventory)
 //!
 //! ### Migration
 //!

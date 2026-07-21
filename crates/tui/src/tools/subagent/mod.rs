@@ -2902,7 +2902,7 @@ impl SubAgentManager {
     /// away. Call on graceful shutdown / session teardown so the most recent
     /// intermediate checkpoint is not lost.
     ///
-    /// Unlike [`persist_state`], this performs disk I/O **synchronously** to
+    /// Unlike `persist_state`, this performs disk I/O **synchronously** to
     /// guarantee data is flushed before the process exits.
     pub fn flush_pending_persist(&mut self) {
         if self.persist_pending {

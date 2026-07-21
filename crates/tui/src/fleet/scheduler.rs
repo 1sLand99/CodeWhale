@@ -77,7 +77,7 @@ impl FleetScheduler {
     /// in-flight leases left by a prior process and apply retry/escalation
     /// policy, then recompute run status.
     ///
-    /// Unlike [`tick_run`], this launches no new queued work and does not
+    /// Unlike `tick_run`, this launches no new queued work and does not
     /// re-process tasks that already reached a terminal state, so it is safe
     /// and idempotent to call on a fresh process: a task re-leased by an
     /// earlier resume is no longer stale at the same instant, and a terminally
@@ -211,10 +211,10 @@ impl FleetScheduler {
     }
 
     /// Reconcile only orphaned/stale in-flight leases (the restart-recovery
-    /// subset of [`recover_unhealthy_work`]): a `Leased` task whose worker has
+    /// subset of `recover_unhealthy_work`): a `Leased` task whose worker has
     /// stopped heartbeating is marked stale and routed through the shared
     /// retry/escalation budget. Terminal and healthy tasks are left untouched,
-    /// which keeps [`resume_run`] idempotent.
+    /// which keeps `resume_run` idempotent.
     fn reconcile_stale_leases(
         &self,
         run_id: &FleetRunId,

@@ -84,7 +84,7 @@ pub struct Session {
     pub frozen_prefix: Option<FrozenPrefix>,
 
     /// Monotonic counter bumped on every direct mutation of `messages`.
-    /// Consumed by [`crate::core::engine::token_estimate_cache::TokenEstimateCache`]
+    /// Consumed by the engine token-estimate cache
     /// to memoize the per-turn token estimate without re-walking the message
     /// list. Defaults to 0; bumped in [`Session::add_message`],
     /// [`Session::replace_messages`], and at other mutation sites in

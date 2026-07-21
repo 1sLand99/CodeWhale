@@ -1,6 +1,6 @@
 //! Route resolution errors (#3384).
 //!
-//! `thiserror` is not a dependency of this crate, so [`Display`] and
+//! `thiserror` is not a dependency of this crate, so [`std::fmt::Display`] and
 //! [`std::error::Error`] are hand-implemented. No new dependency is added.
 
 use std::fmt;

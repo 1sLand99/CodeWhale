@@ -8,7 +8,7 @@
 //! Fields are private and exposed only through read-only getters, so the type
 //! can neither be *constructed* nor *mutated* outside this crate, and it
 //! deliberately does not derive `Deserialize` (so it cannot be fabricated from
-//! JSON either). The only constructor is [`ReadyRouteCandidate::new`]
+//! JSON either). The only constructor is `ReadyRouteCandidate::new`
 //! (`pub(super)`), and [`super::resolver::RouteResolver::resolve`] is its sole
 //! caller. A candidate's existence is therefore proof it passed the resolver,
 //! and a candidate's limits are therefore exactly what the resolver produced
@@ -162,7 +162,7 @@ pub struct ValidationReport {
 /// The candidate is IMMUTABLE once minted: every field is private and exposed
 /// only through read-only getters, the type cannot be constructed outside this
 /// crate (private fields + no `Deserialize`), and there are no setters. The
-/// only constructor is [`Self::new`], which is `pub(super)`; see module docs.
+/// only constructor is `Self::new`, which is `pub(super)`; see module docs.
 /// Post-resolution limit adjustments must instead be requested up front via
 /// [`super::resolver::RouteRequest::limit_overrides`], which the resolver
 /// applies BEFORE construction and records in [`Self::applied_limit_overrides`].

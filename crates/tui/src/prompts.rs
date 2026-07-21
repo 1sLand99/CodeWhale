@@ -3,7 +3,7 @@
 //!
 //! Prompts are assembled from composable layers loaded at compile time from
 //! the single [`text`] module:
-//!   constitution + personality overlay → message[0] (byte-stable).
+//!   constitution + personality overlay → `message[0]` (byte-stable).
 //!   mode delta + tool taxonomy + approval policy → request-time runtime metadata.
 //!
 //! Keeping every layer's text in one module makes prompt tuning a
@@ -1377,7 +1377,7 @@ fn render_route_fragment(session_context: &PromptSessionContext<'_>) -> String {
 /// This is the Codex-parity assembly point: constitution stays byte-stable for
 /// prefix caching; volatile concerns live in `WorldState` fragments with
 /// markers, caps, and `render_diff` retain-unchanged behavior. Callers that
-/// still need a flat string can use [`WorldStateSnapshot::render_text`].
+/// still need a flat string can use `WorldStateSnapshot::render_text`.
 pub fn system_prompt_with_world_state(
     constitution: impl Into<String>,
     world_state: crate::model_context::WorldState,

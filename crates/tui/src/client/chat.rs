@@ -249,7 +249,7 @@ fn apply_route_reasoning_controls(
 /// The direct K3 Chat Completions schema exposes fixed sampling behavior and
 /// omits `temperature` and `top_p`. Strip legacy/generic values only from the
 /// exact first-party route so compatible gateways keep their own contract.
-/// Source: https://platform.kimi.ai/docs/guide/kimi-k3-quickstart (verified 2026-07-20).
+/// Source: <https://platform.kimi.ai/docs/guide/kimi-k3-quickstart> (verified 2026-07-20).
 fn apply_direct_moonshot_k3_fixed_sampling(
     body: &mut Value,
     provider: ApiProvider,
@@ -2287,7 +2287,7 @@ pub(super) fn sanitize_thinking_mode_messages(
     sanitize_thinking_mode_messages_for_route(body, model, effort, provider, "")
 }
 
-/// Route-aware variant of [`sanitize_thinking_mode_messages`].
+/// Route-aware variant of `sanitize_thinking_mode_messages`.
 ///
 /// The wrapper above remains intentionally route-agnostic for existing test
 /// helpers and generic callers. Production chat requests call this version so

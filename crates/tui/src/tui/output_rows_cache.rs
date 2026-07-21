@@ -195,7 +195,7 @@ where
     get_or_compute_rows_with_hash(hash_str(output), width, compute)
 }
 
-/// As [`get_or_compute_rows`] but takes a precomputed content hash, so a
+/// As `get_or_compute_rows` but takes a precomputed content hash, so a
 /// caller that already hashed the output (e.g. to also key
 /// [`get_or_compute_indices`]) does not hash it a second time (#3757 review).
 pub fn get_or_compute_rows_with_hash<F>(content_hash: u64, width: u16, compute: F) -> Vec<OutputRow>
@@ -210,7 +210,7 @@ where
 
 /// Look up (or compute) the selected indices for a previously-cached
 /// rows payload at the given `line_limit`. `content_hash` is the same
-/// 64-bit content hash that was passed to [`get_or_compute_rows`].
+/// 64-bit content hash that was passed to `get_or_compute_rows`.
 pub fn get_or_compute_indices<F>(
     content_hash: u64,
     width: u16,

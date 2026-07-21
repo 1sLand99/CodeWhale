@@ -5,7 +5,7 @@
 //! - fetches `https://models.dev/catalog.json` in the background with a bounded
 //!   timeout and explicit user-agent (no credentials),
 //! - writes the cache atomically via temp file + rename,
-//! - compiles parsed rows into [`CatalogOffering`]s and publishes them into
+//! - compiles parsed rows into `CatalogOffering`s and publishes them into
 //!   [`crate::provider_lake`],
 //! - falls back to the prior cache or the bundled snapshot on any failure.
 //!
@@ -85,7 +85,7 @@ struct PersistedModelsDevCache {
     schema_version: u32,
     /// Unix seconds the payload was fetched (or loaded from an override path).
     fetched_at: u64,
-    /// Fingerprint of the source URL/path used for [`CatalogSource::Live`].
+    /// Fingerprint of the source URL/path used for `CatalogSource::Live`.
     source_fingerprint: String,
     /// Human-readable source label (URL or `file:…`); never a secret.
     source_label: String,

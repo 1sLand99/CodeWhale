@@ -380,9 +380,9 @@ const OPENAI_LONG_CONTEXT_SURCHARGE_THRESHOLD: u32 = 272_000;
 /// OpenAI applies a higher price to the full request once these models exceed
 /// 272K input tokens. Until the pricing layer can represent request-wide tiers,
 /// refuse to report the lower static catalog price (#4317).
-/// https://developers.openai.com/api/docs/models/gpt-5.4
-/// https://developers.openai.com/api/docs/models/gpt-5.5
-/// https://developers.openai.com/api/docs/models/gpt-5.6-sol
+/// <https://developers.openai.com/api/docs/models/gpt-5.4>
+/// <https://developers.openai.com/api/docs/models/gpt-5.5>
+/// <https://developers.openai.com/api/docs/models/gpt-5.6-sol>
 fn direct_openai_long_context_tier_is_unpriced(
     provider: ApiProvider,
     model: &str,
@@ -430,7 +430,7 @@ fn pricing_for_model_and_usage(model: &str, usage: &Usage) -> Option<ModelPricin
     pricing_for_model(model)
 }
 
-/// Claude Sonnet 5 pricing (https://platform.claude.com/docs/en/about-claude/pricing):
+/// Claude Sonnet 5 pricing (<https://platform.claude.com/docs/en/about-claude/pricing>):
 /// introductory 2.00 / 10.00 (cache-read 0.20, cache-write 2.50) through
 /// 2026-08-31 UTC, then the standard 3.00 / 15.00 (cache-read 0.30,
 /// cache-write 3.75). Write rates are the published 5-minute tier (#4318).

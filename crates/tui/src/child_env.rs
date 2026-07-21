@@ -142,7 +142,7 @@ where
 
 /// Build a reviewed plugin child environment from an immutable host snapshot.
 ///
-/// This is separate from [`sanitized_plugin_mcp_env`] so a repository-local
+/// This is separate from `sanitized_plugin_mcp_env` so a repository-local
 /// dotenv file loaded after startup cannot add or replace inherited values.
 pub fn sanitized_plugin_mcp_env_from<B, BK, BV, I, K, V>(
     base_environment: B,
