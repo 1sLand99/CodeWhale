@@ -6,6 +6,10 @@ import { getFacts } from "@/lib/facts";
 
 const REPO = "https://github.com/Hmbown/CodeWhale";
 
+// Revalidate against source-proven runtime facts without giving up static edge
+// caching. `getFacts()` rejects legacy or older KV snapshots.
+export const revalidate = 300;
+
 const WORKFLOW = [
   {
     en: ["Inspect", "Read the repository, its instructions, and the task."],
@@ -52,7 +56,9 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
   const { locale } = await params;
   const isZh = locale === "zh";
   const facts = await getFacts();
-  const version = facts.version ?? "0.9.x";
+  const sourceVersion = facts.version ?? "unknown";
+  const publishedRelease = facts.latestPublishedRelease;
+  const sourceIsPublished = publishedRelease?.version === sourceVersion;
   const providerCount = facts.providers.length;
 
   return (
@@ -104,7 +110,14 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
               />
             </div>
             <p className="product-facts">
-              v{version} <span>·</span> {providerCount} {isZh ? "个提供商路由" : "provider routes"}{" "}
+              {publishedRelease
+                ? isZh
+                  ? `最新发布 ${publishedRelease.tag}`
+                  : `Latest release ${publishedRelease.tag}`
+                : isZh
+                  ? "发布状态暂不可用"
+                  : "Release status unavailable"}{" "}
+              <span>·</span> {providerCount} {isZh ? "个提供商路由" : "provider routes"}{" "}
               <span>·</span> {facts.license ?? "MIT"}
             </p>
           </div>
@@ -114,8 +127,8 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
               src="/codewhale-tui.png"
               alt={
                 isZh
-                  ? "Codewhale v0.9.1 的全新终端会话，使用本地 Ollama 路由且没有空的 Work 栏"
-                  : "Fresh Codewhale v0.9.1 terminal session using a local Ollama route, with no empty Work bar"
+                  ? `Codewhale v${sourceVersion} 的全新终端会话，使用本地 Ollama 路由且没有空的 Work 栏`
+                  : `Fresh Codewhale v${sourceVersion} terminal session using a local Ollama route, with no empty Work bar`
               }
               width={1280}
               height={720}
@@ -124,8 +137,8 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
             />
             <figcaption>
               {isZh
-                ? "v0.9.1 · 本地 Ollama 路由 · Plan / Act / Operate"
-                : "v0.9.1 · local Ollama route · Plan / Act / Operate"}
+                ? `v${sourceVersion} ${sourceIsPublished ? "已发布版" : "源码候选"} · 本地 Ollama 路由 · Plan / Act / Operate`
+                : `v${sourceVersion} ${sourceIsPublished ? "published release" : "source candidate"} · local Ollama route · Plan / Act / Operate`}
             </figcaption>
           </figure>
         </div>
@@ -280,7 +293,11 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
             <a href={REPO}>GitHub</a>
             <a href={`${REPO}/issues`}>Issues</a>
             <Link href={`/${locale}/contribute`}>{isZh ? "参与贡献" : "Contribute"}</Link>
-            <a href={`${REPO}/releases/tag/v${version}`}>v{version}</a>
+            {publishedRelease ? (
+              <a href={publishedRelease.url}>{publishedRelease.tag}</a>
+            ) : (
+              <a href={`${REPO}/releases`}>Releases</a>
+            )}
           </nav>
         </div>
       </section>

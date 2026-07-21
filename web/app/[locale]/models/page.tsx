@@ -2,6 +2,8 @@ import Link from "next/link";
 import { getFacts } from "@/lib/facts";
 import { buildPageMetadata } from "@/lib/page-meta";
 
+export const revalidate = 300;
+
 export async function generateMetadata({ params }: { params: Promise<{ locale: string }> }) {
   const { locale } = await params;
   const isZh = locale === "zh";

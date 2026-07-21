@@ -5,6 +5,8 @@ import { InstallBinary } from "@/components/install-binary";
 import { getFacts } from "@/lib/facts";
 import { buildPageMetadata } from "@/lib/page-meta";
 
+export const revalidate = 300;
+
 export async function generateMetadata({ params }: { params: Promise<{ locale: string }> }) {
   const { locale } = await params;
   const isZh = locale === "zh";
@@ -85,8 +87,11 @@ export default async function InstallPage({ params }: { params: Promise<{ locale
   const { locale } = await params;
   const isZh = locale === "zh";
   const facts = await getFacts();
-  const tag = facts.version ? `v${facts.version}` : "v0.8.x";
-  const verify = `codewhale --version   # ${facts.version ?? "prints the installed version"}
+  const publishedRelease = facts.latestPublishedRelease;
+  const sourceIsPublished = publishedRelease?.version === facts.version;
+  const verify = `codewhale --version${
+    publishedRelease ? `   # latest published: ${publishedRelease.version}` : ""
+  }
 codewhale doctor`;
 
   const copyLabel = isZh ? "复制" : "Copy";
@@ -291,10 +296,20 @@ codewhale doctor`;
           <h2 className="font-display text-3xl mb-2">
             {isZh ? "其他安装方式" : "Other ways to install"}
           </h2>
-          <p className="text-sm text-ink-soft max-w-2xl mb-10">
+          <p className="text-sm text-ink-soft max-w-2xl mb-4">
             {isZh
               ? "如果上面的脚本路径不适合你，请从下面选择匹配你环境的方式。各渠道的命令和打包形式有所不同，说明会明确列出安装内容。"
               : "If the script above doesn't fit your setup, choose the channel that matches your environment. Command availability and packaging differ by channel, and each description states exactly what it installs."}
+          </p>
+
+          <p className="text-sm text-ink-soft max-w-2xl mb-10">
+            {publishedRelease
+              ? isZh
+                ? `下方的发布命令以 ${publishedRelease.tag} 为准；它是 GitHub 上最新的已发布版本。${sourceIsPublished ? "当前源码与该发布版一致。" : `当前源码候选版为 v${facts.version}，发布前不会被安装命令当作正式版本。`}`
+                : `Release-backed commands below use ${publishedRelease.tag}, the latest version published on GitHub. ${sourceIsPublished ? "The current source matches that release." : `The current source candidate is v${facts.version}; install commands do not advertise it before publication.`}`
+              : isZh
+                ? "暂时无法验证最新的 GitHub 发布标签；请先查看 Releases，再运行需要固定标签的命令。"
+                : "The latest GitHub release tag could not be verified. Check Releases before running a command that requires a pinned tag."}
           </p>
 
           <div className="space-y-10">
@@ -362,7 +377,20 @@ codewhale doctor`;
             {/* CNB */}
             <div className="rounded-lg border border-ink/12 bg-white/70 p-5">
               <div className="font-display text-lg mb-3">{isZh ? "CNB 镜像" : "CNB mirror"}</div>
-              <InstallCodeBlock cmd={cnbInstall(tag)} copyLabel={copyLabel} copiedLabel={copiedLabel} />
+              {publishedRelease ? (
+                <InstallCodeBlock
+                  cmd={cnbInstall(publishedRelease.tag)}
+                  copyLabel={copyLabel}
+                  copiedLabel={copiedLabel}
+                />
+              ) : (
+                <a
+                  href="https://github.com/Hmbown/CodeWhale/releases/latest"
+                  className="body-link"
+                >
+                  {isZh ? "查看最新 GitHub 发布" : "Check the latest GitHub release"}
+                </a>
+              )}
             </div>
 
             {/* Mainland China network */}

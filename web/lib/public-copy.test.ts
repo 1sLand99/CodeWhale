@@ -80,6 +80,22 @@ describe("public website copy contracts", () => {
     expect(install).toContain("New sessions open in Act mode by default");
   });
 
+  it("keeps source-candidate facts separate from published install facts", () => {
+    const homepage = pageSource("page.tsx");
+    const install = pageSource("install/page.tsx");
+    const community = pageSource("community/page.tsx");
+
+    expect(homepage).toContain("facts.latestPublishedRelease");
+    expect(homepage).toContain("source candidate");
+    expect(homepage).toContain("publishedRelease.url");
+    expect(homepage).not.toContain("releases/tag/v${version}");
+    expect(homepage).not.toMatch(/Codewhale v0\.9\.1|\"v0\.9\.1 \u00b7/);
+    expect(install).toContain("publishedRelease.tag");
+    expect(install).not.toContain('"v0.8.x"');
+    expect(install).not.toContain("cnbInstall(facts.version");
+    expect(community).toContain("candidate credit");
+  });
+
   it("presents providers as peers and puts contributor actions near the top", () => {
     const providerCopy = `${pageSource("models/page.tsx")}\n${pageSource("faq/page.tsx")}`;
     const community = pageSource("community/page.tsx");

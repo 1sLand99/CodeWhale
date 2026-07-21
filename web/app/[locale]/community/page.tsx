@@ -3,6 +3,8 @@ import { getFacts } from "@/lib/facts";
 import { buildPageMetadata } from "@/lib/page-meta";
 import { RELEASE_CONTRIBUTORS, RELEASE_HELPERS } from "@/lib/release-credits";
 
+export const revalidate = 300;
+
 export async function generateMetadata({ params }: { params: Promise<{ locale: string }> }) {
   const { locale } = await params;
   const isZh = locale === "zh";
@@ -21,6 +23,7 @@ export default async function CommunityPage({ params }: { params: Promise<{ loca
   const isZh = locale === "zh";
   const p = (path: string) => `/${locale}${path}`;
   const facts = await getFacts();
+  const sourceIsPublished = facts.latestPublishedRelease?.version === facts.version;
 
   const contributionPaths = isZh
     ? [
@@ -163,12 +166,20 @@ export default async function CommunityPage({ params }: { params: Promise<{ loca
       <section className="portal-section community-credit-section">
         <div className="portal-container portal-section-grid">
           <div className="portal-section-copy">
-            <span>{isZh ? `v${facts.version} 版本致谢` : `v${facts.version} release credit`}</span>
+            <span>
+              {sourceIsPublished
+                ? isZh
+                  ? `v${facts.version} 版本致谢`
+                  : `v${facts.version} release credit`
+                : isZh
+                  ? `v${facts.version} 候选版致谢`
+                  : `v${facts.version} candidate credit`}
+            </span>
             <h2>{isZh ? "贡献者署名是版本记录的一部分。" : "Contributor credit is part of the release record."}</h2>
             <p>
               {isZh
-                ? "这一版本包含社区提交的代码、测试、复现和验证。即使维护者需要调整补丁后再合入，原始贡献者的署名也会保留在提交、更新日志和贡献者名单中。"
-                : "This release includes code, tests, reproductions, and verification from the community. When a maintainer needs to adapt a patch before it lands, the original contributor remains credited in the commit, changelog, and contributor record."}
+                ? `${sourceIsPublished ? "这一版本" : "这一候选版"}包含社区提交的代码、测试、复现和验证。即使维护者需要调整补丁后再合入，原始贡献者的署名也会保留在提交、更新日志和贡献者名单中。`
+                : `This ${sourceIsPublished ? "release" : "candidate"} includes code, tests, reproductions, and verification from the community. When a maintainer needs to adapt a patch before it lands, the original contributor remains credited in the commit, changelog, and contributor record.`}
             </p>
             <div className="community-record-links">
               <Link href="https://github.com/Hmbown/CodeWhale/blob/main/docs/CONTRIBUTORS.md">
