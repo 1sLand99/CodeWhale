@@ -56,10 +56,9 @@ impl ToolSpec for LoadSkillTool {
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "Skill id (the `name` field from the SKILL.md frontmatter, also shown in the `## Skills` listing)."
+                    "description": "Skill id to load. Omit or pass \"list\" to see all available skills."
                 }
             },
-            "required": ["name"],
             "additionalProperties": false
         })
     }
@@ -80,13 +79,8 @@ impl ToolSpec for LoadSkillTool {
         let name = input
             .get("name")
             .and_then(Value::as_str)
-            .ok_or_else(|| ToolError::missing_field("name"))?
+            .unwrap_or("")
             .trim();
-        if name.is_empty() {
-            return Err(ToolError::invalid_input(
-                "`name` must be a non-empty string",
-            ));
-        }
 
         // #432: walk every candidate skill directory (workspace
         // .agents/skills, skills, .opencode/skills, .claude/skills,
@@ -102,6 +96,24 @@ impl ToolSpec for LoadSkillTool {
         } else {
             discover_in_workspace_with_mode(&context.workspace, discovery_mode)
         };
+
+        // Listing mode: empty name, "*", or "list" returns the full registry (#4651).
+        if name.is_empty() || name == "*" || name == "list" {
+            let skills = registry.list();
+            if skills.is_empty() {
+                return Ok(ToolResult::success("No skills installed."));
+            }
+            let mut listing = format!("Available skills ({}):\n", skills.len());
+            for skill in skills {
+                if skill.description.trim().is_empty() {
+                    listing.push_str(&format!("  - {}\n", skill.name));
+                } else {
+                    listing.push_str(&format!("  - {} — {}\n", skill.name, skill.description));
+                }
+            }
+            return Ok(ToolResult::success(listing));
+        }
+
         let Some(skill) = registry.get(name) else {
             let available: Vec<&str> = registry.list().iter().map(|s| s.name.as_str()).collect();
             let hint = if available.is_empty() {
