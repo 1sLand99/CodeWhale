@@ -661,8 +661,8 @@ pub fn render_header(area: Rect, buf: &mut Buffer, app: &App) {
         _ => app.ui_theme.mode_agent,
     };
     let permission_color = match app.approval_mode {
-        ApprovalMode::Suggest | ApprovalMode::Never => palette::TEXT_REASONING,
-        ApprovalMode::Auto => palette::WHALE_HUMAN,
+        ApprovalMode::Suggest | ApprovalMode::Never => palette::WHALE_HUMAN,
+        ApprovalMode::Auto => palette::TEXT_REASONING,
         ApprovalMode::Bypass => palette::STATUS_WARNING,
     };
     let status_indicator = crate::tui::widgets::header_status_indicator_frame(
@@ -1128,8 +1128,8 @@ mod tests {
     fn header_permission_color_matches_the_composer_warm_ramp() {
         for width in [40, 100] {
             for (approval_mode, expected) in [
-                (ApprovalMode::Suggest, palette::TEXT_REASONING),
-                (ApprovalMode::Auto, palette::WHALE_HUMAN),
+                (ApprovalMode::Suggest, palette::WHALE_HUMAN),
+                (ApprovalMode::Auto, palette::TEXT_REASONING),
                 (ApprovalMode::Bypass, palette::STATUS_WARNING),
             ] {
                 let mut app = test_app();

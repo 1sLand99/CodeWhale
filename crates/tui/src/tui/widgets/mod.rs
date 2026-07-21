@@ -1333,8 +1333,8 @@ impl Renderable for ComposerWidget<'_> {
             };
 
             let permission_color = match self.app.approval_mode {
-                ApprovalMode::Suggest | ApprovalMode::Never => palette::TEXT_REASONING,
-                ApprovalMode::Auto => palette::WHALE_HUMAN,
+                ApprovalMode::Suggest | ApprovalMode::Never => palette::WHALE_HUMAN,
+                ApprovalMode::Auto => palette::TEXT_REASONING,
                 ApprovalMode::Bypass => palette::STATUS_WARNING,
             };
             let mut top_border = Block::default()
@@ -5665,8 +5665,8 @@ mod tests {
         let area = Rect::new(0, 0, 40, 5);
 
         for (approval_mode, expected) in [
-            (ApprovalMode::Suggest, palette::TEXT_REASONING),
-            (ApprovalMode::Auto, palette::WHALE_HUMAN),
+            (ApprovalMode::Suggest, palette::WHALE_HUMAN),
+            (ApprovalMode::Auto, palette::TEXT_REASONING),
             (ApprovalMode::Bypass, palette::STATUS_WARNING),
         ] {
             let mut app = create_test_app();
