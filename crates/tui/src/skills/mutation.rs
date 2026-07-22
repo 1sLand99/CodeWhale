@@ -817,11 +817,11 @@ fn import_external(
 fn copy_skill_package(src: &Path, dest: &Path) -> Result<()> {
     // Fail closed: source must already pass package digest (no symlinks).
     package_digest::compute_package_digest(src).context("source package is not safe to copy")?;
-    copy_dir_regular_files(src, dest, src)?;
+    copy_dir_regular_files(src, dest)?;
     Ok(())
 }
 
-fn copy_dir_regular_files(src: &Path, dest: &Path, package_root: &Path) -> Result<()> {
+fn copy_dir_regular_files(src: &Path, dest: &Path) -> Result<()> {
     fs::create_dir_all(dest)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
@@ -843,7 +843,7 @@ fn copy_dir_regular_files(src: &Path, dest: &Path, package_root: &Path) -> Resul
             if name_str.starts_with('.') {
                 continue;
             }
-            copy_dir_regular_files(&path, &target, package_root)?;
+            copy_dir_regular_files(&path, &target)?;
         } else if meta.is_file() {
             if name_str.starts_with('.') {
                 continue;

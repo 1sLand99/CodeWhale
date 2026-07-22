@@ -117,10 +117,10 @@ impl SkillsManagerView {
             pending: None,
             status,
         };
-        if let Some(id) = focus {
-            if let Some(idx) = view.skills.iter().position(|s| &s.id == id) {
-                view.selected = idx;
-            }
+        if let Some(id) = focus
+            && let Some(idx) = view.skills.iter().position(|s| &s.id == id)
+        {
+            view.selected = idx;
         }
         view.clamp_selection();
         view

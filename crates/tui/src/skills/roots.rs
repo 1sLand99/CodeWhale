@@ -633,6 +633,7 @@ fn match_compatible_global(home: &Path, skills_dir: &Path) -> Option<CompatibleH
     None
 }
 
+#[allow(clippy::too_many_arguments)] // catalog rows keep ownership flags explicit at call sites
 fn push_existing(
     roots: &mut Vec<SkillRootDescriptor>,
     precedence: &mut usize,
@@ -658,6 +659,7 @@ fn push_existing(
     );
 }
 
+#[allow(clippy::too_many_arguments)] // shared constructor for the explicit catalog table above
 fn push_descriptor(
     roots: &mut Vec<SkillRootDescriptor>,
     precedence: &mut usize,
