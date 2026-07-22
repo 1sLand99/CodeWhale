@@ -2,8 +2,8 @@
 
 **One runtime. Every model. Your machine.**
 
-Codewhale is a coding agent for your terminal. It works with any model;
-open models first. Give it a provider, a model, and a task: it reads your
+Codewhale is a coding agent for your terminal. It works with supported hosted
+and local models; open models first. Give it a provider, a model, and a task: it reads your
 code, edits files, runs commands, checks its work, and stops when the job
 is done or it needs you. Switch models mid-task with `/model`. Use the TUI
 for interactive work, `codewhale exec` for scripts and CI. Rust, MIT,
@@ -54,9 +54,10 @@ codewhale web                            # local browser client on 127.0.0.1
 ```
 
 In the TUI: `/model` switches provider and model together, `/fleet` runs a
-team of workers, `/restore` undoes a turn, `Tab` cycles Plan / Act / Operate,
-`Shift+Tab` cycles the Ask / Auto-Review / Full Access approval posture, and
-`!` runs a shell command through the normal approval path.
+team of workers, and `/restore` undoes a turn. When the composer is idle, `Tab`
+cycles Plan / Act / Operate and `Shift+Tab` cycles the Ask / Auto-Review / Full
+Access permission posture. `!` runs a shell command through the normal approval
+path.
 
 ## Learn more
 

@@ -1,9 +1,9 @@
-<!-- source: README.md sha256:f76ebd048ff1 -->
+<!-- source: README.md sha256:acc243c2dc85 -->
 # Codewhale
 
 **一个运行时。所有模型。你的机器。**
 
-Codewhale 是运行在终端里的编程智能体。适配任意模型；开放模型优先。给它一个 provider、一个模型和一个任务：它会读你的代码、改文件、跑命令、检查自己的工作，在任务完成或需要你介入时停下。任务中途用 `/model` 切换模型。交互式工作用 TUI，脚本和 CI 用 `codewhale exec`。Rust 编写，MIT 许可，运行在你自己的机器上。
+Codewhale 是运行在终端里的编程智能体。适配受支持的托管与本地模型；开放模型优先。给它一个 provider、一个模型和一个任务：它会读你的代码、改文件、跑命令、检查自己的工作，在任务完成或需要你介入时停下。任务中途用 `/model` 切换模型。交互式工作用 TUI，脚本和 CI 用 `codewhale exec`。Rust 编写，MIT 许可，运行在你自己的机器上。
 
 **为什么选 Codewhale：**
 - **不被锁定。** DeepSeek、Claude、GPT、Kimi、GLM 等 30 多家 provider，以及你自己的 vLLM、SGLang、Ollama——无需 key——都跑在同一套运行时和同一套工具之上。上下文预算与价格取自真实路由；价格未知时显示未知，绝不显示 $0。
@@ -37,7 +37,7 @@ codewhale exec "fix the failing test"    # headless
 codewhale web                            # local browser client on 127.0.0.1
 ```
 
-在 TUI 中：`/model` 同时切换 provider 和模型，`/fleet` 运行一组 worker，`/restore` 撤销某一轮，`Tab` 在 Plan / Act / Operate 之间循环切换，`Shift+Tab` 在 Ask / Auto-Review / Full Access 审批姿态之间循环切换，`!` 让 shell 命令经由正常的审批路径运行。
+在 TUI 中：`/model` 同时切换 provider 和模型，`/fleet` 运行一组 worker，`/restore` 撤销某一轮。输入区空闲时，`Tab` 在 Plan / Act / Operate 之间循环切换，`Shift+Tab` 在 Ask / Auto-Review / Full Access 权限姿态之间循环切换。`!` 让 shell 命令经由正常的审批路径运行。
 
 ## 了解更多
 

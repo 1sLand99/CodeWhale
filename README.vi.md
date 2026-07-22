@@ -1,10 +1,10 @@
-<!-- source: README.md sha256:f76ebd048ff1 -->
+<!-- source: README.md sha256:acc243c2dc85 -->
 # Codewhale
 
 **Một runtime. Mọi model. Máy của bạn.**
 
-Codewhale là một coding agent cho terminal của bạn. Hoạt động với mọi model;
-ưu tiên model mở. Đưa cho nó một provider, một model và một nhiệm vụ: nó đọc
+Codewhale là một coding agent cho terminal của bạn. Hoạt động với các model
+hosted và local được hỗ trợ; ưu tiên model mở. Đưa cho nó một provider, một model và một nhiệm vụ: nó đọc
 code của bạn, sửa file, chạy lệnh, kiểm tra công việc của mình, và dừng lại
 khi nhiệm vụ hoàn thành hoặc cần đến bạn. Đổi model giữa chừng bằng `/model`.
 Dùng TUI cho công việc tương tác, `codewhale exec` cho script và CI. Viết
@@ -55,9 +55,10 @@ codewhale web                            # local browser client on 127.0.0.1
 ```
 
 Trong TUI: `/model` đổi provider và model cùng lúc, `/fleet` chạy một đội
-worker, `/restore` hoàn tác một lượt, `Tab` chuyển vòng qua Plan / Act /
-Operate, `Shift+Tab` chuyển vòng qua mức phê duyệt Ask / Auto-Review / Full
-Access, và `!` chạy một lệnh shell qua đường phê duyệt bình thường.
+worker, và `/restore` hoàn tác một lượt. Khi vùng soạn thảo đang rảnh, `Tab`
+chuyển vòng qua Plan / Act / Operate và `Shift+Tab` chuyển vòng qua tư thế
+quyền Ask / Auto-Review / Full Access. `!` chạy một lệnh shell qua đường phê
+duyệt bình thường.
 
 ## Tìm hiểu thêm
 

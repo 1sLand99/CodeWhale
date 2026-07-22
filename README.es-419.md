@@ -1,10 +1,10 @@
-<!-- source: README.md sha256:f76ebd048ff1 -->
+<!-- source: README.md sha256:acc243c2dc85 -->
 # Codewhale
 
 **Un runtime. Todos los modelos. Tu máquina.**
 
-Codewhale es un agente de código para tu terminal. Funciona con cualquier
-modelo; los modelos abiertos primero. Le das un proveedor, un modelo y una
+Codewhale es un agente de código para tu terminal. Funciona con modelos
+alojados y locales compatibles; los modelos abiertos primero. Le das un proveedor, un modelo y una
 tarea: lee tu código, edita archivos, ejecuta comandos, verifica su trabajo y
 se detiene cuando la tarea queda lista o te necesita. Cambia de modelo a
 mitad de tarea con `/model`. Usa la TUI para el trabajo interactivo y
@@ -57,10 +57,10 @@ codewhale web                            # local browser client on 127.0.0.1
 ```
 
 En la TUI: `/model` cambia proveedor y modelo juntos, `/fleet` ejecuta un
-equipo de workers, `/restore` deshace un turno, `Tab` cicla entre
-Plan / Act / Operate, `Shift+Tab` cicla la postura de aprobación
-Ask / Auto-Review / Full Access, y `!` ejecuta un comando de shell por la ruta
-normal de aprobación.
+equipo de workers y `/restore` deshace un turno. Cuando el compositor está
+inactivo, `Tab` cicla entre Plan / Act / Operate y `Shift+Tab` cicla la postura
+de permiso Ask / Auto-Review / Full Access. `!` ejecuta un comando de shell por
+la ruta normal de aprobación.
 
 ## Para saber más
 

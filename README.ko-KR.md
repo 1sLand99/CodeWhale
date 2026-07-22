@@ -1,10 +1,10 @@
-<!-- source: README.md sha256:f76ebd048ff1 -->
+<!-- source: README.md sha256:acc243c2dc85 -->
 # Codewhale
 
 **하나의 런타임. 모든 모델. 당신의 컴퓨터.**
 
-Codewhale은 터미널에서 쓰는 코딩 에이전트입니다. 어떤 모델과도 동작하며,
-오픈 모델을 우선합니다. 프로바이더, 모델, 작업을 지정하면 코드를 읽고,
+Codewhale은 터미널에서 쓰는 코딩 에이전트입니다. 지원되는 호스팅 및 로컬
+모델과 함께 동작하며, 오픈 모델을 우선합니다. 프로바이더, 모델, 작업을 지정하면 코드를 읽고,
 파일을 편집하고, 명령을 실행하고, 스스로 작업을 확인하며, 작업이 끝나거나
 사용자의 판단이 필요해지면 멈춥니다. 작업 도중에도 `/model`로 모델을 바꿀
 수 있습니다. 대화형 작업에는 TUI를, 스크립트와 CI에는 `codewhale exec`를
@@ -57,9 +57,9 @@ codewhale web                            # local browser client on 127.0.0.1
 ```
 
 TUI 안에서: `/model`은 프로바이더와 모델을 함께 전환하고, `/fleet`은
-워커 팀을 실행하며, `/restore`는 한 턴을 되돌립니다. `Tab`은
-Plan / Act / Operate 모드를 순환하고, `Shift+Tab`은
-Ask / Auto-Review / Full Access 승인 태세를 순환하며, `!`는 일반 승인
+워커 팀을 실행하며, `/restore`는 한 턴을 되돌립니다. 입력창이 유휴 상태일 때
+`Tab`은 Plan / Act / Operate 모드를 순환하고, `Shift+Tab`은
+Ask / Auto-Review / Full Access 권한 태세를 순환합니다. `!`는 일반 승인
 경로를 거쳐 셸 명령을 실행합니다.
 
 ## 더 알아보기

@@ -1,9 +1,9 @@
 # codewhale
 
-> The terminal coding agent for any model — open models first.
+> The terminal coding agent for supported hosted and local models — open models first.
 
 Codewhale is a Rust TUI and CLI for many model providers — DeepSeek,
-OpenRouter, Hugging Face, and local vLLM/SGLang/Ollama are first-class routes,
+OpenRouter, Hugging Face, and local vLLM/SGLang/Ollama are supported routes,
 and it speaks natively to Anthropic Claude and OpenAI when that's what you have
 — with approval-gated tools, OS sandboxing, side-git snapshots, and `/restore`
 rollback.
@@ -65,9 +65,16 @@ Prebuilt binaries for the GitHub release are downloaded automatically:
 
 - Linux x64
 - Linux arm64
-- Android arm64 (Termux)
 - macOS x64 / arm64
 - Windows x64 / arm64
+- Android arm64 / Termux (preview; requires matching Android assets in the
+  selected GitHub Release)
+
+The source-candidate wrapper recognizes Android arm64 and resolves the
+Termux-native `codewhale`, `codew`, and `codewhale-tui` assets. That path works
+only for package versions whose matching GitHub Release publishes all three
+assets, and remains preview support pending real-device QA. See the support
+table in [docs/INSTALL.md](https://github.com/Hmbown/CodeWhale/blob/main/docs/INSTALL.md).
 
 HarmonyOS PC (`openharmony`) is treated as `linux`, so it gets the Linux
 binaries matching your CPU architecture (x64 or arm64). Linux riscv64 prebuilts

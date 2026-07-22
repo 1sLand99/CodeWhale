@@ -2,7 +2,7 @@
   "name": "codewhale",
   "version": "0.9.1",
   "codewhaleBinaryVersion": "0.9.1",
-  "description": "Terminal coding agent for any model, open models first. One runtime on your machine. Rust, MIT.",
+  "description": "Terminal coding agent for supported hosted and local models. One runtime on your machine. Rust, MIT.",
   "author": "Hmbown",
   "license": "MIT",
   "funding": [

@@ -8,6 +8,11 @@ If you just want the short version, see the
 [main README](../README.md#install) or
 [简体中文 README](../README.zh-CN.md#安装).
 
+This branch describes the **v0.9.1 source candidate**. Install commands that use
+`latest` resolve to the latest published package or GitHub Release, which may
+trail the source candidate. A candidate is not a published install until the
+matching package, tag, checksums, and release assets exist.
+
 On macOS and Linux, the website installer is the shortest install/update path:
 
 ```bash
@@ -22,17 +27,18 @@ verifies them against `codewhale-artifacts-sha256.txt`, installs to
 
 ## 1. Supported platforms
 
-Codewhale ships matched `codewhale`, `codew`, and `codewhale-tui` prebuilt binaries for
-the supported platform/architecture combinations below. Android/Termux is a
-preview in v0.9.1 pending real-device QA. Linux ARM64 is available from v0.8.8
-onward. Linux RISC-V prebuilts are temporarily paused because the locked
+Published Codewhale releases ship matched `codewhale`, `codew`, and
+`codewhale-tui` prebuilt binaries for their supported platform/architecture
+combinations. The table below is the intended v0.9.1 candidate matrix;
+Android/Termux is preview pending real-device QA. Linux ARM64 is available from
+v0.8.8 onward. Linux RISC-V prebuilts are temporarily paused because the locked
 `rquickjs-sys` dependency does not ship `riscv64gc-unknown-linux-gnu` bindings.
 
 | Platform     | Architecture | npm install | `cargo install` | GitHub release asset                                  |
 | ------------ | ------------ | :---------: | :-------------: | ----------------------------------------------------- |
 | Linux        | x64 (x86_64) |     ✅      |       ✅        | `codewhale-linux-x64`, `codew-linux-x64`, `codewhale-tui-linux-x64`        |
 | Linux        | arm64        |     ✅      |       ✅        | `codewhale-linux-arm64`, `codew-linux-arm64`, `codewhale-tui-linux-arm64`    |
-| Android / Termux | arm64 (aarch64) | ❌¹ | ⚠️⁴ preview | `codewhale-android-arm64.tar.gz` preview archive when published |
+| Android / Termux | arm64 (aarch64) | ⚠️⁴ preview | ⚠️⁴ preview | `codewhale-android-arm64.tar.gz` preview archive when published |
 | Linux        | riscv64      |     ❌¹     |       ❌³       | temporarily unsupported until upstream bindings land |
 | macOS        | x64          |     ✅      |       ✅        | `codewhale-macos-x64`, `codew-macos-x64`, `codewhale-tui-macos-x64`        |
 | macOS        | arm64 (M-series) | ✅      |       ✅        | `codewhale-macos-arm64`, `codew-macos-arm64`, `codewhale-tui-macos-arm64`    |
@@ -47,9 +53,12 @@ onward. Linux RISC-V prebuilts are temporarily paused because the locked
   [Build from source](#7-build-from-source) below.
 ³ RISC-V source builds currently need upstream `rquickjs-sys` RISC-V bindings or
   a bindgen-enabled dependency build.
-⁴ The Android/Termux build and setup paths are implemented, but v0.9.1 remains
-  preview-only until the real-device compile, startup, approval, file-tool, and
-  update checks tracked in #4236 and #4242 are complete.
+⁴ The v0.9.1 source-candidate npm wrapper recognizes Android arm64 and resolves
+  the matching `codewhale`, `codew`, and `codewhale-tui` Android assets. npm
+  installation works only for a package version whose GitHub Release publishes
+  those matching assets. The Android/Termux path remains preview-only until the
+  real-device compile, startup, approval, file-tool, and update checks tracked
+  in #4236 and #4242 are complete.
 
 Android / Termux is not the same target as Linux arm64. Do not install the
 GNU libc `codewhale-linux-arm64` archive in Termux; use the Termux-specific
@@ -62,15 +71,15 @@ They have no glibc dependency and run on any x86_64 Linux, including Ubuntu
 binary through `rusqlite`, so no separate `libsqlite3` runtime package is needed.
 
 The Linux **arm64** release assets are still GNU libc (glibc) builds. They
-dynamically link normal Linux runtime libraries such as `libdbus-1` and `libc`,
-and are built on Ubuntu 24.04, so they can require `GLIBC_2.39`.
+dynamically link normal Linux runtime libraries such as `libdbus-1` and `libc`.
+The v0.9.1 candidate build runs on Ubuntu 24.04, so it can require `GLIBC_2.39`.
 
 ### Linux glibc floor (arm64)
 
 This floor applies only to the **GNU libc** arm64 asset. The static x64 (musl)
 asset has no `GLIBC_*` symbols, so it passes the install preflight and runs on
-older systems without error. The v0.9.1 GNU arm64 asset is built on Ubuntu
-24.04 and can require `GLIBC_2.39`. Ubuntu 22.04 ships glibc
+older systems without error. The v0.9.1 candidate GNU arm64 asset is built on
+Ubuntu 24.04 and can require `GLIBC_2.39`. Ubuntu 22.04 ships glibc
 2.35, so those arm64 binaries fail with errors such as:
 
 ```text
@@ -226,12 +235,13 @@ a download sourced from an impersonating repository or mirror.
 
 ## 3. Install via npm
 
-npm is the recommended install path. The `codewhale` wrapper is published at
-v0.9.1 (Node 18+; wrapper available for v0.8.56 and later).
+npm is the recommended install path (Node 18+; wrapper available for v0.8.56
+and later). It installs the registry's latest published version, not an
+unpublished source candidate.
 
 ```bash
 npm install -g codewhale
-codewhale --version   # 0.9.1
+codewhale --version   # prints the published version that was installed
 ```
 
 `postinstall` downloads the right pair of binaries from the matching GitHub

@@ -32,6 +32,7 @@ export const RELEASE_CONTRIBUTORS: string[] = [
   "@zhangweiii",
   "@Angel-Hair",
   "@dmitri-0",
+  "@fleitz",
 ];
 
 /** Contributors who helped with reports, reproductions, and verification. */

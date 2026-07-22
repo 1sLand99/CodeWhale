@@ -1,10 +1,10 @@
-<!-- source: README.md sha256:f76ebd048ff1 -->
+<!-- source: README.md sha256:acc243c2dc85 -->
 # Codewhale
 
 **ひとつのランタイム。あらゆるモデル。あなたのマシン。**
 
-Codewhale はターミナルで動くコーディングエージェントです。あらゆるモデルで
-動作し、オープンモデルを最優先します。プロバイダ、モデル、タスクを渡すと、
+Codewhale はターミナルで動くコーディングエージェントです。対応するホスト型・
+ローカルモデルで動作し、オープンモデルを最優先します。プロバイダ、モデル、タスクを渡すと、
 コードを読み、ファイルを編集し、コマンドを実行し、自分の作業を確認して、
 タスクが完了するかあなたの手が必要になった時点で止まります。タスクの途中でも
 `/model` でモデルを切り替えられます。対話的な作業には TUI を、スクリプトと
@@ -53,7 +53,7 @@ codewhale exec "fix the failing test"    # headless
 codewhale web                            # local browser client on 127.0.0.1
 ```
 
-TUI では、`/model` がプロバイダとモデルをまとめて切り替え、`/fleet` がワーカーのチームを走らせ、`/restore` がターンを取り消します。`Tab` は Plan / Act / Operate を順に切り替え、`Shift+Tab` は Ask / Auto-Review / Full Access の承認スタンスを順に切り替え、`!` は Shell コマンドを通常の承認経路で実行します。
+TUI では、`/model` がプロバイダとモデルをまとめて切り替え、`/fleet` がワーカーのチームを走らせ、`/restore` がターンを取り消します。入力欄がアイドル状態のとき、`Tab` は Plan / Act / Operate を順に切り替え、`Shift+Tab` は Ask / Auto-Review / Full Access の権限スタンスを順に切り替えます。`!` は Shell コマンドを通常の承認経路で実行します。
 
 ## さらに詳しく
 
