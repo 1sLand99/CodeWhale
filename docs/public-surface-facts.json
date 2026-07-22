@@ -139,10 +139,10 @@
     "readme": "assets/screenshot.png",
     "website": "web/public/codewhale-tui.png",
     "sourceVersion": "0.9.1",
-    "sourceCommit": "5c3eb8245512cf790a933484453d3e300eb4c7af",
-    "terminal": "106x32",
+    "sourceCommit": "fa46105a7183ce961f503996a7e746f763ffb29c",
+    "terminal": "120x32",
     "theme": "Blue Stage dark",
-    "capture": "isolated Ollama route rendered from the real v0.9.1 TUI PTY",
+    "capture": "sealed local Ollama route rendered from the real v0.9.1 TUI in a 120x32 tmux PTY and rasterized with VHS",
     "sources": ["crates/tui", "docs/evidence/v091-empty-work-surface-receipt.md"]
   }
 }

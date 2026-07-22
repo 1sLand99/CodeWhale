@@ -468,13 +468,27 @@ done
     expect(digest(readmeImage)).toBe(digest(websiteImage));
     expect(pngDimensions(readmeImage)).toEqual([1280, 720]);
     expect(statSync(new URL(matrix.screenshot.readme, root)).size).toBeLessThan(500_000);
-    expect(matrix.screenshot.terminal).toBe("106x32");
+    expect(matrix.screenshot.terminal).toBe("120x32");
 
     const readme = text("README.md");
     const homepage = text("web/app/[locale]/page.tsx");
     expect(readme).toContain("assets/screenshot.png");
     expect(homepage).toContain('src="/codewhale-tui.png"');
     expect(homepage).toContain("with no empty Work bar");
+  });
+
+  it("keeps reduced motion static without hiding the reasoning trace", () => {
+    const css = text("web/app/globals.css");
+    const terminalPlayer = text("web/components/terminal-player.tsx");
+
+    expect(css).toMatch(
+      /@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\.tp-caret\s*\{\s*animation:\s*none;\s*\}[\s\S]*?\.ticker-track\s*\{\s*animation:\s*none;\s*\}[\s\S]*?\}/,
+    );
+    expect(terminalPlayer).toContain(
+      'window.matchMedia("(prefers-reduced-motion: reduce)").matches',
+    );
+    expect(terminalPlayer).toContain("setShown(Number.MAX_SAFE_INTEGER)");
+    expect(terminalPlayer).toContain("Server render shows the full trace");
   });
 
   it("keeps every fact-matrix source resolvable in the repository", () => {

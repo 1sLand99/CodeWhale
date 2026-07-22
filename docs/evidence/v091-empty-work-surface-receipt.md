@@ -5,10 +5,11 @@ is not based on a product mockup.
 
 ## Source
 
-- Version: `codewhale-tui 0.9.1 (5c3eb8245512)`
-- Commit: `5c3eb8245512cf790a933484453d3e300eb4c7af`
-- Branch at capture: `codex/fix-empty-work-surface-091`
-- Terminal: `106x32`
+- Version: `codewhale-tui 0.9.1 (fa46105a7183)`
+- Commit: `fa46105a7183ce961f503996a7e746f763ffb29c`
+- Checkout at capture: clean detached exact-source worktree for
+  `codex/v091-final-integration-20260721`
+- Terminal: `120x32`
 - Route: isolated local Ollama configuration using `qwen3-coder`; no API key
 - Workspace: clean public fixture shown as `~/codewhale-demo`
 - Theme: Blue Stage dark
@@ -18,26 +19,34 @@ is not based on a product mockup.
 The binary was built with:
 
 ```bash
-cargo build -p codewhale-tui --bin codewhale-tui --locked
+cargo build --release --locked -p codewhale-tui --bin codewhale-tui
 ```
 
-It was launched in a 106-column by 32-row PTY with isolated state:
+It was launched in a 120-column by 32-row tmux PTY with isolated state. VHS
+0.10.0 rasterized the real terminal cells at 1280x720; it did not generate or
+reconstruct product UI:
 
 ```bash
-CODEWHALE_HOME=/tmp/codewhale-v091-receipt/home \
-CODEWHALE_CONFIG_PATH=/tmp/codewhale-v091-receipt/home/config.toml \
-target/debug/codewhale-tui \
+NO_ANIMATIONS=1 \
+CODEWHALE_HOME=/path/to/sealed-home/.codewhale \
+CODEWHALE_CONFIG_PATH=/path/to/sealed-home/.codewhale/config.toml \
+CODEWHALE_MCP_CONFIG=/path/to/sealed-home/.codewhale/mcp.json \
+target/release/codewhale-tui \
   --skip-onboarding \
   --fresh \
   --no-project-config \
   --no-mouse-capture \
-  --workspace /tmp/codewhale-v091-receipt/codewhale-demo
+  --workspace ~/codewhale-demo
 ```
 
 The resulting 1280x720 capture has SHA-256
-`69c81df8a641cdad500d985973546db0a91c138e2c82e0de9586cdea7be85170`.
+`b6d869b74985e8c1c89288076185ce8de5f951e190f0a745e5949c5b60cc666f`.
 It contains no username, credential, account identifier, private repository
-path, error state, or unsupported product claim.
+path, error state, or unsupported product claim. The idle capture process had
+no open TCP or UDP socket. `NO_ANIMATIONS=1` makes this one canonical still
+stable; the separate real-PTY suite proves full, reduced, and still motion.
+The captured header visibly identifies `v0.9.1 (fa46105a7183)`, and the context
+line is `~/codewhale-demo · main · mcp 0`.
 
 ## Acceptance
 
@@ -47,9 +56,9 @@ rows. Active, error, and disconnected Work projections remain covered by the
 TUI unit suite.
 
 ```text
-cargo test -p codewhale-tui --bin codewhale-tui --locked
-test result: ok. 7799 passed; 0 failed; 3 ignored
+cargo test -p codewhale-tui --bins --all-features --locked
+test result: ok. 8062 passed; 0 failed; 4 ignored
 
-cargo test -p codewhale-tui --bin codewhale-tui --locked tui::work_surface::tests::
-test result: ok. 23 passed; 0 failed
+cargo test -p codewhale-tui --test qa_pty --locked
+test result: ok. 25 passed; 0 failed; 1 ignored
 ```
