@@ -190,7 +190,10 @@ pub fn execute(cmd: &str, app: &mut App) -> CommandResult {
             if let Some(result) = groups::skills::run_skill_by_name(app, command.as_str(), arg) {
                 return result;
             }
-            let suggestions = suggest_command_names(command.as_str(), 3);
+            let suggestions =
+                user_registry::with_registry_for_workspace(Some(&app.workspace), |user_commands| {
+                    suggest_command_names(command.as_str(), 3, user_commands)
+                });
             if suggestions.is_empty() {
                 CommandResult::error(format!(
                     "Unknown command: /{command}. Type /help for available commands."
@@ -248,7 +251,42 @@ fn edit_distance(a: &str, b: &str) -> usize {
     previous[b_chars.len()]
 }
 
-fn suggest_command_names(input: &str, limit: usize) -> Vec<String> {
+fn suggestion_score<'a>(
+    query: &str,
+    candidates: impl IntoIterator<Item = &'a str>,
+) -> Option<(u8, usize)> {
+    let mut best: Option<(u8, usize)> = None;
+    for candidate in candidates {
+        let prefix_match = candidate.starts_with(query) || query.starts_with(candidate);
+        let contains_match = candidate.contains(query) || query.contains(candidate);
+        let distance = edit_distance(candidate, query);
+        let close_typo = distance <= 2;
+        if !(prefix_match || contains_match || close_typo) {
+            continue;
+        }
+
+        let rank = if prefix_match {
+            0
+        } else if contains_match {
+            1
+        } else {
+            2
+        };
+
+        match best {
+            Some((best_rank, best_distance))
+                if rank > best_rank || (rank == best_rank && distance >= best_distance) => {}
+            _ => best = Some((rank, distance)),
+        }
+    }
+    best
+}
+
+fn suggest_command_names(
+    input: &str,
+    limit: usize,
+    user_commands: &user_registry::UserCommandRegistry,
+) -> Vec<String> {
     let query = input.trim().to_ascii_lowercase();
     if query.is_empty() || limit == 0 {
         return Vec::new();
@@ -256,32 +294,17 @@ fn suggest_command_names(input: &str, limit: usize) -> Vec<String> {
 
     let mut scored: Vec<(u8, usize, String)> = Vec::new();
     for command in registry().infos() {
-        let mut best: Option<(u8, usize)> = None;
-        for candidate in std::iter::once(command.name).chain(command.aliases.iter().copied()) {
-            let prefix_match = candidate.starts_with(&query) || query.starts_with(candidate);
-            let contains_match = candidate.contains(&query) || query.contains(candidate);
-            let distance = edit_distance(candidate, &query);
-            let close_typo = distance <= 2;
-            if !(prefix_match || contains_match || close_typo) {
-                continue;
-            }
-
-            let rank = if prefix_match {
-                0
-            } else if contains_match {
-                1
-            } else {
-                2
-            };
-
-            match best {
-                Some((best_rank, best_distance))
-                    if rank > best_rank || (rank == best_rank && distance >= best_distance) => {}
-                _ => best = Some((rank, distance)),
-            }
+        if user_commands.get(command.name).is_some() {
+            continue;
         }
-
-        if let Some((rank, distance)) = best {
+        let candidates = std::iter::once(command.name).chain(
+            command
+                .aliases
+                .iter()
+                .copied()
+                .filter(|alias| user_commands.get(alias).is_none()),
+        );
+        if let Some((rank, distance)) = suggestion_score(&query, candidates) {
             scored.push((rank, distance, command.name.to_string()));
         }
     }
@@ -457,12 +480,65 @@ mod tests {
             );
         }
 
+        let user_commands = user_registry::UserCommandRegistry::new();
         assert!(
-            suggest_command_names("slpo", 3)
+            suggest_command_names("slpo", 3, &user_commands)
                 .iter()
                 .any(|name| name == "debt"),
             "typo suggestions should consider the /slop alias"
         );
+    }
+
+    #[test]
+    fn debt_alias_help_and_suggestions_respect_user_command_shadows() {
+        let temp = tempdir().unwrap();
+        let commands_dir = temp.path().join(".codewhale").join("commands");
+        std::fs::create_dir_all(&commands_dir).unwrap();
+        std::fs::write(
+            commands_dir.join("slop.md"),
+            "---\ndescription: Custom slop workflow\nargument-hint: <target>\n---\ncustom slop $ARGUMENTS",
+        )
+        .unwrap();
+        std::fs::write(
+            commands_dir.join("custom-debt.md"),
+            "---\ndescription: Custom debt alias\nalias: canzha\n---\ncustom debt $ARGUMENTS",
+        )
+        .unwrap();
+
+        let mut app = create_test_app();
+        app.workspace = temp.path().to_path_buf();
+
+        for alias in ["slop", "canzha"] {
+            let result = execute(&format!("/help {alias}"), &mut app);
+            assert!(result.is_error, "/help {alias} returned {result:?}");
+            let message = result.message.expect("shadowed alias help should error");
+            assert!(message.contains(alias), "{message:?}");
+            assert!(!message.contains("debt"), "{message:?}");
+        }
+
+        let debt_help = execute("/help debt", &mut app);
+        assert!(!debt_help.is_error);
+        let debt_message = debt_help
+            .message
+            .expect("canonical debt help should render");
+        assert!(debt_message.contains("cleanup"), "{debt_message:?}");
+        assert!(!debt_message.contains("slop"), "{debt_message:?}");
+        assert!(!debt_message.contains("canzha"), "{debt_message:?}");
+
+        let slop_typo = execute("/slpo", &mut app);
+        let slop_typo_message = slop_typo.message.expect("typo should return guidance");
+        assert!(!slop_typo_message.contains("/debt"), "{slop_typo_message}");
+
+        let canzha_typo = execute("/canzhaa", &mut app);
+        let canzha_typo_message = canzha_typo.message.expect("typo should return guidance");
+        assert!(
+            !canzha_typo_message.contains("/debt"),
+            "{canzha_typo_message}"
+        );
+
+        let debt_typo = execute("/detb", &mut app);
+        let debt_typo_message = debt_typo.message.expect("typo should return guidance");
+        assert!(debt_typo_message.contains("/debt"), "{debt_typo_message}");
     }
 
     #[test]

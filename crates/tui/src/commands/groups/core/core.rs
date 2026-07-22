@@ -17,6 +17,16 @@ use super::CommandResult;
 /// Show help information
 pub fn help(app: &mut App, topic: Option<&str>) -> CommandResult {
     if let Some(topic) = topic {
+        let user_commands = crate::commands::user_registry::with_registry_for_workspace(
+            Some(&app.workspace),
+            Clone::clone,
+        );
+        if user_commands.get(topic).is_some() {
+            return CommandResult::error(
+                tr(app.ui_locale, MessageId::HelpUnknownCommand).replace("{topic}", topic),
+            );
+        }
+
         // Show help for specific command
         if let Some(cmd) = crate::commands::get_command_info(topic) {
             let mut help = format!(
@@ -26,12 +36,18 @@ pub fn help(app: &mut App, topic: Option<&str>) -> CommandResult {
                 tr(app.ui_locale, MessageId::HelpUsageLabel),
                 cmd.usage
             );
-            if !cmd.aliases.is_empty() {
+            let visible_aliases = cmd
+                .aliases
+                .iter()
+                .filter(|alias| user_commands.get(alias).is_none())
+                .copied()
+                .collect::<Vec<_>>();
+            if !visible_aliases.is_empty() {
                 let _ = write!(
                     help,
                     "\n  {} {}",
                     tr(app.ui_locale, MessageId::HelpAliasesLabel),
-                    cmd.aliases.join(", ")
+                    visible_aliases.join(", ")
                 );
             }
             return CommandResult::message(help);
