@@ -2671,10 +2671,10 @@ fn spawn_tool_lifecycle_screen_fixture(
                             .and_then(|message| message.get("content"))
                             .and_then(serde_json::Value::as_str)
                             .unwrap_or_default();
-                        if !(bash_result.contains("Exact evidence retained")
-                            && bash_result.contains("art_call_bash_pty")
-                            && !bash_result.contains("PTY-EVIDENCE-DEEP-SENTINEL")
-                            && !bash_result.contains("/artifacts/"))
+                        if !bash_result.contains("Exact evidence retained")
+                            || !bash_result.contains("art_call_bash_pty")
+                            || bash_result.contains("PTY-EVIDENCE-DEEP-SENTINEL")
+                            || bash_result.contains("/artifacts/")
                         {
                             contract_errors.push(format!(
                                     "final request omitted the bounded session-owned Bash receipt (receipt={}, handle={}, deep_sentinel={}, artifact_path={})",
