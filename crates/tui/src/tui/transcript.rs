@@ -1711,13 +1711,21 @@ mod tests {
         ];
         let revisions = vec![1u64, 2, 3, 4];
         let index_map: Vec<usize> = vec![0, 1, 2, 3];
+        // This test compares the two cache traversal paths, not animation.
+        // Freeze live motion so a spinner tick between the two renders cannot
+        // turn an equivalent layout into a timing-dependent failure.
+        let options = TranscriptRenderOptions {
+            low_motion: true,
+            motion_mode: crate::tui::motion::MotionMode::Still,
+            ..TranscriptRenderOptions::default()
+        };
 
         let mut split_cache = TranscriptViewCache::new();
         split_cache.ensure_split(
             &[&cells],
             &revisions,
             40,
-            TranscriptRenderOptions::default(),
+            options,
             &HashSet::new(),
             Some(&index_map),
         );
@@ -1728,7 +1736,7 @@ mod tests {
             &refs,
             &revisions,
             40,
-            TranscriptRenderOptions::default(),
+            options,
             &HashSet::new(),
             Some(&index_map),
         );
