@@ -195,7 +195,7 @@ pub fn draw_min_interval_for_hz(display_hz: Option<u32>, low_motion: bool) -> Du
         return MIN_FRAME_INTERVAL;
     };
     // Cap draw rate at min(display_hz, 120). Never faster than MIN_FRAME_INTERVAL.
-    let capped = hz.min(120).max(30);
+    let capped = hz.clamp(30, 120);
     let nanos = 1_000_000_000u64 / u64::from(capped);
     Duration::from_nanos(nanos).max(MIN_FRAME_INTERVAL)
 }

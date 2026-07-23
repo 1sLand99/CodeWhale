@@ -22,7 +22,7 @@ pub fn format_operation_digest_parts(
         .iter()
         .filter(|node| node.kind == NodeKind::Operation)
         .collect::<Vec<_>>();
-    operations.sort_by_key(|node| (state_rank(node.state), node.updated_at.clone()));
+    operations.sort_by_key(|node| (state_rank(node.state), node.updated_at));
 
     let mut todo_items = todos.items.iter().collect::<Vec<_>>();
     todo_items.sort_by_key(|item| (todo_rank(item), item.id));
