@@ -212,6 +212,7 @@ pub fn save_consent_store(path: &Path, store: &ImportConsentStore) -> std::io::R
 }
 
 /// Filter candidates that still need a user decision for this content hash.
+#[allow(dead_code)] // used by future selector UI + unit tests
 pub fn candidates_needing_consent(
     candidates: &[ImportCandidate],
     store: &ImportConsentStore,

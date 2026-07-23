@@ -48,6 +48,10 @@ impl DisplayRefreshProbeResult {
     }
 }
 
+// Keep outcome() public for diagnostics even when the TUI only logs the probe
+// struct fields today.
+const _: fn(DisplayRefreshProbeResult) -> &'static str = DisplayRefreshProbeResult::outcome;
+
 /// Once per process. Infallible.
 pub fn probe_display_refresh() -> DisplayRefreshProbeResult {
     static CACHE: OnceLock<DisplayRefreshProbeResult> = OnceLock::new();

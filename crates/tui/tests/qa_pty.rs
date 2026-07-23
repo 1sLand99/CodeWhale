@@ -3143,9 +3143,13 @@ where
             let full_width_rules = (0..rows)
                 .filter(|&row| horizontal_rule_fills(frame, row, cols))
                 .count();
+            // Brand-aware header: `cw 🐳` (emoji chip) or legacy `cw  ` spacing.
+            let header = frame.row(0);
+            let brand_header =
+                header.contains("cw  ") || header.contains("cw 🐳") || header.starts_with("cw ");
             frame.rows() == rows
                 && frame.cols() == cols
-                && frame.row(0).contains("cw  ")
+                && brand_header
                 && horizontal_rule_fills(frame, 1, cols)
                 && full_width_rules >= 2
                 && frame.contains(COMPOSER_READY_TEXT)
