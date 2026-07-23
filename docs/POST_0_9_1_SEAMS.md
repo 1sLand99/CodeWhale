@@ -14,7 +14,6 @@ monoliths without necessity):
 | Hover aura | `tui/hover_hit.rs` + `tui/hover_layer.rs` |
 | Git status cache | `tui/git_status.rs` |
 | Worktree manager UI | `tui/worktree_manager.rs` |
-| Activity shelf | `tui/widgets/activity_shelf.rs` |
 | Phase rail | `tui/phase_strip.rs` |
 | Stream entry seam | `client/stream_entry.rs` |
 
@@ -30,9 +29,9 @@ is pure view wiring.
 - idle-timeout message format
 
 Wire-protocol adapters remain at the edge (`chat.rs`, `anthropic.rs`,
-`responses.rs`). **Follow-up:** route each adapter's `create_message_stream`
-through `StreamOpenRequest` + `client_for_policy`, then collapse further toward
-a piagent-style single StreamFn once all three paths share event mapping.
+`responses.rs`). Chat Completions now opens through `StreamOpenRequest`;
+**follow-up:** route the Anthropic Messages and Responses adapters through the
+same policy before collapsing further toward a piagent-style single StreamFn.
 
 ## Thin TUI over core (north star)
 
