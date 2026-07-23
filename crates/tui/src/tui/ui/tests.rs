@@ -1814,6 +1814,23 @@ fn loading_mouse_filter_keeps_active_drags() {
     app.viewport.transcript_scrollbar_dragging = false;
     app.sidebar_resizing = true;
     assert!(!should_drop_loading_mouse_motion(&app, drag));
+
+    app.sidebar_resizing = false;
+    app.work_surface.last_area = Some(Rect::new(0, 0, 80, 3));
+    let started = crate::tui::work_surface::handle_mouse(
+        &mut app,
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 20,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        },
+    );
+    assert!(started.consumed);
+    assert!(
+        !should_drop_loading_mouse_motion(&app, drag),
+        "Underwater Work divider drag must survive the loading filter"
+    );
 }
 
 #[test]
@@ -7832,6 +7849,34 @@ fn sidebar_resize_down_on_handle_starts_resizing() {
     );
     assert_eq!(app.sidebar_resize_anchor_x, 80);
     assert_eq!(app.sidebar_resize_anchor_width, 33);
+}
+
+#[test]
+fn sidebar_resize_handle_tracks_hover_for_visible_feedback() {
+    let mut app = create_test_app();
+    setup_resize_handle(&mut app, 80, 33, 120);
+
+    handle_mouse_event(
+        &mut app,
+        MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 80,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        },
+    );
+    assert!(app.sidebar_resize_hovered);
+
+    handle_mouse_event(
+        &mut app,
+        MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 79,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        },
+    );
+    assert!(!app.sidebar_resize_hovered);
 }
 
 #[test]

@@ -1282,6 +1282,40 @@ mod tests {
     }
 
     #[test]
+    fn divider_hover_and_drag_render_a_discoverable_handle() {
+        let mut app = app();
+        add_todos(&mut app, 3);
+        let resting = render_text(&mut app, 80, 3);
+        assert!(resting.contains('─'), "{resting}");
+
+        let hover = super::handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: 20,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert!(hover.consumed);
+        assert!(app.work_surface.divider_hovered);
+        let hovered = render_text(&mut app, 80, 3);
+        assert!(hovered.contains('━'), "{hovered}");
+
+        let _ = super::handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 20,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        let dragging = render_text(&mut app, 80, 3);
+        assert!(dragging.contains('━'), "{dragging}");
+    }
+
+    #[test]
     fn top_bar_excludes_generic_operations() {
         let mut operation_app = app();
         let graph = operation_graph(NodeState::Failed);

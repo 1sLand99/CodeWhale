@@ -2272,6 +2272,8 @@ pub struct App {
     pub last_mouse_pos: Option<(u16, u16)>,
     /// Whether the user is currently dragging the sidebar resize handle.
     pub sidebar_resizing: bool,
+    /// Whether the pointer is over the classic sidebar resize handle.
+    pub sidebar_resize_hovered: bool,
     /// Mouse column at the start of a sidebar-resize drag.
     pub sidebar_resize_anchor_x: u16,
     /// Sidebar width in columns at the start of a sidebar-resize drag.
@@ -3549,6 +3551,7 @@ impl App {
             provider_picker_memory: None,
             last_mouse_pos: None,
             sidebar_resizing: false,
+            sidebar_resize_hovered: false,
             sidebar_resize_anchor_x: 0,
             sidebar_resize_anchor_width: 0,
             last_sidebar_area: None,

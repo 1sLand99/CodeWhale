@@ -105,9 +105,22 @@ pub fn handle_mouse(app: &mut App, mouse: MouseEvent) -> MouseOutcome {
         }
     };
 
+    if matches!(mouse.kind, MouseEventKind::Moved) && app.work_surface.divider_hovered != on_divider
+    {
+        app.work_surface.divider_hovered = on_divider;
+        app.needs_redraw = true;
+    }
+
     match mouse.kind {
+        MouseEventKind::Moved if on_divider => {
+            return MouseOutcome {
+                consumed: true,
+                action: None,
+            };
+        }
         MouseEventKind::Down(MouseButton::Left) if on_divider => {
             app.work_surface.resizing = true;
+            app.work_surface.divider_hovered = true;
             app.work_surface.resize_anchor_column = mouse.column;
             app.work_surface.resize_anchor_row = mouse.row;
             app.work_surface.resize_anchor_size = match placement {
@@ -153,6 +166,7 @@ pub fn handle_mouse(app: &mut App, mouse: MouseEvent) -> MouseOutcome {
         }
         MouseEventKind::Up(MouseButton::Left) if app.work_surface.resizing => {
             app.work_surface.resizing = false;
+            app.work_surface.divider_hovered = on_divider;
             if let Ok(mut settings) = crate::settings::Settings::load_persisted() {
                 settings.work_surface_top_height = app.work_surface.top_height;
                 settings.work_surface_side_width = app.work_surface.side_width;

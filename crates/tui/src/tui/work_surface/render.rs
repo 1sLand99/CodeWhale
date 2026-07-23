@@ -46,6 +46,7 @@ pub fn height(app: &mut App, width: u16, terminal_height: u16, classic_shell: bo
         app.work_surface.total_rows = 0;
         app.work_surface.scroll_offset = 0;
         app.work_surface.resizing = false;
+        app.work_surface.divider_hovered = false;
         return 0;
     }
     if app.work_surface.effective_placement != WorkSurfacePlacement::Top {
@@ -301,13 +302,19 @@ fn row_style(app: &App, row: &WorkRow, selected: bool, hovered: bool, opened: bo
 }
 
 fn render_divider(frame: &mut Frame, area: Rect, placement: WorkSurfacePlacement, app: &App) {
+    let active = app.work_surface.resizing || app.work_surface.divider_hovered;
+    let color = if active {
+        app.ui_theme.accent_primary
+    } else {
+        app.ui_theme.border
+    };
     match placement {
         WorkSurfacePlacement::Top => {
             let y = area.bottom().saturating_sub(1);
             for x in area.left()..area.right() {
                 frame.buffer_mut()[(x, y)]
-                    .set_symbol("─")
-                    .set_fg(app.ui_theme.border)
+                    .set_symbol(if active { "━" } else { "─" })
+                    .set_fg(color)
                     .set_bg(app.ui_theme.surface_bg);
             }
         }
@@ -319,8 +326,8 @@ fn render_divider(frame: &mut Frame, area: Rect, placement: WorkSurfacePlacement
             };
             for y in area.top()..area.bottom() {
                 frame.buffer_mut()[(x, y)]
-                    .set_symbol("│")
-                    .set_fg(app.ui_theme.border)
+                    .set_symbol(if active { "┃" } else { "│" })
+                    .set_fg(color)
                     .set_bg(app.ui_theme.surface_bg);
             }
         }

@@ -43,11 +43,12 @@ pub(crate) fn should_drop_loading_mouse_motion(app: &App, mouse: MouseEvent) -> 
             !(over_sidebar || was_over_sidebar || app.sidebar_hover_tooltip.is_some())
         }
         MouseEventKind::Drag(_) => {
-            // Sidebar drag-to-resize must stay live during active turns —
-            // dropping these events wedges the resize state mid-drag (#3063).
+            // Divider drags must stay live during active turns — dropping
+            // these events wedges the resize state mid-drag (#3063).
             !app.viewport.transcript_selection.dragging
                 && !app.viewport.transcript_scrollbar_dragging
                 && !app.sidebar_resizing
+                && !app.work_surface.is_resizing()
         }
         _ => false,
     }
@@ -80,8 +81,16 @@ fn handle_sidebar_resize_mouse(app: &mut App, mouse: MouseEvent) -> bool {
         && mouse.row < handle.y.saturating_add(handle.height);
 
     match mouse.kind {
+        MouseEventKind::Moved => {
+            if app.sidebar_resize_hovered != hit {
+                app.sidebar_resize_hovered = hit;
+                app.needs_redraw = true;
+            }
+            false
+        }
         MouseEventKind::Down(MouseButton::Left) if hit => {
             app.sidebar_resizing = true;
+            app.sidebar_resize_hovered = true;
             app.sidebar_resize_anchor_x = mouse.column;
             app.sidebar_resize_anchor_width = app.last_sidebar_area.map(|a| a.width).unwrap_or(28);
             app.needs_redraw = true;
@@ -100,6 +109,7 @@ fn handle_sidebar_resize_mouse(app: &mut App, mouse: MouseEvent) -> bool {
         }
         MouseEventKind::Up(MouseButton::Left) if app.sidebar_resizing => {
             app.sidebar_resizing = false;
+            app.sidebar_resize_hovered = hit;
             app.sidebar_width_dirty = true;
             app.needs_redraw = true;
             true

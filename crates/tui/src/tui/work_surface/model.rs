@@ -114,6 +114,7 @@ pub struct WorkSurfaceState {
     pub top_height: u16,
     pub side_width: u16,
     pub(super) resizing: bool,
+    pub(super) divider_hovered: bool,
     pub(super) resize_anchor_column: u16,
     pub(super) resize_anchor_row: u16,
     pub(super) resize_anchor_size: u16,
@@ -160,6 +161,11 @@ impl Default for WorkSurfaceState {
 
 impl WorkSurfaceState {
     #[must_use]
+    pub(crate) fn is_resizing(&self) -> bool {
+        self.resizing
+    }
+
+    #[must_use]
     pub fn with_placement(placement: WorkSurfacePlacement) -> Self {
         Self::with_layout(placement, 3, 30)
     }
@@ -172,6 +178,7 @@ impl WorkSurfaceState {
             top_height: top_height.clamp(TOP_HEIGHT_MIN, TOP_HEIGHT_MAX),
             side_width: side_width.clamp(SIDE_WIDTH_MIN, SIDE_WIDTH_MAX),
             resizing: false,
+            divider_hovered: false,
             resize_anchor_column: 0,
             resize_anchor_row: 0,
             resize_anchor_size: 0,

@@ -1044,6 +1044,16 @@ fn work_surface_real_rows_own_click_wheel_and_resize() -> anyhow::Result<()> {
         .frame()
         .find_text("todo-mouse-00")
         .expect("real rendered first To-do row");
+
+    // The default top Work surface is three rows tall: two content rows plus
+    // its visible divider. Send genuine SGR down/drag/up bytes and prove the
+    // resized surface exposes additional real rows before exercising scroll.
+    let divider_row = first_row.saturating_add(2);
+    h.send(keys::mouse::down(divider_row, first_col))?;
+    h.send(keys::mouse::drag(divider_row.saturating_add(3), first_col))?;
+    h.send(keys::mouse::up(divider_row.saturating_add(3), first_col))?;
+    h.wait_for_text("todo-mouse-04", KEY_TIMEOUT)?;
+
     for _ in 0..8 {
         h.send(keys::mouse::wheel_down(first_row, first_col))?;
         h.wait_for_idle(Duration::from_millis(40), Duration::from_secs(1))?;

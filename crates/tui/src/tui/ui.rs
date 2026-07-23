@@ -12281,6 +12281,7 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
             app.last_sidebar_area = None;
             app.last_sidebar_handle_area = None;
             app.sidebar_resizing = false;
+            app.sidebar_resize_hovered = false;
             app.sidebar_hover_tooltip = None;
         }
 
@@ -12302,9 +12303,17 @@ fn render(f: &mut Frame, app: &mut App, config: &Config) {
                 height: sidebar_area.height,
             };
             app.last_sidebar_handle_area = Some(handle_area);
-            let handle =
-                ratatui::widgets::Paragraph::new("│\n".repeat(usize::from(handle_area.height)))
-                    .style(Style::default().fg(palette::TEXT_MUTED));
+            let handle_active = app.sidebar_resizing || app.sidebar_resize_hovered;
+            let handle_symbol = if handle_active { "┃\n" } else { "│\n" };
+            let handle_color = if handle_active {
+                app.ui_theme.accent_primary
+            } else {
+                palette::TEXT_MUTED
+            };
+            let handle = ratatui::widgets::Paragraph::new(
+                handle_symbol.repeat(usize::from(handle_area.height)),
+            )
+            .style(Style::default().fg(handle_color));
             f.render_widget(handle, handle_area);
         }
     }

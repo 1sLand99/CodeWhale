@@ -45,6 +45,18 @@ pub mod key {
 
 /// SGR mouse sequences use one-based terminal coordinates.
 pub mod mouse {
+    pub fn down(row: u16, col: u16) -> Vec<u8> {
+        format!("\x1b[<0;{};{}M", col + 1, row + 1).into_bytes()
+    }
+
+    pub fn drag(row: u16, col: u16) -> Vec<u8> {
+        format!("\x1b[<32;{};{}M", col + 1, row + 1).into_bytes()
+    }
+
+    pub fn up(row: u16, col: u16) -> Vec<u8> {
+        format!("\x1b[<0;{};{}m", col + 1, row + 1).into_bytes()
+    }
+
     pub fn click(row: u16, col: u16) -> Vec<u8> {
         format!(
             "\x1b[<0;{};{}M\x1b[<0;{};{}m",
