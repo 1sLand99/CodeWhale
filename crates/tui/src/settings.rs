@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{ApiProvider, expand_path, normalize_model_name};
 use crate::localization::normalize_configured_locale;
-use crate::palette::{normalize_hex_rgb_color, normalize_theme_name};
+use crate::palette::{normalize_hex_rgb_color, normalize_theme_setting};
 use crate::tui::app::ReasoningEffort;
 
 const SETTINGS_FILE_NAME: &str = "settings.toml";
@@ -207,14 +207,7 @@ impl TuiPrefs {
     /// Returns `Err` if an unrecognised `theme` value is found so callers can
     /// surface a helpful message rather than silently ignoring a typo.
     pub fn validate(&mut self) -> Result<()> {
-        let theme = self.theme.trim().to_ascii_lowercase();
-        let Some(theme) = normalize_theme_name(&theme) else {
-            anyhow::bail!(
-                "Invalid tui.toml theme '{}': expected system, dark, light, grayscale, catppuccin-mocha, tokyo-night, dracula, gruvbox-dark, or solarized-light.",
-                self.theme
-            );
-        };
-        self.theme = theme.to_string();
+        self.theme = normalize_theme_setting(&self.theme).map_err(anyhow::Error::msg)?;
         Ok(())
     }
 }
@@ -675,7 +668,7 @@ impl Settings {
                 .unwrap_or("en")
                 .to_string();
             s.background_color = normalize_optional_background_color(s.background_color.as_deref());
-            s.theme = normalize_settings_theme(&s.theme).to_string();
+            s.theme = normalize_settings_theme(&s.theme);
             s.default_model = s.default_model.as_deref().and_then(normalize_default_model);
             s.reasoning_effort = s
                 .reasoning_effort
@@ -944,20 +937,10 @@ impl Settings {
                 self.locale = locale.to_string();
             }
             "theme" => {
-                let Some(id) = crate::palette::ThemeId::from_name(value) else {
-                    anyhow::bail!(
-                        "Failed to update setting: invalid theme '{value}'. Expected: system, dark, light, grayscale, catppuccin-mocha, tokyo-night, dracula, gruvbox-dark, solarized-light."
-                    );
-                };
-                self.theme = id.name().to_string();
+                self.theme = normalize_theme_setting(value).map_err(anyhow::Error::msg)?;
             }
             "ui_theme" => {
-                let Some(id) = crate::palette::ThemeId::from_name(value) else {
-                    anyhow::bail!(
-                        "Failed to update setting: invalid theme '{value}'. Expected: system, dark, light, grayscale, catppuccin-mocha, tokyo-night, dracula, gruvbox-dark, solarized-light."
-                    );
-                };
-                self.theme = id.name().to_string();
+                self.theme = normalize_theme_setting(value).map_err(anyhow::Error::msg)?;
             }
             "background_color" | "background" | "bg" => {
                 self.background_color = normalize_background_color_setting(value)?;
@@ -1342,7 +1325,7 @@ impl Settings {
             ),
             (
                 "theme",
-                "UI theme: system, dark, light, grayscale, catppuccin-mocha, tokyo-night, dracula, gruvbox-dark, solarized-light",
+                "UI theme: a compiled name or custom:<name> from the Codewhale themes directory",
             ),
             (
                 "background_color",
@@ -1772,8 +1755,8 @@ fn normalize_synchronized_output(value: &str) -> &str {
     }
 }
 
-fn normalize_settings_theme(value: &str) -> &'static str {
-    normalize_theme_name(value).unwrap_or("system")
+fn normalize_settings_theme(value: &str) -> String {
+    normalize_theme_setting(value).unwrap_or_else(|_| "system".to_string())
 }
 
 /// Returns `true` when the active terminal is Ptyxis (the new default
@@ -2209,6 +2192,11 @@ mod tests {
             .set("theme", "solarized")
             .expect("set solarized alias");
         assert_eq!(settings.theme, "solarized-light");
+
+        settings
+            .set("theme", "custom:Ocean_1")
+            .expect("custom selector validation must not depend on the file system");
+        assert_eq!(settings.theme, "custom:ocean_1");
 
         let err = settings
             .set("theme", "nord")
@@ -3645,12 +3633,20 @@ mod tests {
             ..TuiPrefs::default()
         };
         let err = prefs.validate().expect_err("nord is not a valid theme");
-        assert!(err.to_string().contains("Invalid tui.toml theme"));
-        assert!(
-            err.to_string()
-                .contains("expected system, dark, light, grayscale")
-        );
-        assert!(err.to_string().contains("solarized-light"));
+        assert!(err.to_string().contains("invalid theme 'nord'"));
+        assert!(err.to_string().contains("custom:<name>"));
+    }
+
+    #[test]
+    fn tui_prefs_validate_custom_selector_without_loading_file() {
+        let mut prefs = TuiPrefs {
+            theme: "custom:Ocean_1".to_string(),
+            ..TuiPrefs::default()
+        };
+        prefs
+            .validate()
+            .expect("selector validation must not depend on the file system");
+        assert_eq!(prefs.theme, "custom:ocean_1");
     }
 
     #[test]

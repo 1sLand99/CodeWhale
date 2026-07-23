@@ -80,7 +80,7 @@ static MODE_INFO: CommandInfo = CommandInfo {
 static THEME_INFO: CommandInfo = CommandInfo {
     name: "theme",
     aliases: &[],
-    usage: "/theme [name]",
+    usage: "/theme [name|custom:<name>|schema|path]",
     description_id: MessageId::CmdThemeDescription,
 };
 static VERBOSE_INFO: CommandInfo = CommandInfo {

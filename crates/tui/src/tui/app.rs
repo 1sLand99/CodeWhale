@@ -3175,16 +3175,27 @@ impl App {
         // Resolve the named theme from settings; unknown values were already
         // normalised to "system" in Settings::load. The background_color
         // setting still overlays on top.
-        let theme_id =
-            palette::ThemeId::from_name(&settings.theme).unwrap_or(palette::ThemeId::System);
-        let mut ui_theme = theme_id.ui_theme();
         let background_color_override = settings
             .background_color
             .as_deref()
             .and_then(palette::parse_hex_rgb_color);
-        if let Some(background) = background_color_override {
-            ui_theme = ui_theme.with_background_color(background);
-        }
+        let background_setting = background_color_override.and_then(palette::hex_rgb_string);
+        let resolved_theme =
+            palette::resolve_theme_setting(&settings.theme, background_setting.as_deref());
+        let theme_warning = resolved_theme.as_ref().err().map(|error| {
+            format!(
+                "⚠ configured theme '{}' could not be loaded — using System ({error})",
+                settings.theme
+            )
+        });
+        let (_, theme_id, ui_theme) = resolved_theme.unwrap_or_else(|_| {
+            let id = palette::ThemeId::System;
+            let mut theme = id.ui_theme();
+            if let Some(background) = background_color_override {
+                theme = theme.with_background_color(background);
+            }
+            (id.name().to_string(), id, theme)
+        });
         let provider_models = settings.provider_models.clone().unwrap_or_default();
         let model = provider_models
             .get(&provider_identity)
@@ -3496,7 +3507,9 @@ impl App {
             turn_error_posted: false,
             // Surface parse warnings so the user knows their config file is
             // broken instead of silently losing all settings.
-            status_message: settings_parse_warning.or(tui_prefs_warning),
+            status_message: settings_parse_warning
+                .or(tui_prefs_warning)
+                .or(theme_warning),
             status_toasts: VecDeque::new(),
             sticky_status: None,
             last_status_message_seen: None,

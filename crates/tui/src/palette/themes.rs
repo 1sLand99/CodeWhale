@@ -894,11 +894,6 @@ impl UiTheme {
     }
 
     #[must_use]
-    pub fn from_setting(value: &str) -> Option<Self> {
-        ThemeId::from_name(value).map(ThemeId::ui_theme)
-    }
-
-    #[must_use]
     pub fn with_background_color(mut self, color: Color) -> Self {
         self.surface_bg = color;
         self.header_bg = color;
@@ -939,12 +934,11 @@ pub fn theme_label_for_mode(mode: PaletteMode) -> &'static str {
 }
 
 #[must_use]
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn ui_theme_from_settings(theme: &str, background_color: Option<&str>) -> UiTheme {
-    let mut ui_theme = UiTheme::from_setting(theme).unwrap_or_else(UiTheme::detect);
-    if let Some(background) = background_color.and_then(parse_hex_rgb_color) {
-        ui_theme = ui_theme.with_background_color(background);
-    }
-    ui_theme
+    super::resolve_theme_setting(theme, background_color)
+        .map(|(_, _, theme)| theme)
+        .unwrap_or_else(|_| UiTheme::detect())
 }
 
 #[must_use]

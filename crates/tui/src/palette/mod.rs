@@ -13,6 +13,7 @@ mod adapt;
 mod detect;
 mod themes;
 mod tokens;
+mod user_theme;
 
 #[cfg(test)]
 mod tests;
@@ -24,3 +25,4 @@ pub use detect::*;
 #[allow(unused_imports)]
 pub use themes::*;
 pub use tokens::*;
+pub use user_theme::*;

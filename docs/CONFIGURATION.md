@@ -1150,6 +1150,13 @@ Common settings keys:
   rose owns danger, violet owns Operate, and green remains completed/verified.
   Text labels, markers, and motion policy carry the same states when color is
   unavailable; color is never the only cue.
+  User-authored overlays live only at `~/.codewhale/themes/<name>.json` (or
+  `$CODEWHALE_HOME/themes/<name>.json`) and are selected with
+  `/theme custom:<name>`. The filename is a bounded slug, symlinks and files
+  over 64 KiB are refused, colors must be `#RRGGBB`, and unknown fields fail
+  validation. `/theme schema` prints the embedded JSON Schema and `/theme path`
+  shows the exact directory. An overlay names one compiled `base` theme and
+  changes only listed semantic colors; it cannot include or read another file.
 - `auto_compact` (on/off, model-aware default on for known context windows
   unless explicitly configured)
 - `auto_compact_threshold_percent` (10-100, default `80`): pre-send

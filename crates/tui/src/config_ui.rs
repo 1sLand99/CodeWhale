@@ -74,6 +74,12 @@ pub struct SettingsSection {
     pub locale: UiLocale,
     pub theme: UiThemeValue,
     #[schemars(
+        title = "Custom theme name",
+        description = "Theme slug from the fixed Codewhale themes directory; used only when theme is custom."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_theme_name: Option<String>,
+    #[schemars(
         title = "Background color",
         description = "Optional Blue Stage background override as #RRGGBB. Leave empty to keep the named theme."
     )]
@@ -216,6 +222,7 @@ pub enum UiThemeValue {
     GruvboxDark,
     Matrix,
     Uwu,
+    Custom,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -390,6 +397,13 @@ pub fn build_document(app: &App, config: &Config) -> Result<ConfigUiDocument> {
             inline_diffs: settings.inline_diffs.as_str().into(),
             locale: UiLocale::from_setting(&settings.locale)?,
             theme: UiThemeValue::from_setting(&settings.theme)?,
+            custom_theme_name: crate::palette::normalize_user_theme_selector(&settings.theme)
+                .map_err(anyhow::Error::msg)?
+                .map(|selector| {
+                    selector
+                        .trim_start_matches(crate::palette::USER_THEME_PREFIX)
+                        .to_string()
+                }),
             background_color: settings.background_color.clone(),
             bracketed_paste: settings.bracketed_paste,
             composer_density: settings.composer_density.as_str().into(),
@@ -550,6 +564,7 @@ pub fn apply_document(
     persist: bool,
 ) -> Result<ConfigUiApplyOutcome> {
     validate_document(&doc, app, config)?;
+    let theme_setting = theme_setting_for_document(&doc)?;
     let mut notes = Vec::new();
     let previous_compaction = app.compaction_config();
     let previous_reasoning_effort = app.reasoning_effort;
@@ -585,7 +600,7 @@ pub fn apply_document(
         ),
         ("inline_diffs", doc.settings.inline_diffs.as_setting()),
         ("locale", doc.settings.locale.as_setting()),
-        ("theme", doc.settings.theme.as_setting()),
+        ("theme", theme_setting.as_str()),
         (
             "background_color",
             doc.settings
@@ -769,7 +784,26 @@ fn validate_document(doc: &ConfigUiDocument, app: &App, config: &Config) -> Resu
     if doc.config.mcp_config_path.trim().is_empty() {
         bail!("mcp_config_path cannot be empty");
     }
+    let _ = theme_setting_for_document(doc)?;
     Ok(())
+}
+
+fn theme_setting_for_document(doc: &ConfigUiDocument) -> Result<String> {
+    let setting = if doc.settings.theme == UiThemeValue::Custom {
+        let name = doc
+            .settings
+            .custom_theme_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("custom theme requires custom_theme_name"))?;
+        format!("{}{}", crate::palette::USER_THEME_PREFIX, name)
+    } else {
+        doc.settings.theme.as_setting().to_string()
+    };
+    crate::palette::resolve_theme_setting(&setting, None)
+        .map(|(normalized, _, _)| normalized)
+        .map_err(anyhow::Error::msg)
 }
 
 fn validate_and_normalize_model(
@@ -912,10 +946,17 @@ impl UiThemeValue {
             Self::GruvboxDark => "gruvbox-dark",
             Self::Matrix => "matrix",
             Self::Uwu => "uwu",
+            Self::Custom => "custom",
         }
     }
 
     fn from_setting(value: &str) -> Result<Self> {
+        if crate::palette::normalize_user_theme_selector(value)
+            .map_err(anyhow::Error::msg)?
+            .is_some()
+        {
+            return Ok(Self::Custom);
+        }
         match crate::palette::normalize_theme_name(value) {
             Some("system") => Ok(Self::System),
             Some("dark") => Ok(Self::Dark),
@@ -1435,6 +1476,39 @@ background_color = "#1A1B26"
     }
 
     #[test]
+    fn custom_theme_round_trips_through_typed_config_document() {
+        let _lock = lock_test_env();
+        let temp_root = tempfile::tempdir().expect("isolated Codewhale home");
+        let codewhale_home = temp_root.path().join(".codewhale");
+        let themes_dir = codewhale_home.join("themes");
+        fs::create_dir_all(&themes_dir).expect("themes dir");
+        fs::write(
+            themes_dir.join("ocean.json"),
+            r##"{"schema_version":1,"base":"dark","colors":{"accent_primary":"#123456"}}"##,
+        )
+        .expect("custom theme");
+        fs::write(
+            codewhale_home.join("settings.toml"),
+            r#"theme = "custom:ocean"
+"#,
+        )
+        .expect("settings");
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+
+        let mut app = app();
+        let mut config = Config::default();
+        let doc = build_document(&app, &config).expect("document");
+        assert_eq!(doc.settings.theme, UiThemeValue::Custom);
+        assert_eq!(doc.settings.custom_theme_name.as_deref(), Some("ocean"));
+
+        apply_document(doc, &mut app, &mut config, false).expect("apply custom theme");
+        assert_eq!(
+            app.ui_theme.accent_primary,
+            ratatui::style::Color::Rgb(0x12, 0x34, 0x56)
+        );
+    }
+
+    #[test]
     fn schema_contains_typed_enums() {
         let schema = build_schema();
         assert_eq!(schema["title"], serde_json::json!("Codewhale Config"));
@@ -1479,7 +1553,8 @@ background_color = "#1A1B26"
                 "dracula",
                 "gruvbox-dark",
                 "matrix",
-                "uwu"
+                "uwu",
+                "custom"
             ])
         );
     }

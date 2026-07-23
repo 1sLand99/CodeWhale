@@ -1881,8 +1881,6 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             app.needs_redraw = true;
         }
         "theme" | "ui_theme" | "background_color" | "background" | "bg" => {
-            app.theme_id = crate::palette::ThemeId::from_name(&settings.theme)
-                .unwrap_or(crate::palette::ThemeId::System);
             // Theme previews reload persisted settings for each cursor move.
             // Keep a session-only background overlay live unless this command
             // is itself updating (or clearing) the background.
@@ -1894,13 +1892,20 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                     .as_deref()
                     .and_then(crate::palette::parse_hex_rgb_color)
             };
-            app.background_color_override = background_color_override;
             let background_setting =
                 background_color_override.and_then(crate::palette::hex_rgb_string);
-            app.ui_theme = crate::palette::ui_theme_from_settings(
+            let (_, theme_id, ui_theme) = match crate::palette::resolve_theme_setting(
                 &settings.theme,
                 background_setting.as_deref(),
-            );
+            ) {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    return CommandResult::error(format!("Failed to apply theme: {error}"));
+                }
+            };
+            app.background_color_override = background_color_override;
+            app.theme_id = theme_id;
+            app.ui_theme = ui_theme;
             app.needs_redraw = true;
         }
         "cost_currency" | "currency" => {
@@ -2134,6 +2139,14 @@ fn switch_mode_with_status(app: &mut App, mode: AppMode) -> (String, bool) {
 pub fn theme(app: &mut App, arg: Option<&str>) -> CommandResult {
     match arg.map(str::trim).filter(|s| !s.is_empty()) {
         None => CommandResult::action(AppAction::OpenThemePicker),
+        Some("schema") => CommandResult::message(crate::palette::user_theme_schema_json()),
+        Some("path") => match crate::palette::user_themes_dir() {
+            Ok(path) => CommandResult::message(format!(
+                "User themes: {}\nSelect with: /theme custom:<name>",
+                path.display()
+            )),
+            Err(error) => CommandResult::error(error),
+        },
         Some(name) => set_config_value(app, "theme", name, true),
     }
 }
