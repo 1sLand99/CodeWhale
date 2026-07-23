@@ -20,6 +20,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
 
+pub mod external_import;
 mod headers;
 pub mod oauth;
 mod sse;

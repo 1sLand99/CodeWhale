@@ -7969,6 +7969,16 @@ pub enum McpUiAction {
     Logout {
         name: String,
     },
+    /// List consent-gated external MCP import candidates with provenance.
+    ImportList,
+    /// Approve importing one discovered external server into user mcp.json.
+    ImportApprove {
+        name: String,
+    },
+    /// Decline an external candidate (durable until source content changes).
+    ImportDecline {
+        name: String,
+    },
     Validate,
     Reload,
 }

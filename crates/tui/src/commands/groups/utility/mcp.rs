@@ -9,7 +9,7 @@ use crate::commands::CommandResult;
 pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
     name: "mcp",
     aliases: &[],
-    usage: "/mcp [init|recommendations|add recommended <id>|add stdio <name> <command> [args...]|add http <name> <url>|enable <name>|disable <name>|remove <name>|doctor|validate|restart|reload]",
+    usage: "/mcp [init|import|import approve <name>|import decline <name>|recommendations|add recommended <id>|add stdio <name> <command> [args...]|add http <name> <url>|enable <name>|disable <name>|remove <name>|doctor|validate|restart|reload]",
     description_id: MessageId::CmdMcpDescription,
 };
 
@@ -64,12 +64,38 @@ fn mcp(_app: &mut App, args: Option<&str>) -> CommandResult {
             Ok(name) => CommandResult::action(AppAction::Mcp(McpUiAction::Logout { name })),
             Err(msg) => CommandResult::error(msg),
         },
+        "import" | "marketplace" | "sources" => {
+            let sub = parts.next().unwrap_or("").to_ascii_lowercase();
+            match sub.as_str() {
+                "" | "list" | "status" => {
+                    CommandResult::action(AppAction::Mcp(McpUiAction::ImportList))
+                }
+                "approve" | "add" => match parse_name(parts.next(), "Usage: /mcp import approve <name>")
+                {
+                    Ok(name) => {
+                        CommandResult::action(AppAction::Mcp(McpUiAction::ImportApprove { name }))
+                    }
+                    Err(msg) => CommandResult::error(msg),
+                },
+                "decline" | "deny" | "reject" => {
+                    match parse_name(parts.next(), "Usage: /mcp import decline <name>") {
+                        Ok(name) => {
+                            CommandResult::action(AppAction::Mcp(McpUiAction::ImportDecline { name }))
+                        }
+                        Err(msg) => CommandResult::error(msg),
+                    }
+                }
+                _ => CommandResult::error(
+                    "Usage: /mcp import [list|approve <name>|decline <name>]",
+                ),
+            }
+        }
         "validate" | "doctor" => CommandResult::action(AppAction::Mcp(McpUiAction::Validate)),
         "reload" | "reconnect" | "restart" => {
             CommandResult::action(AppAction::Mcp(McpUiAction::Reload))
         }
         _ => CommandResult::error(
-            "Usage: /mcp [init|recommendations|add recommended <id>|add stdio <name> <command> [args...]|add http <name> <url>|enable <name>|disable <name>|remove <name>|login <name>|logout <name>|doctor|validate|restart|reload]",
+            "Usage: /mcp [init|import|recommendations|add recommended <id>|add stdio <name> <command> [args...]|add http <name> <url>|enable <name>|disable <name>|remove <name>|login <name>|logout <name>|doctor|validate|restart|reload]",
         ),
     }
 }
@@ -135,7 +161,11 @@ fn recommended_mcp_text() -> &'static str {
        add explicitly: /mcp add recommended hugging-face\n\
        then inspect: /mcp doctor · reload all configured servers: /mcp restart\n\
      \n\
-     External config files and marketplaces are never imported silently. Use /mcp add for an endpoint you have reviewed."
+     External sources (~/.claude.json, .mcp.json, marketplace manifests):\n\
+       /mcp import — list candidates with provenance (keyboard/mouse status)\n\
+       /mcp import approve <name> — create managed connector after consent\n\
+       /mcp import decline <name> — durable decline until source content changes\n\
+     enabled=false is a hard block and will never import. Nothing is auto-imported."
 }
 
 fn parse_scopes(parts: Vec<&str>) -> Vec<String> {
@@ -247,6 +277,30 @@ mod tests {
             Some(AppAction::Mcp(McpUiAction::AddHttp { name, url, transport: None }))
                 if name == "hugging-face" && url == "https://huggingface.co/mcp"
         ));
+
+        let import_list = mcp(&mut app, Some("import"));
+        assert!(matches!(
+            import_list.action,
+            Some(AppAction::Mcp(McpUiAction::ImportList))
+        ));
+        let import_approve = mcp(&mut app, Some("import approve local-tools"));
+        assert!(matches!(
+            import_approve.action,
+            Some(AppAction::Mcp(McpUiAction::ImportApprove { name }))
+                if name == "local-tools"
+        ));
+        let import_decline = mcp(&mut app, Some("import decline local-tools"));
+        assert!(matches!(
+            import_decline.action,
+            Some(AppAction::Mcp(McpUiAction::ImportDecline { name }))
+                if name == "local-tools"
+        ));
+        let marketplace = mcp(&mut app, Some("marketplace"));
+        assert!(matches!(
+            marketplace.action,
+            Some(AppAction::Mcp(McpUiAction::ImportList))
+        ));
+        assert!(recommended.contains("/mcp import"));
 
         let login = mcp(
             &mut app,

@@ -211,9 +211,9 @@ const TOOL_HANG_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(600);
 // braille pattern reads as continuous motion instead of teleport-frames.
 const UI_STATUS_ANIMATION_MS: u64 = crate::tui::spinner::BRAILLE_SPINNER_FRAME_MS;
 /// Ambient fish, the idle-mark caustic, and the completion wake use a modest
-/// ~12.5fps clock. Active markers run at 8fps; keeping the atmosphere on the
-/// faster clock makes diagonal color travel continuous without forcing the
-/// whole TUI onto a 30fps repaint loop.
+/// ~12.5fps clock by default. On measured high-Hz displays the adaptive probe
+/// may raise this (still bounded); low_motion always freezes the cadence.
+/// Active markers run at 8fps; atmosphere stays subordinate.
 pub(crate) const UI_UNDERWATER_ANIMATION_MS: u64 = 80;
 // At an 80-column terminal the file tree owns 20 columns, leaving a 60-column
 // chat host. Keep a compact 20-column sidebar plus a 40-column transcript.
@@ -2279,7 +2279,15 @@ async fn run_event_loop(
     // long stream — wasted work the user can't perceive. See
     // `tui::frame_rate_limiter` for the rationale; ports the small piece of
     // codex's frame coalescing that maps cleanly onto our poll-based loop.
+    // Measured display Hz may raise the floor toward the panel refresh rate
+    // (still never faster than MIN_FRAME_INTERVAL); low_motion always wins.
     let mut frame_rate_limiter = crate::tui::frame_rate_limiter::FrameRateLimiter::default();
+    {
+        let probe = crate::tui::display_refresh::probe_display_refresh();
+        frame_rate_limiter.set_adaptive_interval(Some(
+            crate::tui::display_refresh::draw_min_interval_for_hz(probe.hz, false),
+        ));
+    }
     // Widgets request future animation frames here; the poll loop remains the
     // sole `terminal.draw` emitter (no competing animation loop).
     let mut frame_requester = FrameRequester::new();
@@ -11256,6 +11264,30 @@ async fn handle_mcp_ui_action(
                 });
             })
         }
+        crate::tui::app::McpUiAction::ImportList => {
+            let text = mcp_external_import_status_text(&app.workspace);
+            message = Some(text);
+            Ok(())
+        }
+        crate::tui::app::McpUiAction::ImportApprove { name } => {
+            match mcp_import_apply(&app.workspace, &path, &name, true) {
+                Ok(msg) => {
+                    changed = msg.contains("Imported");
+                    message = Some(msg);
+                    Ok(())
+                }
+                Err(err) => Err(err),
+            }
+        }
+        crate::tui::app::McpUiAction::ImportDecline { name } => {
+            match mcp_import_apply(&app.workspace, &path, &name, false) {
+                Ok(msg) => {
+                    message = Some(msg);
+                    Ok(())
+                }
+                Err(err) => Err(err),
+            }
+        }
         crate::tui::app::McpUiAction::Validate | crate::tui::app::McpUiAction::Reload => Ok(()),
     };
 
@@ -11358,7 +11390,117 @@ fn mcp_ui_action_refreshes_discovery(action: &crate::tui::app::McpUiAction) -> b
             | crate::tui::app::McpUiAction::Validate
             | crate::tui::app::McpUiAction::Login { .. }
             | crate::tui::app::McpUiAction::Logout { .. }
+            | crate::tui::app::McpUiAction::ImportList
+            | crate::tui::app::McpUiAction::ImportApprove { .. }
     )
+}
+
+fn mcp_import_consent_path() -> PathBuf {
+    codewhale_config::codewhale_home()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("mcp-import-consent.json")
+}
+
+fn mcp_external_import_status_text(workspace: &std::path::Path) -> String {
+    use crate::mcp::external_import::{discover_external_sources, format_candidates_for_display};
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let market_path = codewhale_config::codewhale_home()
+        .ok()
+        .map(|h| h.join("mcp-marketplace.json"));
+    let markets: Vec<PathBuf> = market_path.into_iter().collect();
+    let all = discover_external_sources(&home, workspace, &markets);
+    let mut body = format_candidates_for_display(&all);
+    body.push_str("\n\nConfigured managed connectors stay in your mcp.json; external sources never auto-merge.");
+    body
+}
+
+fn mcp_import_apply(
+    workspace: &std::path::Path,
+    mcp_path: &std::path::Path,
+    name: &str,
+    approve: bool,
+) -> anyhow::Result<String> {
+    use crate::mcp::external_import::{
+        ImportDecision, apply_approved, discover_external_sources, load_consent_store,
+        merge_approved_into_config, record_decisions, save_consent_store,
+    };
+    use std::collections::HashMap;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let market_path = codewhale_config::codewhale_home()
+        .ok()
+        .map(|h| h.join("mcp-marketplace.json"));
+    let markets: Vec<PathBuf> = market_path.into_iter().collect();
+    let all = discover_external_sources(&home, workspace, &markets);
+    let candidate = all
+        .iter()
+        .find(|c| c.name.eq_ignore_ascii_case(name))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No external MCP candidate named '{name}'. Run /mcp import to list sources with provenance."
+            )
+        })?;
+
+    if approve && candidate.hard_blocked {
+        anyhow::bail!(
+            "Refusing to import '{}': {} (enabled=false is a hard block)",
+            candidate.name,
+            candidate
+                .block_reason
+                .as_deref()
+                .unwrap_or("hard blocked")
+        );
+    }
+
+    let mut decisions = HashMap::new();
+    decisions.insert(
+        candidate.name.clone(),
+        if approve {
+            ImportDecision::Approve
+        } else {
+            ImportDecision::Decline
+        },
+    );
+
+    let mut store = load_consent_store(&mcp_import_consent_path());
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    record_decisions(&mut store, std::slice::from_ref(candidate), &decisions, now);
+    save_consent_store(&mcp_import_consent_path(), &store)?;
+
+    if !approve {
+        return Ok(format!(
+            "Declined external MCP '{}' from {} (hash {}). Will not re-prompt until the source content changes.",
+            candidate.name,
+            candidate.source_path.display(),
+            &candidate.content_hash[..12.min(candidate.content_hash.len())]
+        ));
+    }
+
+    let approved = apply_approved(std::slice::from_ref(candidate), &decisions);
+    let mut cfg = crate::mcp::load_config(mcp_path)?;
+    let inserted = merge_approved_into_config(&mut cfg, &approved);
+    if inserted.is_empty() {
+        return Ok(format!(
+            "MCP '{}' was already present in {} or could not be merged. Provenance: {} @ {}",
+            candidate.name,
+            mcp_path.display(),
+            candidate.source_kind.as_str(),
+            candidate.source_path.display()
+        ));
+    }
+    crate::mcp::save_config(mcp_path, &cfg)?;
+    Ok(format!(
+        "Imported managed MCP connector '{}' into {} (provenance: {} @ {}, hash {}). Run /mcp reload to connect after review.",
+        candidate.name,
+        mcp_path.display(),
+        candidate.source_kind.as_str(),
+        candidate.source_path.display(),
+        &candidate.content_hash[..12.min(candidate.content_hash.len())]
+    ))
 }
 
 fn handle_shell_job_action(app: &mut App, action: crate::tui::app::ShellJobAction) {
@@ -15660,9 +15802,21 @@ fn should_auto_compact_before_send_with_config(
 
 fn status_animation_interval_ms(app: &App) -> u64 {
     if app.effective_low_motion_for_status() {
-        2_400
+        crate::tui::display_refresh::adaptive_animation_interval_ms(true)
     } else {
+        // Keep the braille marker on its fixed 8 Hz table for width stability;
+        // only atmosphere uses the measured display cadence.
         UI_STATUS_ANIMATION_MS
+    }
+}
+
+fn underwater_animation_interval_ms(app: &App) -> u64 {
+    if app.effective_low_motion_for_status() || app.low_motion {
+        crate::tui::display_refresh::adaptive_animation_interval_ms(true)
+    } else {
+        // Measured display Hz can raise atmosphere cadence on high-Hz
+        // panels; missing probe falls back to the historical ~12.5 fps.
+        crate::tui::display_refresh::adaptive_animation_interval_ms(false)
     }
 }
 
@@ -15691,11 +15845,12 @@ fn underwater_motion_surface_visible(
 }
 
 fn animation_interval_ms(app: &App, status_motion: bool, underwater_motion: bool) -> u64 {
+    let underwater = underwater_animation_interval_ms(app);
     match (status_motion, underwater_motion) {
-        (true, true) => status_animation_interval_ms(app).min(UI_UNDERWATER_ANIMATION_MS),
+        (true, true) => status_animation_interval_ms(app).min(underwater),
         (true, false) => status_animation_interval_ms(app),
-        (false, true) => UI_UNDERWATER_ANIMATION_MS,
-        (false, false) => UI_UNDERWATER_ANIMATION_MS,
+        (false, true) => underwater,
+        (false, false) => underwater,
     }
 }
 
