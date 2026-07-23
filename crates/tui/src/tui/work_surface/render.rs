@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use ratatui::{
     Frame,
     layout::Rect,
@@ -8,6 +10,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
+use crate::localization::MessageId;
 use crate::tui::app::{App, SidebarHoverRow, SidebarHoverSection};
 use crate::tui::ui_text::truncate_line_to_width;
 
@@ -142,18 +145,32 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         // must not spend scarce transcript rows on generic chrome.
         rows.retain(|row| row.selectable);
     }
-    let body_height = usize::from(body_area.height);
+    let todo_ordinals = if placement == WorkSurfacePlacement::Top {
+        todo_ordinals(&rows)
+    } else {
+        HashMap::new()
+    };
+    let ordinal_width = todo_ordinals.len().max(1).to_string().len();
+    let todo_progress = (placement == WorkSurfacePlacement::Top)
+        .then(|| top_todo_progress(app, &rows))
+        .flatten();
+    // At the minimum two-row surface, preserve the one usable content row and
+    // the divider. Taller surfaces pin the authoritative progress receipt
+    // above the scrollable/selectable rows.
+    let progress_height = u16::from(todo_progress.is_some() && body_area.height >= 2);
+    let list_height = body_area.height.saturating_sub(progress_height);
+    let body_height = usize::from(list_height);
     let overflow = rows.len() > body_height;
     let inset = u16::from(body_area.width >= 60);
     let rail_width = u16::from(overflow);
     let content_area = Rect {
         x: body_area.x.saturating_add(inset),
-        y: body_area.y,
+        y: body_area.y.saturating_add(progress_height),
         width: body_area
             .width
             .saturating_sub(inset.saturating_mul(2))
             .saturating_sub(rail_width),
-        height: body_area.height,
+        height: list_height,
     };
 
     app.work_surface.visible_rows = body_height;
@@ -168,6 +185,25 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     Block::default()
         .style(Style::default().bg(app.ui_theme.surface_bg))
         .render(area, frame.buffer_mut());
+
+    if let Some(progress) = todo_progress.filter(|_| progress_height > 0) {
+        let progress = truncate_line_to_width(&progress, usize::from(content_area.width));
+        Paragraph::new(Line::from(Span::styled(
+            progress,
+            Style::default()
+                .fg(app.ui_theme.accent_primary)
+                .bg(app.ui_theme.surface_bg)
+                .add_modifier(Modifier::BOLD),
+        )))
+        .render(
+            Rect {
+                y: body_area.y,
+                height: 1,
+                ..content_area
+            },
+            frame.buffer_mut(),
+        );
+    }
 
     let start = app.work_surface.scroll_offset;
     let visible = rows
@@ -186,13 +222,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         let opened = app.work_surface.opened.as_ref() == Some(&row.id);
         let style = row_style(app, row, selected, hovered, opened);
         let compact_owner = if placement == WorkSurfacePlacement::Top {
-            row.id
-                .0
-                .split_once(':')
-                .map(|(kind, _)| match kind {
-                    "graph" => "To-do · ".to_string(),
-                    _ => String::new(),
-                })
+            todo_ordinals
+                .get(&row.id.0)
+                .map(|ordinal| format!("{ordinal:>ordinal_width$} · "))
                 .unwrap_or_default()
         } else {
             String::new()
@@ -254,7 +286,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     if overflow {
         render_scrollbar(
             frame,
-            body_area,
+            Rect {
+                x: body_area.right().saturating_sub(1),
+                y: content_area.y,
+                width: 1,
+                height: content_area.height,
+            },
             app.work_surface.scroll_offset,
             body_height,
             rows.len(),
@@ -269,6 +306,38 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         lines: visible.iter().map(|row| row.label.clone()).collect(),
         rows: hover_rows,
     });
+}
+
+fn todo_ordinals(rows: &[WorkRow]) -> HashMap<String, usize> {
+    rows.iter()
+        .filter(|row| row.id.0.starts_with("graph:"))
+        .enumerate()
+        .map(|(index, row)| (row.id.0.clone(), index.saturating_add(1)))
+        .collect()
+}
+
+fn top_todo_progress(app: &App, rows: &[WorkRow]) -> Option<String> {
+    let todos = rows
+        .iter()
+        .filter(|row| row.id.0.starts_with("graph:"))
+        .collect::<Vec<_>>();
+    let total = todos.len();
+    if total == 0 {
+        return None;
+    }
+    let completed = todos
+        .iter()
+        .filter(|row| row.tone == WorkTone::Success)
+        .count();
+    let remaining = total.saturating_sub(completed);
+    let label = format!("{} ·", app.tr(MessageId::SidebarTodoLabel));
+    Some(
+        app.tr(MessageId::WorkSurfaceTodoProgress)
+            .replace("{label}", &label)
+            .replace("{completed}", &completed.to_string())
+            .replace("{total}", &total.to_string())
+            .replace("{remaining}", &remaining.to_string()),
+    )
 }
 
 fn row_style(app: &App, row: &WorkRow, selected: bool, hovered: bool, opened: bool) -> Style {

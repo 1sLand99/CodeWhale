@@ -466,6 +466,71 @@ mod tests {
     }
 
     #[test]
+    fn top_surface_pins_one_progress_receipt_and_numbers_canonical_rows() {
+        let mut app = app();
+        {
+            let mut todos = app.todos.try_lock().expect("todos");
+            todos.add("finished".to_string(), TodoStatus::Completed);
+            todos.add("current".to_string(), TodoStatus::InProgress);
+            todos.add("next".to_string(), TodoStatus::Pending);
+        }
+
+        let text = render_text(&mut app, 80, 6);
+        let done = format!("1 · {} finished", crate::tui::glyphs::DONE);
+        let current = format!("2 · {} current", crate::tui::glyphs::SELECTION);
+        let next = format!("3 · {} next", crate::tui::glyphs::READY);
+
+        assert!(text.contains("To-do · 1/3 · 2 left"), "{text:?}");
+        assert_eq!(text.matches("To-do ·").count(), 1, "{text:?}");
+        assert!(text.contains(&done), "{text:?}");
+        assert!(text.contains(&current), "{text:?}");
+        assert!(text.contains(&next), "{text:?}");
+        assert!(
+            text.find(&done) < text.find(&current) && text.find(&current) < text.find(&next),
+            "canonical order drifted: {text:?}"
+        );
+        assert_eq!(app.work_surface.hitboxes.len(), 3);
+        assert_eq!(app.work_surface.hitboxes[0].row_y, 1);
+    }
+
+    #[test]
+    fn minimum_top_surface_keeps_a_numbered_todo_selectable() {
+        let mut app = app();
+        add_todos(&mut app, 2);
+
+        let text = render_text(&mut app, 40, 2);
+
+        assert!(text.contains("1 ·"), "{text:?}");
+        assert!(!text.contains("To-do · 0/"), "{text:?}");
+        assert_eq!(app.work_surface.hitboxes.len(), 1);
+        assert_eq!(app.work_surface.hitboxes[0].row_y, 0);
+    }
+
+    #[test]
+    fn compact_progress_window_reveals_current_without_reordering() {
+        let mut app = app();
+        {
+            let mut todos = app.todos.try_lock().expect("todos");
+            todos.add("finished".to_string(), TodoStatus::Completed);
+            todos.add("current".to_string(), TodoStatus::InProgress);
+            todos.add("next".to_string(), TodoStatus::Pending);
+        }
+
+        // Three rows means one pinned progress receipt, one selectable row,
+        // and the divider. The current item must win that compact window while
+        // retaining its canonical ordinal.
+        let text = render_text(&mut app, 80, 3);
+
+        assert!(text.contains("To-do · 1/3 · 2 left"), "{text:?}");
+        assert!(
+            text.contains(&format!("2 · {} current", crate::tui::glyphs::SELECTION)),
+            "{text:?}"
+        );
+        assert_eq!(app.work_surface.scroll_offset, 1);
+        assert_eq!(app.work_surface.hitboxes[0].row_y, 1);
+    }
+
+    #[test]
     fn settled_file_tools_aggregate_once_and_keep_only_safe_targets() {
         let mut app = app();
         app.current_session_id = Some(SESSION.to_string());

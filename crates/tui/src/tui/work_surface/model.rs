@@ -243,11 +243,29 @@ impl WorkSurfaceState {
             self.scroll_offset = 0;
             return;
         }
-        if !selectable
+        let established_selection = selectable
             .iter()
-            .any(|row| Some(&row.id) == self.selected.as_ref())
-        {
-            self.selected = Some(selectable[0].id.clone());
+            .any(|row| Some(&row.id) == self.selected.as_ref());
+        if !established_selection {
+            let preferred = selectable
+                .iter()
+                .find(|row| row.tone == WorkTone::Attention)
+                .or_else(|| selectable.iter().find(|row| row.tone == WorkTone::Live))
+                .copied()
+                .unwrap_or(selectable[0]);
+            self.selected = Some(preferred.id.clone());
+            // Establishing a new selection should reveal the current or
+            // needs-input item without reordering the canonical list. Later
+            // redraws keep mouse-wheel ownership and do not chase selection.
+            if let Some(selected) = rows.iter().position(|row| row.id == preferred.id) {
+                if selected < self.scroll_offset {
+                    self.scroll_offset = selected;
+                } else if self.visible_rows > 0
+                    && selected >= self.scroll_offset.saturating_add(self.visible_rows)
+                {
+                    self.scroll_offset = selected.saturating_add(1) - self.visible_rows;
+                }
+            }
         }
         self.scroll_offset = self
             .scroll_offset

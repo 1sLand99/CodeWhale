@@ -1423,12 +1423,12 @@ fn work_and_permission_are_visible_at_release_terminal_sizes() -> anyhow::Result
         let frame = h.frame();
         let dump = frame.debug_dump();
         assert!(
-            frame.contains("To-do ·"),
-            "active To-do chrome missing at {cols}x{rows}:\n{dump}"
+            frame.contains("To-do · 1/3 · 2 left"),
+            "numbered To-do progress missing at {cols}x{rows}:\n{dump}"
         );
         assert!(
-            frame.contains("persisted") || frame.contains("2 items"),
-            "To-do state missing at {cols}x{rows}:\n{dump}"
+            frame.contains("1 ·") && frame.contains("verify PTY"),
+            "canonical current To-do missing at {cols}x{rows}:\n{dump}"
         );
         assert!(
             frame.contains("Full Access"),
