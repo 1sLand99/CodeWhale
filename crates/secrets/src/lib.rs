@@ -394,16 +394,27 @@ impl FileKeyringStore {
     /// `CODEWHALE_HOME`, then `HOME`, `USERPROFILE`, and finally the platform
     /// home directory from the `dirs` crate. On first use, non-conflicting
     /// entries from the legacy `<home>/.deepseek/secrets/secrets.json` file are
-    /// copied into the CodeWhale store.
+    /// copied into the CodeWhale store — unless `CODEWHALE_HOME` is explicit,
+    /// in which case ambient `$HOME/.deepseek` credentials are never imported.
     pub fn default_path() -> Result<PathBuf, SecretsError> {
         let primary = default_codewhale_secrets_path()?;
-        let legacy = legacy_deepseek_secrets_path()?;
-        if let Err(err) = Self::migrate_legacy_file_if_needed(&primary, &legacy) {
-            tracing::warn!(
-                "could not migrate legacy secret store from {} to {}: {err}",
-                legacy.display(),
-                primary.display()
-            );
+        // Match the diagnostic isolation boundary: an explicit Codewhale home
+        // must not silently pull ambient legacy DeepSeek credentials.
+        if !codewhale_home_is_explicit() {
+            match legacy_deepseek_secrets_path() {
+                Ok(legacy) => {
+                    if let Err(err) = Self::migrate_legacy_file_if_needed(&primary, &legacy) {
+                        tracing::warn!(
+                            "could not migrate legacy secret store from {} to {}: {err}",
+                            legacy.display(),
+                            primary.display()
+                        );
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!("could not resolve legacy secret store path: {err}");
+                }
+            }
         }
         Ok(primary)
     }
@@ -840,9 +851,43 @@ impl Secrets {
     }
 
     fn file_backed_default() -> Self {
-        let path = FileKeyringStore::default_path()
-            .unwrap_or_else(|_| PathBuf::from(".codewhale-secrets.json"));
-        Self::new(Arc::new(FileKeyringStore::new(path)))
+        Self::file_backed_from_default_path(FileKeyringStore::default_path())
+    }
+
+    /// Build the writable default store only when the resolved path is safe.
+    ///
+    /// Keeping the resolution result as an argument gives the no-home and
+    /// relative-path branches direct regression coverage. Both must refuse
+    /// writes rather than placing credentials in the caller's workspace.
+    fn file_backed_from_default_path(path_result: Result<PathBuf, SecretsError>) -> Self {
+        // Never fall back to a workspace-relative secrets path. Writing
+        // credential material beside the cwd is readable by tools and easy to
+        // commit. If home resolution fails, use a write-refusing store.
+        match path_result {
+            Ok(path) if path.is_absolute() => Self::new(Arc::new(FileKeyringStore::new(path))),
+            Ok(path) => {
+                tracing::error!(
+                    "refusing relative file-backed secret path {}; credentials will not be read or persisted",
+                    path.display()
+                );
+                Self::read_only_empty_store()
+            }
+            Err(err) => {
+                tracing::error!(
+                    "could not resolve file-backed secret path ({err}); credentials will not be read or persisted"
+                );
+                Self::read_only_empty_store()
+            }
+        }
+    }
+
+    /// An unavailable default path must be hermetic: neither inspect an
+    /// accidental workspace file nor create one.  The read-only wrapper keeps
+    /// the public API's write failure explicit while reads safely report empty.
+    fn read_only_empty_store() -> Self {
+        Self::new(Arc::new(ReadOnlyKeyringStore::new(Arc::new(
+            InMemoryKeyringStore::new(),
+        ))))
     }
 
     /// Construct a file-backed diagnostic store without migration or write
@@ -1951,5 +1996,73 @@ mod tests {
                 .join("secrets")
                 .join("secrets.json")
         );
+    }
+
+    #[test]
+    fn default_path_with_explicit_codewhale_home_does_not_migrate_ambient_legacy() {
+        // FR003-C001: explicit CODEWHALE_HOME must not silently import ambient
+        // `$HOME/.deepseek/secrets` credentials into the isolated home.
+        let _lock = env_lock();
+        clear_known_envs();
+        let tmp = tempfile::tempdir().unwrap();
+        let codewhale_home = tmp.path().join("isolated-codewhale-home");
+        let _home = EnvVarGuard::set("HOME", tmp.path());
+        let _userprofile = EnvVarGuard::set("USERPROFILE", tmp.path());
+        let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+        let legacy = tmp
+            .path()
+            .join(".deepseek")
+            .join("secrets")
+            .join("secrets.json");
+        FileKeyringStore::new(&legacy)
+            .set("deepseek", "synthetic-ambient-legacy-value")
+            .unwrap();
+
+        let path = FileKeyringStore::default_path().unwrap();
+        assert_eq!(path, codewhale_home.join("secrets").join("secrets.json"));
+        assert!(
+            !path.exists(),
+            "explicit CODEWHALE_HOME must not create/migrate a primary store from ambient legacy"
+        );
+
+        let secrets = Secrets::auto_detect();
+        assert_eq!(
+            secrets.get("deepseek").unwrap(),
+            None,
+            "explicit CODEWHALE_HOME must not surface ambient legacy credentials"
+        );
+    }
+
+    #[test]
+    fn file_backed_default_refuses_relative_secret_path() {
+        // FR003-C002: a relative fallback would resolve against the workspace
+        // and risk committing credentials. It must be write-refusing instead.
+        let secrets =
+            Secrets::file_backed_from_default_path(Ok(PathBuf::from(".codewhale-secrets.json")));
+        assert!(matches!(
+            secrets.set("deepseek", "must-not-land-relative"),
+            Err(SecretsError::ReadOnly)
+        ));
+        assert_eq!(
+            secrets.get("deepseek").unwrap(),
+            None,
+            "unsafe relative fallback must not read a workspace secret file"
+        );
+    }
+
+    #[test]
+    fn file_backed_default_refuses_writes_when_home_resolution_fails() {
+        // Force the exact fallback branch instead of relying on the host's
+        // dirs::home_dir(), which normally succeeds even with HOME unset.
+        let err = SecretsError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "synthetic unresolved home",
+        ));
+        let secrets = Secrets::file_backed_from_default_path(Err(err));
+        assert!(matches!(
+            secrets.set("deepseek", "must-not-persist"),
+            Err(SecretsError::ReadOnly)
+        ));
+        assert_eq!(secrets.get("deepseek").unwrap(), None);
     }
 }

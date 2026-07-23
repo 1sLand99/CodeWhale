@@ -821,6 +821,10 @@ impl RuntimeBridge {
         } else {
             Command::new("codewhale")
         };
+        // Pass the runtime auth token out-of-band via env (not argv) so local
+        // `ps` cannot read credential material from the child command line.
+        // The TUI/runtime server already accepts CODEWHALE_RUNTIME_TOKEN /
+        // DEEPSEEK_RUNTIME_TOKEN when --auth-token is absent.
         command
             .arg("app-server")
             .arg("--http")
@@ -828,8 +832,8 @@ impl RuntimeBridge {
             .arg("127.0.0.1")
             .arg("--port")
             .arg(port.to_string())
-            .arg("--auth-token")
-            .arg(auth_token)
+            .env("CODEWHALE_RUNTIME_TOKEN", auth_token)
+            .env("DEEPSEEK_RUNTIME_TOKEN", auth_token)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -2573,6 +2577,43 @@ mod tests {
         let token = resolve_auth_token(&options).unwrap();
         assert!(token.is_some());
         assert!(token.unwrap().starts_with("cwapp_"));
+    }
+
+    #[test]
+    fn runtime_bridge_command_keeps_auth_token_out_of_argv() {
+        // FR001-C001: runtime auth token must not appear on the child argv
+        // (visible via local `ps`); pass it via env instead.
+        let token = "cwrt_unit_test_secret_token_not_for_argv";
+        let cmd = RuntimeBridge::runtime_command(None, 18787, token).expect("command");
+        let argv: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !argv
+                .iter()
+                .any(|a| a.contains(token) || a == "--auth-token"),
+            "auth token must not be present in child argv: {argv:?}"
+        );
+        let envs: Vec<(String, String)> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| {
+                Some((
+                    k.to_string_lossy().into_owned(),
+                    v?.to_string_lossy().into_owned(),
+                ))
+            })
+            .collect();
+        assert!(
+            envs.iter()
+                .any(|(k, v)| k == "CODEWHALE_RUNTIME_TOKEN" && v == token),
+            "token must be carried via CODEWHALE_RUNTIME_TOKEN: {envs:?}"
+        );
+        assert!(
+            envs.iter()
+                .any(|(k, v)| k == "DEEPSEEK_RUNTIME_TOKEN" && v == token),
+            "legacy alias DEEPSEEK_RUNTIME_TOKEN must also carry the token: {envs:?}"
+        );
     }
 
     #[test]
