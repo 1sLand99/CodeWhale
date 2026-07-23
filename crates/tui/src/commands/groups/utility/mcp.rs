@@ -70,24 +70,29 @@ fn mcp(_app: &mut App, args: Option<&str>) -> CommandResult {
                 "" | "list" | "status" => {
                     CommandResult::action(AppAction::Mcp(McpUiAction::ImportList))
                 }
-                "approve" | "add" => match parse_name(parts.next(), "Usage: /mcp import approve <name>")
-                {
-                    Ok(name) => {
-                        CommandResult::action(AppAction::Mcp(McpUiAction::ImportApprove { name }))
-                    }
-                    Err(msg) => CommandResult::error(msg),
-                },
-                "decline" | "deny" | "reject" => {
-                    match parse_name(parts.next(), "Usage: /mcp import decline <name>") {
+                "approve" | "add" => {
+                    match parse_name(parts.next(), "Usage: /mcp import approve <name>") {
                         Ok(name) => {
-                            CommandResult::action(AppAction::Mcp(McpUiAction::ImportDecline { name }))
+                            CommandResult::action(AppAction::Mcp(McpUiAction::ImportApprove {
+                                name,
+                            }))
                         }
                         Err(msg) => CommandResult::error(msg),
                     }
                 }
-                _ => CommandResult::error(
-                    "Usage: /mcp import [list|approve <name>|decline <name>]",
-                ),
+                "decline" | "deny" | "reject" => {
+                    match parse_name(parts.next(), "Usage: /mcp import decline <name>") {
+                        Ok(name) => {
+                            CommandResult::action(AppAction::Mcp(McpUiAction::ImportDecline {
+                                name,
+                            }))
+                        }
+                        Err(msg) => CommandResult::error(msg),
+                    }
+                }
+                _ => {
+                    CommandResult::error("Usage: /mcp import [list|approve <name>|decline <name>]")
+                }
             }
         }
         "validate" | "doctor" => CommandResult::action(AppAction::Mcp(McpUiAction::Validate)),

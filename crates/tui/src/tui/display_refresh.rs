@@ -80,7 +80,11 @@ fn probe_inner() -> (Option<u32>, DisplayRefreshSource, &'static str) {
         match probe_macos() {
             Ok(hz) => match accept_hz(hz) {
                 Some(hz) => (Some(hz), DisplayRefreshSource::MacosCoreGraphics, ""),
-                None => (None, DisplayRefreshSource::MacosCoreGraphics, "out_of_range"),
+                None => (
+                    None,
+                    DisplayRefreshSource::MacosCoreGraphics,
+                    "out_of_range",
+                ),
             },
             Err(reason) => (None, DisplayRefreshSource::MacosCoreGraphics, reason),
         }

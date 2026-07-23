@@ -11446,10 +11446,7 @@ fn mcp_import_apply(
         anyhow::bail!(
             "Refusing to import '{}': {} (enabled=false is a hard block)",
             candidate.name,
-            candidate
-                .block_reason
-                .as_deref()
-                .unwrap_or("hard blocked")
+            candidate.block_reason.as_deref().unwrap_or("hard blocked")
         );
     }
 

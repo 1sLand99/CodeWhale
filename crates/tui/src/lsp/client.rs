@@ -61,12 +61,7 @@ pub trait LspTransport: Send + Sync {
     /// Default returns "unsupported" so diagnostic-only fakes keep working.
     /// Real transports implement this for go-to-definition, symbols, and
     /// references without spawning a second server lifecycle.
-    async fn request(
-        &self,
-        _method: &str,
-        _params: Value,
-        _wait: Duration,
-    ) -> Result<Value> {
+    async fn request(&self, _method: &str, _params: Value, _wait: Duration) -> Result<Value> {
         Err(anyhow!("LSP request not supported by this transport"))
     }
 

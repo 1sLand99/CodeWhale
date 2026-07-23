@@ -107,7 +107,10 @@ pub fn discover_external_sources(
     }
     for path in marketplace_paths {
         if path.is_file() {
-            out.extend(discover_from_json_file(path, ExternalMcpSourceKind::Marketplace));
+            out.extend(discover_from_json_file(
+                path,
+                ExternalMcpSourceKind::Marketplace,
+            ));
         }
     }
     out
@@ -153,10 +156,7 @@ fn extract_servers_map(value: &Value) -> Vec<(String, Value)> {
         .or_else(|| value.get("servers"))
         .and_then(|v| v.as_object())
     {
-        return map
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        return map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     }
     if let Some(arr) = value.as_array() {
         let mut out = Vec::new();
@@ -280,16 +280,17 @@ pub fn record_decisions(
             continue;
         }
         by_source
-            .entry((candidate.source_path.clone(), candidate.content_hash.clone()))
+            .entry((
+                candidate.source_path.clone(),
+                candidate.content_hash.clone(),
+            ))
             .or_default()
             .push((candidate, decision));
     }
     for ((path, hash), group) in by_source {
         // If any approval exists, record Approve with the approved names;
         // pure decline groups record Decline.
-        let any_approve = group
-            .iter()
-            .any(|(_, d)| *d == ImportDecision::Approve);
+        let any_approve = group.iter().any(|(_, d)| *d == ImportDecision::Approve);
         let decision = if any_approve {
             ImportDecision::Approve
         } else {
@@ -347,11 +348,7 @@ pub fn format_candidates_for_display(candidates: &[ImportCandidate]) -> String {
         String::new(),
     ];
     for (idx, c) in candidates.iter().enumerate() {
-        let status = if c.hard_blocked {
-            "BLOCKED"
-        } else {
-            "pending"
-        };
+        let status = if c.hard_blocked { "BLOCKED" } else { "pending" };
         lines.push(format!(
             "  {}. [{}] {} — provenance: {} ({})",
             idx + 1,
@@ -360,7 +357,10 @@ pub fn format_candidates_for_display(candidates: &[ImportCandidate]) -> String {
             c.source_kind.as_str(),
             c.source_path.display()
         ));
-        lines.push(format!("     content_hash: {}", &c.content_hash[..12.min(c.content_hash.len())]));
+        lines.push(format!(
+            "     content_hash: {}",
+            &c.content_hash[..12.min(c.content_hash.len())]
+        ));
         if let Some(reason) = &c.block_reason {
             lines.push(format!("     {reason}"));
         }
@@ -394,8 +394,7 @@ mod tests {
             }
         }"#;
         write_claude_json(dir.path(), body);
-        let candidates =
-            discover_external_sources(dir.path(), dir.path(), &[]);
+        let candidates = discover_external_sources(dir.path(), dir.path(), &[]);
         assert_eq!(candidates.len(), 2);
         let blocked = candidates.iter().find(|c| c.name == "blocked").unwrap();
         assert!(blocked.hard_blocked);
@@ -470,8 +469,7 @@ mod tests {
             r#"{"servers":{"shop":{"url":"https://market.example/mcp"}}}"#,
         )
         .unwrap();
-        let candidates =
-            discover_external_sources(home.path(), workspace.path(), &[market]);
+        let candidates = discover_external_sources(home.path(), workspace.path(), &[market]);
         let names: Vec<_> = candidates.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"team"));
         assert!(names.contains(&"shop"));

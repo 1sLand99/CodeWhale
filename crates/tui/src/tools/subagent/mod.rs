@@ -753,13 +753,7 @@ impl<'de> Deserialize<'de> for SubAgentType {
             serde::de::Error::unknown_variant(
                 &raw,
                 &[
-                    "worker",
-                    "scout",
-                    "planner",
-                    "reviewer",
-                    "builder",
-                    "verifier",
-                    "custom",
+                    "worker", "scout", "planner", "reviewer", "builder", "verifier", "custom",
                 ],
             )
         })

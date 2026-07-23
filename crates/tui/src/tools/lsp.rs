@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::spec::{
-    ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec, optional_str,
-    required_str,
+    ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
+    optional_str, required_str,
 };
 
 /// Model-callable LSP intelligence surface.
@@ -71,10 +71,7 @@ impl ToolSpec for LspTool {
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         let operation = required_str(&input, "operation")?;
         let path_raw = required_str(&input, "path")?;
-        let line = input
-            .get("line")
-            .and_then(|v| v.as_u64())
-            .map(|n| n as u32);
+        let line = input.get("line").and_then(|v| v.as_u64()).map(|n| n as u32);
         let character = input
             .get("character")
             .and_then(|v| v.as_u64())
