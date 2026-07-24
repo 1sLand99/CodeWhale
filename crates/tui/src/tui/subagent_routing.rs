@@ -948,7 +948,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::task_manager::{TaskStatus, TaskSummary};
-    use crate::tools::subagent::{SubAgentAssignment, SubAgentType};
+    use crate::tools::subagent::{FleetRole, SubAgentAssignment};
     use crate::tui::app::{InitialInput, TuiOptions};
     use crate::tui::widgets::agent_card::AgentLifecycle;
     use chrono::Utc;
@@ -1005,7 +1005,7 @@ mod tests {
             fork_context: false,
             workspace: None,
             git_branch: None,
-            agent_type: SubAgentType::General,
+            agent_type: FleetRole::Worker,
             assignment: SubAgentAssignment {
                 objective: format!("objective-{id}"),
                 role: Some("worker".to_string()),
@@ -1066,7 +1066,7 @@ mod tests {
     #[test]
     fn mailbox_progress_reports_transcript_change_only_for_visible_card_updates() {
         let mut app = App::new(test_options(), &Config::default());
-        let started = MailboxMessage::started("agent_live", SubAgentType::General);
+        let started = MailboxMessage::started("agent_live", FleetRole::Worker);
         assert!(
             handle_subagent_mailbox(&mut app, 1, &started),
             "first started envelope creates a visible card"
@@ -1224,7 +1224,7 @@ mod tests {
         assert!(handle_subagent_mailbox(
             &mut app,
             1,
-            &MailboxMessage::started("agent_running", SubAgentType::General),
+            &MailboxMessage::started("agent_running", FleetRole::Worker),
         ));
         assert_eq!(
             app.agent_progress_meta["agent_running"]
@@ -1321,7 +1321,7 @@ mod tests {
         assert!(handle_subagent_mailbox(
             &mut app,
             1,
-            &MailboxMessage::started(agent_id, SubAgentType::General),
+            &MailboxMessage::started(agent_id, FleetRole::Worker),
         ));
         let secret = "sk-mailbox-secret-1234567890";
         let raw = format!(
@@ -1443,7 +1443,7 @@ mod tests {
     #[test]
     fn apply_subagent_terminal_projection_clears_live_progress_and_card_state() {
         let mut app = App::new(test_options(), &Config::default());
-        let started = MailboxMessage::started("agent_done", SubAgentType::General);
+        let started = MailboxMessage::started("agent_done", FleetRole::Worker);
         assert!(handle_subagent_mailbox(&mut app, 1, &started));
         let card_idx = app.subagent_card_index["agent_done"];
         let initial_revision = app.history_revisions[card_idx];
@@ -1543,7 +1543,7 @@ mod tests {
         );
         assert!(app.subagent_card_index.contains_key("agent_early"));
 
-        let started = MailboxMessage::started("agent_early", SubAgentType::General);
+        let started = MailboxMessage::started("agent_early", FleetRole::Worker);
         assert!(handle_subagent_mailbox(&mut app, 2, &started));
         match app.history.last() {
             Some(HistoryCell::SubAgent(SubAgentCell::Delegate(card))) => {
@@ -1562,7 +1562,7 @@ mod tests {
             assert!(handle_subagent_mailbox(
                 &mut app,
                 seq as u64 + 1,
-                &MailboxMessage::started(id, SubAgentType::Explore),
+                &MailboxMessage::started(id, FleetRole::Scout),
             ));
         }
         assert!(handle_subagent_mailbox(

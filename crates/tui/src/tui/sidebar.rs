@@ -7093,7 +7093,7 @@ mod tests {
             fork_context: false,
             workspace: None,
             git_branch: None,
-            agent_type: crate::tools::subagent::SubAgentType::General,
+            agent_type: crate::tools::subagent::FleetRole::Worker,
             assignment: crate::tools::subagent::SubAgentAssignment {
                 objective: "task".to_string(),
                 role: Some("worker".to_string()),

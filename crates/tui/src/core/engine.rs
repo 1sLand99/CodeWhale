@@ -59,9 +59,9 @@ use crate::tools::spec::{
     RuntimeToolServices, SharedFileReadTracker, new_shared_file_read_tracker,
 };
 use crate::tools::subagent::{
-    Mailbox, MailboxMessage, SharedSubAgentManager, SubAgentCompletion, SubAgentForkContext,
-    SubAgentManager, SubAgentResult, SubAgentRuntime, SubAgentStatus, SubAgentThinking,
-    SubAgentType, agent_worker_owner_snapshot, ensure_subagent_model_for_provider,
+    FleetRole, Mailbox, MailboxMessage, SharedSubAgentManager, SubAgentCompletion,
+    SubAgentForkContext, SubAgentManager, SubAgentResult, SubAgentRuntime, SubAgentStatus,
+    SubAgentThinking, agent_worker_owner_snapshot, ensure_subagent_model_for_provider,
     new_shared_subagent_manager_with_timeout, resolve_subagent_assignment_route,
 };
 use crate::tools::todo::{SharedTodoList, TodoListSnapshot, new_shared_todo_list};
@@ -1945,7 +1945,7 @@ impl Engine {
                             &runtime,
                             None,
                             &prompt,
-                            &SubAgentType::General,
+                            &FleetRole::Worker,
                             ModelRoute::Inherit,
                             SubAgentThinking::Inherit,
                         )
@@ -1975,7 +1975,7 @@ impl Engine {
                             manager.spawn_background(
                                 Arc::clone(&self.subagent_manager),
                                 runtime,
-                                SubAgentType::General,
+                                FleetRole::Worker,
                                 prompt.clone(),
                                 None,
                             )
@@ -3439,7 +3439,7 @@ impl Engine {
                 .with_parent_completion_tx(self.tx_subagent_completion.clone())
                 .with_parent_mode(input_policy.mode);
                 if matches!(input_policy.mode, AppMode::Plan) {
-                    rt.worker_profile = WorkerRuntimeProfile::for_role(SubAgentType::Plan);
+                    rt.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Planner);
                 }
                 // #4042: stamp the session's --disallowed-tools onto the parent
                 // runtime so every model-spawned sub-agent inherits the deny-list

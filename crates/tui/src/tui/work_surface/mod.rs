@@ -25,7 +25,7 @@ mod tests {
 
     use crate::config::Config;
     use crate::tools::subagent::{
-        AgentWorkerStatus, SubAgentAssignment, SubAgentResult, SubAgentStatus, SubAgentType,
+        AgentWorkerStatus, FleetRole, SubAgentAssignment, SubAgentResult, SubAgentStatus,
     };
     use crate::tools::todo::TodoStatus;
     use crate::tui::app::{
@@ -610,7 +610,7 @@ mod tests {
             fork_context: false,
             workspace: None,
             git_branch: None,
-            agent_type: SubAgentType::Implementer,
+            agent_type: FleetRole::Builder,
             assignment: SubAgentAssignment {
                 objective: "Wire settled file activity".to_string(),
                 role: Some("worker".to_string()),
@@ -711,7 +711,7 @@ mod tests {
                 fork_context: false,
                 workspace: None,
                 git_branch: Some("codex/details".to_string()),
-                agent_type: SubAgentType::Implementer,
+                agent_type: FleetRole::Builder,
                 assignment: SubAgentAssignment {
                     objective: "Verify keyboard and mouse convergence".to_string(),
                     role: Some("worker".to_string()),

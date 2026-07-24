@@ -3,9 +3,11 @@
 Fleet roles are the user-facing vocabulary for delegated work: a parent
 launches a focused `worker`, `scout`, `planner`, `reviewer`, `builder`, or
 `verifier` through `agent` and gets back an `agent_id` plus transcript handle
-while the worker runs. `SubAgentType` and its older role spellings remain an
-internal/persisted compatibility adapter during v0.9.x; new prompts and config
-should use Fleet names.
+while the worker runs. The internal runtime type is `FleetRole` (formerly
+`SubAgentType`); the older role spellings (`general`, `explore`, `plan`,
+`review`, `implementer`, …) remain accepted only as a persisted/deserialize
+compatibility adapter during v0.9.x. New prompts and config should use Fleet
+names.
 
 Architecturally, sub-agents should not be a second execution substrate. The
 durable primitive is the fleet-backed worker run described in

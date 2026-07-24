@@ -18,7 +18,7 @@ use crate::palette;
 use crate::settings::Settings;
 use crate::tools::UserInputResponse;
 use crate::tools::subagent::{
-    SubAgentAssignment, SubAgentResult, SubAgentStatus, SubAgentType, localized_whale_display_names,
+    FleetRole, SubAgentAssignment, SubAgentResult, SubAgentStatus, localized_whale_display_names,
 };
 use crate::tui::app::App;
 use crate::tui::approval::{ElevationOption, ReviewDecision};
@@ -3739,7 +3739,7 @@ pub(crate) fn subagent_view_agents(
         if seen.insert(agent_id.clone()) {
             agents.push(live_subagent_result(
                 agent_id,
-                SubAgentType::General,
+                FleetRole::Worker,
                 SubAgentStatus::Running,
                 progress,
                 Some("live"),
@@ -3753,8 +3753,7 @@ pub(crate) fn subagent_view_agents(
             HistoryCell::SubAgent(SubAgentCell::Delegate(card))
                 if seen.insert(card.agent_id.clone()) =>
             {
-                let agent_type =
-                    SubAgentType::from_str(&card.agent_type).unwrap_or(SubAgentType::General);
+                let agent_type = FleetRole::from_str(&card.agent_type).unwrap_or(FleetRole::Worker);
                 agents.push(live_subagent_result(
                     &card.agent_id,
                     agent_type,
@@ -3774,7 +3773,7 @@ pub(crate) fn subagent_view_agents(
                         );
                         agents.push(live_subagent_result(
                             &worker.agent_id,
-                            SubAgentType::General,
+                            FleetRole::Worker,
                             lifecycle_to_subagent_status(worker.status),
                             &objective,
                             Some(card.kind.as_str()),
@@ -3820,7 +3819,7 @@ fn lifecycle_to_subagent_status(status: AgentLifecycle) -> SubAgentStatus {
 
 fn live_subagent_result(
     agent_id: &str,
-    agent_type: SubAgentType,
+    agent_type: FleetRole,
     status: SubAgentStatus,
     objective: &str,
     role: Option<&str>,
@@ -4195,19 +4194,19 @@ fn append_subagent_group(
     lines.push(Line::from(""));
 }
 
-fn agent_type_order(agent_type: &SubAgentType) -> u8 {
+fn agent_type_order(agent_type: &FleetRole) -> u8 {
     match agent_type {
-        SubAgentType::General => 0,
-        SubAgentType::Explore => 1,
-        SubAgentType::Plan => 2,
-        SubAgentType::Implementer => 3,
-        SubAgentType::Verifier => 4,
-        SubAgentType::Review => 5,
-        SubAgentType::Custom => 6,
+        FleetRole::Worker => 0,
+        FleetRole::Scout => 1,
+        FleetRole::Planner => 2,
+        FleetRole::Builder => 3,
+        FleetRole::Verifier => 4,
+        FleetRole::Reviewer => 5,
+        FleetRole::Custom => 6,
     }
 }
 
-fn format_agent_type(agent_type: &SubAgentType) -> &'static str {
+fn format_agent_type(agent_type: &FleetRole) -> &'static str {
     // Source of truth lives on the enum so any new role lands in both
     // the user-visible label and the sort order via the as_str() helper.
     agent_type.as_str()
@@ -4275,9 +4274,7 @@ mod tests {
     use crate::localization::{Locale, MessageId, tr};
     use crate::palette;
     use crate::settings::Settings;
-    use crate::tools::subagent::{
-        SubAgentAssignment, SubAgentResult, SubAgentStatus, SubAgentType,
-    };
+    use crate::tools::subagent::{FleetRole, SubAgentAssignment, SubAgentResult, SubAgentStatus};
     use crate::tui::app::{App, TuiOptions};
     use crate::tui::history::{HistoryCell, SubAgentCell};
     use crate::tui::views::{CommandPaletteAction, SubAgentsView};
@@ -4608,7 +4605,7 @@ mod tests {
             fork_context: false,
             workspace: None,
             git_branch: None,
-            agent_type: SubAgentType::Explore,
+            agent_type: FleetRole::Scout,
             assignment: SubAgentAssignment {
                 objective: "read the docs".to_string(),
                 role: None,
@@ -4697,7 +4694,7 @@ mod tests {
         let agents = subagent_view_agents(&app, &manager);
 
         assert_eq!(agents.len(), 1);
-        assert_eq!(agents[0].agent_type, SubAgentType::Explore);
+        assert_eq!(agents[0].agent_type, FleetRole::Scout);
         assert_eq!(agents[0].assignment.objective, "read the docs");
     }
 

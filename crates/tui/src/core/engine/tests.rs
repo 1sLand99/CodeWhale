@@ -2743,7 +2743,7 @@ fn subagent_mailbox_keeps_lifecycle_events_reliable() {
     ));
 
     assert!(!subagent_mailbox_message_is_best_effort(
-        &MailboxMessage::started("agent_a", crate::tools::subagent::SubAgentType::Explore)
+        &MailboxMessage::started("agent_a", crate::tools::subagent::FleetRole::Scout)
     ));
     assert!(!subagent_mailbox_message_is_best_effort(
         &MailboxMessage::Completed {
@@ -2825,14 +2825,14 @@ fn subagent_mailbox_samples_best_effort_events_per_agent() {
 #[test]
 fn subagent_mailbox_never_samples_lifecycle_or_usage_events() {
     use crate::models::Usage;
-    use crate::tools::subagent::{MailboxMessage, SubAgentType};
+    use crate::tools::subagent::{FleetRole, MailboxMessage};
 
     let mut last_sent_at = HashMap::new();
     let start = Instant::now();
 
     assert!(subagent_mailbox_best_effort_send_permitted(
         &mut last_sent_at,
-        &MailboxMessage::started("agent_a", SubAgentType::Explore),
+        &MailboxMessage::started("agent_a", FleetRole::Scout),
         start,
     ));
     assert!(subagent_mailbox_best_effort_send_permitted(
@@ -7719,7 +7719,7 @@ fn plan_mode_registry_can_expose_agent_launcher_without_shell_tools() {
     .with_agent_tool_surface_options(
         engine.agent_tool_surface_options(shell_policy_for_mode(AppMode::Plan, false)),
     );
-    runtime.worker_profile = WorkerRuntimeProfile::for_role(SubAgentType::Plan);
+    runtime.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Planner);
 
     let registry = engine
         .build_turn_tool_registry_builder(
@@ -7922,8 +7922,8 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
             engine.agent_tool_surface_options(shell_policy_for_mode(case.mode, true)),
         );
         runtime.worker_profile = WorkerRuntimeProfile::for_role(match case.mode {
-            AppMode::Plan => SubAgentType::Plan,
-            _ => SubAgentType::General,
+            AppMode::Plan => FleetRole::Planner,
+            _ => FleetRole::Worker,
         });
 
         let registry = engine

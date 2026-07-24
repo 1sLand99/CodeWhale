@@ -227,7 +227,7 @@ fn format_step_counter(steps: u32, max_steps: u32) -> String {
     format!("step {steps}/{max_steps}")
 }
 
-fn resolve_max_steps(role: SubAgentType, explicit: Option<u32>, configured: Option<u32>) -> u32 {
+fn resolve_max_steps(role: FleetRole, explicit: Option<u32>, configured: Option<u32>) -> u32 {
     explicit
         .unwrap_or_else(|| {
             configured.unwrap_or_else(|| WorkerRuntimeProfile::default_max_steps(role))
@@ -320,7 +320,7 @@ fn subagent_perf_enabled() -> bool {
 const VALID_SUBAGENT_TYPES: &str = "worker, scout, planner, reviewer, builder, verifier, custom \
      (legacy aliases remain accepted: general, explore/explorer, plan/awaiter, review, implementer)";
 /// Role aliases accepted by `normalize_role_alias`. Kept in sync with the
-/// match arms below so every input that `SubAgentType::from_str` accepts also
+/// match arms below so every input that `FleetRole::from_str` accepts also
 /// resolves to a canonical role (avoids the dual-validation rejection in #2649).
 const VALID_ROLE_ALIASES: &str = "default; worker; scout; planner; reviewer; builder; verifier; custom \
      (legacy aliases remain accepted)";
@@ -701,40 +701,46 @@ impl SubAgentAssignment {
     }
 }
 
-/// Sub-agent execution types with specialized behavior and tool access.
+/// Canonical Fleet role for a delegated worker, with specialized behavior
+/// and tool access per role.
 ///
 /// **Public vocabulary is Fleet roles** (`worker`, `scout`, `planner`,
-/// `reviewer`, `builder`, `verifier`, `custom`). The enum variants retain
-/// historical Rust names for call-site stability; serialization, prompts,
-/// receipts, and UI always use [`Self::as_str`]. Legacy wire spellings
-/// (`explore`, `plan`, …) are accepted only through
+/// `reviewer`, `builder`, `verifier`, `custom`) and the variants match that
+/// vocabulary one-to-one. Serialization, prompts, receipts, and UI always
+/// use [`Self::as_str`]. Legacy wire spellings (`general`, `explore`,
+/// `plan`, `review`, `implementer`, …) are accepted only through
 /// [`migrate_legacy_role_token`] at deserialization / parse boundaries.
+///
+/// This is the closed runtime role set. It is distinct from
+/// `codewhale_config::FleetRole`, which is the open config-side role
+/// *declaration* (free-form name plus instruction overlay) carried by a
+/// Fleet profile.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum SubAgentType {
-    /// General purpose - full tool access for multi-step tasks.
+pub enum FleetRole {
+    /// General-purpose worker - full tool access for multi-step tasks.
     #[default]
-    General,
+    Worker,
     /// Fast exploration - read-only tools for codebase search.
-    Explore,
+    Scout,
     /// Planning - analysis tools only for architectural planning.
-    Plan,
+    Planner,
     /// Code review - read + analysis tools.
-    Review,
+    Reviewer,
     /// Implementation — focused on writing / patching code to satisfy
-    /// a specific change. Distinct from `General` in that the prompt
+    /// a specific change. Distinct from `Worker` in that the prompt
     /// posture pushes hard on landing the change cleanly with the
     /// minimum surrounding edit (#404).
-    Implementer,
+    Builder,
     /// Verification — focused on running the test suite or other
     /// validation gates and reporting pass/fail with evidence.
-    /// Distinct from `Review` in that Review reads code and grades it;
+    /// Distinct from `Reviewer` in that Reviewer reads code and grades it;
     /// Verifier *runs* tests and reports the outcome (#404).
     Verifier,
     /// Custom tool access defined at spawn time.
     Custom,
 }
 
-impl Serialize for SubAgentType {
+impl Serialize for FleetRole {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -743,7 +749,7 @@ impl Serialize for SubAgentType {
     }
 }
 
-impl<'de> Deserialize<'de> for SubAgentType {
+impl<'de> Deserialize<'de> for FleetRole {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -763,8 +769,8 @@ impl<'de> Deserialize<'de> for SubAgentType {
 /// Explicit boundary migration for pre-Fleet serialized role tokens.
 ///
 /// Call this only at load / parse edges. Runtime code must use Fleet role
-/// names via [`SubAgentType::as_str`]. Returns `None` for tokens that are
-/// already canonical or unknown — callers should prefer [`SubAgentType::from_str`]
+/// names via [`FleetRole::as_str`]. Returns `None` for tokens that are
+/// already canonical or unknown — callers should prefer [`FleetRole::from_str`]
 /// for full acceptance (canonical + legacy).
 #[must_use]
 pub fn migrate_legacy_role_token(token: &str) -> Option<&'static str> {
@@ -779,8 +785,8 @@ pub fn migrate_legacy_role_token(token: &str) -> Option<&'static str> {
     }
 }
 
-impl SubAgentType {
-    /// Parse a sub-agent type from user input or a serialized boundary.
+impl FleetRole {
+    /// Parse a Fleet role from user input or a serialized boundary.
     ///
     /// Accepts Fleet role names and, at this parse boundary only, legacy
     /// aliases (`explore` → scout, `plan` → planner, …).
@@ -790,11 +796,11 @@ impl SubAgentType {
         // Boundary migration first, then canonical Fleet names.
         let token = migrate_legacy_role_token(&normalized).unwrap_or(normalized.as_str());
         match token {
-            "worker" => Some(Self::General),
-            "scout" => Some(Self::Explore),
-            "planner" => Some(Self::Plan),
-            "reviewer" => Some(Self::Review),
-            "builder" => Some(Self::Implementer),
+            "worker" => Some(Self::Worker),
+            "scout" => Some(Self::Scout),
+            "planner" => Some(Self::Planner),
+            "reviewer" => Some(Self::Reviewer),
+            "builder" => Some(Self::Builder),
             "verifier" => Some(Self::Verifier),
             "custom" => Some(Self::Custom),
             _ => None,
@@ -805,11 +811,11 @@ impl SubAgentType {
     #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::General => "worker",
-            Self::Explore => "scout",
-            Self::Plan => "planner",
-            Self::Review => "reviewer",
-            Self::Implementer => "builder",
+            Self::Worker => "worker",
+            Self::Scout => "scout",
+            Self::Planner => "planner",
+            Self::Reviewer => "reviewer",
+            Self::Builder => "builder",
             Self::Verifier => "verifier",
             Self::Custom => "custom",
         }
@@ -820,25 +826,25 @@ impl SubAgentType {
     #[must_use]
     fn legacy_type_name(&self) -> &'static str {
         match self {
-            Self::General => "general",
-            Self::Explore => "explore",
-            Self::Plan => "plan",
-            Self::Review => "review",
-            Self::Implementer => "implementer",
+            Self::Worker => "general",
+            Self::Scout => "explore",
+            Self::Planner => "plan",
+            Self::Reviewer => "review",
+            Self::Builder => "implementer",
             Self::Verifier => "verifier",
             Self::Custom => "custom",
         }
     }
 
-    /// Get the system prompt for this agent type.
+    /// Get the system prompt for this Fleet role.
     #[must_use]
     pub fn system_prompt(&self) -> String {
         let role_intro = match self {
-            Self::General => GENERAL_AGENT_INTRO,
-            Self::Explore => EXPLORE_AGENT_INTRO,
-            Self::Plan => PLAN_AGENT_INTRO,
-            Self::Review => REVIEW_AGENT_INTRO,
-            Self::Implementer => IMPLEMENTER_AGENT_INTRO,
+            Self::Worker => GENERAL_AGENT_INTRO,
+            Self::Scout => EXPLORE_AGENT_INTRO,
+            Self::Planner => PLAN_AGENT_INTRO,
+            Self::Reviewer => REVIEW_AGENT_INTRO,
+            Self::Builder => IMPLEMENTER_AGENT_INTRO,
             Self::Verifier => VERIFIER_AGENT_INTRO,
             Self::Custom => CUSTOM_AGENT_INTRO,
         };
@@ -882,7 +888,7 @@ pub struct SubAgentResult {
     pub workspace: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_branch: Option<String>,
-    pub agent_type: SubAgentType,
+    pub agent_type: FleetRole,
     pub assignment: SubAgentAssignment,
     #[serde(default)]
     pub model: String,
@@ -964,7 +970,7 @@ pub struct AgentWorkerSpec {
     pub objective: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
-    pub agent_type: SubAgentType,
+    pub agent_type: FleetRole,
     pub model: String,
     pub workspace: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1537,7 +1543,7 @@ fn worker_profile_from_spec(spec: &AgentWorkerSpec) -> WorkerRuntimeProfile {
 
 fn worker_profile_for_spawn(
     runtime: &SubAgentRuntime,
-    agent_type: &SubAgentType,
+    agent_type: &FleetRole,
     tool_profile: &AgentWorkerToolProfile,
     effective_model: &str,
     model_route: Option<ModelRoute>,
@@ -1547,7 +1553,7 @@ fn worker_profile_for_spawn(
     // Custom starts locked down, but an explicit bounded write authority may
     // deliberately open only the posture needed by its explicit tool list.
     // Parent intersection below remains the hard ceiling.
-    if *agent_type == SubAgentType::Custom && custom_write_authority {
+    if *agent_type == FleetRole::Custom && custom_write_authority {
         requested.permissions.write = true;
         requested.shell = ShellPolicy::Full;
     }
@@ -1757,9 +1763,9 @@ struct SpawnRequest {
     dependencies: Vec<String>,
     /// Explicit bounded acceptance checks relevant to this child.
     acceptance: Vec<String>,
-    agent_type: SubAgentType,
+    agent_type: FleetRole,
     /// True when the caller supplied `type`/`agent_type` or `role` explicitly
-    /// (vs the `General` default). A fleet `profile` only sets the agent type
+    /// (vs the `Worker` default). A fleet `profile` only sets the agent type
     /// when the caller did not, and conflicts are rejected only for explicit
     /// values.
     agent_type_explicit: bool,
@@ -1886,7 +1892,7 @@ struct PersistedSubAgent {
     fork_context: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     workspace: Option<PathBuf>,
-    agent_type: SubAgentType,
+    agent_type: FleetRole,
     prompt: String,
     assignment: SubAgentAssignment,
     #[serde(default)]
@@ -2219,7 +2225,7 @@ impl SubAgentRuntime {
             agent_tool_surface_options: AgentToolSurfaceOptions::new(
                 ShellPolicy::from_legacy_allow_shell(allow_shell),
             ),
-            worker_profile: WorkerRuntimeProfile::for_role(SubAgentType::General),
+            worker_profile: WorkerRuntimeProfile::for_role(FleetRole::Worker),
             event_tx,
             manager,
             spawn_depth: 0,
@@ -2627,7 +2633,7 @@ pub struct SubAgent {
     pub id: String,
     pub session_name: String,
     pub fork_context: bool,
-    pub agent_type: SubAgentType,
+    pub agent_type: FleetRole,
     pub prompt: String,
     pub assignment: SubAgentAssignment,
     pub model: String,
@@ -2669,7 +2675,7 @@ impl SubAgent {
     #[allow(clippy::too_many_arguments)]
     fn new(
         id: String,
-        agent_type: SubAgentType,
+        agent_type: FleetRole,
         prompt: String,
         assignment: SubAgentAssignment,
         model: String,
@@ -2972,12 +2978,12 @@ impl SubAgentManager {
         }
         let reviewer_ids = self.validate_reconciliation_role_evidence(
             &reviewer_evidence_handles,
-            SubAgentType::Review,
+            FleetRole::Reviewer,
             "Reviewer",
         )?;
         let verifier_ids = self.validate_reconciliation_role_evidence(
             &verifier_evidence_handles,
-            SubAgentType::Verifier,
+            FleetRole::Verifier,
             "Verifier",
         )?;
         if !reviewer_ids.is_disjoint(&verifier_ids) {
@@ -3023,7 +3029,7 @@ impl SubAgentManager {
     fn validate_reconciliation_role_evidence(
         &self,
         handles: &[String],
-        expected: SubAgentType,
+        expected: FleetRole,
         label: &str,
     ) -> Result<BTreeSet<String>, String> {
         if handles.is_empty() {
@@ -3044,9 +3050,9 @@ impl SubAgentManager {
             let role_matches = record.spec.agent_type == expected
                 || record.spec.role.as_deref().is_some_and(|role| {
                     role.trim().eq_ignore_ascii_case(label)
-                        || (expected == SubAgentType::Review
+                        || (expected == FleetRole::Reviewer
                             && role.trim().eq_ignore_ascii_case("reviewer"))
-                        || (expected == SubAgentType::Verifier
+                        || (expected == FleetRole::Verifier
                             && role.trim().eq_ignore_ascii_case("verifier"))
                 });
             if !role_matches || record.status != AgentWorkerStatus::Completed {
@@ -3133,7 +3139,7 @@ impl SubAgentManager {
     fn worker_is_fan_in_owner(&self, reference: &str) -> bool {
         self.worker_record_by_ref(reference)
             .is_some_and(|(_, record)| {
-                record.spec.agent_type == SubAgentType::Plan
+                record.spec.agent_type == FleetRole::Planner
                     || record.spec.role.as_deref().is_some_and(|role| {
                         matches!(
                             role.trim().to_ascii_lowercase().as_str(),
@@ -4647,7 +4653,7 @@ impl SubAgentManager {
         let (input_tx, _input_rx) = mpsc::unbounded_channel();
         let mut agent = SubAgent::new(
             agent_id.clone(),
-            SubAgentType::General,
+            FleetRole::Worker,
             "test".to_string(),
             SubAgentAssignment::new("test".to_string(), None),
             "test-model".to_string(),
@@ -4667,7 +4673,7 @@ impl SubAgentManager {
             session_name: Some(name.to_string()),
             objective: "test".to_string(),
             role: None,
-            agent_type: SubAgentType::General,
+            agent_type: FleetRole::Worker,
             model: "test-model".to_string(),
             workspace: workspace.to_path_buf(),
             git_branch: None,
@@ -4788,7 +4794,7 @@ impl SubAgentManager {
         &mut self,
         manager_handle: SharedSubAgentManager,
         runtime: SubAgentRuntime,
-        agent_type: SubAgentType,
+        agent_type: FleetRole,
         prompt: String,
         allowed_tools: Option<Vec<String>>,
     ) -> Result<SubAgentResult> {
@@ -4807,7 +4813,7 @@ impl SubAgentManager {
         &mut self,
         manager_handle: SharedSubAgentManager,
         runtime: SubAgentRuntime,
-        agent_type: SubAgentType,
+        agent_type: FleetRole,
         prompt: String,
         assignment: SubAgentAssignment,
         allowed_tools: Option<Vec<String>>,
@@ -4830,7 +4836,7 @@ impl SubAgentManager {
         &mut self,
         manager_handle: SharedSubAgentManager,
         mut runtime: SubAgentRuntime,
-        agent_type: SubAgentType,
+        agent_type: FleetRole,
         mut prompt: String,
         assignment: SubAgentAssignment,
         allowed_tools: Option<Vec<String>>,
@@ -7235,7 +7241,7 @@ fn apply_spawn_write_authority(runtime: &mut SubAgentRuntime, request: &SpawnReq
     runtime.worker_profile.permissions.write = false;
     if matches!(
         request.agent_type,
-        SubAgentType::General | SubAgentType::Implementer | SubAgentType::Custom
+        FleetRole::Worker | FleetRole::Builder | FleetRole::Custom
     ) {
         runtime.worker_profile.shell = ShellPolicy::None;
     }
@@ -7243,17 +7249,14 @@ fn apply_spawn_write_authority(runtime: &mut SubAgentRuntime, request: &SpawnReq
 
 fn spawn_request_is_write_capable(request: &SpawnRequest) -> bool {
     match request.agent_type {
-        SubAgentType::General | SubAgentType::Implementer => {
+        FleetRole::Worker | FleetRole::Builder => {
             request.write_authority != Some(SpawnWriteAuthority::ReadOnly)
         }
-        SubAgentType::Custom => matches!(
+        FleetRole::Custom => matches!(
             request.write_authority,
             Some(SpawnWriteAuthority::WorkspaceWrite | SpawnWriteAuthority::WorktreeWrite)
         ),
-        SubAgentType::Explore
-        | SubAgentType::Plan
-        | SubAgentType::Review
-        | SubAgentType::Verifier => false,
+        FleetRole::Scout | FleetRole::Planner | FleetRole::Reviewer | FleetRole::Verifier => false,
     }
 }
 
@@ -7375,17 +7378,14 @@ pub(crate) async fn spawn_workflow_task(
 
 /// Build the system prompt for a sub-agent.
 ///
-/// Starts with the per-type prompt (`SubAgentType::system_prompt`) and
+/// Starts with the per-type prompt (`FleetRole::system_prompt`) and
 /// appends a one-line role overlay when `assignment.role` is set. The
 /// full role library — TOML overlays from `~/.deepseek/roles/`, the
 /// `/roles` slash command, model overrides per role — lands in 0.6.7.
 /// For 0.6.6 we just don't drop the role on the floor: the model sees
 /// "You are operating in the role of `{name}`." as a final line so its
 /// behavior reflects the user's choice.
-fn build_subagent_system_prompt(
-    agent_type: &SubAgentType,
-    assignment: &SubAgentAssignment,
-) -> String {
+fn build_subagent_system_prompt(agent_type: &FleetRole, assignment: &SubAgentAssignment) -> String {
     let base = agent_type.system_prompt();
     let mut prompt = match assignment.role.as_deref() {
         Some(role) if !role.trim().is_empty() => {
@@ -7405,7 +7405,7 @@ fn build_subagent_system_prompt(
 }
 
 fn build_subagent_system_prompt_with_skills(
-    agent_type: &SubAgentType,
+    agent_type: &FleetRole,
     assignment: &SubAgentAssignment,
     context: &ToolContext,
 ) -> String {
@@ -7487,7 +7487,7 @@ fn subagent_request_system_prompt(subagent_system_prompt: &str) -> SystemPrompt 
 fn build_initial_subagent_messages(
     prompt: &str,
     assignment: &SubAgentAssignment,
-    agent_type: &SubAgentType,
+    agent_type: &FleetRole,
     fork_context: Option<&SubAgentForkContext>,
 ) -> Vec<Message> {
     let system_prompt = build_subagent_system_prompt(agent_type, assignment);
@@ -7503,7 +7503,7 @@ fn build_initial_subagent_messages(
 fn build_initial_subagent_messages_with_system(
     prompt: &str,
     assignment: &SubAgentAssignment,
-    agent_type: &SubAgentType,
+    agent_type: &FleetRole,
     subagent_system_prompt: &str,
     fork_context: Option<&SubAgentForkContext>,
 ) -> Vec<Message> {
@@ -7554,7 +7554,7 @@ struct SubAgentTask {
     manager_handle: SharedSubAgentManager,
     runtime: SubAgentRuntime,
     agent_id: String,
-    agent_type: SubAgentType,
+    agent_type: FleetRole,
     prompt: String,
     assignment: SubAgentAssignment,
     /// `None` = full registry inheritance. `Some(list)` = explicit narrow.
@@ -7972,7 +7972,7 @@ fn reset_truncated_subagent_responses(consecutive: &mut u32) {
 async fn insert_subagent_full_transcript_handle(
     runtime: &SubAgentRuntime,
     agent_id: &str,
-    agent_type: &SubAgentType,
+    agent_type: &FleetRole,
     assignment: &SubAgentAssignment,
     status: &SubAgentStatus,
     result: Option<&String>,
@@ -8043,7 +8043,7 @@ async fn insert_subagent_full_transcript_handle(
 async fn publish_live_subagent_transcript(
     runtime: &SubAgentRuntime,
     agent_id: &str,
-    agent_type: &SubAgentType,
+    agent_type: &FleetRole,
     assignment: &SubAgentAssignment,
     result: Option<&String>,
     checkpoint: Option<&SubAgentCheckpoint>,
@@ -8418,7 +8418,7 @@ and distinguish that from evidence you personally verified.\n",
 async fn run_subagent(
     runtime: &SubAgentRuntime,
     agent_id: String,
-    agent_type: SubAgentType,
+    agent_type: FleetRole,
     prompt: String,
     assignment: SubAgentAssignment,
     allowed_tools: Option<Vec<String>>,
@@ -9406,7 +9406,7 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
 
     let parsed_type = type_input
         .map(|kind| {
-            SubAgentType::from_str(kind).ok_or_else(|| {
+            FleetRole::from_str(kind).ok_or_else(|| {
                 ToolError::invalid_input(format!(
                     "Invalid sub-agent type '{kind}'. Use: {VALID_SUBAGENT_TYPES}"
                 ))
@@ -9414,10 +9414,10 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         })
         .transpose()?;
 
-    // Role may be either a SubAgentType alias (reviewer → Review) or a fleet
-    // roster role / member id (scout, release_lead). Type aliases still set
+    // Role may be either a FleetRole alias (reviewer → FleetRole::Reviewer)
+    // or a fleet roster role / member id (release_lead). Type aliases still set
     // agent_type; non-alias roles defer to fleet profile resolution (#4177).
-    let parsed_role_type = role_input.and_then(SubAgentType::from_str);
+    let parsed_role_type = role_input.and_then(FleetRole::from_str);
     let role_is_type_alias = parsed_role_type.is_some();
 
     if let (Some(type_kind), Some(role_kind)) = (&parsed_type, &parsed_role_type)
@@ -9431,7 +9431,7 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
     let agent_type_explicit = parsed_type.is_some() || parsed_role_type.is_some();
     let agent_type = parsed_type
         .or(parsed_role_type)
-        .unwrap_or(SubAgentType::General);
+        .unwrap_or(FleetRole::Worker);
 
     let role_alias = role_input
         .and_then(normalize_role_alias)
@@ -9439,7 +9439,7 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         .map(str::to_string);
 
     // Fleet role token: the raw role only when it is not a descriptive type
-    // alias. Type aliases remain local SubAgentType vocabulary and must not be
+    // alias. Type aliases remain local FleetRole vocabulary and must not be
     // promoted into roster lookup keys.
     let fleet_role_token = match role_input {
         Some(raw) if !role_is_type_alias => {
@@ -9460,7 +9460,7 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         .transpose()?;
     // When the caller declared a non-type Fleet role, use it as the profile
     // key so `apply_spawn_profile` is the single roster resolution path.
-    // Descriptive SubAgentType aliases (worker/review/plan/verify/...) keep
+    // Descriptive FleetRole aliases (worker/review/plan/verify/...) keep
     // profile=None; promoting those aliases to roster ids made valid direct
     // agent calls fail because several are not member ids (#4177).
     if profile.is_none() {
@@ -9640,7 +9640,7 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
     let write_roots = parse_coordination_paths(input, "write_roots")?;
     let exact_files = parse_coordination_paths(input, "exact_files")?;
     let coordination_contracts = parse_bounded_strings(input, "coordination_contracts", 16)?;
-    let prompt_only_general = agent_type == SubAgentType::General
+    let prompt_only_general = agent_type == FleetRole::Worker
         && !agent_type_explicit
         && profile.is_none()
         && role_input.is_none()
@@ -9692,7 +9692,7 @@ fn validate_spawn_write_contract(
 ) -> Result<(), ToolError> {
     if matches!(
         request.agent_type,
-        SubAgentType::Explore | SubAgentType::Plan | SubAgentType::Review | SubAgentType::Verifier
+        FleetRole::Scout | FleetRole::Planner | FleetRole::Reviewer | FleetRole::Verifier
     ) && request
         .write_authority
         .is_some_and(|authority| authority != SpawnWriteAuthority::ReadOnly)
@@ -9711,7 +9711,7 @@ fn validate_spawn_write_contract(
                 .to_string(),
         ));
     }
-    if request.agent_type == SubAgentType::Custom && request.write_authority.is_none() {
+    if request.agent_type == FleetRole::Custom && request.write_authority.is_none() {
         if declares_scope {
             return Err(ToolError::invalid_input(
                 "custom write scopes require explicit workspace_write or worktree_write authority"
@@ -9904,7 +9904,7 @@ fn validate_roster_token(value: &str, field: &str) -> Result<String, ToolError> 
 /// delegation bounds. The member's `permissions` block is intentionally NOT
 /// consumed here: it defaults to the floor (no shell, no trust, approvals on)
 /// and the child's capability posture is governed by the member's
-/// `SubAgentType` via `WorkerRuntimeProfile::for_role` — applying the block
+/// `FleetRole` via `WorkerRuntimeProfile::for_role` — applying the block
 /// here could only widen that posture.
 fn apply_spawn_profile(
     request: &mut SpawnRequest,
@@ -10250,7 +10250,7 @@ fn provider_name_for_error(provider: crate::config::ApiProvider) -> &'static str
 pub(crate) fn configured_model_for_role_or_type(
     runtime: &SubAgentRuntime,
     role: Option<&str>,
-    agent_type: &SubAgentType,
+    agent_type: &FleetRole,
 ) -> Result<Option<String>, ToolError> {
     let mut keys = Vec::new();
     if let Some(role) = role.map(str::trim).filter(|role| !role.is_empty()) {
@@ -10303,7 +10303,7 @@ pub(crate) async fn resolve_subagent_assignment_route(
     runtime: &SubAgentRuntime,
     configured_model: Option<String>,
     prompt: &str,
-    agent_type: &SubAgentType,
+    agent_type: &FleetRole,
     requested_model_route: ModelRoute,
     requested_thinking: SubAgentThinking,
 ) -> SubAgentResolvedRoute {
@@ -10358,7 +10358,7 @@ fn fallback_subagent_assignment_route(
         &model_route,
         requested_thinking,
         prompt,
-        &SubAgentType::General,
+        &FleetRole::Worker,
     )
 }
 
@@ -10408,7 +10408,7 @@ fn worker_profile_subagent_assignment_route(
     model_route: &ModelRoute,
     requested_thinking: SubAgentThinking,
     prompt: &str,
-    _agent_type: &SubAgentType,
+    _agent_type: &FleetRole,
 ) -> SubAgentResolvedRoute {
     let candidates = subagent_router_candidates(runtime);
     let mut requested_fast_lane = false;
@@ -10667,7 +10667,7 @@ fn create_isolated_worktree(
     parent_workspace: &Path,
     request: &SubAgentWorktreeRequest,
     session_name: Option<&str>,
-    agent_type: &SubAgentType,
+    agent_type: &FleetRole,
 ) -> Result<PathBuf, ToolError> {
     let repo_root = git_repo_root(parent_workspace)?;
     let branch = request
@@ -10813,7 +10813,7 @@ fn validate_git_branch_name(repo_root: &Path, branch: &str) -> Result<(), ToolEr
     .map_err(|err| ToolError::invalid_input(format!("Invalid worktree_branch '{branch}': {err}")))
 }
 
-fn default_worktree_branch(session_name: Option<&str>, agent_type: &SubAgentType) -> String {
+fn default_worktree_branch(session_name: Option<&str>, agent_type: &FleetRole) -> String {
     let seed = session_name
         .map(str::trim)
         .filter(|name| !name.is_empty())
@@ -10935,7 +10935,7 @@ fn run_git_checked(workspace: &Path, args: &[String], action: &str) -> Result<St
 
 /// Resolve a user-supplied role/agent_role value to a canonical role string.
 ///
-/// This must accept the full set that [`SubAgentType::from_str`] accepts, plus
+/// This must accept the full set that [`FleetRole::from_str`] accepts, plus
 /// role-only aliases (`worker`, `default`, `awaiter`). Before #2649 it covered
 /// only a subset, so `role: "reviewer"` (accepted by `from_str`) was rejected
 /// here by the second validation pass with a misleading four-value hint.
@@ -10956,7 +10956,7 @@ fn normalize_role_alias(input: &str) -> Option<&'static str> {
 fn build_assignment_prompt(
     prompt: &str,
     assignment: &SubAgentAssignment,
-    agent_type: &SubAgentType,
+    agent_type: &FleetRole,
 ) -> String {
     let role = assignment
         .role
@@ -11082,8 +11082,8 @@ fn routine_agent_progress_can_preserve_event_headroom(status: AgentWorkerStatus)
 /// `custom` passes this role-only check. Its explicit allowlist, bounded write
 /// authority, and parent-intersected runtime profile jointly form the actual
 /// authority envelope.
-fn role_posture_permits(agent_type: &SubAgentType, approval: ApprovalRequirement) -> bool {
-    if matches!(agent_type, SubAgentType::Custom) {
+fn role_posture_permits(agent_type: &FleetRole, approval: ApprovalRequirement) -> bool {
+    if matches!(agent_type, FleetRole::Custom) {
         return true;
     }
     let profile = WorkerRuntimeProfile::for_role(agent_type.clone());
@@ -11115,7 +11115,7 @@ struct SubAgentToolRegistry {
     /// The role/type of the sub-agent that this registry belongs to. Used to
     /// decide whether `Suggest`-level tools (write/edit/patch) may run inside
     /// the child without the parent runtime being auto-approved (#1828, #1833).
-    agent_type: SubAgentType,
+    agent_type: FleetRole,
     /// Already-derived capability envelope for this child. This captures the
     /// parent posture intersection, so a Plan parent can expose delegation
     /// without accidentally granting write or shell tools to the child.
@@ -11137,7 +11137,7 @@ impl SubAgentToolRegistry {
     #[cfg(test)]
     fn new(
         runtime: SubAgentRuntime,
-        agent_type: SubAgentType,
+        agent_type: FleetRole,
         explicit_allowed_tools: Option<Vec<String>>,
         todo_list: SharedTodoList,
         plan_state: SharedPlanState,
@@ -11157,7 +11157,7 @@ impl SubAgentToolRegistry {
 
     fn new_with_owner(
         runtime: SubAgentRuntime,
-        agent_type: SubAgentType,
+        agent_type: FleetRole,
         owner_agent_id: String,
         owner_agent_name: String,
         explicit_allowed_tools: Option<Vec<String>>,
@@ -11226,8 +11226,8 @@ impl SubAgentToolRegistry {
     /// while a non-auto parent is delegating bounded investigation.
     /// `Required`-level tools (shell, etc.) still need parent auto-approve
     /// regardless of role (#1828, #1833).
-    fn role_can_delegate_writes(agent_type: &SubAgentType) -> bool {
-        matches!(agent_type, SubAgentType::Implementer | SubAgentType::Custom)
+    fn role_can_delegate_writes(agent_type: &FleetRole) -> bool {
+        matches!(agent_type, FleetRole::Builder | FleetRole::Custom)
     }
 
     fn is_delegated_builtin_verification(name: &str, input: &Value) -> bool {
@@ -11350,7 +11350,7 @@ impl SubAgentToolRegistry {
         }
     }
 
-    fn tools_for_model(&self, agent_type: &SubAgentType) -> Vec<Tool> {
+    fn tools_for_model(&self, agent_type: &FleetRole) -> Vec<Tool> {
         let _ = agent_type;
         let api_tools = self.registry.to_api_tools();
         let filtered = match &self.allowed_tools {
@@ -11634,7 +11634,7 @@ fn reject_subagent_terminal_takeover(name: &str, input: &Value) -> Result<()> {
 /// registry simply doesn't register shell tools, which has the same
 /// effect without papering over the parent's choice with a deny-list.
 fn build_allowed_tools(
-    agent_type: &SubAgentType,
+    agent_type: &FleetRole,
     explicit_tools: Option<Vec<String>>,
     _allow_shell: bool,
 ) -> Result<Option<Vec<String>>> {
@@ -11646,7 +11646,7 @@ fn build_allowed_tools(
                 deduped.push(name.to_string());
             }
         }
-        if matches!(agent_type, SubAgentType::Custom) && deduped.is_empty() {
+        if matches!(agent_type, FleetRole::Custom) && deduped.is_empty() {
             return Err(anyhow!(
                 "Custom sub-agent requires a non-empty allowed_tools list"
             ));
@@ -11654,7 +11654,7 @@ fn build_allowed_tools(
         return Ok(Some(deduped));
     }
 
-    if matches!(agent_type, SubAgentType::Custom) {
+    if matches!(agent_type, FleetRole::Custom) {
         return Err(anyhow!(
             "Custom sub-agent requires a non-empty allowed_tools list"
         ));

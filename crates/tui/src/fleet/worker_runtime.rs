@@ -22,7 +22,7 @@ use codewhale_protocol::fleet::{
 use super::profile::AgentProfile;
 use crate::config::{ApiProvider, Config};
 use crate::route_runtime::{resolve_route_candidate, resolve_runtime_route};
-use crate::tools::subagent::{AgentWorkerSpec, AgentWorkerToolProfile, SubAgentType};
+use crate::tools::subagent::{AgentWorkerSpec, AgentWorkerToolProfile, FleetRole};
 use crate::worker_profile::{ChildLaunchManifest, ModelRoute, ToolScope, WorkerRuntimeProfile};
 
 /// Validate that every task referencing a workspace agent profile can resolve it.
@@ -814,30 +814,30 @@ fn fleet_route_model_selector_with_source(
     }
 }
 
-/// Map a fleet role name to a `SubAgentType`. Unknown roles default to `General`.
-pub(crate) fn fleet_role_to_agent_type(role: Option<&str>) -> SubAgentType {
+/// Map a fleet role name to a `FleetRole`. Unknown roles default to `General`.
+pub(crate) fn fleet_role_to_agent_type(role: Option<&str>) -> FleetRole {
     match role {
-        Some("smoke-runner") => SubAgentType::Verifier,
-        Some("scout") => SubAgentType::Explore,
-        Some("read-only") => SubAgentType::Explore,
-        Some("reviewer") => SubAgentType::Review,
-        Some("builder") => SubAgentType::Implementer,
-        Some("verifier") | Some("tester") => SubAgentType::Verifier,
-        Some("planner") => SubAgentType::Plan,
-        Some("explorer") => SubAgentType::Explore,
+        Some("smoke-runner") => FleetRole::Verifier,
+        Some("scout") => FleetRole::Scout,
+        Some("read-only") => FleetRole::Scout,
+        Some("reviewer") => FleetRole::Reviewer,
+        Some("builder") => FleetRole::Builder,
+        Some("verifier") | Some("tester") => FleetRole::Verifier,
+        Some("planner") => FleetRole::Planner,
+        Some("explorer") => FleetRole::Scout,
         // Coordination happens through delegation, which needs the full
         // General surface (#fleet-roster cutover (v0.8.67)). The operator is
         // the helm of the whole operation (it assigns managers to workflows);
         // the manager is the middle manager of one workflow. Both coordinate,
         // so both get the General surface — explicitly, not by fall-through.
-        Some("manager") | Some("coordinator") | Some("operator") => SubAgentType::General,
+        Some("manager") | Some("coordinator") | Some("operator") => FleetRole::Worker,
         // Synthesis is read-only, no shell: it must never fall through to
         // General's full-write posture (#fleet-roster cutover (v0.8.67)).
-        Some("synthesizer") | Some("summarizer") | Some("reducer") => SubAgentType::Plan,
-        Some("general") | None => SubAgentType::General,
+        Some("synthesizer") | Some("summarizer") | Some("reducer") => FleetRole::Planner,
+        Some("general") | None => FleetRole::Worker,
         Some(other) => {
-            // Try parsing as a SubAgentType directly
-            SubAgentType::from_str(other).unwrap_or(SubAgentType::General)
+            // Try parsing as a FleetRole directly
+            FleetRole::from_str(other).unwrap_or(FleetRole::Worker)
         }
     }
 }
@@ -845,7 +845,7 @@ pub(crate) fn fleet_role_to_agent_type(role: Option<&str>) -> SubAgentType {
 /// Runtime agent type for a roster member: role name first, falling back to
 /// the org-chart slot name when the role name is empty (#fleet-roster cutover
 /// (v0.8.67)).
-pub(crate) fn roster_member_agent_type(member: &AgentProfile) -> SubAgentType {
+pub(crate) fn roster_member_agent_type(member: &AgentProfile) -> FleetRole {
     let role_name = member.profile.role.name.trim();
     if role_name.is_empty() {
         fleet_role_to_agent_type(Some(member.profile.slot.as_str()))
@@ -863,7 +863,7 @@ fn fleet_tool_profile(profile: Option<&FleetTaskWorkerProfile>) -> AgentWorkerTo
 }
 
 fn fleet_worker_runtime_profile(
-    agent_type: &SubAgentType,
+    agent_type: &FleetRole,
     tool_profile: &AgentWorkerToolProfile,
     model: &str,
     spawn_depth: u32,
@@ -885,7 +885,7 @@ fn fleet_worker_runtime_profile(
 }
 
 fn fleet_worker_runtime_profile_for_loadout(
-    agent_type: &SubAgentType,
+    agent_type: &FleetRole,
     tool_profile: &AgentWorkerToolProfile,
     model: &str,
     spawn_depth: u32,
@@ -1305,7 +1305,7 @@ mod tests {
     fn fleet_role_smoke_runner_maps_to_verifier() {
         assert_eq!(
             fleet_role_to_agent_type(Some("smoke-runner")),
-            SubAgentType::Verifier
+            FleetRole::Verifier
         );
     }
 
@@ -1313,7 +1313,7 @@ mod tests {
     fn fleet_role_read_only_maps_to_explore() {
         assert_eq!(
             fleet_role_to_agent_type(Some("read-only")),
-            SubAgentType::Explore
+            FleetRole::Scout
         );
     }
 
@@ -1321,7 +1321,7 @@ mod tests {
     fn fleet_role_reviewer_maps_to_review() {
         assert_eq!(
             fleet_role_to_agent_type(Some("reviewer")),
-            SubAgentType::Review
+            FleetRole::Reviewer
         );
     }
 
@@ -1329,24 +1329,21 @@ mod tests {
     fn fleet_role_builder_maps_to_implementer() {
         assert_eq!(
             fleet_role_to_agent_type(Some("builder")),
-            SubAgentType::Implementer
+            FleetRole::Builder
         );
     }
 
     #[test]
     fn fleet_role_none_maps_to_general() {
-        assert_eq!(fleet_role_to_agent_type(None), SubAgentType::General);
+        assert_eq!(fleet_role_to_agent_type(None), FleetRole::Worker);
     }
 
     #[test]
     fn fleet_role_manager_and_coordinator_map_to_general() {
-        assert_eq!(
-            fleet_role_to_agent_type(Some("manager")),
-            SubAgentType::General
-        );
+        assert_eq!(fleet_role_to_agent_type(Some("manager")), FleetRole::Worker);
         assert_eq!(
             fleet_role_to_agent_type(Some("coordinator")),
-            SubAgentType::General
+            FleetRole::Worker
         );
     }
 
@@ -1357,7 +1354,7 @@ mod tests {
         // match arm, not the unknown-role fall-through.
         assert_eq!(
             fleet_role_to_agent_type(Some("operator")),
-            SubAgentType::General
+            FleetRole::Worker
         );
     }
 
@@ -1368,7 +1365,7 @@ mod tests {
         for role in ["synthesizer", "summarizer", "reducer"] {
             assert_eq!(
                 fleet_role_to_agent_type(Some(role)),
-                SubAgentType::Plan,
+                FleetRole::Planner,
                 "role {role}"
             );
         }
@@ -1382,7 +1379,7 @@ mod tests {
             None,
             codewhale_config::FleetLoadout::Fast,
         );
-        assert_eq!(roster_member_agent_type(&member), SubAgentType::Plan);
+        assert_eq!(roster_member_agent_type(&member), FleetRole::Planner);
 
         let mut slot_only = agent_profile(
             "custom-summarizer",
@@ -1395,14 +1392,14 @@ mod tests {
             slot_only.profile.slot,
             codewhale_config::FleetSlot::Summarizer
         );
-        assert_eq!(roster_member_agent_type(&slot_only), SubAgentType::Plan);
+        assert_eq!(roster_member_agent_type(&slot_only), FleetRole::Planner);
     }
 
     #[test]
     fn unknown_role_maps_to_general() {
         assert_eq!(
             fleet_role_to_agent_type(Some("nonexistent-role")),
-            SubAgentType::General
+            FleetRole::Worker
         );
     }
 
@@ -1637,7 +1634,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(spec.role.as_deref(), Some("reviewer"));
-        assert_eq!(spec.agent_type, SubAgentType::Review);
+        assert_eq!(spec.agent_type, FleetRole::Reviewer);
         assert!(
             spec.objective
                 .contains("summoned as a Codewhale Fleet member (reviewer)")
@@ -1647,7 +1644,7 @@ mod tests {
             spec.objective
                 .contains("Focus on regressions and missing tests.")
         );
-        assert_eq!(spec.runtime_profile.role, SubAgentType::Review);
+        assert_eq!(spec.runtime_profile.role, FleetRole::Reviewer);
         assert_eq!(spec.runtime_profile.model, ModelRoute::Auto);
 
         let permissions = fleet_effective_permissions_for_task(&task, &profiles, &spec);
@@ -2327,7 +2324,7 @@ mod tests {
             capabilities: vec![],
             max_concurrent_tasks: None,
         };
-        let mut parent = WorkerRuntimeProfile::for_role(SubAgentType::General);
+        let mut parent = WorkerRuntimeProfile::for_role(FleetRole::Worker);
         parent.provider = Some("deepseek".to_string());
         parent.reasoning_effort = Some("low".to_string());
         parent.max_spawn_depth = 3;
@@ -2489,7 +2486,7 @@ mod tests {
             capabilities: vec![],
             max_concurrent_tasks: None,
         };
-        let mut parent = WorkerRuntimeProfile::for_role(SubAgentType::Explore);
+        let mut parent = WorkerRuntimeProfile::for_role(FleetRole::Scout);
         parent.tools = ToolScope::Explicit(vec!["read_file".to_string()]);
         parent.max_spawn_depth = 2;
 
@@ -2505,7 +2502,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(spec.agent_type, SubAgentType::Implementer);
+        assert_eq!(spec.agent_type, FleetRole::Builder);
         assert!(!spec.runtime_profile.permissions.write);
         assert!(!spec.runtime_profile.permissions.network);
         assert_eq!(
@@ -2623,7 +2620,7 @@ mod tests {
             (
                 "scout",
                 "deepseek-v4-flash",
-                SubAgentType::Explore,
+                FleetRole::Scout,
                 AgentWorkerToolProfile::Explicit(vec![
                     "read_file".to_string(),
                     "grep_files".to_string(),
@@ -2632,7 +2629,7 @@ mod tests {
             (
                 "builder",
                 "deepseek-v4-pro",
-                SubAgentType::Implementer,
+                FleetRole::Builder,
                 AgentWorkerToolProfile::Explicit(vec![
                     "read_file".to_string(),
                     "apply_patch".to_string(),
@@ -2641,7 +2638,7 @@ mod tests {
             (
                 "verifier",
                 "deepseek-v4-pro",
-                SubAgentType::Verifier,
+                FleetRole::Verifier,
                 AgentWorkerToolProfile::Explicit(vec![
                     "exec_shell".to_string(),
                     "read_file".to_string(),
@@ -2671,7 +2668,7 @@ mod tests {
                     },
                     capabilities: vec![],
                 }),
-                workspace: matches!(&expected_type, SubAgentType::Implementer).then(|| {
+                workspace: matches!(&expected_type, FleetRole::Builder).then(|| {
                     FleetWorkspaceRequirements {
                         root: Some(PathBuf::from(".")),
                         required_files: Vec::new(),
@@ -2812,14 +2809,14 @@ mod tests {
             session_name: None,
             objective: "test".to_string(),
             role: None,
-            agent_type: SubAgentType::General,
+            agent_type: FleetRole::Worker,
             model: "auto".to_string(),
             workspace: std::path::PathBuf::from("/tmp"),
             git_branch: None,
             context_mode: "fresh".to_string(),
             fork_context: false,
             tool_profile: AgentWorkerToolProfile::Inherited,
-            runtime_profile: WorkerRuntimeProfile::for_role(SubAgentType::General),
+            runtime_profile: WorkerRuntimeProfile::for_role(FleetRole::Worker),
             max_steps: 1000,
             spawn_depth: 0,
             max_spawn_depth: 0,
@@ -2842,14 +2839,14 @@ mod tests {
             session_name: None,
             objective: "test".to_string(),
             role: None,
-            agent_type: SubAgentType::General,
+            agent_type: FleetRole::Worker,
             model: "auto".to_string(),
             workspace: std::path::PathBuf::from("/tmp"),
             git_branch: None,
             context_mode: "fresh".to_string(),
             fork_context: false,
             tool_profile: AgentWorkerToolProfile::Inherited,
-            runtime_profile: WorkerRuntimeProfile::for_role(SubAgentType::General),
+            runtime_profile: WorkerRuntimeProfile::for_role(FleetRole::Worker),
             max_steps: 1000,
             spawn_depth: 0,
             max_spawn_depth: 0,
@@ -2948,14 +2945,14 @@ mod tests {
             session_name: None,
             objective: "do the thing".to_string(),
             role: None,
-            agent_type: SubAgentType::General,
+            agent_type: FleetRole::Worker,
             model: "auto".to_string(),
             workspace: std::path::PathBuf::from("/tmp"),
             git_branch: None,
             context_mode: "fresh".to_string(),
             fork_context: false,
             tool_profile: AgentWorkerToolProfile::Inherited,
-            runtime_profile: WorkerRuntimeProfile::for_role(SubAgentType::General),
+            runtime_profile: WorkerRuntimeProfile::for_role(FleetRole::Worker),
             max_steps: 100,
             spawn_depth: 0,
             max_spawn_depth: 0,

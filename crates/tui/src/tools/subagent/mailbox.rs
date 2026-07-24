@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::ApiProvider;
 use crate::models::Usage;
 
-use super::SubAgentType;
+use super::FleetRole;
 
 /// Stable, structured progress envelope shared across the sub-agent surface.
 ///
@@ -93,7 +93,7 @@ impl MailboxMessage {
         }
     }
 
-    pub(crate) fn started(agent_id: impl Into<String>, agent_type: SubAgentType) -> Self {
+    pub(crate) fn started(agent_id: impl Into<String>, agent_type: FleetRole) -> Self {
         Self::Started {
             agent_id: agent_id.into(),
             agent_type: agent_type.as_str().to_string(),
@@ -426,7 +426,7 @@ mod tests {
     #[tokio::test]
     async fn agent_id_is_extractable_from_every_variant() {
         let cases: Vec<(MailboxMessage, &str)> = vec![
-            (MailboxMessage::started("a1", SubAgentType::General), "a1"),
+            (MailboxMessage::started("a1", FleetRole::Worker), "a1"),
             (MailboxMessage::progress("a2", "x"), "a2"),
             (
                 MailboxMessage::ToolCallStarted {

@@ -1825,8 +1825,7 @@ async fn agent_runs_runtime_api_exposes_persisted_worker_receipts() -> Result<()
     use crate::tools::subagent::{
         AgentRunArtifactRef, AgentRunFollowUpTarget, AgentRunRecommendedAction,
         AgentRunTakeoverTarget, AgentRunUsage, AgentRunVerificationSummary, AgentWorkerEvent,
-        AgentWorkerRecord, AgentWorkerSpec, AgentWorkerStatus, AgentWorkerToolProfile,
-        SubAgentType,
+        AgentWorkerRecord, AgentWorkerSpec, AgentWorkerStatus, AgentWorkerToolProfile, FleetRole,
     };
     use crate::worker_profile::{ModelRoute, ToolScope, WorkerRuntimeProfile};
     use std::collections::VecDeque;
@@ -1843,7 +1842,7 @@ async fn agent_runs_runtime_api_exposes_persisted_worker_receipts() -> Result<()
             session_name: Some("receipt_lane".to_string()),
             objective: "Verify run receipt projection".to_string(),
             role: Some("verifier".to_string()),
-            agent_type: SubAgentType::Verifier,
+            agent_type: FleetRole::Verifier,
             model: "deepseek-v4-flash".to_string(),
             workspace: workspace.clone(),
             git_branch: Some("codex/v0.8.60".to_string()),
@@ -1851,7 +1850,7 @@ async fn agent_runs_runtime_api_exposes_persisted_worker_receipts() -> Result<()
             fork_context: false,
             tool_profile: AgentWorkerToolProfile::Explicit(vec!["read_file".to_string()]),
             runtime_profile: {
-                let mut profile = WorkerRuntimeProfile::for_role(SubAgentType::Verifier);
+                let mut profile = WorkerRuntimeProfile::for_role(FleetRole::Verifier);
                 profile.tools = ToolScope::Explicit(vec!["read_file".to_string()]);
                 profile.model = ModelRoute::Fixed("deepseek-v4-flash".to_string());
                 profile.max_spawn_depth =

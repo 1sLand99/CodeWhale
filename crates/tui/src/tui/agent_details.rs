@@ -495,7 +495,7 @@ mod tests {
 
     use crate::config::Config;
     use crate::tools::subagent::{
-        AgentWorkerStatus, SubAgentAssignment, SubAgentNeedsInput, SubAgentType,
+        AgentWorkerStatus, FleetRole, SubAgentAssignment, SubAgentNeedsInput,
     };
     use crate::tui::app::{
         AgentCurrentActivity, AgentRecentAction, MAX_AGENT_RECENT_ACTIONS, TuiOptions,
@@ -536,7 +536,7 @@ mod tests {
             fork_context: false,
             workspace: None,
             git_branch: None,
-            agent_type: SubAgentType::Implementer,
+            agent_type: FleetRole::Builder,
             assignment: SubAgentAssignment {
                 objective: "Implement the bounded details route".to_string(),
                 role: Some("worker".to_string()),
