@@ -1802,19 +1802,6 @@ impl StatusItem {
         ]
     }
 
-    /// Items that belong in the footer's left cluster (steady identity).
-    #[must_use]
-    pub fn is_left_cluster(self) -> bool {
-        matches!(
-            self,
-            StatusItem::Mode
-                | StatusItem::Model
-                | StatusItem::Cost
-                | StatusItem::Status
-                | StatusItem::Balance
-        )
-    }
-
     /// Whether this item is relevant for `provider`.  Provider-specific
     /// items return `false` for unsupported providers so the picker doesn't
     /// offer toggles that can never show useful data.
@@ -1837,20 +1824,6 @@ pub struct RetryPolicy {
     pub initial_delay: f64,
     pub max_delay: f64,
     pub exponential_base: f64,
-}
-
-impl RetryPolicy {
-    /// Compute the backoff delay for a retry attempt.
-    #[must_use]
-    #[allow(dead_code)] // used by runtime_api; will be wired into client retry loop
-    pub fn delay_for_attempt(&self, attempt: u32) -> std::time::Duration {
-        let exponent = i32::try_from(attempt).unwrap_or(i32::MAX);
-        let delay = self.initial_delay * self.exponential_base.powi(exponent);
-        let delay = delay.min(self.max_delay);
-        // Clamp to a sane range to guard against NaN/negative from misconfigured values
-        let delay = delay.clamp(0.0, 300.0);
-        std::time::Duration::from_secs_f64(delay)
-    }
 }
 
 /// Context management configuration.
@@ -2533,21 +2506,6 @@ pub struct SkillsConfig {
 }
 
 impl SkillsConfig {
-    /// Resolve the registry URL with the bundled default.
-    #[must_use]
-    pub fn registry_url(&self) -> String {
-        self.registry_url
-            .clone()
-            .unwrap_or_else(|| crate::skills::install::DEFAULT_REGISTRY_URL.to_string())
-    }
-
-    /// Resolve the max install size with the bundled default.
-    #[must_use]
-    pub fn max_install_size_bytes(&self) -> u64 {
-        self.max_install_size_bytes
-            .unwrap_or(crate::skills::install::DEFAULT_MAX_SIZE_BYTES)
-    }
-
     /// Resolve whether session-time discovery should ignore cross-tool skill
     /// directories. Defaults to the compatibility-preserving broad scan.
     #[must_use]

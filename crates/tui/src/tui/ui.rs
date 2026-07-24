@@ -15691,7 +15691,7 @@ pub(crate) fn terminal_pause_has_live_owner(app: &App) -> bool {
     })
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn transcript_scroll_percent(top: usize, visible: usize, total: usize) -> Option<u16> {
     if total <= visible {
         return None;
@@ -15808,21 +15808,6 @@ fn context_usage_snapshot_for_window(app: &App, max: u32) -> Option<(i64, u32, f
     let used_f64 = used as f64;
     let percent = ((used_f64 / max_f64) * 100.0).clamp(0.0, 100.0);
     Some((used, max, percent))
-}
-
-/// Retained as a callable utility — `context_usage_snapshot` no longer uses
-/// it directly (#115 makes the estimate the primary signal), but tests in
-/// `ui/tests.rs` still exercise it and a future heuristic may want to
-/// distinguish "obviously inflated reported tokens" from healthy reports.
-#[allow(dead_code)]
-fn is_reported_context_inflated(reported: i64, estimated: i64) -> bool {
-    const MIN_ABSOLUTE_GAP: i64 = 4_096;
-    if estimated <= 0 || reported <= estimated {
-        return false;
-    }
-
-    reported.saturating_sub(estimated) >= MIN_ABSOLUTE_GAP
-        && reported >= estimated.saturating_mul(4)
 }
 
 #[cfg(test)]
