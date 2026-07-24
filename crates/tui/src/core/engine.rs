@@ -46,7 +46,6 @@ use crate::route_runtime::resolve_runtime_route;
 use crate::route_runtime::{
     ResolvedRuntimeRoute, ValidatedRuntimeRoute, resolve_runtime_route_for_identity,
 };
-use crate::seam_manager::{SeamConfig, SeamManager};
 use crate::tools::goal::{
     GoalPauseReason, GoalSnapshot, GoalStatus, SharedGoalState, new_shared_goal_state,
 };
@@ -618,9 +617,6 @@ pub struct Engine {
     /// user-facing message names a cause.
     pub(super) cancel_reason: Arc<StdMutex<Option<CancelReason>>>,
     tool_exec_lock: Arc<RwLock<()>>,
-    /// Append-only layered context manager (#159). Opt-in for v0.7.5 while
-    /// cache-hit behavior is audited.
-    seam_manager: Option<SeamManager>,
     turn_counter: u64,
     /// Post-edit LSP diagnostics injection (#136). Populated unconditionally
     /// — when LSP is disabled in config, this is an inert manager that
@@ -908,11 +904,6 @@ impl Engine {
         self.deepseek_client_error = None;
         self.session.model = model;
         self.config.model.clone_from(&self.session.model);
-        self.seam_manager = self
-            .seam_manager
-            .as_ref()
-            .filter(|manager| manager.config().enabled)
-            .map(|manager| SeamManager::new(client, manager.config().clone()));
     }
 
     /// Activate a structurally resolved route at the engine boundary. Normal
@@ -952,16 +943,10 @@ impl Engine {
             Ok(client) => {
                 self.deepseek_client = Some(client.clone());
                 self.deepseek_client_error = None;
-                self.seam_manager = self
-                    .seam_manager
-                    .as_ref()
-                    .filter(|manager| manager.config().enabled)
-                    .map(|manager| SeamManager::new(client, manager.config().clone()));
             }
             Err(err) => {
                 self.deepseek_client = None;
                 self.deepseek_client_error = Some(err.to_string());
-                self.seam_manager = None;
             }
         }
         self.session.model = model;
@@ -1111,37 +1096,6 @@ impl Engine {
             Err(poisoned) => poisoned.into_inner().set_prefer_bwrap(config.prefer_bwrap),
         }
         let file_read_tracker = new_shared_file_read_tracker();
-        // Create Flash seam manager for layered context (#159). v0.7.5 keeps
-        // this opt-in until the prefix-cache audit proves when seam production
-        // is worth the extra request and transcript mutation.
-        let seam_manager = deepseek_client.as_ref().map(|main_client| {
-            let seam_config = SeamConfig {
-                enabled: api_config.context.enabled.unwrap_or(false),
-                verbatim_window_turns: api_config
-                    .context
-                    .verbatim_window_turns
-                    .unwrap_or(crate::seam_manager::VERBATIM_WINDOW_TURNS),
-                l1_threshold: api_config
-                    .context
-                    .l1_threshold
-                    .unwrap_or(crate::seam_manager::DEFAULT_L1_THRESHOLD),
-                l2_threshold: api_config
-                    .context
-                    .l2_threshold
-                    .unwrap_or(crate::seam_manager::DEFAULT_L2_THRESHOLD),
-                l3_threshold: api_config
-                    .context
-                    .l3_threshold
-                    .unwrap_or(crate::seam_manager::DEFAULT_L3_THRESHOLD),
-                seam_model: api_config
-                    .context
-                    .seam_model
-                    .clone()
-                    .unwrap_or_else(|| crate::seam_manager::DEFAULT_SEAM_MODEL.to_string()),
-            };
-            SeamManager::new(main_client.clone(), seam_config)
-        });
-
         let lsp_manager = Arc::new(match config.lsp_config.clone() {
             Some(cfg) => crate::lsp::LspManager::new(cfg, config.workspace.clone()),
             None => crate::lsp::LspManager::disabled(),
@@ -1204,7 +1158,6 @@ impl Engine {
             shared_cancel_token: shared_cancel_token.clone(),
             cancel_reason: cancel_reason.clone(),
             tool_exec_lock,
-            seam_manager,
             turn_counter: 0,
             lsp_manager,
             pending_lsp_blocks: Vec::new(),
@@ -4281,112 +4234,6 @@ impl Engine {
 
     /// Handle a turn using the DeepSeek API.
     #[allow(clippy::too_many_lines)]
-    /// Run the pre-request layered-context checkpoint (#159). Checks whether
-    /// the active input estimate has crossed a soft-seam threshold and, if so,
-    /// produces an `<archived_context>` block via Flash and appends it as an
-    /// assistant message. Called from `handle_deepseek_turn` before each API
-    /// request so the model always has the latest navigation aids.
-    async fn layered_context_checkpoint(&mut self) {
-        if self.seam_manager.is_none() {
-            return;
-        }
-        if !self.seam_manager.as_ref().unwrap().config().enabled {
-            return;
-        }
-
-        // Compute the estimated token count *before* taking a long-lived
-        // `&SeamManager` borrow — `estimated_input_tokens` mutates the
-        // engine's token-estimate cache, which would conflict.
-        let estimated_tokens = self.estimated_input_tokens();
-        let seam_mgr = self.seam_manager.as_ref().unwrap();
-        let highest = seam_mgr.highest_level().await;
-        let Some(level) = seam_mgr.seam_level_for(estimated_tokens, highest) else {
-            return;
-        };
-
-        // Determine the message range to summarize: everything before the
-        // verbatim window. The verbatim window (last ~16 turns) stays
-        // untouched so the model always has ground-truth recent context.
-        let msg_count = self.session.messages.len();
-        let verbatim_start = seam_mgr.verbatim_window_start(msg_count);
-        if verbatim_start == 0 {
-            return; // Not enough messages to summarize.
-        }
-
-        let msg_range_end = verbatim_start;
-        let pinned = self
-            .session
-            .working_set
-            .pinned_message_indices(&self.session.messages, &self.session.workspace);
-
-        let _ = self
-            .tx_event
-            .send(Event::status(format!(
-                "⏻ producing L{level} context seam ({msg_range_end} messages)…"
-            )))
-            .await;
-
-        // If we have existing seams, recompact; otherwise produce fresh.
-        let existing_seams = seam_mgr.collect_seam_texts(&self.session.messages).await;
-        let seam_text = if existing_seams.is_empty() {
-            match seam_mgr
-                .produce_soft_seam(
-                    &self.session.messages,
-                    level,
-                    0,
-                    msg_range_end,
-                    Some(&self.session.workspace),
-                    &pinned,
-                )
-                .await
-            {
-                Ok(text) => text,
-                Err(err) => {
-                    crate::logging::warn(format!("L{level} soft seam failed: {err}"));
-                    return;
-                }
-            }
-        } else {
-            let recent: Vec<&Message> = (0..msg_range_end)
-                .filter_map(|i| self.session.messages.get(i))
-                .collect();
-            match seam_mgr
-                .recompact(&existing_seams, &recent, level, 0, msg_range_end)
-                .await
-            {
-                Ok(text) => text,
-                Err(err) => {
-                    crate::logging::warn(format!("L{level} recompact failed: {err}"));
-                    return;
-                }
-            }
-        };
-
-        if seam_text.is_empty() {
-            return;
-        }
-
-        // Capture seam count before the mutable borrow below.
-        let seam_count = seam_mgr.seam_count().await;
-
-        // Append the seam as an assistant message. This is an append-only
-        // operation — no messages are deleted. The prefix cache stays hot.
-        self.add_session_message(Message {
-            role: "assistant".to_string(),
-            content: vec![ContentBlock::Text {
-                text: seam_text,
-                cache_control: None,
-            }],
-        })
-        .await;
-
-        let _ = self
-            .tx_event
-            .send(Event::status(format!(
-                "⏻ L{level} seam complete ({seam_count} total, {msg_range_end} messages covered)"
-            )))
-            .await;
-    }
     /// Refresh the stable system prompt based on current non-mode context.
     fn refresh_system_prompt(&mut self) {
         let user_memory_block = crate::memory::compose_block(

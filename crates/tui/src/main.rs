@@ -102,7 +102,6 @@ mod runtime_log;
 mod runtime_threads;
 mod sandbox;
 mod scorecard;
-mod seam_manager;
 #[allow(dead_code)]
 mod session_diagnostics;
 #[allow(dead_code)]

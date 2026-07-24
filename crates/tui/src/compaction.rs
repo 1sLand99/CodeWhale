@@ -22,7 +22,7 @@ use crate::models::{
 /// to a token-only trigger. The
 /// `message_threshold` field was removed: its only purpose was to fire
 /// compaction on long sessions of small messages, which is exactly the
-/// case where rewriting the V4 prefix cache is least valuable. Token
+/// case where rewriting the prefix cache is least valuable. Token
 /// budget is the right signal; message count was a 128K-era heuristic.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompactionConfig {
@@ -50,8 +50,8 @@ impl Default for CompactionConfig {
             // derived through the threshold helpers.
             enabled: true,
             // v0.8.11: 50K was a 128K-era leftover that biased every
-            // unconfigured caller toward "compact almost immediately on V4."
-            // Bumped to 800K (80% of V4's 1M window) so the dead-code
+            // unconfigured caller toward "compact almost immediately on large-context routes."
+            // Bumped to 800K (80% of a 1M window) so the fallback
             // default matches the hard automatic compaction guardrail. This
             // is intentionally later than the model-visible 60% "suggest
             // /compact during sustained work" guidance so automatic
@@ -728,7 +728,7 @@ pub fn should_compact(
 
     // Token-only trigger (v0.8.11): the prior message-count branch was a
     // 128K-era heuristic that fired compaction on long chats of small
-    // messages — exactly the case where rewriting the V4 prefix cache is
+    // messages — exactly the case where rewriting the prefix cache is
     // most wasteful. Token budget is the only signal that maps to actual
     // model context pressure.
     if effective_token_threshold == 0 {
@@ -1291,7 +1291,7 @@ async fn create_summary(
     crate::cost_status::report(api_provider, &response.model, &response.usage);
 
     // #584: emit one debug-level event per summary call so the
-    // V4 cache-aligned win is observable post-deploy without
+    // cache-aligned win is observable post-deploy without
     // adding UI surface. The event is emitted with
     // `target = "compaction"`, so the filter is
     // `RUST_LOG=compaction=debug` (the module-path form
@@ -1380,7 +1380,7 @@ fn log_summary_cache_telemetry(used_cache_aligned: bool, usage: &crate::models::
 /// gates hold:
 ///
 /// 1. The model has a known large context window
-///    (≥ `LARGE_CONTEXT_WINDOW_TOKENS`, currently V4-scale).
+///    (≥ `LARGE_CONTEXT_WINDOW_TOKENS`).
 /// 2. Replaying the message prefix plus a ~512-token instruction
 ///    still fits within `CACHE_ALIGNED_SUMMARY_CONTEXT_BUDGET_PERCENT`
 ///    of that budget.
@@ -1392,7 +1392,7 @@ fn log_summary_cache_telemetry(used_cache_aligned: bool, usage: &crate::models::
 /// - **Cache-aligned** replays the original `messages` verbatim
 ///   with `system: None` and appends the summary instruction as
 ///   the final `user` turn. The model sees the conversation as if
-///   it were its own history. This is what lets the V4 prefix cache
+///   it were its own history. This is what lets the provider prefix cache
 ///   hit on the bulk of the request (#572).
 /// - **Fallback** reformats the conversation into a flat
 ///   `User:/Assistant:` transcript inside a single `user` message
@@ -1400,7 +1400,7 @@ fn log_summary_cache_telemetry(used_cache_aligned: bool, usage: &crate::models::
 ///   conversation summaries." system prompt. The model sees a
 ///   transcript of someone else's conversation.
 ///
-/// The empirical bar is that V4 produces equivalent summaries
+/// The empirical bar is that large-context models produce equivalent summaries
 /// either way; the post-#572 review noted this fork is worth
 /// documenting but not yet worth unifying. The fallback's
 /// external-transcript framing is also more conservative for the
@@ -2229,7 +2229,7 @@ mod tests {
     }
 
     /// v0.8.11: message-count is no longer a compaction trigger. Long
-    /// chats of small messages stay uncompacted because rewriting the V4
+    /// chats of small messages stay uncompacted because rewriting the
     /// prefix cache for a tiny budget reclaim is net-negative. Only token
     /// pressure (and the explicit `/compact` slash command) trigger
     /// compaction.

@@ -525,11 +525,6 @@ impl Engine {
             // model sees compile errors before its next reasoning step.
             self.flush_pending_lsp_diagnostics().await;
 
-            // #159: layered context seam checkpoint. This is opt-in for
-            // v0.7.5 while #200 audits cache-hit behavior; when enabled it
-            // appends <archived_context> blocks rather than replacing history.
-            self.layered_context_checkpoint().await;
-
             // Build the request
             let mut active_tools = if tool_catalog.is_empty() {
                 None

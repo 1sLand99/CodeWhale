@@ -1853,28 +1853,32 @@ impl RetryPolicy {
     }
 }
 
-/// Context management configuration (append-only layered context with Flash seams).
+/// Context management configuration.
+///
+/// The append-only "Flash seam" layered-context system (#159) was removed on
+/// 2026-07-23 — it never left its opt-in default and compaction owns context
+/// reduction now. Its keys remain parsed-but-ignored so existing config files
+/// keep loading; `project_pack` is the only live setting.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct ContextConfig {
-    /// Master enable for layered context management. Default: false while
-    /// v0.7.5 audits V4 prefix-cache behavior.
+    /// Ignored (was: master enable for the removed layered-context system).
     #[serde(default)]
     pub enabled: Option<bool>,
     /// Include a deterministic project context pack in the stable prompt
     /// prefix. Default: true; set `[context] project_pack = false` to disable.
     #[serde(default)]
     pub project_pack: Option<bool>,
-    /// Verbatim window: last N turns never summarized. Default: 16.
+    /// Ignored (was: seam verbatim window).
     #[serde(default)]
     pub verbatim_window_turns: Option<usize>,
-    /// Soft seam thresholds based on the active request input estimate.
+    /// Ignored (was: seam thresholds).
     #[serde(default)]
     pub l1_threshold: Option<usize>,
     #[serde(default)]
     pub l2_threshold: Option<usize>,
     #[serde(default)]
     pub l3_threshold: Option<usize>,
-    /// Model used for seam/briefing work. Default: "deepseek-v4-flash".
+    /// Ignored (was: seam model).
     #[serde(default)]
     pub seam_model: Option<String>,
 }
@@ -2224,7 +2228,8 @@ pub struct Config {
     #[serde(default)]
     pub lsp: Option<LspConfigToml>,
 
-    /// Append-only layered context management with Flash seam manager (#159).
+    /// Context configuration (project context pack; legacy seam keys are
+    /// parsed but ignored since the 2026-07-23 removal).
     #[serde(default)]
     pub context: ContextConfig,
 
