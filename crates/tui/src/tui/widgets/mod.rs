@@ -844,12 +844,6 @@ fn occupied_text_bounds(line: &Line<'_>) -> Option<(usize, usize)> {
     crate::tui::ambient_life::occupied_text_bounds(line)
 }
 
-/// Cosine-eased ping-pong retained for unit tests and any residual callers.
-#[cfg(test)]
-fn ambient_ping_pong(elapsed_ms: u128, step_ms: u128, span: u16, phase_ms: u128) -> (u16, bool) {
-    crate::tui::ambient_life::eased_drift(elapsed_ms, step_ms, span, phase_ms)
-}
-
 #[cfg(test)]
 fn fish_flee_offset(elapsed_ms: u128) -> u16 {
     crate::tui::ambient_life::fish_flee_offset(elapsed_ms)
@@ -4154,7 +4148,7 @@ mod tests {
     use super::{
         ACTIVE_REVISION_DOMAIN, ApprovalMode, ApprovalWidget, COMPOSER_PANEL_HEIGHT,
         COMPOSER_PLACEHOLDER, COMPOSER_PROMPT_GUTTER_WIDTH, ChatWidget, ComposerWidget, Renderable,
-        SlashMenuEntry, active_entry_revision, ambient_ping_pong, apply_detail_target_highlight,
+        SlashMenuEntry, active_entry_revision, apply_detail_target_highlight,
         apply_selection_to_line, apply_send_flash, approval_palette, approval_truncation_hint,
         build_empty_state_lines, composer_content_geometry, composer_empty_hint_text,
         composer_height, composer_max_height, composer_min_input_rows, composer_top_padding,
@@ -6213,11 +6207,21 @@ mod tests {
 
         assert_ne!(buf[(0, 0)].bg, buf[(0, 19)].bg);
         let rendered = buffer_text(&buf, area);
-        let fish_count = rendered.matches("><>").count() + rendered.matches("<><").count();
-        assert_eq!(
-            fish_count, 8,
-            "wide idle water should contain two cohesive four-fish schools:\n{rendered}"
+        // One loose wedge school: an eyed lead plus plain members, all
+        // facing the same way (facing equals travel by construction).
+        let rightward = rendered.matches("><>").count() + rendered.matches("><o>").count();
+        let leftward = rendered.matches("<><").count() + rendered.matches("<o><").count();
+        assert!(
+            rightward == 0 || leftward == 0,
+            "one school shares one direction:\n{rendered}"
         );
+        let fish_count = rightward + leftward;
+        assert!(
+            (4..=7).contains(&fish_count),
+            "wide idle water should show one cohesive wedge school (got {fish_count}):\n{rendered}"
+        );
+        let leads = rendered.matches("><o>").count() + rendered.matches("<o><").count();
+        assert_eq!(leads, 1, "exactly one eyed lead fish:\n{rendered}");
 
         let context = "codewhale · /tmp/codewhale-test-workspace · no git · mcp 0";
         let context_x = ((100usize - UnicodeWidthStr::width(context)) / 2) as u16;
@@ -6452,27 +6456,6 @@ mod tests {
         assert_ne!(first[(0, 0)].bg, first[(0, 19)].bg);
         assert_eq!(first[(0, 0)].bg, second[(0, 0)].bg);
         assert_eq!(first[(11, 14)].symbol(), second[(11, 14)].symbol());
-    }
-
-    #[test]
-    fn ambient_path_reverses_without_teleporting() {
-        let step = 620;
-        let span = 11;
-        assert_eq!(ambient_ping_pong(0, step, span, 0), (0, true));
-        assert_eq!(ambient_ping_pong(step * 11, step, span, 0), (11, true));
-        let after_turn = ambient_ping_pong(step * 12, step, span, 0);
-        assert!(!after_turn.1);
-        assert!(
-            after_turn.0 >= 10,
-            "the eased turn must not jump: {after_turn:?}"
-        );
-        let near_origin = ambient_ping_pong(step * 21, step, span, 0);
-        assert!(!near_origin.1);
-        assert!(
-            near_origin.0 <= 1,
-            "the eased return should settle: {near_origin:?}"
-        );
-        assert_eq!(ambient_ping_pong(step * 22, step, span, 0), (0, true));
     }
 
     #[test]

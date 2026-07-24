@@ -1,8 +1,21 @@
 //! Ambient ocean life for the underwater transcript field.
 //!
-//! One clear owner for schools of fish, jellyfish, kelp, bubbles, bio-luminescence,
-//! and the rare whale cameo. Motion stays inside the existing delta/interpolation
-//! path: this module never requests frames on its own.
+//! One clear owner for the fish school, jellyfish, bubbles, and the rare
+//! whale cameo — nothing else lives in the water (2026-07-23 product
+//! decision: seaweed and bio-dust are gone). Motion stays inside the
+//! existing delta/interpolation path: this module never requests frames on
+//! its own.
+//!
+//! Motion language (shared with the rest of the shell): every mark can lerp
+//! between the water and its ink at a time-varying brightness. Fish carry a
+//! travelling sin² wave, jellyfish a slow floor-bounded pulse, bubbles an
+//! occasional raised-cosine glint. Phases are wall-clock keyed and entity
+//! periods deliberately never match, so nothing strobes in sync.
+//!
+//! Fish swim on a wrap-around path: they exit one edge and re-enter the
+//! other still facing their travel direction, so facing always equals
+//! velocity by construction. Direction may only change while the school is
+//! fully off-screen.
 //!
 //! Under reduced motion, entities remain visible but static.
 
@@ -25,15 +38,6 @@ enum Depth {
 }
 
 impl Depth {
-    #[must_use]
-    fn speed_scale(self) -> f64 {
-        match self {
-            Self::Background => 0.55,
-            Self::Midground => 1.0,
-            Self::Foreground => 1.45,
-        }
-    }
-
     #[must_use]
     fn ink_index(self) -> usize {
         match self {
@@ -64,41 +68,21 @@ impl LifeDensity {
     }
 
     #[must_use]
-    fn school_count(self) -> usize {
-        // One cohesive school reads better than many lone arrows.
-        match self {
-            Self::Sparse => 1,
-            Self::Normal => 1,
-            Self::Rich => 2,
-        }
-    }
-
-    #[must_use]
     fn school_size(self) -> usize {
+        // One loose wedge of real fish; two schools compete with the whale.
         match self {
-            Self::Sparse => 2,
-            Self::Normal => 3,
-            Self::Rich => 4,
+            Self::Sparse => 3,
+            Self::Normal => 5,
+            Self::Rich => 7,
         }
     }
 
     #[must_use]
     fn jellyfish_count(self) -> usize {
-        // Jellies are easy to misread as noise — keep them rare and soft.
         match self {
-            Self::Sparse => 0,
-            Self::Normal => 1,
-            Self::Rich => 1,
-        }
-    }
-
-    #[must_use]
-    fn kelp_count(self) -> usize {
-        // Fewer denser fronds beat a forest of antenna stalks.
-        match self {
-            Self::Sparse => 2,
-            Self::Normal => 3,
-            Self::Rich => 4,
+            Self::Sparse => 1,
+            Self::Normal => 2,
+            Self::Rich => 2,
         }
     }
 
@@ -108,15 +92,6 @@ impl LifeDensity {
             Self::Sparse => 1,
             Self::Normal => 2,
             Self::Rich => 2,
-        }
-    }
-
-    #[must_use]
-    fn bio_particles(self) -> usize {
-        match self {
-            Self::Sparse => 1,
-            Self::Normal => 2,
-            Self::Rich => 3,
         }
     }
 }
@@ -149,6 +124,10 @@ struct AmbientMark {
     glyph: &'static str,
     depth: Depth,
     style_mod: Option<Modifier>,
+    /// Time-varying glow in `[0, 1]`: the mark's ink is lerped from the
+    /// painted water toward full ink at this amount. `None` renders the
+    /// plain ink (legacy behavior for the whale cameo).
+    brightness: Option<f32>,
 }
 
 /// Optional pointer reaction for fish dart / bubble rise.
@@ -208,183 +187,182 @@ fn build_frame_marks(
     let quiet_mid_lo = area.height.saturating_mul(2) / 5;
     let quiet_mid_hi = area.height.saturating_mul(3) / 5;
 
-    // --- Cohesive fish schools (not lone arrows) ---
-    // Leader + trailers share one path; every body uses the same fish glyph
-    // family so it reads as a school, not random `>` punctuation.
-    let school_n = density.school_count();
-    let school_size = density.school_size();
-    for i in 0..school_n {
-        let depth = if i == 0 {
-            Depth::Foreground
+    // --- One loose fish school on a wrap-around path ---
+    // The school enters one edge, crosses, and exits the other; direction
+    // may only change while it is fully off-screen, so facing always equals
+    // velocity. A travelling sin² brightness wave runs through the wedge.
+    let school_size = density.school_size().min(SCHOOL_WEDGE.len());
+    let school_span = SCHOOL_WEDGE
+        .iter()
+        .take(school_size)
+        .map(|(_, dx)| *dx)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(LEAD_FISH_RIGHT.len() as u16);
+    let travel = u128::from(area.width.saturating_add(school_span).max(1));
+    let cycle_ms = travel.saturating_mul(SCHOOL_CELL_MS);
+    // Half-cycle head start: freshly opened water shows the school
+    // mid-crossing instead of an empty entry beat.
+    let school_clock = t.saturating_add(cycle_ms / 2);
+    let (cycle_index, cycle_step) = if animated {
+        (
+            school_clock / cycle_ms,
+            ((school_clock % cycle_ms) / SCHOOL_CELL_MS) as i32,
+        )
+    } else {
+        // Reduced motion: park the school mid-crossing, facing right.
+        (0, (travel / 2) as i32)
+    };
+    let swims_right = !animated || school_swims_right(cycle_index);
+    // Alternate the travel band between crossings; both avoid the hero band.
+    let swims_low = school_swims_low(cycle_index);
+    let anchor_y = if swims_low {
+        area.height.saturating_mul(3) / 4
+    } else {
+        quiet_top.saturating_add(1)
+    };
+    let ptr = cursor.column.saturating_sub(area.x);
+    let ptr_y = cursor.row.saturating_sub(area.y);
+    for (m, (dy, dx)) in SCHOOL_WEDGE.iter().take(school_size).enumerate() {
+        let body = fish_body(swims_right, m == 0);
+        let body_w = body.len() as u16; // ASCII bodies: len == width
+        // Nose position in wrap space; trailers sit `dx` columns behind the
+        // lead relative to travel, so the wedge follows instead of leading.
+        // Right-swimmers enter from the left edge, left-swimmers from the
+        // right edge — both facing exactly the way they move.
+        let mut x_i32 = if swims_right {
+            cycle_step - 1 - i32::from(*dx) - (i32::from(body_w) - 1)
         } else {
-            Depth::Midground
+            i32::from(area.width) - cycle_step + i32::from(*dx)
         };
-        let span = ((area.width as f64 / (4.5 + f64::from(i as u16))) as u16).clamp(8, 28);
-        let phase = (i as u128).saturating_mul(2_400);
-        let step = (480.0 / depth.speed_scale()) as u128;
-        let (drift, forward) = if animated {
-            eased_drift(t, step.max(220), span, phase)
-        } else {
-            ((span / 3).max(1), i % 2 == 0)
-        };
+        // Slight per-fish vertical stagger + slow bob.
         let bob = if animated {
-            sine_bob(t, 2_200 + phase, 1)
+            sine_bob(t, 3_400 + (m as u128) * 640, 1)
         } else {
             0
         };
-        // Prefer lower / upper thirds — avoid the empty-state copy band.
-        let mut base_y = match i {
-            0 => area.height.saturating_mul(3) / 4,
-            _ => (area.height / 5).max(1),
-        }
-        .saturating_add(bob)
-        .min(area.height.saturating_sub(1));
-        if base_y > quiet_mid_lo && base_y < quiet_mid_hi {
-            base_y = if i == 0 {
-                quiet_mid_hi
-                    .saturating_add(1)
-                    .min(area.height.saturating_sub(1))
-            } else {
-                quiet_mid_lo.saturating_sub(1)
-            };
-        }
-        let base_x = match i {
-            0 => area.width / 10,
-            _ => area.width.saturating_mul(3) / 4,
-        };
-        let faces_right = if i == 0 { forward } else { !forward };
-        let mut lead_x = if faces_right {
-            base_x.saturating_add(drift)
-        } else {
-            base_x.saturating_add(span).saturating_sub(drift)
-        };
+        let mut y_i32 = i32::from(anchor_y) + i32::from(*dy) + i32::from(bob);
+        // Fish flee the pointer in both dimensions (nearby motion only).
         if let Some(flee_ms) = cursor.flee_elapsed_ms {
-            let flee = fish_flee_offset(flee_ms);
-            let ptr = cursor.column.saturating_sub(area.x);
-            let ptr_y = cursor.row.saturating_sub(area.y);
-            if lead_x.abs_diff(ptr) < 16 && base_y.abs_diff(ptr_y) < 6 {
-                if lead_x >= ptr {
-                    lead_x = lead_x.saturating_add(flee);
+            let flee = i32::from(fish_flee_offset(flee_ms));
+            if x_i32.abs_diff(i32::from(ptr)) < 16 && y_i32.abs_diff(i32::from(ptr_y)) < 6 {
+                if x_i32 >= i32::from(ptr) {
+                    x_i32 += flee;
                 } else {
-                    lead_x = lead_x.saturating_sub(flee);
+                    x_i32 -= flee;
+                }
+                if y_i32 >= i32::from(ptr_y) {
+                    y_i32 += 1;
+                } else {
+                    y_i32 -= 1;
                 }
             }
         }
-        let body = fish_body(faces_right, depth);
-        let body_w = UnicodeWidthStr::width(body) as u16;
-        let max_x = area.width.saturating_sub(body_w.max(1));
-        lead_x = lead_x.min(max_x);
-
-        // Spacing along the swim direction: tight school, slight vertical stagger.
-        for m in 0..school_size {
-            let gap = 3u16.saturating_add((m as u16) % 2); // 3–4 cols between bodies
-            let ox = if faces_right {
-                lead_x.saturating_sub(gap.saturating_mul(m as u16))
-            } else {
-                lead_x
-                    .saturating_add(gap.saturating_mul(m as u16))
-                    .min(max_x)
-            };
-            let oy = base_y
-                .saturating_add(if m % 2 == 0 { 0 } else { 1 })
-                .min(area.height.saturating_sub(1));
-            let member_depth = if m == 0 { depth } else { Depth::Midground };
-            marks.push(AmbientMark {
-                x: ox,
-                y: oy,
-                glyph: fish_body(faces_right, member_depth),
-                depth: member_depth,
-                style_mod: if m == 0 { None } else { Some(Modifier::DIM) },
-            });
+        let max_x = i32::from(area.width.saturating_sub(body_w));
+        let max_y = i32::from(area.height.saturating_sub(1));
+        if x_i32 < 0 || x_i32 > max_x || y_i32 < 0 || y_i32 > max_y {
+            continue; // off-screen while wrapping
         }
+        let y = y_i32 as u16;
+        // Never swim through the hero band.
+        if y > quiet_mid_lo && y < quiet_mid_hi {
+            continue;
+        }
+        let brightness = if animated {
+            FISH_BRIGHTNESS_FLOOR
+                + (1.0 - FISH_BRIGHTNESS_FLOOR)
+                    * wave01(t, FISH_WAVE_MS, (m as u128).saturating_mul(320))
+        } else {
+            0.7
+        };
+        marks.push(AmbientMark {
+            x: x_i32 as u16,
+            y,
+            glyph: body,
+            depth: if m == 0 {
+                Depth::Foreground
+            } else {
+                Depth::Midground
+            },
+            style_mod: None,
+            brightness: Some(brightness),
+        });
     }
 
-    // --- Soft jellyfish (bell + thin trail — no hard │/⎞ junk) ---
+    // --- Jellyfish: a bell with a lagging tentacle pulse ---
+    // The bell pulses on a slow floor-bounded sin²; the tentacle repeats the
+    // pulse ~350 ms later — the lag is what sells "jellyfish". They drift
+    // slowly upward through the side lanes and wrap.
     for j in 0..density.jellyfish_count() {
-        let phase = 3_800u128.saturating_add((j as u128) * 2_900);
-        let span = (area.width / 12).clamp(3, 10);
-        let (drift, _) = if animated {
-            eased_drift(t, 1_100, span, phase)
+        let phase = 3_100u128.saturating_add((j as u128) * 4_700);
+        let lane_x = if j % 2 == 0 {
+            area.width.saturating_mul(5) / 6
         } else {
-            (span / 2, true)
+            area.width / 6
         };
-        let bob = if animated {
-            sine_bob(t, 2_800 + phase, 1)
+        let wobble = if animated {
+            sine_bob(t, 5_200 + phase, 1)
         } else {
             0
         };
-        // Park jellies off to a side, above the quiet mid band.
-        let x = (area.width.saturating_mul(4) / 5 + drift).min(area.width.saturating_sub(1));
-        let y = quiet_top
-            .saturating_add(bob)
-            .min(quiet_mid_lo.saturating_sub(2));
-        let bell = if animated {
-            match (t.saturating_add(phase) / 700) % 2 {
-                0 => "°",
-                _ => "˚",
-            }
+        let x = lane_x
+            .saturating_add(wobble)
+            .min(area.width.saturating_sub(JELLY_BELL.len() as u16 + 1));
+        let rise_rows = u128::from(area.height.saturating_sub(4).max(1));
+        let rise_period = 8_600u128.saturating_add((j as u128) * 1_400);
+        let risen = if animated {
+            ((t.saturating_add(phase) / rise_period) % rise_rows) as u16
         } else {
-            "°"
+            (rise_rows / 2) as u16
+        };
+        let y = area.height.saturating_sub(2).saturating_sub(risen);
+        if y == 0 || (y > quiet_mid_lo && y < quiet_mid_hi) {
+            continue;
+        }
+        let bell_brightness = if animated {
+            JELLY_BRIGHTNESS_FLOOR
+                + (1.0 - JELLY_BRIGHTNESS_FLOOR) * wave01(t, JELLY_PULSE_MS, phase)
+        } else {
+            0.6
+        };
+        let tentacle_brightness = if animated {
+            JELLY_BRIGHTNESS_FLOOR
+                + (1.0 - JELLY_BRIGHTNESS_FLOOR)
+                    * wave01(
+                        t.saturating_sub(JELLY_TENTACLE_LAG_MS),
+                        JELLY_PULSE_MS,
+                        phase,
+                    )
+        } else {
+            0.45
         };
         marks.push(AmbientMark {
             x,
             y,
-            glyph: bell,
+            glyph: JELLY_BELL,
             depth: Depth::Midground,
-            style_mod: Some(Modifier::DIM),
+            style_mod: None,
+            brightness: Some(bell_brightness),
         });
-        if y + 1 < area.height {
-            marks.push(AmbientMark {
-                x,
-                y: y + 1,
-                glyph: "·",
-                depth: Depth::Background,
-                style_mod: Some(Modifier::DIM),
-            });
-        }
-    }
-
-    // --- Bottom-anchored seaweed (wavy fronds, not radio antennas) ---
-    // Each frond is a short stack of soft wave glyphs that lean with sway.
-    for k in 0..density.kelp_count() {
-        let phase = (k as u128).saturating_mul(1_300);
-        let sway_phase = if animated {
-            ((t.saturating_add(phase) % 2_600) as f64 / 2_600.0) * std::f64::consts::TAU
-        } else {
-            0.0
-        };
-        // Keep fronds near the edges so the center brand stays clean.
-        let edge_bias = if k % 2 == 0 {
-            area.width / (density.kelp_count() as u16 * 2 + 2)
-        } else {
-            area.width
-                .saturating_sub(area.width / (density.kelp_count() as u16 * 2 + 2))
-        };
-        let base_x = edge_bias
-            .saturating_add((k as u16) * 2)
-            .min(area.width.saturating_sub(2));
-        let frond_h = 3u16.saturating_add((k % 2) as u16); // 3–4 cells tall
-        for h in 0..frond_h {
-            // Higher segments lean more with the current.
-            let lean = (sway_phase.sin() * (0.4 + 0.35 * f64::from(h))).round() as i16;
-            let x = if lean >= 0 {
-                base_x.saturating_add(lean as u16)
+        if y + 1 < area.height && !(y + 1 > quiet_mid_lo && y + 1 < quiet_mid_hi) {
+            let sway = if animated {
+                JELLY_TENTACLE_FRAMES
+                    [((t.saturating_add(phase) / 1_400) as usize) % JELLY_TENTACLE_FRAMES.len()]
             } else {
-                base_x.saturating_sub((-lean) as u16)
-            }
-            .min(area.width.saturating_sub(1));
-            let y = area.height.saturating_sub(1 + h);
+                "|"
+            };
             marks.push(AmbientMark {
-                x,
-                y,
-                glyph: seaweed_glyph(h, frond_h, lean),
+                x: x.saturating_add(1),
+                y: y + 1,
+                glyph: sway,
                 depth: Depth::Background,
-                style_mod: Some(Modifier::DIM),
+                style_mod: None,
+                brightness: Some(tentacle_brightness),
             });
         }
     }
 
-    // --- Rising bubble streams (quiet ·/˚ only) ---
+    // --- Rising bubble streams (quiet ·/˚ with occasional glints) ---
     for b in 0..density.bubble_streams() {
         let phase = (b as u128).saturating_mul(1_900);
         // Edge columns — avoid center brand.
@@ -401,9 +379,7 @@ fn build_frame_marks(
         } else {
             area.height / 4
         };
-        let boost = if cursor.flee_elapsed_ms.is_some()
-            && column.abs_diff(cursor.column.saturating_sub(area.x)) < 10
-        {
+        let boost = if cursor.flee_elapsed_ms.is_some() && column.abs_diff(ptr) < 10 {
             2
         } else {
             0
@@ -422,48 +398,18 @@ fn build_frame_marks(
         } else {
             "·"
         };
+        let brightness = if animated {
+            glint01(t, 2_600 + phase % 700, 600, BUBBLE_BRIGHTNESS_FLOOR, phase)
+        } else {
+            BUBBLE_BRIGHTNESS_FLOOR
+        };
         marks.push(AmbientMark {
             x: column.min(area.width.saturating_sub(1)),
             y,
             glyph,
             depth: Depth::Foreground,
-            style_mod: Some(Modifier::DIM),
-        });
-    }
-
-    // --- Very sparse bioluminescent dust (edges only) ---
-    for p in 0..density.bio_particles() {
-        let seed = (p as u128).saturating_mul(9973).saturating_add(13);
-        let x = if p % 2 == 0 {
-            ((seed.wrapping_mul(17).wrapping_add(t / 5_000)) % u128::from((area.width / 4).max(1)))
-                as u16
-        } else {
-            area.width.saturating_sub(
-                1 + ((seed.wrapping_mul(19).wrapping_add(t / 5_000))
-                    % u128::from((area.width / 4).max(1))) as u16,
-            )
-        };
-        let y = quiet_top.saturating_add(
-            ((seed.wrapping_mul(31).wrapping_add(t / 6_000))
-                % u128::from(area.height.saturating_sub(quiet_top + 2).max(1))) as u16,
-        );
-        if y > quiet_mid_lo && y < quiet_mid_hi {
-            continue;
-        }
-        let twinkle = if animated {
-            ((t.saturating_add(seed) / 800) % 5) < 2
-        } else {
-            p == 0
-        };
-        if !twinkle {
-            continue;
-        }
-        marks.push(AmbientMark {
-            x: x.min(area.width.saturating_sub(1)),
-            y: y.min(area.height.saturating_sub(1)),
-            glyph: "·",
-            depth: Depth::Background,
-            style_mod: Some(Modifier::DIM),
+            style_mod: None,
+            brightness: Some(brightness),
         });
     }
 
@@ -493,6 +439,7 @@ fn build_frame_marks(
                     glyph,
                     depth: Depth::Foreground,
                     style_mod: None,
+                    brightness: None,
                 });
                 if phase == WhaleCameoPhase::Spout && ay > 0 {
                     marks.push(AmbientMark {
@@ -501,6 +448,7 @@ fn build_frame_marks(
                         glyph: "˚",
                         depth: Depth::Foreground,
                         style_mod: Some(Modifier::DIM),
+                        brightness: None,
                     });
                 }
             }
@@ -510,24 +458,73 @@ fn build_frame_marks(
     FrameMarks { marks }
 }
 
-/// Soft seaweed frond segment. Stacked parentheses/curves lean with current —
-/// classic terminal kelp, not `|` poles topped with carets.
-fn seaweed_glyph(segment_from_bottom: u16, frond_h: u16, lean: i16) -> &'static str {
-    let is_tip = segment_from_bottom + 1 == frond_h;
-    let is_base = segment_from_bottom == 0;
-    // Tip feathers; base roots; mid is a soft S-curve of `)` / `(`.
-    if is_tip {
-        return if lean >= 0 { ")" } else { "(" };
+/// Loose diagonal wedge for the school: `(row_offset, columns_behind_lead)`.
+/// The slight row spread is what makes it read as a school, not a text row.
+const SCHOOL_WEDGE: &[(i16, u16)] = &[(0, 0), (-1, 4), (1, 6), (-2, 9), (2, 11), (0, 14), (-1, 17)];
+
+/// Wall-clock milliseconds per column of school travel (~2.6 cells/s).
+const SCHOOL_CELL_MS: u128 = 380;
+/// Travelling brightness-wave period through the wedge.
+const FISH_WAVE_MS: u128 = 2_200;
+/// Fish are small: never let one sink into the gradient.
+const FISH_BRIGHTNESS_FLOOR: f32 = 0.45;
+
+/// Lead fish silhouettes (ASCII only — width == len). Members drop the eye.
+const LEAD_FISH_RIGHT: &str = "><o>";
+const LEAD_FISH_LEFT: &str = "<o><";
+
+/// Jellyfish bell and its swaying tentacle frames (all width-1 ASCII).
+const JELLY_BELL: &str = "(°)";
+const JELLY_TENTACLE_FRAMES: &[&str] = &["\\", "|", "/", "|"];
+/// Bell pulse period — deliberately different from every other entity
+/// period so nothing in the water strobes in sync.
+const JELLY_PULSE_MS: u128 = 2_900;
+/// The tentacle repeats the bell pulse this much later.
+const JELLY_TENTACLE_LAG_MS: u128 = 350;
+const JELLY_BRIGHTNESS_FLOOR: f32 = 0.35;
+
+/// Bubbles stay mostly steady with occasional glints, not a constant wave.
+const BUBBLE_BRIGHTNESS_FLOOR: f32 = 0.55;
+
+/// One soft sin² hump per `period_ms`, wall-clock keyed, in `[0, 1]`.
+#[must_use]
+fn wave01(elapsed_ms: u128, period_ms: u128, phase_ms: u128) -> f32 {
+    if period_ms == 0 {
+        return 1.0;
     }
-    if is_base {
-        return "~";
+    let frac = (elapsed_ms.saturating_add(phase_ms) % period_ms) as f64 / period_ms as f64;
+    let s = (frac * std::f64::consts::PI).sin();
+    (s * s) as f32
+}
+
+/// Mostly `floor`, with a raised-cosine glint to full brightness for
+/// `glint_ms` out of every `period_ms`.
+#[must_use]
+fn glint01(elapsed_ms: u128, period_ms: u128, glint_ms: u128, floor: f32, phase_ms: u128) -> f32 {
+    if period_ms == 0 || glint_ms == 0 {
+        return floor;
     }
-    match (lean.signum(), segment_from_bottom % 2) {
-        (1 | 0, 0) => ")",
-        (1 | 0, _) => ")",
-        (-1, 0) => "(",
-        _ => "(",
+    let pos = elapsed_ms.saturating_add(phase_ms) % period_ms;
+    if pos >= glint_ms {
+        return floor;
     }
+    let frac = pos as f64 / glint_ms as f64;
+    let bump = 0.5 * (1.0 - (frac * std::f64::consts::TAU).cos());
+    floor + (1.0 - floor) * bump as f32
+}
+
+/// Stateless per-crossing travel direction. Direction only ever changes
+/// between cycles — while the school is fully off-screen — so a turn is
+/// never visible as an in-place flip.
+#[must_use]
+fn school_swims_right(cycle_index: u128) -> bool {
+    (cycle_index.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 7) & 1 == 0
+}
+
+/// Stateless per-crossing band choice (lower vs upper third).
+#[must_use]
+fn school_swims_low(cycle_index: u128) -> bool {
+    (cycle_index.wrapping_mul(0xC2B2_AE3D_27D4_EB4F) >> 9) & 1 == 0
 }
 
 fn paint_marks(
@@ -549,17 +546,26 @@ fn paint_marks(
         if collides || mark.x.saturating_add(mark_width as u16) > area.width {
             continue;
         }
-        let fg = if mark.depth.ink_index() == 1 {
+        let ink = if mark.depth.ink_index() == 1 {
             inks.1
         } else {
             inks.0
         };
-        let mut style = Style::default().fg(fg);
-        if let Some(m) = mark.style_mod {
-            style = style.add_modifier(m);
-        }
         for (offset, ch) in mark.glyph.chars().enumerate() {
             let cell = &mut buf[(area.x + mark.x + offset as u16, area.y + mark.y)];
+            // Glow language: lerp the mark's ink up from the water the cell
+            // already sits in, at the entity's time-varying brightness.
+            let fg = match (mark.brightness, cell.style().bg) {
+                (Some(amount), Some(water)) => {
+                    ocean::mix_colors(water, ink, amount.clamp(0.0, 1.0))
+                }
+                (Some(amount), None) => ocean::scale_color(ink, amount.clamp(0.0, 1.0).max(0.4)),
+                (None, _) => ink,
+            };
+            let mut style = Style::default().fg(fg);
+            if let Some(m) = mark.style_mod {
+                style = style.add_modifier(m);
+            }
             cell.set_symbol(&ch.to_string());
             cell.set_style(style);
         }
@@ -599,26 +605,6 @@ pub fn occupied_text_bounds(line: &Line<'_>) -> Option<(usize, usize)> {
     Some((leading, total.saturating_sub(trailing_run)))
 }
 
-/// Cosine-eased drift (replaces mechanical linear ping-pong feel).
-#[must_use]
-pub fn eased_drift(elapsed_ms: u128, step_ms: u128, span: u16, phase_ms: u128) -> (u16, bool) {
-    if span == 0 || step_ms == 0 {
-        return (0, true);
-    }
-    let leg_ms = step_ms.saturating_mul(u128::from(span));
-    let period_ms = leg_ms.saturating_mul(2);
-    let phase = (elapsed_ms.saturating_add(phase_ms)) % period_ms;
-    let (leg_elapsed, forward) = if phase <= leg_ms {
-        (phase, true)
-    } else {
-        (phase.saturating_sub(leg_ms), false)
-    };
-    let progress = leg_elapsed as f64 / leg_ms as f64;
-    let eased = (1.0 - (progress * std::f64::consts::PI).cos()) * 0.5;
-    let position = if forward { eased } else { 1.0 - eased };
-    ((position * f64::from(span)).round() as u16, forward)
-}
-
 #[must_use]
 fn sine_bob(elapsed_ms: u128, period_ms: u128, amplitude: u16) -> u16 {
     if period_ms == 0 || amplitude == 0 {
@@ -638,11 +624,17 @@ pub fn fish_flee_offset(elapsed_ms: u128) -> u16 {
     excursion.round().clamp(0.0, 9.0) as u16
 }
 
-/// One fish silhouette family for the whole school. Depth is color/dim only —
-/// never mix lone `>` with `><>` (that read as broken punctuation).
+/// One fish silhouette family for the whole school: the lead carries an eye
+/// (`><o>`), members are plain `><>`. Never mix lone `>` arrows in — that
+/// reads as broken punctuation. All bodies are ASCII so `len() == width`.
 #[must_use]
-fn fish_body(facing_right: bool, _depth: Depth) -> &'static str {
-    if facing_right { "><>" } else { "<><" }
+fn fish_body(facing_right: bool, lead: bool) -> &'static str {
+    match (facing_right, lead) {
+        (true, true) => LEAD_FISH_RIGHT,
+        (true, false) => "><>",
+        (false, true) => LEAD_FISH_LEFT,
+        (false, false) => "<><",
+    }
 }
 
 #[must_use]
@@ -804,16 +796,6 @@ mod tests {
     }
 
     #[test]
-    fn eased_drift_is_continuous_and_settles() {
-        let span = 12u16;
-        let step = 400u128;
-        let (a, _) = eased_drift(0, step, span, 0);
-        let (b, _) = eased_drift(step * 6, step, span, 0);
-        assert!(a <= span);
-        assert!(b <= span);
-    }
-
-    #[test]
     fn occupied_text_bounds_skips_string_join() {
         let line = Line::from(vec![Span::raw("  hello  "), Span::raw("world  ")]);
         let (start, end) = occupied_text_bounds(&line).expect("bounds");
@@ -844,23 +826,115 @@ mod tests {
 
     #[test]
     fn fish_school_uses_one_silhouette_family() {
-        // Never mix lone `>` with full fish bodies.
-        for depth in [Depth::Foreground, Depth::Midground, Depth::Background] {
-            assert_eq!(fish_body(true, depth), "><>");
-            assert_eq!(fish_body(false, depth), "<><");
+        // Never mix lone `>` with full fish bodies; the lead just gains an
+        // eye within the same family.
+        assert_eq!(fish_body(true, false), "><>");
+        assert_eq!(fish_body(false, false), "<><");
+        assert_eq!(fish_body(true, true), "><o>");
+        assert_eq!(fish_body(false, true), "<o><");
+    }
+
+    fn frame_at(t: u128) -> FrameMarks {
+        let area = Rect::new(0, 0, 100, 30);
+        build_frame_marks(
+            area,
+            t,
+            true,
+            LifeDensity::from_area(area),
+            AmbientCursor::default(),
+            WhaleCameo::default(),
+        )
+    }
+
+    #[test]
+    fn fish_always_swim_the_way_they_face() {
+        // Wrap-around construction: within one crossing, a right-facing
+        // school only ever moves right, and a left-facing school only left.
+        let area_travel = 100u128 + 21; // width + wedge span (see constants)
+        let cycle_ms = area_travel * SCHOOL_CELL_MS;
+        for cycle in 0u128..6 {
+            // The school clock carries a half-cycle head start, so sampling
+            // at cycle*cycle_ms lands mid-crossing of `cycle`.
+            let t1 = cycle * cycle_ms;
+            let t2 = t1 + SCHOOL_CELL_MS * 3;
+            let lead = |t: u128| {
+                frame_at(t)
+                    .marks
+                    .into_iter()
+                    .find(|mark| mark.glyph.contains('o'))
+            };
+            let (Some(a), Some(b)) = (lead(t1), lead(t2)) else {
+                continue; // school off-screen at this sample — fine
+            };
+            let expect_right = school_swims_right(cycle);
+            if expect_right {
+                assert_eq!(a.glyph, "><o>", "cycle {cycle} facing");
+                assert!(b.x >= a.x, "cycle {cycle}: right-facing fish moved left");
+            } else {
+                assert_eq!(a.glyph, "<o><", "cycle {cycle} facing");
+                assert!(b.x <= a.x, "cycle {cycle}: left-facing fish moved right");
+            }
+        }
+        // Both directions must actually occur across nearby cycles.
+        let dirs: Vec<bool> = (0u128..12).map(school_swims_right).collect();
+        assert!(
+            dirs.iter().any(|d| *d) && dirs.iter().any(|d| !*d),
+            "{dirs:?}"
+        );
+    }
+
+    #[test]
+    fn water_holds_only_fish_bubbles_and_jellyfish() {
+        // Seaweed and bio-dust are gone (2026-07-23): every mark is a fish
+        // body, a bubble glyph, or a jellyfish part.
+        for t in [0u128, 7_500, 33_000, 61_000, 120_000] {
+            for mark in frame_at(t).marks {
+                let ok = matches!(mark.glyph, "><>" | "<><" | "><o>" | "<o><")
+                    || matches!(mark.glyph, "·" | "˚" | "°")
+                    || mark.glyph == JELLY_BELL
+                    || JELLY_TENTACLE_FRAMES.contains(&mark.glyph);
+                assert!(ok, "unexpected ambient glyph {:?} at t={t}", mark.glyph);
+            }
         }
     }
 
     #[test]
-    fn seaweed_is_not_antenna_poles() {
-        // Old execution used `│` + `⌃` and read as radio masts.
-        for h in 0..4 {
-            let g = seaweed_glyph(h, 4, 1);
-            assert_ne!(g, "│", "segment {h}");
-            assert_ne!(g, "⌃", "segment {h}");
-            assert_ne!(g, "|", "segment {h}");
+    fn jellyfish_reads_as_bell_with_lagging_tentacle() {
+        // Find a frame where a jelly is on-screen and assert its two-row
+        // structure: bell, tentacle one row below inside the bell, and the
+        // tentacle pulse trailing the bell pulse.
+        let mut seen = false;
+        for probe in 0..240u128 {
+            let t = probe * 500;
+            let frame = frame_at(t);
+            if let Some(bell) = frame.marks.iter().find(|mark| mark.glyph == JELLY_BELL) {
+                if let Some(tentacle) = frame.marks.iter().find(|mark| {
+                    JELLY_TENTACLE_FRAMES.contains(&mark.glyph)
+                        && mark.y == bell.y + 1
+                        && mark.x == bell.x + 1
+                }) {
+                    let bell_glow = bell.brightness.expect("bell pulses");
+                    let tentacle_glow = tentacle.brightness.expect("tentacle pulses");
+                    assert!(bell_glow >= JELLY_BRIGHTNESS_FLOOR - f32::EPSILON);
+                    assert!(tentacle_glow >= JELLY_BRIGHTNESS_FLOOR - f32::EPSILON);
+                    seen = true;
+                    break;
+                }
+            }
         }
-        assert_eq!(seaweed_glyph(0, 4, 0), "~");
-        assert!(matches!(seaweed_glyph(3, 4, 1), ")" | "("));
+        assert!(seen, "no complete jellyfish found in 120s of frames");
+    }
+
+    #[test]
+    fn glow_helpers_stay_bounded_with_floors() {
+        for t in (0u128..12_000).step_by(97) {
+            let w = wave01(t, FISH_WAVE_MS, 0);
+            assert!((0.0..=1.0).contains(&w), "wave01 out of range: {w}");
+            let g = glint01(t, 2_600, 600, BUBBLE_BRIGHTNESS_FLOOR, 0);
+            assert!(
+                (BUBBLE_BRIGHTNESS_FLOOR..=1.0).contains(&g),
+                "glint01 lost its floor: {g}"
+            );
+        }
     }
 }
