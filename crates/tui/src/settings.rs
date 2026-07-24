@@ -1775,7 +1775,9 @@ fn normalize_tool_collapse_mode(value: &str) -> &str {
 fn normalize_status_indicator(value: &str) -> &str {
     match value.trim().to_ascii_lowercase().as_str() {
         "cw" | "mark" | "text" => "cw",
-        "whale" | "🐳" | "🐋" => "whale",
+        // The whale emoji header chip is retired (2026-07-23): persisted
+        // opt-ins migrate to the typographic mark on load.
+        "whale" | "🐳" | "🐋" => "cw",
         "dots" | "dot" => "dots",
         "off" | "none" | "hidden" | "false" => "off",
         _ => value,

@@ -27,17 +27,10 @@ const CONTEXT_SIGNAL_WIDTH: usize = 4;
 const STATUS_INDICATOR_FRAME_MS: u128 = 420;
 
 /// Frames retained only for the explicitly selected classic treatment.
-const STATUS_INDICATOR_WHALE_FRAMES: &[&str] = &[
-    "🐳", "🐳.", "🐳..", "🐳...", "🐳..", "🐳.", "🐋", "🐋.", "🐋..", "🐋...", "🐋..", "🐋.",
-];
-
 /// Geometric replacement frames shipped between v0.8.x and v0.8.29.
+/// Every frame is one cell wide so the provider/model label never shifts
+/// while the animation advances.
 const STATUS_INDICATOR_DOT_FRAMES: &[&str] = &["◍", "◉", "◌", "◌", "◉", "◍"];
-
-/// The widest historical whale frame is an emoji (two terminal cells) plus
-/// three dots. Header layout reserves this width for every whale frame so the
-/// provider/model label never shifts while the animation advances.
-const STATUS_INDICATOR_WHALE_WIDTH: usize = 5;
 
 /// Resolve the current status-indicator frame to render in the header
 /// chip cluster.
@@ -46,28 +39,24 @@ const STATUS_INDICATOR_WHALE_WIDTH: usize = 5;
 /// chip is *visible* but not animating — it's a chip, not a spinner. As
 /// soon as a turn starts, the elapsed time keys the cycle.
 ///
-/// `mode` accepts the canonical names `"cw"`, `"whale"`, `"dots"`, `"off"`.
-/// Unknown values fall back to `"cw"` (the v0.9.1 product default). The whale
-/// status chip remains available as an explicit opt-in; the animated whale
-/// belongs in the terminal window title by default. `"off"` returns `None`
-/// so the caller can hide the chip outright.
+/// `mode` accepts the canonical names `"cw"`, `"dots"`, `"off"`. The whale
+/// emoji chip is retired from the header (2026-07-23 product decision): the
+/// whale lives in the terminal window title and the idle water, never
+/// beside the model/mode chips. Legacy `"whale"` values (still present in
+/// persisted settings) normalize to the typographic `cw` mark; unknown
+/// values fall back to `"cw"` as well. `"off"` returns `None` so the
+/// caller can hide the chip outright.
 #[must_use]
 pub fn header_status_indicator_frame(
     turn_started_at: Option<Instant>,
     mode: &str,
 ) -> Option<&'static str> {
-    if matches!(
-        mode.trim().to_ascii_lowercase().as_str(),
-        "cw" | "mark" | "text"
-    ) {
-        return Some("cw");
-    }
     let frames: &[&str] = match mode.trim().to_ascii_lowercase().as_str() {
         "off" | "none" | "hidden" | "false" => return None,
         "dots" | "dot" => STATUS_INDICATOR_DOT_FRAMES,
-        "whale" | "🐳" | "🐋" => STATUS_INDICATOR_WHALE_FRAMES,
-        // Unknown values fall back to the static typographic mark so the
-        // header never silently reintroduces the whale chip.
+        // Canonical mark, legacy whale opt-ins, and unknown values all land
+        // on the static typographic mark so the header never reintroduces
+        // an emoji chip beside the model/mode cluster.
         _ => return Some("cw"),
     };
     let elapsed_ms = turn_started_at
@@ -310,13 +299,8 @@ impl<'a> HeaderWidget<'a> {
         } else {
             palette::WHALE_INFO
         };
-        let mut display = frame.to_string();
-        if matches!(frame.chars().next(), Some('🐳' | '🐋')) {
-            display
-                .push_str(&" ".repeat(STATUS_INDICATOR_WHALE_WIDTH.saturating_sub(frame.width())));
-        }
         vec![Span::styled(
-            display,
+            frame.to_string(),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         )]
     }
@@ -858,11 +842,22 @@ mod tests {
     }
 
     #[test]
-    fn whale_indicator_idle_frame_is_first_whale_glyph() {
-        // No active turn = no animation, just the calm 🐳 glyph sitting
-        // next to the effort chip.
-        let frame = super::header_status_indicator_frame(None, "whale");
-        assert_eq!(frame, Some("🐳"));
+    fn legacy_whale_indicator_settings_normalize_to_the_cw_mark() {
+        // The whale emoji chip is retired from the header (2026-07-23):
+        // persisted `status_indicator = "whale"` opt-ins render the static
+        // typographic mark instead, idle or mid-turn.
+        for legacy in ["whale", "🐳", "🐋"] {
+            assert_eq!(
+                super::header_status_indicator_frame(None, legacy),
+                Some("cw"),
+                "legacy mode {legacy:?} must normalize to the cw mark"
+            );
+            assert_eq!(
+                super::header_status_indicator_frame(Some(std::time::Instant::now()), legacy),
+                Some("cw"),
+                "legacy mode {legacy:?} must stay static mid-turn"
+            );
+        }
     }
 
     #[test]
@@ -871,24 +866,6 @@ mod tests {
         assert_eq!(
             super::header_status_indicator_frame(Some(std::time::Instant::now()), "cw"),
             Some("cw")
-        );
-    }
-
-    #[test]
-    fn whale_indicator_advances_through_frames_then_breaches() {
-        use std::thread::sleep;
-        use std::time::Duration;
-        let start = std::time::Instant::now();
-        // Frame 0 immediately.
-        assert_eq!(
-            super::header_status_indicator_frame(Some(start), "whale"),
-            Some("🐳")
-        );
-        // After ~420ms one tick has elapsed → frame 1.
-        sleep(Duration::from_millis(430));
-        assert_eq!(
-            super::header_status_indicator_frame(Some(start), "whale"),
-            Some("🐳.")
         );
     }
 
@@ -914,10 +891,13 @@ mod tests {
     }
 
     #[test]
-    fn whale_frames_reserve_one_stable_header_width() {
+    fn indicator_frames_keep_a_stable_width_within_each_mode() {
         use unicode_width::UnicodeWidthStr;
 
-        for frame in super::STATUS_INDICATOR_WHALE_FRAMES {
+        // Animation must never shift the provider/model label: all frames of
+        // an animated mode share one cell width, and the static mark is
+        // rendered verbatim.
+        for frame in super::STATUS_INDICATOR_DOT_FRAMES {
             let spans = HeaderWidget::new(
                 HeaderData::new(
                     AppMode::Agent,
@@ -931,10 +911,22 @@ mod tests {
             .status_indicator_spans();
             assert_eq!(
                 spans[0].content.as_ref().width(),
-                super::STATUS_INDICATOR_WHALE_WIDTH,
-                "frame {frame:?} shifted the header"
+                1,
+                "dot frame {frame:?} shifted the header"
             );
         }
+        let spans = HeaderWidget::new(
+            HeaderData::new(
+                AppMode::Agent,
+                "model",
+                "workspace",
+                true,
+                palette::WHALE_BG,
+            )
+            .with_status_indicator(Some("cw")),
+        )
+        .status_indicator_spans();
+        assert_eq!(spans[0].content.as_ref(), "cw");
     }
 
     #[test]

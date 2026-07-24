@@ -576,14 +576,19 @@ fn permission_label(app: &App) -> Cow<'static, str> {
 /// sandbox mid-session should update the process env `CODEWHALE_SANDBOX_MODE`.
 #[must_use]
 fn filesystem_scope_label(_app: &App) -> Cow<'static, str> {
+    // Spelled out because the old `fs:` prefix read as an unexplained
+    // acronym (user report, 2026-07-23): this chip states which files the
+    // session may write.
     let mode = std::env::var("CODEWHALE_SANDBOX_MODE").unwrap_or_default();
     match mode.trim().to_ascii_lowercase().as_str() {
-        "read-only" | "readonly" | "read_only" => Cow::Borrowed("fs:read-only"),
-        "danger-full-access" | "danger_full_access" | "full" => Cow::Borrowed("fs:full"),
-        "external-sandbox" | "external_sandbox" | "opensandbox" => Cow::Borrowed("fs:external"),
-        "workspace-write" | "workspace_write" | "workspace" => Cow::Borrowed("fs:workspace"),
+        "read-only" | "readonly" | "read_only" => Cow::Borrowed("files: read-only"),
+        "danger-full-access" | "danger_full_access" | "full" => Cow::Borrowed("files: full disk"),
+        "external-sandbox" | "external_sandbox" | "opensandbox" => {
+            Cow::Borrowed("files: external sandbox")
+        }
+        "workspace-write" | "workspace_write" | "workspace" => Cow::Borrowed("files: workspace"),
         // Empty / unknown: product default is workspace-only.
-        _ => Cow::Borrowed("fs:workspace"),
+        _ => Cow::Borrowed("files: workspace"),
     }
 }
 
@@ -1395,7 +1400,7 @@ mod tests {
                 };
                 let label = permission_label(&app).into_owned();
                 assert!(
-                    label.starts_with(expected_label) && label.contains("fs:"),
+                    label.starts_with(expected_label) && label.contains("files:"),
                     "{approval_mode:?}: {label}"
                 );
                 let area = Rect::new(0, 0, width, 1);
@@ -1437,14 +1442,21 @@ mod tests {
     }
 
     #[test]
-    fn compact_header_keeps_the_selected_whale_indicator() {
+    fn compact_header_never_shows_a_whale_emoji_even_for_legacy_settings() {
+        // The whale emoji header chip is retired (2026-07-23): a persisted
+        // "whale" opt-in renders the typographic mark, and no header width
+        // squeeze may reintroduce the emoji beside the model/mode chips.
         let mut app = test_app();
         app.status_indicator = "whale".to_string();
         app.model = "provider/model-with-a-deliberately-long-route-name".to_string();
 
         let header = header_text(&app, 40);
 
-        assert!(header.contains('🐳'), "selected whale missing: {header:?}");
+        assert!(
+            !header.contains('🐳') && !header.contains('🐋'),
+            "whale emoji must stay out of the header: {header:?}"
+        );
+        assert!(header.contains("cw"), "cw mark missing: {header:?}");
     }
 
     #[test]
