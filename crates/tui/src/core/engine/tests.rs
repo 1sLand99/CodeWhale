@@ -1,6 +1,7 @@
 use super::*;
 
 use super::context::{COMPACTION_SUMMARY_MARKER, TURN_MAX_OUTPUT_TOKENS};
+use super::streaming::{TOOL_CALL_END_MARKERS, TOOL_CALL_MARKER_PAIRS};
 use super::turn_loop::{
     registered_tool_approval_required, registered_tool_blocked_in_full_access,
     registered_tool_forces_prompt, tool_error_degradation_runtime_hint,
@@ -11104,6 +11105,80 @@ fn filter_tool_call_delta_strips_deepseek_xml_marker() {
     }
     assert!(visible.contains("before"));
     assert!(visible.contains("after"));
+}
+
+#[test]
+fn filter_tool_call_delta_strips_deepseek_native_tool_tokens() {
+    // #3880: DeepSeek's chat template separates words with `▁` (U+2581), so
+    // `<｜tool▁calls▁begin｜>` matched no DSML entry and reached the user as
+    // visible text that interrupted the task.
+    for (start, end) in [
+        ("<｜tool▁calls▁begin｜>", "<｜tool▁calls▁end｜>"),
+        ("<｜tool▁call▁begin｜>", "<｜tool▁call▁end｜>"),
+        ("<|tool▁calls▁begin|>", "<|tool▁calls▁end|>"),
+        ("<｜tool_calls_begin｜>", "<｜tool_calls_end｜>"),
+        ("<|tool_call_begin|>", "<|tool_call_end|>"),
+        ("<｜tool▁outputs▁begin｜>", "<｜tool▁outputs▁end｜>"),
+    ] {
+        let mut in_block = false;
+        let visible = filter_tool_call_delta(
+            &format!("before {start}function<｜tool▁sep｜>read_file\n{{}}{end} after"),
+            &mut in_block,
+        );
+        assert!(!in_block, "state stuck inside block for {start}");
+        assert!(
+            !visible.contains("tool▁") && !visible.contains("tool_calls"),
+            "leaked {start} into visible text: {visible:?}"
+        );
+        assert!(visible.contains("before"), "{visible:?}");
+        assert!(visible.contains("after"), "{visible:?}");
+    }
+}
+
+#[test]
+fn filter_tool_call_delta_strips_deepseek_native_token_split_across_chunks() {
+    // The streaming filter carries a partial marker across chunk boundaries.
+    // These markers are multi-byte, so a split partway through one is the case
+    // most likely to slip past the carry buffer.
+    let mut state = ToolCallDeltaFilterState::default();
+    let full = "before <｜tool▁calls▁begin｜>payload<｜tool▁calls▁end｜> after";
+    let cut = full.find("calls").expect("marker present") + 2;
+    let mut visible = filter_tool_call_delta_with_state(&full[..cut], &mut state);
+    visible.push_str(&filter_tool_call_delta_with_state(&full[cut..], &mut state));
+
+    assert!(
+        !visible.contains("tool▁") && !visible.contains("payload"),
+        "chunk-split marker leaked: {visible:?}"
+    );
+    assert!(visible.contains("before"), "{visible:?}");
+    assert!(visible.contains("after"), "{visible:?}");
+}
+
+#[test]
+fn marker_tables_are_consistent() {
+    // Three parallel tables describe the same wrapper shapes. They drifting
+    // apart is exactly how #3880's family went unhandled, so assert they
+    // agree rather than trusting review.
+    assert_eq!(
+        TOOL_CALL_MARKER_PAIRS.len(),
+        TOOL_CALL_START_MARKERS.len(),
+        "start-marker table is out of sync with the pair table"
+    );
+    assert_eq!(
+        TOOL_CALL_MARKER_PAIRS.len(),
+        TOOL_CALL_END_MARKERS.len(),
+        "end-marker table is out of sync with the pair table"
+    );
+    for (index, (start, end)) in TOOL_CALL_MARKER_PAIRS.iter().enumerate() {
+        assert_eq!(
+            *start, TOOL_CALL_START_MARKERS[index],
+            "start marker {index} disagrees with the pair table"
+        );
+        assert_eq!(
+            *end, TOOL_CALL_END_MARKERS[index],
+            "end marker {index} disagrees with the pair table"
+        );
+    }
 }
 
 #[test]
