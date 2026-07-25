@@ -165,6 +165,8 @@
     "HelpNoMatches": "  Không tìm thấy kết quả.",
     "HelpSlashCommands": "Các lệnh bắt đầu bằng dấu gạch chéo (/)",
     "HelpKeybindings": "Phím tắt",
+    "HelpUserCommands": "Lệnh người dùng",
+    "HelpSkills": "Kỹ năng",
     "HelpFooterTypeFilter": " nhập để lọc ",
     "HelpFooterMove": "  Lên/Xuống để di chuyển ",
     "HelpFooterJump": " PgUp/PgDn để nhảy trang ",

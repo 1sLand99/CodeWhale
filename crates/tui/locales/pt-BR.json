@@ -165,6 +165,8 @@
     "HelpNoMatches": "  Sem resultados.",
     "HelpSlashCommands": "Comandos com barra",
     "HelpKeybindings": "Atalhos",
+    "HelpUserCommands": "Comandos do usuário",
+    "HelpSkills": "Habilidades",
     "HelpFooterTypeFilter": " digite para filtrar ",
     "HelpFooterMove": "  Up/Down move ",
     "HelpFooterJump": " PgUp/PgDn salta ",

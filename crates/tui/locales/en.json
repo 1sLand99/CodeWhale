@@ -165,6 +165,8 @@
     "HelpNoMatches": "  No matches.",
     "HelpSlashCommands": "Slash commands",
     "HelpKeybindings": "Keybindings",
+    "HelpUserCommands": "User commands",
+    "HelpSkills": "Skills",
     "HelpFooterTypeFilter": " type to filter ",
     "HelpFooterMove": "  Up/Down move ",
     "HelpFooterJump": " PgUp/PgDn jump ",

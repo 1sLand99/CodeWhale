@@ -165,6 +165,8 @@
     "HelpNoMatches": "  无匹配。",
     "HelpSlashCommands": "斜杠命令",
     "HelpKeybindings": "快捷键",
+    "HelpUserCommands": "用户命令",
+    "HelpSkills": "技能",
     "HelpFooterTypeFilter": " 输入以筛选 ",
     "HelpFooterMove": "  Up/Down 移动 ",
     "HelpFooterJump": " PgUp/PgDn 跳转 ",

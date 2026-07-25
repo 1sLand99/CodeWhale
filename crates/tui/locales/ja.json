@@ -165,6 +165,8 @@
     "HelpNoMatches": "  一致なし。",
     "HelpSlashCommands": "スラッシュコマンド",
     "HelpKeybindings": "キー操作",
+    "HelpUserCommands": "ユーザーコマンド",
+    "HelpSkills": "スキル",
     "HelpFooterTypeFilter": " 入力して絞り込み ",
     "HelpFooterMove": "  Up/Down 移動 ",
     "HelpFooterJump": " PgUp/PgDn ジャンプ ",
