@@ -1320,14 +1320,13 @@ impl ApprovalView {
     }
 
     fn select_prev(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+        let len = ApprovalOption::order_for(&self.request.tool_name).len();
+        self.selected = crate::tui::list_nav::wrap_index(self.selected, len, -1);
     }
 
     fn select_next(&mut self) {
-        let max = ApprovalOption::order_for(&self.request.tool_name)
-            .len()
-            .saturating_sub(1);
-        self.selected = (self.selected + 1).min(max);
+        let len = ApprovalOption::order_for(&self.request.tool_name).len();
+        self.selected = crate::tui::list_nav::wrap_index(self.selected, len, 1);
     }
 
     fn current_option(&self) -> ApprovalOption {
@@ -1728,12 +1727,13 @@ impl ElevationView {
     }
 
     fn select_prev(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+        self.selected =
+            crate::tui::list_nav::wrap_index(self.selected, self.request.options.len(), -1);
     }
 
     fn select_next(&mut self) {
-        let max = self.request.options.len().saturating_sub(1);
-        self.selected = (self.selected + 1).min(max);
+        self.selected =
+            crate::tui::list_nav::wrap_index(self.selected, self.request.options.len(), 1);
     }
 
     fn current_option(&self) -> &ElevationOption {

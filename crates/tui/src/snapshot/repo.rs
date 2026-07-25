@@ -226,7 +226,7 @@ impl SnapshotRepo {
             .canonicalize()
             .unwrap_or_else(|_| workspace.to_path_buf());
         if let Some(reason) =
-            unsafe_workspace_snapshot_reason(&work_tree, dirs::home_dir().as_deref())
+            unsafe_workspace_snapshot_reason(&work_tree, crate::config::effective_home_dir().as_deref())
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1000,7 +1000,7 @@ mod tests {
     }
 
     /// Build a side-repo whose snapshot dir lives under the same
-    /// tempdir we're using for `HOME` — so the inner `dirs::home_dir()`
+    /// tempdir we're using for `HOME` — so the inner `crate::config::effective_home_dir()`
     /// lookup stays inside our sandbox. Returns the guard alongside so
     /// the caller can keep HOME pinned for the rest of the test.
     fn make_repo(tmp: &Path) -> (SnapshotRepo, ScopedHome) {

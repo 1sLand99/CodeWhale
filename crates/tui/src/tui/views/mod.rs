@@ -2148,12 +2148,7 @@ impl ConfigView {
             .iter()
             .position(|idx| *idx == self.selected)
             .unwrap_or(0);
-        let max = matches.len().saturating_sub(1);
-        let next = if delta.is_negative() {
-            current.saturating_sub(delta.unsigned_abs())
-        } else {
-            (current + delta as usize).min(max)
-        };
+        let next = crate::tui::list_nav::wrap_index(current, matches.len(), delta);
 
         self.selected = matches[next];
         let visible_rows = self.visible_rows_cached();

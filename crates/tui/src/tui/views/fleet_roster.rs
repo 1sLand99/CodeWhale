@@ -126,12 +126,12 @@ impl FleetRosterView {
     }
 
     fn move_up(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+        self.selected = crate::tui::list_nav::wrap_index(self.selected, self.row_count(), -1);
         self.detail_scroll = 0;
     }
 
     fn move_down(&mut self) {
-        self.selected = (self.selected + 1).min(self.row_count().saturating_sub(1));
+        self.selected = crate::tui::list_nav::wrap_index(self.selected, self.row_count(), 1);
         self.detail_scroll = 0;
     }
 

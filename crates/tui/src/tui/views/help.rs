@@ -195,23 +195,13 @@ impl HelpView {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        if self.filtered.is_empty() {
-            self.selected = 0;
-            return;
-        }
-        let len = self.filtered.len() as isize;
-        let next = (self.selected as isize + delta).clamp(0, len - 1) as usize;
-        self.selected = next;
+        // #4755: help list wraps at both ends (same as other modal lists).
+        self.selected =
+            crate::tui::list_nav::wrap_index(self.selected, self.filtered.len(), delta);
     }
 
     fn move_selection_wrapping(&mut self, delta: isize) {
-        if self.filtered.is_empty() {
-            self.selected = 0;
-            return;
-        }
-        let len = self.filtered.len() as isize;
-        let next = (self.selected as isize + delta).rem_euclid(len) as usize;
-        self.selected = next;
+        self.move_selection(delta);
     }
 
     fn render_rows(&self) -> Vec<HelpRenderRow> {

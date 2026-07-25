@@ -73,6 +73,16 @@ existing one behave the way it already claimed to.
   and opt-in via `[context] project_pack = true`. Language law is compressed
   while keeping the English-constitution / user-language-reply contract.
 
+- Modal lists and config pickers wrap selection at both ends (Down past the
+  last row returns to the top). Home-directory resolution prefers
+  `HOME`/`USERPROFILE` via `effective_home_dir` across remaining call sites so
+  Windows tests that fake the home env vars match production paths.
+
+### Changed
+
+- Prefix-cache tool catalog entries store only the SHA-256 digest, not the
+  joined catalog string. Unused plan-transition validation helpers are removed.
+
 ## [0.9.1] - 2026-07-24
 
 ### Dogfood follow-ups (2026-07-24)
