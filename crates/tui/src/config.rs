@@ -5797,6 +5797,7 @@ fn root_deepseek_model_is_foreign_to_direct_provider(provider: ApiProvider, mode
 // `pub(crate)` entry points are re-exported so external `crate::config::`
 // callers resolve unchanged; the remaining helpers are imported privately for
 // the workspace-trust/config-load logic that stays in this file (#3311).
+mod home;
 mod paths;
 use paths::{
     canonicalize_or_keep, codewhale_home_dir, default_config_path, default_managed_config_path,
