@@ -128,8 +128,7 @@ impl ContextMenuView {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        self.selected =
-            crate::tui::list_nav::wrap_index(self.selected, self.entries.len(), delta);
+        self.selected = crate::tui::list_nav::wrap_index(self.selected, self.entries.len(), delta);
     }
 
     fn menu_width(&self, area_width: u16) -> u16 {

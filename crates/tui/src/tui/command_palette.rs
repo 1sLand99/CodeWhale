@@ -772,8 +772,7 @@ impl CommandPaletteView {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        self.selected =
-            crate::tui::list_nav::wrap_index(self.selected, self.filtered.len(), delta);
+        self.selected = crate::tui::list_nav::wrap_index(self.selected, self.filtered.len(), delta);
     }
 
     fn selected_entry(&self) -> Option<&CommandPaletteEntry> {
@@ -1773,7 +1772,15 @@ mod tests {
 
         // Drift traps from #3911: no-arg rows must not silently paste, and
         // dead mode-arg names must never reappear as palette allowlist entries.
-        for no_arg in ["cost", "diff", "edit", "purge", "setup", "hotbar", "translate"] {
+        for no_arg in [
+            "cost",
+            "diff",
+            "edit",
+            "purge",
+            "setup",
+            "hotbar",
+            "translate",
+        ] {
             let label = format!("/{no_arg}");
             let entry = entries
                 .iter()

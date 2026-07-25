@@ -657,8 +657,7 @@ impl FleetSetupView {
     fn move_down(&mut self) {
         match self.step {
             Step::Role => {
-                self.role_idx =
-                    crate::tui::list_nav::wrap_index(self.role_idx, self.step_len(), 1);
+                self.role_idx = crate::tui::list_nav::wrap_index(self.role_idx, self.step_len(), 1);
                 self.discard_model_draft();
             }
             Step::Model => {

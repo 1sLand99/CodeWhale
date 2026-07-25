@@ -233,8 +233,7 @@ impl FilePickerView {
         if self.filtered.is_empty() {
             return;
         }
-        self.selected =
-            crate::tui::list_nav::wrap_index(self.selected, self.filtered.len(), delta);
+        self.selected = crate::tui::list_nav::wrap_index(self.selected, self.filtered.len(), delta);
         self.adjust_scroll();
     }
 
