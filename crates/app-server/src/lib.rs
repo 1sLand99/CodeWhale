@@ -1559,7 +1559,16 @@ async fn process_app_request(
             };
             let ok = result.is_ok();
             let message = result.err().map(|e| e.to_string());
-            apply_config_update(state, snapshot, None, true).await;
+            // Only propagate a mutation that actually happened. `set_value`
+            // leaves the config untouched on an unknown key or invalid value,
+            // so this is a no-op from the caller's point of view — but
+            // `apply_config_update` invalidates the cached stdio bridge
+            // regardless, and dropping the last reference kills the running
+            // child runtime along with its thread map. A single typo'd key
+            // would orphan every in-flight thread on that bridge.
+            if ok {
+                apply_config_update(state, snapshot, None, true).await;
+            }
             AppResponse {
                 ok,
                 data: json!({ "key": key, "value": value, "error": message }),
@@ -1574,7 +1583,11 @@ async fn process_app_request(
             };
             let ok = result.is_ok();
             let message = result.err().map(|e| e.to_string());
-            apply_config_update(state, snapshot, None, true).await;
+            // See ConfigSet: a failed unset changed nothing and must not tear
+            // down the runtime bridge.
+            if ok {
+                apply_config_update(state, snapshot, None, true).await;
+            }
             AppResponse {
                 ok,
                 data: json!({ "key": key, "error": message }),
@@ -2017,6 +2030,88 @@ mod tests {
         // The on-disk file was persisted.
         let persisted = fs::read_to_string(&config_path).expect("read config");
         assert!(persisted.contains("deepseek-reasoner"));
+    }
+
+    /// A bridge stand-in with no child process: this test only cares about
+    /// whether the cache slot survives, not about talking to a runtime.
+    fn sentinel_bridge() -> SharedRuntimeBridge {
+        Arc::new(Mutex::new(RuntimeBridge {
+            base_url: "http://127.0.0.1:0".to_string(),
+            client: reqwest::Client::new(),
+            auth_token: None,
+            child: None,
+            thread_map: HashMap::from([("stdio-1".to_string(), "runtime-1".to_string())]),
+            last_seq_by_thread: HashMap::new(),
+        }))
+    }
+
+    #[tokio::test]
+    async fn failed_config_set_keeps_the_stdio_bridge() {
+        // #4737: `set_value` rejects an invalid value before assigning, so the
+        // request is a no-op — but `apply_config_update` ran anyway and
+        // invalidated the cached bridge, dropping the child runtime along with
+        // its thread map. A single bad value orphaned every in-flight stdio
+        // thread, behind a response that correctly reported `ok: false`.
+        //
+        // Only `set_value` is exercised: an unknown key lands in `extras` and
+        // succeeds, and `unset_value` has no failing input today, so its
+        // identical guard has nothing to assert against.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.toml");
+        fs::write(&config_path, "model = \"deepseek-chat\"\n").expect("write config");
+        let state = build_state(Some(config_path.clone()), None).expect("state");
+        *state.stdio_bridge.lock().await = Some(sentinel_bridge());
+
+        let response = process_app_request(
+            &state,
+            AppRequest::ConfigSet {
+                key: "telemetry".to_string(),
+                value: "not-a-bool".to_string(),
+            },
+            AppTransport::Stdio,
+        )
+        .await;
+        assert!(!response.ok, "invalid value must fail: {response:?}");
+
+        let slot = state.stdio_bridge.lock().await;
+        let kept = slot
+            .as_ref()
+            .expect("bridge must survive a failed config/set");
+        assert_eq!(
+            kept.lock()
+                .await
+                .thread_map
+                .get("stdio-1")
+                .map(String::as_str),
+            Some("runtime-1"),
+            "the live thread map must be intact",
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_config_set_still_invalidates_the_stdio_bridge() {
+        // The other half of #4737: a mutation that *did* happen must still
+        // rebuild the bridge, or the runtime keeps serving the old config.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.toml");
+        fs::write(&config_path, "model = \"deepseek-chat\"\n").expect("write config");
+        let state = build_state(Some(config_path.clone()), None).expect("state");
+        *state.stdio_bridge.lock().await = Some(sentinel_bridge());
+
+        let response = process_app_request(
+            &state,
+            AppRequest::ConfigSet {
+                key: "model".to_string(),
+                value: "deepseek-reasoner".to_string(),
+            },
+            AppTransport::Stdio,
+        )
+        .await;
+        assert!(response.ok, "valid set should succeed: {response:?}");
+        assert!(
+            state.stdio_bridge.lock().await.is_none(),
+            "a successful config change must invalidate the cached bridge",
+        );
     }
 
     #[tokio::test]
