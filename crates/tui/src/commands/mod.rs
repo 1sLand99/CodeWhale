@@ -932,6 +932,26 @@ mod tests {
                 "/{} must have non-empty English help text",
                 command.name
             );
+            // #3913: descriptions must not restate the usage field — the
+            // palette and /help already append `usage` when arguments exist.
+            assert!(
+                !description.contains(command.usage),
+                "/{} description embeds its usage string {:?}: {description:?}",
+                command.name,
+                command.usage
+            );
+            assert!(
+                !description.contains(&format!("/{}", command.name)),
+                "/{} description embeds slash-command syntax that usage already covers: {description:?}",
+                command.name
+            );
+            for banned_prefix in ["Toolbox:", "Reference:"] {
+                assert!(
+                    !description.starts_with(banned_prefix),
+                    "/{} description should not start with {banned_prefix:?}: {description:?}",
+                    command.name
+                );
+            }
 
             let palette_command = command.palette_command();
             assert!(

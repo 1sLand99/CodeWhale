@@ -721,6 +721,10 @@ impl SidebarFocus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolCollapseMode {
     /// Collapse qualifying tool runs by default.
+    ///
+    /// Collapsed success cells keep the tool-name + arg/command summary as the
+    /// single intent line (#3256 decision): that is already the model-visible
+    /// call summary, so a second "intent" source is not required.
     Compact,
     /// Never collapse tool runs automatically.
     Expanded,
@@ -2303,6 +2307,10 @@ pub struct App {
     /// Whether the session-context panel is enabled (#504).
     pub context_panel: bool,
     /// Minimum number of consecutive safe tool cells needed for auto-collapse.
+    ///
+    /// Fixed at 3 for v0.9.x (#3256 decision): not a user setting. Rollups need
+    /// enough cells to be readable; exposing a knob without UX for partial
+    /// runs would just recreate the pre-collapse noise floor.
     pub tool_collapse_threshold: usize,
     /// Tool runs the user explicitly expanded. Stores original history indices.
     pub expanded_tool_runs: HashSet<usize>,

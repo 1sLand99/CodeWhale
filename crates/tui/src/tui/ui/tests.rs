@@ -11015,6 +11015,33 @@ fn trust_directory_completion_advances_to_mental_models() {
 }
 
 #[test]
+fn trust_directory_continue_untrusted_advances_without_recording_trust() {
+    let _guard = ConfigPathEnvGuard::new();
+    let tmpdir = TempDir::new().expect("workspace tempdir");
+    let mut app = create_test_app();
+    app.workspace = tmpdir.path().to_path_buf();
+    app.onboarding = OnboardingState::TrustDirectory;
+    app.onboarding_workspace_trust_gate = false;
+    app.onboarding_missing_key_recovery = false;
+    app.onboarding_had_trust_step = true;
+    app.trust_mode = false;
+
+    continue_without_trusting_directory(&mut app);
+
+    assert!(!app.trust_mode);
+    assert_eq!(app.onboarding, OnboardingState::MentalModels);
+    assert!(
+        crate::tui::onboarding::needs_trust(&app.workspace),
+        "declining trust must not write a trusted marker"
+    );
+    let notice = app.status_message.expect("restricted-mode notice");
+    assert!(
+        notice.contains("without workspace trust") || notice.contains("restricted"),
+        "unexpected notice: {notice}"
+    );
+}
+
+#[test]
 fn trust_completion_during_missing_key_recovery_advances_to_tips() {
     let _guard = ConfigPathEnvGuard::new();
     let tmpdir = TempDir::new().expect("workspace tempdir");

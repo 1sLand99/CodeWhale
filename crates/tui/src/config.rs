@@ -1838,7 +1838,10 @@ pub struct ContextConfig {
     #[serde(default)]
     pub enabled: Option<bool>,
     /// Include a deterministic project context pack in the stable prompt
-    /// prefix. Default: true; set `[context] project_pack = false` to disable.
+    /// prefix. Default: false — the pack is a large pretty-printed directory
+    /// listing the model can rebuild with one `File` call (#4781). Set
+    /// `[context] project_pack = true` to opt in (useful for weak tool-calling
+    /// models).
     #[serde(default)]
     pub project_pack: Option<bool>,
     /// Ignored (was: seam verbatim window).
@@ -5320,7 +5323,7 @@ impl Config {
 
     #[must_use]
     pub fn project_context_pack_enabled(&self) -> bool {
-        self.context.project_pack.unwrap_or(true)
+        self.context.project_pack.unwrap_or(false)
     }
 
     /// Return whether shell execution is allowed for noninteractive and
@@ -5794,6 +5797,7 @@ fn root_deepseek_model_is_foreign_to_direct_provider(provider: ApiProvider, mode
 // `pub(crate)` entry points are re-exported so external `crate::config::`
 // callers resolve unchanged; the remaining helpers are imported privately for
 // the workspace-trust/config-load logic that stays in this file (#3311).
+mod home;
 mod paths;
 use paths::{
     canonicalize_or_keep, codewhale_home_dir, default_config_path, default_managed_config_path,

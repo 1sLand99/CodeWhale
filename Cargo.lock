@@ -982,6 +982,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "tracing",
  "uuid",
 ]
 
@@ -992,6 +993,7 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -1038,9 +1040,11 @@ dependencies = [
  "chrono",
  "codewhale-protocol",
  "dirs",
+ "fd-lock",
  "rusqlite",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]

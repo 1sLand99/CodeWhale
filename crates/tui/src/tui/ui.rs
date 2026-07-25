@@ -786,6 +786,21 @@ fn complete_trust_directory_onboarding(app: &mut App, config: &Config) -> Result
     );
     app.runtime_services.hook_executor = Some(std::sync::Arc::new(app.hooks.clone()));
     app.status_message = None;
+    advance_after_trust_directory_choice(app);
+    Ok(())
+}
+
+/// Continue past the trust step without recording workspace trust.
+///
+/// Tools and hooks stay restricted for this session; the next launch will
+/// re-prompt until the user trusts (or uses an explicit trust command).
+fn continue_without_trusting_directory(app: &mut App) {
+    app.trust_mode = false;
+    app.status_message = Some(app.tr(MessageId::OnboardTrustUntrustedNotice).to_string());
+    advance_after_trust_directory_choice(app);
+}
+
+fn advance_after_trust_directory_choice(app: &mut App) {
     if app.onboarding_workspace_trust_gate {
         app.onboarding_workspace_trust_gate = false;
         app.onboarding = OnboardingState::None;
@@ -794,7 +809,6 @@ fn complete_trust_directory_onboarding(app: &mut App, config: &Config) -> Result
     } else {
         app.onboarding = OnboardingState::MentalModels;
     }
-    Ok(())
 }
 
 fn back_from_api_key_onboarding(app: &mut App) {
@@ -1887,6 +1901,7 @@ fn build_app_system_prompt_with_goal(
             verbosity: app.verbosity.as_deref(),
             skills_scan_codewhale_only: app.skills_scan_codewhale_only,
             plugin_registry: Some(app.plugin_registry.as_ref()),
+            mode: app.mode,
         },
     )
 }
@@ -4942,7 +4957,11 @@ async fn run_event_loop(
                 if app.view_stack.top_kind() == Some(ModalKind::Help) {
                     app.view_stack.pop();
                 } else {
-                    let help = HelpView::new_for_shortcuts(app.ui_locale, &app.workspace);
+                    let help = HelpView::new_for_shortcuts(
+                        app.ui_locale,
+                        &app.workspace,
+                        &app.cached_skills,
+                    );
                     app.view_stack.push(help);
                 }
                 continue;
@@ -5139,10 +5158,8 @@ async fn run_event_loop(
                             // grant trust by reflex (accidental-trust risk). Nor
                             // is it a silent dead key: point the user at the
                             // explicit keys the footer advertises.
-                            app.status_message = Some(
-                                "Press 1 or Y to trust this workspace, or 2 or N to exit."
-                                    .to_string(),
-                            );
+                            app.status_message =
+                                Some(app.tr(MessageId::OnboardTrustEnterHint).to_string());
                         }
                         OnboardingState::MentalModels => {
                             app.status_message = None;
@@ -5164,6 +5181,11 @@ async fn run_event_loop(
                         if let Err(err) = complete_trust_directory_onboarding(app, config) {
                             app.status_message = Some(format!("Failed to trust workspace: {err}"));
                         }
+                    }
+                    KeyCode::Char('u') | KeyCode::Char('U') | KeyCode::Char('3')
+                        if app.onboarding == OnboardingState::TrustDirectory =>
+                    {
+                        continue_without_trusting_directory(app);
                     }
                     KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('2')
                         if app.onboarding == OnboardingState::TrustDirectory =>
@@ -11473,7 +11495,7 @@ fn mcp_import_consent_path() -> PathBuf {
 
 fn mcp_external_import_status_text(workspace: &std::path::Path) -> String {
     use crate::mcp::external_import::{discover_external_sources, format_candidates_for_display};
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let home = crate::config::effective_home_dir().unwrap_or_else(|| PathBuf::from("."));
     let market_path = codewhale_config::codewhale_home()
         .ok()
         .map(|h| h.join("mcp-marketplace.json"));
@@ -11497,7 +11519,7 @@ fn mcp_import_apply(
     use std::collections::HashMap;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let home = crate::config::effective_home_dir().unwrap_or_else(|| PathBuf::from("."));
     let market_path = codewhale_config::codewhale_home()
         .ok()
         .map(|h| h.join("mcp-marketplace.json"));
@@ -12851,7 +12873,7 @@ async fn handle_skill_mutation_requested(
     };
 
     let workspace = app.workspace.clone();
-    let home = dirs::home_dir();
+    let home = crate::config::effective_home_dir();
     let cfg = crate::config::Config::load(None, None).unwrap_or_default();
     let network = cfg
         .network
