@@ -7965,9 +7965,29 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
             "{}: {text}",
             case.name
         );
+        // turn_meta carries the mode as a *fact*; the doctrine ships once in
+        // the stable prefix (#4780). Assert both halves so neither can be
+        // dropped silently the way the overlay was.
         assert!(
-            text.contains(case.prompt_marker),
-            "{}: missing {} in metadata",
+            !text.contains(case.prompt_marker),
+            "{}: turn metadata must not re-embed mode doctrine: {text}",
+            case.name
+        );
+        let prefix = crate::prompts::system_prompt_flat_text(
+            &crate::prompts::system_prompt_for_mode_with_context_skills_session_and_approval(
+                &engine.config.workspace,
+                None,
+                None,
+                None,
+                crate::prompts::PromptSessionContext {
+                    mode: case.mode,
+                    ..Default::default()
+                },
+            ),
+        );
+        assert!(
+            prefix.contains(case.prompt_marker),
+            "{}: missing {} in the stable prefix",
             case.name,
             case.prompt_marker
         );

@@ -53,6 +53,14 @@ pub struct PromptSessionContext<'a> {
     /// Immutable plugin snapshot owned by this App/Engine workspace context.
     /// Never sourced from process-global mutable state.
     pub plugin_registry: Option<&'a crate::plugins::PluginRegistry>,
+    /// Active mode. Its doctrine overlay ships once here, in the stable
+    /// prefix, rather than being re-asserted in `<turn_meta>` on every user
+    /// message (#4780) — repetition-per-turn out-shouts the constitution and
+    /// makes the model perform compliance instead of exercising judgment.
+    ///
+    /// Changing mode does invalidate the prefix cache, which is the intended
+    /// trade: mode changes are rare, user messages are not.
+    pub mode: crate::tui::app::AppMode,
 }
 
 impl Default for PromptSessionContext<'_> {
@@ -69,6 +77,7 @@ impl Default for PromptSessionContext<'_> {
             verbosity: None,
             skills_scan_codewhale_only: false,
             plugin_registry: None,
+            mode: crate::tui::app::AppMode::Agent,
         }
     }
 }
@@ -1087,6 +1096,21 @@ fn compose_default_static_layers_with_context(
     apply_model_template(&layers, model_id, context_window_override)
 }
 
+/// Mode doctrine overlay for the stable prefix.
+///
+/// Single mapping shared by prompt composition and the engine's mode-change
+/// invalidation check, so the two can never disagree about which text a mode
+/// ships (#4780).
+pub(crate) fn mode_doctrine(mode: crate::tui::app::AppMode) -> &'static str {
+    use crate::tui::app::AppMode;
+
+    match mode {
+        AppMode::Agent | AppMode::Auto | AppMode::Yolo => AGENT_MODE,
+        AppMode::Plan => PLAN_MODE,
+        AppMode::Operate => OPERATE_MODE,
+    }
+}
+
 fn apply_static_prompt_composer(
     composer: Option<&StaticPromptComposer>,
     personality: Personality,
@@ -1157,6 +1181,7 @@ pub fn system_prompt_for_mode_with_context_and_skills(
             verbosity: None,
             skills_scan_codewhale_only: false,
             plugin_registry: None,
+            mode: crate::tui::app::AppMode::Agent,
         },
     )
 }
@@ -1188,11 +1213,21 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
         session_context.model_id,
         session_context.context_window_override,
     );
-    let mode_prompt = apply_static_prompt_composer(
+    let composed = apply_static_prompt_composer(
         effective_static_prompt_composer(),
         Personality::Calm,
         session_context.model_id,
         &default_layers,
+    );
+
+    // Mode doctrine is layer 1 of the stable prefix (#4780). It sits above the
+    // constitution's own layers so the model reads "which mode am I in" before
+    // the general rules it modulates, and it ships exactly once per prefix
+    // rather than per user message.
+    let mode_prompt = format!(
+        "{}\n\n{}",
+        mode_doctrine(session_context.mode).trim(),
+        composed.trim_start()
     );
 
     // Load project context from workspace
@@ -2193,6 +2228,7 @@ start it",
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    mode: crate::tui::app::AppMode::Agent,
                 },
             ),
         );
@@ -2265,6 +2301,7 @@ start it",
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    mode: crate::tui::app::AppMode::Agent,
                 },
             ),
         );
@@ -2310,6 +2347,7 @@ start it",
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    mode: crate::tui::app::AppMode::Agent,
                 },
             ),
         );
@@ -2365,6 +2403,7 @@ start it",
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    mode: crate::tui::app::AppMode::Agent,
                 },
             ),
         );
@@ -2465,6 +2504,7 @@ start it",
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    mode: crate::tui::app::AppMode::Agent,
                 },
             ));
         assert!(prompt.contains("## Environment"));
@@ -2650,6 +2690,7 @@ start it",
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    mode: crate::tui::app::AppMode::Agent,
                 },
             ));
         assert!(
@@ -2680,6 +2721,7 @@ start it",
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    mode: crate::tui::app::AppMode::Agent,
                 },
             ));
         let mem_at = prompt.find("User Memory").expect("user memory present");
@@ -2793,6 +2835,7 @@ start it",
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    mode: crate::tui::app::AppMode::Agent,
                 },
             ));
         assert!(!prompt.contains("<project_context_pack>"));
@@ -2824,6 +2867,7 @@ start it",
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    mode: crate::tui::app::AppMode::Agent,
                 },
             ));
         assert!(prompt.contains("<project_context_pack>"));
@@ -3149,6 +3193,7 @@ start it",
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    mode: crate::tui::app::AppMode::Agent,
                 },
             ));
 
@@ -3185,6 +3230,7 @@ start it",
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    mode: crate::tui::app::AppMode::Agent,
                 },
             ));
 
@@ -3276,6 +3322,7 @@ start it",
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    mode: crate::tui::app::AppMode::Agent,
                 },
             ));
 
@@ -3846,6 +3893,7 @@ start it",
                     verbosity: Some(" Concise "),
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
+                    mode: crate::tui::app::AppMode::Agent,
                 },
             ),
         );
@@ -3890,6 +3938,7 @@ start it",
                 verbosity: Some("concise"),
                 skills_scan_codewhale_only: false,
                 plugin_registry: None,
+                mode: crate::tui::app::AppMode::Agent,
             },
         );
 
@@ -3939,6 +3988,7 @@ start it",
             verbosity: None,
             skills_scan_codewhale_only: false,
             plugin_registry: None,
+            mode: crate::tui::app::AppMode::Agent,
         };
         let first = system_prompt_for_mode_with_context_skills_session_and_approval(
             tmp.path(),

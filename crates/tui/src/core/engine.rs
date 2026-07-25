@@ -735,19 +735,6 @@ fn subagent_mailbox_best_effort_send_permitted(
 }
 
 impl Engine {
-    /// Mode doctrine for the stable system prefix. Kept as a pure lookup so
-    /// call sites that need the overlay text (not turn_meta — see #4780) share
-    /// one mapping.
-    #[allow(dead_code)] // retained for approval-gate / prefix helpers; turn_meta no longer embeds it
-    fn mode_runtime_instructions(mode: AppMode) -> &'static str {
-        match mode {
-            AppMode::Agent | AppMode::Auto | AppMode::Yolo => prompts::AGENT_MODE,
-            AppMode::Plan => prompts::PLAN_MODE,
-            AppMode::Operate => prompts::OPERATE_MODE,
-        }
-        .trim()
-    }
-
     /// Per-posture question discipline. Lives with the approval overlays in the
     /// stable prefix / gate errors — not re-asserted every turn (#4780).
     #[allow(dead_code)] // surface via approval-gate errors when those are tightened
@@ -1068,6 +1055,9 @@ impl Engine {
                     verbosity: config.verbosity.as_deref(),
                     skills_scan_codewhale_only: config.skills_scan_codewhale_only,
                     plugin_registry: Some(plugin_registry.as_ref()),
+                    // Matches `current_mode`'s initial value below; a later
+                    // `/mode` switch re-runs `refresh_system_prompt`.
+                    mode: AppMode::Agent,
                 },
             );
         let stable_prompt = Some(system_prompt);
@@ -1490,7 +1480,15 @@ impl Engine {
     }
 
     fn apply_runtime_mode_policy(&mut self, authority: &TurnAuthority) {
+        // Mode doctrine lives in the stable prefix (#4780), so a mode change
+        // has to rebuild it. `refresh_system_prompt` is hash-guarded and only
+        // swaps the prompt when the composed text actually differs, so modes
+        // that share an overlay (Agent/Auto/Yolo) keep the prefix cache warm.
+        let mode_changed = self.current_mode != authority.mode;
         self.current_mode = authority.mode;
+        if mode_changed {
+            self.refresh_system_prompt();
+        }
         self.session.allow_shell = authority.allow_shell;
         self.config.allow_shell = authority.allow_shell;
         self.session.trust_mode = authority.trust_mode;
@@ -4340,6 +4338,7 @@ impl Engine {
                 verbosity: self.config.verbosity.as_deref(),
                 skills_scan_codewhale_only: self.config.skills_scan_codewhale_only,
                 plugin_registry: Some(self.plugin_registry.as_ref()),
+                mode: self.current_mode,
             },
         );
         let stable_prompt =

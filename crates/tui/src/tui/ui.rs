@@ -1901,6 +1901,7 @@ fn build_app_system_prompt_with_goal(
             verbosity: app.verbosity.as_deref(),
             skills_scan_codewhale_only: app.skills_scan_codewhale_only,
             plugin_registry: Some(app.plugin_registry.as_ref()),
+            mode: app.mode,
         },
     )
 }
