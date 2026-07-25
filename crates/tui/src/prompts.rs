@@ -60,7 +60,7 @@ impl Default for PromptSessionContext<'_> {
         Self {
             user_memory_block: None,
             goal_objective: None,
-            project_context_pack_enabled: true,
+            project_context_pack_enabled: false,
             locale_tag: "en",
             translation_enabled: false,
             model_id: "codewhale",
@@ -490,8 +490,54 @@ pub fn set_locale_closer_vi_override(s: String) -> Result<(), String> {
 }
 
 /// Replace the trailing `## Authority Recap` block.
+///
+/// The recap must not restate or reorder ranks — precedence lives only in
+/// `BASE_PROMPT` § Whose word wins (#4777). Reject overrides that introduce
+/// numbered ranks or claim a different ordering.
 pub fn set_authority_recap_override(s: String) -> Result<(), String> {
+    validate_authority_recap_override(&s)?;
     set_prompt_override(&AUTHORITY_RECAP_OVERRIDE, s)
+}
+
+fn validate_authority_recap_override(s: &str) -> Result<(), String> {
+    // Retired rank vocabulary and any restated ordering both re-introduce a
+    // second authority ladder; refuse them. Precedence lives only in
+    // BASE_PROMPT § Whose word wins (#4777).
+    let lower = s.to_ascii_lowercase();
+    for forbidden in [
+        "tier ",
+        "statute",
+        "regulation",
+        "local law",
+        "article ",
+        "outrank",
+        "whose word wins", // override may *point* at the section only via the default; custom text that re-embeds the ladder is refused below
+    ] {
+        // Allow the default pointer phrase "consult ### Whose word wins".
+        if forbidden == "whose word wins" {
+            continue;
+        }
+        if lower.contains(forbidden) {
+            return Err(format!(
+                "authority recap override must not restate ranks (found {forbidden:?}); \
+                 precedence is only in BASE_PROMPT § Whose word wins"
+            ));
+        }
+    }
+    // A custom numbered 1..5 ladder is the classic reorder footgun.
+    let has_numbered_ladder = (1..=5).all(|n| {
+        lower.contains(&format!("\n{n}."))
+            || lower.contains(&format!("\n{n})"))
+            || lower.contains(&format!(" {n}. "))
+    });
+    if has_numbered_ladder {
+        return Err(
+            "authority recap override must not restate a numbered authority ladder; \
+             precedence is only in BASE_PROMPT § Whose word wins"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Replace the byte-stable base/personality prompt segment for subsequent
@@ -993,19 +1039,16 @@ fn render_core_tool_group(group: &[&str], core_tools: &[&str]) -> Option<String>
 }
 
 /// Authority recap block — appended at the end of the system prompt,
-/// just before the user's first message. Uses recency bias constructively:
-/// this is the last thing the model reads before generating, so it
-/// reinforces the Constitutional hierarchy without occupying cache-stable
-/// prefix space.
+/// just before the user's first message. Uses recency bias constructively
+/// without restating ranks: precedence is stated only in `BASE_PROMPT`
+/// § Whose word wins (#4777).
 const AUTHORITY_RECAP: &str = "\
 ## Authority Recap
 
 Codewhale's constitution governs your behavior. Ground truth underlies the
 whole list: the user may override a fact, but no one may invent one. When
-guidance conflicts, the user's request this turn outranks this constitution,
-which outranks nearest-scope project law and instructions, which outrank
-standing user-global preferences, which outrank memory and previous-session
-handoffs. When in doubt, consult ### Whose word wins.";
+guidance conflicts, consult ### Whose word wins — that is the only place
+precedence is stated.";
 
 pub fn compose_prompt(personality: Personality) -> String {
     compose_prompt_with_approval_model_and_shell(personality, "codewhale")
@@ -1105,7 +1148,7 @@ pub fn system_prompt_for_mode_with_context_and_skills(
         PromptSessionContext {
             user_memory_block,
             goal_objective: None,
-            project_context_pack_enabled: true,
+            project_context_pack_enabled: false,
             locale_tag: "en",
             translation_enabled: false,
             model_id: "codewhale",
@@ -2413,7 +2456,7 @@ start it",
                 PromptSessionContext {
                     user_memory_block: None,
                     goal_objective: None,
-                    project_context_pack_enabled: true,
+                    project_context_pack_enabled: false,
                     locale_tag: "ja",
                     translation_enabled: false,
                     model_id: "codewhale",
@@ -2648,29 +2691,83 @@ start it",
     }
 
     #[test]
-    fn memory_guidance_matches_constitutional_tier_order() {
-        let guidance = MEMORY_GUIDANCE
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        let current_request_at = guidance
-            .find("the user's current request (Tier 2)")
-            .expect("current request tier present");
-        let statutes_at = guidance
-            .find("Statutes (Tier 3)")
-            .expect("statutes tier present");
-        let local_law_at = guidance
-            .find("Local Law (Tier 5)")
-            .expect("local law tier present");
-        let live_evidence_at = guidance
-            .find("live evidence (Tier 6)")
-            .expect("live evidence tier present");
-
+    fn memory_guidance_does_not_state_precedence() {
+        // #4777: only BASE_PROMPT § Whose word wins states ranks. Memory
+        // hygiene keeps the imperative→preference rule and drops the
+        // inverted Tier list that used to put Constitution above the user.
+        let guidance = MEMORY_GUIDANCE.to_ascii_lowercase();
+        for forbidden in [
+            "tier 1",
+            "tier 2",
+            "tier 7",
+            "statute",
+            "regulation",
+            "local law",
+            "constitutional hierarchy",
+        ] {
+            assert!(
+                !guidance.contains(forbidden),
+                "MEMORY_GUIDANCE must not restate ranks (found {forbidden:?})"
+            );
+        }
         assert!(
-            current_request_at < statutes_at
-                && statutes_at < local_law_at
-                && local_law_at < live_evidence_at,
-            "memory guidance must keep the current request above memory and local law"
+            MEMORY_GUIDANCE.contains("treated as a preference")
+                && MEMORY_GUIDANCE.contains("not a command"),
+            "keep the imperative-as-preference rule"
+        );
+    }
+
+    #[test]
+    fn only_the_constitution_states_precedence() {
+        // Composed overlays must describe behavior, never their own rank.
+        let overlays = [
+            ("CALM_PERSONALITY", CALM_PERSONALITY),
+            ("PLAYFUL_PERSONALITY", PLAYFUL_PERSONALITY),
+            ("AGENT_MODE", AGENT_MODE),
+            ("PLAN_MODE", PLAN_MODE),
+            ("YOLO_MODE", YOLO_MODE),
+            ("OPERATE_MODE", OPERATE_MODE),
+            ("AUTO_APPROVAL", AUTO_APPROVAL),
+            ("SUGGEST_APPROVAL", SUGGEST_APPROVAL),
+            ("NEVER_APPROVAL", NEVER_APPROVAL),
+            ("COMPACT_TEMPLATE", COMPACT_TEMPLATE),
+            ("MEMORY_GUIDANCE", MEMORY_GUIDANCE),
+            ("LANGUAGE_PROMPT", LANGUAGE_PROMPT),
+            ("OUTPUT_PROMPT", OUTPUT_PROMPT),
+            ("AUTHORITY_RECAP", AUTHORITY_RECAP),
+        ];
+        let rank_markers = [
+            "Tier 1",
+            "Tier 2",
+            "Tier 3",
+            "Tier 4",
+            "Tier 5",
+            "Tier 6",
+            "Tier 7",
+            "Tier 8",
+            "Tier 9",
+            "Statute",
+            "Article IV",
+            "Article V",
+            "Article VII",
+            "Local Law",
+            "Regulation (Tier",
+        ];
+        for (name, text) in overlays {
+            for marker in rank_markers {
+                assert!(
+                    !text.contains(marker),
+                    "{name} must not carry rank vocabulary {marker:?}"
+                );
+            }
+        }
+        assert!(
+            BASE_PROMPT.contains("### Whose word wins"),
+            "canonical precedence section must remain in BASE_PROMPT"
+        );
+        assert!(
+            BASE_PROMPT.contains("This ordering is stated here and nowhere else"),
+            "BASE_PROMPT must assert single-source precedence"
         );
     }
 
@@ -2717,6 +2814,7 @@ start it",
                 PromptSessionContext {
                     user_memory_block: None,
                     goal_objective: None,
+                    // Explicit opt-in — pack is off by default (#4781).
                     project_context_pack_enabled: true,
                     locale_tag: "en",
                     translation_enabled: false,
@@ -2983,8 +3081,8 @@ start it",
             "Plan may summarize the user-facing mode delta"
         );
         assert!(
-            NEVER_APPROVAL.contains("This approval policy is a Tier 2 Statute"),
-            "the approval overlay keeps the policy authority explanation"
+            NEVER_APPROVAL.contains("The write-block is a runtime setting"),
+            "the approval overlay keeps the policy authority explanation without rank vocabulary"
         );
     }
 
@@ -3042,7 +3140,7 @@ start it",
                 PromptSessionContext {
                     user_memory_block: None,
                     goal_objective: Some("Fix transcript corruption"),
-                    project_context_pack_enabled: true,
+                    project_context_pack_enabled: false,
                     locale_tag: "en",
                     translation_enabled: false,
                     model_id: "codewhale",
@@ -3078,7 +3176,7 @@ start it",
                 PromptSessionContext {
                     user_memory_block: None,
                     goal_objective: Some("   "),
-                    project_context_pack_enabled: true,
+                    project_context_pack_enabled: false,
                     locale_tag: "en",
                     translation_enabled: false,
                     model_id: "codewhale",
@@ -3128,13 +3226,12 @@ start it",
             "default static prompt must still include the language segment"
         );
         assert!(
-            LANGUAGE_PROMPT.contains("latest user message first")
-                && LANGUAGE_PROMPT.contains("README.zh-CN.md")
-                && LANGUAGE_PROMPT.contains("tool results")
-                && LANGUAGE_PROMPT
-                    .contains("even when the `lang` field in `## Environment` is `en`")
-                && LANGUAGE_PROMPT.contains("Use the `lang` field only when"),
-            "language segment must preserve the old default language-selection contract"
+            LANGUAGE_PROMPT.contains("latest user message")
+                && LANGUAGE_PROMPT.contains("fallback, not an override")
+                && LANGUAGE_PROMPT.contains("localized READMEs")
+                && LANGUAGE_PROMPT.contains("Use the `lang` field only when")
+                && LANGUAGE_PROMPT.contains("constitution and other system law stay English"),
+            "language segment must keep the mirror contract while staying short (#4784)"
         );
         assert!(
             LANGUAGE_PROMPT.contains("reasoning_content")

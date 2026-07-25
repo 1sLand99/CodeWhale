@@ -59,6 +59,20 @@ existing one behave the way it already claimed to.
   `shutdown`) can reach a runaway turn instead of waiting on the very turn
   they were meant to stop.
 
+- Precedence is stated only in the constitution's "Whose word wins" section.
+  Memory hygiene no longer ships an inverted Tier list that put the
+  constitution above the user's current request; approval, compaction, and
+  personality overlays describe behavior without rank vocabulary; and the
+  authority recap points at the single source rather than restating a second
+  ladder.
+
+- `<turn_meta>` carries facts (mode, posture, model, workspace), not mode
+  doctrine or permission-question essays re-asserted every user message.
+
+- The project context pack (pretty-printed workspace tree) is off by default
+  and opt-in via `[context] project_pack = true`. Language law is compressed
+  while keeping the English-constitution / user-language-reply contract.
+
 ## [0.9.1] - 2026-07-24
 
 ### Dogfood follow-ups (2026-07-24)

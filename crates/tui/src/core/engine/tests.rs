@@ -9884,7 +9884,8 @@ fn external_user_wording_does_not_downgrade_standing_authority() {
 }
 
 #[test]
-fn turn_metadata_includes_plan_mode_policy() {
+fn turn_metadata_includes_plan_mode_as_fact_only() {
+    // #4780: turn_meta carries mode as a label, not the full mode doctrine.
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
         workspace: tmp.path().to_path_buf(),
@@ -9907,41 +9908,32 @@ fn turn_metadata_includes_plan_mode_policy() {
 
     assert!(text.contains("Current mode: plan"), "got: {text}");
     assert!(
-        text.contains("Current mode policy source: runtime"),
-        "got: {text}"
+        !text.contains("Current mode policy"),
+        "mode doctrine must not re-enter turn_meta: {text}"
     );
-    assert!(text.contains("##### Mode: Plan"), "got: {text}");
     assert!(
-        text.contains("All writes, patches, shell commands,")
-            && text.contains("and code execution are blocked"),
-        "got: {text}"
+        !text.contains("##### Mode: Plan"),
+        "mode overlay text must not re-enter turn_meta: {text}"
+    );
+    assert!(
+        !text.contains("All writes, patches, shell commands,"),
+        "mode doctrine must not re-enter turn_meta: {text}"
     );
 }
 
 #[test]
-fn turn_metadata_projects_effective_permission_question_discipline() {
+fn turn_metadata_projects_permission_posture_as_fact_only() {
+    // #4780: posture is a fact; question-discipline prose stays out of turn_meta.
     use crate::tui::approval::ApprovalMode;
 
     let cases = [
-        (
-            ApprovalMode::Suggest,
-            "Ask",
-            "Tool approvals and user decisions are separate",
-        ),
-        (
-            ApprovalMode::Auto,
-            "Auto-Review",
-            "Do not ask the user questions or pause for a user decision",
-        ),
-        (
-            ApprovalMode::Bypass,
-            "Full Access",
-            "Full Access does not authorize invented intent",
-        ),
-        (ApprovalMode::Never, "Never", "Remain read-only"),
+        (ApprovalMode::Suggest, "Ask"),
+        (ApprovalMode::Auto, "Auto-Review"),
+        (ApprovalMode::Bypass, "Full Access"),
+        (ApprovalMode::Never, "Never"),
     ];
 
-    for (approval_mode, posture, question_marker) in cases {
+    for (approval_mode, posture) in cases {
         let tmp = tempdir().expect("tempdir");
         let config = EngineConfig {
             workspace: tmp.path().to_path_buf(),
@@ -9964,10 +9956,13 @@ fn turn_metadata_projects_effective_permission_question_discipline() {
             "{posture}: {text}"
         );
         assert!(
-            text.contains("Current permission policy source: effective runtime authority"),
-            "{posture}: {text}"
+            !text.contains("Current permission policy source"),
+            "{posture}: doctrine must not re-enter turn_meta: {text}"
         );
-        assert!(text.contains(question_marker), "{posture}: {text}");
+        assert!(
+            !text.contains("Current question discipline"),
+            "{posture}: question discipline must not re-enter turn_meta: {text}"
+        );
     }
 }
 
