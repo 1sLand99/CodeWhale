@@ -833,7 +833,7 @@ checksum = "e9b18233253483ce2f65329a24072ec414db782531bdbb7d0bbc4bd2ce6b7e21"
 
 [[package]]
 name = "codewhale-agent"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "codewhale-config",
  "serde",
@@ -841,7 +841,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-app-server"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -870,11 +870,11 @@ dependencies = [
 
 [[package]]
 name = "codewhale-build-support"
-version = "0.9.1"
+version = "0.9.2"
 
 [[package]]
 name = "codewhale-cli"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -908,7 +908,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-config"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "codewhale-execpolicy",
@@ -927,7 +927,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-core"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -948,7 +948,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-execpolicy"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "codewhale-protocol",
@@ -957,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-hooks"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -972,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-lane"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -988,7 +988,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-mcp"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -998,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-protocol"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "chrono",
  "serde",
@@ -1008,7 +1008,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-release"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "reqwest 0.13.4",
@@ -1021,7 +1021,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-secrets"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "dirs",
  "keyring",
@@ -1034,7 +1034,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-state"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1049,7 +1049,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-tools"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1063,7 +1063,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-tui"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1154,7 +1154,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-workflow"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -1165,7 +1165,7 @@ dependencies = [
 
 [[package]]
 name = "codewhale-workflow-js"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "async-trait",
  "jsonschema 0.48.1",

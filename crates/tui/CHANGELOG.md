@@ -8,6 +8,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 
+## [0.9.2] - Unreleased candidate
+
+### Fixed
+
+- Deny rules in `permissions.toml` no longer miss a command because of an
+  intervening flag: deny matching is token-based with flag-skipping and
+  backtracking, so a `git push` rule still catches
+  `git -c foo=bar push`. Path matching folds case only on platforms whose
+  filesystems are case-insensitive, and the default approval branch no
+  longer proposes the working directory as a network host.
+
+- MCP tool calls run once. A failed call is no longer retried as if it
+  were a failed lookup, qualified-name resolution collects every match and
+  reports an ambiguity instead of taking whichever the hash map yielded
+  first, and registering a server whose name collides with an existing one
+  after sanitization is now an error rather than a silent overwrite.
+
+- The session index survives a torn line: an unparseable entry is skipped
+  rather than aborting the whole read, appends carry their data through to
+  disk, and appends and compaction share a lock so a compaction can no
+  longer race an append into a lost record.
+
+- `Edit` counts as a write tool for workflow elevation, and the TUI's
+  write/shell classification now delegates to one shared allowlist rather
+  than keeping a second copy that could drift.
+
+- A rejected `app/config/set` stays a no-op. Previously an invalid value
+  still tore down the cached runtime bridge, killing the child runtime and
+  orphaning every other in-flight stdio thread behind a response that
+  correctly reported failure.
+
+- A malformed project `config.toml` is no longer indistinguishable from
+  having no project config. Because a project config may only *tighten*
+  approval and sandbox policy, silently discarding a broken one dropped a
+  repository's restrictions back to the looser user defaults; the setup
+  wizard now says so, naming the file but never quoting its contents.
+
+- An expired lane worktree no longer leaves its branch behind, which made
+  reusing the same lane name fail with "branch already exists". A branch
+  still carrying unmerged commits is kept — a TTL lapsing is not consent
+  to delete someone's work.
+
+- An in-flight `thread/message` turn can be stopped. The stdio loop keeps
+  reading while a turn streams, so the new `thread/interrupt` request (and
+  `shutdown`) can reach a runaway turn instead of waiting on the very turn
+  they were meant to stop.
+
 ## [0.9.1] - 2026-07-24
 
 ### Dogfood follow-ups (2026-07-24)
@@ -2481,62 +2528,6 @@ folds in several community contributions.
 - Unused dependencies: `tracing-appender` and `zeroize` (TUI crate),
   `rustls` (release crate); the orphaned `vendor/schemaui-0.12.0` lockfile
   leftover and a machine-specific one-off `scripts/verify_task.sh`.
-
-## [0.8.56] - 2026-06-09
-
-### Added
-
-- **Status picker localization.** The status picker surface (7 MessageIds) is
-  now localized across all supported locales (#2896, @gordonlu).
-- **Approval dialog localization.** The approval dialog surface is now
-  localized across 7 locales: English, Simplified Chinese, Japanese,
-  Vietnamese, Portuguese, Spanish, and French (#2891, @gordonlu).
-- **Volcengine provider in TUI dispatcher.** The `codewhale` / `codewhale-tui`
-  CLI dispatcher now allows the Volcengine provider, so users can launch
-  directly into a Volcengine-backed session (#2923, @hongchen1993).
-- **Dispatcher API-key preference.** When a provider-specific API key is
-  supplied via the CLI dispatcher, it is now preferred over the saved root
-  key, fixing a regression where saved keys masked explicit CLI keys (#2928,
-  @hongchen1993).
-- **Qwen 3.6 Plus model support.** Added complete Qwen 3.6 Plus model
-  resolution with dedicated version-bump tests (#2930, @idling11).
-- **Oversized paste spill.** Pastes larger than ~10 KB are now written to
-  `.codewhale/pastes/` instead of being truncated or dropped, preserving the
-  full content for the session (#2920, @sximelon).
-- **Cross-session prompt cache.** Added a disk-backed cross-session prompt
-  base-section cache so post-mode-flip and post-restart turns reuse the
-  byte-stable prefix without rebuilding it from scratch.
-
-### Fixed
-
-- **Background shell routing.** Shell commands expected to take >5 seconds are
-  now automatically guided to background tasks instead of blocking the agent
-  loop, with the task panel syncing immediately on cancel (#2947, #2941,
-  @cyq1017, @idling11).
-- **`allow_shell` error naming.** Shell-tool refusal errors now explicitly name
-  `allow_shell = false` as the reason and suggest `/config allow_shell true` as
-  the escape hatch (#2905, @cyq1017).
-- **Prefix-cache stability across mode flips.** `allow_shell` is now decoupled
-  from the static system-prompt prefix, so mode changes (Plan ↔ Agent ↔ YOLO)
-  no longer rebuild the byte-stable message[0] and invalidate the DeepSeek
-  prefix cache (#2949, @LeoAlex0).
-- **`visibility="internal"` explained.** The Runtime Policy Reference section
-  of the system prompt now explains the `visibility="internal"` attribute so
-  models stop narrating their current mode between steps (#2951, @LeoAlex0).
-- **Bocha web search response handling.** Updated response parsing for the
-  Bocha search backend after an upstream API change (#2946, @h3c-hexin).
-- **PDF read hang.** Full-PDF reads now use `extract_text_by_pages` to avoid
-  a hang on large or complex PDFs (#2898, @idling11).
-- **9 critical bugs.** Fixed bugs across tools, client, and commands: stale
-  `ContentBlockStop` cleanup, missing `#[test]` attribute, trailing-space
-  restoration on English `ApprovalField` labels, and several
-  correctness/stability issues (#2880, @HUQIANTAO).
-
-### Changed
-
-- **CNB shim cleanup.** Removed deprecated `deepseek` shim references from the
-  CNB mirror path.
-- **Style.** Applied `cargo fmt` to `crates/tools/src/file.rs`.
 
 ---
 

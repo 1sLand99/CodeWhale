@@ -8,6 +8,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 
+## [0.9.2] - Unreleased candidate
+
+### Fixed
+
+- Deny rules in `permissions.toml` no longer miss a command because of an
+  intervening flag: deny matching is token-based with flag-skipping and
+  backtracking, so a `git push` rule still catches
+  `git -c foo=bar push`. Path matching folds case only on platforms whose
+  filesystems are case-insensitive, and the default approval branch no
+  longer proposes the working directory as a network host.
+
+- MCP tool calls run once. A failed call is no longer retried as if it
+  were a failed lookup, qualified-name resolution collects every match and
+  reports an ambiguity instead of taking whichever the hash map yielded
+  first, and registering a server whose name collides with an existing one
+  after sanitization is now an error rather than a silent overwrite.
+
+- The session index survives a torn line: an unparseable entry is skipped
+  rather than aborting the whole read, appends carry their data through to
+  disk, and appends and compaction share a lock so a compaction can no
+  longer race an append into a lost record.
+
+- `Edit` counts as a write tool for workflow elevation, and the TUI's
+  write/shell classification now delegates to one shared allowlist rather
+  than keeping a second copy that could drift.
+
+- A rejected `app/config/set` stays a no-op. Previously an invalid value
+  still tore down the cached runtime bridge, killing the child runtime and
+  orphaning every other in-flight stdio thread behind a response that
+  correctly reported failure.
+
+- A malformed project `config.toml` is no longer indistinguishable from
+  having no project config. Because a project config may only *tighten*
+  approval and sandbox policy, silently discarding a broken one dropped a
+  repository's restrictions back to the looser user defaults; the setup
+  wizard now says so, naming the file but never quoting its contents.
+
+- An expired lane worktree no longer leaves its branch behind, which made
+  reusing the same lane name fail with "branch already exists". A branch
+  still carrying unmerged commits is kept — a TTL lapsing is not consent
+  to delete someone's work.
+
+- An in-flight `thread/message` turn can be stopped. The stdio loop keeps
+  reading while a turn streams, so the new `thread/interrupt` request (and
+  `shutdown`) can reach a runaway turn instead of waiting on the very turn
+  they were meant to stop.
+
 ## [0.9.1] - 2026-07-24
 
 ### Dogfood follow-ups (2026-07-24)
@@ -4050,7 +4097,8 @@ overflow report and `/theme` picker edge-wrapping patch in #1814.
 
 Older releases (v0.8.39 and earlier) are archived in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).
 
-[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/Hmbown/CodeWhale/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/Hmbown/CodeWhale/compare/v0.9.0...v0.9.1
 [0.8.68]: https://github.com/Hmbown/CodeWhale/compare/v0.8.67...v0.8.68
 [0.8.67]: https://github.com/Hmbown/CodeWhale/compare/v0.8.66...v0.8.67
