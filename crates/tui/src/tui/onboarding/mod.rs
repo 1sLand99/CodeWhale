@@ -460,7 +460,10 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect::<String>();
 
-        assert_eq!(footer, "Press 1/Y to trust and continue, 2/N/Esc to quit");
+        assert_eq!(
+            footer,
+            "Press 1/Y to trust and continue, 3/U to continue without trusting, 2/N/Esc to quit Codewhale"
+        );
     }
 
     #[test]

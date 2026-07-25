@@ -61,6 +61,17 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
             Style::default().fg(palette::TEXT_MUTED),
         ),
         Span::styled(
+            "3/U",
+            Style::default()
+                .fg(palette::TEXT_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            app.tr(MessageId::OnboardTrustFooterUntrustedMiddle)
+                .to_string(),
+            Style::default().fg(palette::TEXT_MUTED),
+        ),
+        Span::styled(
             "2/N/Esc",
             Style::default()
                 .fg(palette::TEXT_PRIMARY)
@@ -117,6 +128,9 @@ mod tests {
         assert!(body.contains("prompt injection"));
         assert!(body.contains("tools and hooks"));
         assert!(body.contains("1/Y"));
+        assert!(body.contains("3/U"));
+        assert!(body.contains("continue without trusting"));
         assert!(body.contains("2/N/Esc"));
+        assert!(body.contains("quit Codewhale"));
     }
 }
