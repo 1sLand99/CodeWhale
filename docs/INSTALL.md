@@ -8,7 +8,7 @@ If you just want the short version, see the
 [main README](../README.md#install) or
 [简体中文 README](../README.zh-CN.md#安装).
 
-This branch describes the **v0.9.2 source candidate**. Install commands that use
+This branch describes the **v0.9.1 source candidate**. Install commands that use
 `latest` resolve to the latest published package or GitHub Release, which may
 trail the source candidate. A candidate is not a published install until the
 matching package, tag, checksums, and release assets exist.
@@ -29,7 +29,7 @@ verifies them against `codewhale-artifacts-sha256.txt`, installs to
 
 Published Codewhale releases ship matched `codewhale`, `codew`, and
 `codewhale-tui` prebuilt binaries for their supported platform/architecture
-combinations. The table below is the intended v0.9.2 candidate matrix;
+combinations. The table below is the intended v0.9.1 candidate matrix;
 Android/Termux is preview pending real-device QA. Linux ARM64 is available from
 v0.8.8 onward. Linux RISC-V prebuilts are temporarily paused because the locked
 `rquickjs-sys` dependency does not ship `riscv64gc-unknown-linux-gnu` bindings.
@@ -53,7 +53,7 @@ v0.8.8 onward. Linux RISC-V prebuilts are temporarily paused because the locked
   [Build from source](#7-build-from-source) below.
 ³ RISC-V source builds currently need upstream `rquickjs-sys` RISC-V bindings or
   a bindgen-enabled dependency build.
-⁴ The v0.9.2 source-candidate npm wrapper recognizes Android arm64 and resolves
+⁴ The v0.9.1 source-candidate npm wrapper recognizes Android arm64 and resolves
   the matching `codewhale`, `codew`, and `codewhale-tui` Android assets. npm
   installation works only for a package version whose GitHub Release publishes
   those matching assets. The Android/Termux path remains preview-only until the
@@ -72,13 +72,13 @@ binary through `rusqlite`, so no separate `libsqlite3` runtime package is needed
 
 The Linux **arm64** release assets are still GNU libc (glibc) builds. They
 dynamically link normal Linux runtime libraries such as `libdbus-1` and `libc`.
-The v0.9.2 candidate build runs on Ubuntu 24.04, so it can require `GLIBC_2.39`.
+The v0.9.1 candidate build runs on Ubuntu 24.04, so it can require `GLIBC_2.39`.
 
 ### Linux glibc floor (arm64)
 
 This floor applies only to the **GNU libc** arm64 asset. The static x64 (musl)
 asset has no `GLIBC_*` symbols, so it passes the install preflight and runs on
-older systems without error. The v0.9.2 candidate GNU arm64 asset is built on
+older systems without error. The v0.9.1 candidate GNU arm64 asset is built on
 Ubuntu 24.04 and can require `GLIBC_2.39`. Ubuntu 22.04 ships glibc
 2.35, so those arm64 binaries fail with errors such as:
 

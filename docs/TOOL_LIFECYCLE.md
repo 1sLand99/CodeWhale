@@ -1,7 +1,7 @@
 # Historical Tool-Surface Lifecycle Policy (v0.8.53)
 
 **Status:** Historical design record, not current runtime documentation. The
-v0.9.2 canonical action surface and replay-only alias contract are documented in
+v0.9.1 canonical action surface and replay-only alias contract are documented in
 [`RUNTIME_SIMPLIFICATION_DESIGN.md`](RUNTIME_SIMPLIFICATION_DESIGN.md) and
 [`TOOL_SURFACE.md`](TOOL_SURFACE.md). No catalog code landed in this old cycle — the code
 work is **deferred**. This document is the umbrella policy for GitHub **#2681**,
@@ -50,7 +50,7 @@ The lifecycle policy exists to **shrink and discipline the model-visible
 surface** without ever breaking the ability to replay an old transcript that
 referenced a now-retired name.
 
-### Canonical work-tracking surface for v0.9.2
+### Canonical work-tracking surface for v0.9.1
 
 The model-visible progress surface is a single tool: `work_update` (#4132).
 Agents and Fleet workers use it for concrete To-do / Work progress under the

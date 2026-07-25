@@ -1,6 +1,6 @@
 # Tool surface
 
-This document describes the current model-facing tool contract in the v0.9.2
+This document describes the current model-facing tool contract in the v0.9.1
 source candidate. The registry remains larger than the first-turn catalog so
 saved transcripts can replay and uncommon capabilities can be loaded on demand.
 The model should learn one canonical name for each common operation.
@@ -11,7 +11,7 @@ Implementation sources:
 - `crates/tui/src/tools/registry.rs` registers canonical tools and hidden aliases.
 - `crates/tui/src/tools/{file_tool,git_tool,run_tool,web_tool,shell}.rs` own the
   canonical action schemas.
-- `docs/RUNTIME_SIMPLIFICATION_DESIGN.md` records the v0.9.2 cutover and receipt.
+- `docs/RUNTIME_SIMPLIFICATION_DESIGN.md` records the v0.9.1 cutover and receipt.
 
 ## Default-active contract
 
