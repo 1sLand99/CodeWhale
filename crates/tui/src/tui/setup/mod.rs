@@ -3213,7 +3213,23 @@ fn runtime_preset_diff_rows(preset: SetupRuntimePreset, facts: &SetupRuntimeFact
 }
 
 fn project_runtime_override_warning(workspace: &Path, locale: Locale) -> Option<String> {
-    let project = codewhale_config::load_project_config(workspace)?;
+    let outcome = codewhale_config::load_project_config_outcome(workspace);
+    // A project config that exists but can't be parsed is not the same as no
+    // project config: its restrictions are silently not in effect, and the
+    // workspace falls back to the user's baseline. Say so here rather than
+    // only in a log line the TUI never shows.
+    if let Some((path, reason)) = outcome.invalid() {
+        let path = path.display();
+        return Some(match locale {
+            Locale::ZhHans => format!(
+                "无法解析项目配置 {path}（{reason}）。此工作区的项目级运行姿态限制未生效，将回退到用户默认值。",
+            ),
+            _ => format!(
+                "Project config {path} could not be parsed ({reason}). Its runtime posture restrictions are NOT in effect; this workspace falls back to your user defaults.",
+            ),
+        });
+    }
+    let project = outcome.into_config()?;
     let mut fields = Vec::new();
     if let Some(policy) = project.approval_policy.as_deref() {
         fields.push(format!("approval_policy={policy}"));
