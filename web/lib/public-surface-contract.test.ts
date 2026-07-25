@@ -190,11 +190,16 @@ describe("public surface contracts", () => {
     ]) {
       expect(npmArtifacts).toContain(binary);
     }
-    expect(changelog).toMatch(
-      new RegExp(
-        `^## \\[${FACTS.version.replace(/\./g, "\\.")}\\] - (?:Unreleased candidate|\\d{4}-\\d{2}-\\d{2})$`,
-        "m",
-      ),
+    // Matched by string prefix rather than by building a RegExp from
+    // FACTS.version: escaping only `.` left backslashes unescaped, which
+    // CodeQL flagged as incomplete escaping. The version needs no regex.
+    const heading = `## [${FACTS.version}] - `;
+    const headingLine = changelog
+      .split("\n")
+      .find((line) => line.startsWith(heading));
+    expect(headingLine, `missing "${heading}" changelog heading`).toBeTruthy();
+    expect(headingLine?.slice(heading.length)).toMatch(
+      /^(?:Unreleased candidate|\d{4}-\d{2}-\d{2})$/,
     );
     expect(changelog).toContain(`v${FACTS.version} source candidate`);
     expect(changelog).not.toContain(`compare/v${FACTS.version}...HEAD`);

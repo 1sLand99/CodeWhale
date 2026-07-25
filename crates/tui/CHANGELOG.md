@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.2] - Unreleased candidate
 
+The Codewhale v0.9.2 source candidate is a correctness release. It closes a
+cluster of defects found by a read-through audit of the policy engine, the
+MCP proxy, the session index, and the app-server bridge — several of them
+cases where the wrong outcome was reached silently, behind a response or a
+log line that looked fine. Nothing here changes a public interface; every
+entry below makes an existing one behave the way it already claimed to.
+
 ### Fixed
 
 - Deny rules in `permissions.toml` no longer miss a command because of an
