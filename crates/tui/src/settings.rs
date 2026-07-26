@@ -327,7 +327,8 @@ pub struct Settings {
     /// This affects inline presentation only; exact evidence remains available
     /// through the tool-details route in every mode.
     pub inline_diffs: String,
-    /// UI locale: auto, en, ja, zh-Hans, pt-BR, es-419
+    /// UI locale: auto, en, ja, zh-Hans, zh-Hant, pt-BR, es-419, vi, ko.
+    /// zh-Hant is a partial pack; missing strings fall back to English.
     pub locale: String,
     /// Named UI theme. Accepts `"system"` (follow terminal background),
     /// `"dark"`, `"light"`, `"grayscale"`, or one of the community
@@ -1429,7 +1430,7 @@ impl Settings {
             ),
             (
                 "locale",
-                "UI locale and default model language: auto, en, ja, zh-Hans, pt-BR, es-419",
+                "UI locale and default model language: auto, en, ja, zh-Hans, zh-Hant, pt-BR, es-419, vi, ko; zh-Hant is partial and missing strings fall back to English",
             ),
             (
                 "theme",
@@ -2306,8 +2307,20 @@ mod tests {
     #[test]
     fn locale_normalizes_supported_values_and_rejects_unknowns() {
         let mut settings = Settings::default();
-        settings.set("locale", "ja_JP.UTF-8").expect("set ja");
-        assert_eq!(settings.locale, "ja");
+        for (input, expected) in [
+            ("ja_JP.UTF-8", "ja"),
+            ("zh-CN", "zh-Hans"),
+            ("zh-TW", "zh-Hant"),
+            ("zh-Hant", "zh-Hant"),
+            ("es-MX", "es-419"),
+            ("vi_VN.UTF-8", "vi"),
+            ("ko-KR", "ko"),
+        ] {
+            settings
+                .set("locale", input)
+                .unwrap_or_else(|err| panic!("set locale {input}: {err}"));
+            assert_eq!(settings.locale, expected);
+        }
 
         settings.set("language", "pt-PT").expect("set pt fallback");
         assert_eq!(settings.locale, "pt-BR");

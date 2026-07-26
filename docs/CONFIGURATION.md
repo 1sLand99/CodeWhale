@@ -1188,13 +1188,15 @@ Common settings keys:
   the exact applied change in the selected File receipt's Alt/Option+V detail.
   Failure and cancellation never render a successful diff. Save the choice
   with `/config inline_diffs <mode> --save`.
-- `locale` (`auto`, `en`, `ja`, `zh-Hans`, `pt-BR`; default `auto`): UI chrome
-  locale. `auto` checks `LC_ALL`, `LC_MESSAGES`, then `LANG`; unsupported or
-  missing locales fall back to English. The runtime also exposes the resolved
-  locale in the system prompt as the fallback natural language for V4 reasoning
-  and replies when the latest user message is ambiguous. Clear user language
-  still takes priority; Chinese turns should produce Chinese `reasoning_content`
-  and Chinese final replies even when the resolved locale is English.
+- `locale` (`auto`, `en`, `ja`, `zh-Hans`, `zh-Hant`, `pt-BR`, `es-419`, `vi`,
+  `ko`; default `auto`): UI chrome locale. `auto` checks `LC_ALL`,
+  `LC_MESSAGES`, then `LANG`; unsupported locale selections resolve to English.
+  `zh-Hant` is a shipped partial pack, so strings it does not yet provide fall
+  back to English. The runtime also exposes the resolved locale in the system
+  prompt as the fallback natural language for V4 reasoning and replies when the
+  latest user message is ambiguous. Clear user language still takes priority;
+  Chinese turns should produce Chinese `reasoning_content` and Chinese final
+  replies even when the resolved locale is English.
 - `background_color` (`#RRGGBB`, `RRGGBB`, or `default`): optional main TUI
   background color applied to the root, header, transcript, and footer
   surfaces while preserving panel contrast.

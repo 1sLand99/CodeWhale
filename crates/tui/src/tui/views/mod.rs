@@ -13,7 +13,9 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::config::{ApiProvider, ApprovalPolicyControl, Config};
 use crate::features::{FEATURES, Stage};
-use crate::localization::{Locale, MessageId, tr};
+use crate::localization::{
+    Locale, MessageId, configured_locale_is_partial_pack, normalize_configured_locale, tr,
+};
 use crate::palette;
 use crate::settings::Settings;
 use crate::tools::UserInputResponse;
@@ -2470,9 +2472,12 @@ impl ConfigView {
         if let Some(runtime_value) = runtime_value
             && row.value.parse::<bool>().ok() != Some(runtime_value)
         {
-            let saved =
-                config_choice_label(&row.key, &canonical_config_choice(&row.key, &row.value));
-            let effective = config_choice_label(&row.key, &runtime_value.to_string());
+            let saved = config_choice_label(
+                self.locale,
+                &row.key,
+                &canonical_config_choice(&row.key, &row.value),
+            );
+            let effective = config_choice_label(self.locale, &row.key, &runtime_value.to_string());
             return format!(
                 "{}{}",
                 saved,
@@ -2498,7 +2503,7 @@ impl ConfigView {
                 return "Provider default".to_string();
             }
             let canonical = canonical_config_choice(&row.key, &row.value);
-            return config_choice_label(&row.key, &canonical);
+            return config_choice_label(self.locale, &row.key, &canonical);
         }
 
         row.value.clone()
@@ -2946,12 +2951,15 @@ fn canonical_config_choice(key: &str, value: &str) -> String {
             // startup workspace; permission posture is shown separately.
             _ => "agent".to_string(),
         },
+        "locale" => normalize_configured_locale(value)
+            .unwrap_or(value)
+            .to_string(),
         _ => normalized,
     }
 }
 
-fn config_choice_label(key: &str, value: &str) -> String {
-    match (key, value) {
+fn config_choice_label(locale: Locale, key: &str, value: &str) -> String {
+    let label = match (key, value) {
         (key, "true") if config_boolean_key(key) => "On".to_string(),
         (key, "false") if config_boolean_key(key) => "Off".to_string(),
         ("approval_mode" | "permission_posture" | "approval_policy", "ask") => "Ask".to_string(),
@@ -2978,11 +2986,24 @@ fn config_choice_label(key: &str, value: &str) -> String {
         ("sidebar_focus", "tasks") => "Activity".to_string(),
         ("sidebar_focus", "agents") => "Workers".to_string(),
         _ => value.to_string(),
+    };
+
+    if key == "locale" && configured_locale_is_partial_pack(value) {
+        format!(
+            "{label} ({})",
+            tr(locale, MessageId::ConfigLocalePartialBadge)
+        )
+    } else {
+        label
     }
 }
 
-fn config_choice_detail(key: &str, value: &str) -> &'static str {
-    match (key, value) {
+fn config_choice_detail(locale: Locale, key: &str, value: &str) -> Cow<'static, str> {
+    if key == "locale" && configured_locale_is_partial_pack(value) {
+        return tr(locale, MessageId::ConfigLocalePartialDetail);
+    }
+
+    Cow::Borrowed(match (key, value) {
         ("approval_mode" | "permission_posture" | "approval_policy", "ask") => {
             "Ask before tools that can make consequential changes."
         }
@@ -3018,7 +3039,7 @@ fn config_choice_detail(key: &str, value: &str) -> &'static str {
         ("ocean_treatment", "ombre") => "Use one continuous ocean color field.",
         ("ocean_treatment", "flat") => "Use a single flat background color.",
         _ => "",
-    }
+    })
 }
 
 fn render_config_editor_value_line(
@@ -3342,8 +3363,8 @@ impl ModalView for ConfigView {
                 // only the slice that is actually visible.
                 let selected_detail = choices
                     .get(edit.selected_choice)
-                    .map(|choice| config_choice_detail(&edit.key, choice))
-                    .unwrap_or("");
+                    .map(|choice| config_choice_detail(self.locale, &edit.key, choice))
+                    .unwrap_or_default();
                 let available_rows =
                     usize::from(inner.height).saturating_sub(reserved_footer_lines + lines.len());
                 // At the minimum supported height, the choices themselves are
@@ -3363,7 +3384,7 @@ impl ModalView for ConfigView {
                 for (choice_idx, choice) in choices.iter().enumerate().take(end).skip(start) {
                     let selected = choice_idx == edit.selected_choice;
                     let marker = if selected { "›" } else { " " };
-                    let label = config_choice_label(&edit.key, choice);
+                    let label = config_choice_label(self.locale, &edit.key, choice);
                     let line_y = inner.y.saturating_add(lines.len() as u16);
                     hitboxes.push((line_y, choice_idx));
                     let mut line = Line::from(format!(
@@ -3388,7 +3409,7 @@ impl ModalView for ConfigView {
                 {
                     lines.push(Line::from(Span::styled(
                         crate::tui::ui_text::semantic_truncate(
-                            selected_detail,
+                            selected_detail.as_ref(),
                             usize::from(inner.width),
                         ),
                         Style::default().fg(palette::TEXT_MUTED),
@@ -4262,9 +4283,9 @@ mod tests {
         ActionHint, ConfigListItem, ConfigScope, ConfigTab, ConfigView, EmptyState, HelpView,
         ListDetailLayout, ModalKind, ModalView, SettingKind, SettingsRegistry, ViewAction,
         ViewEvent, ViewStack, action_footer_lines, canonical_config_choice, centered_modal_area,
-        config_choice_values, config_label_for_key, config_label_for_key_for_locale,
-        render_modal_footer_with_gutter, render_underwater_surface, subagent_view_agents,
-        truncate_view_text,
+        config_choice_detail, config_choice_label, config_choice_values, config_label_for_key,
+        config_label_for_key_for_locale, render_modal_footer_with_gutter,
+        render_underwater_surface, subagent_view_agents, truncate_view_text,
     };
     use crate::config::Config;
     use crate::localization::{Locale, MessageId, tr};
@@ -5746,6 +5767,94 @@ base_url = "https://api.xiaomimimo.com/v1"
             }
             other => panic!("expected startup choice update, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn locale_choices_cover_shipped_registry_and_mark_partial_packs() {
+        let choices = config_choice_values("locale", crate::config::ApiProvider::Deepseek)
+            .expect("locale choices");
+        let expected = std::iter::once("auto".to_string())
+            .chain(
+                Locale::shipped()
+                    .iter()
+                    .map(|locale| locale.tag().to_string()),
+            )
+            .collect::<Vec<_>>();
+        assert_eq!(
+            choices, expected,
+            "native locale choices must match Locale::shipped()"
+        );
+
+        let partial_badge = tr(Locale::En, MessageId::ConfigLocalePartialBadge);
+        let partial_detail = tr(Locale::En, MessageId::ConfigLocalePartialDetail);
+        for locale in Locale::shipped() {
+            let canonical = canonical_config_choice("locale", locale.tag());
+            assert_eq!(canonical, locale.tag());
+
+            let label = config_choice_label(Locale::En, "locale", &canonical);
+            assert_eq!(
+                label.contains(partial_badge.as_ref()),
+                locale.is_partial_pack(),
+                "{} partial-pack badge drifted",
+                locale.tag()
+            );
+
+            let detail = config_choice_detail(Locale::En, "locale", &canonical);
+            assert_eq!(
+                !detail.is_empty(),
+                locale.is_partial_pack(),
+                "{} partial-pack detail drifted",
+                locale.tag()
+            );
+            if locale.is_partial_pack() {
+                assert_eq!(detail, partial_detail);
+            }
+        }
+    }
+
+    #[test]
+    fn locale_choice_editor_submits_newly_admitted_locales() {
+        for tag in ["ko", "vi", "zh-Hant"] {
+            let mut view = create_config_view(Locale::En);
+            view.focus_key("locale");
+            view.start_edit();
+            let edit = view.editing.as_mut().expect("locale choice editor");
+            edit.selected_choice = edit
+                .choices
+                .as_ref()
+                .and_then(|choices| choices.iter().position(|choice| choice == tag))
+                .unwrap_or_else(|| panic!("locale choices must include {tag}"));
+
+            match view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+                ViewAction::Emit(ViewEvent::ConfigUpdated { key, value, .. }) => {
+                    assert_eq!(key, "locale");
+                    assert_eq!(value, tag);
+                }
+                other => panic!("selecting locale {tag} must submit ConfigUpdated, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn partial_locale_badge_survives_minimum_terminal_layout() {
+        let mut view = create_config_view(Locale::En);
+        view.focus_key("locale");
+        view.start_edit();
+        let edit = view.editing.as_mut().expect("locale choice editor");
+        edit.selected_choice = edit
+            .choices
+            .as_ref()
+            .and_then(|choices| choices.iter().position(|choice| choice == "zh-Hant"))
+            .expect("zh-Hant choice");
+
+        let area = Rect::new(0, 0, 40, 12);
+        let mut buf = Buffer::empty(area);
+        view.render(area, &mut buf);
+        let dump = buffer_text(&buf, area);
+        assert!(
+            dump.contains("zh-Hant (partial)"),
+            "partial-pack badge must remain visible when detail is shed: {dump:?}"
+        );
     }
 
     #[test]

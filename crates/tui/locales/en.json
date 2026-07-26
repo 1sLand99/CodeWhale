@@ -87,6 +87,8 @@
     "ConfigEditHintLabel": "Hint: ",
     "ConfigEditNewLabel": "New: ",
     "ConfigEditFooter": " Enter=apply, Esc=cancel, Ctrl+U=clear, Ctrl+A=all, ←,/→,=move ",
+    "ConfigLocalePartialBadge": "partial",
+    "ConfigLocalePartialDetail": "Partial translation pack; missing strings fall back to English.",
     "ConfigRowEffective": " (effective {currency})",
     "ConfigDefaultValue": "(default)",
     "ConfigDefaultReasoning": "(config/default)",

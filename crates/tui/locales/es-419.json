@@ -87,6 +87,8 @@
     "ConfigEditHintLabel": "Pista: ",
     "ConfigEditNewLabel": "Nuevo: ",
     "ConfigEditFooter": " Enter=aplicar, Esc=cancelar, Ctrl+U=limpiar, Ctrl+A=todo, ←,/→,=mover ",
+    "ConfigLocalePartialBadge": "parcial",
+    "ConfigLocalePartialDetail": "Paquete de traducción parcial; los textos sin traducir se muestran en inglés.",
     "ConfigRowEffective": " (efectivo {currency})",
     "ConfigDefaultValue": "(predeterminado)",
     "ConfigDefaultReasoning": "(config/predeterminado)",

@@ -38,16 +38,16 @@ only at exact raw key parity with it, enforced by
 `crates/tui/src/localization.rs`. See `crates/tui/locales/AGENTS.md` for the
 authoring contract.
 
-| Locale | File | Keys vs `en.json` (1128) | Status | Notes |
+| Locale | File | Keys vs `en.json` (1131) | Status | Notes |
 |--------|------|--------------------------|--------|-------|
-| English | `en.json` | 1128/1128 | **shipped** | Reference pack. |
-| Japanese | `ja.json` | 1128/1128 | **shipped** | Complete. |
-| Simplified Chinese | `zh-Hans.json` | 1128/1128 | **shipped** | Complete. |
-| Traditional Chinese | `zh-Hant.json` | 478/1128 | **partial** | Setup core only; missing keys fall back to English at runtime. Deliberate scope per #4057. |
-| Brazilian Portuguese | `pt-BR.json` | 1128/1128 | **shipped** | Complete. |
-| Latin American Spanish | `es-419.json` | 1128/1128 | **shipped** | Complete. Note the website tracks `es` as deferred — the shipped TUI pack is Latin American Spanish, not `es-ES`. |
-| Vietnamese | `vi.json` | 1128/1128 | **shipped** | Complete. |
-| Korean | `ko.json` | 1128/1128 | **shipped** | Complete. |
+| English | `en.json` | 1131/1131 | **shipped** | Reference pack. |
+| Japanese | `ja.json` | 1131/1131 | **shipped** | Complete. |
+| Simplified Chinese | `zh-Hans.json` | 1131/1131 | **shipped** | Complete. |
+| Traditional Chinese | `zh-Hant.json` | 478/1131 | **partial** | Setup core only; missing keys fall back to English at runtime. Deliberate scope per #4057. |
+| Brazilian Portuguese | `pt-BR.json` | 1131/1131 | **shipped** | Complete. |
+| Latin American Spanish | `es-419.json` | 1131/1131 | **shipped** | Complete. Note the website tracks `es` as deferred — the shipped TUI pack is Latin American Spanish, not `es-ES`. |
+| Vietnamese | `vi.json` | 1131/1131 | **shipped** | Complete. |
+| Korean | `ko.json` | 1131/1131 | **shipped** | Complete. |
 
 ## Website locales
 
@@ -100,10 +100,13 @@ carry an explicit `planned`/`partial`/`deferred` row in this matrix.
    `parse_locale`/`shipped`/`shipped_complete` arms in
    `crates/tui/src/localization.rs`, and the `include_str!` arm in the
    test module.
-3. Wire the pickers and displays that enumerate locales: onboarding
-   language picker (`crates/tui/src/tui/onboarding/language.rs` — a test
-   forces every shipped locale to be offered), setup-wizard match arms,
-   and the locale display arms in the `/config` and changelog commands.
+3. Wire the typed settings schema (`UiLocale` in
+   `crates/tui/src/config_ui.rs`) plus the pickers and displays that enumerate
+   locales: onboarding language picker
+   (`crates/tui/src/tui/onboarding/language.rs` — a test forces every shipped
+   locale to be offered), setup-wizard match arms, and the locale display arms
+   in the `/config` and changelog commands. Keep the schema/round-trip invariant
+   tied to `Locale::shipped()` so these surfaces cannot silently drift.
 4. Run `python3 scripts/check-tui-locale-parity.py` and
    `cargo test -p codewhale-tui localization`.
 5. If the pack must ship incomplete, declare it partial (see `zh-Hant` /

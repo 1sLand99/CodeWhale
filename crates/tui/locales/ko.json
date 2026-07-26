@@ -87,6 +87,8 @@
     "ConfigEditHintLabel": "힌트: ",
     "ConfigEditNewLabel": "새 값: ",
     "ConfigEditFooter": " Enter=적용, Esc=취소, Ctrl+U=지우기, Ctrl+A=전체, ←,/→,=이동 ",
+    "ConfigLocalePartialBadge": "부분 번역",
+    "ConfigLocalePartialDetail": "일부만 번역된 언어 팩입니다. 누락된 문자열은 영어로 대체됩니다.",
     "ConfigRowEffective": " (적용 통화 {currency})",
     "ConfigDefaultValue": "(기본값)",
     "ConfigDefaultReasoning": "(설정/기본값)",
