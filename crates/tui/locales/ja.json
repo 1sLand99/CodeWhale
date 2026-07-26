@@ -87,6 +87,8 @@
     "ConfigEditHintLabel": "ヒント: ",
     "ConfigEditNewLabel": "新規: ",
     "ConfigEditFooter": " Enter=適用, Esc=キャンセル, Ctrl+U=クリア, Ctrl+A=全選択, ←,/→,=移動 ",
+    "ConfigLocalePartialBadge": "一部翻訳",
+    "ConfigLocalePartialDetail": "一部のみ翻訳された言語パックです。未翻訳の文字列は英語にフォールバックします。",
     "ConfigRowEffective": " (実効 {currency})",
     "ConfigDefaultValue": "(デフォルト)",
     "ConfigDefaultReasoning": "(設定/デフォルト)",

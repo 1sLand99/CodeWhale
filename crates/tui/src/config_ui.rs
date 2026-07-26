@@ -71,6 +71,10 @@ pub struct SettingsSection {
     pub show_thinking: bool,
     pub show_tool_details: bool,
     pub inline_diffs: InlineDiffValue,
+    #[schemars(
+        title = "UI locale",
+        description = "Locale used by the TUI. zh-Hant is a partial pack; missing strings fall back to English."
+    )]
     pub locale: UiLocale,
     pub theme: UiThemeValue,
     #[schemars(
@@ -201,12 +205,21 @@ pub enum UiLocale {
     #[serde(rename = "zh-Hans")]
     #[schemars(rename = "zh-Hans")]
     ZhHans,
+    #[serde(rename = "zh-Hant")]
+    #[schemars(rename = "zh-Hant")]
+    ZhHant,
     #[serde(rename = "pt-BR")]
     #[schemars(rename = "pt-BR")]
     PtBr,
     #[serde(rename = "es-419")]
     #[schemars(rename = "es-419")]
     Es419,
+    #[serde(rename = "vi")]
+    #[schemars(rename = "vi")]
+    Vi,
+    #[serde(rename = "ko")]
+    #[schemars(rename = "ko")]
+    Ko,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -916,8 +929,11 @@ impl UiLocale {
             Self::En => "en",
             Self::Ja => "ja",
             Self::ZhHans => "zh-Hans",
+            Self::ZhHant => "zh-Hant",
             Self::PtBr => "pt-BR",
             Self::Es419 => "es-419",
+            Self::Vi => "vi",
+            Self::Ko => "ko",
         }
     }
 
@@ -927,8 +943,11 @@ impl UiLocale {
             Some("en") => Ok(Self::En),
             Some("ja") => Ok(Self::Ja),
             Some("zh-Hans") => Ok(Self::ZhHans),
+            Some("zh-Hant") => Ok(Self::ZhHant),
             Some("pt-BR") => Ok(Self::PtBr),
             Some("es-419") => Ok(Self::Es419),
+            Some("vi") => Ok(Self::Vi),
+            Some("ko") => Ok(Self::Ko),
             Some(other) => bail!("unsupported locale '{other}'"),
             None => bail!("invalid locale '{value}'"),
         }
@@ -1490,6 +1509,35 @@ background_color = "#1A1B26"
     }
 
     #[test]
+    fn build_document_accepts_every_shipped_locale_from_settings() {
+        let _lock = lock_test_env();
+        let temp_root = tempfile::tempdir().expect("isolated Codewhale home");
+        let codewhale_home = temp_root.path().join(".codewhale");
+        fs::create_dir_all(&codewhale_home).expect("settings dir");
+        let settings_path = codewhale_home.join("settings.toml");
+        fs::write(&settings_path, "").expect("seed settings");
+        let _home = EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+
+        let app = app();
+        let config = Config::default();
+        for tag in std::iter::once("auto").chain(
+            crate::localization::Locale::shipped()
+                .iter()
+                .map(|locale| locale.tag()),
+        ) {
+            fs::write(&settings_path, format!("locale = \"{tag}\"\n"))
+                .unwrap_or_else(|err| panic!("persist locale {tag}: {err}"));
+            let doc = build_document(&app, &config)
+                .unwrap_or_else(|err| panic!("build config document for {tag}: {err}"));
+            assert_eq!(
+                doc.settings.locale.as_setting(),
+                tag,
+                "typed config document must preserve persisted locale {tag}"
+            );
+        }
+    }
+
+    #[test]
     fn custom_theme_round_trips_through_typed_config_document() {
         let _lock = lock_test_env();
         let temp_root = tempfile::tempdir().expect("isolated Codewhale home");
@@ -1540,6 +1588,15 @@ background_color = "#1A1B26"
                 .as_str()
                 .is_some_and(|copy| copy.contains("Blue Stage"))
         );
+        assert!(
+            schema["$defs"]["SettingsSection"]["properties"]["locale"]["description"]
+                .as_str()
+                .is_some_and(|copy| {
+                    copy.contains("zh-Hant")
+                        && copy.contains("partial")
+                        && copy.contains("fall back to English")
+                })
+        );
         let approval_mode = &schema["$defs"]["ApprovalModeValue"]["enum"];
         assert_eq!(
             approval_mode,
@@ -1571,9 +1628,17 @@ background_color = "#1A1B26"
         let inline_diffs = &schema["$defs"]["InlineDiffValue"]["enum"];
         assert_eq!(inline_diffs, &serde_json::json!(["full", "summary", "off"]));
         let locale = &schema["$defs"]["UiLocale"]["enum"];
+        let expected_locales = std::iter::once("auto")
+            .chain(
+                crate::localization::Locale::shipped()
+                    .iter()
+                    .map(|locale| locale.tag()),
+            )
+            .collect::<Vec<_>>();
         assert_eq!(
             locale,
-            &serde_json::json!(["auto", "en", "ja", "zh-Hans", "pt-BR", "es-419"])
+            &serde_json::json!(expected_locales),
+            "UiLocale schema must match Locale::shipped()"
         );
         let theme = &schema["$defs"]["UiThemeValue"]["enum"];
         assert_eq!(
@@ -1592,6 +1657,28 @@ background_color = "#1A1B26"
                 "custom"
             ])
         );
+    }
+
+    #[test]
+    fn ui_locale_round_trips_every_shipped_locale() {
+        for locale in crate::localization::Locale::shipped() {
+            let tag = locale.tag();
+            let ui_locale = UiLocale::from_setting(tag)
+                .unwrap_or_else(|err| panic!("UiLocale must accept shipped locale {tag}: {err}"));
+            assert_eq!(
+                ui_locale.as_setting(),
+                tag,
+                "UiLocale must preserve shipped locale {tag}"
+            );
+            let serialized = serde_json::to_value(ui_locale)
+                .unwrap_or_else(|err| panic!("serialize UiLocale {tag}: {err}"));
+            assert_eq!(serialized, serde_json::json!(tag));
+            assert_eq!(
+                serde_json::from_value::<UiLocale>(serialized)
+                    .unwrap_or_else(|err| panic!("deserialize UiLocale {tag}: {err}")),
+                ui_locale
+            );
+        }
     }
 
     #[test]

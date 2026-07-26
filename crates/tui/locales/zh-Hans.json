@@ -87,6 +87,8 @@
     "ConfigEditHintLabel": "提示: ",
     "ConfigEditNewLabel": "新值: ",
     "ConfigEditFooter": " Enter=应用, Esc=取消, Ctrl+U=清除, Ctrl+A=全选, ←/→=移动 ",
+    "ConfigLocalePartialBadge": "部分翻译",
+    "ConfigLocalePartialDetail": "此语言包仅有部分翻译；未翻译的文本将使用英文版本。",
     "ConfigRowEffective": " (实际 {currency})",
     "ConfigDefaultValue": "(默认)",
     "ConfigDefaultReasoning": "(配置/默认)",

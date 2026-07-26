@@ -87,6 +87,8 @@
     "ConfigEditHintLabel": "Dica: ",
     "ConfigEditNewLabel": "Novo: ",
     "ConfigEditFooter": " Enter=aplicar, Esc=cancelar, Ctrl+U=limpar, Ctrl+A=tudo, ←,/→,=mover ",
+    "ConfigLocalePartialBadge": "parcial",
+    "ConfigLocalePartialDetail": "Pacote de tradução parcial; textos sem tradução são exibidos em inglês.",
     "ConfigRowEffective": " (efetivo {currency})",
     "ConfigDefaultValue": "(padrão)",
     "ConfigDefaultReasoning": "(config/padrão)",

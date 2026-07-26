@@ -45,7 +45,6 @@ impl Locale {
     }
 
     /// Every locale the TUI exposes in pickers and runtime resolution.
-    #[allow(dead_code)]
     pub fn shipped() -> &'static [Self] {
         &[
             Self::En,
@@ -62,7 +61,6 @@ impl Locale {
     /// Complete UI packs held to `en.json` parity. `zh-Hant` is intentionally
     /// excluded — it remains selectable but falls back to English for missing
     /// keys until the pack catches up (#4057).
-    #[allow(dead_code)]
     pub fn shipped_complete() -> &'static [Self] {
         &[
             Self::En,
@@ -76,7 +74,6 @@ impl Locale {
     }
 
     #[must_use]
-    #[allow(dead_code)]
     pub fn is_partial_pack(self) -> bool {
         matches!(self, Self::ZhHant)
     }
@@ -179,6 +176,8 @@ pub enum MessageId {
     ConfigEditHintLabel,
     ConfigEditNewLabel,
     ConfigEditFooter,
+    ConfigLocalePartialBadge,
+    ConfigLocalePartialDetail,
     ConfigRowEffective,
     ConfigDefaultValue,
     ConfigDefaultReasoning,
@@ -1366,6 +1365,8 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::ConfigEditHintLabel,
     MessageId::ConfigEditNewLabel,
     MessageId::ConfigEditFooter,
+    MessageId::ConfigLocalePartialBadge,
+    MessageId::ConfigLocalePartialDetail,
     MessageId::ConfigRowEffective,
     MessageId::ConfigDefaultValue,
     MessageId::ConfigDefaultReasoning,
@@ -2482,6 +2483,21 @@ pub fn normalize_configured_locale(input: &str) -> Option<&'static str> {
     parse_locale(&normalized).map(Locale::tag)
 }
 
+/// Whether a configured locale selects a shipped pack that intentionally
+/// relies on English fallback for missing messages.
+#[must_use]
+pub fn configured_locale_is_partial_pack(input: &str) -> bool {
+    let normalized = normalize_locale_input(input);
+    if matches!(normalized.as_str(), "" | "auto" | "system") {
+        return false;
+    }
+    parse_locale(&normalized).is_some_and(|locale| {
+        Locale::shipped().contains(&locale)
+            && locale.is_partial_pack()
+            && !Locale::shipped_complete().contains(&locale)
+    })
+}
+
 /// Human-facing list of accepted `locale` setting values, derived from the
 /// shipped packs so config hints and error messages cannot go stale as new
 /// locales land. `separator` is `", "` for prose and `" | "` for hints.
@@ -2613,6 +2629,31 @@ mod tests {
         assert_eq!(normalize_configured_locale("pt-PT"), Some("pt-BR"));
         assert_eq!(normalize_configured_locale("es"), Some("es-419"));
         assert_eq!(normalize_configured_locale("es-MX"), Some("es-419"));
+    }
+
+    #[test]
+    fn partial_pack_status_tracks_the_shipped_locale_registry() {
+        assert!(!configured_locale_is_partial_pack("auto"));
+        assert!(!configured_locale_is_partial_pack("system"));
+        assert!(configured_locale_is_partial_pack("zh-Hant"));
+        assert!(configured_locale_is_partial_pack("zh_TW.UTF-8"));
+        assert!(!configured_locale_is_partial_pack("vi"));
+        assert!(!configured_locale_is_partial_pack("ko"));
+
+        for locale in Locale::shipped() {
+            assert_eq!(
+                configured_locale_is_partial_pack(locale.tag()),
+                locale.is_partial_pack(),
+                "{} partial-pack classification drifted",
+                locale.tag()
+            );
+            assert_ne!(
+                Locale::shipped_complete().contains(locale),
+                locale.is_partial_pack(),
+                "{} must be exactly one of complete or partial",
+                locale.tag()
+            );
+        }
     }
 
     #[test]

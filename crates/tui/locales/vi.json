@@ -87,6 +87,8 @@
     "ConfigEditHintLabel": "Gợi ý: ",
     "ConfigEditNewLabel": "Mới: ",
     "ConfigEditFooter": " Enter=áp dụng, Esc=hủy, Ctrl+U=xóa, Ctrl+A=tất cả, ←/→=di chuyển ",
+    "ConfigLocalePartialBadge": "dịch một phần",
+    "ConfigLocalePartialDetail": "Gói ngôn ngữ chỉ được dịch một phần; các chuỗi còn thiếu sẽ dùng tiếng Anh.",
     "ConfigRowEffective": " (hiệu lực {currency})",
     "ConfigDefaultValue": "(mặc định)",
     "ConfigDefaultReasoning": "(cấu hình/mặc định)",
