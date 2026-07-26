@@ -21,6 +21,42 @@ fn env_lock() -> &'static Mutex<()> {
 
 const BACKGROUND_COMPLETION_WAIT_MS: u64 = 30_000;
 
+#[test]
+fn deleted_saved_workspace_reports_path_and_recovery_before_spawn() {
+    let workspace = tempdir().expect("workspace");
+    let stale = workspace.path().join("deleted-session-workspace");
+    let mut manager = ShellManager::new(stale.clone());
+
+    let error = manager
+        .execute("echo should-not-run", None, 1_000, false)
+        .expect_err("missing saved workspace must fail before shell spawn");
+    let message = error.to_string();
+    assert!(message.contains("saved session workspace is unavailable"));
+    assert!(message.contains(&stale.display().to_string()));
+    assert!(message.contains("working_dir") || message.contains("cwd"));
+    assert!(message.contains("resume/fork"));
+}
+
+#[test]
+fn explicit_missing_working_dir_is_not_misreported_as_session_corruption() {
+    let workspace = tempdir().expect("workspace");
+    let missing = workspace.path().join("explicit-missing");
+    let mut manager = ShellManager::new(workspace.path().to_path_buf());
+
+    let error = manager
+        .execute(
+            "echo should-not-run",
+            missing.to_str(),
+            1_000,
+            false,
+        )
+        .expect_err("missing explicit cwd must fail before shell spawn");
+    let message = error.to_string();
+    assert!(message.contains("requested working directory is unavailable"));
+    assert!(message.contains(&missing.display().to_string()));
+    assert!(!message.contains("saved session workspace"));
+}
+
 #[cfg(not(target_env = "ohos"))]
 #[test]
 fn pty_exit_status_preserves_high_windows_code_losslessly() {
