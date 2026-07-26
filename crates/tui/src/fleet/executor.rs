@@ -696,6 +696,7 @@ impl FleetExecutor {
         };
         let terminal = match status.state {
             super::host::FleetHostWorkerState::Running
+            | super::host::FleetHostWorkerState::Draining
             | super::host::FleetHostWorkerState::Unknown => return None,
             super::host::FleetHostWorkerState::Stopped => {
                 classify_worker_exit(status.exit_code, true)

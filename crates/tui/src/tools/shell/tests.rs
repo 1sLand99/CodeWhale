@@ -194,6 +194,58 @@ fn failed_network_shell_result(stdout: &str, stderr: &str) -> ShellResult {
     }
 }
 
+#[cfg(unix)]
+const SHELL_DESCENDANT_HELPER_ENV: &str = "CODEWHALE_SHELL_DESCENDANT_HELPER";
+#[cfg(unix)]
+const SHELL_DESCENDANT_PID_FILE_ENV: &str = "CODEWHALE_SHELL_DESCENDANT_PID_FILE";
+
+#[cfg(unix)]
+#[test]
+fn shell_descendant_helper_process() {
+    if std::env::var(SHELL_DESCENDANT_HELPER_ENV).ok().as_deref() != Some("1") {
+        return;
+    }
+    let pid_file = PathBuf::from(
+        std::env::var(SHELL_DESCENDANT_PID_FILE_ENV).expect("descendant pid file"),
+    );
+    let child = Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn cheap descendant");
+    std::fs::write(pid_file, child.id().to_string()).expect("write descendant pid");
+    std::thread::sleep(Duration::from_secs(30));
+}
+
+#[cfg(unix)]
+fn wait_for_shell_pid_file(path: &Path) -> libc::pid_t {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(raw) = std::fs::read_to_string(path)
+            && let Ok(pid) = raw.trim().parse()
+        {
+            return pid;
+        }
+        assert!(Instant::now() < deadline, "descendant pid file never appeared");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_shell_pid_exit(pid: libc::pid_t) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if unsafe { libc::kill(pid, 0) } != 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn wait_for_completed_shell(manager: &mut ShellManager, task_id: &str) -> ShellResult {
     let deadline = Instant::now() + Duration::from_millis(BACKGROUND_COMPLETION_WAIT_MS);
 
@@ -1471,6 +1523,44 @@ async fn test_completed_background_shell_releases_process_handles() {
     assert!(shell.child.is_none());
     assert!(shell.stdout_thread.is_none());
     assert!(shell.stderr_thread.is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn exec_shell_cancel_kills_descendant_process_group() {
+    let tmp = tempdir().expect("tempdir");
+    let pid_file = tmp.path().join("descendant.pid");
+    let test_binary = std::env::current_exe().expect("current test binary");
+    let command = format!(
+        "{} --exact {} --nocapture",
+        shell_words::quote(&test_binary.display().to_string()),
+        shell_words::quote("tools::shell::tests::shell_descendant_helper_process"),
+    );
+    let ctx = ToolContext::new(tmp.path());
+    let mut env = std::collections::HashMap::new();
+    env.insert(SHELL_DESCENDANT_HELPER_ENV.to_string(), "1".to_string());
+    env.insert(
+        SHELL_DESCENDANT_PID_FILE_ENV.to_string(),
+        pid_file.display().to_string(),
+    );
+    let started = ctx
+        .shell_manager
+        .lock()
+        .expect("shell manager")
+        .execute_with_options_env(&command, None, 60_000, true, None, false, None, env)
+        .expect("start descendant tree");
+    let task_id = started.task_id.expect("task id");
+    let descendant = wait_for_shell_pid_file(&pid_file);
+
+    let result = BashTool::alias("exec_shell_cancel", "cancel")
+        .execute(json!({"task_id": task_id}), &ctx)
+        .await
+        .expect("cancel process group");
+    assert!(result.success);
+    assert!(
+        wait_for_shell_pid_exit(descendant),
+        "descendant {descendant} survived shell process-group cancellation"
+    );
 }
 
 #[tokio::test]

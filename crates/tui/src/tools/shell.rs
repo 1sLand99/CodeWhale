@@ -41,6 +41,9 @@ mod output;
 
 use super::shell_output::{summarize_output, truncate_with_meta};
 use crate::child_env;
+use crate::tools::resource_admission::{
+    CommandExpense, HeavyCommandPermit, acquire_heavy_command_permit, infer_command_expense,
+};
 use crate::sandbox::{
     CommandSpec,
     ExecEnv,
@@ -582,6 +585,7 @@ pub struct BackgroundShell {
     pub owner_agent: Option<ShellJobOwner>,
     stdout_buffer: Arc<Mutex<Vec<u8>>>,
     stderr_buffer: Option<Arc<Mutex<Vec<u8>>>>,
+    heavy_permit: Option<HeavyCommandPermit>,
     stdout_cursor: usize,
     stderr_cursor: usize,
     completion_reported: bool,
@@ -710,12 +714,14 @@ impl BackgroundShell {
                     } else {
                         ShellStatus::Failed
                     };
+                    self.heavy_permit.take();
                     self.collect_output();
                     true
                 }
                 Ok(None) => false, // Still running
                 Err(_) => {
                     self.status = ShellStatus::Failed;
+                    self.heavy_permit.take();
                     self.collect_output();
                     true
                 }
@@ -911,6 +917,7 @@ impl BackgroundShell {
             }
         }
         self.status = ShellStatus::Killed;
+        self.heavy_permit.take();
         self.collect_output();
         self.publish_lifecycle_best_effort();
         Ok(())
@@ -1312,6 +1319,7 @@ impl ShellManager {
                 command,
                 &work_dir,
                 &exec_env,
+                None,
                 stdin_data,
                 tty,
                 ShellSpawnContext {
@@ -1675,6 +1683,7 @@ impl ShellManager {
         original_command: &str,
         working_dir: &std::path::Path,
         exec_env: &ExecEnv,
+        heavy_permit: Option<HeavyCommandPermit>,
         stdin_data: Option<&str>,
         tty: bool,
         spawn_context: ShellSpawnContext,
@@ -1840,6 +1849,7 @@ impl ShellManager {
             owner_agent,
             stdout_buffer,
             stderr_buffer,
+            heavy_permit,
             stdout_cursor: 0,
             stderr_cursor: 0,
             completion_reported: false,
@@ -2005,6 +2015,19 @@ impl ShellManager {
             stdout_total_len: stdout_total,
             stderr_total_len: stderr_total,
         })
+    }
+
+    fn attach_heavy_permit(
+        &mut self,
+        task_id: &str,
+        permit: HeavyCommandPermit,
+    ) -> Result<()> {
+        let shell = self
+            .processes
+            .get_mut(task_id)
+            .ok_or_else(|| anyhow!("Task {task_id} not found"))?;
+        shell.heavy_permit = Some(permit);
+        Ok(())
     }
 
     /// Kill a running background process
@@ -2493,6 +2516,7 @@ fn exec_shell_input_starts_detached(input: &serde_json::Value) -> bool {
 async fn execute_foreground_via_background(
     context: &ToolContext,
     command: &str,
+    heavy_permit: Option<HeavyCommandPermit>,
     working_dir: Option<String>,
     timeout_ms: u64,
     stdin_data: Option<&str>,
@@ -2523,6 +2547,13 @@ async fn execute_foreground_via_background(
     let task_id = spawned
         .task_id
         .ok_or_else(|| anyhow!("foreground shell did not return a process id"))?;
+    if let Some(permit) = heavy_permit {
+        let mut manager = context
+            .shell_manager
+            .lock()
+            .map_err(|_| anyhow!("shell manager lock poisoned"))?;
+        manager.attach_heavy_permit(&task_id, permit)?;
+    }
 
     if stdin_data.is_some() {
         let mut manager = context
@@ -2851,6 +2882,15 @@ impl ToolSpec for BashTool {
             std::collections::HashMap::new()
         };
 
+        let command_expense = infer_command_expense(command);
+        let heavy_permit = acquire_heavy_command_permit(command, context.cancel_token.as_ref())
+            .await
+            .map_err(|error| ToolError::execution_failed(error.to_string()))?;
+        let admission_wait_ms = heavy_permit
+            .as_ref()
+            .map(|permit| u64::try_from(permit.queued_for().as_millis()).unwrap_or(u64::MAX));
+        let admission_limit = heavy_permit.as_ref().map(HeavyCommandPermit::limit);
+
         // Route through external sandbox backend when configured.
         if let Some(backend) = &context.sandbox_backend {
             if interactive {
@@ -2946,6 +2986,12 @@ impl ToolSpec for BashTool {
                 "interactive": false,
                 "canceled": false,
                 "sandbox_backend": "opensandbox",
+                "expense_class": match command_expense {
+                    CommandExpense::Heavy => "heavy",
+                    CommandExpense::Normal => "normal",
+                },
+                "resource_admission_wait_ms": admission_wait_ms,
+                "resource_admission_limit": admission_limit,
             });
             attach_shell_owner_metadata(&mut metadata, context);
             attach_cargo_failure_summary(&mut metadata, command, &result);
@@ -2999,7 +3045,7 @@ impl ToolSpec for BashTool {
                 .shell_manager
                 .lock()
                 .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
-            manager.execute_with_options_env_for_owner_and_work(
+            let result = manager.execute_with_options_env_for_owner_and_work(
                 command,
                 working_dir.as_deref(),
                 timeout_ms,
@@ -3010,11 +3056,20 @@ impl ToolSpec for BashTool {
                 extra_env,
                 shell_job_owner_from_context(context),
                 shell_work_lifecycle_from_context(context),
-            )
+            );
+            if let (Ok(result), Some(permit)) = (&result, heavy_permit)
+                && let Some(task_id) = result.task_id.as_deref()
+            {
+                manager
+                    .attach_heavy_permit(task_id, permit)
+                    .map_err(|error| ToolError::execution_failed(error.to_string()))?;
+            }
+            result
         } else {
             execute_foreground_via_background(
                 context,
                 command,
+                heavy_permit,
                 working_dir,
                 timeout_ms,
                 stdin_data.as_deref(),
@@ -3122,6 +3177,12 @@ impl ToolSpec for BashTool {
                     "stdout_omitted": result.stdout_omitted,
                     "stderr_omitted": result.stderr_omitted,
                     "lifecycle_warning": lifecycle_warning,
+                    "expense_class": match command_expense {
+                        CommandExpense::Heavy => "heavy",
+                        CommandExpense::Normal => "normal",
+                    },
+                    "resource_admission_wait_ms": admission_wait_ms,
+                    "resource_admission_limit": admission_limit,
                     "summary": summary,
                     "stdout_summary": stdout_summary,
                     "stderr_summary": stderr_summary,
