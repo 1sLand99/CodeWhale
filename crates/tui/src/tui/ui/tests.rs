@@ -7339,31 +7339,46 @@ fn hotbar_alt_digit_requires_plain_alt_one_through_eight() {
     let mut app = create_test_app();
     app.onboarding = OnboardingState::None;
 
-    assert_eq!(
-        hotbar_slot_from_key(
-            &app,
-            &KeyEvent::new(
-                KeyCode::Char('4'),
-                KeyModifiers::ALT | KeyModifiers::CONTROL
-            )
-        ),
-        None
-    );
-    assert_eq!(
-        hotbar_slot_from_key(
-            &app,
-            &KeyEvent::new(KeyCode::Char('4'), KeyModifiers::ALT | KeyModifiers::SUPER)
-        ),
-        None
-    );
-    assert_eq!(
-        hotbar_slot_from_key(&app, &KeyEvent::new(KeyCode::Char('0'), KeyModifiers::ALT)),
-        None
-    );
-    assert_eq!(
-        hotbar_slot_from_key(&app, &KeyEvent::new(KeyCode::Char('9'), KeyModifiers::ALT)),
-        None
-    );
+    for slot in 1..=8 {
+        let digit = char::from_digit(slot.into(), 10).expect("Hotbar slot digit");
+        assert_eq!(
+            hotbar_slot_from_key(
+                &app,
+                &KeyEvent::new(KeyCode::Char(digit), KeyModifiers::ALT)
+            ),
+            Some(slot),
+            "plain Alt-{slot} must dispatch the corresponding Hotbar slot"
+        );
+        for modifiers in [
+            KeyModifiers::NONE,
+            KeyModifiers::CONTROL,
+            KeyModifiers::SUPER,
+            KeyModifiers::ALT | KeyModifiers::CONTROL,
+            KeyModifiers::ALT | KeyModifiers::SUPER,
+        ] {
+            assert_eq!(
+                hotbar_slot_from_key(
+                    &app,
+                    &KeyEvent::new(KeyCode::Char(digit), modifiers)
+                ),
+                None,
+                "modifiers {modifiers:?} must not impersonate Alt-{slot}"
+            );
+        }
+    }
+
+    for key in [
+        KeyCode::Char('0'),
+        KeyCode::Char('9'),
+        KeyCode::F(1),
+        KeyCode::F(4),
+    ] {
+        assert_eq!(
+            hotbar_slot_from_key(&app, &KeyEvent::new(key, KeyModifiers::ALT)),
+            None,
+            "out-of-contract key {key:?} must not dispatch a Hotbar slot"
+        );
+    }
 }
 
 #[test]

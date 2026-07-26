@@ -49,6 +49,42 @@ coverage.
 | Unknown action | Unknown configured action is visible and does not dispatch. | `crates/tui/src/tui/sidebar.rs::hotbar_panel_slots_handle_empty_partial_and_unknown_config`; `crates/tui/src/tui/ui.rs::dispatch_hotbar_slot` |
 | Approval-gated/deferred source | Source is explicitly deferred and must not register bindable actions before gates exist. | `crates/tui/src/tui/hotbar/actions.rs::source_descriptors_cover_dispatch_boundaries`; `crates/tui/src/tui/hotbar/actions.rs::deferred_sources_cannot_register_dispatchable_actions` |
 
+## Terminal chord evidence for v0.9.2 (#3758)
+
+Codewhale receives terminal key events; it cannot force a terminal to forward the
+macOS Option key as Meta. The source-level contract below is release-gated on
+every platform. Terminal/device observations stay separate so an unrun terminal
+is never presented as green.
+
+### Automated event matrix
+
+| Input/state | Required result | Regression evidence |
+| --- | --- | --- |
+| `Alt-1` through `Alt-8` | Dispatch the corresponding slot | `hotbar_alt_digit_fires_from_composer_and_sidebar_states` |
+| Bare `1` through `8` | Insert/retain ordinary composer input | `hotbar_bare_digit_inserts_text_even_when_composer_empty` |
+| `Ctrl-number`, `Super/Cmd-number`, `Alt-0`, `Alt-9`, and F-keys | Never dispatch a Hotbar slot; `F1` remains help | `hotbar_slot_from_key_accepts_only_alt_one_through_eight` and global keybinding tests |
+| AltGr-style `Ctrl+Alt+number` | Never dispatch, preserving non-US input ownership | `hotbar_slot_from_key_accepts_only_alt_one_through_eight` |
+| Modal, onboarding, slash/history selector, approval, picker, or decision card | Owning surface blocks Hotbar dispatch | `hotbar_digits_are_blocked_while_modal_or_onboarding_is_active`, `hotbar_alt_digit_is_blocked_while_inline_selectors_are_open`, `hotbar_alt_digit_is_blocked_while_decision_card_is_active` |
+| Default-hidden/disabled Hotbar | No visible accelerator surface and no slot dispatch | config/sidebar hidden-state tests listed above |
+
+### Manual terminal matrix
+
+Record the exact app/version and the terminal key setting when a device pass is
+run. A blank or `UNRUN` row is not release evidence.
+
+| OS | Terminal | Meta/Option setting | Alt/Option-1..8 | Bare/Cmd/F1 | Modal/default-hidden | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| macOS | Terminal.app | UNRUN | UNRUN | UNRUN | UNRUN | Some Option settings emit characters rather than Meta. |
+| macOS | iTerm2 | UNRUN | UNRUN | UNRUN | UNRUN | Record the Left/Right Option key mapping. |
+| macOS | Ghostty | UNRUN | UNRUN | UNRUN | UNRUN | Record `macos-option-as-alt` or equivalent. |
+| macOS | Kitty | UNRUN | UNRUN | UNRUN | UNRUN | Record any `macos_option_as_alt` setting. |
+| Linux | terminal + layout | UNRUN | UNRUN | UNRUN | UNRUN | Include an AltGr/non-US layout pass. |
+| Windows | Windows Terminal | UNRUN | UNRUN | UNRUN | UNRUN | Include the host shell and keyboard layout. |
+
+A terminal-specific caveat belongs in `docs/KEYBINDINGS.md` and `/hotbar help`
+only after it is reproduced. The product must not advertise Cmd-number or
+function-key aliases merely because a terminal can remap them.
+
 ## Release Smoke Checklist
 
 Run before claiming Hotbar MVP readiness:
