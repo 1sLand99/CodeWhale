@@ -120,6 +120,7 @@
     "ConfigLabelFancyAnimations": "Chuyển động giao diện trực tiếp",
     "ConfigLabelLaunchScreen": "Màn hình khởi động",
     "ConfigLabelShowThinking": "Hiển thị suy luận trong trò chuyện",
+    "ConfigLabelThinkingHighlight": "Tô nền phần suy luận",
     "ConfigLabelShowToolDetails": "Mức chi tiết công cụ",
     "ConfigLabelInlineDiffs": "Thay đổi tệp nội dòng",
     "ConfigLabelStatusIndicator": "Chỉ báo trạng thái",

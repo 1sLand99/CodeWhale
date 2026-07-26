@@ -120,6 +120,7 @@
     "ConfigLabelFancyAnimations": "Live UI motion",
     "ConfigLabelLaunchScreen": "Launch screen",
     "ConfigLabelShowThinking": "Model reasoning in chat",
+    "ConfigLabelThinkingHighlight": "Reasoning background highlight",
     "ConfigLabelShowToolDetails": "Tool detail level",
     "ConfigLabelInlineDiffs": "Inline file changes",
     "ConfigLabelStatusIndicator": "Status indicator",

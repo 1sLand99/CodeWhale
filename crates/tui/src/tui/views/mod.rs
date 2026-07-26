@@ -1615,6 +1615,13 @@ impl ConfigView {
             },
             ConfigRow {
                 section: ConfigSection::Display,
+                key: "thinking_highlight".to_string(),
+                value: settings.thinking_highlight.to_string(),
+                editable: true,
+                scope: ConfigScope::Saved,
+            },
+            ConfigRow {
+                section: ConfigSection::Display,
                 key: "show_tool_details".to_string(),
                 value: settings.show_tool_details.to_string(),
                 editable: true,
@@ -2682,6 +2689,7 @@ fn config_label_message(key: &str) -> Option<MessageId> {
         "fancy_animations" => MessageId::ConfigLabelFancyAnimations,
         "launch_screen" => MessageId::ConfigLabelLaunchScreen,
         "show_thinking" => MessageId::ConfigLabelShowThinking,
+        "thinking_highlight" => MessageId::ConfigLabelThinkingHighlight,
         "show_tool_details" => MessageId::ConfigLabelShowToolDetails,
         "inline_diffs" => MessageId::ConfigLabelInlineDiffs,
         "status_indicator" => MessageId::ConfigLabelStatusIndicator,
@@ -2806,6 +2814,9 @@ fn config_hint_for_key(key: &str) -> &'static str {
         "fancy_animations" => "on animates truthful tool, status, and ocean live state",
         "ocean_treatment" => "ombre | flat (appearance; independent of motion)",
         "show_thinking" => "show or hide model reasoning in chat; task lists stay concise",
+        "thinking_highlight" => {
+            "fill the model reasoning background; the dashed rail remains visible when off"
+        }
         "synchronized_output" => "auto | on | off; terminal redraw pacing, not model speed",
         "default_mode" => "agent | plan",
         "sidebar_width" => "10..=50",
@@ -2853,6 +2864,7 @@ fn config_boolean_key(key: &str) -> bool {
             | "fancy_animations"
             | "launch_screen"
             | "show_thinking"
+            | "thinking_highlight"
             | "show_tool_details"
             | "composer_border"
             | "bracketed_paste"
@@ -3044,6 +3056,10 @@ fn config_choice_detail(locale: Locale, key: &str, value: &str) -> Cow<'static, 
         ("show_thinking", "true") => "Show model reasoning blocks in the transcript.",
         ("show_thinking", "false") => {
             "Keep model reasoning hidden; answers and tools remain visible."
+        }
+        ("thinking_highlight", "true") => "Fill the model reasoning background.",
+        ("thinking_highlight", "false") => {
+            "Keep the dashed reasoning rail and italic text without a filled background."
         }
         ("ocean_treatment", "ombre") => "Use one continuous ocean color field.",
         ("ocean_treatment", "flat") => "Use a single flat background color.",
@@ -5474,7 +5490,10 @@ base_url = "https://api.xiaomimimo.com/v1"
         let mut view = ConfigView::new_for_app(&app);
 
         type_filter(&mut view, "thinking");
-        assert_eq!(visible_row_keys(&view), vec!["show_thinking"]);
+        assert_eq!(
+            visible_row_keys(&view),
+            vec!["show_thinking", "thinking_highlight"]
+        );
 
         view.clear_filter();
         view.rows[0].value = "CAFÉ".to_string();
@@ -5501,6 +5520,11 @@ base_url = "https://api.xiaomimimo.com/v1"
     #[test]
     fn config_view_renders_friendly_setting_labels() {
         let mut view = create_config_view(Locale::En);
+        assert_ne!(
+            config_label_for_key("show_thinking"),
+            config_label_for_key("thinking_highlight"),
+            "reasoning visibility and background controls need distinct labels"
+        );
         let area = Rect::new(0, 0, 100, 40);
         let mut buf = Buffer::empty(area);
 

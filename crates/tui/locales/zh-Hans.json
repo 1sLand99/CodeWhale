@@ -120,6 +120,7 @@
     "ConfigLabelFancyAnimations": "实时界面动态",
     "ConfigLabelLaunchScreen": "启动画面",
     "ConfigLabelShowThinking": "对话中显示模型推理",
+    "ConfigLabelThinkingHighlight": "推理背景高亮",
     "ConfigLabelShowToolDetails": "工具详情级别",
     "ConfigLabelInlineDiffs": "内联文件更改",
     "ConfigLabelStatusIndicator": "状态指示器",
