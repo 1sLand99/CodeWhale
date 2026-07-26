@@ -2204,10 +2204,19 @@ pub struct SubAgentRuntime {
     /// child registries. Keeps parent and sub-agent `speech` / `tts` tools on
     /// the same `[speech].output_dir` / env override.
     pub speech_output_dir: Option<PathBuf>,
-    /// Shared todo list — the parent's `SharedTodoList`, cloned into each
-    /// child so sub-agent `checklist_update` calls are visible in the
-    /// Work sidebar live. Without this, each child gets a fresh isolated
-    /// list and the parent never sees child progress until completion.
+    /// This runtime's **own** todo list. It is never shared with a parent or a
+    /// sibling: `child_runtime()` allocates a fresh `SharedTodoList` for every
+    /// spawned agent (#4810). Sharing the parent's `Arc` here let a child's
+    /// `work_update` / `todo_write` replace the parent's Work checklist
+    /// wholesale — a data-integrity bug, because the tools *replace* the list
+    /// rather than merge into it, and because `WorkRuntime::matches_todos`
+    /// routes any write on the parent `Arc` straight into the parent's work
+    /// graph.
+    ///
+    /// Parent progress reaches a child as **immutable context only**, via the
+    /// `fork_context` structured-state block (see `StructuredState::capture`),
+    /// never as writable state. Child progress reaches the parent through the
+    /// completion payload and delegate card, not by mutating the parent list.
     pub todos: SharedTodoList,
     /// Session mode of the orchestrating parent at spawn time (Wave 7 M4/M5).
     pub parent_mode: AppMode,
@@ -2277,9 +2286,10 @@ impl SubAgentRuntime {
         self
     }
 
-    /// Attach the parent's shared todo list so sub-agent `checklist_update`
-    /// calls are visible in the Work sidebar live. Without this, children
-    /// get a fresh isolated list.
+    /// Bind the todo list this runtime writes to. The engine passes its own
+    /// session list here so the *root* runtime and the turn tool registry
+    /// agree on one list; spawned agents never inherit it, because
+    /// `child_runtime()` allocates a fresh list per agent (#4810).
     #[must_use]
     pub fn with_todos(mut self, todos: SharedTodoList) -> Self {
         self.todos = todos;
@@ -2517,7 +2527,14 @@ impl SubAgentRuntime {
             step_api_timeout: self.step_api_timeout,
             tool_timeout: self.tool_timeout,
             speech_output_dir: self.speech_output_dir.clone(),
-            todos: self.todos.clone(),
+            // #4810: every spawned agent owns its todo list. Cloning the
+            // parent `Arc` here made child `work_update` / `todo_write` replace
+            // the parent's Work checklist (and, through
+            // `WorkRuntime::matches_todos`, the parent's work graph), so a
+            // worker could silently erase the supervisor's plan and its
+            // siblings' progress. Parent todo state is still visible to an
+            // opt-in forked child as immutable `fork_context` text.
+            todos: crate::tools::todo::new_shared_todo_list(),
             parent_mode: self.parent_mode,
         }
     }
@@ -8563,9 +8580,10 @@ async fn run_subagent(
             .unwrap_or(agent_type.as_str())
             .to_string(),
         allowed_tools.clone(),
-        // Share the parent's todo list so child checklist updates are visible
-        // in the Work sidebar live. Previously each child got a fresh isolated
-        // TodoList — parent never saw child progress until completion.
+        // This agent's own list, allocated by `child_runtime()` (#4810). It is
+        // writable by this agent alone: neither the parent nor a sibling holds
+        // this `Arc`, so `work_update` here cannot reach the parent's Work
+        // checklist or work graph.
         runtime.todos.clone(),
         Arc::new(Mutex::new(PlanState::default())),
     );

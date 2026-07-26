@@ -7058,6 +7058,223 @@ fn child_runtime_increments_depth_and_preserves_auto_approve() {
     );
 }
 
+// === #4810: per-agent todo isolation ===
+//
+// A spawned agent's `work_update` / `todo_write` *replaces* the list it is
+// bound to. While `child_runtime()` cloned the parent's `Arc<Mutex<TodoList>>`,
+// any child write wiped the parent's Work checklist (and, because
+// `WorkRuntime::matches_todos` keys on `Arc::ptr_eq`, drove the parent's work
+// graph). These tests pin the invariant: every spawned agent owns its list,
+// and no agent can reach a parent's or a sibling's.
+
+/// Run `work_update` against `todos` with `runtime`'s own tool context, the
+/// way a live agent's registry would.
+async fn write_todos_as(runtime: &SubAgentRuntime, contents: &[&str]) {
+    let items: Vec<serde_json::Value> = contents
+        .iter()
+        .map(|content| json!({"content": content, "status": "pending"}))
+        .collect();
+    crate::tools::todo::TodoWriteTool::work_update(runtime.todos.clone())
+        .execute(json!({"todos": items}), &runtime.context)
+        .await
+        .expect("work_update must succeed against the agent's own list");
+}
+
+async fn todo_contents(todos: &crate::tools::todo::SharedTodoList) -> Vec<String> {
+    todos
+        .lock()
+        .await
+        .snapshot()
+        .items
+        .into_iter()
+        .map(|item| item.content)
+        .collect()
+}
+
+#[test]
+fn child_and_nested_runtimes_get_their_own_todo_list() {
+    let parent = stub_runtime();
+    let direct = parent.child_runtime();
+    let nested = direct.child_runtime();
+    let sibling = parent.child_runtime();
+    let background = parent.background_runtime();
+
+    for (label, child) in [
+        ("direct child", &direct),
+        ("nested child", &nested),
+        ("sibling child", &sibling),
+        ("background child", &background),
+    ] {
+        assert!(
+            !Arc::ptr_eq(&parent.todos, &child.todos),
+            "{label} must not share the parent's todo list"
+        );
+    }
+    assert!(
+        !Arc::ptr_eq(&direct.todos, &nested.todos),
+        "a nested child must not share its orchestrating parent's todo list"
+    );
+    assert!(
+        !Arc::ptr_eq(&direct.todos, &sibling.todos),
+        "siblings must not share a todo list"
+    );
+    assert!(
+        !Arc::ptr_eq(&direct.todos, &background.todos),
+        "a detached background child must not share a sibling's todo list"
+    );
+}
+
+#[tokio::test]
+async fn direct_child_todo_write_cannot_mutate_parent_checklist() {
+    let parent = stub_runtime();
+    write_todos_as(&parent, &["parent step one", "parent step two"]).await;
+
+    let child = parent.child_runtime();
+    assert!(
+        todo_contents(&child.todos).await.is_empty(),
+        "a fresh child starts with an empty list, not a writable copy of the parent's"
+    );
+
+    write_todos_as(&child, &["child step"]).await;
+
+    assert_eq!(
+        todo_contents(&parent.todos).await,
+        vec!["parent step one".to_string(), "parent step two".to_string()],
+        "child work_update must not replace the parent's Work checklist"
+    );
+    assert_eq!(
+        todo_contents(&child.todos).await,
+        vec!["child step".to_string()],
+        "the child must still be able to write and read its own list"
+    );
+}
+
+#[tokio::test]
+async fn nested_child_todo_write_cannot_mutate_parent_or_grandparent() {
+    let root = stub_runtime();
+    write_todos_as(&root, &["root item"]).await;
+
+    let direct = root.child_runtime();
+    write_todos_as(&direct, &["direct item"]).await;
+
+    let nested = direct.child_runtime();
+    write_todos_as(&nested, &["nested item"]).await;
+
+    assert_eq!(todo_contents(&root.todos).await, vec!["root item"]);
+    assert_eq!(todo_contents(&direct.todos).await, vec!["direct item"]);
+    assert_eq!(todo_contents(&nested.todos).await, vec!["nested item"]);
+}
+
+#[tokio::test]
+async fn sibling_children_cannot_mutate_each_others_todo_lists() {
+    let parent = stub_runtime();
+    let first = parent.background_runtime();
+    let second = parent.background_runtime();
+
+    write_todos_as(&first, &["first worker item"]).await;
+    write_todos_as(&second, &["second worker item"]).await;
+
+    assert_eq!(todo_contents(&first.todos).await, vec!["first worker item"]);
+    assert_eq!(
+        todo_contents(&second.todos).await,
+        vec!["second worker item"]
+    );
+    assert!(
+        todo_contents(&parent.todos).await.is_empty(),
+        "neither sibling may write into the parent's list"
+    );
+}
+
+/// The parent's list is the one bound to the work graph. A child must not be
+/// able to reach that graph — `matches_todos` is what routes a write there.
+#[tokio::test]
+async fn child_todo_write_cannot_reach_the_parent_work_graph() {
+    let todos = crate::tools::todo::new_shared_todo_list();
+    let plan = crate::tools::plan::new_shared_plan_state();
+    let work = crate::work_graph::new_shared_work_runtime(todos.clone(), plan);
+
+    let mut parent = stub_runtime();
+    parent.todos = todos.clone();
+    parent.context.state_namespace = "todo-isolation".to_string();
+    parent.context.runtime.work = Some(work.clone());
+
+    write_todos_as(&parent, &["graph-owned parent item"]).await;
+    let parent_graph_items: Vec<String> = work
+        .current_todos()
+        .await
+        .expect("parent todos from the work graph")
+        .items
+        .into_iter()
+        .map(|item| item.content)
+        .collect();
+    assert_eq!(parent_graph_items, vec!["graph-owned parent item"]);
+
+    let child = parent.child_runtime();
+    assert!(
+        !work.matches_todos(&child.todos),
+        "a child's list must not be the graph-bound list"
+    );
+    // The child still carries the parent's work runtime in its context; the
+    // Arc identity check is the only thing keeping its writes out of the graph.
+    assert!(child.context.runtime.work.is_some());
+
+    write_todos_as(&child, &["child scratch item"]).await;
+
+    let after: Vec<String> = work
+        .current_todos()
+        .await
+        .expect("parent todos from the work graph")
+        .items
+        .into_iter()
+        .map(|item| item.content)
+        .collect();
+    assert_eq!(
+        after,
+        vec!["graph-owned parent item"],
+        "child work_update must not mutate the parent's work graph"
+    );
+    assert_eq!(
+        todo_contents(&child.todos).await,
+        vec!["child scratch item"],
+        "the child's own list still accepts writes"
+    );
+}
+
+/// Isolating the list must not cut children off from *seeing* parent progress.
+/// The sanctioned channel is the fork-context structured-state block, which is
+/// immutable text — it still propagates through the whole spawn chain.
+#[tokio::test]
+async fn parent_todo_state_still_reaches_children_as_immutable_fork_context() {
+    let mut parent = stub_runtime();
+    write_todos_as(&parent, &["parent step one"]).await;
+    parent.fork_context = Some(SubAgentForkContext {
+        messages: Vec::new(),
+        structured_state_block: Some(
+            "## Fork State\n\n### Work\n\nTo-do (0% settled)\n- [ ] #1 parent step one\n"
+                .to_string(),
+        ),
+    });
+
+    let direct = parent.child_runtime();
+    let nested = direct.child_runtime();
+
+    for (label, child) in [("direct child", &direct), ("nested child", &nested)] {
+        let block = child
+            .fork_context
+            .as_ref()
+            .and_then(|context| context.structured_state_block.as_ref())
+            .unwrap_or_else(|| panic!("{label} must keep the fork-context state block"));
+        assert!(
+            block.contains("#1 parent step one"),
+            "{label} must still read the parent checklist as text"
+        );
+        assert!(
+            todo_contents(&child.todos).await.is_empty(),
+            "{label} must receive that state as context only, never as writable list state"
+        );
+    }
+}
+
 #[test]
 fn child_and_background_runtimes_preserve_step_api_timeout() {
     let timeout = Duration::from_secs(7);

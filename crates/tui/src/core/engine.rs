@@ -1916,8 +1916,12 @@ impl Engine {
                         .with_step_api_timeout(self.config.subagent_api_timeout)
                         .with_speech_output_dir(self.config.speech_output_dir.clone())
                         .with_mcp_pool(mcp_pool)
-                        .with_todos(self.config.todos.clone())
                         .with_parent_mode(self.current_mode)
+                        // #4810: no `with_todos` here — this runtime *is* the
+                        // spawned background agent, and `background_runtime()`
+                        // gives it its own list. Binding the session list would
+                        // be discarded anyway, and reading as if the background
+                        // agent writes the user's Work checklist.
                         .background_runtime();
                         // #4042: thread the session's --disallowed-tools into
                         // the child so tool restrictions flow down to sub-agents.
