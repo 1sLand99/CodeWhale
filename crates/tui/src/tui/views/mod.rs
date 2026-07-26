@@ -723,10 +723,14 @@ pub enum ViewEvent {
     ModelPickerRefresh,
     ModelPickerTogglePin {
         provider: crate::config::ApiProvider,
+        /// Exact named route for `Custom`; built-in providers leave this unset.
+        provider_id: Option<String>,
         model: String,
     },
     ModelPickerMovePin {
         provider: crate::config::ApiProvider,
+        /// Exact named route for `Custom`; built-in providers leave this unset.
+        provider_id: Option<String>,
         model: String,
         delta: isize,
     },

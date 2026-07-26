@@ -13798,12 +13798,12 @@ async fn handle_view_events(
                 }
                 app.needs_redraw = true;
             }
-            ViewEvent::ModelPickerTogglePin { provider, model } => {
-                let provider_key = if provider == crate::config::ApiProvider::Custom {
-                    app.provider_identity_for_persistence().to_string()
-                } else {
-                    provider.as_str().to_string()
-                };
+            ViewEvent::ModelPickerTogglePin {
+                provider,
+                provider_id,
+                model,
+            } => {
+                let provider_key = provider_id.unwrap_or_else(|| provider.as_str().to_string());
                 match crate::settings::Settings::load_persisted().and_then(|mut settings| {
                     let pinned = settings.toggle_pinned_model(&provider_key, &model);
                     settings.save()?;
@@ -13833,14 +13833,11 @@ async fn handle_view_events(
             }
             ViewEvent::ModelPickerMovePin {
                 provider,
+                provider_id,
                 model,
                 delta,
             } => {
-                let provider_key = if provider == crate::config::ApiProvider::Custom {
-                    app.provider_identity_for_persistence().to_string()
-                } else {
-                    provider.as_str().to_string()
-                };
+                let provider_key = provider_id.unwrap_or_else(|| provider.as_str().to_string());
                 if let Ok(mut settings) = crate::settings::Settings::load_persisted()
                     && settings.move_pinned_model(&provider_key, &model, delta)
                 {
@@ -13849,6 +13846,15 @@ async fn handle_view_events(
                     } else {
                         app.pinned_models = settings.pinned_models;
                         app.status_message = Some("Pinned model order updated".into());
+                        if let Some(mut boxed) = app.view_stack.pop() {
+                            if let Some(picker) = boxed
+                                .as_any_mut()
+                                .downcast_mut::<crate::tui::model_picker::ModelPickerView>(
+                            ) {
+                                picker.re_resolve_from_app(app, config);
+                            }
+                            app.view_stack.push_boxed(boxed);
+                        }
                     }
                 }
                 app.needs_redraw = true;
