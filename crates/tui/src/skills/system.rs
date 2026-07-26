@@ -2,6 +2,7 @@
 //! on first launch.
 
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 /// Bundled catalog generation for the default CodeWhale skill pack (#4691).
@@ -374,9 +375,19 @@ fn install_one(
 pub fn install_system_skills(skills_dir: &Path) -> std::io::Result<()> {
     let marker = skills_dir.join(".system-installed-version");
 
-    let installed_version = fs::read_to_string(&marker)
-        .ok()
-        .map(|s| s.trim().to_string());
+    // A marker can be left behind as an invalid file (or even as a directory
+    // after an interrupted/manual install). Treat it as an untrusted marker,
+    // but still repair it after reconciling the bundled skills. This keeps
+    // user-edited skill bodies intact while allowing missing skills to be
+    // restored and future upgrades to be versioned again.
+    let (installed_version, repair_marker) = match fs::read_to_string(&marker) {
+        Ok(contents) => match contents.trim().parse::<u32>() {
+            Ok(_) => (Some(contents.trim().to_string()), false),
+            Err(_) => (None, true),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (None, false),
+        Err(_) => (None, true),
+    };
 
     let mut changed = false;
     for skill in BUNDLED_SKILLS {
@@ -390,9 +401,16 @@ pub fn install_system_skills(skills_dir: &Path) -> std::io::Result<()> {
     // installed an exact shipped copy, leave it; never delete by name alone.
     let _ = feishu_body();
 
-    if changed {
+    if changed || repair_marker {
         fs::create_dir_all(skills_dir)?;
-        fs::write(&marker, BUNDLED_SKILL_VERSION)?;
+        if marker.exists() && !marker.is_file() {
+            if marker.is_dir() {
+                fs::remove_dir_all(&marker)?;
+            } else {
+                fs::remove_file(&marker)?;
+            }
+        }
+        write_marker_atomically(&marker, BUNDLED_SKILL_VERSION)?;
     }
     Ok(())
 }
@@ -412,6 +430,22 @@ fn retire_unchanged_v4_best_practices(skills_dir: &Path) -> std::io::Result<bool
     }
     fs::remove_dir_all(&dir)?;
     Ok(true)
+}
+
+fn write_marker_atomically(marker: &Path, version: &str) -> std::io::Result<()> {
+    let parent = marker
+        .parent()
+        .expect("skill version marker should have a parent directory");
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(version.as_bytes())?;
+    temporary.as_file().sync_all()?;
+    // `rename` atomically replaces a file on Unix. Windows refuses to replace
+    // an existing destination, so remove only this reserved marker first.
+    #[cfg(windows)]
+    if marker.exists() {
+        fs::remove_file(marker)?;
+    }
+    fs::rename(temporary.path(), marker)
 }
 
 /// Remove all system skills and the version marker.
@@ -492,6 +526,69 @@ mod tests {
                 skill.name
             );
         }
+    }
+
+    #[test]
+    fn corrupt_marker_is_repaired_without_overwriting_user_skill_body() {
+        let tmp = TempDir::new().unwrap();
+        install_system_skills(tmp.path()).unwrap();
+
+        let user_body = "user-edited body";
+        fs::write(skill_file(&tmp, "delegate"), user_body).unwrap();
+        fs::remove_dir_all(skill_dir(&tmp, "skill-creator")).unwrap();
+        fs::write(marker_file(&tmp), "not-a-version").unwrap();
+
+        install_system_skills(tmp.path()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(skill_file(&tmp, "delegate")).unwrap(),
+            user_body
+        );
+        assert!(skill_file(&tmp, "skill-creator").exists());
+        assert_eq!(
+            fs::read_to_string(marker_file(&tmp)).unwrap().trim(),
+            BUNDLED_SKILL_VERSION
+        );
+    }
+
+    #[test]
+    fn directory_marker_is_replaced_and_user_skills_are_preserved() {
+        let tmp = TempDir::new().unwrap();
+        install_system_skills(tmp.path()).unwrap();
+
+        let user_body = "user-edited body";
+        fs::write(skill_file(&tmp, "delegate"), user_body).unwrap();
+        fs::remove_dir_all(skill_dir(&tmp, "skill-creator")).unwrap();
+        fs::remove_file(marker_file(&tmp)).unwrap();
+        fs::create_dir(marker_file(&tmp)).unwrap();
+        fs::write(marker_file(&tmp).join("stale-entry"), "stale").unwrap();
+
+        install_system_skills(tmp.path()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(skill_file(&tmp, "delegate")).unwrap(),
+            user_body
+        );
+        assert!(skill_file(&tmp, "skill-creator").exists());
+        assert!(marker_file(&tmp).is_file());
+        assert_eq!(
+            fs::read_to_string(marker_file(&tmp)).unwrap().trim(),
+            BUNDLED_SKILL_VERSION
+        );
+    }
+
+    #[test]
+    fn invalid_marker_is_repaired_even_when_no_skill_body_changes() {
+        let tmp = TempDir::new().unwrap();
+        install_system_skills(tmp.path()).unwrap();
+        fs::write(marker_file(&tmp), "").unwrap();
+
+        install_system_skills(tmp.path()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(marker_file(&tmp)).unwrap().trim(),
+            BUNDLED_SKILL_VERSION
+        );
     }
 
     #[test]
