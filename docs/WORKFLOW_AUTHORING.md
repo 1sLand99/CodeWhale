@@ -89,6 +89,12 @@ roster profile. The name is trimmed and lowercased at compile time and must be
 a single token (no whitespace, quotes, or `=`); the saved roster is resolved at
 dispatch time, and explicit fields on the agent override profile defaults.
 
+The runtime `task()` surface also accepts `cwd` for an existing repository-
+relative working directory. This is required when a workflow is launched from
+a multi-repository workspace and the child needs shell or file access. `cwd`
+is validated by the host, does not grant mutation authority, and should be
+paired with `worktree: true` when the child needs an isolated checkout.
+
 The compiler rejects effectful constructs such as `import`, `require`, `fetch`,
 `process`, `Deno`, `Bun`, `child_process`, file reads/writes, `eval`, `async`,
 and `await`. This is intentionally stricter than JavaScript: workflow source is

@@ -50,6 +50,9 @@ pub struct TaskRequest {
     pub model_strength: Option<String>,
     /// Reasoning effort (`inherit`/`off`/`low`/`medium`/`high`/`max`).
     pub thinking: Option<String>,
+    /// Optional existing working directory, relative to the parent workspace.
+    /// The host validates that it exists and remains inside the workspace.
+    pub cwd: Option<String>,
     /// Run the child in a fresh git worktree for parallel edits.
     pub worktree: bool,
     /// Explicit child mutation authority. A write-capable value remains
@@ -262,6 +265,7 @@ mod tests {
             "model": null,
             "model_strength": null,
             "thinking": null,
+            "cwd": null,
             "worktree": false,
             "allowed_tools": null,
             "max_depth": null,

@@ -70,6 +70,7 @@ async fn task_round_trip_carries_all_options_and_normalizes_profile() {
             model: "deepseek-chat",
             modelStrength: "faster",
             thinking: "low",
+            cwd: "repo-a",
             worktree: true,
             writeAuthority: "worktree_write",
             writeRoots: ["crates/tui/src"],
@@ -101,6 +102,7 @@ async fn task_round_trip_carries_all_options_and_normalizes_profile() {
     assert_eq!(request.model.as_deref(), Some("deepseek-chat"));
     assert_eq!(request.model_strength.as_deref(), Some("faster"));
     assert_eq!(request.thinking.as_deref(), Some("low"));
+    assert_eq!(request.cwd.as_deref(), Some("repo-a"));
     assert!(request.worktree);
     assert_eq!(request.write_authority.as_deref(), Some("worktree_write"));
     assert_eq!(request.write_roots, ["crates/tui/src"]);

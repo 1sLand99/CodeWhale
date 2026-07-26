@@ -718,6 +718,7 @@ struct TaskOptions {
     model: Option<String>,
     model_strength: Option<String>,
     thinking: Option<String>,
+    cwd: Option<String>,
     #[serde(default)]
     worktree: bool,
     write_authority: Option<String>,
@@ -763,6 +764,12 @@ fn parse_task_options(opts_json: &str) -> Result<TaskRequest, String> {
         .map_err(|err| format!("task(): {err}"))?;
     options.write_roots = normalize_task_paths("writeRoots", options.write_roots, 32)?;
     options.exact_files = normalize_task_paths("exactFiles", options.exact_files, 32)?;
+    let cwd = options
+        .cwd
+        .take()
+        .map(|value| normalize_task_paths("cwd", vec![value], 1))
+        .transpose()?
+        .and_then(|mut paths| paths.pop());
     options.coordination_contracts =
         normalize_task_string_list("coordinationContracts", options.coordination_contracts, 16)?;
     options.dependencies = normalize_task_string_list("dependencies", options.dependencies, 8)?;
@@ -831,6 +838,7 @@ fn parse_task_options(opts_json: &str) -> Result<TaskRequest, String> {
         model: options.model,
         model_strength: options.model_strength,
         thinking: options.thinking,
+        cwd,
         worktree: options.worktree,
         write_authority,
         write_roots: options.write_roots,

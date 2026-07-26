@@ -59,6 +59,13 @@ silently grant mutation authority. A prompt-only general task is read-only.
 `dependencies` and `acceptance` carry bounded child-specific prerequisites and
 observable completion checks; they are not a parent-transcript copy.
 
+When a workflow runs from a workspace containing multiple repositories, a
+child that needs shell or file access must set `cwd` to the repository-relative
+directory it should use. The host validates that the directory exists inside
+the parent workspace before dispatch. Use `worktree: true` for isolated writes;
+`cwd` selects an existing checkout and does not grant write authority or
+isolation by itself.
+
 ## What you see while it runs
 
 - **Workflow panel** — phases, children, status, budget

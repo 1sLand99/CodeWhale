@@ -7324,6 +7324,9 @@ pub(crate) async fn spawn_workflow_task(
         "prompt": request.description,
         "worktree": request.worktree,
     });
+    if let Some(value) = request.cwd {
+        input["cwd"] = json!(value);
+    }
     if let Some(value) = request.write_authority {
         input["write_authority"] = json!(value);
     }
