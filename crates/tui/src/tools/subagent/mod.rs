@@ -912,6 +912,9 @@ pub struct SubAgentResult {
     pub status: SubAgentStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_status: Option<AgentWorkerStatus>,
+    /// Effective non-secret runtime posture for Fleet-backed workers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_permissions: Option<codewhale_protocol::fleet::FleetEffectivePermissions>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_run_id: Option<String>,
     #[serde(default)]
@@ -2746,6 +2749,7 @@ impl SubAgent {
             nickname: self.nickname.clone(),
             status: self.status.clone(),
             worker_status: None,
+            runtime_permissions: None,
             parent_run_id: None,
             spawn_depth: 0,
             result: self.result.clone(),
@@ -5294,6 +5298,12 @@ impl SubAgentManager {
         snap.from_prior_session = self.is_from_prior_session(agent);
         if let Some(record) = self.worker_records.get(&agent.id) {
             snap.worker_status = Some(record.status);
+            snap.runtime_permissions = Some(
+                crate::fleet::worker_runtime::fleet_effective_permissions_from_runtime_profile(
+                    &record.spec.runtime_profile,
+                    None,
+                ),
+            );
             snap.parent_run_id = record
                 .parent_run_id
                 .clone()
@@ -8627,6 +8637,7 @@ async fn run_subagent(
                 nickname: None,
                 status,
                 worker_status: None,
+                runtime_permissions: None,
                 parent_run_id: runtime.parent_agent_id.clone(),
                 spawn_depth: runtime.spawn_depth,
                 result: None,
@@ -8766,6 +8777,7 @@ async fn run_subagent(
                     nickname: None,
                     status,
                     worker_status: None,
+                    runtime_permissions: None,
                     parent_run_id: runtime.parent_agent_id.clone(),
                     spawn_depth: runtime.spawn_depth,
                     result: None,
@@ -8852,6 +8864,7 @@ async fn run_subagent(
                             nickname: None,
                             status,
                             worker_status: None,
+                            runtime_permissions: None,
                             parent_run_id: runtime.parent_agent_id.clone(),
                             spawn_depth: runtime.spawn_depth,
                             result: Some(reason),
@@ -8948,6 +8961,7 @@ async fn run_subagent(
                 nickname: None,
                 status,
                 worker_status: None,
+                runtime_permissions: None,
                 parent_run_id: runtime.parent_agent_id.clone(),
                 spawn_depth: runtime.spawn_depth,
                 result: final_result.clone(),
@@ -9304,6 +9318,7 @@ async fn run_subagent(
         nickname: None,
         status,
         worker_status: None,
+        runtime_permissions: None,
         parent_run_id: runtime.parent_agent_id.clone(),
         spawn_depth: runtime.spawn_depth,
         result: final_result,
