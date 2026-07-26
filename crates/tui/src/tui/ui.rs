@@ -2378,6 +2378,18 @@ async fn run_event_loop(
     let mut pending_subagent_list_refresh = false;
 
     loop {
+        while let Some(completion) = app.clipboard.poll_write_completion() {
+            if let Err(err) = completion {
+                tracing::warn!(error = %err, "background terminal clipboard write failed");
+                app.push_status_toast(
+                    format!("Clipboard copy failed: {err}"),
+                    StatusToastLevel::Error,
+                    None,
+                );
+                app.needs_redraw = true;
+            }
+        }
+
         // Drain dispatch completions from spawned send tasks (#4605). The
         // closure receives `&mut App` and applies success state or rollback.
         while let Ok(apply) = dispatch_completion_rx.try_recv() {
