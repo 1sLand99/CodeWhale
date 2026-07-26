@@ -8084,7 +8084,12 @@ fn mode_invariant_matrix_covers_provenance_authority_narrowing() {
             case.name
         );
         assert!(policy.allow_shell, "{}", case.name);
-        assert_eq!(policy.status.is_some(), case.expect_status, "{}", case.name);
+        assert_eq!(
+            policy.status().is_some(),
+            case.expect_status,
+            "{}",
+            case.name
+        );
     }
 }
 
@@ -9693,7 +9698,7 @@ fn provenance_gate_preserves_standing_yolo_for_runtime_and_subagent_continuation
                 crate::tui::approval::ApprovalMode::Auto,
                 "{provenance:?}"
             );
-            assert!(policy.status.is_none(), "{provenance:?}");
+            assert!(policy.status().is_none(), "{provenance:?}");
         } else {
             assert_eq!(policy.mode, AppMode::Agent, "{provenance:?}");
             assert!(policy.allow_shell, "{provenance:?}");
@@ -9705,7 +9710,7 @@ fn provenance_gate_preserves_standing_yolo_for_runtime_and_subagent_continuation
                 "{provenance:?}"
             );
             assert!(
-                policy.status.as_deref().is_some_and(
+                policy.status().as_deref().is_some_and(
                     |status| status.contains("cannot inherit standing auto-approval authority")
                 ),
                 "{provenance:?}"
@@ -9745,7 +9750,7 @@ fn provenance_gate_never_invents_auto_authority_for_non_yolo_sessions() {
             crate::tui::approval::ApprovalMode::Suggest,
             "{provenance:?}"
         );
-        assert!(policy.status.is_none(), "{provenance:?}");
+        assert!(policy.status().is_none(), "{provenance:?}");
     }
 }
 
@@ -9767,7 +9772,7 @@ fn full_access_posture_normalizes_a_stale_auto_approve_bit() {
         crate::tui::approval::ApprovalMode::Bypass
     );
     assert!(policy.auto_approve);
-    assert!(policy.status.is_none());
+    assert!(policy.status().is_none());
 }
 
 #[test]
@@ -9800,7 +9805,7 @@ fn self_generated_fake_approvals_cannot_authorize_work() {
                 "{provenance:?} {content}"
             );
             assert!(
-                policy.status.as_deref().is_some_and(
+                policy.status().as_deref().is_some_and(
                     |status| status.contains("cannot inherit standing auto-approval authority")
                 ),
                 "{provenance:?} {content}"
@@ -9852,7 +9857,7 @@ fn external_prompt_wording_never_changes_effective_mode_or_authority() {
         assert_eq!(policy.approval_mode, approval_mode, "{content}");
         assert!(policy.allow_shell, "{content}");
         assert!(policy.dynamic_active_tools.is_empty(), "{content}");
-        assert!(policy.status.is_none(), "{content}");
+        assert!(policy.status().is_none(), "{content}");
     }
 }
 
@@ -9876,7 +9881,7 @@ fn external_user_wording_does_not_downgrade_standing_authority() {
         crate::tui::approval::ApprovalMode::Bypass
     );
     assert!(
-        review_wording.status.is_none(),
+        review_wording.status().is_none(),
         "external user wording must not content-downgrade standing authority"
     );
 
@@ -9898,7 +9903,7 @@ fn external_user_wording_does_not_downgrade_standing_authority() {
         crate::tui::approval::ApprovalMode::Bypass
     );
     assert!(
-        later_user_instruction.status.is_none(),
+        later_user_instruction.status().is_none(),
         "a fresh external write instruction must not inherit the prior review-only downgrade"
     );
 }
@@ -12013,5 +12018,185 @@ async fn list_subagents_event_try_send_does_not_block_when_event_channel_full() 
     assert!(
         result.is_err(),
         "try_send should fail when event channel is full (backpressure avoided)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+//  #3947 — hidden policy overrides are observable
+// ---------------------------------------------------------------------------
+
+/// Acceptance: no effective mode change without a structured event. Every
+/// provenance that loses standing authority carries a `PolicyNarrowingEvent`,
+/// not just a sentence, and every provenance that keeps it carries none.
+#[test]
+fn every_effective_mode_change_carries_a_structured_narrowing_event() {
+    use crate::core::authority::PolicyNarrowingReason;
+
+    let narrowing_provenances = [
+        UserInputProvenance::ImportedTranscript,
+        UserInputProvenance::MemoryRecall,
+        UserInputProvenance::AssistantGenerated,
+    ];
+
+    for provenance in narrowing_provenances {
+        let policy = effective_input_policy(
+            provenance,
+            AppMode::Yolo,
+            "continue",
+            true,
+            true,
+            true,
+            crate::tui::approval::ApprovalMode::Bypass,
+        );
+        // The posture actually changed...
+        assert_eq!(policy.mode, AppMode::Agent, "{provenance:?}");
+        assert_eq!(
+            policy.approval_mode,
+            crate::tui::approval::ApprovalMode::Suggest,
+            "{provenance:?}"
+        );
+        // ...so a structured event must exist to explain it.
+        let event = policy
+            .narrowing
+            .as_ref()
+            .unwrap_or_else(|| panic!("silent narrowing for {provenance:?}"));
+        assert_eq!(
+            event.reason(),
+            PolicyNarrowingReason::NonAuthoritativeProvenance,
+            "{provenance:?}"
+        );
+        assert_eq!(event.reason().as_str(), "non_authoritative_provenance");
+        // The transition names both ends, so a reader can see what was lost.
+        // Mode deliberately reads as the permission vocabulary (`AppMode::
+        // as_setting` writes "agent" for the legacy Yolo label), so the
+        // posture is what carries the change here.
+        let transition = event.transition();
+        assert_eq!(
+            transition, "agent (Full Access) -> agent (Ask)",
+            "{provenance:?}"
+        );
+    }
+
+    // An authoritative turn narrows nothing and therefore reports nothing.
+    let unchanged = effective_input_policy(
+        UserInputProvenance::ExternalUser,
+        AppMode::Yolo,
+        "continue",
+        true,
+        true,
+        true,
+        crate::tui::approval::ApprovalMode::Bypass,
+    );
+    assert!(unchanged.narrowing.is_none());
+    assert!(unchanged.status().is_none());
+}
+
+/// Acceptance: the UI-visible status and the model-visible metadata agree.
+/// Both are rendered from the same event, so this asserts the shared string
+/// rather than two independently maintained wordings.
+#[test]
+fn ui_status_and_model_metadata_render_the_same_narrowing_sentence() {
+    let policy = effective_input_policy(
+        UserInputProvenance::AssistantGenerated,
+        AppMode::Yolo,
+        "continue",
+        true,
+        true,
+        true,
+        crate::tui::approval::ApprovalMode::Bypass,
+    );
+    let event = policy.narrowing.as_ref().expect("narrowed");
+    let ui_status = policy.status().expect("status for a narrowed turn");
+    assert_eq!(ui_status, event.message());
+    assert!(
+        ui_status.contains("assistant_generated"),
+        "the sentence must name the provenance that caused it: {ui_status}"
+    );
+    assert!(
+        ui_status.contains("continuing with approvals required"),
+        "the sentence must say what the user should now expect: {ui_status}"
+    );
+}
+
+/// Acceptance: a narrowing that does not change the effective posture is not
+/// reported. A turn that never had standing authority to lose is not a hidden
+/// override, and reporting one would train users to ignore the status.
+#[test]
+fn narrowing_is_not_reported_when_there_was_no_authority_to_lose() {
+    let policy = effective_input_policy(
+        UserInputProvenance::MemoryRecall,
+        AppMode::Agent,
+        "continue",
+        true,
+        false,
+        false,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    assert_eq!(policy.mode, AppMode::Agent);
+    assert!(policy.narrowing.is_none());
+    assert!(policy.status().is_none());
+}
+
+/// Acceptance: the narrowing reaches the model, not just the status line. A
+/// narrowed turn's `<turn_meta>` names the reason, the transition, and the
+/// exact sentence the user saw; an ordinary turn's metadata is untouched, so
+/// the common path keeps its byte-stable prefix.
+#[test]
+fn turn_metadata_carries_the_narrowing_only_on_a_narrowed_turn() {
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+
+    let clean = engine.runtime_text_message_with_turn_metadata(
+        "continue".to_string(),
+        UserInputProvenance::ExternalUser,
+    );
+    let ContentBlock::Text {
+        text: clean_text, ..
+    } = clean.content.last().expect("turn metadata block")
+    else {
+        panic!("expected text metadata block");
+    };
+    assert!(
+        !clean_text.contains("Authority narrowing"),
+        "an un-narrowed turn must not carry narrowing metadata: {clean_text}"
+    );
+
+    let policy = effective_input_policy(
+        UserInputProvenance::AssistantGenerated,
+        AppMode::Yolo,
+        "continue",
+        true,
+        true,
+        true,
+        crate::tui::approval::ApprovalMode::Bypass,
+    );
+    let event = policy.narrowing.clone().expect("narrowed");
+    engine.last_policy_narrowing = Some(event.clone());
+
+    let narrowed = engine.runtime_text_message_with_turn_metadata(
+        "continue".to_string(),
+        UserInputProvenance::AssistantGenerated,
+    );
+    let ContentBlock::Text { text, .. } = narrowed.content.last().expect("turn metadata block")
+    else {
+        panic!("expected text metadata block");
+    };
+
+    assert!(
+        text.contains("Authority narrowing: non_authoritative_provenance"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("Authority transition: {}", event.transition())),
+        "{text}"
+    );
+    // The model reads the same sentence the user read.
+    assert!(
+        text.contains(&format!("Authority narrowing status: {}", event.message())),
+        "{text}"
     );
 }
