@@ -52,6 +52,12 @@ const SUBAGENT_HANDOFF_TURN_META: &str = concat!(
     "Input authority: non_authoritative\n",
     "</turn_meta>",
 );
+const SHELL_COMPLETION_HANDOFF_TURN_META: &str = concat!(
+    "<turn_meta>\n",
+    "Input provenance: shell_completion\n",
+    "Input authority: non_authoritative\n",
+    "</turn_meta>",
+);
 const RESTORED_CHECKPOINT_TURN_META: &str = concat!(
     "<turn_meta>\n",
     "Input provenance: subagent_handoff\n",
@@ -77,14 +83,18 @@ pub(crate) fn subagent_completion_runtime_text(payload: &str) -> String {
 
 /// Build the exact live completion message persisted in a session.
 pub(crate) fn subagent_completion_runtime_message(payload: &str) -> Message {
-    runtime_handoff_message(subagent_completion_runtime_text(payload))
+    runtime_handoff_message_with_meta(
+        subagent_completion_runtime_text(payload),
+        SUBAGENT_HANDOFF_TURN_META,
+    )
 }
 
 /// Build the exact live waiting message persisted when children outlive a turn.
 pub(crate) fn waiting_for_subagents_runtime_message(running: usize) -> Message {
-    runtime_handoff_message(format!(
-        "{WAITING_EVENT_PREFIX}{running}{WAITING_EVENT_SUFFIX}"
-    ))
+    runtime_handoff_message_with_meta(
+        format!("{WAITING_EVENT_PREFIX}{running}{WAITING_EVENT_SUFFIX}"),
+        SUBAGENT_HANDOFF_TURN_META,
+    )
 }
 
 /// Build the model-visible handoff for tracked background shell completions.
@@ -112,12 +122,18 @@ pub(crate) fn shell_completion_runtime_message(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    runtime_handoff_message(format!(
-        "{SHELL_COMPLETION_EVENT_PREFIX}{payload}{SHELL_COMPLETION_EVENT_SUFFIX}"
-    ))
+    runtime_handoff_message_with_meta(
+        format!("{SHELL_COMPLETION_EVENT_PREFIX}{payload}{SHELL_COMPLETION_EVENT_SUFFIX}"),
+        SHELL_COMPLETION_HANDOFF_TURN_META,
+    )
 }
 
+#[cfg(test)]
 fn runtime_handoff_message(text: String) -> Message {
+    runtime_handoff_message_with_meta(text, SUBAGENT_HANDOFF_TURN_META)
+}
+
+fn runtime_handoff_message_with_meta(text: String, turn_meta: &str) -> Message {
     // Keep role=user for strict OpenAI-compatible chat templates which reject
     // system messages inserted after the first turn. Authority is carried by
     // the runtime-owned metadata block instead of the transport role.
@@ -129,7 +145,7 @@ fn runtime_handoff_message(text: String) -> Message {
                 cache_control: None,
             },
             ContentBlock::Text {
-                text: SUBAGENT_HANDOFF_TURN_META.to_string(),
+                text: turn_meta.to_string(),
                 cache_control: None,
             },
         ],

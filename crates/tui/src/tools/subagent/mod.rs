@@ -41,6 +41,7 @@ use crate::tools::canonical_action::{CANONICAL_ACTION_ALIASES, canonical_action_
 use crate::tools::handle::VarHandle;
 use crate::tools::plan::{PlanState, SharedPlanState};
 use crate::tools::registry::{AgentToolSurfaceOptions, ToolRegistry, ToolRegistryBuilder};
+use crate::tools::shell::SharedShellManager;
 use crate::tools::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
 };
@@ -6569,6 +6570,7 @@ impl ToolSpec for AgentTool {
                 return cancel_agent_from_input(&input, self.manager.clone(), context).await;
             }
         }
+        touch_running_shell_owners(&self.manager, &context.execution.shell_manager).await;
         let (snapshot, _) =
             spawn_subagent_from_input(input, self.manager.clone(), self.runtime.clone()).await?;
         let worker_record = {
@@ -6621,6 +6623,7 @@ async fn inspect_agent_from_input(
 
     if let Some(agent_ref) = parse_agent_ref(input) {
         let (snapshot, worker_record) = {
+            touch_running_shell_owners(&manager, &context.execution.shell_manager).await;
             let mut manager = manager.write().await;
             manager.cleanup(COMPLETED_AGENT_RETENTION);
             let snapshot = manager
@@ -6690,6 +6693,7 @@ async fn inspect_agent_from_input(
     }
 
     let snapshots = {
+        touch_running_shell_owners(&manager, &context.execution.shell_manager).await;
         let mut manager = manager.write().await;
         manager.cleanup(COMPLETED_AGENT_RETENTION);
         manager
@@ -6720,6 +6724,28 @@ async fn inspect_agent_from_input(
         "count": payload["count"],
     }));
     Ok(tool_result)
+}
+
+/// Keep a running child alive while one of its tracked background shell jobs
+/// is still active. Shell output is progress owned by the child even before
+/// the next model-visible completion event is emitted.
+async fn touch_running_shell_owners(
+    manager: &SharedSubAgentManager,
+    shell_manager: &SharedShellManager,
+) {
+    let owner_ids = {
+        let Ok(mut shell_manager) = shell_manager.lock() else {
+            return;
+        };
+        shell_manager.running_owner_agent_ids()
+    };
+    if owner_ids.is_empty() {
+        return;
+    }
+    let mut manager = manager.write().await;
+    for owner_id in owner_ids {
+        manager.touch(&owner_id);
+    }
 }
 
 async fn cancel_agent_from_input(
