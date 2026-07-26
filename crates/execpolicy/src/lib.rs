@@ -2354,6 +2354,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn exact_workspace_file_allow_preserves_posix_case_boundaries() {
         let rule = ToolAskRule::file_path("write_file", "src/Foo.rs")
             .into_exact_workspace_allow("/Workspace");
