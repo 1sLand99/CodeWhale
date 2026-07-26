@@ -741,7 +741,7 @@ model = "k3"
 
     h.wait_for_text("Moonshot/Kimi", BOOT_TIMEOUT)?;
     h.wait_for_text("api.kimi.com", BOOT_TIMEOUT)?;
-    h.wait_for_text("does not import Kimi CLI credentials", BOOT_TIMEOUT)?;
+    h.wait_for_text("missing MOONSHOT_API_KEY / KIMI_API_KEY", BOOT_TIMEOUT)?;
 
     // The picker rendered without mutating the configured route.
     assert_eq!(
