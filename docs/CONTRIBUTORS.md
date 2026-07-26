@@ -30,6 +30,11 @@ notes, and relevant issue/PR comments.
 <details open>
 <summary><strong>v0.9.1 — provider and runtime hardening</strong></summary>
 
+- **[XhesicaFrost](https://github.com/XhesicaFrost)** — the opt-in
+  `tui.header_items` session token chip (input / cache-hit / output) for the
+  shell header, its forward-compatible unknown-key deserializer, and the
+  width-priority contract that elides only the optional chip (#4520,
+  PR #4610; harvested with co-authorship)
 - **[h3c-hexin](https://github.com/h3c-hexin)** — calendar-anchored hourly
   automation recurrence across DST and lifecycle transitions (PR #4381),
   explicit limits for unknown local models (PR #4656 / #4655), and

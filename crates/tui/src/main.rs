@@ -14540,6 +14540,7 @@ mod terminal_mode_tests {
                 osc8_links: None,
                 composer_arrows_scroll: None,
                 notification_condition: None,
+                header_items: None,
             }),
             ..Config::default()
         };
@@ -14634,6 +14635,7 @@ mod terminal_mode_tests {
                 osc8_links: None,
                 composer_arrows_scroll: None,
                 notification_condition: None,
+                header_items: None,
             }),
             ..Config::default()
         };
@@ -14666,6 +14668,7 @@ mod terminal_mode_tests {
                 osc8_links: None,
                 composer_arrows_scroll: None,
                 notification_condition: None,
+                header_items: None,
             }),
             ..Config::default()
         };
@@ -14752,6 +14755,7 @@ mod terminal_mode_tests {
                 osc8_links: None,
                 composer_arrows_scroll: None,
                 notification_condition: None,
+                header_items: None,
             }),
             ..Config::default()
         };
