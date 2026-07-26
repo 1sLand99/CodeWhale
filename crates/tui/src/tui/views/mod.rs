@@ -2689,7 +2689,7 @@ fn config_label_message(key: &str) -> Option<MessageId> {
         "fancy_animations" => MessageId::ConfigLabelFancyAnimations,
         "launch_screen" => MessageId::ConfigLabelLaunchScreen,
         "show_thinking" => MessageId::ConfigLabelShowThinking,
-        "thinking_highlight" => MessageId::ConfigLabelShowThinking,
+        "thinking_highlight" => MessageId::ConfigLabelThinkingHighlight,
         "show_tool_details" => MessageId::ConfigLabelShowToolDetails,
         "inline_diffs" => MessageId::ConfigLabelInlineDiffs,
         "status_indicator" => MessageId::ConfigLabelStatusIndicator,
@@ -5520,6 +5520,11 @@ base_url = "https://api.xiaomimimo.com/v1"
     #[test]
     fn config_view_renders_friendly_setting_labels() {
         let mut view = create_config_view(Locale::En);
+        assert_ne!(
+            config_label_for_key("show_thinking"),
+            config_label_for_key("thinking_highlight"),
+            "reasoning visibility and background controls need distinct labels"
+        );
         let area = Rect::new(0, 0, 100, 40);
         let mut buf = Buffer::empty(area);
 

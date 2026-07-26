@@ -120,6 +120,7 @@
     "ConfigLabelFancyAnimations": "ライブ UI モーション",
     "ConfigLabelLaunchScreen": "起動画面",
     "ConfigLabelShowThinking": "会話にモデル推論を表示",
+    "ConfigLabelThinkingHighlight": "推論の背景ハイライト",
     "ConfigLabelShowToolDetails": "ツール詳細レベル",
     "ConfigLabelInlineDiffs": "インライン変更",
     "ConfigLabelStatusIndicator": "状態インジケータ",

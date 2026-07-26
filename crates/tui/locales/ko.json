@@ -120,6 +120,7 @@
     "ConfigLabelFancyAnimations": "실시간 UI 동작",
     "ConfigLabelLaunchScreen": "시작 화면",
     "ConfigLabelShowThinking": "채팅에 모델 추론 표시",
+    "ConfigLabelThinkingHighlight": "추론 배경 강조",
     "ConfigLabelShowToolDetails": "도구 세부 수준",
     "ConfigLabelInlineDiffs": "인라인 파일 변경",
     "ConfigLabelStatusIndicator": "상태 표시기",

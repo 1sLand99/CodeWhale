@@ -120,6 +120,7 @@
     "ConfigLabelFancyAnimations": "Movimiento de la interfaz en vivo",
     "ConfigLabelLaunchScreen": "Pantalla de inicio",
     "ConfigLabelShowThinking": "Razonamiento del modelo en el chat",
+    "ConfigLabelThinkingHighlight": "Resaltado de fondo del razonamiento",
     "ConfigLabelShowToolDetails": "Nivel de detalle de herramientas",
     "ConfigLabelInlineDiffs": "Cambios de archivo en línea",
     "ConfigLabelStatusIndicator": "Indicador de estado",
