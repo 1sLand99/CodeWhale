@@ -3406,6 +3406,34 @@ fn enter_inside_paste_burst_window_after_flush_inserts_newline_not_submit() {
     );
 }
 
+/// The absorbed Enter above must not buy the window more time. Re-arming on
+/// it meant a user pressing Enter to send kept extending suppression by
+/// another 120ms per press, so the composer only ever grew newlines and
+/// never submitted.
+#[test]
+fn enter_absorbed_after_flush_does_not_re_arm_the_suppression_window() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.use_paste_burst_detection = true;
+    app.input = "hello".to_string();
+    app.cursor_position = "hello".chars().count();
+    let now = Instant::now();
+    app.paste_burst.extend_window(now);
+
+    assert!(
+        app.handle_composer_enter().is_none(),
+        "first Enter is absorbed as the paste's possible trailing newline"
+    );
+    assert_eq!(app.input, "hello\n");
+
+    // The window must still expire relative to `now` — the moment the burst
+    // last saw real input — not relative to the Enter that was absorbed.
+    assert!(
+        !app.paste_burst
+            .newline_should_insert_instead_of_submit(now + Duration::from_millis(121)),
+        "absorbing an Enter must not extend the suppression window"
+    );
+}
+
 #[test]
 fn enter_outside_any_paste_burst_window_submits_normally() {
     // Regression guard: the suppression must not trip when the user
