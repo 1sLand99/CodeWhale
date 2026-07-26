@@ -4809,8 +4809,13 @@ fn file_mentions_add_local_text_context_to_model_payload() {
     app.workspace = tmpdir.path().to_path_buf();
     let message = QueuedMessage::new("Summarize @guide.md".to_string(), None);
 
-    let content = queued_message_content_for_app(&app, &message, None)
-        .expect("native queued message should remain dispatchable");
+    let content = queued_message_content_for_app(
+        &app,
+        &message,
+        None,
+        &mut crate::tui::git_mention::GitMentionCache::default(),
+    )
+    .expect("native queued message should remain dispatchable");
 
     assert!(content.starts_with("Summarize @guide.md"));
     assert!(content.contains("Local context from @mentions:"));
@@ -4859,13 +4864,26 @@ fn persisted_queued_plugin_skill_is_denied_after_cross_process_revocation() {
     let restored = queued_session_to_ui(persisted);
     let mut app = create_test_app();
     app.workspace = workspace;
-    assert!(queued_message_content_for_app(&app, &restored, None).is_ok());
+    assert!(
+        queued_message_content_for_app(
+            &app,
+            &restored,
+            None,
+            &mut crate::tui::git_mention::GitMentionCache::default(),
+        )
+        .is_ok()
+    );
 
     let mut external = crate::plugins::discovery::discover_with_config(&discovery);
     external.revoke_trust("queued-skill").unwrap();
-    let error = queued_message_content_for_app(&app, &restored, None)
-        .expect_err("persisted queued Skill must be denied after external revocation")
-        .to_string();
+    let error = queued_message_content_for_app(
+        &app,
+        &restored,
+        None,
+        &mut crate::tui::git_mention::GitMentionCache::default(),
+    )
+    .expect_err("persisted queued Skill must be denied after external revocation")
+    .to_string();
     assert!(error.contains("disabled, revoked, or no longer matches"));
 }
 

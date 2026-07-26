@@ -8501,6 +8501,7 @@ fn queued_message_content_for_app(
     app: &App,
     message: &QueuedMessage,
     cwd: Option<PathBuf>,
+    git_cache: &mut crate::tui::git_mention::GitMentionCache,
 ) -> Result<String> {
     if let Some(authority) = message.skill_provenance.as_ref() {
         if authority.workspace != app.workspace {
@@ -8511,10 +8512,11 @@ fn queued_message_content_for_app(
     // Pass the process CWD explicitly so the resolver's two-pass logic can
     // honor the user's launch directory when it differs from `--workspace`
     // (issue #101 — file mentions silently routing to the wrong root).
-    let user_request = crate::tui::file_mention::user_request_with_file_mentions(
+    let user_request = crate::tui::file_mention::user_request_with_file_mentions_cached(
         &message.display,
         &app.workspace,
         cwd,
+        git_cache,
     );
     if let Some(skill_instruction) = message.skill_instruction.as_ref() {
         Ok(format!(
@@ -8892,12 +8894,17 @@ async fn dispatch_user_message_with_recovery(
     let paused_dispatch = plan_paused_command_message(app, &message.display);
 
     let cwd = std::env::current_dir().ok();
-    let references = crate::tui::file_mention::context_references_from_input(
+    // One cache for this submit: the references pass and the payload pass
+    // otherwise each shell out for `@git`/`@diff`, making git compute a large
+    // working-tree diff twice to attach it once (#4067 review follow-up).
+    let mut git_cache = crate::tui::git_mention::GitMentionCache::default();
+    let references = crate::tui::file_mention::context_references_from_input_cached(
         &message.display,
         &app.workspace,
         cwd.clone(),
+        &mut git_cache,
     );
-    let mut content = queued_message_content_for_app(app, &message, cwd)?;
+    let mut content = queued_message_content_for_app(app, &message, cwd, &mut git_cache)?;
     if let Some(note) = paused_dispatch.note() {
         content.push_str(note);
     }
@@ -11944,12 +11951,15 @@ async fn steer_user_message(
     let paused_note = paused_dispatch.note().map(str::to_string);
     paused_dispatch.apply(app, engine_handle);
     let cwd = std::env::current_dir().ok();
-    let references = crate::tui::file_mention::context_references_from_input(
+    // Same single-submit cache as the other send path — see #4067 follow-up.
+    let mut git_cache = crate::tui::git_mention::GitMentionCache::default();
+    let references = crate::tui::file_mention::context_references_from_input_cached(
         &message.display,
         &app.workspace,
         cwd.clone(),
+        &mut git_cache,
     );
-    let mut content = queued_message_content_for_app(app, &message, cwd)?;
+    let mut content = queued_message_content_for_app(app, &message, cwd, &mut git_cache)?;
     if let Some(note) = paused_note.as_deref() {
         content.push_str(note);
     }
