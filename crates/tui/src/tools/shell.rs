@@ -41,15 +41,16 @@ mod output;
 
 use super::shell_output::{summarize_output, truncate_with_meta};
 use crate::child_env;
-use crate::tools::resource_admission::{
-    CommandExpense, HeavyCommandPermit, acquire_heavy_command_permit, infer_command_expense,
-};
 use crate::sandbox::{
     CommandSpec,
     ExecEnv,
     SandboxManager,
     SandboxPolicy as ExecutionSandboxPolicy, // Rename to avoid conflict with spec::SandboxPolicy
     SandboxType,
+};
+use crate::tools::resource_admission::{
+    CommandExpense, HeavyCommandPermit, MemoryPressure, acquire_heavy_command_permit,
+    infer_command_expense,
 };
 use crate::work_graph::{
     EvidenceKind, EvidenceRef, OperationIntent, OperationOwnerSnapshot, OwnerState,
@@ -2017,11 +2018,7 @@ impl ShellManager {
         })
     }
 
-    fn attach_heavy_permit(
-        &mut self,
-        task_id: &str,
-        permit: HeavyCommandPermit,
-    ) -> Result<()> {
+    fn attach_heavy_permit(&mut self, task_id: &str, permit: HeavyCommandPermit) -> Result<()> {
         let shell = self
             .processes
             .get_mut(task_id)
@@ -2890,6 +2887,9 @@ impl ToolSpec for BashTool {
             .as_ref()
             .map(|permit| u64::try_from(permit.queued_for().as_millis()).unwrap_or(u64::MAX));
         let admission_limit = heavy_permit.as_ref().map(HeavyCommandPermit::limit);
+        let admission_memory = heavy_permit
+            .as_ref()
+            .map(HeavyCommandPermit::memory_pressure);
 
         // Route through external sandbox backend when configured.
         if let Some(backend) = &context.sandbox_backend {
@@ -3183,6 +3183,12 @@ impl ToolSpec for BashTool {
                     },
                     "resource_admission_wait_ms": admission_wait_ms,
                     "resource_admission_limit": admission_limit,
+                    "resource_admission_memory": match admission_memory {
+                        Some(MemoryPressure::Critical) => "critical",
+                        Some(MemoryPressure::Constrained) => "constrained",
+                        Some(MemoryPressure::Nominal) | None => "nominal",
+                        Some(MemoryPressure::Unknown) => "unknown",
+                    },
                     "summary": summary,
                     "stdout_summary": stdout_summary,
                     "stderr_summary": stderr_summary,
