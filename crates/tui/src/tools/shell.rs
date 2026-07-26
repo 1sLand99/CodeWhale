@@ -55,6 +55,32 @@ use crate::work_graph::{
 use crate::worker_profile::ShellPolicy;
 use output::{tail_from_buffer, take_delta_from_buffer};
 
+fn validate_shell_working_dir(path: &Path, inherited_session_workspace: bool) -> Result<()> {
+    let metadata = std::fs::metadata(path).with_context(|| {
+        let source = if inherited_session_workspace {
+            "saved session workspace"
+        } else {
+            "requested working directory"
+        };
+        format!(
+            "{source} is unavailable: {}. Restore or remap that directory, resume/fork the session from an existing workspace, or pass an explicit `working_dir`/`cwd` to exec_shell",
+            path.display()
+        )
+    })?;
+    if !metadata.is_dir() {
+        let source = if inherited_session_workspace {
+            "saved session workspace"
+        } else {
+            "requested working directory"
+        };
+        return Err(anyhow!(
+            "{source} is not a directory: {}. Resume/fork from an existing workspace or pass an explicit `working_dir`/`cwd`",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Status of a shell process
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ShellStatus {
@@ -1267,6 +1293,7 @@ impl ShellManager {
         crate::shell_dispatcher::ShellDispatcher::log_exec(command);
 
         let work_dir = working_dir.map_or_else(|| self.default_workspace.clone(), PathBuf::from);
+        validate_shell_working_dir(&work_dir, working_dir.is_none())?;
 
         // Clamp timeout to max 10 minutes (600000ms)
         let timeout_ms = timeout_ms.clamp(1000, 600_000);
@@ -1342,6 +1369,7 @@ impl ShellManager {
         crate::shell_dispatcher::ShellDispatcher::log_exec(command);
 
         let work_dir = working_dir.map_or_else(|| self.default_workspace.clone(), PathBuf::from);
+        validate_shell_working_dir(&work_dir, working_dir.is_none())?;
 
         let timeout_ms = timeout_ms.clamp(1000, 600_000);
         let policy = policy_override.unwrap_or_else(|| self.sandbox_policy.clone());

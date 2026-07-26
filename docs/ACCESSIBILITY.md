@@ -16,7 +16,7 @@ visual motion and density for screen-reader and low-motion users.
 | `ocean_treatment` setting | `ombre` | Chooses the background appearance: `ombre` paints the state-reactive water column; `flat` uses the plain theme surface. Both keep the same state marks and idle ambient life; appearance is independent of motion settings. |
 | `status_indicator` setting | `cw` | Static typographic header mark. Set to `whale` or `dots` for the legacy animations, or `off` to hide it. |
 | `calm_mode` setting | `true` | Collapses tool-output details by default and trims status messages. Useful for screen readers that announce every redraw. |
-| `show_thinking` setting | `true` | Set to `false` to hide model `reasoning_content` blocks entirely. |
+| `show_thinking` setting | `true` | Set to `false` to hide model `reasoning_content` blocks from the TUI presentation. Canonical session/replay receipts remain unchanged. |
 | `show_tool_details` setting | `false` | Set to `true` to expand tool calls inline; details remain available on demand either way. |
 | `inline_diffs` setting | `full` | Use `summary` or `off` to reduce inline File-change density. Exact applied evidence remains available with Alt/Option+V in every mode. |
 

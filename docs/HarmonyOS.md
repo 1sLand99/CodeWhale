@@ -2,6 +2,19 @@
 
 This page covers Codewhale on HarmonyOS PC and OpenHarmony cross-build setups.
 
+## Support Tier
+
+| Target | Codewhale tier | CI coverage | Distribution |
+| --- | --- | --- | --- |
+| HarmonyOS PC with a glibc-compatible userspace | Tier 1 Linux ARM64 runtime | Covered by the Linux ARM64 release build | npm and release binaries |
+| `aarch64-unknown-linux-ohos` (OpenHarmony) | Tier 2 cross-build target | `codewhale-tui` is checked with a real OpenHarmony native SDK/sysroot | Build from source; no prebuilt release asset |
+
+Tier 2 means every relevant source change is compile-checked, but maintainers do
+not promise a release binary or full device-level runtime testing. The CI job
+uses the published OpenHarmony 6.1 native SDK; it deliberately fails if the SDK,
+Clang, or sysroot is unavailable rather than substituting host headers or a stub
+that could report false success.
+
 ## Running On HarmonyOS PC
 
 HarmonyOS PC can use the normal Linux ARM64 package when its userspace is
@@ -105,3 +118,17 @@ Because `portable-pty` is intentionally absent from the OpenHarmony graph, the
 persistent `terminal/*` PTY tools are not registered on that target. The
 ordinary `exec_shell` tools remain available through their non-PTY process
 implementation.
+
+Linux-only sandbox implementations (bubblewrap, Landlock, seccomp, and `prctl`
+process hardening) are compiled only for
+`all(target_os = "linux", not(target_env = "ohos"))`. OpenHarmony therefore
+reports no local OS sandbox instead of probing Linux kernel paths or syscalls it
+does not support. External OpenSandbox execution remains separately available
+when configured.
+
+Native desktop clipboard libraries and Wayland helpers are also excluded from
+the OpenHarmony graph. Text copy degrades to the terminal-client path (OSC 52,
+or tmux `load-buffer -w` when inside tmux); paste is supplied by the terminal as
+normal/bracketed input. Image clipboard reads are unavailable on this target.
+If the terminal cannot accept OSC 52, copy returns a clear "Clipboard
+unavailable" error rather than panicking or claiming success.
