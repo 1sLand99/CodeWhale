@@ -760,6 +760,83 @@ mod tests {
     }
 
     #[test]
+    fn empty_and_crlf_scaffold_files_are_safe_and_searchable() {
+        let tmp = TempDir::new().unwrap();
+        let store = NativeMemoryStore::new(tmp.path().join("memory"));
+        let path = store.global_path();
+        ensure_memory_file(&path).unwrap();
+        fs::write(&path, "---\r\n\r\n- Unicode ✓\r\n").unwrap();
+
+        assert_eq!(store.reindex().unwrap(), 1);
+        let hit = store.search("Unicode", 10).unwrap().pop().unwrap();
+        assert_eq!(hit.text, "Unicode ✓");
+        assert!(store.search("---", 10).unwrap().is_empty());
+
+        fs::write(&path, "\r\n---\r\n").unwrap();
+        assert_eq!(store.reindex().unwrap(), 0);
+        assert!(store.search("Unicode", 10).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_markdown_is_not_indexed() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().unwrap();
+        let store = NativeMemoryStore::new(tmp.path().join("memory"));
+        let outside = tmp.path().join("outside.md");
+        fs::write(&outside, "- outside secret\n").unwrap();
+        let linked = store.root().join("global").join("linked.md");
+        fs::create_dir_all(linked.parent().unwrap()).unwrap();
+        symlink(&outside, &linked).unwrap();
+
+        assert_eq!(store.reindex().unwrap(), 0);
+        assert!(store.search("outside", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn workspace_search_excludes_another_origin_scope() {
+        let first = TempDir::new().unwrap();
+        let second = TempDir::new().unwrap();
+        let git = |path: &Path, origin: &str| {
+            for args in [
+                &["init", "-q"][..],
+                &["remote", "add", "origin", origin][..],
+            ] {
+                let status = Command::new("git")
+                    .arg("-C")
+                    .arg(path)
+                    .args(args)
+                    .status()
+                    .unwrap();
+                assert!(status.success());
+            }
+        };
+        git(first.path(), "https://example.test/first.git");
+        git(second.path(), "https://example.test/second.git");
+
+        let store = NativeMemoryStore::new(first.path().join("memory"));
+        let first_id = NativeMemoryStore::workspace_id(first.path())
+            .unwrap()
+            .unwrap();
+        let second_id = NativeMemoryStore::workspace_id(second.path())
+            .unwrap()
+            .unwrap();
+        store
+            .remember(MemoryScope::Workspace, Some(&first_id), "first-only")
+            .unwrap();
+        store
+            .remember(MemoryScope::Workspace, Some(&second_id), "second-only")
+            .unwrap();
+
+        let hits = store
+            .search_for_workspace(first.path(), "only", 10)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text, "first-only");
+    }
+
+    #[test]
     fn origin_identity_is_shared_by_worktrees_and_absent_without_git() {
         let first = TempDir::new().unwrap();
         let second = TempDir::new().unwrap();
