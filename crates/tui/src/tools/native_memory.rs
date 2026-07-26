@@ -241,4 +241,72 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("not found"));
     }
+
+    #[tokio::test]
+    async fn tools_enforce_workspace_scope_boundary() {
+        let first = tempdir().unwrap();
+        let second = tempdir().unwrap();
+        let init_git = |path: &std::path::Path, origin: &str| {
+            assert!(
+                std::process::Command::new("git")
+                    .args(["-C", path.to_str().unwrap(), "init", "-q"])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            assert!(
+                std::process::Command::new("git")
+                    .args([
+                        "-C",
+                        path.to_str().unwrap(),
+                        "remote",
+                        "add",
+                        "origin",
+                        origin,
+                    ])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        init_git(first.path(), "https://example.test/first.git");
+        init_git(second.path(), "https://example.test/second.git");
+
+        let store = NativeMemoryStore::new(first.path().join("memory"));
+        let first_id = NativeMemoryStore::workspace_id(first.path())
+            .unwrap()
+            .unwrap();
+        let second_id = NativeMemoryStore::workspace_id(second.path())
+            .unwrap()
+            .unwrap();
+        let first_hit = store
+            .remember(
+                crate::native_memory::MemoryScope::Workspace,
+                Some(&first_id),
+                "first workspace note",
+            )
+            .unwrap();
+        let second_hit = store
+            .remember(
+                crate::native_memory::MemoryScope::Workspace,
+                Some(&second_id),
+                "second workspace secret",
+            )
+            .unwrap();
+
+        let context = context_for(first.path());
+        let result = MemorySearchTool
+            .execute(json!({"query": "workspace"}), &context)
+            .await
+            .unwrap();
+        assert!(result.content.contains("first workspace note"));
+        assert!(!result.content.contains("second workspace secret"));
+
+        let error = MemoryGetTool
+            .execute(json!({"id": second_hit.id}), &context)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("outside the active"));
+        assert_ne!(first_hit.source, second_hit.source);
+    }
 }
