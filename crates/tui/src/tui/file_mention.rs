@@ -555,7 +555,6 @@ pub fn pending_context_previews(input: &str) -> Vec<FileMentionPreview> {
     previews
 }
 
-#[must_use]
 /// Convenience wrapper that allocates a throwaway cache. Test-only, as above.
 #[cfg(test)]
 #[must_use]
