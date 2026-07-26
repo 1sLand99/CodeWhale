@@ -7098,8 +7098,10 @@ fn turn_liveness_recovers_stalled_in_progress_turn() {
             provider_identity: "openai".to_string(),
             model: "gpt-5.5".to_string(),
             auto_model: false,
+            receipt: None,
         }),
         auto_route_receipt: None,
+        suggestion_authority: None,
     });
 
     let recovered = reconcile_turn_liveness(&mut app, now, false);
@@ -7139,8 +7141,10 @@ fn engine_event_disconnect_recovers_live_turn_immediately() {
             provider_identity: "openai".to_string(),
             model: "gpt-5.5".to_string(),
             auto_model: false,
+            receipt: None,
         }),
         auto_route_receipt: None,
+        suggestion_authority: None,
     });
     let thinking_idx = crate::tui::streaming_thinking::ensure_active_entry(&mut app);
     crate::tui::streaming_thinking::append(&mut app, thinking_idx, "partial reasoning");
@@ -7204,8 +7208,10 @@ fn engine_event_disconnect_cleans_cancelled_turn_metadata() {
             provider_identity: "openai".to_string(),
             model: "gpt-5.5".to_string(),
             auto_model: false,
+            receipt: None,
         }),
         auto_route_receipt: None,
+        suggestion_authority: None,
     });
 
     let recovered = recover_engine_event_disconnect(&mut app);
@@ -9606,6 +9612,7 @@ fn turn_started_route_is_captured_before_cancel_suppression() {
             provider_identity: "openai".to_string(),
             model: "gpt-5.5".to_string(),
             auto_model: true,
+            receipt: None,
         }),
     };
 
@@ -9635,6 +9642,81 @@ fn turn_started_route_is_captured_before_cancel_suppression() {
     assert_eq!(observer.route, Some(route));
 }
 
+/// #4404/#4411: prompt-suggestion authority comes off the engine's route
+/// receipt, not off live config.
+///
+/// The TUI drains web config events ahead of engine events, so by the time
+/// `TurnStarted` is handled, config may already describe a different route than
+/// the one whose client the engine preflighted and installed. This test hands
+/// the handler a receipt for route A while the app's own config knows nothing
+/// about route A at all — authority must still be A.
+#[test]
+fn turn_started_suggestion_authority_comes_from_the_route_receipt_not_config() {
+    let mut app = create_test_app();
+    let receipt = crate::route_receipt::TurnRouteReceipt::new(
+        ApiProvider::Deepseek,
+        "deepseek",
+        "deepseek-chat",
+        "https://api.deepseek.com/v1",
+        "sk-route-a-secret",
+    );
+    let event = EngineEvent::TurnStarted {
+        turn_id: "turn_route_receipt".to_string(),
+        created_at: chrono::Utc::now(),
+        route: Some(crate::core::events::TurnRoute {
+            provider: ApiProvider::Deepseek,
+            provider_identity: "deepseek".to_string(),
+            model: "deepseek-chat".to_string(),
+            auto_model: false,
+            receipt: Some(receipt),
+        }),
+    };
+
+    capture_turn_started_metadata(&mut app, &event);
+
+    let active_turn = app.active_turn.as_ref().expect("captured turn");
+    let authority = active_turn
+        .suggestion_authority
+        .as_ref()
+        .expect("the route receipt is the authority, so no config lookup is required");
+    assert_eq!(authority.provider(), ApiProvider::Deepseek);
+    assert_eq!(authority.provider_identity(), "deepseek");
+    assert_eq!(authority.model(), "deepseek-chat");
+    assert_eq!(authority.endpoint_identity(), "https://api.deepseek.com/v1");
+    // Nothing credential-derived may render.
+    let rendered = format!("{authority:?}");
+    assert!(!rendered.contains("sk-route-a-secret"), "{rendered}");
+    assert!(rendered.contains("<redacted>"), "{rendered}");
+}
+
+/// A turn with no installed-client receipt has no provenance, so it can never
+/// authorize a follow-up request — regardless of what config would resolve.
+#[test]
+fn turn_started_without_a_route_receipt_captures_no_suggestion_authority() {
+    let mut app = create_test_app();
+    let event = EngineEvent::TurnStarted {
+        turn_id: "turn_no_receipt".to_string(),
+        created_at: chrono::Utc::now(),
+        route: Some(crate::core::events::TurnRoute {
+            provider: ApiProvider::Deepseek,
+            provider_identity: "deepseek".to_string(),
+            model: "deepseek-chat".to_string(),
+            auto_model: false,
+            receipt: None,
+        }),
+    };
+
+    capture_turn_started_metadata(&mut app, &event);
+
+    assert!(
+        app.active_turn
+            .as_ref()
+            .expect("captured turn")
+            .suggestion_authority
+            .is_none()
+    );
+}
+
 #[test]
 fn engine_error_health_accounting_uses_active_turn_route() {
     let mut app = create_test_app();
@@ -9648,6 +9730,7 @@ fn engine_error_health_accounting_uses_active_turn_route() {
             provider_identity: "openai".to_string(),
             model: "gpt-5.5".to_string(),
             auto_model: true,
+            receipt: None,
         }),
     };
     capture_turn_started_metadata(&mut app, &event);

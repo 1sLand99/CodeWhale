@@ -37,6 +37,17 @@ pub struct TurnRoute {
     pub provider_identity: String,
     pub model: String,
     pub auto_model: bool,
+    /// Secret-free proof of the endpoint and credential generation the turn's
+    /// client was *installed* on, minted from that client rather than re-read
+    /// from config later.
+    ///
+    /// Hosts that dispatch follow-up work derived from this turn's context must
+    /// authorize it against this receipt: config is mutable and web config
+    /// events are drained ahead of engine events, so anything a host resolves
+    /// while handling `TurnStarted` may already describe a different route.
+    /// `None` when no concrete client was installed (injected-client engines,
+    /// or a client that failed to construct).
+    pub receipt: Option<crate::route_receipt::TurnRouteReceipt>,
 }
 
 /// Structured lifecycle metadata paired with a human-readable

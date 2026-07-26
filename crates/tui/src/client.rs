@@ -751,7 +751,7 @@ fn is_version_segment(segment: &str) -> bool {
             .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit()))
 }
 
-pub(super) fn api_url(base_url: &str, path: &str) -> String {
+pub(crate) fn api_url(base_url: &str, path: &str) -> String {
     api_url_with_suffix(base_url, path, None)
 }
 
@@ -1556,6 +1556,27 @@ impl DeepSeekClient {
     /// Returns the active API provider for this client.
     pub fn api_provider(&self) -> ApiProvider {
         self.api_provider
+    }
+
+    /// Secret-free receipt for the exact base endpoint and credential
+    /// generation this client was constructed with.
+    ///
+    /// This is the only way the API key leaves `client.rs`, and it leaves as a
+    /// one-way digest. Minting the receipt here — rather than re-reading config
+    /// at some later lifecycle point — is what makes it immutable proof of the
+    /// route that was actually installed for the turn.
+    #[must_use]
+    pub fn turn_route_receipt(
+        &self,
+        provider_identity: &str,
+    ) -> crate::route_receipt::TurnRouteReceipt {
+        crate::route_receipt::TurnRouteReceipt::new(
+            self.api_provider,
+            provider_identity,
+            &self.default_model,
+            &self.base_url,
+            &self.api_key,
+        )
     }
 
     /// Resolved in-flight provider request cap, if one is active.

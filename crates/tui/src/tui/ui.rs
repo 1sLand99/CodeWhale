@@ -3067,6 +3067,10 @@ async fn run_event_loop(
                                 )
                             });
                         app.session.last_tool_catalog = tool_catalog;
+                        // The endpoint this turn's client actually used. Kept
+                        // separately from the mutable session/config surfaces
+                        // so the prompt-suggestion gate below can require it.
+                        let turn_actual_base_url = base_url.clone();
                         app.session.last_base_url = base_url;
                         let was_locally_cancelled = app.suppress_stream_events_until_turn_complete;
                         app.suppress_stream_events_until_turn_complete = false;
@@ -3313,35 +3317,63 @@ async fn run_event_loop(
                         }
 
                         // Generate ghost-text follow-up suggestion asynchronously.
-                        if status == crate::core::events::TurnOutcomeStatus::Completed
-                            && config.prompt_suggestion_enabled()
-                            && app.api_messages.len() >= 2
-                        {
+                        //
+                        // Privacy (#4404/#4411): the request is anchored to the
+                        // completed turn's route snapshot and to the receipt the
+                        // engine minted from the client it installed for that
+                        // turn — never to live UI selection, and never to
+                        // authority re-derived from mutable config.
+                        // Conversation context is only ever sent to that exact
+                        // endpoint with that exact credential. Providers whose
+                        // wire shape this helper does not speak produce no
+                        // background request at all — and never reach another
+                        // provider's credentials while deciding that.
+                        let suggestion_launch = completed_turn
+                            .as_ref()
+                            .and_then(|turn| {
+                                let route = turn.route.as_ref()?;
+                                let authority = turn.suggestion_authority.as_ref()?;
+                                Some(crate::tui::prompt_suggestion::SuggestionRouteSnapshot {
+                                    provider: route.provider,
+                                    provider_identity: route.provider_identity.as_str(),
+                                    model: route.model.as_str(),
+                                    authority,
+                                    actual_base_url: turn_actual_base_url.as_deref(),
+                                })
+                            })
+                            .and_then(|snapshot| {
+                                crate::tui::prompt_suggestion::plan_suggestion_launch_with_config(
+                                    config,
+                                    status == crate::core::events::TurnOutcomeStatus::Completed,
+                                    config.prompt_suggestion_enabled(),
+                                    app.api_messages.len(),
+                                    Some(snapshot),
+                                )
+                            });
+                        if let Some(launch) = suggestion_launch {
                             let suggestion_cell = app.prompt_suggestion_cell.clone();
-                            let api_key = config.deepseek_api_key().unwrap_or_default();
-                            let base_url = config.deepseek_base_url();
-                            let model = config.default_model();
                             let messages: Vec<crate::models::Message> = app.api_messages.clone();
                             let gen_token = app
                                 .prompt_suggestion_gen
                                 .load(std::sync::atomic::Ordering::Relaxed);
-                            if !api_key.is_empty() {
-                                tokio::spawn(async move {
-                                    let summary =
-                                        crate::tui::prompt_suggestion::summarize_recent_messages(
-                                            &messages, 8,
-                                        );
-                                    if let Some(suggestion) =
-                                        crate::tui::prompt_suggestion::generate_suggestion(
-                                            &api_key, &base_url, &model, &summary,
-                                        )
-                                        .await
-                                        && let Ok(mut guard) = suggestion_cell.lock()
-                                    {
-                                        *guard = Some((gen_token, suggestion));
-                                    }
-                                });
-                            }
+                            tokio::spawn(async move {
+                                let summary =
+                                    crate::tui::prompt_suggestion::summarize_recent_messages(
+                                        &messages, 8,
+                                    );
+                                if let Some(suggestion) =
+                                    crate::tui::prompt_suggestion::generate_suggestion(
+                                        &launch.api_key,
+                                        &launch.base_url,
+                                        &launch.model,
+                                        &summary,
+                                    )
+                                    .await
+                                    && let Ok(mut guard) = suggestion_cell.lock()
+                                {
+                                    *guard = Some((gen_token, suggestion));
+                                }
+                            });
                         }
 
                         // Generate post-turn receipt for completed turns.
@@ -7779,11 +7811,20 @@ fn capture_turn_started_metadata(app: &mut App, event: &EngineEvent) {
             app.pending_auto_route_receipt = None;
             None
         };
+        // Bind the prompt-suggestion authority to the receipt the engine minted
+        // from the client it installed for this turn. Deliberately not read
+        // from `config`: web config events are drained ahead of engine events,
+        // so config here may already describe a different key or endpoint than
+        // the one this turn is actually running on.
+        let suggestion_authority = route
+            .as_ref()
+            .and_then(crate::tui::prompt_suggestion::capture_route_authority);
         app.active_turn = Some(ActiveTurnMetadata {
             turn_id: turn_id.clone(),
             created_at: *created_at,
             route: route.clone(),
             auto_route_receipt,
+            suggestion_authority,
         });
         app.pending_turn_route = None;
     }

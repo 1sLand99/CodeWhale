@@ -86,6 +86,12 @@ pub struct ActiveTurnMetadata {
     pub route: Option<TurnRoute>,
     /// Auto decision metadata captured with this exact authoritative route.
     pub auto_route_receipt: Option<crate::model_routing::AutoRouteReceipt>,
+    /// Non-secret proof of the exact endpoint + credential this turn launched
+    /// against, adopted at `TurnStarted` from the engine's route receipt — not
+    /// re-resolved from mutable config. Only populated for routes that can
+    /// produce a follow-up prompt suggestion; see
+    /// [`crate::tui::prompt_suggestion::capture_route_authority`].
+    pub suggestion_authority: Option<crate::tui::prompt_suggestion::SuggestionRouteAuthority>,
 }
 
 /// Per-message context estimates used by the render-time context meter.

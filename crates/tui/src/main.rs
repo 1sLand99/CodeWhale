@@ -96,6 +96,7 @@ mod retry_status;
 pub mod rlm;
 mod route_billing;
 mod route_budget;
+mod route_receipt;
 mod route_runtime;
 mod runtime_api;
 mod runtime_handoff;

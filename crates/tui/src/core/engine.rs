@@ -3177,11 +3177,27 @@ impl Engine {
         // Create turn context first so start event includes a stable turn id.
         let mut turn = TurnContext::new(self.config.max_steps);
         self.turn_counter = self.turn_counter.saturating_add(1);
+        // Mint the route receipt from the client that `install_resolved_runtime_route`
+        // actually installed above — the same client `Event::TurnComplete`
+        // reports `base_url` from. Hosts must not re-derive this from config
+        // when they process `TurnStarted`: by then config may already describe
+        // a different endpoint or credential.
+        let route_receipt = if self.model_client_injected {
+            // Provider-neutral injected clients are the I/O authority, while
+            // `deepseek_client` is only an auxiliary route-shaping client.
+            // It cannot truthfully receipt a transport it did not perform.
+            None
+        } else {
+            self.deepseek_client
+                .as_ref()
+                .map(|client| client.turn_route_receipt(&provider_identity))
+        };
         let turn_route = TurnRoute {
             provider: effective_provider,
             provider_identity,
             model: model.clone(),
             auto_model,
+            receipt: route_receipt,
         };
 
         // Emit turn started event IMMEDIATELY so the UI knows the turn is
@@ -3529,10 +3545,13 @@ impl Engine {
             catalog
         });
         let tool_catalog_for_event = tools.clone();
-        let base_url_for_event = self
-            .deepseek_client
-            .as_ref()
-            .map(|client| client.base_url().to_string());
+        let base_url_for_event = if self.model_client_injected {
+            None
+        } else {
+            self.deepseek_client
+                .as_ref()
+                .map(|client| client.base_url().to_string())
+        };
 
         // Main turn loop. Catch panics here so an internal error surfaces as a
         // failed TurnComplete instead of unwinding through `engine.run()` and

@@ -3295,12 +3295,22 @@ async fn injected_model_drives_real_engine_navigation_trajectory() {
 
     let mut saw_read = false;
     let mut saw_answer = false;
+    let mut saw_unreceipted_injected_route = false;
+    let mut saw_unattributed_injected_completion = false;
     let mut rx = handle.rx_event.write().await;
     while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
         .await
         .expect("timed out waiting for deterministic navigation")
     {
         match event {
+            Event::TurnStarted { route, .. } => {
+                let route = route.expect("injected model turn route");
+                assert!(
+                    route.receipt.is_none(),
+                    "an auxiliary route client must not receipt injected model I/O"
+                );
+                saw_unreceipted_injected_route = true;
+            }
             Event::ToolCallComplete { name, result, .. } if name == "read_file" => {
                 let result = result.expect("read_file result");
                 assert!(result.success, "{result:?}");
@@ -3310,8 +3320,18 @@ async fn injected_model_drives_real_engine_navigation_trajectory() {
             Event::MessageDelta { content, .. } => {
                 saw_answer |= content.contains("Navigation complete");
             }
-            Event::TurnComplete { status, error, .. } => {
+            Event::TurnComplete {
+                status,
+                error,
+                base_url,
+                ..
+            } => {
                 assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                assert!(
+                    base_url.is_none(),
+                    "an auxiliary route client must not attribute an injected completion"
+                );
+                saw_unattributed_injected_completion = true;
                 break;
             }
             _ => {}
@@ -3326,6 +3346,8 @@ async fn injected_model_drives_real_engine_navigation_trajectory() {
         saw_answer,
         "real stream projection must emit the final answer"
     );
+    assert!(saw_unreceipted_injected_route);
+    assert!(saw_unattributed_injected_completion);
     assert_eq!(mock.call_count(), 2);
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     task.await.expect("engine task");
