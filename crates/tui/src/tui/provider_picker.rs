@@ -273,6 +273,7 @@ pub struct ProviderCapabilityBadges {
     pub structured: SupportState,
     pub streaming: SupportState,
     pub cache: SupportState,
+    pub vision: SupportState,
 }
 
 impl ProviderCapabilityBadges {
@@ -297,6 +298,7 @@ impl ProviderCapabilityBadges {
             structured: cap.structured_output,
             streaming: cap.streaming,
             cache: cap.prompt_caching,
+            vision: cap.image_input,
         }
     }
 
@@ -309,6 +311,7 @@ impl ProviderCapabilityBadges {
             structured: SupportState::Unknown,
             streaming: SupportState::Unknown,
             cache: SupportState::Unknown,
+            vision: SupportState::Unknown,
         }
     }
 
@@ -316,7 +319,7 @@ impl ProviderCapabilityBadges {
     /// render `?` when unknown rather than being silently dropped.
     fn label(&self) -> String {
         format!(
-            "ctx:{}({}) out:{} tools:{} json:{} stream:{} cache:{}",
+            "ctx:{}({}) out:{} tools:{} json:{} stream:{} cache:{} vision:{}",
             humanize_token_count(self.context_window),
             self.context_window_source.as_deref().unwrap_or("?"),
             humanize_token_count(self.max_output),
@@ -324,6 +327,7 @@ impl ProviderCapabilityBadges {
             support_glyph(self.structured),
             support_glyph(self.streaming),
             support_glyph(self.cache),
+            support_glyph(self.vision),
         )
     }
 }

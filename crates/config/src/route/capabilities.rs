@@ -92,6 +92,9 @@ pub(crate) fn documented_server_side_web_search(
 pub struct RouteCapabilities {
     #[serde(default)]
     pub attachments: CapabilityState,
+    /// Whether the exact offering explicitly accepts image input.
+    #[serde(default)]
+    pub image_input: CapabilityState,
     #[serde(default)]
     pub reasoning: CapabilityState,
     #[serde(default)]

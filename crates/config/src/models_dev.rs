@@ -139,6 +139,7 @@ impl ModelsDevCatalog {
 fn route_capabilities(provider_id: &str, model: &ModelsDevProviderModel) -> RouteCapabilities {
     RouteCapabilities {
         attachments: CapabilityState::from_optional_bool(model.attachment),
+        image_input: image_input_support(model.modalities.as_ref()),
         reasoning: CapabilityState::from_optional_bool(model.reasoning),
         native_tool_calls: CapabilityState::from_optional_bool(model.tool_call),
         structured_output: CapabilityState::from_optional_bool(model.structured_output),
@@ -148,6 +149,25 @@ fn route_capabilities(provider_id: &str, model: &ModelsDevProviderModel) -> Rout
         ),
         ..RouteCapabilities::default()
     }
+}
+
+/// Resolve the exact image-input fact from a provider-owned modality block.
+/// Missing or empty input metadata remains unknown; stated text-only input is
+/// unsupported rather than silently treated as unknown.
+#[must_use]
+pub fn image_input_support(modalities: Option<&ModelsDevModalities>) -> CapabilityState {
+    let Some(modalities) = modalities else {
+        return CapabilityState::Unknown;
+    };
+    if modalities.input.is_empty() {
+        return CapabilityState::Unknown;
+    }
+    CapabilityState::from_optional_bool(Some(
+        modalities
+            .input
+            .iter()
+            .any(|modality| modality.trim().eq_ignore_ascii_case("image")),
+    ))
 }
 
 /// Provider-agnostic model facts from `models.json` / `catalog.models`.
@@ -656,6 +676,29 @@ mod tests {
             ..Default::default()
         };
         assert!(!audio_only.supports_text_chat());
+    }
+
+    #[test]
+    fn image_input_support_preserves_unknown_and_text_only_facts() {
+        assert_eq!(image_input_support(None), CapabilityState::Unknown);
+        assert_eq!(
+            image_input_support(Some(&ModelsDevModalities::default())),
+            CapabilityState::Unknown
+        );
+        assert_eq!(
+            image_input_support(Some(&ModelsDevModalities {
+                input: vec!["text".to_string()],
+                output: vec!["text".to_string()],
+            })),
+            CapabilityState::Unsupported
+        );
+        assert_eq!(
+            image_input_support(Some(&ModelsDevModalities {
+                input: vec!["text".to_string(), "image".to_string()],
+                output: vec!["text".to_string()],
+            })),
+            CapabilityState::Supported
+        );
     }
 
     #[test]

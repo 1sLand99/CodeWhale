@@ -48,6 +48,7 @@ pub struct IntrinsicCapabilityProfile {
     pub structured_output: SupportState,
     pub streaming: SupportState,
     pub prompt_caching: SupportState,
+    pub image_input: SupportState,
     pub tool_surface_budget: ToolSurfaceBudget,
 }
 
@@ -73,6 +74,7 @@ pub struct CapabilityOverride {
     pub structured_output: Option<SupportState>,
     pub streaming: Option<SupportState>,
     pub prompt_caching: Option<SupportState>,
+    pub image_input: Option<SupportState>,
     pub tool_surface_budget: Option<ToolSurfaceBudget>,
 }
 
@@ -91,6 +93,7 @@ pub struct CapabilityProfile {
     pub structured_output: SupportState,
     pub streaming: SupportState,
     pub prompt_caching: SupportState,
+    pub image_input: SupportState,
     pub tool_surface_budget: ToolSurfaceBudget,
     pub provenance: Vec<FactProvenance>,
 }
@@ -99,6 +102,11 @@ impl CapabilityProfile {
     #[must_use]
     pub fn supports_reasoning(&self) -> bool {
         self.reasoning.is_supported()
+    }
+
+    #[must_use]
+    pub fn supports_image_input(&self) -> bool {
+        self.image_input.is_supported()
     }
 
     #[must_use]
@@ -153,6 +161,7 @@ pub fn model_profile(model: &str) -> ModelProfile {
                     structured_output: SupportState::Unknown,
                     streaming: SupportState::Supported,
                     prompt_caching: SupportState::Unknown,
+                    image_input: SupportState::Unknown,
                     tool_surface_budget: tool_surface_for_window(meta.context_window),
                 },
                 provenance,
@@ -172,6 +181,7 @@ pub fn model_profile(model: &str) -> ModelProfile {
                 structured_output: SupportState::Unknown,
                 streaming: SupportState::Unknown,
                 prompt_caching: SupportState::Unknown,
+                image_input: SupportState::Unknown,
                 tool_surface_budget: ToolSurfaceBudget::Compact,
             },
             provenance: FactProvenance::ConservativeUnknownFallback,
@@ -218,6 +228,7 @@ pub fn resolved_capability_profile_with_overrides(
     let prompt_caching = overrides
         .prompt_caching
         .unwrap_or_else(|| bool_state(provider_cap.cache_telemetry_supported));
+    let image_input = overrides.image_input.unwrap_or(SupportState::Unknown);
     let native_tool_calls = overrides
         .native_tool_calls
         .unwrap_or_else(|| native_tool_support_for_payload(request_payload_mode));
@@ -250,6 +261,7 @@ pub fn resolved_capability_profile_with_overrides(
         structured_output,
         streaming,
         prompt_caching,
+        image_input,
         tool_surface_budget,
         provenance,
     }
@@ -292,6 +304,8 @@ pub fn resolved_capability_profile_for_route(
     profile.streaming = route_fact_or_fallback(route_capabilities.streaming, profile.streaming);
     profile.prompt_caching =
         route_fact_or_fallback(route_capabilities.prompt_caching, profile.prompt_caching);
+    profile.image_input =
+        route_fact_or_fallback(route_capabilities.image_input, profile.image_input);
     profile.tool_surface_budget = tool_surface_for_window(profile.context_window);
     profile
         .provenance
@@ -337,6 +351,9 @@ pub fn resolved_capability_profile_for_route_with_overrides(
     }
     if let Some(prompt_caching) = overrides.prompt_caching {
         profile.prompt_caching = prompt_caching;
+    }
+    if let Some(image_input) = overrides.image_input {
+        profile.image_input = image_input;
     }
     profile.tool_surface_budget = overrides
         .tool_surface_budget
@@ -496,6 +513,7 @@ mod tests {
         assert_eq!(profile.max_output, Some(7_000));
         assert_eq!(profile.reasoning, SupportState::Unsupported);
         assert_eq!(profile.native_tool_calls, SupportState::Unsupported);
+        assert_eq!(profile.image_input, SupportState::Unknown);
         assert_eq!(profile.structured_output, SupportState::Supported);
         assert!(
             profile
@@ -530,5 +548,31 @@ mod tests {
             profile.provenance.last(),
             Some(&FactProvenance::UserOverride)
         );
+    }
+
+    #[test]
+    fn image_input_route_fact_and_override_are_explicit() {
+        let sourced = resolved_capability_profile_for_route(
+            ApiProvider::Openai,
+            "vision-fixture",
+            RouteCapabilities {
+                image_input: SupportState::Supported,
+                ..RouteCapabilities::default()
+            },
+            RouteLimits::default(),
+        );
+        assert!(sourced.supports_image_input());
+
+        let overridden = resolved_capability_profile_for_route_with_overrides(
+            ApiProvider::Openai,
+            "vision-fixture",
+            RouteCapabilities::default(),
+            RouteLimits::default(),
+            CapabilityOverride {
+                image_input: Some(SupportState::Supported),
+                ..CapabilityOverride::default()
+            },
+        );
+        assert!(overridden.supports_image_input());
     }
 }
