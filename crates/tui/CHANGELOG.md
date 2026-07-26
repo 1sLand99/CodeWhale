@@ -11,8 +11,20 @@ Landed since v0.9.1, not yet released. A cluster of defects found by a
 read-through audit of the policy engine, the MCP proxy, the session index,
 and the app-server bridge — several of them cases where the wrong outcome
 was reached silently, behind a response or a log line that looked fine.
-Nothing here changes a public interface; every entry below makes an
-existing one behave the way it already claimed to.
+Apart from one opt-in header setting, nothing here changes a public
+interface; every other entry below makes an existing one behave the way it
+already claimed to.
+
+### Added
+
+- `tui.header_items` (array of strings, optional, default `[]`): an opt-in
+  header chip showing cumulative session token usage as input / cache-hit /
+  output. Set `header_items = ["tokens"]` under `[tui]` to enable it. The
+  chip is the only elidable element of the header — the git label, context
+  meter, and version stamp keep their space, and narrow terminals drop the
+  chip rather than the baseline chrome. Unknown entries are warned about and
+  skipped so configs written by newer builds stay loadable by older ones
+  (#4520, PR #4610 by @XhesicaFrost; harvested with co-authorship).
 
 ### Fixed
 

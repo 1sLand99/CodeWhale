@@ -736,6 +736,11 @@ impl App {
                 .as_ref()
                 .and_then(|tui| tui.status_items.clone())
                 .unwrap_or_else(crate::config::StatusItem::default_footer),
+            header_items: config
+                .tui
+                .as_ref()
+                .and_then(|tui| tui.header_items.clone())
+                .unwrap_or_else(crate::config::HeaderItem::default_header),
             project_doc: None,
             plan_state,
             todos,
