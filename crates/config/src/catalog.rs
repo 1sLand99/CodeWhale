@@ -151,6 +151,7 @@ impl CatalogOffering {
                 .unwrap_or_default(),
             capabilities: crate::route::RouteCapabilities {
                 attachments: crate::route::CapabilityState::from_optional_bool(self.attachment),
+                image_input: crate::models_dev::image_input_support(self.modalities.as_ref()),
                 reasoning: crate::route::CapabilityState::from_optional_bool(self.reasoning),
                 native_tool_calls: crate::route::CapabilityState::from_optional_bool(
                     self.tool_call,

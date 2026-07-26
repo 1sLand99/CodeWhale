@@ -223,6 +223,7 @@ struct EffectivePickerMetadata {
     max_output: Option<u32>,
     tool_calls: Option<bool>,
     reasoning: bool,
+    vision: SupportState,
     pricing: PickerPricing,
     source: Option<CatalogSource>,
 }
@@ -1500,6 +1501,7 @@ fn effective_picker_metadata_with_codex(
             reasoning: registry
                 .as_ref()
                 .is_some_and(|meta| meta.supports_reasoning),
+            vision: SupportState::Unknown,
             pricing: if crate::pricing::has_pricing_for_model(id) {
                 PickerPricing::Known("priced".to_string())
             } else {
@@ -1584,6 +1586,7 @@ fn effective_picker_metadata_with_codex(
             .and_then(|offering| offering.reasoning)
             .unwrap_or_else(|| profile.supports_reasoning())
     };
+    let vision = profile.image_input;
     let card_price = card.as_ref().and_then(|card| {
         let label = card.price_label();
         (label != "unknown").then_some(label)
@@ -1603,6 +1606,7 @@ fn effective_picker_metadata_with_codex(
         max_output,
         tool_calls,
         reasoning,
+        vision,
         pricing,
         source: card.map(|card| card.source),
     }
@@ -1672,6 +1676,12 @@ fn render_picker_model_hint(
 
     if metadata.reasoning {
         parts.push("reasoning".to_string());
+    }
+
+    match metadata.vision {
+        SupportState::Supported => parts.push("vision".to_string()),
+        SupportState::Unsupported => parts.push("no vision".to_string()),
+        SupportState::Unknown => {}
     }
 
     match &metadata.pricing {
