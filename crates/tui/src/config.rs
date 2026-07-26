@@ -5375,21 +5375,11 @@ impl Config {
     /// Resolve the memory file path.
     #[must_use]
     pub fn memory_path(&self) -> PathBuf {
-        let legacy_path = self
-            .memory_path
+        self.memory_path
             .as_deref()
             .map(expand_path)
             .or_else(default_memory_path)
-            .unwrap_or_else(|| PathBuf::from("./memory.md"));
-        if self.memory_backend() == MemoryBackend::Native {
-            return legacy_path
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join("memory")
-                .join("global")
-                .join("MEMORY.md");
-        }
-        legacy_path
+            .unwrap_or_else(|| PathBuf::from("./memory.md"))
     }
 
     /// Resolve the default speech/TTS output directory, if configured.
@@ -5452,7 +5442,7 @@ impl Config {
     #[must_use]
     pub fn moraine_fallback(&self) -> bool {
         if let Some(backend) = self.memory.as_ref().and_then(|memory| memory.backend) {
-            return backend == MemoryBackend::Moraine;
+            return backend != MemoryBackend::Off;
         }
         self.memory
             .as_ref()
