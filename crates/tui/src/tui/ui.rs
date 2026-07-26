@@ -13939,6 +13939,7 @@ async fn handle_view_events(
                 provider_id,
                 api_key,
                 model,
+                context_window,
             } => {
                 let identity = picker_provider_identity(config, provider, provider_id.as_deref())
                     .map_err(anyhow::Error::msg)?;
@@ -13949,6 +13950,7 @@ async fn handle_view_events(
                     identity,
                     api_key,
                     model,
+                    context_window,
                 )
                 .await;
                 if completed && app.onboarding == OnboardingState::Provider {
@@ -14871,8 +14873,12 @@ async fn apply_provider_picker_setup_confirmed(
     identity: crate::config::ProviderIdentity,
     api_key: String,
     model: String,
+    context_window: Option<u32>,
 ) -> bool {
-    use crate::config::{save_api_key_for_identity, save_provider_model_for_identity};
+    use crate::config::{
+        save_api_key_for_identity, save_provider_context_window_for_identity,
+        save_provider_model_for_identity,
+    };
 
     let provider = identity.provider;
 
@@ -14900,6 +14906,24 @@ async fn apply_provider_picker_setup_confirmed(
                         path.display()
                     ),
                 });
+            } else if let Some(context_window) = context_window {
+                if let Err(err) =
+                    save_provider_context_window_for_identity(&identity, config, context_window)
+                {
+                    app.add_message(HistoryCell::System {
+                        content: format!(
+                            "Saved {} API key and model to {}, but failed to save context window: {err}",
+                            provider.as_str(),
+                            path.display()
+                        ),
+                    });
+                } else {
+                    app.status_message = Some(format!(
+                        "Saved {} API key, model, and context window to {}",
+                        provider.as_str(),
+                        path.display()
+                    ));
+                }
             } else {
                 app.status_message = Some(format!(
                     "Saved {} API key and model to {}",
@@ -14923,6 +14947,9 @@ async fn apply_provider_picker_setup_confirmed(
     config.provider = Some(identity.key);
     mirror_saved_api_key_in_config(config, provider, api_key);
     mirror_saved_model_in_config(config, provider, model.clone());
+    if let Some(context_window) = context_window {
+        mirror_saved_context_window_in_config(config, provider, context_window);
+    }
     switch_provider(app, engine_handle, config, provider, Some(model)).await
 }
 
@@ -14932,6 +14959,21 @@ fn mirror_saved_model_in_config(config: &mut Config, provider: ApiProvider, mode
         return;
     }
     config.set_provider_model_override(provider, Some(model));
+}
+
+fn mirror_saved_context_window_in_config(
+    config: &mut Config,
+    provider: ApiProvider,
+    context_window: u32,
+) {
+    let providers = config
+        .providers
+        .get_or_insert_with(ProvidersConfig::default);
+    let entry = match provider {
+        ApiProvider::Moonshot => &mut providers.moonshot,
+        _ => return,
+    };
+    entry.context_window = Some(context_window);
 }
 
 fn mirror_saved_api_key_in_config(config: &mut Config, provider: ApiProvider, api_key: String) {
@@ -16864,6 +16906,7 @@ auth_mode = "kimi_oauth"
             identity,
             "sk-kimi-supported".to_string(),
             crate::config::DEFAULT_KIMI_CODE_MODEL.to_string(),
+            None,
         )
         .await;
 
@@ -16916,6 +16959,7 @@ base_url = "https://mock.openrouter.test/v1"
             identity,
             "sk-confirmed".to_string(),
             model.clone(),
+            None,
         )
         .await;
 
@@ -17069,6 +17113,7 @@ model = "model-b"
             identity,
             "saved-b-key".to_string(),
             "model-b-confirmed".to_string(),
+            None,
         )
         .await;
 

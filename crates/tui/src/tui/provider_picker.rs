@@ -72,6 +72,8 @@ enum Stage {
     ExternalConsentConfirm,
     /// Default model pick after a key has been live-validated (#3875).
     ModelPick,
+    /// Kimi Code membership plan selection for the exact `api.kimi.com` route.
+    PlanTier,
     /// Confirmation summary before any secret or model is persisted (#3875).
     Confirm,
     CustomForm,
@@ -82,6 +84,12 @@ enum ExternalConsentChoice {
     Disabled,
     ReadOnly,
     ManagedUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KimiCodePlanTier {
+    Safe262k,
+    OneMillion,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +129,8 @@ pub struct ProviderPickerView {
     model_selected_idx: usize,
     /// Model chosen on the model-pick stage (and shown on confirm).
     selected_model: Option<String>,
+    selected_context_window: Option<u32>,
+    kimi_code_plan_tier: KimiCodePlanTier,
     custom_provider_field: CustomProviderField,
     custom_provider_id: String,
     custom_provider_base_url: String,
@@ -1383,6 +1393,8 @@ impl ProviderPickerView {
             model_options: Vec::new(),
             model_selected_idx: 0,
             selected_model: None,
+            selected_context_window: None,
+            kimi_code_plan_tier: KimiCodePlanTier::Safe262k,
             custom_provider_field: CustomProviderField::Name,
             custom_provider_id: String::new(),
             custom_provider_base_url: String::new(),
@@ -1703,6 +1715,7 @@ impl ProviderPickerView {
 
     fn enter_model_pick(&mut self) {
         self.stage = Stage::ModelPick;
+        self.selected_context_window = None;
         let provider = self.selected_provider();
         let route = &self.rows[self.selected_idx].default_route;
         let kimi_code_k3 = crate::config::is_exact_kimi_code_k3_route(
@@ -1751,6 +1764,30 @@ impl ProviderPickerView {
         self.stage = Stage::Confirm;
     }
 
+    fn selected_kimi_code_k3(&self) -> bool {
+        let Some(model) = self.selected_model.as_deref() else {
+            return false;
+        };
+        crate::config::is_exact_kimi_code_k3_route(
+            self.selected_provider(),
+            &self.rows[self.selected_idx].base_url,
+            model,
+        )
+    }
+
+    fn enter_plan_tier(&mut self) {
+        self.stage = Stage::PlanTier;
+        self.kimi_code_plan_tier = KimiCodePlanTier::Safe262k;
+    }
+
+    fn apply_plan_tier(&mut self) {
+        self.selected_context_window = Some(match self.kimi_code_plan_tier {
+            KimiCodePlanTier::Safe262k => crate::models::KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS,
+            KimiCodePlanTier::OneMillion => 1_048_576,
+        });
+        self.enter_confirm();
+    }
+
     fn move_model_selection(&mut self, delta: isize) {
         let len = self.model_options.len();
         if len == 0 {
@@ -1777,6 +1814,7 @@ impl ProviderPickerView {
             provider_id: self.selected_provider_id(),
             api_key: api_key.to_string(),
             model: model.to_string(),
+            context_window: self.selected_context_window,
         })
     }
 
@@ -2607,6 +2645,47 @@ impl ProviderPickerView {
         Paragraph::new(lines).render(list_area, buf);
     }
 
+    fn render_plan_tier(&self, area: Rect, buf: &mut Buffer) {
+        let outer = Block::default()
+            .title(Line::from(Span::styled(
+                " Kimi Code plan tier ",
+                Style::default()
+                    .fg(palette::WHALE_INFO)
+                    .add_modifier(Modifier::BOLD),
+            )))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette::BORDER_COLOR))
+            .style(Style::default().bg(palette::WHALE_BG));
+        let inner = outer.inner(area);
+        outer.render(area, buf);
+        let content = render_modal_footer(
+            inner,
+            buf,
+            &[
+                ActionHint::new("↑↓", "choose"),
+                ActionHint::new("Enter", "continue"),
+                ActionHint::new("Esc", "back"),
+            ],
+        );
+        let selected = self.kimi_code_plan_tier;
+        let marker = |tier| crate::tui::glyphs::selection_marker(selected == tier);
+        Paragraph::new(vec![
+            Line::from("Kimi Code plan limits determine the context window used for k3."),
+            Line::from("Choose the tier you actually have; the safe floor is selected by default."),
+            Line::from(""),
+            Line::from(format!(
+                "{} 1. 262K context (safe default)",
+                marker(KimiCodePlanTier::Safe262k)
+            )),
+            Line::from(format!(
+                "{} 2. 1M context (only with an eligible plan)",
+                marker(KimiCodePlanTier::OneMillion)
+            )),
+        ])
+        .wrap(Wrap { trim: false })
+        .render(content, buf);
+    }
+
     fn render_confirm(&self, area: Rect, buf: &mut Buffer) {
         let row = &self.rows[self.selected_idx];
         let outer = Block::default()
@@ -2669,6 +2748,11 @@ impl ProviderPickerView {
                         .add_modifier(Modifier::BOLD),
                 ),
             ]),
+            if let Some(context_window) = self.selected_context_window {
+                Line::from(format!("Context:  {} tokens", context_window))
+            } else {
+                Line::from("")
+            },
         ];
         Paragraph::new(lines).render(content, buf);
     }
@@ -2835,6 +2919,7 @@ impl ModalView for ProviderPickerView {
             | Stage::ExternalConsentChoice
             | Stage::ExternalConsentConfirm
             | Stage::ModelPick
+            | Stage::PlanTier
             | Stage::Confirm => false,
         }
     }
@@ -3111,14 +3196,48 @@ impl ModalView for ProviderPickerView {
                         return ViewAction::None;
                     }
                     self.selected_model = self.model_options.get(self.model_selected_idx).cloned();
-                    self.enter_confirm();
+                    if self.selected_kimi_code_k3() {
+                        self.enter_plan_tier();
+                    } else {
+                        self.enter_confirm();
+                    }
+                    ViewAction::None
+                }
+                _ => ViewAction::None,
+            },
+            Stage::PlanTier => match key.code {
+                KeyCode::Esc => {
+                    self.stage = Stage::ModelPick;
+                    ViewAction::None
+                }
+                KeyCode::Up | KeyCode::Down => {
+                    self.kimi_code_plan_tier = match self.kimi_code_plan_tier {
+                        KimiCodePlanTier::Safe262k => KimiCodePlanTier::OneMillion,
+                        KimiCodePlanTier::OneMillion => KimiCodePlanTier::Safe262k,
+                    };
+                    ViewAction::None
+                }
+                KeyCode::Char('1') => {
+                    self.kimi_code_plan_tier = KimiCodePlanTier::Safe262k;
+                    ViewAction::None
+                }
+                KeyCode::Char('2') => {
+                    self.kimi_code_plan_tier = KimiCodePlanTier::OneMillion;
+                    ViewAction::None
+                }
+                KeyCode::Enter => {
+                    self.apply_plan_tier();
                     ViewAction::None
                 }
                 _ => ViewAction::None,
             },
             Stage::Confirm => match key.code {
                 KeyCode::Esc => {
-                    self.stage = Stage::ModelPick;
+                    self.stage = if self.selected_kimi_code_k3() {
+                        Stage::PlanTier
+                    } else {
+                        Stage::ModelPick
+                    };
                     ViewAction::None
                 }
                 KeyCode::Enter => self
@@ -3181,7 +3300,8 @@ impl ModalView for ProviderPickerView {
                 MouseEventKind::ScrollDown => self.move_model_selection(1),
                 _ => {}
             },
-            Stage::KeyEntry
+            Stage::PlanTier
+            | Stage::KeyEntry
             | Stage::ExternalConsentChoice
             | Stage::ExternalConsentConfirm
             | Stage::Confirm
@@ -3208,6 +3328,7 @@ impl ModalView for ProviderPickerView {
             Stage::ExternalConsentChoice => 12,
             Stage::ExternalConsentConfirm => 13,
             Stage::ModelPick => 12,
+            Stage::PlanTier => 10,
             Stage::Confirm => 10,
             Stage::CustomForm => 12,
         };
@@ -3221,6 +3342,7 @@ impl ModalView for ProviderPickerView {
             Stage::ExternalConsentChoice => self.render_external_consent_choice(popup_area, buf),
             Stage::ExternalConsentConfirm => self.render_external_consent_confirm(popup_area, buf),
             Stage::ModelPick => self.render_model_pick(popup_area, buf),
+            Stage::PlanTier => self.render_plan_tier(popup_area, buf),
             Stage::Confirm => self.render_confirm(popup_area, buf),
             Stage::CustomForm => self.render_custom_form(popup_area, buf),
         }
@@ -5255,6 +5377,7 @@ mod tests {
                 provider_id,
                 api_key,
                 model,
+                ..
             }) => {
                 assert_eq!(provider, ApiProvider::Openrouter);
                 assert_eq!(provider_id, None);
@@ -5262,6 +5385,56 @@ mod tests {
                 assert_eq!(model, selected_model);
             }
             other => panic!("expected ProviderPickerSetupConfirmed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exact_kimi_code_setup_asks_for_plan_and_emits_selected_context_window() {
+        let config = Config {
+            providers: Some(crate::config::ProvidersConfig {
+                moonshot: crate::config::ProviderConfig {
+                    base_url: Some(crate::config::DEFAULT_KIMI_CODE_BASE_URL.to_string()),
+                    model: Some(crate::config::KIMI_CODE_K3_MODEL.to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut picker = ProviderPickerView::new_for_model_pick_after_validation(
+            ApiProvider::Deepseek,
+            ApiProvider::Moonshot,
+            &config,
+            None,
+            "sk-kimi-plan".to_string(),
+        )
+        .expect("Moonshot has a picker row");
+
+        assert_eq!(picker.stage, Stage::ModelPick);
+        assert!(matches!(
+            picker.handle_key(key(KeyCode::Enter)),
+            ViewAction::None
+        ));
+        assert_eq!(picker.stage, Stage::PlanTier);
+        assert!(matches!(
+            picker.handle_key(key(KeyCode::Char('2'))),
+            ViewAction::None
+        ));
+        assert!(matches!(
+            picker.handle_key(key(KeyCode::Enter)),
+            ViewAction::None
+        ));
+        assert_eq!(picker.stage, Stage::Confirm);
+        match picker.handle_key(key(KeyCode::Enter)) {
+            ViewAction::EmitAndClose(ViewEvent::ProviderPickerSetupConfirmed {
+                context_window,
+                model,
+                ..
+            }) => {
+                assert_eq!(model, crate::config::KIMI_CODE_K3_MODEL);
+                assert_eq!(context_window, Some(1_048_576));
+            }
+            other => panic!("expected Kimi Code setup confirmation, got {other:?}"),
         }
     }
 

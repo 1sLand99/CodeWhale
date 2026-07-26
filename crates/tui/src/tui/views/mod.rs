@@ -773,6 +773,7 @@ pub enum ViewEvent {
         provider_id: Option<String>,
         api_key: String,
         model: String,
+        context_window: Option<u32>,
     },
     /// Emitted by the `/provider` picker after the custom provider form is
     /// completed. The handler persists a named OpenAI-compatible provider
