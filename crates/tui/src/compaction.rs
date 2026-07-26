@@ -37,20 +37,19 @@ pub struct CompactionConfig {
     /// into the successor-brief prompt so the summary weights what the user
     /// said matters. `None` for automatic compaction.
     pub focus: Option<String>,
-    /// Typed live runtime state for post-compact rehydrate (todos, workers,
-    /// shells, approvals, mode/permission). Host-owned snapshot; pure format
-    /// lives in [`format_live_state_reminder`].
+    /// Typed live runtime state for post-compact rehydrate (workers, shells,
+    /// approvals, mode/permission). Canonical To-do state is appended fresh at
+    /// the request tail instead of being frozen into the stable prefix.
+    /// Host-owned snapshot; pure format lives in [`format_live_state_reminder`].
     pub live_state: Option<CompactionLiveState>,
 }
 
 /// Host-captured live state injected after compaction so the successor agent
-/// does not reconstruct todos/workers/mode from prose alone (compactionidea P1).
+/// does not reconstruct workers/mode from prose alone (compactionidea P1).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CompactionLiveState {
     pub mode: Option<String>,
     pub permission_posture: Option<String>,
-    /// Preformatted todo lines (status + content), newest or checklist order.
-    pub todos: Vec<String>,
     /// Running background shell commands (id + command).
     pub background_shells: Vec<String>,
     /// Running sub-agents / fleet workers (id + role + objective).
@@ -64,7 +63,6 @@ impl CompactionLiveState {
     pub fn is_empty(&self) -> bool {
         self.mode.is_none()
             && self.permission_posture.is_none()
-            && self.todos.is_empty()
             && self.background_shells.is_empty()
             && self.running_workers.is_empty()
             && self.open_approvals.is_empty()
@@ -1559,12 +1557,6 @@ pub fn format_live_state_reminder(state: &CompactionLiveState) -> String {
     if let Some(posture) = state.permission_posture.as_deref() {
         let _ = writeln!(out, "- Permission posture: `{posture}`");
     }
-    if !state.todos.is_empty() {
-        out.push_str("\n### Todos\n");
-        for line in &state.todos {
-            let _ = writeln!(out, "- {line}");
-        }
-    }
     if !state.background_shells.is_empty() {
         out.push_str("\n### Running background shells\n");
         for line in &state.background_shells {
@@ -2354,7 +2346,6 @@ mod tests {
         let state = CompactionLiveState {
             mode: Some("operate".into()),
             permission_posture: Some("Ask".into()),
-            todos: vec!["[in_progress] #1 land fix".into()],
             background_shells: vec!["`sh_1`: `cargo test -p foo`".into()],
             running_workers: vec!["`agent_a` (role: implementer) — fix flaky".into()],
             open_approvals: vec!["shell: git push".into()],
@@ -2363,7 +2354,6 @@ mod tests {
         assert!(text.contains("Live State"));
         assert!(text.contains("operate"));
         assert!(text.contains("Ask"));
-        assert!(text.contains("land fix"));
         assert!(text.contains("cargo test"));
         assert!(text.contains("agent_a"));
         assert!(text.contains("git push"));

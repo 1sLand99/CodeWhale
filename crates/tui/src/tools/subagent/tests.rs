@@ -3131,6 +3131,7 @@ fn forked_subagent_messages_preserve_parent_prefix_then_append_task() {
     let fork_context = SubAgentForkContext {
         messages: vec![parent_message.clone()],
         structured_state_block: Some("## Fork State\n- Mode: `AGENT`".to_string()),
+        work_source: None,
     };
 
     let assignment = SubAgentAssignment::new("inspect parser".to_string(), Some("worker".into()));
@@ -6602,6 +6603,7 @@ fn fresh_forked_and_nested_subagents_share_authority_bound_skill_catalogs() {
             }],
         }],
         structured_state_block: None,
+        work_source: None,
     };
     let forked = build_initial_subagent_messages_with_system(
         "review",
@@ -6626,6 +6628,7 @@ fn fresh_forked_and_nested_subagents_share_authority_bound_skill_catalogs() {
         SubAgentForkContext {
             messages: Vec::new(),
             structured_state_block: None,
+            work_source: None,
         },
     );
     let nested_system = build_subagent_system_prompt_with_skills(
@@ -7253,6 +7256,7 @@ async fn parent_todo_state_still_reaches_children_as_immutable_fork_context() {
             "## Fork State\n\n### Work\n\nTo-do (0% settled)\n- [ ] #1 parent step one\n"
                 .to_string(),
         ),
+        work_source: None,
     });
 
     let direct = parent.child_runtime();
@@ -7272,6 +7276,118 @@ async fn parent_todo_state_still_reaches_children_as_immutable_fork_context() {
             todo_contents(&child.todos).await.is_empty(),
             "{label} must receive that state as context only, never as writable list state"
         );
+    }
+}
+
+// === #3983: every child grounds on its own Work ledger ===
+
+fn work_state_source_for(runtime: &SubAgentRuntime) -> crate::work_grounding::WorkStateSource {
+    crate::work_grounding::WorkStateSource::new(
+        runtime.context.runtime.work.clone(),
+        runtime.todos.clone(),
+    )
+}
+
+fn tail_text(messages: &[Message]) -> Option<String> {
+    let last = messages.last()?;
+    let text = last
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    text.contains(crate::work_grounding::WORK_STATE_OPEN_TAG)
+        .then_some(text)
+}
+
+/// A child's provider request carries the same canonical Work tail the parent
+/// gets, sourced from the child's own list, and refreshed after the child's own
+/// `work_update`. It is transient: the child's stored messages are unchanged.
+#[tokio::test]
+async fn child_request_carries_its_own_refreshed_work_tail() {
+    let child = stub_runtime().child_runtime();
+    let source = work_state_source_for(&child);
+    let stored = vec![Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::Text {
+            text: "child assignment".to_string(),
+            cache_control: None,
+        }],
+    }];
+
+    // No work yet: nothing is appended at all.
+    let request = subagent_request_messages(&stored, &source).await;
+    assert_eq!(request, stored, "an empty child ledger appends nothing");
+
+    write_todos_as(&child, &["child step one"]).await;
+    let request = subagent_request_messages(&stored, &source).await;
+    assert_eq!(request.len(), stored.len() + 1);
+    assert_eq!(&request[..stored.len()], &stored[..]);
+    let tail = tail_text(&request).expect("child work tail");
+    let snapshot = source.snapshot().await;
+    assert_eq!(
+        tail,
+        crate::work_grounding::work_state_block(&snapshot).expect("block"),
+        "the child tail must be the byte-identical canonical block"
+    );
+    assert!(tail.contains("#1 child step one"), "{tail}");
+
+    // After the child's own update, the next child request reflects it.
+    write_todos_as(&child, &["child step one", "child step two"]).await;
+    let tail = tail_text(&subagent_request_messages(&stored, &source).await).expect("tail");
+    assert!(tail.contains("#2 child step two"), "{tail}");
+
+    // Transient: the caller's message list never grew a block.
+    assert_eq!(stored.len(), 1);
+    assert!(tail_text(&stored).is_none());
+}
+
+/// Sibling and parent isolation: each agent's tail states only its own ledger.
+#[tokio::test]
+async fn child_work_tail_never_leaks_across_siblings_or_to_the_parent() {
+    let parent = stub_runtime();
+    let first = parent.child_runtime();
+    let second = parent.child_runtime();
+
+    write_todos_as(&parent, &["parent ledger item"]).await;
+    write_todos_as(&first, &["first sibling item"]).await;
+    write_todos_as(&second, &["second sibling item"]).await;
+
+    let stored: Vec<Message> = Vec::new();
+    let cases = [
+        (
+            "parent",
+            work_state_source_for(&parent),
+            "parent ledger item",
+            ["first sibling item", "second sibling item"],
+        ),
+        (
+            "first child",
+            work_state_source_for(&first),
+            "first sibling item",
+            ["parent ledger item", "second sibling item"],
+        ),
+        (
+            "second child",
+            work_state_source_for(&second),
+            "second sibling item",
+            ["parent ledger item", "first sibling item"],
+        ),
+    ];
+
+    for (label, source, own, foreign) in cases {
+        let tail = tail_text(&subagent_request_messages(&stored, &source).await)
+            .unwrap_or_else(|| panic!("{label} must have a Work tail"));
+        assert!(tail.contains(own), "{label} lost its own ledger: {tail}");
+        for other in foreign {
+            assert!(
+                !tail.contains(other),
+                "{label} leaked another agent's ledger ({other}): {tail}"
+            );
+        }
     }
 }
 
@@ -9541,6 +9657,7 @@ fn nested_tool_runtime_routes_child_completions_to_local_inbox() {
     let fork_context = SubAgentForkContext {
         messages: Vec::new(),
         structured_state_block: None,
+        work_source: None,
     };
 
     let (tool_runtime, mut local_rx) =

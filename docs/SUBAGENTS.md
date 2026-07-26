@@ -84,11 +84,27 @@ Use fresh sessions for independent exploration. Use forked sessions when the
 task depends on decisions, files, todos, or plan state already in the parent
 transcript.
 
-Forked state renders concrete Work progress through the canonical
-`checklist_*` surface. The durable task/Fleet ledger owns lifecycle state;
-checklist entries are the model-visible progress projection. Use `update_plan`
-only for strategy metadata that helps a parent or later worker understand the
-approach.
+Forked state renders concrete Work progress from the To-do ledger — the sole
+canonical Work surface, written by `work_update`. The child's
+`<codewhale:fork_state>` block carries the same bounded body
+(`crates/tui/src/work_grounding.rs`) that the parent's own requests carry, so a
+fork continues from the parent's real progress position rather than a
+paraphrase. That Work section is resolved when the spawn happens, so a
+`work_update` earlier in the same parent turn is included.
+
+Each agent then grounds on **its own** ledger: every sub-agent request carries
+the same transient `<codewhale:work_state>` tail rendered from that agent's
+private To-do list (#4810), refreshed after the agent's own `work_update`. It is
+request-scoped — never stored in the child transcript or its system prefix — so
+a worker can never read or write a parent's or sibling's **private transient
+tail**. A deliberately forked child still receives the bounded immutable parent
+ledger snapshot described above as part of its fork context; it cannot mutate
+that snapshot or keep reading later parent changes.
+
+The durable task/Fleet ledger still owns lifecycle state. Use
+`update_plan` only for conversational strategy that helps a parent or later
+worker understand the approach; it is not a second Work ledger and never
+becomes Work grounding on its own.
 
 ## Worktree isolation
 
@@ -180,8 +196,8 @@ OUTPUT: VERDICT, EVIDENCE, GAPS, NEXT.
   likely scope, and return `path:line-range` evidence instead of a narrative
   tour. The role name to use is `scout`.
 - **`planner`** — when the parent has an objective but no executable
-  decomposition. Planners write artifacts (`update_plan` rows,
-  `checklist_write` entries) but don't carry them out.
+  decomposition. Planners write artifacts (`work_update` items for the ledger,
+  `update_plan` notes for strategy) but don't carry them out.
 - **`reviewer`** — when there's already a change and the parent wants
   it graded. Reviewers don't patch — they describe the fix in the
   finding so the parent can dispatch a builder if the verdict

@@ -511,13 +511,21 @@ impl Engine {
                 }
             }
 
+            // Resolve the transient Work tail once per step, before the
+            // preflight gate, and reuse the very same message when the request
+            // is built below (#3983). Anything that estimates one list and
+            // sends another can approve a request that is over the limit only
+            // after up to `MAX_BODY_CHARS` of Work grounding is appended.
+            let work_state_tail = self.work_state_tail_message().await;
+
             if let Some(input_budget) = context_input_budget_for_route(
                 self.api_provider,
                 &self.session.model,
                 self.active_route_limits,
                 0,
             ) {
-                let estimated_input = self.estimated_input_tokens();
+                let estimated_input =
+                    self.estimated_input_tokens_with_work_tail(work_state_tail.as_ref());
                 if estimated_input > input_budget {
                     if context_recovery_attempts >= MAX_CONTEXT_RECOVERY_ATTEMPTS {
                         let message = format!(
@@ -672,7 +680,7 @@ impl Engine {
 
             let request = MessageRequest {
                 model: self.session.model.clone(),
-                messages: self.messages_with_turn_metadata(),
+                messages: self.request_messages_with_work_tail(work_state_tail.as_ref()),
                 max_tokens: effective_max_output_tokens_for_route(
                     self.api_provider,
                     &self.session.model,
@@ -3166,6 +3174,86 @@ impl Engine {
 
     pub(super) fn messages_with_turn_metadata(&self) -> Vec<Message> {
         self.session.messages.clone().into()
+    }
+
+    /// This session's authoritative Work state (#3983).
+    ///
+    /// The graph projection wins when a `WorkRuntime` owns this session's list:
+    /// a real `work_update` stages the new projection there and only publishes
+    /// into `config.todos` asynchronously, so reading `config.todos` alone
+    /// would show the model its state from before its own last write. Sessions
+    /// with no attached runtime (legacy paths, one-off contexts) resolve
+    /// against `config.todos`, which is authoritative for them.
+    pub(super) fn work_state_source(&self) -> crate::work_grounding::WorkStateSource {
+        crate::work_grounding::WorkStateSource::new(
+            self.config.runtime_services.work.clone(),
+            self.config.todos.clone(),
+        )
+    }
+
+    /// The transient Work grounding block for the *current* To-do state
+    /// (#3983), or `None` when there is no work to state.
+    ///
+    /// This message is deliberately request-scoped: it is never added to
+    /// session history and never enters the system prompt, so the stable
+    /// prefix (and its cache) is untouched and a stale ledger cannot outlive
+    /// the request that carried it.
+    pub(super) async fn work_state_tail_message(&self) -> Option<Message> {
+        self.work_state_source().tail_message().await
+    }
+
+    /// Message list for one provider request: stored history, then the
+    /// already-resolved transient Work block at the tail.
+    ///
+    /// Takes the tail rather than resolving it so that preflight token
+    /// accounting and the request itself are built from the *same* message
+    /// (#3983): if preflight estimated a smaller list than the one sent, it
+    /// could approve a request that only becomes over-limit once the tail is
+    /// added.
+    pub(super) fn request_messages_with_work_tail(
+        &self,
+        work_tail: Option<&Message>,
+    ) -> Vec<Message> {
+        let mut messages = self.messages_with_turn_metadata();
+        if let Some(work_state) = work_tail {
+            messages.push(work_state.clone());
+        }
+        messages
+    }
+
+    /// Resolve the tail and build the request messages in one step.
+    ///
+    /// Test-only: the live turn loop resolves the tail *before* its preflight
+    /// gate and passes that same message to
+    /// [`Self::request_messages_with_work_tail`], so it must not use a helper
+    /// that resolves a second time.
+    #[cfg(test)]
+    pub(super) async fn request_messages_with_work_state(&self) -> Vec<Message> {
+        let tail = self.work_state_tail_message().await;
+        self.request_messages_with_work_tail(tail.as_ref())
+    }
+
+    /// Conservative token cost of the stored history plus the exact transient
+    /// Work tail that will be sent.
+    ///
+    /// Reuses [`estimate_input_tokens_conservative`] — the same estimator the
+    /// preflight budget is expressed in — over the tail message. Summing two
+    /// conservative estimates double-counts the estimator's fixed framing
+    /// constant, so the result is an over-estimate, never an under-estimate;
+    /// that direction is the safe one for a preflight gate, and offline counts
+    /// are conservative estimates by contract.
+    pub(super) fn estimated_input_tokens_with_work_tail(
+        &mut self,
+        work_tail: Option<&Message>,
+    ) -> usize {
+        let base = self.estimated_input_tokens();
+        let Some(tail) = work_tail else {
+            return base;
+        };
+        base.saturating_add(super::context::estimate_input_tokens_conservative(
+            std::slice::from_ref(tail),
+            None,
+        ))
     }
 }
 

@@ -80,25 +80,6 @@ impl TodoListSnapshot {
         self.items.is_empty()
     }
 
-    /// Plain-text rendering for headless and accessibility surfaces. Styled
-    /// panes consume the same `items`; this keeps status wording and ordering
-    /// owned by the canonical list rather than a second progress model.
-    #[must_use]
-    pub fn plain_text(&self) -> String {
-        self.items
-            .iter()
-            .map(|item| {
-                let marker = match item.status {
-                    TodoStatus::Pending => "[ ]",
-                    TodoStatus::InProgress => "[~]",
-                    TodoStatus::Completed => "[x]",
-                    TodoStatus::Cancelled => "[-]",
-                };
-                format!("{marker} #{} {}", item.id, item.content)
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
 }
 
 /// Mutable list of todo items with helper operations.
@@ -786,7 +767,6 @@ mod tests {
         let snapshot = list.snapshot();
         assert_eq!(snapshot.completion_pct, 100);
         assert_eq!(snapshot.in_progress_id, None);
-        assert_eq!(snapshot.plain_text(), "[-] #1 abandoned approach");
         assert_eq!(
             serde_json::to_value(snapshot.items[0].status).expect("serialize"),
             serde_json::json!("cancelled")

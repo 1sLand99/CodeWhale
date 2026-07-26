@@ -64,7 +64,7 @@ use crate::tools::subagent::{
     SubAgentThinking, agent_worker_owner_snapshot, ensure_subagent_model_for_provider,
     new_shared_subagent_manager_with_timeout, resolve_subagent_assignment_route,
 };
-use crate::tools::todo::{SharedTodoList, TodoListSnapshot, new_shared_todo_list};
+use crate::tools::todo::{SharedTodoList, new_shared_todo_list};
 use crate::tools::user_input::{UserInputRequest, UserInputResponse};
 use crate::tools::{ToolContext, ToolRegistryBuilder};
 use crate::tui::app::AppMode;
@@ -97,13 +97,19 @@ fn agent_list_event(manager: &SubAgentManager) -> Event {
 
 /// Snapshot of parent state that can be passed to forked sub-agents without
 /// rewriting the parent transcript.
+///
+/// Deliberately **Work-free**: this is captured once at turn start, and Work
+/// state changes during the turn. The Work section of the fork-state block is
+/// resolved at the actual fork seam instead (see
+/// `SubAgentForkContext::with_resolved_state_block`), so a `work_update`
+/// followed by an `agent` spawn in the same turn hands the child the current
+/// ledger rather than the one that existed before the turn's first tool call.
 #[derive(Debug, Clone, Default)]
 struct StructuredState {
     mode_label: String,
     workspace: PathBuf,
     cwd: Option<PathBuf>,
     working_set_summary: Option<String>,
-    todo_snapshot: Option<TodoListSnapshot>,
     subagent_snapshots: Vec<SubAgentResult>,
 }
 
@@ -113,20 +119,9 @@ impl StructuredState {
         workspace: PathBuf,
         cwd: Option<PathBuf>,
         working_set: &WorkingSet,
-        todos: &SharedTodoList,
         subagents: Option<&SharedSubAgentManager>,
     ) -> Self {
         let working_set_summary = working_set.summary_block(&workspace);
-
-        let todo_snapshot = {
-            let guard = todos.lock().await;
-            let snap = guard.snapshot();
-            if snap.items.is_empty() {
-                None
-            } else {
-                Some(snap)
-            }
-        };
 
         let subagent_snapshots = if let Some(handle) = subagents {
             let mut guard = handle.write().await;
@@ -145,7 +140,6 @@ impl StructuredState {
             workspace,
             cwd,
             working_set_summary,
-            todo_snapshot,
             subagent_snapshots,
         }
     }
@@ -160,19 +154,9 @@ impl StructuredState {
             out.push_str(&format!("- Cwd: `{}`\n", cwd.display()));
         }
 
-        if self.todo_snapshot.is_some() {
-            out.push_str("\n### Work\n");
-        }
-
-        if let Some(todos) = self.todo_snapshot.as_ref() {
-            out.push_str(&format!("\nTo-do ({}% settled)\n", todos.completion_pct));
-            for line in todos.plain_text().lines() {
-                // IDs are useful in the canonical digest because work_update
-                // addresses later transitions by stable item identity.
-                out.push_str(&format!("- {line}\n"));
-            }
-        }
-
+        // No Work section here on purpose: it is appended at the fork seam from
+        // the authoritative projection (#3983), because this block is captured
+        // at turn start and Work moves during the turn.
         if !self.subagent_snapshots.is_empty() {
             out.push_str("\n### Open Sub-Agents\n");
             for s in &self.subagent_snapshots {
@@ -3355,13 +3339,15 @@ impl Engine {
                 self.config.workspace.clone(),
                 std::env::current_dir().ok(),
                 &self.session.working_set,
-                &self.config.todos,
                 Some(&self.subagent_manager),
             )
             .await;
             Some(SubAgentForkContext {
                 messages: self.messages_with_turn_metadata(),
                 structured_state_block: state.to_system_block(),
+                // Resolved at spawn time, not now: a `work_update` earlier in
+                // this same turn must reach the child (#3983).
+                work_source: Some(self.work_state_source()),
             })
         } else {
             None
@@ -3642,25 +3628,13 @@ impl Engine {
         outcome
     }
 
-    /// Capture typed live state for post-compact rehydrate (todos, workers,
-    /// shells, mode, permission). Pure formatting lives in compaction.rs.
+    /// Capture typed live state for post-compact rehydrate (workers, shells,
+    /// mode, permission). To-do state deliberately stays out of this stable
+    /// prefix snapshot: the authoritative graph projection is appended fresh
+    /// to each parent turn-loop and sub-agent step request by
+    /// `work_state_tail_message`.
     async fn capture_compaction_live_state(&self) -> CompactionLiveState {
         self.touch_workers_with_running_shells().await;
-        let todos = {
-            let guard = self.config.todos.lock().await;
-            let snap = guard.snapshot();
-            if snap.is_empty() {
-                Vec::new()
-            } else {
-                snap.plain_text()
-                    .lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                    .map(str::to_string)
-                    .collect()
-            }
-        };
-
         let running_workers = {
             let mut guard = self.subagent_manager.write().await;
             guard.cleanup(Duration::from_secs(60 * 60));
@@ -3698,7 +3672,6 @@ impl Engine {
                     .permission_chip_label()
                     .to_string(),
             ),
-            todos,
             background_shells,
             running_workers,
             open_approvals: Vec::new(),

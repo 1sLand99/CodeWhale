@@ -14,7 +14,7 @@ use crate::prompts::{
 };
 use crate::test_support::{EnvVarGuard, lock_test_env};
 use crate::tools::spec::ToolCapability;
-use crate::tools::todo::{TodoItem, TodoListSnapshot, TodoStatus};
+use crate::tools::todo::TodoStatus;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -2957,37 +2957,25 @@ fn tool_catalog_filter_is_inert_without_gates() {
     assert_eq!(catalog.len(), 2);
 }
 
+/// The turn-start capture carries mode/workspace/working-set state only. Work
+/// used to be rendered here; it moved to the fork seam (#3983) because this
+/// block is captured before the turn's first tool call. Fork-seam Work parity is
+/// covered by `fork_state_block_reuses_the_canonical_work_body`.
 #[test]
-fn structured_state_block_uses_checklist_as_work_surface() {
+fn structured_state_block_carries_stable_state_without_work() {
     let state = StructuredState {
         mode_label: "Agent".to_string(),
         workspace: PathBuf::from("/workspace/codewhale"),
         cwd: Some(PathBuf::from("/workspace/codewhale")),
         working_set_summary: None,
-        todo_snapshot: Some(TodoListSnapshot {
-            items: vec![
-                TodoItem {
-                    id: 1,
-                    content: "Wire Fleet progress projection".to_string(),
-                    status: TodoStatus::InProgress,
-                },
-                TodoItem {
-                    id: 2,
-                    content: "Run focused gates".to_string(),
-                    status: TodoStatus::Pending,
-                },
-            ],
-            completion_pct: 0,
-            in_progress_id: Some(1),
-        }),
         subagent_snapshots: Vec::new(),
     };
 
     let block = state.to_system_block().expect("fork state block");
 
-    assert!(block.contains("### Work"));
-    assert!(block.contains("To-do (0% settled)"));
-    assert!(block.contains("- [~] #1 Wire Fleet progress projection"));
+    assert!(block.contains("- Mode: `Agent`"));
+    assert!(!block.contains(crate::work_grounding::FORK_WORK_SECTION_HEADING));
+    assert!(!block.contains("To-do ("));
     assert!(!block.contains("Strategy"));
 }
 
@@ -8544,6 +8532,496 @@ fn messages_with_turn_metadata_returns_stored_session_messages() {
             .all(|message| message.role != "system"),
         "model request projection must not create appended system messages"
     );
+}
+
+// === #3983: canonical Work grounding at the request tail ===
+
+fn work_grounding_engine() -> (Engine, EngineHandle, tempfile::TempDir) {
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, handle) = Engine::new(config, &Config::default());
+    engine.session.messages = vec![Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::Text {
+            text: "land the grounding seam".to_string(),
+            cache_control: None,
+        }],
+    }]
+    .into();
+    (engine, handle, tmp)
+}
+
+fn message_text_of(message: &Message) -> String {
+    message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[tokio::test]
+async fn empty_todo_appends_no_work_state_block() {
+    let (engine, _handle, _tmp) = work_grounding_engine();
+
+    assert!(engine.work_state_tail_message().await.is_none());
+    assert_eq!(
+        engine.request_messages_with_work_state().await,
+        engine.messages_with_turn_metadata(),
+        "an empty To-do must add nothing to the request"
+    );
+}
+
+#[tokio::test]
+async fn request_tail_carries_work_state_without_storing_it() {
+    let (engine, _handle, _tmp) = work_grounding_engine();
+    {
+        let mut todos = engine.config.todos.lock().await;
+        todos.add("read the seam".to_string(), TodoStatus::Completed);
+        todos.add("write the renderer".to_string(), TodoStatus::InProgress);
+    }
+    let stored = engine.session.messages.clone();
+    let system_before = engine.session.system_prompt.clone();
+
+    let request = engine.request_messages_with_work_state().await;
+
+    // Stable prefix is byte-identical: the block is appended, never woven in.
+    assert_eq!(request.len(), stored.len() + 1);
+    assert_eq!(&request[..stored.len()], &stored[..]);
+    assert_eq!(engine.session.system_prompt, system_before);
+
+    let tail = request.last().expect("tail message");
+    assert_eq!(tail.role, "user");
+    let text = message_text_of(tail);
+    let snapshot = engine.config.todos.lock().await.snapshot();
+    assert_eq!(
+        text,
+        crate::work_grounding::work_state_block(&snapshot).expect("block")
+    );
+    assert!(text.contains("[~] #2 write the renderer"));
+
+    // Transient: nothing about the block reaches session history.
+    assert_eq!(&*engine.session.messages, &*stored);
+    assert!(
+        !engine
+            .session
+            .messages
+            .iter()
+            .any(|message| message_text_of(message)
+                .contains(crate::work_grounding::WORK_STATE_OPEN_TAG)),
+        "the work_state block must never be stored in session history"
+    );
+    assert!(engine.messages_with_turn_metadata().iter().all(|message| {
+        !message_text_of(message).contains(crate::work_grounding::WORK_STATE_OPEN_TAG)
+    }));
+}
+
+/// A `work_update` executed mid tool-loop must be visible on the next model
+/// step, because the block is rebuilt per request rather than pinned once.
+#[tokio::test]
+async fn later_request_sees_an_intervening_work_update() {
+    let (engine, _handle, _tmp) = work_grounding_engine();
+    {
+        let mut todos = engine.config.todos.lock().await;
+        todos.add("first step".to_string(), TodoStatus::InProgress);
+    }
+
+    let first = engine.request_messages_with_work_state().await;
+    let first_text = message_text_of(first.last().expect("tail"));
+    assert!(first_text.contains("first step"));
+    assert!(!first_text.contains("second step"));
+
+    {
+        let mut todos = engine.config.todos.lock().await;
+        let _ = todos.update_status(1, TodoStatus::Completed);
+        todos.add("second step".to_string(), TodoStatus::InProgress);
+    }
+
+    let second_text = message_text_of(
+        engine
+            .request_messages_with_work_state()
+            .await
+            .last()
+            .expect("tail"),
+    );
+    assert!(second_text.contains("[x] #1 first step"));
+    assert!(second_text.contains("[~] #2 second step"));
+}
+
+/// The turn-start structured state is deliberately Work-free: Work moves
+/// during a turn, so it is resolved at the fork seam instead.
+#[test]
+fn turn_start_structured_state_carries_no_work_section() {
+    let state = StructuredState {
+        mode_label: "Agent".to_string(),
+        workspace: PathBuf::from("/workspace/codewhale"),
+        cwd: None,
+        working_set_summary: None,
+        subagent_snapshots: Vec::new(),
+    };
+
+    let block = state.to_system_block().expect("fork state block");
+
+    assert!(
+        !block.contains(crate::work_grounding::FORK_WORK_SECTION_HEADING),
+        "stable capture must not pin a Work section: {block}"
+    );
+    assert!(!block.contains("To-do ("));
+}
+
+/// Parent request tail, fork state block, and `/relay` all state the same
+/// ledger. Relay parity is asserted in `commands::tests`.
+#[tokio::test]
+async fn fork_state_block_reuses_the_canonical_work_body() {
+    let (engine, _handle, _tmp) = work_grounding_engine();
+    {
+        let mut todos = engine.config.todos.lock().await;
+        todos.add(
+            "Wire Fleet progress projection".to_string(),
+            TodoStatus::InProgress,
+        );
+        todos.add("Run focused gates".to_string(), TodoStatus::Pending);
+    }
+    let snapshot = engine.config.todos.lock().await.snapshot();
+    let body = crate::work_grounding::canonical_todo_body(&snapshot).expect("body");
+
+    let state = StructuredState {
+        mode_label: "Agent".to_string(),
+        workspace: PathBuf::from("/workspace/codewhale"),
+        cwd: None,
+        working_set_summary: None,
+        subagent_snapshots: Vec::new(),
+    };
+    let fork_context = crate::tools::subagent::SubAgentForkContext {
+        messages: engine.messages_with_turn_metadata(),
+        structured_state_block: state.to_system_block(),
+        work_source: Some(engine.work_state_source()),
+    };
+
+    let resolved = fork_context
+        .with_resolved_state_block()
+        .await
+        .structured_state_block
+        .expect("resolved fork state block");
+    let tail_block = crate::work_grounding::work_state_block(&snapshot).expect("tail block");
+
+    assert!(resolved.contains(&body), "fork body drifted: {resolved}");
+    assert!(tail_block.contains(&body));
+}
+
+/// `update_plan` is conversational reasoning, not a Work ledger: plan-only
+/// state must not produce Work grounding.
+#[tokio::test]
+async fn plan_only_state_produces_no_work_grounding() {
+    let (engine, _handle, _tmp) = work_grounding_engine();
+    {
+        let mut plan = engine.config.plan_state.lock().await;
+        plan.update(crate::tools::plan::UpdatePlanArgs {
+            objective: Some("Ship the grounding seam".to_string()),
+            plan: vec![crate::tools::plan::PlanItemArg {
+                step: "draft the renderer".to_string(),
+                status: crate::tools::plan::StepStatus::InProgress,
+            }],
+            ..crate::tools::plan::UpdatePlanArgs::default()
+        });
+        assert!(!plan.snapshot().is_empty());
+    }
+
+    assert!(
+        engine.work_state_tail_message().await.is_none(),
+        "legacy plan-only state must not leak into Work grounding"
+    );
+}
+
+/// Engine whose To-do list is owned by a real `WorkRuntime`, i.e. the live
+/// configuration rather than the legacy no-runtime one.
+fn graph_backed_work_grounding_engine() -> (
+    Engine,
+    EngineHandle,
+    crate::tools::todo::SharedTodoList,
+    crate::work_graph::SharedWorkRuntime,
+    tempfile::TempDir,
+) {
+    let tmp = tempdir().expect("tempdir");
+    let todos = crate::tools::todo::new_shared_todo_list();
+    let plan = crate::tools::plan::new_shared_plan_state();
+    let work = crate::work_graph::new_shared_work_runtime(todos.clone(), plan.clone());
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        todos: todos.clone(),
+        plan_state: plan,
+        runtime_services: crate::tools::spec::RuntimeToolServices {
+            work: Some(work.clone()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let (engine, handle) = Engine::new(config, &Config::default());
+    (engine, handle, todos, work, tmp)
+}
+
+/// Run the real `work_update` tool against the attached graph — not a direct
+/// mutation of the legacy list, which is exactly the state this seam must stop
+/// trusting.
+async fn run_graph_backed_work_update(
+    todos: &crate::tools::todo::SharedTodoList,
+    work: &crate::work_graph::SharedWorkRuntime,
+    items: serde_json::Value,
+) {
+    use crate::tools::spec::ToolSpec as _;
+    let mut context = crate::tools::spec::ToolContext::new(std::env::temp_dir());
+    context.runtime.work = Some(work.clone());
+    crate::tools::todo::TodoWriteTool::work_update(todos.clone())
+        .execute(json!({ "todos": items }), &context)
+        .await
+        .expect("graph-backed work_update");
+}
+
+/// #3983 runtime regression: a real graph-backed `work_update` stages the new
+/// projection in the `WorkRuntime` and publishes into `config.todos` only later,
+/// asynchronously, from the UI. The next provider request must carry the staged
+/// projection, not the pre-write legacy view.
+#[tokio::test]
+async fn next_provider_request_reflects_graph_backed_work_update() {
+    let (engine, _handle, todos, work, _tmp) = graph_backed_work_grounding_engine();
+    assert!(
+        engine.work_state_source().is_graph_backed(),
+        "this engine must read the graph, not the legacy view"
+    );
+
+    run_graph_backed_work_update(
+        &todos,
+        &work,
+        json!([
+            { "content": "read the runtime seam", "status": "completed" },
+            { "content": "ground the next request", "status": "in_progress" }
+        ]),
+    )
+    .await;
+
+    // The staleness this test exists for: the legacy view is still empty here.
+    assert!(
+        todos.lock().await.snapshot().is_empty(),
+        "precondition: work_update stages in the graph and publishes later"
+    );
+
+    let tail = message_text_of(
+        engine
+            .request_messages_with_work_state()
+            .await
+            .last()
+            .expect("tail"),
+    );
+    assert!(
+        tail.contains("[x] #1 read the runtime seam"),
+        "request tail must carry the staged projection: {tail}"
+    );
+    assert!(tail.contains("[~] #2 ground the next request"), "{tail}");
+
+    // And a second graph-backed update lands on the following request.
+    run_graph_backed_work_update(
+        &todos,
+        &work,
+        json!([
+            { "content": "read the runtime seam", "status": "completed" },
+            { "content": "ground the next request", "status": "completed" },
+            { "content": "cover the child seam", "status": "in_progress" }
+        ]),
+    )
+    .await;
+    let tail = message_text_of(
+        engine
+            .request_messages_with_work_state()
+            .await
+            .last()
+            .expect("tail"),
+    );
+    assert!(tail.contains("[x] #2 ground the next request"), "{tail}");
+    assert!(tail.contains("[~] #3 cover the child seam"), "{tail}");
+}
+
+/// #3983: compaction must not freeze a To-do projection into the stable
+/// system prefix. The next request rehydrates from the live graph tail instead.
+#[tokio::test]
+async fn compaction_keeps_todos_out_of_prefix_and_next_tail_current() {
+    let (mut engine, _handle, todos, work, _tmp) = graph_backed_work_grounding_engine();
+    run_graph_backed_work_update(
+        &todos,
+        &work,
+        json!([{ "content": "staged graph-only todo", "status": "in_progress" }]),
+    )
+    .await;
+    assert!(
+        todos.lock().await.snapshot().is_empty(),
+        "precondition: the compatibility list is still stale"
+    );
+
+    let live = engine.capture_compaction_live_state().await;
+    let reminder = crate::compaction::format_live_state_reminder(&live);
+    assert!(
+        !reminder.contains("staged graph-only todo") && !reminder.contains("### Todos"),
+        "compaction live state must not create a second To-do surface: {reminder}"
+    );
+    engine.merge_compaction_summary(Some(SystemPrompt::Text(format!(
+        "{COMPACTION_SUMMARY_MARKER}\nsummary\n{reminder}"
+    ))));
+    let prefix = engine.rendered_compaction_summary().expect("summary");
+    assert!(!prefix.contains("staged graph-only todo"), "{prefix}");
+    assert!(!prefix.contains("### Todos"), "{prefix}");
+
+    let request = engine.request_messages_with_work_state().await;
+    let tail = message_text_of(request.last().expect("current Work tail"));
+    assert!(tail.contains("[~] #1 staged graph-only todo"), "{tail}");
+}
+
+/// #3983 runtime regression: `fork_context` is captured once at turn start, so a
+/// `work_update` followed by an `agent` spawn *in the same turn* must still hand
+/// the child the current canonical body. Only the Work portion is refreshed;
+/// the inherited transcript and stable state text are unchanged.
+#[tokio::test]
+async fn same_turn_fork_carries_the_updated_work_state() {
+    let (engine, _handle, todos, work, _tmp) = graph_backed_work_grounding_engine();
+
+    // Turn start: capture the fork context, before any work exists.
+    let stable_block = StructuredState {
+        mode_label: "Agent".to_string(),
+        workspace: engine.config.workspace.clone(),
+        cwd: None,
+        working_set_summary: None,
+        subagent_snapshots: Vec::new(),
+    }
+    .to_system_block();
+    let fork_context = crate::tools::subagent::SubAgentForkContext {
+        messages: engine.messages_with_turn_metadata(),
+        structured_state_block: stable_block.clone(),
+        work_source: Some(engine.work_state_source()),
+    };
+    let captured_messages = fork_context.messages.clone();
+    assert!(
+        !fork_context
+            .with_resolved_state_block()
+            .await
+            .structured_state_block
+            .expect("stable block")
+            .contains("To-do ("),
+        "no work yet, so no Work section"
+    );
+
+    // Mid-turn: the model calls work_update, then spawns an agent.
+    run_graph_backed_work_update(
+        &todos,
+        &work,
+        json!([{ "content": "hand the child the live ledger", "status": "in_progress" }]),
+    )
+    .await;
+
+    let resolved = fork_context.with_resolved_state_block().await;
+    let block = resolved
+        .structured_state_block
+        .as_deref()
+        .expect("resolved block");
+    let snapshot = engine.work_state_source().snapshot().await;
+    let body = crate::work_grounding::canonical_todo_body(&snapshot).expect("body");
+
+    assert!(
+        block.contains(&body),
+        "same-turn fork must carry the current body: {block}"
+    );
+    assert!(
+        block.contains("[~] #1 hand the child the live ledger"),
+        "{block}"
+    );
+    // Stable history semantics are untouched.
+    assert_eq!(resolved.messages, captured_messages);
+    assert!(
+        block.starts_with(stable_block.as_deref().expect("stable").trim()),
+        "the stable capture must stay a byte-identical prefix: {block}"
+    );
+}
+
+/// #3983 context safety: preflight must account for the exact transient tail
+/// bytes it is about to send. A request that fits at the ceiling must not be
+/// approved and then grow by up to `MAX_BODY_CHARS` of Work grounding.
+#[tokio::test]
+async fn preflight_accounting_includes_the_work_tail() {
+    let (mut engine, _handle, todos, work, _tmp) = graph_backed_work_grounding_engine();
+    // A large-but-bounded ledger: the tail is the maximum the renderer emits.
+    let items: Vec<serde_json::Value> = (1..=40)
+        .map(|idx| {
+            json!({
+                "content": format!("item {idx} {}", "grounding detail ".repeat(12)),
+                "status": if idx == 3 { "in_progress" } else { "pending" },
+            })
+        })
+        .collect();
+    run_graph_backed_work_update(&todos, &work, json!(items)).await;
+
+    let tail = engine.work_state_tail_message().await.expect("tail");
+    let tail_chars: usize = message_text_of(&tail).chars().count();
+    assert!(
+        tail_chars > crate::work_grounding::MAX_BODY_CHARS / 2,
+        "expected a near-maximal tail, got {tail_chars} chars"
+    );
+
+    let base = engine.estimated_input_tokens();
+    let with_tail = engine.estimated_input_tokens_with_work_tail(Some(&tail));
+
+    assert!(
+        with_tail > base,
+        "the tail must be counted: {with_tail} vs {base}"
+    );
+    // Near-limit regression: with the budget exactly at the untailed estimate,
+    // the tailed estimate must exceed it so preflight recovers instead of
+    // shipping an over-limit request.
+    let budget_at_the_edge = base;
+    assert!(
+        with_tail > budget_at_the_edge,
+        "preflight would have approved an over-limit request: {with_tail} <= {budget_at_the_edge}"
+    );
+    // Conservative, not exact: never an under-count of the bytes sent.
+    assert!(with_tail >= base + tail_chars / 4);
+
+    // The accounting is over the same message the request carries.
+    let request = engine.request_messages_with_work_tail(Some(&tail));
+    assert_eq!(request.last().expect("tail"), &tail);
+}
+
+/// #3983: repeated requests (retries, later tool-loop steps) must never
+/// accumulate a second tail, and the stored history must stay untouched.
+#[tokio::test]
+async fn repeated_requests_never_accumulate_a_second_work_tail() {
+    let (engine, _handle, todos, work, _tmp) = graph_backed_work_grounding_engine();
+    run_graph_backed_work_update(
+        &todos,
+        &work,
+        json!([{ "content": "only once", "status": "in_progress" }]),
+    )
+    .await;
+    let stored = engine.session.messages.clone();
+
+    for _ in 0..3 {
+        let tail = engine.work_state_tail_message().await;
+        let request = engine.request_messages_with_work_tail(tail.as_ref());
+        let blocks: usize = request
+            .iter()
+            .map(|message| {
+                message_text_of(message)
+                    .matches(crate::work_grounding::WORK_STATE_OPEN_TAG)
+                    .count()
+            })
+            .sum();
+        assert_eq!(blocks, 1, "exactly one Work tail per request");
+        assert_eq!(request.len(), stored.len() + 1);
+        assert_eq!(&request[..stored.len()], &stored[..]);
+    }
+
+    assert_eq!(&*engine.session.messages, &*stored);
 }
 
 #[tokio::test]

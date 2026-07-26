@@ -2095,7 +2095,48 @@ fn terminal_mailbox_message(result: &SubAgentResult) -> MailboxMessage {
 #[derive(Clone, Debug)]
 pub struct SubAgentForkContext {
     pub messages: Vec<Message>,
+    /// Stable, Work-free parent state captured once at turn start. History
+    /// semantics stay exactly as they were: this text is not re-derived per
+    /// spawn.
     pub structured_state_block: Option<String>,
+    /// Where to read the spawning agent's Work ledger *at spawn time*.
+    ///
+    /// The block above is captured before the turn's first tool call, so a
+    /// `work_update` earlier in the same turn would otherwise hand the child a
+    /// stale ledger (#3983). Only the Work portion is refreshed.
+    pub work_source: Option<crate::work_grounding::WorkStateSource>,
+}
+
+impl SubAgentForkContext {
+    /// Resolve the fork-state block at the fork seam: the stable captured
+    /// state, then the current canonical Work body.
+    pub(crate) async fn with_resolved_state_block(&self) -> Self {
+        let stable = self
+            .structured_state_block
+            .as_deref()
+            .map(str::trim)
+            .filter(|state| !state.is_empty())
+            .map(str::to_string);
+        let work_body = match self.work_source.as_ref() {
+            Some(source) => source.canonical_body().await,
+            None => None,
+        };
+        let work_section = work_body
+            .as_deref()
+            .map(crate::work_grounding::fork_state_work_section);
+
+        let structured_state_block = match (stable, work_section) {
+            (Some(stable), Some(work)) => Some(format!("{stable}\n{work}")),
+            (Some(stable), None) => Some(stable),
+            (None, work) => work,
+        };
+
+        Self {
+            messages: self.messages.clone(),
+            structured_state_block,
+            work_source: self.work_source.clone(),
+        }
+    }
 }
 
 /// Runtime configuration for spawning sub-agents.
@@ -7636,6 +7677,24 @@ fn build_initial_subagent_messages_with_system(
     messages
 }
 
+/// Messages for one sub-agent provider request: the child's stored messages,
+/// then the transient canonical Work tail rendered from the child's own ledger
+/// (#3983).
+///
+/// The tail is never pushed into the caller's `messages` accumulator, so it
+/// cannot be stored in the child transcript, cannot reach the child's system
+/// prefix, and cannot duplicate across steps or retries.
+async fn subagent_request_messages(
+    messages: &[Message],
+    work_state_source: &crate::work_grounding::WorkStateSource,
+) -> Vec<Message> {
+    let mut request_messages = messages.to_vec();
+    if let Some(tail) = work_state_source.tail_message().await {
+        request_messages.push(tail);
+    }
+    request_messages
+}
+
 fn system_text_message(text: String) -> Message {
     Message {
         role: "system".to_string(),
@@ -8531,12 +8590,28 @@ async fn run_subagent(
         .then_some(runtime.fork_context.as_ref())
         .flatten();
     let request_system = subagent_request_system_prompt(&system_prompt);
+    // Refresh only the Work portion of the inherited state, now, at the fork
+    // seam (#3983). The parent's captured transcript and its stable state text
+    // are untouched.
+    let refreshed_fork_context = match fork_context {
+        Some(context) => Some(context.with_resolved_state_block().await),
+        None => None,
+    };
     let mut messages = build_initial_subagent_messages_with_system(
         &prompt,
         &assignment,
         &agent_type,
         &system_prompt,
-        fork_context,
+        refreshed_fork_context.as_ref(),
+    );
+    // This agent's *own* Work ledger (#4810): the runtime carries the parent's
+    // work-graph handle but a private To-do list, so this source resolves
+    // against the child's store and can never read a parent's or sibling's
+    // ledger. Rebuilt per request below, so a child `work_update` lands on the
+    // child's next step.
+    let work_state_source = crate::work_grounding::WorkStateSource::new(
+        runtime.context.runtime.work.clone(),
+        runtime.todos.clone(),
     );
     let mut transcript_artifact =
         match SubAgentTranscriptArtifactWriter::for_runtime(runtime, &agent_id).await {
@@ -8567,6 +8642,9 @@ async fn run_subagent(
         SubAgentForkContext {
             messages: messages.clone(),
             structured_state_block: None,
+            // A grandchild forks *this* agent, so it inherits this agent's own
+            // ledger, resolved when that spawn actually happens.
+            work_source: Some(work_state_source.clone()),
         },
     );
     let tool_registry = SubAgentToolRegistry::new_with_owner(
@@ -8739,9 +8817,14 @@ async fn run_subagent(
         }
 
         let has_tools = !tools.is_empty();
+        // Same canonical tail the parent gets, from this child's own ledger.
+        // Appended to a per-request copy: `messages` (history, transcript,
+        // checkpoints, live inspection) stays byte-identical, so no retry or
+        // later step can accumulate a second block.
+        let request_messages = subagent_request_messages(&messages, &work_state_source).await;
         let request = MessageRequest {
             model: runtime.model.clone(),
-            messages: messages.clone(),
+            messages: request_messages,
             max_tokens: SUBAGENT_RESPONSE_MAX_TOKENS,
             system: Some(request_system.clone()),
             tools: has_tools.then(|| tools.clone()),

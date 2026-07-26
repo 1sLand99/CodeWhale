@@ -698,10 +698,25 @@ mod tests {
         assert!(message.contains("Requested relay focus: verify install"));
         assert!(message.contains("Goal objective: Unify the work surface"));
         assert!(message.contains("Goal token budget: 12000"));
-        assert!(message.contains("To-do (primary progress surface, 50% complete)"));
-        assert!(message.contains("#1 [completed] inspect workspace"));
-        assert!(message.contains("#2 [in_progress] patch relay command"));
-        assert!(message.contains("Optional strategy metadata from update_plan"));
+        // #3983: the relay artifact carries the same bounded canonical body a
+        // parent request and a forked agent see — byte for byte.
+        let expected_body = crate::work_grounding::canonical_todo_body(
+            &app.todos.try_lock().expect("todo lock").snapshot(),
+        )
+        .expect("canonical body");
+        assert_eq!(
+            expected_body,
+            "To-do (50% settled)\n- [x] #1 inspect workspace\n- [~] #2 patch relay command"
+        );
+        assert!(
+            message.contains(&expected_body),
+            "relay must embed the canonical To-do body: {message}"
+        );
+        assert!(
+            !message.contains(crate::work_grounding::WORK_STATE_OPEN_TAG),
+            "the transient request-tail wrapper must not be stored in relay history: {message}"
+        );
+        assert!(message.contains("Conversational strategy notes from update_plan"));
         assert!(message.contains("Objective: Keep relays grounded"));
         assert!(message.contains("Explanation: RLM-style strategy"));
         assert!(message.contains("Source: transcript context"));
@@ -713,6 +728,78 @@ mod tests {
         assert!(
             !message.contains("Work checklist"),
             "relay copy should use To-do vocabulary: {message}"
+        );
+    }
+
+    /// #3983: `update_plan` is conversational strategy, not a Work ledger. A
+    /// session with plan state and an empty To-do has *no* Work state, and the
+    /// relay artifact must not manufacture one.
+    #[test]
+    fn relay_does_not_present_plan_only_state_as_work_state() {
+        let mut app = create_test_app();
+        {
+            let mut plan = app.plan_state.try_lock().expect("plan lock");
+            plan.update(UpdatePlanArgs {
+                objective: Some("Ship the grounding seam".to_string()),
+                plan: vec![PlanItemArg {
+                    step: "draft the renderer".to_string(),
+                    status: StepStatus::InProgress,
+                }],
+                ..UpdatePlanArgs::default()
+            });
+        }
+
+        let result = execute("/relay", &mut app);
+        let Some(AppAction::SendMessage(message)) = result.action else {
+            panic!("expected SendMessage action");
+        };
+
+        assert!(
+            !message.contains("Current Work state"),
+            "plan-only state must not render as Work state: {message}"
+        );
+        assert!(
+            !message.contains("To-do ("),
+            "plan-only state must not synthesize a To-do ledger: {message}"
+        );
+        assert!(message.contains("Conversational strategy notes from update_plan"));
+    }
+
+    /// #3983: a graph-backed update is authoritative immediately, even before
+    /// the compatibility To-do projection is published to the UI.
+    #[tokio::test]
+    async fn relay_reads_same_turn_graph_backed_work_update() {
+        use crate::tools::spec::ToolSpec as _;
+
+        let mut app = create_test_app();
+        let work =
+            crate::work_graph::new_shared_work_runtime(app.todos.clone(), app.plan_state.clone());
+        app.runtime_services.work = Some(work.clone());
+
+        let mut context = crate::tools::spec::ToolContext::new(app.workspace.clone());
+        context.runtime.work = Some(work);
+        crate::tools::todo::TodoWriteTool::work_update(app.todos.clone())
+            .execute(
+                serde_json::json!({
+                    "todos": [{"content": "relay the staged graph", "status": "in_progress"}]
+                }),
+                &context,
+            )
+            .await
+            .expect("graph-backed work_update");
+
+        assert!(
+            app.todos.lock().await.snapshot().is_empty(),
+            "precondition: legacy projection has not published yet"
+        );
+
+        let result = execute("/relay", &mut app);
+        let Some(AppAction::SendMessage(message)) = result.action else {
+            panic!("expected SendMessage action");
+        };
+        assert!(
+            message.contains("[~] #1 relay the staged graph"),
+            "{message}"
         );
     }
 

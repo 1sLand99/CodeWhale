@@ -69,9 +69,17 @@ by the former spellings remain in force.
 | `work_update` | Replace the concrete To-do / Work progress projection for the active thread or durable task. |
 | `tool_search` | Discover and load a deferred tool only when the current turn needs it. |
 
-`update_plan` and `work_update` are complementary, not competing checklists.
-The former carries strategy; the latter is the concrete progress ledger shown
-to the user.
+`work_update` writes the **sole canonical Work ledger**. `update_plan` is
+conversational reasoning — strategy, constraints, and route notes that help a
+reader understand the approach. It is not a second Work surface, and plan-only
+state never becomes model-facing Work grounding.
+
+That distinction is enforced at the request boundary (#3983): the current To-do
+snapshot is rendered by one bounded renderer
+(`crates/tui/src/work_grounding.rs`) and appended to each parent turn-loop and
+sub-agent step request as a transient `<codewhale:work_state>` block. Forked
+sub-agents and `/relay` handoffs embed the byte-identical body. An empty To-do
+emits no block at all.
 
 ## Deferred and dynamic tools
 
