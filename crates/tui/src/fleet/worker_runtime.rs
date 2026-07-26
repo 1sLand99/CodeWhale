@@ -1969,6 +1969,35 @@ mod tests {
     }
 
     #[test]
+    fn validate_fleet_task_routes_keeps_non_explicit_thinking_modes_route_agnostic() {
+        for effort in ["inherit", "auto", "off"] {
+            let mut profile = agent_profile(
+                "preview-builder",
+                "builder",
+                None,
+                codewhale_config::FleetLoadout::Inherit,
+            );
+            profile.profile.model = Some("trinity-large-preview".to_string());
+            profile.profile.provider = Some("arcee".to_string());
+            profile.profile.reasoning_effort = Some(effort.to_string());
+            let task = fleet_task(
+                "preview-build",
+                Some(worker_profile(
+                    Some("preview-builder"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    vec![],
+                )),
+            );
+
+            validate_fleet_task_routes(&[task], &[profile], Some("deepseek-v4-flash"), None)
+                .unwrap_or_else(|error| panic!("{effort} must remain valid: {error}"));
+        }
+    }
+
+    #[test]
     fn resolve_fleet_route_honors_explicit_profile_provider_not_the_default() {
         // EPIC #2608 / #4093: the resolved provider must come ONLY from the
         // profile's explicit `provider` field — never inferred from a
