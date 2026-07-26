@@ -1133,5 +1133,20 @@
     "BehavioralTipBackgroundReceipt": "Receipts live in the Work panel — {key} opens the inspector",
     "BehavioralTipClearedInput": "Cleared · {chord} restores",
     "BehavioralTipMcpValidation": "{command} starts servers and shows why",
-    "BehavioralTipRepeatedCommand": "{command} can pin this"
+    "BehavioralTipRepeatedCommand": "{command} can pin this",
+    "SettingLockedDuringTurn": "{setting} is locked while a turn is running — press Esc to interrupt first",
+    "SettingSubjectMode": "Mode",
+    "SettingSubjectThinking": "Thinking",
+    "SettingSubjectModel": "Model",
+    "SettingSubjectModelAndThinking": "Model and thinking",
+    "SettingSubjectProvider": "Provider",
+    "SettingSubjectPermissions": "Permissions",
+    "ThinkingControlledByAutoRouting": "Thinking is controlled by automatic model routing; choose a fixed model first.",
+    "SavedAsStartupDefault": "saved as startup default",
+    "ModeAlreadyActiveSavedAsDefault": "Already in {mode} mode — saved as startup default.",
+    "StartupDefaultNotSaved": "{setting} was not saved: {error}",
+    "StartupDefaultSubjectMode": "startup mode",
+    "StartupDefaultSubjectThinking": "thinking level",
+    "StartupDefaultSubjectModel": "model",
+    "StartupDefaultSubjectAll": "startup defaults"
 }

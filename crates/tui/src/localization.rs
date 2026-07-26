@@ -1272,6 +1272,22 @@ pub enum MessageId {
     BehavioralTipClearedInput,
     BehavioralTipMcpValidation,
     BehavioralTipRepeatedCommand,
+    // Live-route settings lock (#2982): refusals and startup-default receipts.
+    SettingLockedDuringTurn,
+    SettingSubjectMode,
+    SettingSubjectThinking,
+    SettingSubjectModel,
+    SettingSubjectModelAndThinking,
+    SettingSubjectProvider,
+    SettingSubjectPermissions,
+    ThinkingControlledByAutoRouting,
+    SavedAsStartupDefault,
+    ModeAlreadyActiveSavedAsDefault,
+    StartupDefaultNotSaved,
+    StartupDefaultSubjectMode,
+    StartupDefaultSubjectThinking,
+    StartupDefaultSubjectModel,
+    StartupDefaultSubjectAll,
 }
 
 #[allow(dead_code)]
@@ -2412,6 +2428,21 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::BehavioralTipClearedInput,
     MessageId::BehavioralTipMcpValidation,
     MessageId::BehavioralTipRepeatedCommand,
+    MessageId::SettingLockedDuringTurn,
+    MessageId::SettingSubjectMode,
+    MessageId::SettingSubjectThinking,
+    MessageId::SettingSubjectModel,
+    MessageId::SettingSubjectModelAndThinking,
+    MessageId::SettingSubjectProvider,
+    MessageId::SettingSubjectPermissions,
+    MessageId::ThinkingControlledByAutoRouting,
+    MessageId::SavedAsStartupDefault,
+    MessageId::ModeAlreadyActiveSavedAsDefault,
+    MessageId::StartupDefaultNotSaved,
+    MessageId::StartupDefaultSubjectMode,
+    MessageId::StartupDefaultSubjectThinking,
+    MessageId::StartupDefaultSubjectModel,
+    MessageId::StartupDefaultSubjectAll,
 ];
 
 pub fn tr(locale: Locale, id: MessageId) -> Cow<'static, str> {

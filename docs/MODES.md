@@ -103,6 +103,44 @@ record carries `active`, `paused`, `blocked`, `usage_limited`, `budget_limited`,
 or `complete` status plus token/time accounting fields for clients that need
 thread resume semantics.
 
+## Mode Persistence
+
+Choosing a mode interactively also sets the mode a fresh session starts in.
+Tab/Shift+Tab cycling, the `Alt+A` / `Alt+P` / `Alt+Y` shortcuts, the hotbar's
+Plan/Act/Operate actions, and `/mode` all write `default_mode` to
+`~/.codewhale/settings.toml`, so switching to Operate survives a restart. The
+write happens off the event loop; if it fails, the TUI says so in a warning
+toast rather than reverting silently on the next launch.
+
+Mode, thinking level, and the model picker share one serialized writer, so the
+selection you made last is the one on disk — a burst of Tab presses cannot end
+up persisting whichever write happened to finish last — and a mode write never
+rolls back an unrelated key such as `default_model`.
+
+Two paths deliberately do **not** rewrite the startup default: restoring a saved
+session (which re-installs the mode that session was in) and a mode change
+refused because a turn is in flight. The legacy `yolo` entry point installs Act
+plus bypass approvals, and `agent` is what it persists — `yolo` is a permission
+alias, never a startup mode.
+
+Re-selecting the mode you are already in is not a no-op. After a restored
+session the live mode and `default_mode` routinely disagree, so choosing the
+live mode again is how you make it durable; Codewhale confirms with a
+"saved as startup default" receipt rather than reporting "already in that mode".
+
+While a turn is running, every change to the live route is refused — mode,
+model, thinking level, and provider — no matter which surface you use. That
+now includes the slash surfaces (`/mode`, `/model`, `/set <key> <value>`,
+`/config <key> <value>`, `/config preset`), which are reachable mid-turn. Press
+Esc to interrupt first. The restart-only `default_mode` key is exempt, because
+it does not touch the running turn.
+
+Codewhale writes `settings.toml` under a lock that spans processes, and replaces
+the file atomically, so a second Codewhale instance on the same home directory
+cannot lose your selection or read a half-written file. At exit, queued writes
+are flushed before the terminal is restored; anything that failed is printed on
+the way out instead of disappearing with the alternate screen.
+
 ## Compatibility Notes
 
 - Older settings files with `default_mode = "normal"` still load as `agent`; saving rewrites the normalized value.

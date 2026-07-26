@@ -1133,5 +1133,20 @@
     "BehavioralTipBackgroundReceipt": "Os recibos ficam no painel Work — {key} abre o inspetor",
     "BehavioralTipClearedInput": "Limpo · {chord} restaura",
     "BehavioralTipMcpValidation": "{command} inicia os servidores e mostra o motivo",
-    "BehavioralTipRepeatedCommand": "{command} pode fixar isto"
+    "BehavioralTipRepeatedCommand": "{command} pode fixar isto",
+    "SettingLockedDuringTurn": "{setting} está bloqueado enquanto um turno está em execução — pressione Esc para interromper primeiro",
+    "SettingSubjectMode": "O modo",
+    "SettingSubjectThinking": "O raciocínio",
+    "SettingSubjectModel": "O modelo",
+    "SettingSubjectModelAndThinking": "O modelo e o raciocínio",
+    "SettingSubjectProvider": "O provedor",
+    "SettingSubjectPermissions": "As permissões",
+    "ThinkingControlledByAutoRouting": "O raciocínio é controlado pelo roteamento automático de modelos; escolha um modelo fixo primeiro.",
+    "SavedAsStartupDefault": "salvo como padrão de inicialização",
+    "ModeAlreadyActiveSavedAsDefault": "Já está no modo {mode} — salvo como padrão de inicialização.",
+    "StartupDefaultNotSaved": "Não foi possível salvar {setting}: {error}",
+    "StartupDefaultSubjectMode": "o modo de inicialização",
+    "StartupDefaultSubjectThinking": "o nível de raciocínio",
+    "StartupDefaultSubjectModel": "o modelo",
+    "StartupDefaultSubjectAll": "os padrões de inicialização"
 }

@@ -1021,8 +1021,13 @@ impl HotbarAction for AppHotbarAction {
                 }))
             }
             AppHotbarKind::Mode(mode) => {
-                let changed = app.set_mode(mode);
-                if changed {
+                // User-facing selection: persists the startup default too.
+                let outcome = app.select_mode(mode);
+                // Only a live change needs an `AppAction`; a persisted-same
+                // selection still gets its own receipt so the row does not look
+                // inert when it actually wrote the startup default.
+                app.report_mode_selection(mode, outcome);
+                if outcome.changed_live_state() {
                     Ok(HotbarDispatch::AppAction(AppAction::ModeChanged(mode)))
                 } else {
                     Ok(HotbarDispatch::Handled)
@@ -1032,10 +1037,13 @@ impl HotbarAction for AppHotbarAction {
                 if app.auto_model {
                     bail!("Reasoning effort is controlled by auto model routing.");
                 }
-                app.apply_reasoning_effort_cycle();
-                Ok(HotbarDispatch::AppAction(AppAction::UpdateCompaction(
-                    app.compaction_config(),
-                )))
+                if app.cycle_effort().changed_live_state() {
+                    Ok(HotbarDispatch::AppAction(AppAction::UpdateCompaction(
+                        app.compaction_config(),
+                    )))
+                } else {
+                    Ok(HotbarDispatch::Handled)
+                }
             }
             AppHotbarKind::SidebarToggle => {
                 if app.sidebar_focus == SidebarFocus::Hidden {
@@ -2421,6 +2429,48 @@ mod tests {
         app.auto_model = true;
         assert!(!reasoning.is_active(&app));
         assert!(reasoning.dispatch(&mut app).is_err());
+    }
+
+    #[test]
+    fn reasoning_cycle_is_inert_while_a_turn_is_running() {
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let _home = crate::test_support::EnvVarGuard::set("HOME", tmp.path());
+        let _user_profile = crate::test_support::EnvVarGuard::set("USERPROFILE", tmp.path());
+        let _codewhale_home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", tmp.path().join(".codewhale"));
+        let _deepseek_config = crate::test_support::EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
+        let _codewhale_config = crate::test_support::EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
+        let _writes = crate::tui::startup_defaults::allow_writes_in_tests();
+
+        crate::settings::Settings::transact(|settings| {
+            settings.reasoning_effort = Some("off".to_string());
+            Ok(())
+        })
+        .expect("seed startup reasoning");
+
+        let registry = HotbarActionRegistry::with_builtins();
+        let reasoning = registry.get("reasoning.cycle").expect("reasoning action");
+        let mut app = test_app();
+        app.api_provider = ApiProvider::Deepseek;
+        app.auto_model = false;
+        app.reasoning_effort = ReasoningEffort::Off;
+        app.is_loading = true;
+
+        assert_eq!(
+            reasoning.dispatch(&mut app).expect("dispatch while busy"),
+            HotbarDispatch::Handled
+        );
+        assert_eq!(app.reasoning_effort, ReasoningEffort::Off);
+        assert_eq!(app.startup_defaults.pending_len(), 0);
+        assert_eq!(
+            crate::settings::Settings::load()
+                .expect("reload settings")
+                .reasoning_effort
+                .as_deref(),
+            Some("off"),
+            "a refused hotbar action must not persist a different tier"
+        );
     }
 
     #[test]

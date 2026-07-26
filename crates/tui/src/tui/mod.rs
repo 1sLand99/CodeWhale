@@ -83,6 +83,7 @@ pub mod shell_key_routing;
 pub mod sidebar;
 pub mod slash_menu;
 pub mod spinner;
+pub mod startup_defaults;
 pub mod streaming;
 pub mod streaming_thinking;
 mod subagent_routing;

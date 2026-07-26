@@ -58,7 +58,7 @@ impl App {
             );
             match control {
                 crate::config::ApprovalPolicyControl::Unset => {
-                    if let Err(error) = settings.save() {
+                    if let Err(error) = normalize_legacy_yolo_settings() {
                         tracing::warn!(
                             "failed to normalize legacy YOLO settings; retrying next launch: {error:#}"
                         );
@@ -73,7 +73,7 @@ impl App {
                         "approval_policy",
                     ) {
                         Ok(_) => {
-                            if let Err(error) = settings.save() {
+                            if let Err(error) = normalize_legacy_yolo_settings() {
                                 tracing::warn!(
                                     "removed legacy approval_policy but could not normalize settings; retrying next launch: {error:#}"
                                 );
@@ -710,6 +710,7 @@ impl App {
             hooks,
             yolo: yolo_compat,
             yolo_compat_notified: false,
+            startup_defaults: Default::default(),
             keybinding_migration_notified: false,
             mode_prefs,
             approval_policy_locked,
@@ -853,4 +854,18 @@ impl App {
         }
         app
     }
+}
+
+/// Rewrite `settings.toml` with the legacy `default_mode = "yolo"` value
+/// normalized away.
+///
+/// The normalization happens during parsing, so an empty transaction *is* the
+/// migration: load (which normalizes), then save. Doing it as its own
+/// [`crate::settings::Settings::transact`] rather than saving the snapshot
+/// `App::new` already loaded matters twice over. It cannot write back a stale
+/// pre-image, and — because `App::new` runs on the same hot path as several
+/// hundred tests — it keeps the transaction lock out of the common construction
+/// path entirely, taking it only when a legacy file actually needs migrating.
+fn normalize_legacy_yolo_settings() -> anyhow::Result<()> {
+    crate::settings::Settings::transact(|_normalized_on_load| Ok(()))
 }

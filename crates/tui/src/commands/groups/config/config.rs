@@ -16,10 +16,11 @@ use crate::config_persistence::{
     persist_unset_root_key,
 };
 use crate::config_ui::{ConfigUiMode, parse_mode};
-use crate::localization::resolve_locale;
+use crate::localization::{MessageId, resolve_locale};
 use crate::settings::Settings;
 use crate::tui::app::{
-    App, AppAction, AppMode, OnboardingState, ReasoningEffort, SidebarFocus, VimMode,
+    App, AppAction, AppMode, OnboardingState, ReasoningEffort, SettingSelection, SidebarFocus,
+    VimMode,
 };
 use crate::tui::approval::ApprovalMode;
 use crate::tui::ui::{SidebarRenderState, sidebar_render_state};
@@ -112,6 +113,32 @@ pub fn config_command(app: &mut App, arg: Option<&str>) -> CommandResult {
     }
 }
 
+/// Reject a preset bundle *before* anything is written, returning the message
+/// to show, or `None` when every field can be applied.
+///
+/// The bundle is persisted in one transaction and then mirrored field by field
+/// into the live session. A per-field refusal during that mirror pass therefore
+/// arrives *after* the file has already been rewritten — the user gets an error
+/// and a saved file, which is the partial apply this preflight exists to make
+/// impossible. Both refusals a field can raise are knowable up front:
+///
+/// 1. A live-route key while a turn is running (#2982).
+/// 2. A value the setter would reject, checked against a throwaway `Settings`
+///    so the real file is never touched by the check.
+fn preset_preflight(app: &App, fields: &[(&str, &str)]) -> Option<String> {
+    for (key, value) in fields {
+        if app.is_loading
+            && let Some(subject) = live_route_setting_subject(&key.to_lowercase())
+        {
+            return Some(app.setting_locked_message(subject));
+        }
+        if let Err(e) = Settings::default().set(key, value) {
+            return Some(format!("Failed to apply preset field {key}={value}: {e}"));
+        }
+    }
+    None
+}
+
 /// Apply a bundled settings preset, e.g. `/config preset calm [--save]` (#3478).
 ///
 /// The preset is applied to the live session through the same per-key setter a
@@ -132,19 +159,19 @@ fn config_preset_command(app: &mut App, rest: &str) -> CommandResult {
         return CommandResult::error(format!("Unknown preset '{name}'. Available presets: calm."));
     };
 
+    if let Some(refusal) = preset_preflight(app, fields) {
+        return CommandResult::error(refusal);
+    }
+
     // Persist the whole bundle atomically when requested (one load/apply/save),
-    // validating the preset before touching anything on disk.
+    // now that every field is known to be applicable.
     if persist {
-        match Settings::load_persisted() {
-            Ok(mut settings) => {
-                if let Err(e) = settings.apply_preset(name) {
-                    return CommandResult::error(format!("{e}"));
-                }
-                if let Err(e) = settings.save() {
-                    return CommandResult::error(format!("Failed to save settings: {e}"));
-                }
-            }
-            Err(e) => return CommandResult::error(format!("Failed to load settings: {e}")),
+        // `Settings::transact` is what makes "one load/apply/save" true against
+        // the *other* writers in this process, not just against a second preset
+        // apply: an unsynchronized load/save pair here would write back a
+        // pre-image that reverts a concurrent mode/thinking/posture write.
+        if let Err(e) = Settings::transact(|settings| settings.apply_preset(name)) {
+            return CommandResult::error(format!("Failed to save settings: {e}"));
         }
     }
 
@@ -1417,11 +1444,51 @@ fn subagents_runtime_action(app: &App, config: &Config) -> AppAction {
     }
 }
 
+/// The subject a live-route key belongs to, or `None` if the key does not touch
+/// the route the engine is currently acting on.
+///
+/// This is the single list the #2982 turn lock is enforced from. It exists
+/// because the lock used to live in the *selectors* — the Tab cycle, the
+/// pickers, the hotbar — while `/set <key> <value>` and `/config <key> <value>`
+/// reached the same live state through a different door. A slash command is
+/// reachable mid-turn (the composer accepts Shift+Enter and the slash menu while
+/// `is_loading`), so during a running turn `/set model …` could swap the route
+/// out from under the engine and persist it.
+///
+/// `default_mode` is deliberately absent: it is a restart default that
+/// `set_config_value` explicitly does *not* apply to the live session, so
+/// refusing it would lock a key that cannot affect the turn.
+fn live_route_setting_subject(key: &str) -> Option<MessageId> {
+    match key {
+        "mode" => Some(MessageId::SettingSubjectMode),
+        // `default_model` is not merely a startup default: for the DeepSeek
+        // routes `set_config_value` installs it as the live model.
+        "model" | "default_model" => Some(MessageId::SettingSubjectModel),
+        "reasoning_effort" | "effort" => Some(MessageId::SettingSubjectThinking),
+        "provider" => Some(MessageId::SettingSubjectProvider),
+        "approval_mode" | "approval_policy" | "approval" => {
+            Some(MessageId::SettingSubjectPermissions)
+        }
+        _ => None,
+    }
+}
+
 /// Modify a setting at runtime
 pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) -> CommandResult {
     let key = key.to_lowercase();
     if let Some(subagent_key) = key.strip_prefix("subagents.") {
         return set_subagents_config_value(app, subagent_key, value, persist);
+    }
+
+    // Refuse before *anything* — before the disk write, and before the live
+    // `App` mutation each arm performs. Placing the check at the top is what
+    // makes it central: every caller of this function (`/set`, `/config k v`,
+    // the preset mirror, the schema-driven config editor, the runtime
+    // `ConfigUpdated` event) inherits it, and none of them can half-apply.
+    if let Some(subject) = live_route_setting_subject(key.as_str())
+        && app.is_loading
+    {
+        return CommandResult::error(app.setting_locked_message(subject));
     }
 
     match key.as_str() {
@@ -1785,6 +1852,9 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
         _ => {}
     }
 
+    // This copy exists to validate the value and to project it onto live `App`
+    // state. It is deliberately *not* what gets saved: see
+    // [`persist_single_setting`].
     let mut settings = match Settings::load_persisted() {
         Ok(s) => s,
         Err(e) if !persist => {
@@ -1975,7 +2045,7 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             app.needs_redraw = true;
             // Engine tools use EngineConfig which is fixed at startup
             return CommandResult::message(if persist {
-                if let Err(e) = settings.save() {
+                if let Err(e) = persist_single_setting(&key, value) {
                     return CommandResult::error(format!("Failed to save: {e}"));
                 }
                 format!(
@@ -2082,7 +2152,7 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
     };
 
     let mut message = if persist {
-        if let Err(e) = settings.save() {
+        if let Err(e) = persist_single_setting(&key, value) {
             return CommandResult::error(format!("Failed to save: {e}"));
         }
         format!("{key} = {display_value} (saved)")
@@ -2109,6 +2179,20 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
     }
 }
 
+/// Persist exactly the one key `/set --save` changed.
+///
+/// `/set` loads a `Settings` copy up front to validate the value and to project
+/// it onto live `App` state, and a lot of `App` mutation happens in between. That
+/// copy is a stale snapshot by the time we get here, so saving *it* would write
+/// back every other field as it looked before — reverting any mode, thinking,
+/// model, or permission write that landed in the meantime. Re-applying the single
+/// key inside [`Settings::transact`] persists the user's actual edit and nothing
+/// else. `Settings::set` is the same normalizer the copy above already accepted
+/// the value through, so this cannot fail for a value that validated.
+fn persist_single_setting(key: &str, value: &str) -> anyhow::Result<()> {
+    Settings::transact(|settings| settings.set(key, value))
+}
+
 /// Select the TUI operating mode.
 pub fn mode(app: &mut App, arg: Option<&str>) -> CommandResult {
     let Some(arg) = arg.filter(|value| !value.trim().is_empty()) else {
@@ -2131,16 +2215,22 @@ pub fn switch_mode(app: &mut App, mode: AppMode) -> String {
     switch_mode_with_status(app, mode).0
 }
 
+/// Returns the user-facing sentence and whether live mode moved (the caller
+/// emits `AppAction::ModeChanged` only for the latter).
+///
+/// The three outcomes read differently on purpose. Before the typed
+/// [`SettingSelection`], a refusal and a same-mode selection that *did* persist
+/// the startup default both came back as "Already in X mode." — so the one case
+/// where `/mode` had written something looked exactly like the case where it had
+/// written nothing.
 fn switch_mode_with_status(app: &mut App, mode: AppMode) -> (String, bool) {
-    if app.set_mode(mode) {
-        // Persist so the mode survives across sessions (#4628).
-        if let Ok(mut settings) = crate::settings::Settings::load() {
-            settings.default_mode = app.mode.as_setting().to_string();
-            let _ = settings.save();
-        }
-        (format!("Switched to {} mode.", mode.display_name()), true)
-    } else {
-        (format!("Already in {} mode.", mode.display_name()), false)
+    match app.select_mode(mode) {
+        SettingSelection::Changed => (format!("Switched to {} mode.", mode.display_name()), true),
+        SettingSelection::PersistedSame => (app.mode_startup_default_receipt(mode), false),
+        SettingSelection::Refused => (
+            app.setting_locked_message(MessageId::SettingSubjectMode),
+            false,
+        ),
     }
 }
 
@@ -2568,6 +2658,102 @@ mod tests {
 
     fn create_test_app() -> App {
         create_test_app_with_config(&Config::default())
+    }
+
+    /// The shipped preset must survive its own preflight, or `/config preset
+    /// calm` would be refused for a reason the user cannot act on.
+    #[test]
+    fn the_shipped_preset_passes_its_own_preflight() {
+        let app = create_test_app();
+        let fields = crate::settings::preset_fields("calm").expect("the calm preset exists");
+        assert_eq!(preset_preflight(&app, fields), None);
+    }
+
+    /// A field the setter would reject must be caught *before* the transaction
+    /// opens. Previously the bundle was saved first and the per-field mirror
+    /// pass then failed, leaving the user with an error message and a rewritten
+    /// settings file.
+    #[test]
+    fn preset_preflight_refuses_an_invalid_field_before_any_write() {
+        let app = create_test_app();
+        let refusal = preset_preflight(&app, &[("calm_mode", "true"), ("low_motion", "banana")])
+            .expect("an invalid value must be refused");
+        assert!(
+            refusal.contains("low_motion"),
+            "the refusal must name the offending field, got {refusal:?}"
+        );
+    }
+
+    /// A preset carrying a live-route key is refused whole while a turn runs,
+    /// rather than saving the bundle and then failing on that one field.
+    #[test]
+    fn preset_preflight_refuses_a_live_route_field_while_a_turn_runs() {
+        let mut app = create_test_app();
+        app.is_loading = true;
+        let bundle = [("calm_mode", "true"), ("reasoning_effort", "high")];
+        let refusal =
+            preset_preflight(&app, &bundle).expect("a live-route field must be refused mid-turn");
+        assert!(
+            refusal.contains("locked while a turn is running"),
+            "got {refusal:?}"
+        );
+
+        app.is_loading = false;
+        assert_eq!(
+            preset_preflight(&app, &bundle),
+            None,
+            "the same bundle must apply once the turn ends"
+        );
+    }
+
+    /// The refusal list is the contract for #2982 on the slash surfaces. Keep
+    /// restart-only `default_mode` out of it: `set_config_value` deliberately
+    /// does not apply that key to the live session.
+    #[test]
+    fn live_route_key_list_covers_every_route_mutating_alias() {
+        for key in [
+            "mode",
+            "model",
+            "default_model",
+            "reasoning_effort",
+            "effort",
+            "provider",
+            "approval_mode",
+            "approval_policy",
+            "approval",
+        ] {
+            assert!(
+                live_route_setting_subject(key).is_some(),
+                "{key} mutates the active route and must be locked mid-turn"
+            );
+        }
+        for key in ["default_mode", "theme", "calm_mode", "sidebar_width"] {
+            assert!(
+                live_route_setting_subject(key).is_none(),
+                "{key} does not mutate the active route and must stay settable"
+            );
+        }
+    }
+
+    #[test]
+    fn approval_aliases_are_inert_while_a_turn_is_running() {
+        let mut app = create_test_app();
+        app.approval_mode = ApprovalMode::Suggest;
+        app.is_loading = true;
+
+        for key in ["approval_mode", "approval_policy", "approval"] {
+            let result = set_config_value(&mut app, key, "never", false);
+            assert!(result.is_error, "{key} must be refused mid-turn");
+            assert!(
+                result
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("locked while a turn is running")),
+                "unexpected refusal for {key}: {:?}",
+                result.message
+            );
+            assert_eq!(app.approval_mode, ApprovalMode::Suggest);
+        }
     }
 
     #[test]

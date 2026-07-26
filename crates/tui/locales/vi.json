@@ -1133,5 +1133,20 @@
     "BehavioralTipBackgroundReceipt": "Biên nhận nằm trong bảng Work — {key} mở trình kiểm tra",
     "BehavioralTipClearedInput": "Đã xóa · {chord} để khôi phục",
     "BehavioralTipMcpValidation": "{command} khởi động máy chủ và cho biết nguyên nhân",
-    "BehavioralTipRepeatedCommand": "{command} có thể ghim lệnh này"
+    "BehavioralTipRepeatedCommand": "{command} có thể ghim lệnh này",
+    "SettingLockedDuringTurn": "{setting} bị khóa khi một lượt đang chạy — hãy nhấn Esc để ngắt trước",
+    "SettingSubjectMode": "Chế độ",
+    "SettingSubjectThinking": "Suy nghĩ",
+    "SettingSubjectModel": "Mô hình",
+    "SettingSubjectModelAndThinking": "Mô hình và suy nghĩ",
+    "SettingSubjectProvider": "Nhà cung cấp",
+    "SettingSubjectPermissions": "Quyền",
+    "ThinkingControlledByAutoRouting": "Suy nghĩ do định tuyến mô hình tự động điều khiển; hãy chọn một mô hình cố định trước.",
+    "SavedAsStartupDefault": "đã lưu làm mặc định khi khởi động",
+    "ModeAlreadyActiveSavedAsDefault": "Đang ở chế độ {mode} — đã lưu làm mặc định khi khởi động.",
+    "StartupDefaultNotSaved": "Không lưu được {setting}: {error}",
+    "StartupDefaultSubjectMode": "chế độ khởi động",
+    "StartupDefaultSubjectThinking": "mức suy nghĩ",
+    "StartupDefaultSubjectModel": "mô hình",
+    "StartupDefaultSubjectAll": "các mặc định khi khởi động"
 }

@@ -359,11 +359,10 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
 
 fn provider_model_selection_persist_warning(app: &App, model: &str) -> Option<String> {
     let result = if app.api_provider == ApiProvider::Custom {
-        (|| -> anyhow::Result<()> {
-            let mut settings = crate::settings::Settings::load()?;
+        crate::settings::Settings::transact(|settings| {
             settings.set_model_for_provider(app.provider_identity_for_persistence(), model);
-            settings.save()
-        })()
+            Ok(())
+        })
     } else {
         crate::settings::Settings::persist_provider_model_selection(app.api_provider, model)
     };

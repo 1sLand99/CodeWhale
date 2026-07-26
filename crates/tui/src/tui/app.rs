@@ -69,8 +69,8 @@ pub(crate) use composer::{
 pub use status::{StatusToast, StatusToastLevel};
 pub use types::{
     ApiKeyError, AppAction, AppMode, ComposerDensity, InitialInput, McpUiAction, QueuedMessage,
-    ReasoningEffort, ShellJobAction, SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind,
-    ToolCollapseMode, ToolDetailRecord, TranscriptSpacing, TuiOptions, VimMode,
+    ReasoningEffort, SettingSelection, ShellJobAction, SubmitDisposition, TaskPanelEntry,
+    TaskPanelEntryKind, ToolCollapseMode, ToolDetailRecord, TranscriptSpacing, TuiOptions, VimMode,
 };
 
 // === Types ===
@@ -1384,6 +1384,13 @@ pub struct App {
     pub yolo: bool,
     /// One-shot YOLO→Act+Bypass migration notice for this session (#0.8.68 M6).
     yolo_compat_notified: bool,
+    /// The single serialized owner of `settings.toml` startup-default writes
+    /// (mode, thinking, model). Keeping one owner per `App` is what stops two
+    /// rapid selections from interleaving their load/modify/save transactions
+    /// and losing the newer one. Failures are drained by the event loop into a
+    /// warning toast, so a settings write that did not land is never silently
+    /// reverted on the next launch.
+    pub startup_defaults: crate::tui::startup_defaults::StartupDefaultsWriter,
     /// One-shot Shift+Tab/Ctrl+T rebinding notice for this session (#0.8.68 M3).
     keybinding_migration_notified: bool,
     /// Durable Agent-era permission baseline that Plan/YOLO derive from and
@@ -1956,14 +1963,22 @@ impl App {
         if self.onboarding_needs_api_key {
             return;
         }
-        let mut settings = Settings::load_persisted().unwrap_or_default();
-        if settings.feature_intro_shown {
-            return;
-        }
-        settings.feature_intro_shown = true;
-        if let Err(err) = settings.save() {
-            self.status_message = Some(format!("Failed to save feature-intro flag: {err}"));
-            // Still show the nudge; the flag write may simply retry next launch.
+        // One transaction: the "already shown?" read and the flag write must not
+        // straddle another writer's whole-file save.
+        let write = Settings::transact_opt(|settings| {
+            if settings.feature_intro_shown {
+                return Ok(None);
+            }
+            settings.feature_intro_shown = true;
+            Ok(Some(()))
+        });
+        match write {
+            Ok(None) => return,
+            Ok(Some(())) => {}
+            Err(err) => {
+                self.status_message = Some(format!("Failed to save feature-intro flag: {err}"));
+                // Still show the nudge; the flag write may simply retry next launch.
+            }
         }
         self.status_message = Some(self.tr(MessageId::FleetReadyNotice).into_owned());
         self.needs_redraw = true;
@@ -1976,10 +1991,11 @@ impl App {
     /// and rewrites on exit, mirroring the pattern used by the `/config`
     /// surface.
     pub fn set_locale_from_onboarding(&mut self, tag: &str) -> anyhow::Result<()> {
-        let mut settings = Settings::load_persisted().unwrap_or_else(|_| Settings::default());
-        settings.set("locale", tag)?;
-        settings.save()?;
-        self.ui_locale = crate::localization::resolve_locale(&settings.locale);
+        let locale = Settings::transact(|settings| {
+            settings.set("locale", tag)?;
+            Ok(settings.locale.clone())
+        })?;
+        self.ui_locale = crate::localization::resolve_locale(&locale);
         self.needs_redraw = true;
         Ok(())
     }
@@ -2052,6 +2068,122 @@ impl App {
         true
     }
 
+    /// Apply a *user-facing* mode selection: change the live session mode and
+    /// persist it as the startup default.
+    ///
+    /// This is the difference between [`Self::set_mode`] and this method.
+    /// `set_mode` is the session-only primitive — session restore and preset
+    /// application use it because they are re-installing a mode the user
+    /// already chose elsewhere, and re-persisting there would let a restored
+    /// session silently rewrite the startup default. Every interactive
+    /// selector (Tab/Shift+Tab cycling, the Alt+A/P/Y shortcuts, the hotbar
+    /// mode actions) goes through here instead, so "I switched to Operate"
+    /// survives a restart (reported by Hunter against v0.9.1).
+    ///
+    /// The write is queued, not performed here: it is ordered behind every
+    /// earlier selection by [`StartupDefaultsWriter`], and a failure surfaces
+    /// through [`Self::drain_startup_default_failures`] rather than being
+    /// dropped.
+    ///
+    /// What is persisted is `self.mode` — the mode `set_mode` actually
+    /// installed — not the requested enum. The legacy `Yolo` entry point installs
+    /// Act, so persisting the request would write a startup mode the user never
+    /// lands in. `AppMode::as_setting` collapses that alias too, but reading the
+    /// installed value keeps the two from having to agree.
+    ///
+    /// The outcome is typed, not a bool, because three things can happen and
+    /// only one of them means "nothing was saved":
+    ///
+    /// - [`SettingSelection::Changed`] — live mode moved *and* the startup
+    ///   default was queued.
+    /// - [`SettingSelection::PersistedSame`] — live mode was already the
+    ///   requested one, but the startup default was still queued. This is a
+    ///   real, reportable action: after a session restore the live mode and the
+    ///   startup default routinely disagree.
+    /// - [`SettingSelection::Refused`] — the #2982 turn lock rejected it and
+    ///   nothing was written anywhere.
+    ///
+    /// A bool collapsed the last two, so every caller (slash `/mode`, the
+    /// Alt+A/P/Y shortcuts, the hotbar mode rows) reported a refusal and a
+    /// successful same-mode save identically — as "already in that mode", with
+    /// no receipt for the write that did happen.
+    ///
+    /// [`StartupDefaultsWriter`]: crate::tui::startup_defaults::StartupDefaultsWriter
+    pub fn select_mode(&mut self, mode: AppMode) -> SettingSelection {
+        if self.reject_setting_change_while_busy(MessageId::SettingSubjectMode) {
+            return SettingSelection::Refused;
+        }
+        let changed = self.set_mode(mode);
+        // Persist an explicit selection even when it matches the live mode.
+        // A restored session can be Operate while the startup default remains
+        // Act; choosing Operate again is a request to make the visible state
+        // durable, not a no-op.
+        self.startup_defaults
+            .spawn(crate::tui::startup_defaults::StartupDefaults::mode(
+                self.mode,
+            ));
+        if changed {
+            SettingSelection::Changed
+        } else {
+            SettingSelection::PersistedSame
+        }
+    }
+
+    /// The receipt for an accepted selection that did not move live state.
+    ///
+    /// Without it a same-live selection is indistinguishable from a refusal on
+    /// screen, even though it wrote the file the user was trying to change.
+    #[must_use]
+    pub fn mode_startup_default_receipt(&self, mode: AppMode) -> String {
+        self.tr(MessageId::ModeAlreadyActiveSavedAsDefault)
+            .replace("{mode}", mode.display_name())
+    }
+
+    /// Surface any startup-default write that failed since the last drain.
+    /// Called once per event-loop iteration.
+    pub fn drain_startup_default_failures(&mut self) {
+        for failure in self.startup_defaults.drain_failures() {
+            let message = self.startup_default_failure_message(&failure);
+            self.push_status_toast(message, StatusToastLevel::Warning, Some(8_000));
+        }
+    }
+
+    /// Translate a typed startup-default failure at the locale boundary.
+    ///
+    /// The writer runs on a blocking pool and knows nothing about the user's
+    /// locale, so it reports `StartupDefaultSubject` values and a path-free
+    /// detail. Turning those into a sentence is this side's job.
+    #[must_use]
+    pub fn startup_default_failure_message(
+        &self,
+        failure: &crate::tui::startup_defaults::StartupDefaultFailure,
+    ) -> String {
+        use crate::tui::startup_defaults::StartupDefaultSubject;
+
+        let subject = if failure.subjects.is_empty() {
+            self.tr(MessageId::StartupDefaultSubjectAll).into_owned()
+        } else {
+            failure
+                .subjects
+                .iter()
+                .map(|subject| {
+                    self.tr(match subject {
+                        StartupDefaultSubject::Mode => MessageId::StartupDefaultSubjectMode,
+                        StartupDefaultSubject::Thinking => MessageId::StartupDefaultSubjectThinking,
+                        StartupDefaultSubject::Model => MessageId::StartupDefaultSubjectModel,
+                    })
+                    .into_owned()
+                })
+                .collect::<Vec<_>>()
+                // A separator, not a word: composed in code per the crate's
+                // localization rules.
+                .join(" + ")
+        };
+        self.tr(MessageId::StartupDefaultNotSaved)
+            .replace("{setting}", &subject)
+            .replace("{error}", &failure.detail)
+    }
+
     fn notify_yolo_compat_once(&mut self) {
         if self.yolo_compat_notified {
             return;
@@ -2066,10 +2198,10 @@ impl App {
         }
         // Persist the flag best-effort; toast still fires even if the write
         // fails (retries on the next attempt).
-        if let Ok(mut settings) = crate::settings::Settings::load_persisted() {
+        let _ = crate::settings::Settings::transact(|settings| {
             settings.yolo_deprecation_shown = true;
-            let _ = settings.save();
-        }
+            Ok(())
+        });
         self.push_status_toast(
             "Legacy full-access mode is deprecated — use Act + Full Access (Shift+Tab)".to_string(),
             StatusToastLevel::Warning,
@@ -2098,11 +2230,14 @@ impl App {
     /// are refused (#2982). Returns true (and posts a concise status message) if
     /// the change should be rejected — the caller leaves the selection unchanged
     /// so the chip "twitches" back instead of moving.
-    fn reject_setting_change_while_busy(&mut self, what: &str) -> bool {
+    ///
+    /// `subject` is a `MessageId`, not a `&str`, so the refusal is translated
+    /// as one sentence in the user's locale instead of splicing an English noun
+    /// into a translated template.
+    pub(crate) fn reject_setting_change_while_busy(&mut self, subject: MessageId) -> bool {
         if self.is_loading {
-            self.status_message = Some(format!(
-                "{what} is locked while a turn is running — press Esc to interrupt first"
-            ));
+            let message = self.setting_locked_message(subject);
+            self.status_message = Some(message);
             self.needs_redraw = true;
             true
         } else {
@@ -2110,31 +2245,55 @@ impl App {
         }
     }
 
+    /// The localized "locked while a turn is running" sentence for `subject`.
+    #[must_use]
+    pub(crate) fn setting_locked_message(&self, subject: MessageId) -> String {
+        self.tr(MessageId::SettingLockedDuringTurn)
+            .replace("{setting}", self.tr(subject).as_ref())
+    }
+
     /// Cycle through productive modes: Plan → Act → Operate → Plan.
     pub fn cycle_mode(&mut self) {
-        if self.reject_setting_change_while_busy("Mode") {
-            return;
-        }
         let next = self.mode.next();
-        let _ = self.set_mode(next);
+        let outcome = self.select_mode(next);
+        self.report_mode_selection(next, outcome);
     }
 
     /// Cycle through modes in reverse.
     #[allow(dead_code)]
     pub fn cycle_mode_reverse(&mut self) {
-        if self.reject_setting_change_while_busy("Mode") {
-            return;
-        }
         let next = self.mode.previous();
-        let _ = self.set_mode(next);
+        let outcome = self.select_mode(next);
+        self.report_mode_selection(next, outcome);
+    }
+
+    /// Show the startup-default receipt for a selection that did not move live
+    /// mode. `Changed` and `Refused` already have their own messaging (the mode
+    /// chip, and `reject_setting_change_while_busy` respectively).
+    pub(crate) fn report_mode_selection(&mut self, mode: AppMode, outcome: SettingSelection) {
+        if outcome == SettingSelection::PersistedSame {
+            let receipt = self.mode_startup_default_receipt(mode);
+            self.status_message = Some(receipt);
+            self.needs_redraw = true;
+        }
     }
 
     /// Cycle reasoning-effort through the active provider's distinct tiers.
-    pub fn cycle_effort(&mut self) {
-        if self.reject_setting_change_while_busy("Thinking") {
-            return;
+    ///
+    /// Typed for the same reason as [`Self::select_mode`]: a bool could not tell
+    /// the hotbar whether the turn lock refused the action or the provider
+    /// simply exposes a single tier.
+    pub fn cycle_effort(&mut self) -> SettingSelection {
+        if self.reject_setting_change_while_busy(MessageId::SettingSubjectThinking) {
+            return SettingSelection::Refused;
         }
+        let previous = self.reasoning_effort;
         self.apply_reasoning_effort_cycle();
+        if self.reasoning_effort == previous {
+            SettingSelection::PersistedSame
+        } else {
+            SettingSelection::Changed
+        }
     }
 
     /// Advance reasoning effort to the next tier for the active provider and
@@ -2164,6 +2323,18 @@ impl App {
         self.reasoning_effort = requested;
         self.reasoning_effort_explicit = true;
         self.last_effective_reasoning_effort = None;
+        // Same persistence owner as the model/effort pickers, so Ctrl+T and the
+        // hotbar `reasoning.cycle` action restore on restart exactly like a
+        // picker selection does. Only the *requested* tier is persisted — the
+        // effective tier is a per-turn route fact, not a user preference.
+        let persisted_effort = requested.as_setting_for_route(
+            self.api_provider,
+            &self.active_route_base_url,
+            &self.model,
+        );
+        self.startup_defaults.spawn(
+            crate::tui::startup_defaults::StartupDefaults::reasoning_effort(persisted_effort),
+        );
         self.update_model_compaction_budget();
         self.status_message = Some(format!(
             "Reasoning effort: {}",
@@ -2217,42 +2388,59 @@ impl App {
             return false;
         }
 
-        let mut settings = match Settings::load_persisted() {
-            Ok(settings) => settings,
-            Err(err) => {
-                self.push_status_toast(
-                    format!("Permissions were not changed: could not load TUI settings ({err})"),
-                    StatusToastLevel::Warning,
-                    Some(8_000),
-                );
-                return false;
-            }
-        };
-        let previous = settings.permission_posture.clone();
-        settings.permission_posture = Some(Self::approval_posture_setting(next).to_string());
-        if let Err(err) = settings.save() {
-            self.push_status_toast(
-                format!("Permissions were not changed: could not save TUI posture ({err})"),
-                StatusToastLevel::Warning,
-                Some(8_000),
-            );
-            return false;
+        let active_config_path = crate::config::resolve_load_config_path(self.config_path.clone());
+        // The posture commit, the root-key release, and the rollback are one
+        // critical section. Two `Settings::transact` calls would expose the
+        // uncommitted middle state — a concurrent writer (a queued startup-default
+        // drain, say) could load the new posture, and the rollback save would then
+        // also revert whatever that writer had committed in between.
+        /// Why the critical section ended, carried out so every toast is
+        /// pushed after the settings lock is released.
+        enum RootPostureOutcome {
+            Committed,
+            Failed(String),
         }
 
-        let active_config_path = crate::config::resolve_load_config_path(self.config_path.clone());
-        if let Err(err) = crate::config_persistence::persist_unset_root_key(
-            active_config_path.as_deref(),
-            "approval_policy",
-        ) {
-            settings.permission_posture = previous;
-            let rollback = settings.save().err();
-            let rollback_note = rollback
-                .map(|rollback| format!("; settings rollback also failed: {rollback}"))
-                .unwrap_or_default();
+        let posture = Self::approval_posture_setting(next).to_string();
+        let outcome = crate::settings::with_settings_transaction(|transaction| {
+            let mut settings = match transaction.load() {
+                Ok(settings) => settings,
+                Err(err) => {
+                    return Ok(RootPostureOutcome::Failed(format!(
+                        "could not load TUI settings ({err})"
+                    )));
+                }
+            };
+            let previous = settings.permission_posture.clone();
+            settings.permission_posture = Some(posture);
+            if let Err(err) = transaction.save(&settings) {
+                return Ok(RootPostureOutcome::Failed(format!(
+                    "could not save TUI posture ({err})"
+                )));
+            }
+
+            if let Err(err) = crate::config_persistence::persist_unset_root_key(
+                active_config_path.as_deref(),
+                "approval_policy",
+            ) {
+                settings.permission_posture = previous;
+                let rollback_note = transaction
+                    .save(&settings)
+                    .err()
+                    .map(|rollback| format!("; settings rollback also failed: {rollback}"))
+                    .unwrap_or_default();
+                return Ok(RootPostureOutcome::Failed(format!(
+                    "could not release root config policy ({err}){rollback_note}"
+                )));
+            }
+            Ok(RootPostureOutcome::Committed)
+        })
+        .unwrap_or_else(|err| {
+            RootPostureOutcome::Failed(format!("could not lock TUI settings ({err})"))
+        });
+        if let RootPostureOutcome::Failed(reason) = outcome {
             self.push_status_toast(
-                format!(
-                    "Permissions were not changed: could not release root config policy ({err}){rollback_note}"
-                ),
+                format!("Permissions were not changed: {reason}"),
                 StatusToastLevel::Warning,
                 Some(8_000),
             );
@@ -2266,7 +2454,7 @@ impl App {
     }
 
     fn next_approval_posture(&mut self, allow_root_policy: bool) -> Option<ApprovalMode> {
-        if self.reject_setting_change_while_busy("Permissions") {
+        if self.reject_setting_change_while_busy(MessageId::SettingSubjectPermissions) {
             return None;
         }
         if self.mode == AppMode::Plan {
@@ -2293,10 +2481,18 @@ impl App {
         }
     }
 
+    /// Persist the Shift+Tab permission posture.
+    ///
+    /// Synchronous on purpose: `cycle_approval_posture` only moves the live
+    /// posture if this succeeded, so the keystroke already required the write.
+    /// It runs inside [`Settings::transact`] so it cannot interleave with a
+    /// queued mode/thinking write — the two used to load the same bytes and the
+    /// later save reverted the other's field.
     fn persist_permission_posture(next: ApprovalMode) -> anyhow::Result<()> {
-        let mut settings = Settings::load_persisted()?;
-        settings.permission_posture = Some(Self::approval_posture_setting(next).to_string());
-        settings.save()
+        Settings::transact(|settings| {
+            settings.permission_posture = Some(Self::approval_posture_setting(next).to_string());
+            Ok(())
+        })
     }
 
     fn finish_approval_posture_change(&mut self, next: ApprovalMode) {

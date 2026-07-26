@@ -1327,6 +1327,32 @@ pub async fn run_tui(
     automation_cancel.cancel();
     automation_scheduler.abort();
 
+    // Join the startup-default writer before anything else tears down.
+    //
+    // The last thing a user does before quitting is very often the selection
+    // they most want to survive — Tab into Operate, then Ctrl+C. Those writes
+    // are queued off the event loop on purpose, so at this point one may still
+    // be in flight or not yet started. Draining here is what makes "the last
+    // immediate selection lands" true rather than a race against process exit.
+    //
+    // Failures are collected, not toasted: the event loop has already drawn its
+    // final frame, so a toast would never be painted. They are printed below,
+    // after the alternate screen is gone and stderr is back on the user's real
+    // terminal.
+    let startup_default_failures = app.startup_defaults.shutdown();
+    for failure in &startup_default_failures {
+        tracing::warn!(
+            target: "settings",
+            subjects = ?failure.subjects,
+            detail = %failure.detail,
+            "startup default was not persisted before shutdown",
+        );
+    }
+    let startup_default_failures: Vec<String> = startup_default_failures
+        .iter()
+        .map(|failure| app.startup_default_failure_message(failure))
+        .collect();
+
     // Fire session end hook
     {
         let context = app.base_hook_context();
@@ -1373,6 +1399,20 @@ pub async fn run_tui(
     }
     terminal.show_cursor()?;
     drop(terminal);
+
+    // Back on the primary screen, so this is somewhere the user can actually
+    // read. A settings write that did not land would otherwise be invisible
+    // until the next launch quietly came up in the old mode.
+    for failure in &startup_default_failures {
+        tracing::error!(target: "settings", "{failure}");
+        // Printed AFTER `LeaveAlternateScreen` / `drop(terminal)`, so this is on
+        // the restored primary screen. The module-level
+        // `#![deny(clippy::print_stderr)]` would otherwise refuse it.
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!("codewhale: {failure}");
+        }
+    }
 
     if result.is_ok() && should_show_resume_hint(app.current_session_id.as_deref()) {
         // Printed AFTER `LeaveAlternateScreen` / `drop(terminal)` above,
@@ -2454,6 +2494,11 @@ async fn run_event_loop(
         if !drain_web_config_events(&mut web_config_session, app, config, &engine_handle).await {
             web_config_session = None;
         }
+
+        // Non-blocking startup-default writes (mode / thinking) report their
+        // failures here rather than at the keystroke, so a settings file we
+        // could not write is visible instead of silently reverting next launch.
+        app.drain_startup_default_failures();
 
         while let Ok(event) = translation_rx.try_recv() {
             match event {
@@ -6795,7 +6840,17 @@ fn handle_reasoning_effort_key(app: &mut App, key: &event::KeyEvent) -> bool {
     {
         return false;
     }
-    app.cycle_effort();
+    if app.auto_model {
+        // The auto router picks a tier per turn, so a Ctrl+T here would persist
+        // a startup default the session then ignores. Refuse, and say why.
+        let message = app
+            .tr(crate::localization::MessageId::ThinkingControlledByAutoRouting)
+            .into_owned();
+        app.status_message = Some(message);
+        app.needs_redraw = true;
+        return true;
+    }
+    let _ = app.cycle_effort();
     true
 }
 
@@ -6999,15 +7054,17 @@ fn persist_sidebar_settings_if_dirty(app: &mut App) {
     app.sidebar_width_dirty = false;
     app.sidebar_focus_dirty = false;
 
-    if let Ok(mut settings) = Settings::load_persisted() {
+    let width_percent = app.sidebar_width_percent;
+    let focus_setting = app.sidebar_focus.as_setting();
+    let _ = Settings::transact(|settings| {
         if width_dirty {
-            settings.update_sidebar_width(app.sidebar_width_percent);
+            settings.update_sidebar_width(width_percent);
         }
         if focus_dirty {
-            let _ = settings.set("sidebar_focus", app.sidebar_focus.as_setting());
+            let _ = settings.set("sidebar_focus", focus_setting);
         }
-        let _ = settings.save();
-    }
+        Ok(())
+    });
 }
 
 fn apply_alt_0_shortcut(app: &mut App, modifiers: KeyModifiers) {
@@ -8038,19 +8095,20 @@ fn rollback_provider_after_auth_failure(app: &mut App, config: &mut Config) -> O
             "provider",
             app.provider_identity_for_persistence(),
         )?;
-        let mut settings = crate::settings::Settings::load_persisted()?;
-        settings.default_provider = Some(app.provider_identity_for_persistence().to_string());
-        settings.set_model_for_provider(
-            app.provider_identity_for_persistence(),
-            &app.model_selection_for_persistence(),
-        );
-        if matches!(
-            previous_provider,
-            ApiProvider::Deepseek | ApiProvider::DeepseekCN
-        ) {
-            settings.set("default_model", &app.model_selection_for_persistence())?;
-        }
-        settings.save()?;
+        crate::settings::Settings::transact(|settings| {
+            settings.default_provider = Some(app.provider_identity_for_persistence().to_string());
+            settings.set_model_for_provider(
+                app.provider_identity_for_persistence(),
+                &app.model_selection_for_persistence(),
+            );
+            if matches!(
+                previous_provider,
+                ApiProvider::Deepseek | ApiProvider::DeepseekCN
+            ) {
+                settings.set("default_model", &app.model_selection_for_persistence())?;
+            }
+            Ok(())
+        })?;
         Ok(())
     })() {
         persistence_errors.push(err.to_string());
@@ -9489,8 +9547,14 @@ async fn cycle_permission_posture(
     }
 }
 
+/// Apply an explicit mode selection from a user shortcut (Alt+A/P/Y).
+///
+/// Uses `select_mode`, not `set_mode`, so an explicitly chosen mode is also the
+/// startup default next launch — matching the Tab cycle and hotbar paths.
 async fn apply_mode_update(app: &mut App, engine_handle: &EngineHandle, mode: AppMode) -> bool {
-    if app.set_mode(mode) {
+    let outcome = app.select_mode(mode);
+    app.report_mode_selection(mode, outcome);
+    if outcome.changed_live_state() {
         sync_mode_update(app, engine_handle).await;
         true
     } else {
@@ -9712,6 +9776,11 @@ async fn apply_model_picker_choice(
     previous_model: String,
     previous_effort: crate::tui::app::ReasoningEffort,
 ) {
+    if app.reject_setting_change_while_busy(
+        crate::localization::MessageId::SettingSubjectModelAndThinking,
+    ) {
+        return;
+    }
     let target_provider = target_provider.unwrap_or(app.api_provider);
     let target_identity = if target_provider == ApiProvider::Custom {
         target_provider_id.unwrap_or_else(|| config.provider_identity_for(target_provider))
@@ -9801,13 +9870,6 @@ async fn apply_model_picker_choice(
         effort = effort.normalize_for_route(app.api_provider, &route_base_url, &resolved_model);
     }
     let effort_changed = effort != previous_effort;
-    if !model_changed && !effort_changed {
-        app.status_message = Some(format!(
-            "Model unchanged: {model} · thinking {}",
-            effort.display_label_for_provider(app.api_provider)
-        ));
-        return;
-    }
 
     if model_changed {
         app.set_model_selection(resolved_model.clone());
@@ -9829,26 +9891,32 @@ async fn apply_model_picker_choice(
     // Best-effort persist; surface a status warning if the settings file
     // can't be written rather than aborting the in-memory change.
     let mut persist_warning: Option<String> = None;
-    let persist_result = (|| -> anyhow::Result<()> {
-        let mut settings = crate::settings::Settings::load_persisted()?;
-        if model_changed {
-            if matches!(
-                app.api_provider,
-                ApiProvider::Deepseek | ApiProvider::DeepseekCN
-            ) {
-                settings.set("default_model", &resolved_model)?;
-            }
-            let provider_identity = app.provider_identity_for_persistence();
-            settings.set_model_for_provider(provider_identity, &resolved_model);
-        }
-        if effort_changed {
-            settings.set(
-                "reasoning_effort",
-                effort.as_setting_for_route(app.api_provider, &route_base_url, &resolved_model),
-            )?;
-        }
-        settings.save()
-    })();
+    let mut update = crate::tui::startup_defaults::StartupDefaults::default();
+    // An explicit picker selection is also a request to make the visible
+    // model/thinking pair the startup default. This matters after restoring a
+    // session whose live pair differs from the global defaults, even when the
+    // user chooses the already-live row.
+    if matches!(
+        app.api_provider,
+        ApiProvider::Deepseek | ApiProvider::DeepseekCN
+    ) {
+        update = update.with_default_model(resolved_model.as_str());
+    }
+    update = update
+        .with_provider_model(
+            app.provider_identity_for_persistence(),
+            resolved_model.as_str(),
+        )
+        .with_reasoning_effort(effort.as_setting_for_route(
+            app.api_provider,
+            &route_base_url,
+            &resolved_model,
+        ));
+    // Applied synchronously: the setup receipt below is only honest if we know
+    // the write landed. Going through the app-owned writer means any queued
+    // mode/thinking selection the user made first is applied first, so this
+    // transaction can neither overtake nor be overtaken by one of those.
+    let persist_result = app.startup_defaults.apply_blocking(update);
     if let Err(err) = persist_result {
         persist_warning = Some(format!("(not persisted: {err})"));
     }
@@ -9887,15 +9955,30 @@ async fn apply_model_picker_choice(
         (false, true) => format!(
             "Thinking: {previous_effort_summary} → {effort_summary} · model {model_summary}"
         ),
-        (false, false) => unreachable!(),
+        (false, false) => {
+            format!("Model unchanged: {model_summary} · thinking {effort_summary}")
+        }
     };
     let persisted = persist_warning.is_none();
+    if !model_changed && !effort_changed && persisted {
+        // The selection did not move live state, so without this the picker
+        // reads as a no-op even though it just wrote the startup default.
+        summary.push_str(" · ");
+        summary.push_str(&app.tr(crate::localization::MessageId::SavedAsStartupDefault));
+    }
     if let Some(warning) = persist_warning {
         summary.push(' ');
         summary.push_str(&warning);
     }
     app.status_message = Some(summary);
-    if model_changed && persisted {
+    // Setup progress records "this provider has a concrete model chosen", which
+    // is a fact about the *persisted* selection, not about whether this
+    // keystroke moved the live route. A restored session can already be running
+    // the model the user then picks explicitly; that selection still completes
+    // the provider/model setup step. `auto` keeps its existing contract — it is
+    // not a concrete model, so it only refreshes the receipt when it is itself
+    // the change.
+    if persisted && (model_changed || !model_is_auto) {
         record_provider_model_setup_progress(app, config);
     }
 }
@@ -9906,41 +9989,64 @@ async fn apply_picker_effort_choice(
     mut effort: ReasoningEffort,
     previous_effort: ReasoningEffort,
 ) {
-    effort = effort.normalize_for_route(app.api_provider, &app.active_route_base_url, &app.model);
-    if effort == previous_effort {
+    if app.reject_setting_change_while_busy(crate::localization::MessageId::SettingSubjectThinking)
+    {
         return;
     }
+    effort = effort.normalize_for_route(app.api_provider, &app.active_route_base_url, &app.model);
+    let changed = effort != previous_effort;
 
-    app.reasoning_effort = effort;
-    app.reasoning_effort_explicit = true;
-    app.last_effective_reasoning_effort = None;
-    app.update_model_compaction_budget();
+    if changed {
+        app.reasoning_effort = effort;
+        app.reasoning_effort_explicit = true;
+        app.last_effective_reasoning_effort = None;
+        app.update_model_compaction_budget();
+    }
 
-    let persist_warning = (|| -> anyhow::Result<()> {
-        let mut settings = crate::settings::Settings::load_persisted()?;
-        settings.set(
-            "reasoning_effort",
-            effort.as_setting_for_route(app.api_provider, &app.active_route_base_url, &app.model),
-        )?;
-        settings.save()
-    })()
-    .err()
-    .map(|err| format!(" (not persisted: {err})"));
+    let persist_warning = app
+        .startup_defaults
+        .apply_blocking(
+            crate::tui::startup_defaults::StartupDefaults::reasoning_effort(
+                effort.as_setting_for_route(
+                    app.api_provider,
+                    &app.active_route_base_url,
+                    &app.model,
+                ),
+            ),
+        )
+        .err()
+        .map(|err| format!(" (not persisted: {err})"));
 
-    apply_model_and_compaction_update(
-        engine_handle,
-        app.compaction_config(),
-        app.mode,
-        app.active_route_limits,
-    )
-    .await;
+    if changed {
+        apply_model_and_compaction_update(
+            engine_handle,
+            app.compaction_config(),
+            app.mode,
+            app.active_route_limits,
+        )
+        .await;
+    }
 
-    let mut summary = format!(
-        "Thinking: {} → {} · model {}",
-        previous_effort.display_label_for_provider(app.api_provider),
-        effort.display_label_for_provider(app.api_provider),
-        app.model_display_label()
-    );
+    let persisted = persist_warning.is_none();
+    let mut summary = if changed {
+        format!(
+            "Thinking: {} → {} · model {}",
+            previous_effort.display_label_for_provider(app.api_provider),
+            effort.display_label_for_provider(app.api_provider),
+            app.model_display_label()
+        )
+    } else {
+        let mut summary = format!(
+            "Thinking unchanged: {} · model {}",
+            effort.display_label_for_provider(app.api_provider),
+            app.model_display_label()
+        );
+        if persisted {
+            summary.push_str(" · ");
+            summary.push_str(&app.tr(crate::localization::MessageId::SavedAsStartupDefault));
+        }
+        summary
+    };
     if let Some(warning) = persist_warning {
         summary.push_str(&warning);
     }
@@ -10119,15 +10225,16 @@ async fn switch_provider(
             &provider_key,
         )?;
 
-        let mut settings = crate::settings::Settings::load_persisted()?;
-        settings.default_provider = Some(provider_key.clone());
-        if model_override.is_some() {
-            settings.set_model_for_provider(&provider_key, &new_model);
-            if matches!(target, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
-                settings.set("default_model", &new_model)?;
+        crate::settings::Settings::transact(|settings| {
+            settings.default_provider = Some(provider_key.clone());
+            if model_override.is_some() {
+                settings.set_model_for_provider(&provider_key, &new_model);
+                if matches!(target, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
+                    settings.set("default_model", &new_model)?;
+                }
             }
-        }
-        settings.save()?;
+            Ok(())
+        })?;
         Ok(())
     })()
     .err()
@@ -13865,10 +13972,8 @@ async fn handle_view_events(
                 model,
             } => {
                 let provider_key = provider_id.unwrap_or_else(|| provider.as_str().to_string());
-                match crate::settings::Settings::load_persisted().and_then(|mut settings| {
-                    let pinned = settings.toggle_pinned_model(&provider_key, &model);
-                    settings.save()?;
-                    Ok(pinned)
+                match crate::settings::Settings::transact(|settings| {
+                    Ok(settings.toggle_pinned_model(&provider_key, &model))
                 }) {
                     Ok(true) => app.status_message = Some(format!("Pinned {provider_key}/{model}")),
                     Ok(false) => {
@@ -13899,13 +14004,16 @@ async fn handle_view_events(
                 delta,
             } => {
                 let provider_key = provider_id.unwrap_or_else(|| provider.as_str().to_string());
-                if let Ok(mut settings) = crate::settings::Settings::load_persisted()
-                    && settings.move_pinned_model(&provider_key, &model, delta)
-                {
-                    if let Err(error) = settings.save() {
-                        app.status_message = Some(format!("Could not reorder pin: {error}"));
-                    } else {
-                        app.pinned_models = settings.pinned_models;
+                let reordered = crate::settings::Settings::transact_opt(|settings| {
+                    if !settings.move_pinned_model(&provider_key, &model, delta) {
+                        return Ok(None);
+                    }
+                    Ok(Some(settings.pinned_models.clone()))
+                });
+                match reordered {
+                    Ok(None) => {}
+                    Ok(Some(pinned_models)) => {
+                        app.pinned_models = pinned_models;
                         app.status_message = Some("Pinned model order updated".into());
                         if let Some(mut boxed) = app.view_stack.pop() {
                             if let Some(picker) = boxed
@@ -13916,6 +14024,9 @@ async fn handle_view_events(
                             }
                             app.view_stack.push_boxed(boxed);
                         }
+                    }
+                    Err(error) => {
+                        app.status_message = Some(format!("Could not reorder pin: {error}"));
                     }
                 }
                 app.needs_redraw = true;
@@ -14405,64 +14516,83 @@ fn apply_setup_runtime_preset(
 
     let settings_path = Settings::path().context("failed to resolve settings path")?;
     let settings_snapshot = RuntimePresetFileSnapshot::capture(settings_path)?;
-    let mut settings = Settings::load_persisted().context("failed to load settings")?;
-    settings.default_mode = preset.default_mode().to_string();
-    settings.permission_posture = Some(preset.permission_posture().to_string());
+    // The preset's settings read, its config-document write, and its settings
+    // write are one durable transaction with file-snapshot rollback. Hold the
+    // settings transaction lock across all of it so a concurrent writer (a queued
+    // mode/thinking drain, the Shift+Tab posture write) can neither be lost by
+    // this save nor be reverted by the rollback.
+    // Every durable write happens inside this closure, so the settings lock is
+    // released before live state moves below.
+    crate::settings::with_settings_transaction(|settings_transaction| {
+        let mut settings = settings_transaction
+            .load()
+            .context("failed to load settings")?;
+        settings.default_mode = preset.default_mode().to_string();
+        settings.permission_posture = Some(preset.permission_posture().to_string());
 
-    // Persist into the same file Config::load actually selected. When an env
-    // override names a missing file, reads intentionally fall back to an
-    // existing home config; writing to the missing override would otherwise
-    // leave the controlling key untouched and shadow the home config on the
-    // next launch.
-    let selected_config_path = crate::config::resolve_load_config_path(app.config_path.clone())
-        .or_else(|| app.config_path.clone());
-    let config_path = crate::config_persistence::config_toml_path(selected_config_path.as_deref())
-        .context("failed to resolve config path")?;
-    let config_snapshot = RuntimePresetFileSnapshot::capture(config_path.clone())?;
-    if let Err(error) =
-        crate::config_persistence::mutate_config_document(&config_path, |document| {
-            if let Some(policy) = preset.approval_policy() {
+        // Persist into the same file Config::load actually selected. When an env
+        // override names a missing file, reads intentionally fall back to an
+        // existing home config; writing to the missing override would otherwise
+        // leave the controlling key untouched and shadow the home config on the
+        // next launch.
+        let selected_config_path = crate::config::resolve_load_config_path(app.config_path.clone())
+            .or_else(|| app.config_path.clone());
+        let config_path =
+            crate::config_persistence::config_toml_path(selected_config_path.as_deref())
+                .context("failed to resolve config path")?;
+        let config_snapshot = RuntimePresetFileSnapshot::capture(config_path.clone())?;
+        if let Err(error) =
+            crate::config_persistence::mutate_config_document(&config_path, |document| {
+                if let Some(policy) = preset.approval_policy() {
+                    crate::config_persistence::set_document_value(
+                        document,
+                        &["approval_policy"],
+                        policy,
+                    )?;
+                } else {
+                    crate::config_persistence::unset_document_value(
+                        document,
+                        &["approval_policy"],
+                    )?;
+                }
                 crate::config_persistence::set_document_value(
                     document,
-                    &["approval_policy"],
-                    policy,
+                    &["allow_shell"],
+                    preset.allow_shell(),
                 )?;
-            } else {
-                crate::config_persistence::unset_document_value(document, &["approval_policy"])?;
-            }
-            crate::config_persistence::set_document_value(
-                document,
-                &["allow_shell"],
-                preset.allow_shell(),
-            )?;
-            crate::config_persistence::set_document_value(
-                document,
-                &["sandbox_mode"],
-                preset.sandbox_mode(),
-            )
-        })
-        .context("failed to persist runtime posture")
-    {
-        return Err(runtime_preset_error_with_rollback(
-            error,
-            &[&settings_snapshot, &config_snapshot],
-        ));
-    }
-    if let Err(error) = settings.save().context("failed to save settings") {
-        return Err(runtime_preset_error_with_rollback(
-            error,
-            &[&settings_snapshot, &config_snapshot],
-        ));
-    }
-    if let Err(error) = state
-        .save()
-        .context("failed to persist setup runtime posture state")
-    {
-        return Err(runtime_preset_error_with_rollback(
-            error,
-            &[&settings_snapshot, &config_snapshot],
-        ));
-    }
+                crate::config_persistence::set_document_value(
+                    document,
+                    &["sandbox_mode"],
+                    preset.sandbox_mode(),
+                )
+            })
+            .context("failed to persist runtime posture")
+        {
+            return Err(runtime_preset_error_with_rollback(
+                error,
+                &[&settings_snapshot, &config_snapshot],
+            ));
+        }
+        if let Err(error) = settings_transaction
+            .save(&settings)
+            .context("failed to save settings")
+        {
+            return Err(runtime_preset_error_with_rollback(
+                error,
+                &[&settings_snapshot, &config_snapshot],
+            ));
+        }
+        if let Err(error) = state
+            .save()
+            .context("failed to persist setup runtime posture state")
+        {
+            return Err(runtime_preset_error_with_rollback(
+                error,
+                &[&settings_snapshot, &config_snapshot],
+            ));
+        }
+        Ok(())
+    })?;
 
     // Durable writes succeeded as one transaction. Only now may live state
     // move to the new posture.

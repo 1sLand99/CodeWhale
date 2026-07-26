@@ -715,7 +715,6 @@ pub fn apply_document(
         // provider-scoped model map. `set_config_value("model", ...)` owns the
         // live App mutation, while this block persists that selection without
         // rewriting the DeepSeek-only global fallback (#3227).
-        let mut settings = Settings::load_persisted()?;
         let mut provider_models = doc
             .settings
             .provider_models
@@ -726,8 +725,10 @@ pub fn apply_document(
             app.provider_identity_for_persistence().to_string(),
             app.model_selection_for_persistence(),
         );
-        settings.provider_models = (!provider_models.is_empty()).then_some(provider_models);
-        settings.save()?;
+        Settings::transact(|settings| {
+            settings.provider_models = (!provider_models.is_empty()).then_some(provider_models);
+            Ok(())
+        })?;
         notes.push(format!(
             "{} model saved for {}",
             app.model_display_label(),

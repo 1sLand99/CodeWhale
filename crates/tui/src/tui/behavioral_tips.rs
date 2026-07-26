@@ -103,29 +103,41 @@ impl App {
         if !self.behavioral_tips.eligible_in_session(tip) {
             return false;
         }
-        let mut settings = if cfg!(test) {
-            Settings::default()
+        // Tests never touch the settings file here, so the eligibility read uses
+        // in-memory defaults. Outside tests the read and the increment are one
+        // transaction: a read-modify-write on an impression counter is exactly
+        // what another whole-file writer would otherwise revert.
+        if cfg!(test) {
+            // No settings file is read or written, so the lifetime count is
+            // whatever `Settings::default()` carries: nothing.
+            if !self.behavioral_tips.eligible(tip, 0) {
+                return false;
+            }
+            self.behavioral_tips.record_impression(tip);
         } else {
-            Settings::load_persisted().unwrap_or_default()
-        };
-        let lifetime_impressions = settings
-            .behavioral_tip_impressions
-            .get(tip.key())
-            .copied()
-            .unwrap_or(0);
-        if !self.behavioral_tips.eligible(tip, lifetime_impressions) {
-            return false;
-        }
-
-        self.behavioral_tips.record_impression(tip);
-        settings.behavioral_tip_impressions.insert(
-            tip.key().to_string(),
-            lifetime_impressions.saturating_add(1),
-        );
-        if !cfg!(test)
-            && let Err(err) = settings.save()
-        {
-            tracing::warn!(tip = tip.key(), error = %err, "behavioral tip impression was not persisted");
+            let eligible = Settings::transact_opt(|settings| {
+                let lifetime_impressions = settings
+                    .behavioral_tip_impressions
+                    .get(tip.key())
+                    .copied()
+                    .unwrap_or(0);
+                if !self.behavioral_tips.eligible(tip, lifetime_impressions) {
+                    return Ok(None);
+                }
+                settings.behavioral_tip_impressions.insert(
+                    tip.key().to_string(),
+                    lifetime_impressions.saturating_add(1),
+                );
+                Ok(Some(()))
+            });
+            match eligible {
+                Ok(None) => return false,
+                Ok(Some(())) => {}
+                Err(err) => {
+                    tracing::warn!(tip = tip.key(), error = %err, "behavioral tip impression was not persisted");
+                }
+            }
+            self.behavioral_tips.record_impression(tip);
         }
         self.push_status_toast(
             tip.message(self.ui_locale),

@@ -105,6 +105,24 @@ fn ctrl_t_key_event_reaches_reasoning_effort_cycle() {
 }
 
 #[test]
+fn ctrl_t_does_not_persist_an_ignored_tier_under_auto_model() {
+    let mut app = create_test_app();
+    app.auto_model = true;
+    app.reasoning_effort = ReasoningEffort::Auto;
+
+    assert!(handle_reasoning_effort_key(
+        &mut app,
+        &KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+    ));
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
+    assert!(
+        app.status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("automatic model routing"))
+    );
+}
+
+#[test]
 fn underwater_motion_keeps_its_smoother_cadence_during_live_status() {
     let mut app = create_test_app();
     // App::new reads real terminal overlays. This test owns the authored
@@ -13829,6 +13847,93 @@ async fn model_picker_persists_model_and_reasoning_effort() {
     assert!(provider_model_result.contains("auth=key saved · not checked"));
     assert!(provider_model_result.contains("health=attemptable"));
     assert!(!provider_model_result.contains("test-key"));
+}
+
+/// Re-picking the already-live model is a real, completed provider/model
+/// choice: after a session restore the live route routinely differs from the
+/// persisted defaults, so this is exactly how a user makes the restored route
+/// durable. It must persist *and* record setup progress — gating the receipt on
+/// "the model changed" made the setup step depend on what the session happened
+/// to be restored to.
+#[tokio::test]
+async fn reselecting_live_model_and_thinking_persists_startup_defaults() {
+    let _guard = SettingsHomeGuard::new();
+    let mut app = create_test_app();
+    app.set_model_selection("deepseek-v4-pro".to_string());
+    app.reasoning_effort = ReasoningEffort::High;
+    let mut engine = mock_engine_handle();
+    let mut config = Config {
+        api_key: Some("test-key".to_string()),
+        ..Default::default()
+    };
+    assert!(
+        codewhale_config::SetupState::load()
+            .ok()
+            .flatten()
+            .is_none(),
+        "the test home must start with no recorded setup progress"
+    );
+
+    apply_model_picker_choice(
+        &mut app,
+        &mut engine.handle,
+        &mut config,
+        "deepseek-v4-pro".to_string(),
+        None,
+        None,
+        ReasoningEffort::High,
+        "deepseek-v4-pro".to_string(),
+        ReasoningEffort::High,
+    )
+    .await;
+
+    let settings = crate::settings::Settings::load().expect("load settings");
+    assert_eq!(settings.default_model.as_deref(), Some("deepseek-v4-pro"));
+    assert_eq!(settings.reasoning_effort.as_deref(), Some("high"));
+    assert!(
+        app.status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("saved as startup default"))
+    );
+    let state = codewhale_config::SetupState::load()
+        .expect("read setup state")
+        .expect("a persisted concrete model selection must record setup progress");
+    assert!(
+        state
+            .steps
+            .contains_key(&codewhale_config::SetupStep::ProviderModel),
+        "the provider/model setup step must be recorded even when the model was already live"
+    );
+}
+
+#[tokio::test]
+async fn reselecting_live_thinking_only_persists_startup_default() {
+    let _guard = SettingsHomeGuard::new();
+    let mut app = create_test_app();
+    app.set_model_selection("deepseek-v4-pro".to_string());
+    app.reasoning_effort = ReasoningEffort::High;
+    let engine = mock_engine_handle();
+
+    apply_picker_effort_choice(
+        &mut app,
+        &engine.handle,
+        ReasoningEffort::High,
+        ReasoningEffort::High,
+    )
+    .await;
+
+    assert_eq!(
+        crate::settings::Settings::load()
+            .expect("load settings")
+            .reasoning_effort
+            .as_deref(),
+        Some("high")
+    );
+    assert!(
+        app.status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("saved as startup default"))
+    );
 }
 
 #[tokio::test]

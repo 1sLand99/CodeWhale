@@ -1133,5 +1133,20 @@
     "BehavioralTipBackgroundReceipt": "レシートは Work パネルにあります — {key} でインスペクターを開く",
     "BehavioralTipClearedInput": "クリアしました · {chord} で復元",
     "BehavioralTipMcpValidation": "{command} はサーバーを起動し、原因を表示します",
-    "BehavioralTipRepeatedCommand": "{command} でこれを固定できます"
+    "BehavioralTipRepeatedCommand": "{command} でこれを固定できます",
+    "SettingLockedDuringTurn": "ターンの実行中は{setting}を変更できません。まず Esc で中断してください",
+    "SettingSubjectMode": "モード",
+    "SettingSubjectThinking": "思考",
+    "SettingSubjectModel": "モデル",
+    "SettingSubjectModelAndThinking": "モデルと思考",
+    "SettingSubjectProvider": "プロバイダー",
+    "SettingSubjectPermissions": "権限",
+    "ThinkingControlledByAutoRouting": "思考は自動モデルルーティングが制御しています。先に固定モデルを選んでください。",
+    "SavedAsStartupDefault": "起動時の既定として保存しました",
+    "ModeAlreadyActiveSavedAsDefault": "すでに {mode} モードです — 起動時の既定として保存しました。",
+    "StartupDefaultNotSaved": "{setting}を保存できませんでした: {error}",
+    "StartupDefaultSubjectMode": "起動時のモード",
+    "StartupDefaultSubjectThinking": "思考レベル",
+    "StartupDefaultSubjectModel": "モデル",
+    "StartupDefaultSubjectAll": "起動時の既定値"
 }

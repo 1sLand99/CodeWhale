@@ -1133,5 +1133,20 @@
     "BehavioralTipBackgroundReceipt": "回执在 Work 面板中 — 按 {key} 打开检查器",
     "BehavioralTipClearedInput": "已清空 · 按 {chord} 恢复",
     "BehavioralTipMcpValidation": "{command} 会启动服务器并显示原因",
-    "BehavioralTipRepeatedCommand": "{command} 可以固定此命令"
+    "BehavioralTipRepeatedCommand": "{command} 可以固定此命令",
+    "SettingLockedDuringTurn": "回合运行期间{setting}已锁定 — 请先按 Esc 中断",
+    "SettingSubjectMode": "模式",
+    "SettingSubjectThinking": "思考",
+    "SettingSubjectModel": "模型",
+    "SettingSubjectModelAndThinking": "模型与思考",
+    "SettingSubjectProvider": "提供方",
+    "SettingSubjectPermissions": "权限",
+    "ThinkingControlledByAutoRouting": "思考由自动模型路由控制；请先选择固定模型。",
+    "SavedAsStartupDefault": "已保存为启动默认值",
+    "ModeAlreadyActiveSavedAsDefault": "已处于 {mode} 模式 — 已保存为启动默认值。",
+    "StartupDefaultNotSaved": "{setting}未能保存：{error}",
+    "StartupDefaultSubjectMode": "启动模式",
+    "StartupDefaultSubjectThinking": "思考级别",
+    "StartupDefaultSubjectModel": "模型",
+    "StartupDefaultSubjectAll": "启动默认值"
 }

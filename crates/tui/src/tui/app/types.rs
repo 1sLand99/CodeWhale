@@ -8,6 +8,42 @@
 
 use super::*;
 
+/// What an interactive setting selection actually did.
+///
+/// The three cases are genuinely different to the user, and the boolean this
+/// replaced conflated the last two: a refused selection and an accepted one
+/// that only wrote the startup default both returned `false`, so every caller
+/// reported "already in that mode" and showed no receipt for the write.
+///
+/// Only [`Self::Changed`] means live session state moved — that is the case
+/// that must still emit an `AppAction` so the engine is resynchronized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingSelection {
+    /// Live state moved, and the startup default was persisted.
+    Changed,
+    /// Live state already matched, and the startup default was persisted. This
+    /// is the normal shape after a session restore, where the live value and
+    /// the startup default legitimately disagree.
+    PersistedSame,
+    /// Refused by the turn lock (#2982). Nothing was written anywhere.
+    Refused,
+}
+
+impl SettingSelection {
+    /// Whether live state moved — i.e. whether the engine needs resyncing.
+    #[must_use]
+    pub fn changed_live_state(self) -> bool {
+        matches!(self, Self::Changed)
+    }
+
+    /// Whether the selection was accepted at all (either case that persisted).
+    #[must_use]
+    #[cfg(test)]
+    pub fn accepted(self) -> bool {
+        !matches!(self, Self::Refused)
+    }
+}
+
 /// Supported application modes for the TUI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {

@@ -638,6 +638,12 @@ impl Settings {
     /// overlays. Configuration editors use this path so a value labelled
     /// "saved" never silently reports a tmux, SSH, or accessibility override.
     pub(crate) fn load_persisted() -> Result<Self> {
+        with_settings_transaction(SettingsTransaction::load)
+    }
+
+    /// Load persisted values while the caller already holds the settings
+    /// process mutex and adjacent file lock.
+    fn load_persisted_locked() -> Result<Self> {
         let (primary, legacy_home, legacy_config_dir) = settings_path_candidates();
         Self::load_persisted_from_candidates(primary, legacy_home, legacy_config_dir)
     }
@@ -918,15 +924,79 @@ impl Settings {
         }
     }
 
-    /// Save settings to disk
+    /// Run one atomic load → mutate → save cycle against `settings.toml`.
+    ///
+    /// **Every writer that reads the whole file, changes some fields, and writes
+    /// the whole file back must go through here** (or through
+    /// [`SettingsTransaction`] for the multi-step shape). `save` serializes the
+    /// complete struct, so two unsynchronized writers that each did their own
+    /// `load_persisted` will each write back the *other's* pre-image: whichever
+    /// saves last silently reverts the other's field. Locking `save` alone does
+    /// not help, because the stale read already happened before the lock.
+    ///
+    /// Two locks are taken (see [`with_settings_transaction`]): a process-wide
+    /// mutex keyed by the resolved settings path, which covers writers that
+    /// never share an object — a background startup-default drain and a
+    /// synchronous Shift+Tab permission write, the concrete pair that lost
+    /// `default_mode` / `permission_posture` against each other — and a
+    /// cross-process file lock, which covers a second Codewhale process on the
+    /// same home directory.
+    ///
+    /// The closure must not call `transact`, [`with_settings_transaction`],
+    /// `save`, or `load_persisted` itself — the lock is not re-entrant. Use
+    /// [`with_settings_transaction`] when you need more than one save in one
+    /// critical section.
+    pub fn transact<T>(mutate: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        with_settings_transaction(|transaction| {
+            let mut settings = transaction.load()?;
+            let value = mutate(&mut settings)?;
+            transaction.save(&settings)?;
+            Ok(value)
+        })
+    }
+
+    /// [`Self::transact`] for a mutation that may decide there is nothing to
+    /// write. Returning `None` abandons the transaction without touching disk,
+    /// so a "flag already set" early return does not rewrite the file.
+    pub fn transact_opt<T>(
+        mutate: impl FnOnce(&mut Self) -> Result<Option<T>>,
+    ) -> Result<Option<T>> {
+        with_settings_transaction(|transaction| {
+            let mut settings = transaction.load()?;
+            let Some(value) = mutate(&mut settings)? else {
+                return Ok(None);
+            };
+            transaction.save(&settings)?;
+            Ok(Some(value))
+        })
+    }
+
+    /// Save settings to disk as a standalone, fully locked write.
+    ///
+    /// Prefer [`Self::transact`]: calling this on a `Settings` that was loaded
+    /// outside a transaction writes back a snapshot that may already be stale
+    /// for every field the caller did *not* mean to change. This entry point
+    /// still takes both locks, so the bytes it writes are never interleaved with
+    /// another writer's — it just cannot fix a stale read that already happened.
+    ///
+    /// Not callable from inside a transaction: the cross-process lock is not
+    /// re-entrant, so a nested acquisition would deadlock against itself. Inside
+    /// a critical section use [`SettingsTransaction::save`].
+    #[cfg(test)]
     pub fn save(&self) -> Result<()> {
-        let path = Self::path()?;
+        with_settings_transaction(|transaction| transaction.save(self))
+    }
+
+    /// The write half of a settings transaction: serialize, merge comments, and
+    /// replace the file atomically. The caller already holds both the
+    /// process-wide mutex and the cross-process file lock.
+    fn save_locked(&self, path: &Path) -> Result<()> {
         #[cfg(test)]
         {
-            return crate::test_support::with_test_state_io_lock(|| self.save_to_path(&path));
+            return crate::test_support::with_test_state_io_lock(|| self.save_to_path(path));
         }
         #[cfg(not(test))]
-        self.save_to_path(&path)
+        self.save_to_path(path)
     }
 
     fn save_to_path(&self, path: &Path) -> Result<()> {
@@ -948,9 +1018,7 @@ impl Settings {
         } else {
             serialized
         };
-        std::fs::write(path, body)
-            .with_context(|| format!("Failed to write settings to {}", path.display()))?;
-        Ok(())
+        atomically_replace_settings_file(path, body.as_bytes())
     }
 
     /// Update and persist sidebar width percentage (10-50) — used by the
@@ -1654,9 +1722,11 @@ impl Settings {
     /// the shared global default (the session-local path; see
     /// [`Self::set_provider_model_selection`]).
     pub fn persist_provider_model_selection(provider: ApiProvider, model: &str) -> Result<()> {
-        let mut settings = Self::load()?;
-        settings.set_provider_model_selection(provider, model, false)?;
-        settings.save()
+        // `transact` reads `load_persisted`, not `load`: env/terminal overlays are
+        // an effective projection, and baking them into the file during an
+        // unrelated model save is how a temporary `NO_ANIMATIONS` becomes
+        // permanent.
+        Self::transact(|settings| settings.set_provider_model_selection(provider, model, false))
     }
 
     /// Load, update, and save a provider/model tuple as the global default
@@ -1666,9 +1736,7 @@ impl Settings {
         provider: ApiProvider,
         model: &str,
     ) -> Result<()> {
-        let mut settings = Self::load()?;
-        settings.set_provider_model_selection(provider, model, true)?;
-        settings.save()
+        Self::transact(|settings| settings.set_provider_model_selection(provider, model, true))
     }
 
     /// Resolved boolean for whether the renderer should wrap each frame in
@@ -1720,6 +1788,293 @@ fn resolve_settings_path_from_candidates(
     primary.or(legacy_config_dir).ok_or_else(|| {
         anyhow::anyhow!("Failed to resolve settings path: no config directory found.")
     })
+}
+
+/// Proof that the caller is inside the settings critical section.
+///
+/// Only [`with_settings_transaction`] can hand one out, so a `load`/`save` pair
+/// on this type is by construction covered by both the process-wide mutex and
+/// the cross-process file lock.
+pub(crate) struct SettingsTransaction {
+    path: PathBuf,
+}
+
+impl SettingsTransaction {
+    /// Read the on-disk values inside the critical section.
+    pub(crate) fn load(&self) -> Result<Settings> {
+        Settings::load_persisted_locked()
+    }
+
+    /// Write the whole file inside the critical section.
+    pub(crate) fn save(&self, settings: &Settings) -> Result<()> {
+        settings.save_locked(&self.path)
+    }
+}
+
+/// Run `operation` as one whole-file settings critical section.
+///
+/// Most callers want [`Settings::transact`]. Reach for this directly only when a
+/// single logical change needs more than one save under one lock — the
+/// Shift+Tab root-policy release is the motivating case: it commits the new
+/// posture, unsets the shadowing root config key, and must restore the previous
+/// posture if that unset fails. Splitting that into two `transact` calls would
+/// let another writer observe (and rewrite over) the uncommitted middle state.
+///
+/// Two locks are taken, in this order, and both are held across disk I/O:
+///
+/// 1. A process-wide mutex keyed by the resolved settings path. It covers
+///    writers that never share an object — a background startup-default drain
+///    and a synchronous Shift+Tab permission write, the concrete pair that lost
+///    `default_mode` / `permission_posture` against each other.
+/// 2. An **advisory file lock on an adjacent `settings.toml.lock`**, following
+///    the `codewhale_config::config_document` pattern. The process mutex says
+///    nothing about a second Codewhale process (a second TUI, `codewhale exec`,
+///    the runtime HTTP surface in another instance) doing its own
+///    load/modify/save. Without a cross-process lock those two interleave and
+///    the later save reverts the earlier one's field — last-save-wins across
+///    processes, which is exactly the bug the in-process lock was added to
+///    prevent in-process.
+///
+/// The lock file is only ever a lock: no settings content is written to it, so
+/// a stale one carries nothing to lose.
+///
+/// There is exactly one permitted lock order for anything that touches
+/// `settings.toml`, and every acquisition in the tree below obeys it:
+///
+/// ```text
+/// StartupDefaultsWriter::write  →  settings process mutex  →  settings file lock  →  test env lock  →  test state-I/O lock
+/// ```
+///
+/// Two consequences worth stating, because breaking either is a deadlock:
+///
+/// - A thread holding a transaction must never wait on
+///   `StartupDefaultsWriter::write`. The queued-drain paths (`flush`,
+///   `apply_blocking`) take `write` *first* and only then enter a transaction.
+/// - Under `cfg(test)` path resolution enters the process-wide env barrier from
+///   inside a transaction, so a background thread inside a transaction must be
+///   enrolled in the sealing test's env scope (see `tui::startup_defaults`) or it
+///   will park on a lock its own test holds.
+///
+/// Neither lock is re-entrant. `operation` must not call back into `transact`,
+/// `Settings::save`, or this function.
+pub(crate) fn with_settings_transaction<T>(
+    operation: impl FnOnce(&SettingsTransaction) -> Result<T>,
+) -> Result<T> {
+    let path = Settings::path()?;
+    let _process_guard = lock_settings_transaction(settings_transaction_mutex(&path));
+    with_settings_file_lock(&path, || {
+        operation(&SettingsTransaction { path: path.clone() })
+    })
+}
+
+/// Hold an exclusive advisory lock on `<settings.toml>.lock` for `operation`.
+///
+/// The lock file is opened (not followed) with owner-only permissions and is
+/// created if absent. Dropping the `fd_lock` guard — including on an unwind —
+/// releases it, and the OS releases it if the process dies, so a crash cannot
+/// wedge another Codewhale instance out of its settings.
+fn with_settings_file_lock<T>(path: &Path, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    use std::fs;
+
+    let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        anyhow::bail!(
+            "Failed to lock settings: {} has no parent directory",
+            path.display()
+        );
+    };
+    fs::create_dir_all(parent)
+        .with_context(|| format!("Failed to create config directory {}", parent.display()))?;
+
+    let mut lock_name = path
+        .file_name()
+        .context("Failed to lock settings: settings path has no file name")?
+        .to_os_string();
+    lock_name.push(".lock");
+    let lock_path = parent.join(lock_name);
+    reject_settings_lock_symlink(&lock_path)?;
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let lock_file = options
+        .open(&lock_path)
+        .with_context(|| format!("Failed to open settings lock at {}", lock_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        lock_file
+            .set_permissions(fs::Permissions::from_mode(0o600))
+            .with_context(|| {
+                format!("Failed to secure settings lock at {}", lock_path.display())
+            })?;
+    }
+    if !lock_file
+        .metadata()
+        .with_context(|| format!("Failed to inspect settings lock at {}", lock_path.display()))?
+        .file_type()
+        .is_file()
+    {
+        anyhow::bail!(
+            "Refusing a non-regular settings lock at {}",
+            lock_path.display()
+        );
+    }
+
+    let mut lock = fd_lock::RwLock::new(lock_file);
+    let _guard = lock
+        .write()
+        .with_context(|| format!("Failed to acquire settings lock at {}", lock_path.display()))?;
+    operation()
+}
+
+/// Refuse to lock through a symlink: a planted `settings.toml.lock -> …` would
+/// otherwise let an attacker pick which file we create with our permissions.
+fn reject_settings_lock_symlink(lock_path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(lock_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => anyhow::bail!(
+            "Refusing a symlinked settings lock at {}",
+            lock_path.display()
+        ),
+        Ok(_) | Err(_) => Ok(()),
+    }
+}
+
+/// Replace `path` with `body` by writing an adjacent temporary file and
+/// renaming it into place.
+///
+/// A direct `fs::write` truncates first, so any concurrent reader — another
+/// Codewhale process, an editor, a `cat` — can observe a half-written file and
+/// parse it as truncated TOML, silently losing every key past the tear. A
+/// same-directory temp file plus `rename` makes the swap atomic for readers:
+/// they see either the whole previous file or the whole new one.
+///
+/// The temp file inherits the existing file's permission bits when there is one
+/// (so a user who tightened `settings.toml` keeps that), and is created
+/// owner-only otherwise. `NamedTempFile` removes itself if anything below fails,
+/// so a failed save leaves no debris and never damages the previous file.
+fn atomically_replace_settings_file(path: &Path, body: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".settings-")
+        .suffix(".tmp")
+        .tempfile_in(dir)
+        .with_context(|| format!("Failed to stage settings write in {}", dir.display()))?;
+    tmp.write_all(body)
+        .with_context(|| format!("Failed to write settings to {}", path.display()))?;
+    tmp.flush()
+        .with_context(|| format!("Failed to flush settings for {}", path.display()))?;
+    tmp.as_file()
+        .sync_all()
+        .with_context(|| format!("Failed to sync settings for {}", path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o777)
+            .unwrap_or(0o600);
+        tmp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(mode))
+            .with_context(|| format!("Failed to set permissions for {}", path.display()))?;
+    }
+
+    tmp.persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("Failed to write settings to {}", path.display()))?;
+    Ok(())
+}
+
+/// Per-settings-path transaction mutexes.
+///
+/// Keyed by path rather than global because tests seal `HOME` onto their own
+/// temp dirs: two sealed tests write different files and have no reason to
+/// serialize against each other. Production has exactly one entry, so the
+/// registry never grows; entries are intentionally `'static` (leaked once) so a
+/// transaction can hold a plain `MutexGuard` without also pinning the registry
+/// lock it came from.
+fn settings_transaction_mutex(path: &Path) -> &'static std::sync::Mutex<()> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, &'static Mutex<()>>>> = OnceLock::new();
+    let key = path.to_path_buf();
+    let mut locks = LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mutex: &'static Mutex<()> = *locks
+        .entry(key)
+        .or_insert_with(|| Box::leak(Box::new(Mutex::new(()))));
+    drop(locks);
+    mutex
+}
+
+/// Acquire a transaction lock.
+///
+/// The mutex protects ordering, not an invariant, so a panic inside one
+/// transaction must not wedge settings persistence for the rest of the session:
+/// a poisoned guard is recovered rather than propagated.
+#[cfg(not(test))]
+fn lock_settings_transaction(
+    mutex: &'static std::sync::Mutex<()>,
+) -> std::sync::MutexGuard<'static, ()> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Test build of [`lock_settings_transaction`], with a watchdog.
+///
+/// Production blocks indefinitely, which is correct — the only thing ahead of it
+/// is a bounded settings transaction. In a test binary an indefinite wait is
+/// indistinguishable from a lock-order inversion, and a hung test job reports
+/// nothing. This is not a synchronization device: every honest acquisition
+/// succeeds on the first `try_lock` or shortly after. It exists so a regression
+/// fails loudly instead of hanging CI.
+///
+/// The deadline is generous on purpose. A transaction still reads and writes
+/// under `cfg(test)`'s state-I/O barrier, and the cross-process file lock can be
+/// held by a deliberately slow child process in the cross-process regressions —
+/// so the watchdog only has to be longer than the slowest honest transaction and
+/// shorter than a CI job timeout, not tight.
+#[cfg(test)]
+fn lock_settings_transaction(
+    mutex: &'static std::sync::Mutex<()>,
+) -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::TryLockError;
+
+    const DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+    let deadline = std::time::Instant::now() + DEADLINE;
+    loop {
+        match mutex.try_lock() {
+            Ok(guard) => return guard,
+            Err(TryLockError::Poisoned(poisoned)) => return poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => {}
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "settings transaction lock was not released within {DEADLINE:?}. Some thread is \
+             holding it across a load/modify/save that cannot finish — usually because it is \
+             blocked on a lock this test already holds, or because a transaction was opened \
+             re-entrantly. See Settings::transact."
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
 }
 
 fn settings_path_candidates() -> (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) {
@@ -1791,6 +2146,8 @@ fn legacy_config_override_parent() -> Option<PathBuf> {
 }
 
 fn migrate_settings_file_to_primary_if_needed(primary: &Path, active_read_path: &Path) {
+    use std::io::Write as _;
+
     if primary == active_read_path || primary.exists() || !active_read_path.exists() {
         return;
     }
@@ -1807,7 +2164,56 @@ fn migrate_settings_file_to_primary_if_needed(primary: &Path, active_read_path: 
         return;
     }
 
-    if let Err(err) = std::fs::copy(active_read_path, primary) {
+    let migration = (|| -> Result<()> {
+        let body = std::fs::read(active_read_path).with_context(|| {
+            format!(
+                "Failed to read legacy settings from {}",
+                active_read_path.display()
+            )
+        })?;
+        let mut tmp = tempfile::Builder::new()
+            .prefix(".settings-migration-")
+            .suffix(".tmp")
+            .tempfile_in(parent)
+            .with_context(|| {
+                format!("Failed to stage settings migration in {}", parent.display())
+            })?;
+        tmp.write_all(&body).with_context(|| {
+            format!(
+                "Failed to stage legacy settings from {}",
+                active_read_path.display()
+            )
+        })?;
+        tmp.flush()
+            .context("Failed to flush staged settings migration")?;
+        tmp.as_file()
+            .sync_all()
+            .context("Failed to sync staged settings migration")?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(active_read_path)
+                .map(|metadata| metadata.permissions().mode() & 0o777)
+                .unwrap_or(0o600);
+            tmp.as_file()
+                .set_permissions(std::fs::Permissions::from_mode(mode))
+                .context("Failed to preserve legacy settings permissions")?;
+        }
+
+        match tmp.persist_noclobber(primary) {
+            Ok(_) => Ok(()),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(error.error).with_context(|| {
+                format!(
+                    "Failed to install migrated settings at {}",
+                    primary.display()
+                )
+            }),
+        }
+    })();
+
+    if let Err(err) = migration {
         tracing::warn!(
             "failed to migrate settings from {} to {}: {err}",
             active_read_path.display(),
@@ -2102,6 +2508,248 @@ fn env_truthy(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // Cross-process settings integrity
+    // -----------------------------------------------------------------------
+    //
+    // The in-process mutex says nothing about a *second* Codewhale process on
+    // the same home directory — a second TUI, `codewhale exec`, the runtime HTTP
+    // surface in another instance. Two of those doing load/modify/save at once
+    // is the same last-save-wins bug the in-process lock was added to prevent,
+    // and no amount of thread-based testing can observe it: threads share the
+    // mutex that makes the bug impossible. These regressions therefore drive a
+    // real child process.
+    //
+    // The child is this same test binary, re-invoked with `--ignored --exact`
+    // on the helper below. It inherits the sealed `HOME`/`CODEWHALE_HOME`
+    // through its environment, so both processes resolve the same
+    // `settings.toml`.
+
+    /// Selects which child behavior [`settings_cross_process_child_helper`] runs.
+    const CHILD_ROLE_ENV: &str = "CODEWHALE_TEST_SETTINGS_CHILD_ROLE";
+    /// Path of the parent↔child handshake file. Its meaning is per-role: the
+    /// slow writer *creates* it once its transaction is open; the reader *waits*
+    /// for it as a stop signal.
+    const CHILD_SIGNAL_ENV: &str = "CODEWHALE_TEST_SETTINGS_CHILD_SIGNAL";
+    /// Where the child writes what it observed, for the parent to assert on.
+    const CHILD_RESULT_ENV: &str = "CODEWHALE_TEST_SETTINGS_CHILD_RESULT";
+
+    /// The other process in the cross-process regressions.
+    ///
+    /// Ignored so a normal `cargo test` never runs it directly; the parent tests
+    /// invoke it explicitly with `--ignored --exact`. With no role set it is a
+    /// no-op, so an accidental `--ignored` sweep stays green.
+    #[test]
+    #[ignore = "spawned as a child process by the cross-process settings regressions"]
+    fn settings_cross_process_child_helper() {
+        use std::time::{Duration, Instant};
+
+        let Ok(role) = std::env::var(CHILD_ROLE_ENV) else {
+            return;
+        };
+        // Under `cfg(test)` the settings path only honors the real environment
+        // for a thread that holds this lock; without it the child would resolve
+        // the isolated per-process test root and never touch the parent's file.
+        // The child is a fresh process, so the acquisition is uncontended.
+        let _env_lock = crate::test_support::lock_test_env();
+        let signal = PathBuf::from(
+            std::env::var(CHILD_SIGNAL_ENV).expect("child helper needs a signal path"),
+        );
+
+        match role.as_str() {
+            // Hold the settings critical section open across a visible delay, so
+            // the parent's transaction is guaranteed to arrive while this one is
+            // mid-flight.
+            "slow-writer" => {
+                with_settings_transaction(|transaction| {
+                    let mut settings = transaction.load()?;
+                    settings.default_mode = "operate".to_string();
+                    // Announce *after* the read: from here on, any parent write
+                    // that is not excluded by the lock will be lost by the save
+                    // below.
+                    std::fs::write(&signal, b"loaded").expect("write the handshake file");
+                    std::thread::sleep(Duration::from_millis(1_500));
+                    transaction.save(&settings)
+                })
+                .expect("the child transaction must commit");
+            }
+            // Read the raw file as fast as possible while the parent rewrites
+            // it, and report how many reads were torn.
+            "reader" => {
+                let result = PathBuf::from(
+                    std::env::var(CHILD_RESULT_ENV).expect("reader needs a result path"),
+                );
+                let path = Settings::path().expect("resolve the shared settings path");
+                let deadline = Instant::now() + Duration::from_secs(60);
+                let (mut reads, mut torn) = (0_u64, 0_u64);
+                while !path_exists_for_test(&signal) && Instant::now() < deadline {
+                    let Ok(raw) = std::fs::read_to_string(&path) else {
+                        // The file legitimately does not exist yet.
+                        continue;
+                    };
+                    reads += 1;
+                    // Both failure shapes a truncate-then-write produces: the
+                    // momentarily empty file, and a prefix that stops mid-value.
+                    if raw.is_empty() || toml::from_str::<toml::Value>(&raw).is_err() {
+                        torn += 1;
+                    }
+                }
+                std::fs::write(&result, format!("{reads} {torn}")).expect("write the result file");
+            }
+            other => panic!("unknown child role {other}"),
+        }
+    }
+
+    fn path_exists_for_test(path: &Path) -> bool {
+        std::fs::metadata(path).is_ok()
+    }
+
+    /// Spawn this test binary as a child running the helper above in `role`.
+    fn spawn_settings_child(
+        role: &str,
+        home: &Path,
+        signal: &Path,
+        result: Option<&Path>,
+    ) -> std::process::Child {
+        let mut command = std::process::Command::new(
+            std::env::current_exe().expect("the test binary path is the child program"),
+        );
+        command
+            .arg("settings::tests::settings_cross_process_child_helper")
+            .args(["--exact", "--ignored", "--test-threads", "1"])
+            .env(CHILD_ROLE_ENV, role)
+            .env(CHILD_SIGNAL_ENV, signal)
+            .env("HOME", home)
+            .env("USERPROFILE", home)
+            .env("CODEWHALE_HOME", home.join(".codewhale"))
+            .env_remove("DEEPSEEK_CONFIG_PATH")
+            .env_remove("CODEWHALE_CONFIG_PATH")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        if let Some(result) = result {
+            command.env(CHILD_RESULT_ENV, result);
+        }
+        command.spawn().expect("spawn the settings child process")
+    }
+
+    fn seal_settings_home_for_test(home: &Path) -> Vec<crate::test_support::EnvVarGuard> {
+        use crate::test_support::EnvVarGuard;
+        vec![
+            EnvVarGuard::set("HOME", home),
+            EnvVarGuard::set("USERPROFILE", home),
+            EnvVarGuard::set("CODEWHALE_HOME", home.join(".codewhale")),
+            EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH"),
+            EnvVarGuard::remove("CODEWHALE_CONFIG_PATH"),
+        ]
+    }
+
+    fn wait_for_file(path: &Path, what: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !path_exists_for_test(path) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {what} at {}",
+                path.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// Two processes mutating **disjoint** fields must both survive.
+    ///
+    /// The child opens a transaction, reads the pre-image, announces itself, and
+    /// only then saves `default_mode`. The parent's `max_history` write arrives
+    /// squarely inside that window. Without the cross-process lock the parent
+    /// loads the same pre-image, saves, and is then overwritten wholesale by the
+    /// child's later save — `max_history` silently reverts. With the lock the
+    /// parent waits, re-reads the child's committed value, and both fields land.
+    #[test]
+    fn two_processes_mutating_disjoint_fields_do_not_last_save_wins() {
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let _env = seal_settings_home_for_test(tmp.path());
+
+        // A real pre-image, so "whichever saves last wins" has something to
+        // revert rather than a fresh file.
+        Settings::transact(|settings| settings.set("max_history", "100"))
+            .expect("seed the settings file");
+        let signal = tmp.path().join("child-transaction-open");
+
+        let mut child = spawn_settings_child("slow-writer", tmp.path(), &signal, None);
+        wait_for_file(&signal, "the child's open transaction");
+
+        // The child is mid-transaction right now. This must block, not race.
+        Settings::transact(|settings| settings.set("max_history", "321"))
+            .expect("the parent write must land once the child releases the lock");
+
+        let status = child.wait().expect("await the child process");
+        assert!(status.success(), "the child transaction must succeed");
+
+        let settled = Settings::load_persisted().expect("reload the shared settings");
+        assert_eq!(
+            settled.default_mode, "operate",
+            "the child's field must survive the parent's whole-file save"
+        );
+        assert_eq!(
+            settled.max_input_history, 321,
+            "the parent's field must survive the child's whole-file save"
+        );
+    }
+
+    /// A concurrent reader must never observe a half-written `settings.toml`.
+    ///
+    /// `fs::write` truncates before it writes, so any other process reading at
+    /// the wrong moment sees an empty file or a prefix that stops mid-value —
+    /// and parses it as a settings file that is simply missing everything past
+    /// the tear. Writing to an adjacent temp file and renaming makes the swap
+    /// atomic: a reader sees either the whole old file or the whole new one.
+    #[test]
+    fn concurrent_readers_never_observe_a_truncated_settings_file() {
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let _env = seal_settings_home_for_test(tmp.path());
+
+        // Make the file big enough that a non-atomic write has a real window.
+        // A short file can be written in one syscall and hide the bug.
+        Settings::transact(|settings| {
+            settings.pinned_models = (0..400)
+                .map(|index| PinnedModel {
+                    provider: "deepseek".to_string(),
+                    model: format!("pinned-model-{index:04}"),
+                    label: Some(format!("Pinned model {index:04}")),
+                })
+                .collect();
+            Ok(())
+        })
+        .expect("seed a large settings file");
+
+        let stop = tmp.path().join("reader-stop");
+        let result = tmp.path().join("reader-result");
+        let mut child = spawn_settings_child("reader", tmp.path(), &stop, Some(&result));
+
+        for index in 0..150 {
+            Settings::transact(|settings| settings.set("max_history", &(100 + index).to_string()))
+                .expect("the parent write must land");
+        }
+
+        std::fs::write(&stop, b"stop").expect("signal the reader to stop");
+        let status = child.wait().expect("await the reader process");
+        assert!(status.success(), "the reader must exit cleanly");
+
+        let observed = std::fs::read_to_string(&result).expect("read the reader's report");
+        let mut parts = observed.split_whitespace();
+        let reads: u64 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let torn: u64 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+        assert!(
+            reads > 0,
+            "the reader observed nothing, so it proves nothing (report: {observed:?})"
+        );
+        assert_eq!(
+            torn, 0,
+            "{torn} of {reads} concurrent reads saw a truncated or unparseable settings file"
+        );
+    }
 
     #[test]
     fn ocean_treatment_is_appearance_not_motion() {
