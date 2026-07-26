@@ -64,12 +64,16 @@ pub fn validate_fleet_task_routes(
             .flatten();
         let (model, source) =
             effective_fleet_model_with_source(run_model, task.worker.as_ref(), agent_profile);
+        let route = resolve_fleet_route_with_config(task, agent_profiles, session_model, config);
+        if route.is_some() {
+            validate_fleet_reasoning_effort(task, agent_profiles, session_model, config)?;
+        }
         if !matches!(source, "task.model" | "agent_profile.model") {
             continue;
         }
         // A concrete model is pinned at the task/profile level; it must resolve
         // to a real provider route or the worker cannot launch.
-        if resolve_fleet_route_with_config(task, agent_profiles, session_model, config).is_some() {
+        if route.is_some() {
             continue;
         }
         let provider = explicit_fleet_provider_id(agent_profile)
@@ -88,6 +92,46 @@ pub fn validate_fleet_task_routes(
         );
     }
     Ok(())
+}
+
+/// Reject an explicit Fleet thinking tier when the exact resolved route does
+/// not advertise reasoning support. `inherit`, `auto`, and `off` are valid on
+/// every route because they do not force a reasoning payload. This check is
+/// deliberately performed at run creation, after the same route resolver used
+/// for launch, so the UI cannot save a profile that will silently downgrade or
+/// fail at spawn time (#4866).
+fn validate_fleet_reasoning_effort(
+    task: &FleetTaskSpec,
+    agent_profiles: &[AgentProfile],
+    session_model: Option<&str>,
+    config: Option<&Config>,
+) -> Result<()> {
+    let agent_profile = resolve_task_agent_profile(task, agent_profiles)
+        .ok()
+        .flatten();
+    let Some(effort) = effective_fleet_reasoning_effort(agent_profile) else {
+        return Ok(());
+    };
+    if matches!(effort.as_str(), "inherit" | "auto" | "off") {
+        return Ok(());
+    }
+    let Some(route) = resolve_fleet_route_with_config(task, agent_profiles, session_model, config)
+    else {
+        // The model-route validator owns unresolved-route errors and produces
+        // the more useful provider/model diagnosis.
+        return Ok(());
+    };
+    let provider = ApiProvider::parse(&route.provider_kind).unwrap_or(ApiProvider::Custom);
+    let capability = crate::config::provider_capability(provider, &route.wire_model_id);
+    if capability.thinking_supported {
+        return Ok(());
+    }
+    bail!(
+        "Fleet task `{}` requests thinking tier `{effort}` for `{}` / `{}`, but that exact model route does not support thinking; choose inherit, auto, or off, or select a reasoning-capable model",
+        task.id,
+        route.provider_id,
+        route.wire_model_id,
+    );
 }
 
 /// Build a sub-agent worker spec after resolving workspace Fleet profile input.
@@ -1866,6 +1910,62 @@ mod tests {
         );
         validate_fleet_task_routes(&[inherit_task], &[inherit], None, None)
             .expect("inherit (no model pin) must pass");
+    }
+
+    #[test]
+    fn validate_fleet_task_routes_rejects_unsupported_thinking_tier() {
+        let mut profile = agent_profile(
+            "preview-builder",
+            "builder",
+            None,
+            codewhale_config::FleetLoadout::Inherit,
+        );
+        profile.profile.model = Some("trinity-large-preview".to_string());
+        profile.profile.provider = Some("arcee".to_string());
+        profile.profile.reasoning_effort = Some("high".to_string());
+        let task = fleet_task(
+            "preview-build",
+            Some(worker_profile(
+                Some("preview-builder"),
+                None,
+                None,
+                None,
+                None,
+                vec![],
+            )),
+        );
+
+        let err = validate_fleet_task_routes(&[task], &[profile], Some("deepseek-v4-flash"), None)
+            .expect_err("unsupported thinking tier must fail before leasing");
+        let message = err.to_string();
+        assert!(message.contains("does not support thinking"), "{message}");
+        assert!(message.contains("trinity-large-preview"), "{message}");
+    }
+
+    #[test]
+    fn validate_fleet_task_routes_accepts_thinking_capable_route() {
+        let mut profile = agent_profile(
+            "deep-builder",
+            "builder",
+            None,
+            codewhale_config::FleetLoadout::Inherit,
+        );
+        profile.profile.model = Some("deepseek-v4-flash".to_string());
+        profile.profile.reasoning_effort = Some("high".to_string());
+        let task = fleet_task(
+            "deep-build",
+            Some(worker_profile(
+                Some("deep-builder"),
+                None,
+                None,
+                None,
+                None,
+                vec![],
+            )),
+        );
+
+        validate_fleet_task_routes(&[task], &[profile], Some("deepseek-v4-flash"), None)
+            .expect("thinking-capable route must pass");
     }
 
     #[test]
