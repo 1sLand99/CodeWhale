@@ -1428,8 +1428,6 @@ impl Engine {
                     if let Some(status) = shell_completion_status_text(&shell_completions, "") {
                         let _ = self.tx_event.send(Event::status(status)).await;
                     }
-                    turn.next_step();
-                    continue;
                 }
 
                 // Sub-agent completion handoff (issue #756). The model finished
@@ -1597,8 +1595,6 @@ impl Engine {
                     {
                         let _ = self.tx_event.send(Event::status(status)).await;
                     }
-                    turn.next_step();
-                    continue;
                 }
 
                 if self.drain_subagent_completion_events("late").await > 0 {
