@@ -299,6 +299,12 @@ impl FleetManager {
         validate_task_spec_document(&doc)?;
         let roster = self.agent_roster();
         worker_runtime::validate_task_agent_profiles(&doc.tasks, roster.members())?;
+        worker_runtime::validate_fleet_task_routes(
+            &doc.tasks,
+            roster.members(),
+            self.session_model(),
+            self.route_config.as_ref(),
+        )?;
         let max_workers = max_workers.clamp(1, 128);
         let run_id = FleetRunId::from(format!(
             "fleet-{}",
