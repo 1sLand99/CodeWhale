@@ -1426,7 +1426,7 @@ impl ApprovalView {
     }
 
     fn select_prev(&mut self) {
-        let len = ApprovalOption::order_for(&self.request.tool_name).len();
+        let len = ApprovalOption::order_for(&self.request).len();
         self.selected = crate::tui::list_nav::wrap_index(self.selected, len, -1);
     }
 
