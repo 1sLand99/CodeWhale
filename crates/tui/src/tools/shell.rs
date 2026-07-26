@@ -1679,6 +1679,7 @@ impl ShellManager {
     }
 
     /// Spawn a background process (sandboxed).
+    #[allow(clippy::too_many_arguments)]
     fn spawn_background_sandboxed(
         &mut self,
         original_command: &str,
