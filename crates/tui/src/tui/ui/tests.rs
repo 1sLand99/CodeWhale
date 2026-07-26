@@ -10693,7 +10693,7 @@ async fn queue_send_index_sends_selected_message_into_running_turn() {
 }
 
 #[tokio::test]
-async fn enter_while_model_waiting_steers_instead_of_queueing() {
+async fn enter_while_model_waiting_queues_instead_of_steering() {
     let mut app = create_test_app();
     app.is_loading = true;
     app.streaming_message_index = None;
@@ -10703,12 +10703,16 @@ async fn enter_while_model_waiting_steers_instead_of_queueing() {
 
     submit_or_steer_message(&mut app, &config, &engine.handle, queued)
         .await
-        .expect("busy waiting submit steers");
+        .expect("busy waiting submit queues");
 
-    assert_eq!(app.queued_message_count(), 0);
+    assert_eq!(app.queued_message_count(), 1);
     assert_eq!(
-        engine.rx_steer.recv().await.as_deref(),
+        app.queued_messages.front().map(|message| message.display.as_str()),
         Some("adjust current turn")
+    );
+    assert!(
+        engine.rx_steer.try_recv().is_err(),
+        "bare Enter must never become a same-turn steer"
     );
 }
 
