@@ -113,7 +113,7 @@ impl HeavyCommandPermit {
 
 pub(crate) fn infer_command_expense(command: &str) -> CommandExpense {
     let heavy = command
-        .split(|character| matches!(character, '\n' | '\r' | ';' | '|' | '&'))
+        .split(['\n', '\r', ';', '|', '&'])
         .any(segment_is_heavy);
 
     if heavy {
@@ -363,6 +363,7 @@ fn host_memory_free_fraction() -> Option<f64> {
     None
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn run_capture(program: &str, args: &[&str]) -> Option<String> {
     let output = std::process::Command::new(program)
         .args(args)

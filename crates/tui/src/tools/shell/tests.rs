@@ -205,9 +205,8 @@ fn shell_descendant_helper_process() {
     if std::env::var(SHELL_DESCENDANT_HELPER_ENV).ok().as_deref() != Some("1") {
         return;
     }
-    let pid_file = PathBuf::from(
-        std::env::var(SHELL_DESCENDANT_PID_FILE_ENV).expect("descendant pid file"),
-    );
+    let pid_file =
+        PathBuf::from(std::env::var(SHELL_DESCENDANT_PID_FILE_ENV).expect("descendant pid file"));
     let child = Command::new("sleep")
         .arg("30")
         .spawn()
@@ -225,7 +224,10 @@ fn wait_for_shell_pid_file(path: &Path) -> libc::pid_t {
         {
             return pid;
         }
-        assert!(Instant::now() < deadline, "descendant pid file never appeared");
+        assert!(
+            Instant::now() < deadline,
+            "descendant pid file never appeared"
+        );
         std::thread::sleep(Duration::from_millis(25));
     }
 }

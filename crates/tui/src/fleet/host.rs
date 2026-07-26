@@ -1791,7 +1791,10 @@ mod tests {
             Duration::from_secs(3),
         );
         assert_eq!(status.state, FleetHostWorkerState::Draining);
-        assert!(unix_pid_is_running(tool_pid), "descendant exited before draining check");
+        assert!(
+            unix_pid_is_running(tool_pid),
+            "descendant exited before draining check"
+        );
 
         let stopped = adapter
             .stop_worker("draining-dispatcher-tree")
