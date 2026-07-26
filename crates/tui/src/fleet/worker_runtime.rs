@@ -39,6 +39,57 @@ pub fn validate_task_agent_profiles(
     Ok(())
 }
 
+/// Validate that every task's pinned model route actually resolves before any
+/// worker is leased (#4866).
+///
+/// Catches the "provider-less model pin" failure mode: a profile that pins a
+/// concrete model without an explicit provider resolves against the
+/// session/default provider, which may not carry that model — causing a silent
+/// launch failure (e.g. selecting `gpt-5.6-luna` as a Fleet Builder model with
+/// no provider, when Luna lives on a different configured provider). The
+/// runtime never infers a provider from a model's spelling (#4093/#2608), so a
+/// pinned model that does not resolve is rejected here with a clear error
+/// instead of failing silently inside the worker. Models inherited from the
+/// session/run route (`run.model`) are not pins and are left alone.
+pub fn validate_fleet_task_routes(
+    tasks: &[FleetTaskSpec],
+    agent_profiles: &[AgentProfile],
+    session_model: Option<&str>,
+    config: Option<&Config>,
+) -> Result<()> {
+    let run_model = session_model.unwrap_or("auto");
+    for task in tasks {
+        let agent_profile = resolve_task_agent_profile(task, agent_profiles)
+            .ok()
+            .flatten();
+        let (model, source) =
+            effective_fleet_model_with_source(run_model, task.worker.as_ref(), agent_profile);
+        if !matches!(source, "task.model" | "agent_profile.model") {
+            continue;
+        }
+        // A concrete model is pinned at the task/profile level; it must resolve
+        // to a real provider route or the worker cannot launch.
+        if resolve_fleet_route_with_config(task, agent_profiles, session_model, config).is_some() {
+            continue;
+        }
+        let provider = explicit_fleet_provider_id(agent_profile)
+            .map(|provider| format!("provider=`{provider}`"))
+            .unwrap_or_else(|| {
+                "no explicit provider (resolves against the session/default provider)".to_string()
+            });
+        bail!(
+            "Fleet task `{}` pins model `{}` with {} (source={source}), but that route does not \
+             resolve to a real model on any configured provider, so the worker cannot launch. \
+             The runtime never infers a provider from a model's spelling — set an explicit \
+             provider for this model in the profile, or switch the role to `inherit`.",
+            task.id,
+            model,
+            provider
+        );
+    }
+    Ok(())
+}
+
 /// Build a sub-agent worker spec after resolving workspace Fleet profile input.
 ///
 /// This keeps Fleet and sub-agents on the same runtime substrate: profile files
@@ -1734,6 +1785,87 @@ mod tests {
             .expect("pinned route should resolve");
         assert_eq!(pinned.model_source.as_deref(), Some("agent_profile.model"));
         assert_eq!(pinned.wire_model_id, "deepseek-v4-pro");
+    }
+
+    #[test]
+    fn validate_fleet_task_routes_rejects_unresolvable_providerless_pin() {
+        // #4866 Luna failure mode: a profile pins a concrete model with no
+        // explicit provider. The runtime never infers a provider from spelling,
+        // so a model that does not resolve on the default provider must be
+        // rejected at run creation with a clear error, not fail silently later.
+        let mut profile = agent_profile(
+            "builder-luna",
+            "builder",
+            None,
+            codewhale_config::FleetLoadout::Inherit,
+        );
+        profile.profile.model = Some("gpt-5.6-luna".to_string());
+        let task = fleet_task(
+            "luna-build",
+            Some(worker_profile(
+                Some("builder-luna"),
+                None,
+                None,
+                None,
+                None,
+                vec![],
+            )),
+        );
+
+        let err = validate_fleet_task_routes(&[task], &[profile], None, None)
+            .expect_err("provider-less unresolvable pin must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("gpt-5.6-luna"), "error names the model: {msg}");
+        assert!(
+            msg.contains("provider") || msg.contains("inherit"),
+            "error tells the user how to fix it: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_fleet_task_routes_accepts_resolvable_pin_and_inherit() {
+        // A real default-provider model resolves fine without an explicit pin.
+        let mut good = agent_profile(
+            "builder-ds",
+            "builder",
+            None,
+            codewhale_config::FleetLoadout::Inherit,
+        );
+        good.profile.model = Some("deepseek-v4-flash".to_string());
+        let good_task = fleet_task(
+            "ds-build",
+            Some(worker_profile(
+                Some("builder-ds"),
+                None,
+                None,
+                None,
+                None,
+                vec![],
+            )),
+        );
+        validate_fleet_task_routes(&[good_task], &[good], None, None)
+            .expect("resolvable default-provider model must pass");
+
+        // Inherit (no model pin) is never rejected.
+        let inherit = agent_profile(
+            "inherit-role",
+            "builder",
+            None,
+            codewhale_config::FleetLoadout::Inherit,
+        );
+        let inherit_task = fleet_task(
+            "inherit-build",
+            Some(worker_profile(
+                Some("inherit-role"),
+                None,
+                None,
+                None,
+                None,
+                vec![],
+            )),
+        );
+        validate_fleet_task_routes(&[inherit_task], &[inherit], None, None)
+            .expect("inherit (no model pin) must pass");
     }
 
     #[test]
