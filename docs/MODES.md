@@ -20,9 +20,9 @@ into a resumable workflow with its own progress view.
 
 ## TUI Modes
 
-Press `Tab` to complete composer menus, queue a draft as a next-turn follow-up
-while a turn is running, or cycle through the visible modes when the composer is
-otherwise idle: **Plan → Act → Operate → Plan**.
+Press `Tab` to complete composer menus or cycle through the visible modes when
+the composer is empty: **Plan → Act → Operate → Plan**. `Tab` never sends
+or queues composer text; use `Enter` to send or queue it.
 Press `Shift+Tab` to cycle permission posture (Ask → Auto-Review → Full Access).
 Press `Ctrl+T` to cycle reasoning effort.
 Run `/mode` to open the mode picker, or switch directly with `/mode act`,

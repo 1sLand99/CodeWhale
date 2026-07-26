@@ -2,8 +2,7 @@
 //!
 //! These scenarios cover the live TUI checks that unit tests cannot prove:
 //! six-worker fanout liveness/cancellation, multi-terminal route isolation,
-//! and queued steering via the terminal-safe Ctrl+G shortcut. Every provider is a loopback
-//! wiremock
+//! and the explicit Enter-queue / Ctrl+Enter-steer contract. Every provider is a loopback wiremock
 //! server and every process receives a sealed HOME.
 
 #![cfg(unix)]
@@ -282,13 +281,6 @@ fn type_and_submit(harness: &mut Harness, text: &str) -> Result<()> {
     std::thread::sleep(PASTE_GUARD_SETTLE);
     harness.pump();
     harness.send(keys::key::enter())?;
-    Ok(())
-}
-
-fn type_and_tab(harness: &mut Harness, text: &str) -> Result<()> {
-    harness.send(keys::key::text(text))?;
-    harness.wait_for_text(text, Duration::from_secs(3))?;
-    harness.send(b"\t")?;
     Ok(())
 }
 
@@ -782,9 +774,13 @@ impl Respond for SteeringResponder {
     fn respond(&self, request: &Request) -> ResponseTemplate {
         let body = request.body_json::<Value>().unwrap_or(Value::Null);
         let raw = body.to_string();
-        if raw.contains("queued steering from ctrl-g") {
+        if raw.contains("queued steering from enter") {
             self.steer_requests.fetch_add(1, Ordering::SeqCst);
             return sse_response(text_sse(DEEPSEEK_TEST_MODEL, "steering-applied"));
+        }
+        if raw.contains("direct steering from ctrl-enter") {
+            self.steer_requests.fetch_add(1, Ordering::SeqCst);
+            return sse_response(text_sse(DEEPSEEK_TEST_MODEL, "direct-steering-applied"));
         }
         if raw.contains("initial slow turn") {
             self.initial_requests.fetch_add(1, Ordering::SeqCst);
@@ -798,7 +794,7 @@ impl Respond for SteeringResponder {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn release_queued_steering_ctrl_g_sends_now_with_clear_status() -> Result<()> {
+async fn release_empty_enter_promotes_queued_follow_up() -> Result<()> {
     let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
     let server = MockServer::start().await;
     mount_models(&server, &[DEEPSEEK_TEST_MODEL]).await;
@@ -829,21 +825,110 @@ async fn release_queued_steering_ctrl_g_sends_now_with_clear_status() -> Result<
     // A dead engine still fails closed because the counter never advances.
     wait_for_counter(&mut tui, &initial_requests, 1, INTERACTION_TIMEOUT)?;
 
-    type_and_tab(&mut tui, "queued steering from ctrl-g")?;
-    tui.wait_for_text("Ctrl+G send", Duration::from_secs(5))?;
+    tui.send(keys::key::text("queued steering from enter"))?;
+    tui.wait_for_text("queued steering from enter", Duration::from_secs(3))?;
+    tui.send(b"\t")?;
+    std::thread::sleep(PASTE_GUARD_SETTLE);
+    tui.pump();
     assert!(
-        tui.frame().contains("queued steering from ctrl-g"),
+        tui.frame().contains("queued steering from enter"),
+        "Tab must leave a busy-turn draft in the composer:\n{}",
+        tui.debug_dump()
+    );
+    tui.send(keys::key::enter())?;
+    tui.wait_for_text("Enter send now", Duration::from_secs(5))?;
+    assert!(
+        tui.frame().contains("queued steering from enter"),
         "queued steering preview was not readable:\n{}",
         tui.debug_dump()
     );
 
+    tui.send(keys::key::text("stash this draft, do not steer"))?;
+    tui.wait_for_text("stash this draft, do not steer", Duration::from_secs(3))?;
+    tui.send(keys::key::ctrl_g())?;
+    tui.wait_for_text("Draft stashed", Duration::from_secs(3))?;
+    assert_eq!(
+        steer_requests.load(Ordering::SeqCst),
+        0,
+        "Ctrl+G must not send a queued follow-up"
+    );
+    tui.wait_for_text("Enter send now", Duration::from_secs(3))?;
+
     let steer_started = Instant::now();
-    tui.send(b"\x07")?;
+    tui.send(keys::key::enter())?;
     wait_for_counter(&mut tui, &steer_requests, 1, INTERACTION_TIMEOUT)?;
     tui.wait_for_text("steering-applied", INTERACTION_TIMEOUT)?;
     assert!(
         steer_started.elapsed() < Duration::from_secs(10),
-        "Ctrl+G steering was not incorporated promptly"
+        "empty Enter queue promotion was not incorporated promptly"
+    );
+
+    let _ = tui.shutdown();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn release_ctrl_enter_steers_running_turn() -> Result<()> {
+    let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
+    let server = MockServer::start().await;
+    mount_models(&server, &[DEEPSEEK_TEST_MODEL]).await;
+    let initial_requests = Arc::new(AtomicUsize::new(0));
+    let steer_requests = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(SteeringResponder {
+            initial_requests: Arc::clone(&initial_requests),
+            steer_requests: Arc::clone(&steer_requests),
+        })
+        .mount(&server)
+        .await;
+
+    let ws = make_sealed_workspace()?;
+    let mut tui = common_tui_builder(&ws)
+        .env("CODEWHALE_PROVIDER", "deepseek")
+        .env("DEEPSEEK_API_KEY", "deepseek-local-test-key")
+        .env("DEEPSEEK_BASE_URL", server.uri())
+        .env("DEEPSEEK_MODEL", DEEPSEEK_TEST_MODEL)
+        .spawn()?;
+    enter_launch_session(&mut tui)?;
+
+    type_and_submit(&mut tui, "initial slow turn")?;
+    wait_for_counter(&mut tui, &initial_requests, 1, INTERACTION_TIMEOUT)?;
+
+    tui.send(keys::key::text("busy-shift-line"))?;
+    tui.send(keys::key::shift_enter())?;
+    tui.send(keys::key::text("busy-alt-line"))?;
+    tui.send(keys::key::alt_enter())?;
+    tui.send(keys::key::text("busy-ctrl-j-line"))?;
+    tui.send(keys::key::ctrl_j())?;
+    tui.send(keys::key::text("direct steering from ctrl-enter"))?;
+    tui.wait_for_text("direct steering from ctrl-enter", Duration::from_secs(3))?;
+    let frame = tui.frame();
+    let rows = [
+        "busy-shift-line",
+        "busy-alt-line",
+        "busy-ctrl-j-line",
+        "direct steering from ctrl-enter",
+    ]
+    .map(|line| {
+        frame
+            .find_text(line)
+            .expect("busy multiline draft stays visible")
+            .0
+    });
+    assert!(
+        rows.windows(2).all(|pair| pair[0] < pair[1]),
+        "newline chords must stay newlines during a running turn:\n{}",
+        frame.debug_dump()
+    );
+    tui.wait_for_text("Ctrl+↵ steer", Duration::from_secs(3))?;
+    let steer_started = Instant::now();
+    tui.send(keys::key::ctrl_enter())?;
+    wait_for_counter(&mut tui, &steer_requests, 1, INTERACTION_TIMEOUT)?;
+    tui.wait_for_text("direct-steering-applied", INTERACTION_TIMEOUT)?;
+    assert!(
+        steer_started.elapsed() < Duration::from_secs(10),
+        "Ctrl+Enter steering was not incorporated promptly"
     );
 
     let _ = tui.shutdown();

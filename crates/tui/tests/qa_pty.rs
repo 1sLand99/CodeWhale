@@ -97,6 +97,55 @@ fn enter_launch_session(h: &mut Harness) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn composer_newline_and_stash_chords_keep_stable_roles() -> anyhow::Result<()> {
+    let _guard = qa_pty_test_lock();
+    let (ws, mut h) = boot_minimal()?;
+
+    h.send(keys::key::text("shift-line"))?;
+    h.send(keys::key::shift_enter())?;
+    h.send(keys::key::text("alt-line"))?;
+    h.send(keys::key::alt_enter())?;
+    h.send(keys::key::text("ctrl-j-line"))?;
+    h.send(keys::key::ctrl_j())?;
+    h.send(keys::key::text("last-line"))?;
+    h.wait_for_text("last-line", KEY_TIMEOUT)?;
+
+    let frame = h.frame();
+    let rows = ["shift-line", "alt-line", "ctrl-j-line", "last-line"].map(|line| {
+        frame
+            .find_text(line)
+            .expect("multiline draft stays visible")
+            .0
+    });
+    assert!(
+        rows.windows(2).all(|pair| pair[0] < pair[1]),
+        "Shift+Enter, Alt+Enter, and Ctrl+J must each add a line:\n{}",
+        frame.debug_dump()
+    );
+
+    h.send(keys::key::ctrl_g())?;
+    h.wait_for_text("Draft stashed", KEY_TIMEOUT)?;
+    h.wait_for_text(COMPOSER_READY_TEXT, KEY_TIMEOUT)?;
+    let stash_path = ws.home().join(".codewhale/composer_stash.jsonl");
+    let first_stash = std::fs::read_to_string(&stash_path)?;
+    assert!(first_stash.contains("shift-line\\nalt-line\\nctrl-j-line\\nlast-line"));
+
+    h.send(keys::key::text("/stash pop"))?;
+    h.wait_for_text("/stash pop", KEY_TIMEOUT)?;
+    std::thread::sleep(Duration::from_millis(180));
+    h.send(keys::key::enter())?;
+    h.wait_for_text("last-line", KEY_TIMEOUT)?;
+
+    h.send(keys::key::ctrl_s())?;
+    h.wait_for_text(COMPOSER_READY_TEXT, KEY_TIMEOUT)?;
+    let second_stash = std::fs::read_to_string(&stash_path)?;
+    assert!(second_stash.contains("shift-line\\nalt-line\\nctrl-j-line\\nlast-line"));
+
+    let _ = h.shutdown();
+    Ok(())
+}
+
 fn write_skill(root: std::path::PathBuf, name: &str, description: &str) -> anyhow::Result<()> {
     let dir = root.join(name);
     std::fs::create_dir_all(&dir)?;

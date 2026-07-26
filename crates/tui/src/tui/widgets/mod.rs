@@ -1159,9 +1159,8 @@ impl Renderable for ComposerWidget<'_> {
             } else if !input_text.trim().is_empty() {
                 // Live disambiguation for #345: when there's content in the
                 // composer, show what `Enter` will do RIGHT NOW so the user
-                // never has to guess between Immediate / Steer / QueueFollowUp /
-                // Queue. The disposition flips with engine state so this hint
-                // is the only reliable cue before pressing Enter.
+                // never has to guess between Immediate / QueueFollowUp /
+                // Queue. Ctrl+Enter is the separate, stable steer gesture.
                 use crate::tui::app::SubmitDisposition;
                 let queue_count = self.app.queued_message_count();
                 let (label, color) = match self.app.decide_submit_disposition() {
@@ -1179,39 +1178,38 @@ impl Renderable for ComposerWidget<'_> {
                         if self.app.offline_mode {
                             (Some("↵ offline queue".to_string()), palette::STATUS_WARNING)
                         } else if self.app.mode == crate::tui::app::AppMode::Operate {
-                            // Ctrl+G sends an already-queued item now; with only
-                            // composer text it stashes the draft (#440). Steer is
-                            // an explicit Shift+Enter / Ctrl+Enter gesture.
+                            // Enter queues while busy; Ctrl+Enter explicitly
+                            // steers. Ctrl+G/Ctrl+S only stash drafts (#440).
                             let label = if queue_count > 0 {
                                 format!(
-                                    "↵ queue task ({} waiting) · ⇧↵ steer · Ctrl+G send queued",
+                                    "↵ queue task ({} waiting) · Ctrl+↵ steer",
                                     queue_count.saturating_add(1)
                                 )
                             } else {
-                                "↵ queue task · ⇧↵ steer".to_string()
+                                "↵ queue task · Ctrl+↵ steer".to_string()
                             };
                             (Some(label), palette::WHALE_INFO)
                         } else {
                             let label = if queue_count > 0 {
                                 format!(
-                                    "↵ queue ({} waiting) · ⇧↵ steer · Ctrl+G send queued",
+                                    "↵ queue ({} waiting) · Ctrl+↵ steer",
                                     queue_count.saturating_add(1)
                                 )
                             } else {
-                                "↵ queue · ⇧↵ steer".to_string()
+                                "↵ queue · Ctrl+↵ steer".to_string()
                             };
                             (Some(label), palette::TEXT_MUTED)
                         }
                     }
-                    // Steer is reached via Shift+Enter or Ctrl+Enter only.
+                    // Steer is reached via Ctrl+Enter only.
                     SubmitDisposition::Steer => {
                         (Some("↵ steering".to_string()), palette::WHALE_INFO)
                     }
                     SubmitDisposition::QueueFollowUp => (
                         Some(if self.app.mode == crate::tui::app::AppMode::Operate {
-                            "↵ queued task · ⇧↵ steer · Ctrl+G send queued".to_string()
+                            "↵ queued task · Ctrl+↵ steer".to_string()
                         } else {
-                            "↵ queued · ⇧↵ steer · Ctrl+G send queued".to_string()
+                            "↵ queued · Ctrl+↵ steer".to_string()
                         }),
                         palette::TEXT_MUTED,
                     ),

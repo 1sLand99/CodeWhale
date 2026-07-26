@@ -1004,7 +1004,7 @@ pub struct App {
     pub dispatch_in_flight: bool,
     /// Timestamp of the most recent Enter while the engine was busy.
     /// Retained for session layout compatibility; bare-Enter double-tap
-    /// steering was removed (use Shift+Enter / Ctrl+Enter instead).
+    /// steering was removed (use Ctrl+Enter instead).
     #[allow(dead_code)]
     pub last_enter_instant: Option<Instant>,
     /// Whether the once-per-turn provider-wait incident (#3095) has already
@@ -1546,8 +1546,8 @@ pub struct App {
     /// Draft queued message being edited
     pub queued_draft: Option<QueuedMessage>,
     /// Legacy pending-steer bucket retained for session compatibility. New
-    /// in-flight input uses Enter for same-turn steering and Tab for queued
-    /// follow-ups; Esc only cancels the active turn.
+    /// in-flight input uses Ctrl+Enter for same-turn steering and Enter for
+    /// queued follow-ups; Esc only cancels the active turn.
     pub pending_steers: VecDeque<QueuedMessage>,
     /// Engine-rejected steers (e.g. a tool was already running and couldn't be
     /// cancelled cleanly). Surfaced in the pending-input preview so the user
@@ -3583,7 +3583,8 @@ impl App {
     }
 
     /// Park a legacy pending steer. New keyboard handling routes running-turn
-    /// drafts through Enter (same-turn steer) or Tab (next-turn follow-up).
+    /// drafts through Ctrl+Enter (same-turn steer) or Enter (next-turn
+    /// follow-up).
     #[allow(dead_code)]
     pub fn push_pending_steer(&mut self, message: QueuedMessage) {
         self.pending_steers.push_back(message);
@@ -3604,15 +3605,13 @@ impl App {
 
     /// Decide how to route a fresh composer submit.
     ///
-    /// v0.8.68: streaming output queues. Busy-but-waiting turns steer so
-    /// Enter can amend the active turn before output starts. Explicit Shift/Ctrl+Enter
-    /// Enter within 500 ms triggers Steer while streaming; Ctrl+Enter forces
-    /// Steer in all busy states.
+    /// Running turns always queue bare-Enter submissions. Ctrl+Enter is the
+    /// single explicit gesture for amending the active turn, regardless of
+    /// whether the provider has emitted its first token yet.
     ///
     /// Truth table:
     ///   offline=F, busy=F → Immediate
-    ///   offline=F, busy=T, streaming=F → Steer
-    ///   offline=F, busy=T, streaming=T → Queue (Shift/Ctrl+Enter steers)
+    ///   offline=F, busy=T, streaming=* → Queue (Ctrl+Enter steers)
     ///   offline=T, busy=* → Queue
     #[must_use]
     pub fn decide_submit_disposition(&self) -> SubmitDisposition {
@@ -3627,19 +3626,15 @@ impl App {
         if !self.is_loading {
             return SubmitDisposition::Immediate;
         }
-        if self.streaming_message_index.is_none() {
-            return SubmitDisposition::Steer;
-        }
-        // Streaming: queue the message. Steer is an explicit gesture
-        // (Shift+Enter / Ctrl+Enter), not a bare double-Enter race.
+        // Busy: queue the message. Steer is an explicit Ctrl+Enter gesture,
+        // not a timing-sensitive change in bare Enter behavior.
         SubmitDisposition::Queue
     }
 
     /// Resolve what bare Enter should do right now.
     ///
     /// When the engine is busy, Enter queues. When idle, Enter submits
-    /// immediately. Steering is only available via explicit Shift+Enter or
-    /// Ctrl+Enter — a second bare Enter after queueing must not interrupt.
+    /// immediately. Steering is only available via explicit Ctrl+Enter.
     #[must_use]
     pub fn enter_with_double_tap(&mut self) -> Option<SubmitDisposition> {
         // Name kept for call-site stability; the double-tap window is gone.

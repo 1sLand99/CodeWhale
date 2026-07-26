@@ -5649,7 +5649,13 @@ async fn run_event_loop(
             let has_ctrl_alt_or_super = super::widgets::key_hint::has_ctrl_or_alt(key.modifiers)
                 || key.modifiers.contains(KeyModifiers::SUPER);
             let is_plain_char = matches!(key.code, KeyCode::Char(_)) && !has_ctrl_alt_or_super;
-            let is_enter = matches!(key.code, KeyCode::Enter);
+            // Only bare Enter participates in trailing-newline paste-burst
+            // protection. Modified Enter chords are deliberate composer
+            // actions: flush any buffered text, then route the chord normally
+            // so Shift/Alt+Enter newline and Ctrl+Enter steer are never eaten
+            // after fast typing or an unbracketed paste.
+            let is_plain_enter =
+                matches!(key.code, KeyCode::Enter) && key.modifiers == KeyModifiers::NONE;
 
             // Tool details: Alt+V / Option+V only. Bare `v` always types `v`
             // in every focus state (TUI-DOG-002).
@@ -5659,13 +5665,15 @@ async fn run_event_loop(
             }
 
             if !is_plain_char
-                && !is_enter
+                && !is_plain_enter
                 && let Some(pending) = app.flush_paste_burst_before_modified_input_if_enabled()
             {
                 app.insert_str(&pending);
             }
 
-            if (is_plain_char || is_enter) && super::paste::handle_paste_burst_key(app, &key, now) {
+            if (is_plain_char || is_plain_enter)
+                && super::paste::handle_paste_burst_key(app, &key, now)
+            {
                 continue;
             }
 
@@ -6141,15 +6149,19 @@ async fn run_event_loop(
                     if crate::tui::file_mention::try_autocomplete_file_mention(app) {
                         continue;
                     }
-                    if app.is_loading && queue_current_draft_for_next_turn(app) {
-                        continue;
-                    }
                     if app.input.is_empty()
                         && let Some(suggestion) = app.prompt_suggestion.take()
                     {
                         app.input = suggestion;
                         app.cursor_position = app.input.chars().count();
                         app.needs_redraw = true;
+                        continue;
+                    }
+                    // Tab is completion when the composer has content and a
+                    // mode switch only when it is empty. Sending or queueing
+                    // input is reserved for Enter so Tab never changes roles
+                    // based on whether a turn happens to be running.
+                    if !app.input.is_empty() {
                         continue;
                     }
                     let prior_model = app.model.clone();
@@ -6212,48 +6224,8 @@ async fn run_event_loop(
                 // Help chords (Alt+?, F1, Ctrl+/) are handled above via
                 // shell_key_routing::is_help_shortcut so printable layout
                 // characters stay text.
-                // Shift+Enter steers a running turn. When idle, the
-                // normal composer-newline branch below still handles it
-                // as a multiline input gesture.
-                KeyCode::Enter
-                    if app.is_loading
-                        && key.modifiers.contains(KeyModifiers::SHIFT)
-                        && !key.modifiers.contains(KeyModifiers::CONTROL)
-                        && !key.modifiers.contains(KeyModifiers::ALT) =>
-                {
-                    if let Some(input) = app.submit_input() {
-                        if handle_bang_shell_input(app, &engine_handle, &input).await? {
-                            continue;
-                        }
-                        if looks_like_slash_command_input(&input) {
-                            if execute_command_input(
-                                terminal,
-                                app,
-                                &mut engine_handle,
-                                &task_manager,
-                                config,
-                                &mut web_config_session,
-                                &input,
-                            )
-                            .await?
-                            {
-                                return Ok(());
-                            }
-                        } else {
-                            let queued = if let Some(mut draft) = app.queued_draft.take() {
-                                draft.display = input;
-                                draft
-                            } else {
-                                build_queued_message(app, input)
-                            };
-                            attempt_steer_with_queue_fallback(app, &engine_handle, queued).await;
-                        }
-                    }
-                }
                 // Input handling
-                _ if is_composer_newline_key(key)
-                    && !(app.is_loading && is_forced_submit_key(key)) =>
-                {
+                _ if is_composer_newline_key(key) => {
                     app.insert_char('\n');
                 }
                 KeyCode::Enter
@@ -6266,12 +6238,9 @@ async fn run_event_loop(
                     continue;
                 }
                 // #382: Ctrl+Enter forces a steer into the current turn.
-                // Some terminals report Ctrl/Cmd+Enter as Ctrl+J; while a
-                // turn is running, accept that encoding here instead of
-                // inserting a newline.
-                _ if is_forced_submit_key(key)
-                    && (matches!(key.code, KeyCode::Enter) || app.is_loading) =>
-                {
+                // Ctrl+J remains a newline everywhere; it never changes
+                // meaning based on engine state.
+                _ if is_forced_submit_key(key) => {
                     if let Some(input) = app.submit_input() {
                         if handle_bang_shell_input(app, &engine_handle, &input).await? {
                             continue;
@@ -6314,6 +6283,18 @@ async fn run_event_loop(
                             }
                         }
                     }
+                }
+                // An empty Enter promotes the oldest queued follow-up into
+                // the active turn. This is the only context-sensitive Enter
+                // shortcut: typed Enter always submits (idle) or queues
+                // (busy), while Ctrl+Enter always means explicit steer.
+                KeyCode::Enter
+                    if app.is_loading
+                        && app.input.is_empty()
+                        && app.queued_draft.is_none()
+                        && !app.queued_messages.is_empty() =>
+                {
+                    let _ = send_next_queued_message_now(app, config, &engine_handle).await?;
                 }
                 KeyCode::Enter => {
                     // #573: when the user typed a slash-command prefix that
@@ -6644,9 +6625,6 @@ async fn run_event_loop(
                 | KeyCode::Char('G')
                     if key.modifiers == KeyModifiers::CONTROL =>
                 {
-                    if send_shortcut_queued_message_now(app, config, &engine_handle).await? {
-                        continue;
-                    }
                     // #440: park the current draft to the persistent stash and
                     // clear the composer. Ctrl+G is the terminal-safe alias for
                     // hosts such as Cursor/VS Code that reserve Ctrl+S for Save.
@@ -6655,7 +6633,13 @@ async fn run_event_loop(
                     // confirmation (no-op feels broken otherwise).
                     if !app.input.is_empty() {
                         crate::composer_stash::push_stash(&app.input);
-                        app.clear_input_recoverable();
+                        if app.queued_draft.is_some() {
+                            // Stash the edited text while preserving the
+                            // original queued follow-up in its queue slot.
+                            let _ = app.cancel_queued_draft_edit();
+                        } else {
+                            app.clear_input_recoverable();
+                        }
                         app.push_status_toast(
                             "Draft stashed — `/stash pop` to restore",
                             StatusToastLevel::Info,
@@ -6750,7 +6734,7 @@ async fn run_event_loop(
                 _ => {}
             }
 
-            if !is_plain_char && !is_enter {
+            if !is_plain_char && !is_plain_enter {
                 app.paste_burst.deactivate_keep_window();
             }
         }
@@ -8368,33 +8352,7 @@ async fn submit_initial_input_if_ready(
     Ok(())
 }
 
-fn queue_current_draft_for_next_turn(app: &mut App) -> bool {
-    let Some(input) = app.submit_input() else {
-        return false;
-    };
-    let queued = if let Some(mut draft) = app.queued_draft.take() {
-        draft.display = input;
-        draft
-    } else {
-        build_queued_message(app, input)
-    };
-    enqueue_offline_message(app, queued);
-    let toast = format!(
-        "{} queued follow-up(s) — sends after current output; ↑ edit last, /queue send <n>",
-        app.queued_message_count()
-    );
-    app.status_message = Some(toast.clone());
-    app.push_status_toast(toast, StatusToastLevel::Info, Some(3_000));
-    true
-}
-
-fn take_shortcut_queued_message(app: &mut App) -> Option<(QueuedMessage, Option<usize>)> {
-    if let Some(mut draft) = app.queued_draft.take() {
-        if let Some(input) = app.submit_input() {
-            draft.display = input;
-        }
-        return Some((draft, None));
-    }
+fn take_next_queued_message(app: &mut App) -> Option<(QueuedMessage, Option<usize>)> {
     if app.input.is_empty() {
         return app
             .remove_queued_message(0)
@@ -8403,12 +8361,12 @@ fn take_shortcut_queued_message(app: &mut App) -> Option<(QueuedMessage, Option<
     None
 }
 
-async fn send_shortcut_queued_message_now(
+async fn send_next_queued_message_now(
     app: &mut App,
     config: &Config,
     engine_handle: &EngineHandle,
 ) -> Result<bool> {
-    let Some((message, restore_index)) = take_shortcut_queued_message(app) else {
+    let Some((message, restore_index)) = take_next_queued_message(app) else {
         return Ok(false);
     };
     send_taken_queued_message_now(app, config, engine_handle, message, restore_index).await?;
@@ -12116,8 +12074,7 @@ async fn submit_or_steer_message(
             app.push_status_toast(toast, StatusToastLevel::Info, Some(3_000));
             Ok(())
         }
-        // Steer: reached via Enter when busy-but-waiting (v0.8.44), or
-        // via Ctrl+Enter override in any busy state.
+        // Steer: reached only via Ctrl+Enter in a busy state.
         SubmitDisposition::Steer => {
             attempt_steer_with_queue_fallback(app, engine_handle, message).await;
             Ok(())

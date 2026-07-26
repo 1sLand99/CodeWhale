@@ -1,8 +1,9 @@
 //! Byte-sequence builders for keys and paste.
 //!
 //! These produce the raw bytes a real terminal would deliver to the child's
-//! PTY slave. They match crossterm's input-decoding tables (keyboard
-//! enhancement off, mouse capture off, bracketed paste on).
+//! PTY slave. They match crossterm's input-decoding tables: legacy sequences
+//! by default, CSI-u for the modified Enter chords the TUI opts into, mouse
+//! capture off, and bracketed paste on.
 
 /// Plain key press helpers.
 pub mod key {
@@ -13,6 +14,31 @@ pub mod key {
 
     pub fn enter() -> Vec<u8> {
         b"\r".to_vec()
+    }
+
+    /// Enhanced-keyboard (CSI-u) encodings used by the TUI for modified Enter.
+    pub fn shift_enter() -> Vec<u8> {
+        b"\x1b[13;2u".to_vec()
+    }
+
+    pub fn alt_enter() -> Vec<u8> {
+        b"\x1b[13;3u".to_vec()
+    }
+
+    pub fn ctrl_enter() -> Vec<u8> {
+        b"\x1b[13;5u".to_vec()
+    }
+
+    pub fn ctrl_j() -> Vec<u8> {
+        vec![0x0a]
+    }
+
+    pub fn ctrl_g() -> Vec<u8> {
+        vec![0x07]
+    }
+
+    pub fn ctrl_s() -> Vec<u8> {
+        vec![0x13]
     }
 
     pub fn esc() -> Vec<u8> {

@@ -14,7 +14,7 @@ Global key chords are not yet user-configurable — tracked for a future release
 | `Ctrl-C`             | Cancel current turn / dismiss modal / arm-then-confirm quit    |
 | `Ctrl-B`             | Move a supported foreground shell wait into `/jobs` so the turn can continue; use `/jobs` or `Bash` with `action: "wait"` to inspect it |
 | `Ctrl-D`             | Quit (only when the composer is empty)                         |
-| `Tab`                | When the composer is idle, cycle TUI mode: Plan → Act → Operate → Plan |
+| `Tab`                | When the composer is empty, cycle TUI mode: Plan → Act → Operate → Plan |
 | `Shift+Tab`          | When the composer is idle, cycle permission posture: Ask → Auto-Review → Full Access |
 | `Ctrl-T`             | Cycle reasoning effort for the active provider. DeepSeek-style providers cycle off → high → max → off; OpenAI Codex cycles low → medium → high → xhigh → low. |
 | `Ctrl-Shift-T`       | Toggle live transcript overlay (sticky-tail auto-scroll)                       |
@@ -35,9 +35,9 @@ Editing the message you're about to send.
 
 | Chord                       | Action                                                  |
 |-----------------------------|---------------------------------------------------------|
-| `Enter`                     | Send the message (or run the slash command)             |
-| `Alt-Enter` / `Ctrl-J`      | Insert a newline without sending (`Ctrl-J` force-steers while a turn is running) |
-| `Ctrl-Enter` / `Cmd-Enter`  | Force a live steer into the current turn when supported by the terminal |
+| `Enter`                     | Send when idle; queue while busy; with an empty composer, send the next queued follow-up now |
+| `Shift-Enter` / `Alt-Enter` / `Ctrl-J` | Insert a newline without sending (idle or busy) |
+| `Ctrl-Enter` / `Cmd-Enter`  | Steer the current turn; send normally when idle (when supported by the terminal) |
 | `Ctrl-U`                    | Clear the whole draft (recoverable — see `Ctrl-Z`)      |
 | `Ctrl-Z`                    | Restore the cleared draft (only while the composer is empty) |
 | `Ctrl-W`                    | Delete previous word                                    |
@@ -56,7 +56,7 @@ Editing the message you're about to send.
 | `Ctrl-Y`                    | Yank (paste) from kill buffer                           |
 | `↑` / `↓`                   | Cycle composer history (also selects popup/attachment items) |
 | `Ctrl-P` / `Ctrl-N`         | Cycle composer history (alternative)                     |
-| `Ctrl-S`                    | Stash current draft; with queued follow-ups during a running turn, send the next queued item now |
+| `Ctrl-G` / `Ctrl-S`         | Stash current draft (`/stash pop` restores it); never sends or steers |
 | `Alt-R`                    | Search prompt history (Alt-R to exit)                  |
 | `Tab`                       | Slash-command / `@`-mention completion (popup-aware)    |
 | `Ctrl-Shift-O` / `F4`       | Open the composer draft in `$VISUAL` / `$EDITOR`; F4 works when the terminal cannot distinguish Ctrl-Shift-O from Ctrl-O |

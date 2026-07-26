@@ -1292,7 +1292,7 @@ fn composer_newline_shortcuts_do_not_steal_ctrl_enter() {
 }
 
 #[test]
-fn forced_submit_accepts_ctrl_enter_and_ctrl_j_encodings() {
+fn forced_submit_accepts_only_ctrl_enter() {
     assert!(is_forced_submit_key(KeyEvent::new(
         KeyCode::Enter,
         KeyModifiers::CONTROL,
@@ -1301,11 +1301,11 @@ fn forced_submit_accepts_ctrl_enter_and_ctrl_j_encodings() {
         KeyCode::Enter,
         KeyModifiers::CONTROL | KeyModifiers::SHIFT,
     )));
-    assert!(is_forced_submit_key(KeyEvent::new(
+    assert!(!is_forced_submit_key(KeyEvent::new(
         KeyCode::Char('j'),
         KeyModifiers::CONTROL,
     )));
-    assert!(is_forced_submit_key(KeyEvent::new(
+    assert!(!is_forced_submit_key(KeyEvent::new(
         KeyCode::Char('J'),
         KeyModifiers::CONTROL | KeyModifiers::SHIFT,
     )));
@@ -10599,7 +10599,7 @@ async fn steer_user_message_records_prompt_for_cancel_restore() {
 }
 
 #[tokio::test]
-async fn composer_send_shortcut_sends_next_queued_message_into_running_turn() {
+async fn empty_enter_sends_next_queued_message_into_running_turn() {
     let mut app = create_test_app();
     app.is_loading = true;
     app.queue_message(crate::tui::app::QueuedMessage::new(
@@ -10610,9 +10610,9 @@ async fn composer_send_shortcut_sends_next_queued_message_into_running_turn() {
     let mut engine = crate::core::engine::mock_engine_handle();
 
     assert!(
-        send_shortcut_queued_message_now(&mut app, &config, &engine.handle)
+        send_next_queued_message_now(&mut app, &config, &engine.handle)
             .await
-            .expect("composer send shortcut succeeds")
+            .expect("empty Enter succeeds")
     );
 
     assert_eq!(app.queued_message_count(), 0);
@@ -10623,7 +10623,7 @@ async fn composer_send_shortcut_sends_next_queued_message_into_running_turn() {
 }
 
 #[tokio::test]
-async fn composer_send_shortcut_sends_edited_queued_draft_into_running_turn() {
+async fn empty_enter_does_not_send_an_edited_queued_draft() {
     let mut app = create_test_app();
     app.is_loading = true;
     app.queued_draft = Some(crate::tui::app::QueuedMessage::new(
@@ -10636,17 +10636,15 @@ async fn composer_send_shortcut_sends_edited_queued_draft_into_running_turn() {
     let mut engine = crate::core::engine::mock_engine_handle();
 
     assert!(
-        send_shortcut_queued_message_now(&mut app, &config, &engine.handle)
+        !send_next_queued_message_now(&mut app, &config, &engine.handle)
             .await
-            .expect("composer send shortcut succeeds")
+            .expect("empty Enter no-op succeeds")
     );
 
-    assert!(app.queued_draft.is_none());
-    assert!(app.input.is_empty());
+    assert!(app.queued_draft.is_some());
+    assert_eq!(app.input, "edited queued follow-up");
     assert_eq!(app.queued_message_count(), 0);
-    let content = engine.rx_steer.recv().await.expect("steer content");
-    assert!(content.contains("edited queued follow-up"));
-    assert!(content.contains("skill body"));
+    assert!(engine.rx_steer.try_recv().is_err());
 }
 
 #[test]
@@ -10797,14 +10795,14 @@ async fn streaming_enter_queue_pushes_visible_toast() {
 }
 
 #[tokio::test]
-async fn empty_composer_second_enter_leaves_queued_message() {
-    // Bare Enter while streaming only queues. A second bare Enter must not
-    // steal the just-queued body for steer — use Shift+Enter / Ctrl+Enter.
+async fn empty_enter_promotes_the_oldest_queued_message() {
+    // Typed Enter while streaming queues. An explicit empty Enter promotes
+    // the oldest queued follow-up into the active turn.
     let mut app = create_test_app();
     app.is_loading = true;
     app.streaming_message_index = Some(0);
     let config = Config::default();
-    let engine = crate::core::engine::mock_engine_handle();
+    let mut engine = crate::core::engine::mock_engine_handle();
     let queued = build_queued_message(&mut app, "coordinate parallel tasks".to_string());
 
     submit_or_steer_message(&mut app, &config, &engine.handle, queued)
@@ -10813,15 +10811,14 @@ async fn empty_composer_second_enter_leaves_queued_message() {
     assert_eq!(app.queued_message_count(), 1);
     assert!(app.input.is_empty());
 
-    // Second bare Enter with empty composer is a no-op for queue contents.
-    assert!(app.input.trim().is_empty());
-    assert_eq!(
-        app.decide_submit_disposition(),
-        crate::tui::app::SubmitDisposition::Queue
+    assert!(
+        send_next_queued_message_now(&mut app, &config, &engine.handle)
+            .await
+            .expect("empty Enter promotes queue")
     );
-    assert_eq!(app.queued_message_count(), 1);
+    assert_eq!(app.queued_message_count(), 0);
     assert_eq!(
-        app.queued_messages.front().map(|m| m.display.as_str()),
+        engine.rx_steer.recv().await.as_deref(),
         Some("coordinate parallel tasks")
     );
 }
@@ -16262,47 +16259,6 @@ fn next_escape_action_slash_menu_takes_priority() {
     app.is_loading = true;
     app.input = "anything".to_string();
     assert_eq!(next_escape_action(&app, true), EscapeAction::CloseSlashMenu);
-}
-
-#[test]
-fn tab_queues_running_turn_draft_for_next_turn() {
-    let mut app = create_test_app();
-    app.is_loading = true;
-    app.input = "follow up next".to_string();
-    app.cursor_position = app.input.chars().count();
-
-    assert!(queue_current_draft_for_next_turn(&mut app));
-
-    assert!(app.input.is_empty());
-    assert_eq!(app.queued_message_count(), 1);
-    assert_eq!(
-        app.queued_messages.front().map(|msg| msg.display.as_str()),
-        Some("follow up next")
-    );
-    assert!(
-        app.status_message
-            .as_deref()
-            .is_some_and(|msg| msg.contains("queued follow-up(s)"))
-    );
-}
-
-#[test]
-fn tab_queue_preserves_queued_draft_skill_instruction() {
-    let mut app = create_test_app();
-    app.is_loading = true;
-    app.input = "edited queued follow-up".to_string();
-    app.cursor_position = app.input.chars().count();
-    app.queued_draft = Some(QueuedMessage::new(
-        "original".to_string(),
-        Some("skill body".to_string()),
-    ));
-
-    assert!(queue_current_draft_for_next_turn(&mut app));
-
-    let queued = app.queued_messages.front().expect("queued message");
-    assert_eq!(queued.display, "edited queued follow-up");
-    assert_eq!(queued.skill_instruction.as_deref(), Some("skill body"));
-    assert!(app.queued_draft.is_none());
 }
 
 #[test]

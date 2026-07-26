@@ -1106,16 +1106,26 @@ Previews are capped before delivery so lifecycle hooks do not receive full
 sub-agent prompts, transcripts, or unbounded results. Use the transcript handle
 returned by `agent` when full sub-agent details are needed.
 
+### Running-turn input
+
+Composer shortcuts keep the same role throughout a session:
+
+- **Enter** sends when idle and queues a next-turn follow-up while busy. The
+  behavior does not change before versus after the provider's first token.
+- With an empty composer and queued follow-ups visible, **Enter** sends the
+  oldest queued follow-up into the active turn now.
+- **Ctrl+Enter** (or **Cmd+Enter** when the terminal forwards it) explicitly
+  steers the active turn. It sends normally when idle.
+- **Shift+Enter**, **Alt+Enter**, and **Ctrl+J** always insert a newline.
+- **Ctrl+G** and **Ctrl+S** only stash drafts; they never send or steer.
+
 ### Composer stash (`/stash`, Ctrl+G / Ctrl+S)
 
 Press **Ctrl+G** in the composer to park the current draft to
 `~/.codewhale/composer_stash.jsonl`. `/stash list` shows parked
 drafts with one-line previews and timestamps; `/stash pop`
 restores the most recently parked draft (LIFO); `/stash clear`
-wipes the file. Capped at 200 entries; multiline drafts
-round-trip intact. When a turn is already running and queued follow-ups exist,
-the pending-input preview advertises **Ctrl+G send now**; in that state Ctrl+G
-sends the next queued follow-up into the active turn instead of stashing.
+wipes the file. Capped at 200 entries; multiline drafts round-trip intact.
 **Ctrl+S** remains an alias in terminals that forward it; Cursor and VS Code
 reserve Ctrl+S for Save, so Ctrl+G is the portable default.
 

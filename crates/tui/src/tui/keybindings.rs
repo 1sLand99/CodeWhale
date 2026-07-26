@@ -180,6 +180,11 @@ pub const KEYBINDINGS: &[KeybindingEntry] = &[
         section: KeybindingSection::Submission,
     },
     KeybindingEntry {
+        chord: "Ctrl+Enter / Cmd+Enter",
+        description_id: crate::localization::MessageId::KbSteerCurrentTurn,
+        section: KeybindingSection::Submission,
+    },
+    KeybindingEntry {
         chord: "Esc",
         description_id: crate::localization::MessageId::KbCloseMenu,
         section: KeybindingSection::Submission,
@@ -381,6 +386,45 @@ mod tests {
                 .all(|entry| !entry.chord.contains("Alt+?")),
             "Alt+? must not be advertised in the help catalog"
         );
+    }
+
+    #[test]
+    fn composer_catalog_assigns_one_stable_role_to_each_chord() {
+        let chord_for = |id| {
+            KEYBINDINGS
+                .iter()
+                .find(|entry| entry.description_id == id)
+                .expect("composer binding should be documented")
+                .chord
+        };
+
+        assert_eq!(
+            chord_for(crate::localization::MessageId::KbInsertNewline),
+            "Ctrl+J / Alt+Enter / Shift+Enter"
+        );
+        assert_eq!(
+            chord_for(crate::localization::MessageId::KbSteerCurrentTurn),
+            "Ctrl+Enter / Cmd+Enter"
+        );
+        assert_eq!(
+            chord_for(crate::localization::MessageId::KbStashDraft),
+            "Ctrl+G / Ctrl+S"
+        );
+        assert_eq!(
+            chord_for(crate::localization::MessageId::KbSendDraft),
+            "Enter"
+        );
+
+        let tab_copy = crate::localization::tr(
+            crate::localization::Locale::En,
+            crate::localization::MessageId::KbCompleteCycleModes,
+        );
+        assert!(!tab_copy.to_ascii_lowercase().contains("queue"));
+        let stash_copy = crate::localization::tr(
+            crate::localization::Locale::En,
+            crate::localization::MessageId::KbStashDraft,
+        );
+        assert!(!stash_copy.to_ascii_lowercase().contains("send"));
     }
 
     #[test]

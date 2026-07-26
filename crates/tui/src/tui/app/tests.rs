@@ -3736,13 +3736,13 @@ fn submit_disposition_immediate_when_idle_and_online() {
 
 #[test]
 fn submit_disposition_queue_when_busy_and_online_not_streaming() {
-    // Busy but not streaming means the model is still waiting, so Enter can
-    // amend the active turn immediately.
+    // Bare Enter has one stable busy-state meaning even before the provider
+    // emits its first token: queue a follow-up for the next turn.
     let mut app = App::new(test_options(false), &Config::default());
     app.is_loading = true;
     app.offline_mode = false;
     // streaming_message_index is None (default) → waiting phase
-    assert_eq!(app.decide_submit_disposition(), SubmitDisposition::Steer);
+    assert_eq!(app.decide_submit_disposition(), SubmitDisposition::Queue);
 }
 
 #[test]
@@ -3776,7 +3776,7 @@ fn submit_disposition_offline_busy_queues() {
 #[test]
 fn bare_enter_while_streaming_stays_queue_not_steer() {
     let mut app = App::new(test_options(false), &Config::default());
-    // Busy + streaming: every bare Enter queues. Steer is Shift/Ctrl+Enter only.
+    // Busy + streaming: every bare Enter queues. Steer is Ctrl+Enter only.
     app.is_loading = true;
     app.streaming_message_index = Some(0);
 
@@ -3787,7 +3787,7 @@ fn bare_enter_while_streaming_stays_queue_not_steer() {
 }
 
 #[test]
-fn empty_composer_second_enter_does_not_steal_queued_for_steer() {
+fn submit_disposition_does_not_mutate_the_queue() {
     let mut app = App::new(test_options(false), &Config::default());
     app.is_loading = true;
     app.streaming_message_index = Some(0);
@@ -3795,7 +3795,8 @@ fn empty_composer_second_enter_does_not_steal_queued_for_steer() {
     app.queue_message(QueuedMessage::new("older queued".to_string(), None));
     app.queue_message(QueuedMessage::new("just typed follow-up".to_string(), None));
     assert!(app.input.is_empty());
-    // Bare Enter no longer pops the queue for steer; messages stay queued.
+    // The event loop owns empty-Enter queue promotion. Merely asking for the
+    // typed-submit disposition must not mutate queue state.
     assert_eq!(app.enter_with_double_tap(), Some(SubmitDisposition::Queue));
     assert_eq!(app.queued_message_count(), 2);
 }
