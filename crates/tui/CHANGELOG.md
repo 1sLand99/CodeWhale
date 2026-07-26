@@ -101,6 +101,18 @@ already claimed to.
 
 ### Added
 
+- Approval cards can now remember eligible safe shell and file-write approvals
+  as exact `allow` rules scoped to the current repository. Remembered shell
+  commands use complete-command matching, validated file and patch paths remain
+  workspace-relative, and dangerous, critical, or repo-law-held requests stay
+  ineligible and continue to require review.
+
+## [0.9.1] - 2026-07-24
+
+### Dogfood follow-ups (2026-07-24)
+
+### Added
+
 - `/compact [focus]`: the manual compaction command now accepts an
   optional focus argument that is injected into the summary prompt, and
   the compaction summary itself becomes a structured nine-section
