@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const script = new URL("../scripts/check-cloudflare-deploy-env.mjs", import.meta.url);
@@ -61,5 +62,97 @@ describe("Cloudflare deploy preflight", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("workflow_dispatch on refs/heads/main");
+  });
+
+  it("rejects a dispatch on a non-main ref", () => {
+    const result = run({
+      GITHUB_ACTIONS: "true",
+      GITHUB_EVENT_NAME: "workflow_dispatch",
+      GITHUB_REF: "refs/heads/release",
+      GITHUB_SHA: "a".repeat(40),
+      CLOUDFLARE_ACCOUNT_ID: "a".repeat(32),
+      CLOUDFLARE_API_TOKEN: "token-" + "b".repeat(32),
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("workflow_dispatch on refs/heads/main");
+  });
+
+  it("rejects a dispatch without an exact 40-hex revision", () => {
+    const result = run({
+      GITHUB_ACTIONS: "true",
+      GITHUB_EVENT_NAME: "workflow_dispatch",
+      GITHUB_REF: "refs/heads/main",
+      GITHUB_SHA: "main",
+      CLOUDFLARE_ACCOUNT_ID: "a".repeat(32),
+      CLOUDFLARE_API_TOKEN: "token-" + "b".repeat(32),
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("exact SHA");
+  });
+
+  it("accepts a manual dispatch on main at an exact SHA", () => {
+    const result = run({
+      GITHUB_ACTIONS: "true",
+      GITHUB_EVENT_NAME: "workflow_dispatch",
+      GITHUB_REF: "refs/heads/main",
+      GITHUB_SHA: "a".repeat(40),
+      CLOUDFLARE_ACCOUNT_ID: "a".repeat(32),
+      CLOUDFLARE_API_TOKEN: "token-" + "b".repeat(32),
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("Cloudflare deploy environment is present");
+  });
+});
+
+// Minimal, dependency-free reader for the two-space-indented job blocks in
+// .github/workflows/web.yml. A real YAML parser is not a web dependency, and
+// this file only needs the `on:` triggers plus the deploy job's `if:` guard.
+function readWebWorkflow() {
+  const path = new URL("../../.github/workflows/web.yml", import.meta.url);
+  return readFileSync(path, "utf8");
+}
+
+function jobBlock(source: string, job: string) {
+  const lines = source.split("\n");
+  const start = lines.findIndex((line) => line === `  ${job}:`);
+  expect(start, `job ${job} not found in web.yml`).toBeGreaterThanOrEqual(0);
+  const rest = lines.slice(start + 1);
+  const end = rest.findIndex((line) => /^ {2}\S/.test(line));
+  return (end === -1 ? rest : rest.slice(0, end)).join("\n");
+}
+
+describe("web workflow deploy trigger contract", () => {
+  const workflow = readWebWorkflow();
+  const deploy = jobBlock(workflow, "deploy");
+
+  it("still runs lint on pushes and pull requests", () => {
+    expect(workflow).toContain("  push:\n    branches: [master, main]");
+    expect(workflow).toContain("  pull_request:\n    branches: [master, main]");
+    expect(workflow).toContain("  workflow_dispatch:");
+    expect(jobBlock(workflow, "lint")).not.toContain("if:");
+  });
+
+  it("gates deploy on a manual dispatch of main only", () => {
+    const guard = deploy
+      .slice(deploy.indexOf("if:"))
+      .split("\n")
+      .slice(0, 3)
+      .join(" ")
+      .replace(/\s+/g, " ");
+
+    expect(guard).toContain("github.event_name == 'workflow_dispatch'");
+    expect(guard).toContain("github.ref == 'refs/heads/main'");
+    // The preflight script fails closed on any non-dispatch event, so a push
+    // trigger here could only ever produce a red deploy job (#4907).
+    expect(guard).not.toContain("'push'");
+    expect(deploy).toContain("needs: lint");
+  });
+
+  it("checks out the exact dispatched revision before deploying", () => {
+    expect(deploy).toContain("ref: ${{ github.sha }}");
+    expect(deploy).toContain('--expected-revision "$GITHUB_SHA"');
   });
 });
