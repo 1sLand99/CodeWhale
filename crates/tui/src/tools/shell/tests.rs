@@ -44,12 +44,7 @@ fn explicit_missing_working_dir_is_not_misreported_as_session_corruption() {
     let mut manager = ShellManager::new(workspace.path().to_path_buf());
 
     let error = manager
-        .execute(
-            "echo should-not-run",
-            missing.to_str(),
-            1_000,
-            false,
-        )
+        .execute("echo should-not-run", missing.to_str(), 1_000, false)
         .expect_err("missing explicit cwd must fail before shell spawn");
     let message = error.to_string();
     assert!(message.contains("requested working directory is unavailable"));

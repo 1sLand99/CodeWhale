@@ -7357,10 +7357,7 @@ fn hotbar_alt_digit_requires_plain_alt_one_through_eight() {
             KeyModifiers::ALT | KeyModifiers::SUPER,
         ] {
             assert_eq!(
-                hotbar_slot_from_key(
-                    &app,
-                    &KeyEvent::new(KeyCode::Char(digit), modifiers)
-                ),
+                hotbar_slot_from_key(&app, &KeyEvent::new(KeyCode::Char(digit), modifiers)),
                 None,
                 "modifiers {modifiers:?} must not impersonate Alt-{slot}"
             );
