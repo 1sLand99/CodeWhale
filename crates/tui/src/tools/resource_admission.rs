@@ -541,7 +541,7 @@ mod tests {
     #[tokio::test]
     async fn real_cargo_command_is_admitted_and_released() {
         if std::env::var_os("CODEWHALE_RESOURCE_ADMISSION_RUST_ACCEPTANCE").is_none() {
-            eprintln!(
+            tracing::info!(
                 "skipping opt-in real-rust admission acceptance; \
                  set CODEWHALE_RESOURCE_ADMISSION_RUST_ACCEPTANCE=1 to run"
             );
