@@ -12,6 +12,9 @@
 //! - **Linux**: Uses bubblewrap only when the user opts in and `/usr/bin/bwrap`
 //!   is executable. Landlock and seccomp helpers are not wired into child
 //!   execution yet and therefore are not advertised.
+//! - **OpenHarmony**: No local Linux sandbox is advertised. Bubblewrap,
+//!   Landlock, seccomp, and Linux `prctl` hardening are gated out under
+//!   `target_env = "ohos"`.
 //! - **Windows**: No OS sandbox is advertised yet. The planned first helper
 //!   contract is process-tree containment only via a Windows Job Object; it
 //!   must not claim filesystem, network, registry, or AppContainer isolation.

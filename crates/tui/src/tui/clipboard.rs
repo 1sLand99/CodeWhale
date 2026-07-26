@@ -6,6 +6,10 @@
 //! V4 does not currently accept inline image input on its Chat Completions
 //! endpoint, so we materialize the bytes to disk instead of base64-embedding
 //! them in the request).
+//!
+//! OpenHarmony deliberately excludes native desktop/Wayland clipboard APIs.
+//! Copy falls back to OSC 52 (or tmux `load-buffer -w`), paste arrives through
+//! terminal input, and image clipboard reads are unavailable.
 
 use std::ffi::OsStr;
 #[cfg(any(not(test), all(test, unix)))]
