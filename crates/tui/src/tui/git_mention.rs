@@ -28,7 +28,7 @@ pub const MAX_GIT_DIFF_MENTION_BYTES: usize = 32 * 1024;
 pub const MAX_GIT_STATUS_MENTION_BYTES: usize = 8 * 1024;
 
 /// Which curated git payload a mention token asks for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GitMentionKind {
     /// `@git` — a bounded `git status` summary plus the current branch.
     Status,
@@ -111,6 +111,39 @@ impl GitMentionPayload {
     }
 }
 
+/// Per-submit memo for resolved git mentions.
+///
+/// One message send resolves mentions twice — once to build the context
+/// inspector references and once to build the model-facing payload. For
+/// `@diff` each resolution makes git compute the *entire* working-tree diff
+/// before the 32 KB budget applies, so a large repository paid for that twice
+/// to attach it once.
+///
+/// Scoped deliberately: a cache lives for one submit and is then dropped, so a
+/// second `@diff` in a later message always re-shells out and can never show a
+/// stale working tree.
+#[derive(Debug, Default)]
+pub struct GitMentionCache {
+    resolved: std::collections::HashMap<(GitMentionKind, std::path::PathBuf), GitMentionPayload>,
+}
+
+impl GitMentionCache {
+    /// Number of distinct mentions resolved so far this submit. Used by tests
+    /// to prove one submit shells out once per mention.
+    #[cfg(test)]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.resolved.len()
+    }
+
+    /// Resolve `kind` against `workspace`, reusing this submit's result.
+    pub fn resolve(&mut self, kind: GitMentionKind, workspace: &Path) -> &GitMentionPayload {
+        self.resolved
+            .entry((kind, workspace.to_path_buf()))
+            .or_insert_with(|| resolve_git_mention(kind, workspace))
+    }
+}
+
 /// Run the git commands for `kind` in `cwd` and render the model-facing block.
 ///
 /// Never returns an error: an unavailable git, a non-repository directory, or
@@ -118,7 +151,7 @@ impl GitMentionPayload {
 /// the turn records why the mention contributed nothing.
 #[must_use]
 pub fn resolve_git_mention(kind: GitMentionKind, cwd: &Path) -> GitMentionPayload {
-    if Git::command().is_none() {
+    if !Git::available() {
         return GitMentionPayload::unavailable(kind, "git not found on PATH");
     }
     if !is_git_repository(cwd) {

@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::tui::app::{App, MentionCompletionCache};
-use crate::tui::git_mention::{self, GitMentionKind};
+use crate::tui::git_mention::{self, GitMentionCache, GitMentionKind};
 use crate::tui::mention_completion::{MentionDiscoveryBehavior, MentionDiscoveryKey};
 use crate::working_set::Workspace;
 
@@ -293,6 +293,12 @@ fn mention_menu_entries(app: &mut App, partial: &str, limit: usize) -> (Vec<Stri
 /// mention the user makes. The tokens appear as soon as a matching character
 /// is typed.
 fn with_git_mention_entries(entries: Vec<String>, partial: &str, limit: usize) -> Vec<String> {
+    // `mention_menu_limit = 0` is a documented way to disable the popup
+    // entirely. The git tokens are menu entries like any other and must
+    // respect the same cap, or setting 0 would still pop a one-entry menu.
+    if limit == 0 {
+        return Vec::new();
+    }
     let needle = partial.trim().to_lowercase();
     if needle.is_empty() {
         return entries;
@@ -305,6 +311,7 @@ fn with_git_mention_entries(entries: Vec<String>, partial: &str, limit: usize) -
         return entries;
     }
     let mut combined = matching;
+    combined.truncate(limit);
     for entry in entries {
         if combined.len() >= limit {
             break;
@@ -472,12 +479,24 @@ pub fn longest_common_prefix<'a>(values: &[&'a str]) -> &'a str {
 /// background completion popup; silently resolving a manually typed basename
 /// would require a tree walk on submit and could attach an arbitrary same-name
 /// file from a nested directory.
+/// Convenience wrapper that allocates a throwaway cache. Test-only: the real
+/// send paths share one cache across the references and payload passes.
+#[cfg(test)]
 pub fn user_request_with_file_mentions(
     input: &str,
     workspace: &Path,
     cwd: Option<PathBuf>,
 ) -> String {
-    let Some(context) = local_context_from_file_mentions(input, workspace, cwd) else {
+    user_request_with_file_mentions_cached(input, workspace, cwd, &mut GitMentionCache::default())
+}
+
+pub fn user_request_with_file_mentions_cached(
+    input: &str,
+    workspace: &Path,
+    cwd: Option<PathBuf>,
+    git_cache: &mut GitMentionCache,
+) -> String {
+    let Some(context) = local_context_from_file_mentions(input, workspace, cwd, git_cache) else {
         return input.to_string();
     };
     format!("{input}\n\n---\n\nLocal context from @mentions:\n{context}")
@@ -537,10 +556,23 @@ pub fn pending_context_previews(input: &str) -> Vec<FileMentionPreview> {
 }
 
 #[must_use]
+/// Convenience wrapper that allocates a throwaway cache. Test-only, as above.
+#[cfg(test)]
+#[must_use]
 pub fn context_references_from_input(
     input: &str,
     workspace: &Path,
     cwd: Option<PathBuf>,
+) -> Vec<ContextReference> {
+    context_references_from_input_cached(input, workspace, cwd, &mut GitMentionCache::default())
+}
+
+#[must_use]
+pub fn context_references_from_input_cached(
+    input: &str,
+    workspace: &Path,
+    cwd: Option<PathBuf>,
+    git_cache: &mut GitMentionCache,
 ) -> Vec<ContextReference> {
     let mut references = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -553,7 +585,7 @@ pub fn context_references_from_input(
         // Git mentions resolve against the working tree, not the path index,
         // so the inspector reports their real size and budget (#4067).
         if let Some(kind) = git_mention::git_mention_kind(&mention) {
-            let payload = git_mention::resolve_git_mention(kind, workspace);
+            let payload = git_cache.resolve(kind, workspace).clone();
             let detail = match payload.unavailable_reason.as_deref() {
                 Some(reason) => format!("{}, {reason}", kind.label()),
                 None if payload.truncated => format!(
@@ -750,6 +782,7 @@ fn local_context_from_file_mentions(
     input: &str,
     workspace: &Path,
     cwd: Option<PathBuf>,
+    git_cache: &mut GitMentionCache,
 ) -> Option<String> {
     let mentions = extract_file_mentions(input);
     if mentions.is_empty() {
@@ -767,7 +800,7 @@ fn local_context_from_file_mentions(
             if !seen.insert(format!("git-mention:{}", kind.token())) {
                 continue;
             }
-            blocks.push(git_mention::resolve_git_mention(kind, workspace).block);
+            blocks.push(git_cache.resolve(kind, workspace).block.clone());
             continue;
         }
 
@@ -1408,6 +1441,76 @@ mod tests {
         let kinds: Vec<&str> = previews.iter().map(|p| p.kind.as_str()).collect();
         assert_eq!(kinds, vec!["git", "git"]);
         assert!(previews.iter().all(|p| !p.included));
+    }
+
+    /// #4067 review follow-up: `mention_menu_limit = 0` is a documented way to
+    /// disable the popup. The git tokens are menu entries like any other and
+    /// must respect the same cap — otherwise setting 0 still pops a one-entry
+    /// menu the moment the user types `@g`.
+    #[test]
+    fn git_mention_entries_respect_a_zero_menu_limit() {
+        let paths = vec!["src/main.rs".to_string()];
+        assert!(with_git_mention_entries(paths.clone(), "g", 0).is_empty());
+        assert!(with_git_mention_entries(paths.clone(), "d", 0).is_empty());
+        assert!(with_git_mention_entries(paths.clone(), "", 0).is_empty());
+        assert!(with_git_mention_entries(Vec::new(), "gi", 0).is_empty());
+    }
+
+    /// A small non-zero limit must cap the token list this function builds.
+    ///
+    /// The empty-partial branch is pass-through by design — those entries were
+    /// already capped upstream by `rank_completion_candidates`, and shrinking
+    /// them here would silently drop paths the caller asked for.
+    #[test]
+    fn git_mention_entries_never_exceed_the_menu_limit() {
+        let paths = vec!["a.rs".to_string(), "b.rs".to_string()];
+        for limit in 1..=4 {
+            let matched = with_git_mention_entries(paths.clone(), "d", limit);
+            assert!(matched.len() <= limit, "limit {limit}: {matched:?}");
+            // Both tokens match a bare prefix that hits `git` and `diff`
+            // through separate entries; the cap still holds.
+            let both = with_git_mention_entries(Vec::new(), "", limit);
+            assert!(both.len() <= limit, "limit {limit}: {both:?}");
+        }
+        // Pass-through: the caller's already-capped paths survive untouched.
+        assert_eq!(with_git_mention_entries(paths.clone(), "", 1), paths);
+    }
+
+    /// #4067 review follow-up: one submit resolves a git mention once, not
+    /// once per surface. `@diff` makes git compute the whole working-tree diff
+    /// before the byte budget applies, so a repeat is real wasted work.
+    #[test]
+    fn a_submit_resolves_each_git_mention_only_once() {
+        let tmp = TempDir::new().expect("tempdir");
+        init_test_repo(tmp.path());
+        std::fs::write(tmp.path().join("a.txt"), "one\n").expect("write");
+        commit_test_repo(tmp.path());
+        std::fs::write(tmp.path().join("a.txt"), "two\n").expect("write");
+
+        let mut cache = crate::tui::git_mention::GitMentionCache::default();
+        let references = context_references_from_input_cached(
+            "@diff",
+            tmp.path(),
+            Some(tmp.path().to_path_buf()),
+            &mut cache,
+        );
+        let expanded = user_request_with_file_mentions_cached(
+            "@diff",
+            tmp.path(),
+            Some(tmp.path().to_path_buf()),
+            &mut cache,
+        );
+
+        // Both surfaces describe the same resolution.
+        let git_ref = references
+            .iter()
+            .find(|r| r.kind == ContextReferenceKind::GitContext)
+            .expect("git reference");
+        assert!(git_ref.included);
+        assert!(expanded.contains("<git-diff"), "{expanded}");
+
+        // And the shared cache holds exactly one entry for it.
+        assert_eq!(cache.len(), 1, "the diff must be resolved once per submit");
     }
 
     #[test]
