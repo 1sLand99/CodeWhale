@@ -21,7 +21,7 @@ use codewhale_config::catalog::{
     ProviderCatalogCache, ProviderCatalogDelta, base_url_fingerprint, now_unix,
 };
 use codewhale_config::provider::WireFormat;
-use codewhale_config::route::ReadyRouteCandidate;
+use codewhale_config::route::{LogicalModelRef, ReadyRouteCandidate, RouteRequest, RouteResolver};
 use codewhale_config::{auth_mode_disables_api_key, is_upstream_auth_header};
 
 use crate::config::{
@@ -954,7 +954,18 @@ fn add_extra_root_certs(
 impl DeepSeekClient {
     /// Create a DeepSeek client from CLI configuration.
     pub fn new(config: &Config) -> Result<Self> {
-        Self::from_parts(config.deepseek_base_url(), config.default_model(), config)
+        let api_provider = config.api_provider();
+        if api_provider == ApiProvider::OpencodeZen {
+            let route = crate::route_runtime::resolve_runtime_route(config, api_provider, None)
+                .map_err(anyhow::Error::msg)?;
+            return Self::from_candidate(&route.config, &route.candidate);
+        }
+        Self::from_parts(
+            config.deepseek_base_url(),
+            config.default_model(),
+            provider_default_wire_format(api_provider),
+            config,
+        )
     }
 
     /// Create a DeepSeek client whose transport is bound to a runtime-resolved
@@ -967,15 +978,12 @@ impl DeepSeekClient {
     /// an auth-source *class*), so the API key and provider are still read from
     /// `config`.
     pub fn from_candidate(config: &Config, candidate: &ReadyRouteCandidate) -> Result<Self> {
-        let mut client = Self::from_parts(
+        Self::from_parts(
             candidate.endpoint().base_url.clone(),
             candidate.wire_model_id().as_str().to_string(),
+            candidate.protocol(),
             config,
-        )?;
-        // #185: dispatch the wire format from the resolved route offering,
-        // not from the provider enum.
-        client.wire_format = candidate.protocol();
-        Ok(client)
+        )
     }
 
     /// Shared constructor body for [`Self::new`] and [`Self::from_candidate`].
@@ -983,7 +991,12 @@ impl DeepSeekClient {
     /// `base_url` and `default_model` are the only inputs that differ between
     /// the two entry points; everything else (auth, provider, retry, headers,
     /// timeouts) is derived from `config` so the two paths cannot drift.
-    fn from_parts(base_url: String, default_model: String, config: &Config) -> Result<Self> {
+    fn from_parts(
+        base_url: String,
+        default_model: String,
+        wire_format: WireFormat,
+        config: &Config,
+    ) -> Result<Self> {
         let api_provider = config.api_provider();
         if api_provider == ApiProvider::OpencodeGo {
             validate_route(api_provider, &default_model).map_err(anyhow::Error::msg)?;
@@ -1051,6 +1064,7 @@ impl DeepSeekClient {
             &http_headers,
             api_provider,
             &base_url,
+            wire_format,
             auth_disabled,
             false,
         )?;
@@ -1062,17 +1076,10 @@ impl DeepSeekClient {
             &http_headers,
             api_provider,
             &base_url,
+            wire_format,
             auth_disabled,
             true,
         )?;
-
-        let wire_format = if api_provider == ApiProvider::OpenaiCodex {
-            WireFormat::Responses
-        } else if api_provider_uses_anthropic_messages(api_provider) {
-            WireFormat::AnthropicMessages
-        } else {
-            WireFormat::ChatCompletions
-        };
 
         Ok(Self {
             http_client,
@@ -1147,6 +1154,32 @@ impl DeepSeekClient {
         redact_model_bound_text(text, &self.model_bound_secret_values)
     }
 
+    fn bind_request_to_protocol(&self, mut request: MessageRequest) -> Result<MessageRequest> {
+        if self.api_provider != ApiProvider::OpencodeZen {
+            return Ok(request);
+        }
+
+        let candidate = RouteResolver::new()
+            .resolve(&RouteRequest {
+                explicit_provider: ApiProvider::OpencodeZen.kind(),
+                model_selector: Some(LogicalModelRef::from(request.model.as_str())),
+                saved_provider_model: None,
+                base_url_override: Some(self.base_url.clone()),
+                limit_overrides: Vec::new(),
+            })
+            .map_err(anyhow::Error::msg)?;
+        if candidate.protocol() != self.wire_format {
+            bail!(
+                "OpenCode Zen model {:?} uses {:?}, but this client is bound to {:?}; resolve a new model route before sending",
+                request.model,
+                candidate.protocol(),
+                self.wire_format
+            );
+        }
+        request.model = candidate.wire_model_id().as_str().to_string();
+        Ok(request)
+    }
+
     #[cfg(test)]
     fn build_http_client(
         api_key: &str,
@@ -1159,6 +1192,7 @@ impl DeepSeekClient {
             extra_headers,
             api_provider,
             base_url,
+            provider_default_wire_format(api_provider),
             false,
             false,
         )
@@ -1169,6 +1203,7 @@ impl DeepSeekClient {
         extra_headers: &HashMap<String, String>,
         api_provider: ApiProvider,
         base_url: &str,
+        wire_format: WireFormat,
         auth_disabled: bool,
         force_http1: bool,
     ) -> Result<reqwest::Client> {
@@ -1177,6 +1212,7 @@ impl DeepSeekClient {
             extra_headers,
             api_provider,
             base_url,
+            wire_format,
             auth_disabled,
         )?;
         let mut builder = crate::tls::reqwest_client_builder()
@@ -1218,6 +1254,7 @@ impl DeepSeekClient {
             extra_headers,
             ApiProvider::Deepseek,
             crate::config::DEFAULT_DEEPSEEK_BASE_URL,
+            WireFormat::ChatCompletions,
             false,
         )
     }
@@ -1229,7 +1266,14 @@ impl DeepSeekClient {
         api_provider: ApiProvider,
         base_url: &str,
     ) -> Result<HeaderMap> {
-        build_default_headers(api_key, extra_headers, api_provider, base_url, false)
+        build_default_headers(
+            api_key,
+            extra_headers,
+            api_provider,
+            base_url,
+            provider_default_wire_format(api_provider),
+            false,
+        )
     }
 
     #[cfg(test)]
@@ -1239,7 +1283,14 @@ impl DeepSeekClient {
         api_provider: ApiProvider,
         base_url: &str,
     ) -> Result<HeaderMap> {
-        build_default_headers(api_key, extra_headers, api_provider, base_url, true)
+        build_default_headers(
+            api_key,
+            extra_headers,
+            api_provider,
+            base_url,
+            provider_default_wire_format(api_provider),
+            true,
+        )
     }
 }
 
@@ -1248,12 +1299,14 @@ fn build_default_headers(
     extra_headers: &HashMap<String, String>,
     api_provider: ApiProvider,
     base_url: &str,
+    wire_format: WireFormat,
     auth_disabled: bool,
 ) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     let api_key = api_key.trim();
-    if api_provider_uses_anthropic_messages(api_provider) {
+    let uses_anthropic_messages = wire_format == WireFormat::AnthropicMessages;
+    if uses_anthropic_messages {
         // #3014: most Messages API routes authenticate with `x-api-key`.
         // OpenModel also supports Bearer auth for Messages, and its `/models`
         // endpoint requires it, so the header chooser below keeps OpenModel on
@@ -1266,7 +1319,7 @@ fn build_default_headers(
     let auth_header_name = if auth_disabled {
         None
     } else if !api_key.is_empty()
-        && api_provider_uses_anthropic_messages(api_provider)
+        && uses_anthropic_messages
         && api_provider != ApiProvider::Openmodel
     {
         Some(HeaderName::from_static("x-api-key"))
@@ -1317,14 +1370,21 @@ fn is_auth_dialect_header(header_name: &HeaderName) -> bool {
         || header_name == HeaderName::from_static("x-api-key")
 }
 
-fn api_provider_uses_anthropic_messages(api_provider: ApiProvider) -> bool {
-    matches!(
-        api_provider,
-        ApiProvider::Anthropic
-            | ApiProvider::DeepseekAnthropic
-            | ApiProvider::MinimaxAnthropic
-            | ApiProvider::Openmodel
-    )
+fn provider_default_wire_format(api_provider: ApiProvider) -> WireFormat {
+    api_provider
+        .kind()
+        .and_then(|kind| {
+            codewhale_config::provider::provider_for_kind(kind)
+                .wire_policy()
+                .fixed()
+        })
+        .unwrap_or_else(|| {
+            if api_provider == ApiProvider::OpencodeZen {
+                WireFormat::Responses
+            } else {
+                WireFormat::ChatCompletions
+            }
+        })
 }
 
 fn api_provider_skips_models_probe(api_provider: ApiProvider) -> bool {
@@ -1354,8 +1414,15 @@ pub async fn verify_provider_api_key(
         // way; accept the key optimistically (same as health_check).
         return Ok(());
     }
-    let headers = build_default_headers(api_key, &Default::default(), provider, base_url, false)
-        .map_err(|err| format!("failed to build auth headers: {err:#}"))?;
+    let headers = build_default_headers(
+        api_key,
+        &Default::default(),
+        provider,
+        base_url,
+        provider_default_wire_format(provider),
+        false,
+    )
+    .map_err(|err| format!("failed to build auth headers: {err:#}"))?;
     let client = crate::tls::reqwest_client_builder()
         .default_headers(headers)
         .user_agent(concat!(
@@ -1541,10 +1608,17 @@ impl DeepSeekClient {
         target_language: &str,
     ) -> Result<String> {
         let model = wire_model_for_provider_route(self.api_provider, &self.base_url, model);
-        if self.wire_format == WireFormat::AnthropicMessages {
-            let response = self
-                .handle_anthropic_message(translation_message_request(text, model, target_language))
-                .await?;
+        if self.wire_format != WireFormat::ChatCompletions {
+            let request = self.bind_request_to_protocol(translation_message_request(
+                text,
+                model,
+                target_language,
+            ))?;
+            let response = match self.wire_format {
+                WireFormat::Responses => self.handle_responses_message(request).await?,
+                WireFormat::AnthropicMessages => self.handle_anthropic_message(request).await?,
+                WireFormat::ChatCompletions => unreachable!(),
+            };
             return translation_text_from_response(&response);
         }
 
@@ -2116,7 +2190,7 @@ impl LlmClient for DeepSeekClient {
 
     async fn create_message(&self, request: MessageRequest) -> Result<MessageResponse> {
         let _permit = self.acquire_provider_request_permit().await;
-        let request = self.prepare_model_bound_request(request);
+        let request = self.bind_request_to_protocol(self.prepare_model_bound_request(request))?;
         match self.wire_format {
             WireFormat::Responses => self.handle_responses_message(request).await,
             WireFormat::AnthropicMessages => self.handle_anthropic_message(request).await,
@@ -2129,7 +2203,7 @@ impl LlmClient for DeepSeekClient {
         request: MessageRequest,
     ) -> Result<crate::llm_client::StreamEventBox> {
         let permit = self.acquire_provider_request_permit().await;
-        let request = self.prepare_model_bound_request(request);
+        let request = self.bind_request_to_protocol(self.prepare_model_bound_request(request))?;
         let stream = match self.wire_format {
             WireFormat::Responses => self.handle_responses_stream(request).await?,
             WireFormat::AnthropicMessages => self.handle_anthropic_stream(request).await?,
@@ -2582,7 +2656,7 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Stepfun => {}
             ApiProvider::Sakana => {}
             ApiProvider::LongCat => {}
-            ApiProvider::OpencodeGo => {}
+            ApiProvider::OpencodeGo | ApiProvider::OpencodeZen => {}
             ApiProvider::Meta => {}
             ApiProvider::Xai => {}
         },
@@ -2680,7 +2754,7 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Stepfun => {}
             ApiProvider::Sakana => {}
             ApiProvider::LongCat => {}
-            ApiProvider::OpencodeGo => {}
+            ApiProvider::OpencodeGo | ApiProvider::OpencodeZen => {}
             ApiProvider::Meta => {}
             ApiProvider::Xai => {}
         },
@@ -2758,7 +2832,7 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Stepfun => {}
             ApiProvider::Sakana => {}
             ApiProvider::LongCat => {}
-            ApiProvider::OpencodeGo => {}
+            ApiProvider::OpencodeGo | ApiProvider::OpencodeZen => {}
             ApiProvider::Meta => {}
             ApiProvider::Xai => {}
         },
@@ -2846,10 +2920,13 @@ impl DeepSeekClient {
         suffix: &str,
         max_tokens: u32,
     ) -> anyhow::Result<String> {
-        if self.wire_format == WireFormat::AnthropicMessages {
+        if self.api_provider == ApiProvider::OpencodeZen
+            || self.wire_format != WireFormat::ChatCompletions
+        {
             bail!(
-                "FIM completion is not supported for {} because it uses the Anthropic Messages protocol",
-                self.api_provider.display_name()
+                "FIM completion is not supported for {} because the route has no proven FIM wire contract ({:?})",
+                self.api_provider.display_name(),
+                self.wire_format
             );
         }
         let url = api_url_with_suffix(&self.base_url, "beta/completions", None);
@@ -3707,6 +3784,191 @@ mod tests {
     #[tokio::test]
     async fn create_message_captures_exact_mfjs_safe_general_child_catalog() {
         assert_kimi_code_captures_exact_general_child_catalog().await;
+    }
+
+    fn opencode_zen_client(server: &MockServer, model: &str) -> DeepSeekClient {
+        let config = Config {
+            provider: Some("opencode-zen".to_string()),
+            providers: Some(ProvidersConfig {
+                opencode_zen: ProviderConfig {
+                    api_key: Some("zen-test-key".to_string()),
+                    base_url: Some(server.uri()),
+                    model: Some(model.to_string()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        };
+        DeepSeekClient::new(&config).expect("OpenCode Zen client should resolve its model route")
+    }
+
+    fn minimal_zen_request(model: &str) -> MessageRequest {
+        translation_message_request("hello", model.to_string(), "English")
+    }
+
+    fn assert_zen_bearer_without_codex_headers(request: &wiremock::Request) {
+        assert_eq!(
+            request
+                .headers
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer zen-test-key")
+        );
+        for forbidden in [
+            "openai-beta",
+            "originator",
+            "chatgpt-account-id",
+            "x-api-key",
+        ] {
+            assert!(
+                request.headers.get(forbidden).is_none(),
+                "Zen request must not include {forbidden}"
+            );
+        }
+    }
+
+    fn assert_zen_messages_api_key_without_bearer(request: &wiremock::Request) {
+        assert_eq!(
+            request
+                .headers
+                .get("x-api-key")
+                .and_then(|value| value.to_str().ok()),
+            Some("zen-test-key")
+        );
+        assert!(
+            request.headers.get(AUTHORIZATION).is_none(),
+            "Zen Messages request must not include Authorization"
+        );
+        for forbidden in ["openai-beta", "originator", "chatgpt-account-id"] {
+            assert!(
+                request.headers.get(forbidden).is_none(),
+                "Zen request must not include {forbidden}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn opencode_zen_responses_request_uses_responses_route_without_oauth_headers() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "text/event-stream")
+                    .set_body_string("data: [DONE]\n\n"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = opencode_zen_client(&server, "gpt-5.5");
+        assert_eq!(client.wire_format, WireFormat::Responses);
+        let mut stream = client
+            .create_message_stream(minimal_zen_request("gpt-5.5"))
+            .await
+            .expect("Zen Responses request should start");
+        while let Some(event) = stream.next().await {
+            event.expect("Zen Responses stream event");
+        }
+
+        let requests = server.received_requests().await.expect("recorded request");
+        assert_eq!(requests.len(), 1);
+        assert_zen_bearer_without_codex_headers(&requests[0]);
+        let body: Value = serde_json::from_slice(&requests[0].body).expect("Responses JSON body");
+        assert_eq!(body.get("model").and_then(Value::as_str), Some("gpt-5.5"));
+        assert!(body.get("input").is_some(), "Responses body: {body}");
+        assert!(body.get("messages").is_none(), "Responses body: {body}");
+    }
+
+    #[tokio::test]
+    async fn opencode_zen_messages_request_shape_uses_api_key_anthropic_route() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg_zen",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ok"}],
+                "model": "claude-sonnet-4-6",
+                "stop_reason": "end_turn",
+                "stop_sequence": null,
+                "usage": {"input_tokens": 1, "output_tokens": 1}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = opencode_zen_client(&server, "claude-sonnet-4-6");
+        assert_eq!(client.wire_format, WireFormat::AnthropicMessages);
+        client
+            .create_message(minimal_zen_request("claude-sonnet-4-6"))
+            .await
+            .expect("Zen Messages request should succeed");
+
+        let requests = server.received_requests().await.expect("recorded request");
+        assert_eq!(requests.len(), 1);
+        assert_zen_messages_api_key_without_bearer(&requests[0]);
+        assert_eq!(
+            requests[0]
+                .headers
+                .get("anthropic-version")
+                .and_then(|value| value.to_str().ok()),
+            Some("2023-06-01")
+        );
+    }
+
+    #[tokio::test]
+    async fn opencode_zen_chat_request_uses_chat_completions_route() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "chatcmpl_zen",
+                "object": "chat.completion",
+                "model": "deepseek-v4-pro",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = opencode_zen_client(&server, "deepseek-v4-pro");
+        assert_eq!(client.wire_format, WireFormat::ChatCompletions);
+        client
+            .create_message(minimal_zen_request("deepseek-v4-pro"))
+            .await
+            .expect("Zen Chat Completions request should succeed");
+
+        let requests = server.received_requests().await.expect("recorded request");
+        assert_eq!(requests.len(), 1);
+        assert_zen_bearer_without_codex_headers(&requests[0]);
+        assert!(requests[0].headers.get("anthropic-version").is_none());
+    }
+
+    #[tokio::test]
+    async fn opencode_zen_client_fails_closed_when_request_model_changes_protocol() {
+        let server = MockServer::start().await;
+        let client = opencode_zen_client(&server, "gpt-5.5");
+
+        let error = client
+            .create_message(minimal_zen_request("claude-sonnet-4-6"))
+            .await
+            .expect_err("a Responses-bound client must not send a Messages model");
+        assert!(format!("{error:#}").contains("resolve a new model route"));
+        assert!(
+            server
+                .received_requests()
+                .await
+                .expect("recorded requests")
+                .is_empty()
+        );
     }
 
     const CONFIG_SECRET_SENTINELS: [&str; 8] = [
@@ -4968,7 +5230,7 @@ mod tests {
             message.contains("FIM completion is not supported"),
             "{message}"
         );
-        assert!(message.contains("Anthropic Messages protocol"), "{message}");
+        assert!(message.contains("no proven FIM wire contract"), "{message}");
         let requests = server.received_requests().await.expect("recorded requests");
         assert!(
             requests.is_empty(),

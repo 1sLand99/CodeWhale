@@ -15087,6 +15087,7 @@ fn mirror_saved_api_key_in_config(config: &mut Config, provider: ApiProvider, ap
         ApiProvider::Sakana => &mut providers.sakana,
         ApiProvider::LongCat => &mut providers.longcat,
         ApiProvider::OpencodeGo => &mut providers.opencode_go,
+        ApiProvider::OpencodeZen => &mut providers.opencode_zen,
         ApiProvider::Meta => &mut providers.meta,
         ApiProvider::Xai => &mut providers.xai,
         ApiProvider::Telecomjs => &mut providers.telecomjs,

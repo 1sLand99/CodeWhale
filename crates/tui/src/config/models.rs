@@ -188,6 +188,8 @@ pub const DEFAULT_LONGCAT_BASE_URL: &str = "https://api.longcat.chat/openai/v1";
 pub const DEFAULT_OPENCODE_GO_MODEL: &str = "deepseek-v4-pro";
 pub const DEFAULT_OPENCODE_GO_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
 pub use codewhale_config::OPENCODE_GO_CHAT_MODELS;
+pub const DEFAULT_OPENCODE_ZEN_MODEL: &str = "gpt-5.5";
+pub const DEFAULT_OPENCODE_ZEN_BASE_URL: &str = "https://opencode.ai/zen/v1";
 pub const DEFAULT_META_MODEL: &str = "muse-spark-1.1";
 pub const DEFAULT_META_BASE_URL: &str = "https://api.meta.ai/v1";
 pub const DEFAULT_XAI_MODEL: &str = "grok-4.5";
