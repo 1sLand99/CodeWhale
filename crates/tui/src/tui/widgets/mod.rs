@@ -656,7 +656,7 @@ fn history_entry_revision(revision: u64) -> u64 {
     revision_in_domain(revision, false)
 }
 
-fn active_entry_revision(active_rev: u64, salt: u64) -> u64 {
+pub(crate) fn active_entry_revision(active_rev: u64, salt: u64) -> u64 {
     // Active entries and committed history cells can occupy the same
     // positional cache slot across `flush_active_cell`. Keep their revision
     // domains distinct so the first active entry (`active_rev = 0`,
