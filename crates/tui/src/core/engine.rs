@@ -74,7 +74,9 @@ use crate::working_set::WorkingSet;
 
 #[cfg(test)]
 use super::authority::agent_approval_mode_for_turn;
-use super::authority::{TurnAuthority, effective_input_policy, shell_policy_for_mode};
+use super::authority::{
+    PolicyNarrowingEvent, TurnAuthority, effective_input_policy, shell_policy_for_mode,
+};
 use super::events::{Event, TurnOutcomeStatus, TurnRoute};
 use super::ops::{
     Op, ProviderRuntimeStatus, SessionSnapshot, USER_SHELL_TOOL_ID_PREFIX, UserInputProvenance,
@@ -641,6 +643,10 @@ pub struct Engine {
     slop_ledger_gate_cache: Option<(Option<SystemTime>, Option<String>)>,
     /// Current operating mode. Updated on `ChangeMode` and `SendMessage`.
     current_mode: AppMode,
+    /// The most recent authority narrowing, if any (#3947). Kept on the engine
+    /// so doctor and debug surfaces can answer "why is this tool unavailable"
+    /// with the same record the user and the model already saw.
+    last_policy_narrowing: Option<PolicyNarrowingEvent>,
     /// Process-local cache for `estimated_input_tokens`. Memoizes the most
     /// recent token estimate keyed on `(session.messages_revision,
     /// system_prompt_fingerprint)`. Five call sites per turn consult this
@@ -1172,6 +1178,7 @@ impl Engine {
             workshop_vars,
             sandbox_backend,
             current_mode: AppMode::Agent,
+            last_policy_narrowing: None,
             token_estimate_cache: TokenEstimateCache::new(),
             shared_paused: shared_paused.clone(),
         };
@@ -2503,6 +2510,7 @@ impl Engine {
         self.emit_session_updated().await;
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn turn_metadata_block(
         &self,
         routed_model: &str,
@@ -2511,6 +2519,7 @@ impl Engine {
         reasoning_effort_auto: bool,
         provenance: UserInputProvenance,
         current_text: &str,
+        policy_narrowing: Option<&PolicyNarrowingEvent>,
     ) -> ContentBlock {
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let working_set_summary = self
@@ -2551,6 +2560,15 @@ impl Engine {
         }
         if reasoning_effort_auto && let Some(reasoning_effort) = reasoning_effort {
             lines.push(format!("Auto reasoning effort: {reasoning_effort}"));
+        }
+        // #3947: when runtime policy narrowed this turn's authority, the model
+        // learns that it happened, why, and the exact sentence the user saw —
+        // not merely the already-narrowed posture above. Emitted only on a
+        // narrowed turn, so the ordinary turn's metadata stays byte-stable.
+        if let Some(event) = policy_narrowing {
+            lines.push(format!("Authority narrowing: {}", event.reason().as_str()));
+            lines.push(format!("Authority transition: {}", event.transition()));
+            lines.push(format!("Authority narrowing status: {}", event.message()));
         }
         self.append_resource_metadata_lines(&mut lines, routed_model, current_text);
         if let Some(working_set_summary) = working_set_summary {
@@ -2668,6 +2686,7 @@ impl Engine {
             reasoning_effort_auto,
             provenance,
             &text,
+            self.last_policy_narrowing.as_ref(),
         );
         Message {
             role: "user".to_string(),
@@ -3125,7 +3144,11 @@ impl Engine {
             mode == AppMode::Yolo || auto_approve,
             approval_mode,
         );
-        if let Some(status) = input_policy.status.clone() {
+        // #3947: an effective-mode change is never silent. The structured
+        // event is recorded first (so doctor and this turn's metadata can read
+        // it), then rendered to the UI from that same value.
+        self.last_policy_narrowing = input_policy.narrowing.clone();
+        if let Some(status) = input_policy.status() {
             let _ = self.tx_event.send(Event::status(status)).await;
         }
         // Reset cancel token for fresh turn (in case previous was cancelled)
