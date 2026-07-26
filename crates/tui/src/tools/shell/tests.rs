@@ -1904,6 +1904,7 @@ fn killed_shell_does_not_wait_for_blocked_reader_threads() {
         owner_agent: None,
         stdout_buffer: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         stderr_buffer: None,
+        heavy_permit: None,
         stdout_cursor: 0,
         stderr_cursor: 0,
         completion_reported: false,
