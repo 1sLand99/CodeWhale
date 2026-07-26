@@ -281,19 +281,49 @@ impl NativeMemoryStore {
             let conn = self.connection_unlocked()?;
             Ok(conn
                 .query_row(
-                    "SELECT id,text,source,line_start,line_end FROM memory_entries WHERE id=?1",
+                    "SELECT e.id,e.text,e.source,e.line_start,e.line_end,
+                            CASE WHEN e.source_mtime != s.mtime THEN 1 ELSE 0 END
+                     FROM memory_entries e
+                     LEFT JOIN memory_sources s ON s.path=e.source
+                     WHERE e.id=?1",
                     params![id],
-                    |row| {
-                        Ok(MemoryHit {
-                            id: row.get(0)?,
-                            text: row.get(1)?,
-                            source: PathBuf::from(row.get::<_, String>(2)?),
-                            line_start: row.get::<_, i64>(3)? as usize,
-                            line_end: row.get::<_, i64>(4)? as usize,
-                            stale: false,
-                        })
-                    },
+                    memory_hit_from_row,
                 )
+                .optional()?)
+        })
+    }
+
+    /// Read one entry only when it belongs to global memory or the current
+    /// repository's origin-scoped workspace memory. User-facing retrieval
+    /// surfaces must use this boundary; numeric SQLite IDs are not authority.
+    pub fn get_for_workspace(&self, workspace: &Path, id: i64) -> Result<Option<MemoryHit>> {
+        let global = self.global_path();
+        let workspace = self.workspace_path_for(workspace)?;
+        let Some(workspace) = workspace else {
+            return self.get_from_sources(id, &[global]);
+        };
+        self.get_from_sources(id, &[global, workspace])
+    }
+
+    fn get_from_sources(&self, id: i64, sources: &[PathBuf]) -> Result<Option<MemoryHit>> {
+        self.with_write_lock(|| {
+            self.reindex_unlocked()?;
+            let conn = self.connection_unlocked()?;
+            let mut stmt = conn.prepare(
+                "SELECT e.id,e.text,e.source,e.line_start,e.line_end,
+                        CASE WHEN e.source_mtime != s.mtime THEN 1 ELSE 0 END
+                 FROM memory_entries e
+                 LEFT JOIN memory_sources s ON s.path=e.source
+                 WHERE e.id=?1 AND e.source IN (?2, ?3)",
+            )?;
+            let first = sources
+                .first()
+                .map_or_else(String::new, |path| path.to_string_lossy().into_owned());
+            let second = sources
+                .get(1)
+                .map_or_else(String::new, |path| path.to_string_lossy().into_owned());
+            Ok(stmt
+                .query_row(params![id, first, second], memory_hit_from_row)
                 .optional()?)
         })
     }
