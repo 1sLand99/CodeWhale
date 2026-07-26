@@ -28,8 +28,9 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE};
 #[cfg(windows)]
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-    SetInformationJobObject, TerminateJobObject,
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
+    QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
 };
 #[cfg(windows)]
 use windows::core::PCWSTR;
@@ -137,6 +138,8 @@ pub enum FleetHostKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FleetHostWorkerState {
     Running,
+    /// The dispatcher stopped but the owned process session/job is not yet empty.
+    Draining,
     Exited,
     Failed,
     Stopped,
@@ -312,6 +315,16 @@ impl FleetHostAdapter for LocalProcessFleetHostAdapter {
             .get_mut(worker_id)
             .ok_or_else(|| FleetHostError::terminal(format!("unknown worker {worker_id}")))?;
         if let Some(status) = process.last_exit {
+            if local_worker_tree_alive(process)? {
+                return Ok(FleetHostWorkerStatus {
+                    worker_id: worker_id.to_string(),
+                    state: FleetHostWorkerState::Draining,
+                    pid: Some(process.child.id()),
+                    exit_code: status.code(),
+                    memory_mb: process.last_memory_mb,
+                    retryable: true,
+                });
+            }
             return Ok(status_from_exit(
                 worker_id,
                 Some(process.child.id()),
@@ -343,6 +356,16 @@ impl FleetHostAdapter for LocalProcessFleetHostAdapter {
             }
             Ok(Some(status)) => {
                 process.last_exit = Some(status);
+                if local_worker_tree_alive(process)? {
+                    return Ok(FleetHostWorkerStatus {
+                        worker_id: worker_id.to_string(),
+                        state: FleetHostWorkerState::Draining,
+                        pid: Some(process.child.id()),
+                        exit_code: status.code(),
+                        memory_mb: process.last_memory_mb,
+                        retryable: true,
+                    });
+                }
                 Ok(status_from_exit(
                     worker_id,
                     Some(process.child.id()),
@@ -764,7 +787,10 @@ fn wait_for_exit(
     let deadline = Instant::now() + timeout;
     loop {
         let status = adapter.read_status(worker_id)?;
-        if !matches!(status.state, FleetHostWorkerState::Running) {
+        if !matches!(
+            status.state,
+            FleetHostWorkerState::Running | FleetHostWorkerState::Draining
+        ) {
             return Ok(status);
         }
         if Instant::now() >= deadline {
@@ -772,6 +798,23 @@ fn wait_for_exit(
         }
         thread::sleep(Duration::from_millis(25));
     }
+}
+
+#[cfg(unix)]
+fn local_worker_tree_alive(process: &LocalWorkerProcess) -> FleetHostResult<bool> {
+    Ok(!unix_session_members(process.session_id, Some(process.session_id))?.is_empty())
+}
+
+#[cfg(windows)]
+fn local_worker_tree_alive(process: &LocalWorkerProcess) -> FleetHostResult<bool> {
+    process.windows_job.has_active_processes().map_err(|err| {
+        FleetHostError::retryable(format!("querying Windows worker job activity: {err}"))
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn local_worker_tree_alive(_process: &LocalWorkerProcess) -> FleetHostResult<bool> {
+    Ok(false)
 }
 
 #[cfg(unix)]
@@ -1224,6 +1267,21 @@ impl FleetWindowsJob {
     fn terminate(&self) -> std::io::Result<()> {
         unsafe { TerminateJobObject(self.handle, 1).map_err(windows_io_error) }
     }
+
+    fn has_active_processes(&self) -> std::io::Result<bool> {
+        let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+        unsafe {
+            QueryInformationJobObject(
+                Some(self.handle),
+                JobObjectBasicAccountingInformation,
+                &mut accounting as *mut _ as *mut core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                None,
+            )
+            .map_err(windows_io_error)?;
+        }
+        Ok(accounting.ActiveProcesses > 0)
+    }
 }
 
 #[cfg(windows)]
@@ -1484,6 +1542,23 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn wait_for_host_state(
+        adapter: &mut LocalProcessFleetHostAdapter,
+        worker_id: &str,
+        expected: FleetHostWorkerState,
+        timeout: Duration,
+    ) -> FleetHostWorkerStatus {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let status = adapter.read_status(worker_id).expect("worker status");
+            if status.state == expected || Instant::now() >= deadline {
+                return status;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    #[cfg(unix)]
     fn wait_for_valid_pid_file(pid_file: &Path, timeout: Duration) -> libc::pid_t {
         let deadline = Instant::now() + timeout;
         let mut last_observation = "file not created".to_string();
@@ -1687,6 +1762,47 @@ mod tests {
         assert!(
             wait_for_unix_pid_exit(tool_pid, Duration::from_secs(1)),
             "separate-process-group tool survived interrupt"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fleet_host_reports_draining_after_dispatcher_exits_with_live_descendant() {
+        if skip_if_process_table_unavailable() {
+            return;
+        }
+        let tmp = TempDir::new().unwrap();
+        let mut adapter = LocalProcessFleetHostAdapter::new(tmp.path());
+        let (root_pid, tool_pid) = start_dispatcher_tree(
+            &mut adapter,
+            &tmp,
+            "draining-dispatcher-tree",
+            "detached-dispatcher",
+        );
+
+        assert!(
+            wait_for_unix_pid_exit(root_pid, Duration::from_secs(3)),
+            "dispatcher did not exit"
+        );
+        let status = wait_for_host_state(
+            &mut adapter,
+            "draining-dispatcher-tree",
+            FleetHostWorkerState::Draining,
+            Duration::from_secs(3),
+        );
+        assert_eq!(status.state, FleetHostWorkerState::Draining);
+        assert!(
+            unix_pid_is_running(tool_pid),
+            "descendant exited before draining check"
+        );
+
+        let stopped = adapter
+            .stop_worker("draining-dispatcher-tree")
+            .expect("stop draining worker tree");
+        assert_eq!(stopped.state, FleetHostWorkerState::Stopped);
+        assert!(
+            wait_for_unix_pid_exit(tool_pid, Duration::from_secs(1)),
+            "draining descendant survived bounded stop"
         );
     }
 

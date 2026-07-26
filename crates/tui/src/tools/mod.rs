@@ -43,6 +43,7 @@ pub mod plugin;
 pub mod project;
 pub mod registry;
 pub mod remember;
+mod resource_admission;
 pub mod revert_turn;
 pub mod review;
 pub mod rlm;
