@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::ApiProvider;
 use crate::models::Usage;
+use crate::tools::todo::TodoListSnapshot;
 
 use super::FleetRole;
 
@@ -60,6 +61,20 @@ pub enum MailboxMessage {
     Interrupted { agent_id: String, reason: String },
     /// Cancellation propagated to this agent.
     Cancelled { agent_id: String },
+    /// This agent's **own** bounded To-do snapshot (#4810).
+    ///
+    /// Published by the agent that owns the ledger, from its private list, so a
+    /// consumer keyed on `agent_id` can never attribute a parent's or a
+    /// sibling's work to this agent. Emitted only when the snapshot actually
+    /// changes; the payload is the canonical [`TodoListSnapshot`], not a second
+    /// ledger.
+    WorkState {
+        agent_id: String,
+        /// Absent in older persisted payloads, which predate per-agent Work
+        /// state; those deserialize to an empty (no work stated) snapshot.
+        #[serde(default)]
+        todo: TodoListSnapshot,
+    },
     /// Incremental token usage from a sub-agent's API call.
     /// Published after each turn so the parent's cost counter updates live.
     TokenUsage {
@@ -88,6 +103,7 @@ impl MailboxMessage {
             | Self::Failed { agent_id, .. }
             | Self::Interrupted { agent_id, .. }
             | Self::Cancelled { agent_id }
+            | Self::WorkState { agent_id, .. }
             | Self::TokenUsage { agent_id, .. } => agent_id,
             Self::ChildSpawned { child_id, .. } => child_id,
         }
@@ -104,6 +120,13 @@ impl MailboxMessage {
         Self::Progress {
             agent_id: agent_id.into(),
             status: status.into(),
+        }
+    }
+
+    pub(crate) fn work_state(agent_id: impl Into<String>, todo: TodoListSnapshot) -> Self {
+        Self::WorkState {
+            agent_id: agent_id.into(),
+            todo,
         }
     }
 
@@ -423,6 +446,44 @@ mod tests {
         assert!(token.is_cancelled());
     }
 
+    #[test]
+    fn work_state_payload_round_trips_and_tolerates_a_missing_snapshot() {
+        use crate::tools::todo::{TodoItem, TodoStatus};
+
+        let message = MailboxMessage::work_state(
+            "agent_child",
+            TodoListSnapshot {
+                items: vec![TodoItem {
+                    id: 2,
+                    content: "write the projection".to_string(),
+                    status: TodoStatus::InProgress,
+                }],
+                completion_pct: 50,
+                in_progress_id: Some(2),
+            },
+        );
+        let encoded = serde_json::to_string(&message).expect("encode");
+        let decoded: MailboxMessage = serde_json::from_str(&encoded).expect("decode");
+        assert_eq!(decoded, message);
+
+        // An older payload that predates per-agent Work state decodes to an
+        // empty snapshot rather than failing the whole stream.
+        let legacy: MailboxMessage =
+            serde_json::from_str(r#"{"kind":"work_state","agent_id":"agent_old"}"#)
+                .expect("legacy");
+        assert_eq!(legacy.agent_id(), "agent_old");
+        match legacy {
+            MailboxMessage::WorkState { todo, .. } => assert!(todo.is_empty()),
+            other => panic!("expected work state, got {other:?}"),
+        }
+
+        // Every pre-existing variant still decodes unchanged.
+        let started: MailboxMessage =
+            serde_json::from_str(r#"{"kind":"started","agent_id":"a","agent_type":"worker"}"#)
+                .expect("started");
+        assert_eq!(started.agent_id(), "a");
+    }
+
     #[tokio::test]
     async fn agent_id_is_extractable_from_every_variant() {
         let cases: Vec<(MailboxMessage, &str)> = vec![
@@ -478,6 +539,10 @@ mod tests {
                     reason: "API call timed out".into(),
                 },
                 "a10",
+            ),
+            (
+                MailboxMessage::work_state("a11", TodoListSnapshot::default()),
+                "a11",
             ),
             (
                 MailboxMessage::TokenUsage {

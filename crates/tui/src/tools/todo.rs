@@ -79,7 +79,6 @@ impl TodoListSnapshot {
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
-
 }
 
 /// Mutable list of todo items with helper operations.

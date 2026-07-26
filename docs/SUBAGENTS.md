@@ -101,6 +101,20 @@ tail**. A deliberately forked child still receives the bounded immutable parent
 ledger snapshot described above as part of its fork context; it cannot mutate
 that snapshot or keep reading later parent changes.
 
+That same private ledger is what the child's in-transcript card shows. A
+delegate card renders a bounded projection of **its own** agent's To-do — the
+settled/total count, the in-progress item always included, up to three rows, and an
+explicit `… +N more` when the bound elides the rest — built by
+`card_todo_projection` from the same snapshot, priority order, and sanitizer the
+model-facing body uses. A card only ever consumes an envelope whose `agent_id`
+matches it, so a parent's list never appears under a child and no sibling's list
+appears under another. An agent that has stated no work shows no To-do rows at
+all rather than a placeholder task, and a terminal card keeps the last snapshot
+its agent actually published. Fanout cards stay a dot grid and do not show child
+To-do: with many workers behind one card there is no truthful place to hang a
+single ledger. A child To-do appears only when the runtime already represents
+that child as its own delegate card.
+
 The durable task/Fleet ledger still owns lifecycle state. Use
 `update_plan` only for conversational strategy that helps a parent or later
 worker understand the approach; it is not a second Work ledger and never

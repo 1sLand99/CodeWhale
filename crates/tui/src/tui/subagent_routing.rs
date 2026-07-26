@@ -606,6 +606,24 @@ fn bounded_mailbox_message(message: &MailboxMessage) -> MailboxMessage {
             agent_id: agent_id.clone(),
             reason: bound_agent_activity_text(reason),
         },
+        // Item text is model-authored and reaches the transcript, so it gets
+        // the same redaction/bounding every other displayed child string gets.
+        // Ids, statuses, and counts are preserved exactly — bounding must not
+        // change what the ledger says.
+        MailboxMessage::WorkState { agent_id, todo } => MailboxMessage::WorkState {
+            agent_id: agent_id.clone(),
+            todo: crate::tools::todo::TodoListSnapshot {
+                items: todo
+                    .items
+                    .iter()
+                    .map(|item| crate::tools::todo::TodoItem {
+                        content: bound_agent_activity_text(&item.content),
+                        ..item.clone()
+                    })
+                    .collect(),
+                ..todo.clone()
+            },
+        },
         _ => message.clone(),
     }
 }
@@ -620,6 +638,12 @@ fn record_agent_current_activity(app: &mut App, message: &MailboxMessage) {
         meta.resolved_provider = Some(provider.as_str().to_string());
         meta.resolved_model =
             Some(bound_agent_activity_text(model)).filter(|model| !model.trim().is_empty());
+        return;
+    }
+    if matches!(message, MailboxMessage::WorkState { .. }) {
+        // Work state is a separate fact from what the agent is doing right
+        // now. Publishing a ledger update must not invent an activity
+        // transition or overwrite the current one.
         return;
     }
     if let MailboxMessage::ToolCallCompleted {
@@ -712,6 +736,7 @@ fn record_agent_current_activity(app: &mut App, message: &MailboxMessage) {
             previous.as_ref().and_then(|activity| activity.step),
         ),
         MailboxMessage::TokenUsage { .. } => unreachable!("token usage handled above"),
+        MailboxMessage::WorkState { .. } => unreachable!("work state handled above"),
     };
 
     meta.current_activity = Some(AgentCurrentActivity::bounded(
@@ -1540,6 +1565,192 @@ mod tests {
             }
             other => panic!("expected delegate card, got {other:?}"),
         }
+    }
+
+    /// #4810: each child card carries that child's own ledger — never the
+    /// parent's, never a sibling's, and never as transcript messages.
+    #[test]
+    fn sibling_child_cards_render_disjoint_todo_lists() {
+        use crate::tools::todo::{TodoItem, TodoListSnapshot, TodoStatus};
+
+        fn snapshot(id: u32, content: &str) -> TodoListSnapshot {
+            TodoListSnapshot {
+                items: vec![TodoItem {
+                    id,
+                    content: content.to_string(),
+                    status: TodoStatus::InProgress,
+                }],
+                completion_pct: 0,
+                in_progress_id: Some(id),
+            }
+        }
+
+        fn card_text(app: &App, agent_id: &str) -> String {
+            let idx = app.subagent_card_index[agent_id];
+            let HistoryCell::SubAgent(SubAgentCell::Delegate(card)) = &app.history[idx] else {
+                panic!("expected a delegate card for {agent_id}");
+            };
+            assert_eq!(card.agent_id, agent_id);
+            card.render_lines(120)
+                .into_iter()
+                .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
+                .collect()
+        }
+
+        let mut app = App::new(test_options(), &Config::default());
+        // The parent's own ledger exists and must never surface on a child.
+        let parent_item = "PARENT ONLY: ship the release";
+
+        for (seq, id) in ["agent_left", "agent_right"].into_iter().enumerate() {
+            assert!(handle_subagent_mailbox(
+                &mut app,
+                seq as u64 + 1,
+                &MailboxMessage::started(id, FleetRole::Worker),
+            ));
+        }
+        assert!(handle_subagent_mailbox(
+            &mut app,
+            3,
+            &MailboxMessage::WorkState {
+                agent_id: "agent_left".to_string(),
+                todo: snapshot(1, "LEFT: map the call sites"),
+            },
+        ));
+        assert!(handle_subagent_mailbox(
+            &mut app,
+            4,
+            &MailboxMessage::WorkState {
+                agent_id: "agent_right".to_string(),
+                todo: snapshot(1, "RIGHT: write the migration"),
+            },
+        ));
+
+        let left = card_text(&app, "agent_left");
+        let right = card_text(&app, "agent_right");
+        assert!(left.contains("LEFT: map the call sites"), "{left}");
+        assert!(!left.contains("RIGHT:"), "sibling leak: {left}");
+        assert!(!left.contains(parent_item), "parent leak: {left}");
+        assert!(right.contains("RIGHT: write the migration"), "{right}");
+        assert!(!right.contains("LEFT:"), "sibling leak: {right}");
+        assert!(!right.contains(parent_item), "parent leak: {right}");
+
+        // A nested child of agent_left gets its own card and its own ledger;
+        // neither its parent's card nor its uncle's card absorbs it.
+        assert!(handle_subagent_mailbox(
+            &mut app,
+            5,
+            &MailboxMessage::started("agent_nested", FleetRole::Worker),
+        ));
+        assert!(handle_subagent_mailbox(
+            &mut app,
+            6,
+            &MailboxMessage::WorkState {
+                agent_id: "agent_nested".to_string(),
+                todo: snapshot(1, "NESTED: read one file"),
+            },
+        ));
+        assert!(card_text(&app, "agent_nested").contains("NESTED: read one file"));
+        assert!(!card_text(&app, "agent_left").contains("NESTED:"));
+        assert!(!card_text(&app, "agent_right").contains("NESTED:"));
+
+        // Nothing entered the transcript as an ordinary message: every To-do
+        // row lives inside a sub-agent card.
+        assert!(
+            !app.history.iter().any(|cell| {
+                !matches!(cell, HistoryCell::SubAgent(_))
+                    && format!("{cell:?}").contains("map the call sites")
+            }),
+            "child To-do must not become an ordinary transcript message"
+        );
+    }
+
+    /// Work state is a ledger fact, not an activity transition: it must not
+    /// invent or overwrite what the agent is currently doing.
+    #[test]
+    fn work_state_envelope_does_not_rewrite_current_activity() {
+        let mut app = App::new(test_options(), &Config::default());
+        assert!(handle_subagent_mailbox(
+            &mut app,
+            1,
+            &MailboxMessage::started("agent_x", FleetRole::Worker),
+        ));
+        assert!(handle_subagent_mailbox(
+            &mut app,
+            2,
+            &MailboxMessage::ToolCallStarted {
+                agent_id: "agent_x".to_string(),
+                tool_name: "read_file".to_string(),
+                step: 2,
+            },
+        ));
+        assert!(handle_subagent_mailbox(
+            &mut app,
+            3,
+            &MailboxMessage::WorkState {
+                agent_id: "agent_x".to_string(),
+                todo: crate::tools::todo::TodoListSnapshot {
+                    items: vec![crate::tools::todo::TodoItem {
+                        id: 1,
+                        content: "keep reading".to_string(),
+                        status: crate::tools::todo::TodoStatus::InProgress,
+                    }],
+                    completion_pct: 0,
+                    in_progress_id: Some(1),
+                },
+            },
+        ));
+
+        let activity = app.agent_progress_meta["agent_x"]
+            .current_activity
+            .as_ref()
+            .expect("activity");
+        assert_eq!(activity.status, AgentCurrentActivityStatus::RunningTool);
+        assert_eq!(activity.current_tool.as_deref(), Some("read_file"));
+    }
+
+    /// Displayed child ledger text goes through the same redaction the rest of
+    /// the child's displayed strings do.
+    #[test]
+    fn work_state_item_text_is_redacted_before_it_reaches_the_card() {
+        let mut app = App::new(test_options(), &Config::default());
+        assert!(handle_subagent_mailbox(
+            &mut app,
+            1,
+            &MailboxMessage::started("agent_secret", FleetRole::Worker),
+        ));
+        let secret = "sk-mailbox-secret-1234567890";
+        assert!(handle_subagent_mailbox(
+            &mut app,
+            2,
+            &MailboxMessage::WorkState {
+                agent_id: "agent_secret".to_string(),
+                todo: crate::tools::todo::TodoListSnapshot {
+                    items: vec![crate::tools::todo::TodoItem {
+                        id: 4,
+                        content: format!("rotate api_key={secret}"),
+                        status: crate::tools::todo::TodoStatus::InProgress,
+                    }],
+                    completion_pct: 0,
+                    in_progress_id: Some(4),
+                },
+            },
+        ));
+
+        let idx = app.subagent_card_index["agent_secret"];
+        let HistoryCell::SubAgent(SubAgentCell::Delegate(card)) = &app.history[idx] else {
+            panic!("expected delegate card");
+        };
+        let rendered: String = card
+            .render_lines(120)
+            .into_iter()
+            .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
+            .collect();
+        assert!(!rendered.contains(secret), "{rendered}");
+        assert!(rendered.contains("[redacted]"), "{rendered}");
+        assert!(
+            rendered.contains("#4"),
+            "item identity is preserved: {rendered}"
+        );
     }
 
     #[test]

@@ -7677,6 +7677,24 @@ fn build_initial_subagent_messages_with_system(
     messages
 }
 
+/// Whether an agent's current To-do snapshot is worth publishing to the
+/// mailbox (#4810).
+///
+/// Two silences are deliberate: an unchanged ledger is not news, and an agent
+/// that has never stated any work says nothing at all rather than announcing
+/// an empty list. A ledger that goes from non-empty to empty *is* published —
+/// that is a real transition the card must reflect instead of showing stale
+/// items.
+fn work_state_worth_publishing(
+    last_published: Option<&crate::tools::todo::TodoListSnapshot>,
+    current: &crate::tools::todo::TodoListSnapshot,
+) -> bool {
+    match last_published {
+        Some(last) => last != current,
+        None => !current.is_empty(),
+    }
+}
+
 /// Messages for one sub-agent provider request: the child's stored messages,
 /// then the transient canonical Work tail rendered from the child's own ledger
 /// (#3983).
@@ -8613,6 +8631,9 @@ async fn run_subagent(
         runtime.context.runtime.work.clone(),
         runtime.todos.clone(),
     );
+    // Last snapshot published to the mailbox for *this* agent, so repeated
+    // tool calls that leave the ledger untouched do not redraw its card.
+    let mut last_published_todo: Option<crate::tools::todo::TodoListSnapshot> = None;
     let mut transcript_artifact =
         match SubAgentTranscriptArtifactWriter::for_runtime(runtime, &agent_id).await {
             Ok(mut writer) => {
@@ -9340,6 +9361,17 @@ async fn run_subagent(
                     step: steps,
                     ok: tool_ok,
                 });
+                // This child's own ledger, read from its own store right after
+                // the tool that may have changed it — so a `work_update` in
+                // this step is visible on this child's card in this same turn,
+                // not one step later (#4810). Published only on change, and
+                // never before the child has stated any work, so a child that
+                // never uses the To-do surface adds no rows to its card.
+                let todo = work_state_source.snapshot().await;
+                if work_state_worth_publishing(last_published_todo.as_ref(), &todo) {
+                    let _ = mb.send(MailboxMessage::work_state(agent_id.clone(), todo.clone()));
+                    last_published_todo = Some(todo);
+                }
             }
 
             tool_results.push(ContentBlock::ToolResult {

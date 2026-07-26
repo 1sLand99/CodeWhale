@@ -10808,7 +10808,9 @@ async fn enter_while_model_waiting_queues_instead_of_steering() {
 
     assert_eq!(app.queued_message_count(), 1);
     assert_eq!(
-        app.queued_messages.front().map(|message| message.display.as_str()),
+        app.queued_messages
+            .front()
+            .map(|message| message.display.as_str()),
         Some("adjust current turn")
     );
     assert!(

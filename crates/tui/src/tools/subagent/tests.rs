@@ -12104,3 +12104,70 @@ async fn tracked_running_background_shell_keeps_its_owner_off_the_heartbeat_reap
         .expect("live task handle")
         .abort();
 }
+
+/// #4810: a child publishes its *own* ledger, only when it actually changes.
+#[tokio::test]
+async fn child_work_state_publishes_only_real_changes_from_its_own_list() {
+    // `ToolSpec` (for `execute`) is already in scope via `use super::*`.
+    use crate::tools::todo::{TodoListSnapshot, TodoStatus};
+
+    let parent_todos = crate::tools::todo::new_shared_todo_list();
+    let plan = crate::tools::plan::new_shared_plan_state();
+    let work = crate::work_graph::new_shared_work_runtime(parent_todos.clone(), plan);
+    parent_todos.lock().await.add(
+        "PARENT: ship the release".to_string(),
+        TodoStatus::InProgress,
+    );
+
+    // The child carries the parent's work runtime but its own list — the
+    // isolation that already landed at HEAD.
+    let child_todos = crate::tools::todo::new_shared_todo_list();
+    let source =
+        crate::work_grounding::WorkStateSource::new(Some(work.clone()), child_todos.clone());
+    let mut context = crate::tools::spec::ToolContext::new(std::env::temp_dir());
+    context.runtime.work = Some(work);
+
+    // Nothing stated yet: silence, not an empty announcement.
+    let mut last: Option<TodoListSnapshot> = None;
+    let empty = source.snapshot().await;
+    assert!(!work_state_worth_publishing(last.as_ref(), &empty));
+
+    crate::tools::todo::TodoWriteTool::work_update(child_todos.clone())
+        .execute(
+            serde_json::json!({"todos": [{"content": "CHILD: write the projection", "status": "in_progress"}]}),
+            &context,
+        )
+        .await
+        .expect("child work_update");
+
+    let first = source.snapshot().await;
+    assert!(work_state_worth_publishing(last.as_ref(), &first));
+    last = Some(first.clone());
+    assert_eq!(first.items.len(), 1);
+    assert_eq!(first.items[0].content, "CHILD: write the projection");
+    assert!(
+        !first
+            .items
+            .iter()
+            .any(|item| item.content.starts_with("PARENT:")),
+        "a child snapshot must never carry the parent's ledger: {first:?}"
+    );
+
+    // Same snapshot on the next tool call: not news.
+    let again = source.snapshot().await;
+    assert!(!work_state_worth_publishing(last.as_ref(), &again));
+
+    // A real transition, including back to empty, is published.
+    crate::tools::todo::TodoWriteTool::work_update(child_todos.clone())
+        .execute(serde_json::json!({"todos": []}), &context)
+        .await
+        .expect("child clears its list");
+    let cleared = source.snapshot().await;
+    assert!(cleared.is_empty());
+    assert!(work_state_worth_publishing(last.as_ref(), &cleared));
+
+    // The parent's own ledger is untouched by any of this.
+    let parent = parent_todos.lock().await.snapshot();
+    assert_eq!(parent.items.len(), 1);
+    assert_eq!(parent.items[0].content, "PARENT: ship the release");
+}
