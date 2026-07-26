@@ -578,6 +578,20 @@ mod tests {
     }
 
     #[test]
+    fn invalid_marker_is_repaired_even_when_no_skill_body_changes() {
+        let tmp = TempDir::new().unwrap();
+        install_system_skills(tmp.path()).unwrap();
+        fs::write(marker_file(&tmp), "").unwrap();
+
+        install_system_skills(tmp.path()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(marker_file(&tmp)).unwrap().trim(),
+            BUNDLED_SKILL_VERSION
+        );
+    }
+
+    #[test]
     fn bundled_catalog_has_two_complete_truthful_tiers() {
         for skill in BUNDLED_SKILLS {
             assert!(
