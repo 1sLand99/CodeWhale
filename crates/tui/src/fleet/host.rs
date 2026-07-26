@@ -1079,12 +1079,12 @@ fn unix_process_ids_uncached() -> FleetHostResult<Vec<libc::pid_t>> {
 
 #[cfg(all(unix, not(target_os = "linux")))]
 fn unix_process_ids() -> FleetHostResult<Vec<libc::pid_t>> {
-    if let Some(available) = process_table_probe_cell().get() {
-        if !*available {
-            return Err(FleetHostError::retryable(
-                "listing Fleet session with ps: process-table inspection unavailable",
-            ));
-        }
+    if let Some(available) = process_table_probe_cell().get()
+        && !*available
+    {
+        return Err(FleetHostError::retryable(
+            "listing Fleet session with ps: process-table inspection unavailable",
+        ));
     }
     match unix_process_ids_uncached() {
         Ok(pids) => {
@@ -1154,10 +1154,10 @@ fn signal_unix_session(
     // Prefer known leader first so stop/interrupt still works when the full
     // process table cannot be enumerated under a restricted sandbox.
     let mut candidates = unix_session_members(session_id, known_leader)?;
-    if candidates.is_empty() {
-        if let Some(leader) = known_leader.filter(|pid| *pid > 0) {
-            candidates.push(leader);
-        }
+    if candidates.is_empty()
+        && let Some(leader) = known_leader.filter(|pid| *pid > 0)
+    {
+        candidates.push(leader);
     }
     for pid in candidates {
         // Verify identity again immediately before signalling. Session IDs

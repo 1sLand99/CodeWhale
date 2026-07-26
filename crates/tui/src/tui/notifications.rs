@@ -410,10 +410,10 @@ pub fn start_title_animation(original: &str) {
     if let Ok(mut base) = title_animation_base().lock() {
         original.clone_into(&mut base);
     }
-    if let Ok(mut verb) = title_activity_verb().lock() {
-        if verb.is_empty() {
-            "working…".clone_into(&mut *verb);
-        }
+    if let Ok(mut verb) = title_activity_verb().lock()
+        && verb.is_empty()
+    {
+        "working…".clone_into(&mut *verb);
     }
     COMPLETION_MARKER_SHOWN.store(false, Ordering::SeqCst);
     TITLE_ANIMATION_RUNNING.store(true, Ordering::SeqCst);
