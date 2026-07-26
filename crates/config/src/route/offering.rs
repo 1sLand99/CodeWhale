@@ -162,6 +162,7 @@ pub fn bundled_offerings() -> Vec<ProviderModelOffering> {
                 endpoint_key: endpoint_key.to_string(),
                 default_for_provider: *model == "gpt-5.5",
                 limits: RouteLimits::default(),
+                capabilities: RouteCapabilities::default(),
                 pricing: PricingSku::UnknownOrStale,
             })
         })

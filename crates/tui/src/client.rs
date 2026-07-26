@@ -21,9 +21,7 @@ use codewhale_config::catalog::{
     ProviderCatalogCache, ProviderCatalogDelta, base_url_fingerprint, now_unix,
 };
 use codewhale_config::provider::WireFormat;
-use codewhale_config::route::{
-    LogicalModelRef, ReadyRouteCandidate, RouteRequest, RouteResolver,
-};
+use codewhale_config::route::{LogicalModelRef, ReadyRouteCandidate, RouteRequest, RouteResolver};
 use codewhale_config::{auth_mode_disables_api_key, is_upstream_auth_header};
 
 use crate::config::{
@@ -1370,16 +1368,6 @@ fn is_auth_dialect_header(header_name: &HeaderName) -> bool {
     header_name == AUTHORIZATION
         || header_name == HeaderName::from_static("api-key")
         || header_name == HeaderName::from_static("x-api-key")
-}
-
-fn api_provider_uses_anthropic_messages(api_provider: ApiProvider) -> bool {
-    matches!(
-        api_provider,
-        ApiProvider::Anthropic
-            | ApiProvider::DeepseekAnthropic
-            | ApiProvider::MinimaxAnthropic
-            | ApiProvider::Openmodel
-    )
 }
 
 fn provider_default_wire_format(api_provider: ApiProvider) -> WireFormat {

@@ -19,7 +19,7 @@ use crate::models::{
 use crate::tools::schema_sanitize;
 
 use super::{
-    DeepSeekClient, ERROR_BODY_MAX_BYTES, bounded_error_text, from_api_tool_name,
+    DeepSeekClient, ERROR_BODY_MAX_BYTES, api_url, bounded_error_text, from_api_tool_name,
     system_to_instructions, to_api_tool_name,
 };
 

@@ -2972,12 +2972,12 @@ fn load_project_config_keeps_unknown_provider_names_strict() {
     fs::create_dir_all(&config_dir).expect("mkdir project config");
     fs::write(
         config_dir.join(CONFIG_FILE_NAME),
-        r#"provider = "opencode_zen"
+        r#"provider = "acme_zen_gateway"
 model = "must-not-apply"
 
-[providers.opencode_zen]
+[providers.acme_zen_gateway]
 kind = "openai-compatible"
-base_url = "https://opencode.example/v1"
+base_url = "https://acme.example/v1"
 "#,
     )
     .expect("write project config");
@@ -2992,7 +2992,7 @@ base_url = "https://opencode.example/v1"
         .map(|(path, reason)| (path.to_path_buf(), reason.to_string()))
         .expect("unknown provider must report why the config was rejected");
     assert!(path.ends_with(CONFIG_FILE_NAME), "{path:?}");
-    assert!(reason.contains("opencode_zen"), "{reason}");
+    assert!(reason.contains("acme_zen_gateway"), "{reason}");
 }
 
 #[test]
@@ -3782,23 +3782,23 @@ fn config_store_preserves_named_custom_provider_identity_across_typed_dispatch_r
     fs::write(
         &path,
         r#"# written by the TUI custom-provider flow
-provider = "opencode_zen"
+provider = "acme_zen_gateway"
 
-[providers.opencode_zen]
+[providers.acme_zen_gateway]
 kind = "openai-compatible"
-base_url = "https://opencode.example/v1"
+base_url = "https://acme.example/v1"
 model = "deepseek-v4-flash-free"
-api_key_env = "OPENCODE_ZEN_API_KEY"
+api_key_env = "ACME_ZEN_GATEWAY_API_KEY"
 "#,
     )
     .expect("custom provider fixture");
 
     let mut store = ConfigStore::load(Some(path.clone())).expect("dispatcher config should load");
     assert_eq!(store.config.provider, ProviderKind::Custom);
-    assert_eq!(store.config.provider_id(), "opencode_zen");
+    assert_eq!(store.config.provider_id(), "acme_zen_gateway");
     assert_eq!(
         store.config.get_value("provider").as_deref(),
-        Some("opencode_zen")
+        Some("acme_zen_gateway")
     );
     assert_eq!(
         store
@@ -3806,7 +3806,7 @@ api_key_env = "OPENCODE_ZEN_API_KEY"
             .list_values()
             .get("provider")
             .map(String::as_str),
-        Some("opencode_zen")
+        Some("acme_zen_gateway")
     );
 
     let resolved = store
@@ -3814,7 +3814,7 @@ api_key_env = "OPENCODE_ZEN_API_KEY"
         .resolve_runtime_options(&CliRuntimeOverrides::default());
     assert_eq!(resolved.provider, ProviderKind::Custom);
     assert_eq!(resolved.provider_source, ProviderSource::Config);
-    assert_eq!(resolved.base_url, "https://opencode.example/v1");
+    assert_eq!(resolved.base_url, "https://acme.example/v1");
     assert_eq!(resolved.model, "deepseek-v4-flash-free");
 
     store
@@ -3825,7 +3825,7 @@ api_key_env = "OPENCODE_ZEN_API_KEY"
         .rendered_body()
         .expect("render custom provider config");
     assert!(
-        rendered.contains("provider = \"opencode_zen\""),
+        rendered.contains("provider = \"acme_zen_gateway\""),
         "{rendered}"
     );
     assert!(!rendered.contains("provider = \"custom\""), "{rendered}");
@@ -3833,18 +3833,18 @@ api_key_env = "OPENCODE_ZEN_API_KEY"
 
     store.save().expect("save custom provider config");
     let reloaded = ConfigStore::load(Some(path)).expect("reload custom provider config");
-    assert_eq!(reloaded.config.provider_id(), "opencode_zen");
+    assert_eq!(reloaded.config.provider_id(), "acme_zen_gateway");
 }
 
 #[test]
 fn named_custom_root_provider_requires_a_matching_openai_compatible_table() {
     for body in [
-        "provider = \"opencode_zen\"\n",
-        r#"provider = "opencode_zen"
+        "provider = \"acme_zen_gateway\"\n",
+        r#"provider = "acme_zen_gateway"
 
-[providers.opencode_zen]
+[providers.acme_zen_gateway]
 kind = "anthropic-messages"
-base_url = "https://opencode.example/v1"
+base_url = "https://acme.example/v1"
 "#,
     ] {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3852,7 +3852,7 @@ base_url = "https://opencode.example/v1"
         fs::write(&path, body).expect("invalid custom provider fixture");
         let err = ConfigStore::load(Some(path)).expect_err("invalid custom route should fail");
         let message = format!("{err:#}");
-        assert!(message.contains("opencode_zen"), "{message}");
+        assert!(message.contains("acme_zen_gateway"), "{message}");
         assert!(message.contains("openai-compatible") || message.contains("matching"));
     }
 }
@@ -4207,10 +4207,11 @@ model = "gpt-5.5"
             model_selector: Some(crate::route::LogicalModelRef::from("gpt-5.5")),
             saved_provider_model: None,
             base_url_override: None,
+            limit_overrides: Vec::new(),
         })
         .expect("documented Zen model must resolve");
-    assert_eq!(route.protocol, crate::route::RequestProtocol::Responses);
-    assert_eq!(route.endpoint.endpoint_key, "responses");
+    assert_eq!(route.protocol(), crate::route::RequestProtocol::Responses);
+    assert_eq!(route.endpoint().endpoint_key, "responses");
 }
 
 #[test]

@@ -932,10 +932,10 @@ fn opencode_zen_resolver_selects_protocol_from_documented_model_catalog() {
                 let route = resolver
                     .resolve(&req(Some(ProviderKind::OpencodeZen), Some(&requested)))
                     .unwrap_or_else(|error| panic!("{requested} should resolve: {error}"));
-                assert_eq!(route.provider_kind, ProviderKind::OpencodeZen);
-                assert_eq!(route.wire_model_id.as_str(), *model, "{requested}");
-                assert_eq!(route.endpoint.endpoint_key, endpoint_key, "{requested}");
-                assert_eq!(route.protocol, protocol, "{requested}");
+                assert_eq!(route.provider_kind(), ProviderKind::OpencodeZen);
+                assert_eq!(route.wire_model_id().as_str(), *model, "{requested}");
+                assert_eq!(route.endpoint().endpoint_key, endpoint_key, "{requested}");
+                assert_eq!(route.protocol(), protocol, "{requested}");
             }
         }
     }
@@ -943,8 +943,8 @@ fn opencode_zen_resolver_selects_protocol_from_documented_model_catalog() {
     let automatic = resolver
         .resolve(&req(Some(ProviderKind::OpencodeZen), Some("auto")))
         .expect("OpenCode Zen auto should resolve to its documented default");
-    assert_eq!(automatic.wire_model_id.as_str(), "gpt-5.5");
-    assert_eq!(automatic.protocol, RequestProtocol::Responses);
+    assert_eq!(automatic.wire_model_id().as_str(), "gpt-5.5");
+    assert_eq!(automatic.protocol(), RequestProtocol::Responses);
 }
 
 #[test]
@@ -965,6 +965,7 @@ fn opencode_zen_resolver_fails_closed_for_unproven_protocols() {
                 model_selector: Some(LogicalModelRef::from(model)),
                 saved_provider_model: None,
                 base_url_override,
+                limit_overrides: Vec::new(),
             };
             assert!(
                 matches!(
@@ -1073,7 +1074,7 @@ fn resolver_protocol_matches_descriptor_for_every_provider() {
         assert_eq!(
             out.protocol(),
             ProviderDescriptor::for_kind(kind)
-                .protocol_for_endpoint(&out.endpoint.endpoint_key)
+                .protocol_for_endpoint(&out.endpoint().endpoint_key)
                 .expect("resolved endpoint protocol"),
             "{kind:?} candidate protocol must match descriptor"
         );

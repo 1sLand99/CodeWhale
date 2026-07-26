@@ -350,6 +350,10 @@ Kimi remains API-key-only; external consent for Kimi is rejected.
 
 ### OpenCode Zen protocol catalog
 
+Zen Responses and Chat Completions requests authenticate with Bearer
+`Authorization`; Zen Anthropic Messages requests use `x-api-key`. None of these
+routes add ChatGPT/Codex OAuth headers.
+
 The bundled Zen transport snapshot follows the [official endpoint
 table](https://opencode.ai/docs/zen/) and is intentionally explicit:
 

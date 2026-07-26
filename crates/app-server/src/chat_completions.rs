@@ -144,7 +144,7 @@ fn resolve_endpoint(
 
     let insecure_skip_tls_verify = provider_cfg.insecure_skip_tls_verify.unwrap_or(false);
 
-    let wire_format = route.protocol;
+    let wire_format = route.protocol();
 
     Ok(ResolvedModelEndpoint {
         provider: provider_kind,

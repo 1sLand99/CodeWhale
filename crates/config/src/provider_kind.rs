@@ -154,7 +154,7 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 37] = [
         Self::Deepseek,
         Self::DeepseekAnthropic,
         Self::NvidiaNim,
