@@ -4161,6 +4161,8 @@ model = "glm-5.2"
 
 #[test]
 fn opencode_zen_configures_model_aware_provider_with_catalog_proof() {
+    let _lock = env_lock();
+    let _env = EnvGuard::without_deepseek_runtime_overrides();
     for alias in [
         "opencode-zen",
         "opencode_zen",
