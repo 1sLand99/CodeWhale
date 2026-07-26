@@ -12370,3 +12370,88 @@ async fn background_completion_after_a_turn_is_delivered_once_on_the_next_turn()
         "a completion must not be delivered twice across turn boundaries"
     );
 }
+
+/// #3738 acceptance: the cacheable prefix must be byte-stable across turns
+/// when mode and context are unchanged.
+///
+/// Providers cache on the longest common prefix of the request, so anything
+/// that rewrites an *already-sent* message — or the system prompt — between
+/// turns invalidates every cached token after it and silently raises cost.
+/// This is easy to regress because per-turn `<turn_meta>` legitimately varies
+/// (context pressure and session token totals change every turn); what makes
+/// that safe is that a message is frozen once it enters the session.
+///
+/// The test pins both halves of that contract:
+///   1. `<turn_meta>` is the *last* content block of a user message, so the
+///      leading bytes of each user message stay stable (#4780).
+///   2. Appending turn N+1 leaves the system prompt and every earlier message
+///      byte-identical.
+#[tokio::test]
+async fn cacheable_prefix_is_byte_stable_across_unchanged_turns() {
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+
+    fn serialize(messages: &[Message]) -> Vec<String> {
+        messages
+            .iter()
+            .map(|m| serde_json::to_string(m).expect("serializable message"))
+            .collect()
+    }
+
+    // Turn 1: a user message plus an assistant reply, as a real turn leaves.
+    let first = engine.user_text_message_with_turn_metadata("first request".to_string());
+
+    // (1) turn_meta rides last, so the user's own text leads the message.
+    let last_block = first.content.last().expect("content");
+    let ContentBlock::Text { text: meta, .. } = last_block else {
+        panic!("expected trailing text block");
+    };
+    assert!(
+        meta.starts_with("<turn_meta>"),
+        "turn_meta must be the trailing block so leading bytes stay stable: {meta}"
+    );
+    let ContentBlock::Text { text: lead, .. } = &first.content[0] else {
+        panic!("expected leading text block");
+    };
+    assert_eq!(lead, "first request");
+
+    engine.session.add_message(first);
+    engine.session.add_message(Message {
+        role: "assistant".to_string(),
+        content: vec![ContentBlock::Text {
+            text: "first reply".to_string(),
+            cache_control: None,
+        }],
+    });
+
+    let prefix_before = serialize(&engine.session.messages.iter().cloned().collect::<Vec<_>>());
+    let system_before = engine.session.system_prompt.clone();
+
+    // Turn 2: nothing about mode or context changed.
+    let second = engine.user_text_message_with_turn_metadata("second request".to_string());
+    engine.session.add_message(second);
+
+    let after = serialize(&engine.session.messages.iter().cloned().collect::<Vec<_>>());
+
+    // (2) Everything sent before this turn is untouched — that span is what
+    // the provider can serve from cache.
+    assert_eq!(
+        after.len(),
+        prefix_before.len() + 1,
+        "a turn must append exactly one user message"
+    );
+    for (idx, (before, now)) in prefix_before.iter().zip(after.iter()).enumerate() {
+        assert_eq!(
+            before, now,
+            "message {idx} was rewritten between turns; every cached token after it is lost"
+        );
+    }
+    assert_eq!(
+        system_before, engine.session.system_prompt,
+        "the system prompt must not churn on an unchanged-mode turn"
+    );
+}
