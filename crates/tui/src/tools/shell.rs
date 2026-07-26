@@ -2128,6 +2128,30 @@ impl ShellManager {
         events
     }
 
+    /// Return agent owners whose tracked shell work is still running. The
+    /// engine uses this to keep a worker's heartbeat alive while its only
+    /// pending work is an explicitly tracked background shell task.
+    pub fn running_owner_agent_ids(&mut self) -> Vec<String> {
+        let mut owners = self
+            .processes
+            .values_mut()
+            .filter_map(|shell| {
+                shell.poll();
+                (shell.status == ShellStatus::Running)
+                    .then(|| {
+                        shell
+                            .owner_agent
+                            .as_ref()
+                            .map(|owner| owner.agent_id.clone())
+                    })
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        owners.sort();
+        owners.dedup();
+        owners
+    }
+
     /// Remember a restart-stale job so the UI can show it instead of hiding it.
     #[allow(dead_code)]
     pub fn remember_stale_job(
@@ -3127,11 +3151,11 @@ impl ToolSpec for BashTool {
                 } else if result.status == ShellStatus::Running {
                     if backgrounded_foreground {
                         format!(
-                            "Foreground shell wait moved to /jobs: {task_id_str}\n\nReturns immediately; completion is tracked in task/status state. Keep working; call exec_shell_wait only if you need early output, final output, or wait=true at a true dependency."
+                            "Foreground shell wait moved to /jobs: {task_id_str}\n\nReturns immediately; completion is delivered to the model as an internal runtime event and shown in task/status state. Keep working; call exec_shell_wait only if you need early output, final output, or wait=true at a true dependency."
                         )
                     } else {
                         format!(
-                            "Background task started: {task_id_str}\n\nReturns immediately; completion is tracked in task/status state. Keep working; call exec_shell_wait only if you need early output, final output, or wait=true at a true dependency."
+                            "Background task started: {task_id_str}\n\nReturns immediately; completion is delivered to the model as an internal runtime event and shown in task/status state. Keep working; call exec_shell_wait only if you need early output, final output, or wait=true at a true dependency."
                         )
                     }
                 } else if result.status == ShellStatus::Killed && was_cancelled {
@@ -3213,8 +3237,8 @@ impl ToolSpec for BashTool {
                 });
                 metadata["backgrounded"] = json!(background || backgrounded_foreground);
                 if background || backgrounded_foreground {
-                    metadata["auto_resume_on_completion"] = json!(false);
-                    metadata["completion_surface"] = json!("task_status");
+                    metadata["auto_resume_on_completion"] = json!(true);
+                    metadata["completion_surface"] = json!("runtime_event_and_task_status");
                     metadata["background_policy"] = json!("nonblocking");
                 }
                 if result.status == ShellStatus::TimedOut && !background && !interactive {

@@ -1976,6 +1976,7 @@ impl Engine {
                         // during a sub-agent fanout no longer contends for the
                         // write lock (against completions/persistence) on every
                         // request. Cleanup still auto-cancels stale agents.
+                        self.touch_workers_with_running_shells().await;
                         let due = {
                             let manager = self.subagent_manager.read().await;
                             manager.cleanup_due(
@@ -3116,6 +3117,22 @@ impl Engine {
             return outcome;
         }
 
+        // Deliver completions that arrived after the previous turn before the
+        // next user request is sent. This keeps background shell work
+        // model-visible without requiring an explicit wait/poll tool call.
+        let shell_completions = self.drain_shell_completion_events();
+        if !shell_completions.is_empty() {
+            self.add_session_message(crate::runtime_handoff::shell_completion_runtime_message(
+                &shell_completions,
+            ))
+            .await;
+            if let Some(status) =
+                crate::core::engine::turn_loop::shell_completion_status_text(&shell_completions, "")
+            {
+                let _ = self.tx_event.send(Event::status(status)).await;
+            }
+        }
+
         let input_policy = effective_input_policy(
             provenance,
             mode,
@@ -3594,6 +3611,7 @@ impl Engine {
     /// Capture typed live state for post-compact rehydrate (todos, workers,
     /// shells, mode, permission). Pure formatting lives in compaction.rs.
     async fn capture_compaction_live_state(&self) -> CompactionLiveState {
+        self.touch_workers_with_running_shells().await;
         let todos = {
             let guard = self.config.todos.lock().await;
             let snap = guard.snapshot();
