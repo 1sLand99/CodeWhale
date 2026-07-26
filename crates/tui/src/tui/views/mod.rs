@@ -3882,6 +3882,7 @@ fn live_subagent_result(
         nickname,
         status,
         worker_status: None,
+        runtime_permissions: None,
         parent_run_id: None,
         spawn_depth: 0,
         result: None,
@@ -4193,6 +4194,21 @@ fn append_subagent_group(
             lines.push(Line::from(vec![
                 Span::styled("    role: ", Style::default().fg(palette::TEXT_MUTED)),
                 Span::styled(role, Style::default().fg(palette::WHALE_INFO)),
+            ]));
+        }
+
+        if let Some(permissions) = agent.runtime_permissions.as_ref() {
+            let posture = format!(
+                "network={} · shell={} · write={}",
+                if permissions.network { "on" } else { "off" },
+                permissions.shell,
+                if permissions.write { "on" } else { "off" },
+            );
+            let max_len = content_width.saturating_sub(18);
+            let posture = truncate_view_text(&posture, max_len);
+            lines.push(Line::from(vec![
+                Span::styled("    posture: ", Style::default().fg(palette::TEXT_MUTED)),
+                Span::styled(posture, Style::default().fg(palette::WHALE_INFO)),
             ]));
         }
 
@@ -4639,6 +4655,7 @@ mod tests {
             nickname: None,
             status,
             worker_status: None,
+            runtime_permissions: None,
             parent_run_id: None,
             spawn_depth: 0,
             result: None,

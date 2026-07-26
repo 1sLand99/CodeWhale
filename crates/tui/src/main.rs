@@ -2569,6 +2569,9 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
                 "fleet run: {} tasks={} leased={} queued={}",
                 report.run_id.0, report.task_count, report.leased, report.queued
             );
+            for warning in &report.warnings {
+                println!("warning: {warning}");
+            }
             println!("workers:");
             for worker_id in &report.worker_ids {
                 println!("  {worker_id}");

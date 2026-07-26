@@ -1047,7 +1047,7 @@ pub(crate) fn fleet_effective_permissions_for_task(
     fleet_effective_permissions_from_runtime_profile(&spec.runtime_profile, agent_profile)
 }
 
-fn fleet_effective_permissions_from_runtime_profile(
+pub(crate) fn fleet_effective_permissions_from_runtime_profile(
     profile: &WorkerRuntimeProfile,
     agent_profile: Option<&AgentProfile>,
 ) -> FleetEffectivePermissions {
@@ -1067,6 +1067,74 @@ fn fleet_effective_permissions_from_runtime_profile(
             .map(|profile| profile_origin_label(profile.origin).to_string()),
         source: "worker_runtime_profile".to_string(),
     }
+}
+
+/// Return a truthful dispatch warning when a brief asks for network-backed
+/// verification but the selected Fleet role cannot use the network.
+pub(crate) fn network_posture_warning_for_task(
+    task: &FleetTaskSpec,
+    agent_profiles: &[AgentProfile],
+    session_model: Option<&str>,
+) -> Option<String> {
+    let brief = format!(
+        "{}\n{}\n{}",
+        task.name,
+        task.objective.as_deref().unwrap_or_default(),
+        task.instructions
+    );
+    let lower = brief.to_ascii_lowercase();
+    let asks_for_network = [
+        "gh ",
+        "gh\n",
+        "github",
+        "curl ",
+        "wget ",
+        "http://",
+        "https://",
+        "network",
+        "web search",
+        "check ci",
+        "check the pr",
+        "check the issue",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    if !asks_for_network {
+        return None;
+    }
+
+    let agent_profile = resolve_task_agent_profile(task, agent_profiles)
+        .ok()
+        .flatten();
+    let worker_profile = task.worker.as_ref();
+    let role = effective_fleet_role(worker_profile, agent_profile);
+    let agent_type = fleet_role_to_agent_type(role.as_deref());
+    let tool_profile = fleet_tool_profile(worker_profile);
+    let (model, model_source) = effective_fleet_model_with_source(
+        session_model.unwrap_or("auto"),
+        worker_profile,
+        agent_profile,
+    );
+    let loadout = effective_fleet_loadout(worker_profile, agent_profile);
+    let runtime = fleet_worker_runtime_profile_for_loadout(
+        &agent_type,
+        &tool_profile,
+        &model,
+        0,
+        codewhale_config::FleetExecConfig::default().max_spawn_depth,
+        &loadout,
+        model_source,
+    );
+    if runtime.permissions.network {
+        return None;
+    }
+
+    Some(format!(
+        "Fleet task `{}` mentions network-backed verification, but role `{}` has network=off and shell={}. Dispatch a `worker` role with shell `read_only` for gh/curl evidence, or revise the brief.",
+        task.id,
+        role.as_deref().unwrap_or("worker"),
+        shell_policy_label(runtime.shell),
+    ))
 }
 
 fn profile_origin_label(origin: crate::fleet::roster::ProfileOrigin) -> &'static str {
@@ -1609,6 +1677,47 @@ mod tests {
             fleet_tool_profile(Some(&profile)),
             AgentWorkerToolProfile::Explicit(vec!["cargo".to_string(), "git".to_string()])
         );
+    }
+
+    #[test]
+    fn network_brief_warns_for_networkless_reviewer_but_not_worker() {
+        let reviewer = fleet_task(
+            "triage",
+            Some(worker_profile(
+                None,
+                Some("reviewer"),
+                None,
+                None,
+                None,
+                vec!["read_file"],
+            )),
+        );
+        let mut reviewer = reviewer;
+        reviewer.instructions = "Use gh to check the PR and report CI evidence.".to_string();
+        let warning = network_posture_warning_for_task(&reviewer, &[], None)
+            .expect("network-dependent reviewer brief should warn");
+        assert!(warning.contains("network=off"));
+        assert!(warning.contains("worker"));
+
+        let mut worker = reviewer.clone();
+        worker.worker.as_mut().unwrap().role = Some("worker".to_string());
+        assert!(network_posture_warning_for_task(&worker, &[], None).is_none());
+    }
+
+    #[test]
+    fn non_network_brief_does_not_warn_for_networkless_role() {
+        let task = fleet_task(
+            "local-review",
+            Some(worker_profile(
+                None,
+                Some("reviewer"),
+                None,
+                None,
+                None,
+                vec!["read_file"],
+            )),
+        );
+        assert!(network_posture_warning_for_task(&task, &[], None).is_none());
     }
 
     #[test]

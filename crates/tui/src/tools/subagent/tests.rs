@@ -155,6 +155,7 @@ fn make_snapshot(status: SubAgentStatus) -> SubAgentResult {
         nickname: None,
         status,
         worker_status: None,
+        runtime_permissions: None,
         parent_run_id: None,
         spawn_depth: 0,
         result: None,
