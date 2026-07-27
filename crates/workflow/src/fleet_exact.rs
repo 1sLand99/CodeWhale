@@ -1116,7 +1116,9 @@ reasoning = "auto"
             // canonical name, and a caller still spelling the legacy one lands
             // on the same member rather than on nothing.
             assert_eq!(
-                fleet.member_by_role(legacy).map(|member| member.id.as_str()),
+                fleet
+                    .member_by_role(legacy)
+                    .map(|member| member.id.as_str()),
                 fleet
                     .member_by_role("consultant")
                     .map(|member| member.id.as_str()),

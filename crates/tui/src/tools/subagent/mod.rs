@@ -37,7 +37,9 @@ use crate::models::{
     ContentBlock, Message, MessageRequest, MessageResponse, SystemPrompt, Tool, Usage,
 };
 use crate::request_tuning::RequestTuning;
-use crate::tools::canonical_action::{CANONICAL_ACTION_ALIASES, canonical_action_alias};
+use crate::tools::canonical_action::{
+    CANONICAL_ACTION_ALIASES, canonical_action_alias, is_action_family,
+};
 use crate::tools::handle::VarHandle;
 use crate::tools::plan::{PlanState, SharedPlanState};
 use crate::tools::registry::{AgentToolSurfaceOptions, ToolRegistry, ToolRegistryBuilder};
@@ -1709,6 +1711,15 @@ pub(crate) struct WorkflowTaskSpawnIdentity {
     pub workflow_phase_id: Option<String>,
     pub workflow_task_label: Option<String>,
     pub workflow_child_index: u32,
+    /// Fingerprint of the exact-Fleet permission envelope this task was routed
+    /// under, taken from the durable receipt.
+    ///
+    /// `None` for every non-Fleet task. When it is `Some`,
+    /// [`spawn_workflow_task`] recomputes the fingerprint from the spawn input
+    /// it actually built and refuses the launch on any difference. That check is
+    /// what makes the Fleet's clamped authority a property of the child that
+    /// runs rather than a value recorded next to it.
+    pub fleet_authority_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1840,6 +1851,11 @@ struct SpawnRequest {
     /// default does not.
     model_strength_explicit: bool,
     thinking: SubAgentThinking,
+    /// True when the caller supplied `thinking`/`reasoning_effort` explicitly.
+    /// A saved Fleet profile's reasoning tier only applies when the caller did
+    /// not — an explicit spawn-time tier always wins (#4137 parity with the
+    /// headless `codewhale exec` launch path).
+    thinking_explicit: bool,
     /// Optional working directory for the child. Must canonicalize to a path
     /// inside the parent's workspace. For first-class git worktree isolation,
     /// use `worktree` instead of pre-creating a cwd by hand.
@@ -7263,7 +7279,14 @@ async fn spawn_subagent_from_input(
     // drops *only* the inherited list; an explicit caller `disallowed_tools`
     // always applies (union, deny never relaxes).
     if !spawn_request.inherit_disallowed_tools {
-        child_runtime.worker_profile.denied_tools.clear();
+        // Drops the *preference* half of the inherited list only. A rule that
+        // expresses an enforced ceiling survives, because a child that could
+        // clear it would be widening its parent's network/write/execution
+        // envelope by asking — see `crate::fleet::exact::is_posture_denial`.
+        child_runtime
+            .worker_profile
+            .denied_tools
+            .retain(|rule| crate::fleet::exact::is_posture_denial(rule));
     }
     if let Some(ref caller_deny) = spawn_request.disallowed_tools {
         for tool in caller_deny {
@@ -7558,6 +7581,12 @@ pub(crate) async fn spawn_workflow_task(
     if let Some(value) = request.allowed_tools {
         input["allowed_tools"] = json!(value);
     }
+    // A host-derived ceiling (e.g. an exact Fleet member's
+    // `network_tool = false`) reaches the child as a deny list, which the child
+    // registry applies to both the model-visible surface and the call guard.
+    if !request.disallowed_tools.is_empty() {
+        input["disallowed_tools"] = json!(request.disallowed_tools);
+    }
     if let Some(value) = request.max_depth {
         input["max_depth"] = json!(value);
     }
@@ -7569,6 +7598,18 @@ pub(crate) async fn spawn_workflow_task(
     }
     if let Some(value) = request.wall_time_secs {
         input["wall_time_secs"] = json!(value);
+    }
+    // An exact-Fleet task must arrive here carrying the envelope its receipt
+    // names, and the input just built is the last place both are visible. A
+    // missing, stale, or mismatched fingerprint fails the spawn closed rather
+    // than launching a child whose surface nobody can tie back to a decision.
+    if let Some(expected) = identity.fleet_authority_fingerprint.as_deref() {
+        // `spawn_workflow_task` reports `ToolError`, so the verification's
+        // `anyhow` failure is mapped onto the variant that matches what just
+        // happened: the child's surface could not be authorized, so it is
+        // denied rather than launched.
+        verify_fleet_authority_input(expected, &input)
+            .map_err(|err| ToolError::permission_denied(err.to_string()))?;
     }
     // Workflow children inherit the parent tool surface and auto-accept
     // Suggest-level file edits for write-capable roles. Shell / network / MCP
@@ -7589,6 +7630,82 @@ pub(crate) async fn spawn_workflow_task(
     metadata.workflow_task_label = workflow_task_label;
     metadata.workflow_child_index = Some(identity.workflow_child_index);
     Ok(WorkflowTaskSpawnResult { result, metadata })
+}
+
+/// Check the spawn input against the fingerprint on the Fleet receipt.
+///
+/// The fingerprint is produced by `ChildAuthority::fingerprint` and names every
+/// field of the envelope. Only four of them survive into the spawn input as
+/// distinct keys — `write_authority`, `max_depth`, `allowed_tools`,
+/// `disallowed_tools` — and those are exactly the four this function can and
+/// does verify. The remaining fields (`tools`, `network`, `shell`, `posture`)
+/// are *derivations* the Fleet used to compute those four, so a divergence in
+/// any of them shows up in one of the four; verifying the wire form is
+/// therefore the stronger check, not the weaker one, because it is the value
+/// the child is actually constructed from.
+///
+/// Fails closed in every ambiguous case: an unparseable fingerprint is a
+/// refusal, not a pass.
+fn verify_fleet_authority_input(expected: &str, input: &Value) -> Result<()> {
+    let fields: std::collections::HashMap<&str, &str> = expected
+        .split(';')
+        .filter_map(|part| part.split_once('='))
+        .collect();
+    if !expected.starts_with("v1;") || fields.len() < 8 {
+        return Err(anyhow!(
+            "fleet authority fingerprint `{expected}` is not a form this build understands; \
+             refusing the spawn rather than launching an unverified child"
+        ));
+    }
+
+    let listed = |key: &str| -> String {
+        let mut values: Vec<String> = input
+            .get(key)
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        values.sort();
+        values.dedup();
+        values.join(",")
+    };
+
+    let actual_allow = match input.get("allowed_tools") {
+        None | Some(Value::Null) => "inherit".to_string(),
+        Some(Value::Array(list)) if list.is_empty() => "none".to_string(),
+        Some(_) => listed("allowed_tools"),
+    };
+    let actual_write = input
+        .get("write_authority")
+        .and_then(Value::as_str)
+        .unwrap_or("read_only");
+    let actual_depth = input
+        .get("max_depth")
+        .and_then(Value::as_u64)
+        .map(|depth| depth.to_string())
+        .unwrap_or_default();
+
+    for (key, actual) in [
+        ("write", actual_write.to_string()),
+        ("depth", actual_depth),
+        ("allow", actual_allow),
+        ("deny", listed("disallowed_tools")),
+    ] {
+        let expected_value = fields.get(key).copied().unwrap_or_default();
+        if expected_value != actual {
+            return Err(anyhow!(
+                "fleet authority mismatch at the spawn boundary: the receipt names {key}=`{expected_value}` \
+                 but the child would be constructed with `{actual}`. Refusing the spawn — a Fleet \
+                 ceiling that does not reach the runtime is not a ceiling."
+            ));
+        }
+    }
+    Ok(())
 }
 
 // === Sub-agent Execution ===
@@ -9809,10 +9926,12 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
     // A cheaper sibling is an explicit routing choice through model_strength,
     // a saved Fleet profile, or a concrete model override.
     let model_strength = explicit_model_strength.unwrap_or(SubAgentModelStrength::Same);
-    let thinking = optional_input_str(input, &["thinking", "reasoning_effort", "reasoningEffort"])
-        .map(SubAgentThinking::parse)
-        .transpose()?
-        .unwrap_or(SubAgentThinking::Inherit);
+    let explicit_thinking =
+        optional_input_str(input, &["thinking", "reasoning_effort", "reasoningEffort"])
+            .map(SubAgentThinking::parse)
+            .transpose()?;
+    let thinking_explicit = explicit_thinking.is_some();
+    let thinking = explicit_thinking.unwrap_or(SubAgentThinking::Inherit);
     let resident_file = input
         .get("resident_file")
         .and_then(|v| v.as_str())
@@ -9975,6 +10094,7 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         model_strength,
         model_strength_explicit,
         thinking,
+        thinking_explicit,
         cwd,
         worktree,
         resident_file,
@@ -10265,6 +10385,27 @@ fn apply_spawn_profile(
     } else {
         role_name.to_string()
     });
+
+    // A saved Fleet profile's reasoning tier must reach the spawn, not just the
+    // headless `codewhale exec` argv. Without this, `agent { profile: "x" }`
+    // (direct AND workflow spawn, which share this path) silently ran on the
+    // session tier while the same profile launched as a Fleet subprocess ran on
+    // its own. An explicit caller `thinking` still wins.
+    if !request.thinking_explicit
+        && let Some(effort) =
+            crate::fleet::worker_runtime::effective_fleet_reasoning_effort(Some(member))
+    {
+        // `inherit` is the profile saying "no opinion"; leave the session tier.
+        if !effort.eq_ignore_ascii_case("inherit") {
+            request.thinking = SubAgentThinking::parse(&effort).map_err(|_| {
+                ToolError::invalid_input(format!(
+                    "fleet profile '{}' has invalid reasoning_effort '{effort}'; expected \
+                     inherit, auto, off, low, medium, high, or max",
+                    member.id
+                ))
+            })?;
+        }
+    }
 
     if let Some(overlay) = spawn_profile_prompt_overlay(member) {
         request.prompt.push_str(&overlay);
@@ -10834,7 +10975,16 @@ fn fallback_subagent_reasoning_effort(
             model,
         )
     };
-    if runtime.reasoning_effort_auto {
+    // `reasoning_effort_auto` is the flag; a literal `"auto"` tier is the same
+    // request by another spelling. A fixed-model Fleet subprocess arrives with
+    // the string and no flag, so treating only the flag as Auto left `"auto"`
+    // to travel raw to a provider that has no such tier.
+    let requested_auto = runtime.reasoning_effort_auto
+        || runtime
+            .reasoning_effort
+            .as_deref()
+            .is_some_and(|effort| ReasoningEffort::from_setting(effort) == ReasoningEffort::Auto);
+    if requested_auto {
         Some(
             normalize(auto_subagent_reasoning_effort(prompt))
                 .as_setting()
@@ -11445,9 +11595,60 @@ fn role_posture_permits(agent_type: &FleetRole, approval: ApprovalRequirement) -
     }
 }
 
+/// Fold an explicit **parent** tool subset into the child's allowlist.
+///
+/// [`ToolScope::Explicit`] is the parent saying "these tools and no others".
+/// The registry only ever consults `allowed_tools`, so a scope that is not
+/// folded in here is a restriction that exists on paper and nowhere else.
+///
+/// - Parent explicit, child explicit → the intersection: a child may narrow
+///   inside its parent's subset and never step outside it.
+/// - Parent explicit, child unrestricted → the parent's subset, which is the
+///   whole point of the parent having declared one.
+/// - Parent unrestricted → the child's own request stands, unchanged.
+fn intersect_explicit_tool_scope(
+    parent: &ToolScope,
+    child: Option<Vec<String>>,
+) -> Option<Vec<String>> {
+    let ToolScope::Explicit(parent) = parent else {
+        return child;
+    };
+    let Some(child) = child else {
+        return Some(parent.clone());
+    };
+    Some(
+        child
+            .into_iter()
+            .filter(|name| explicit_scope_permits(parent, name))
+            .collect(),
+    )
+}
+
+/// Whether an explicit parent scope covers one tool name.
+///
+/// Canonical families and their per-action aliases name the same capability
+/// (`File` ↔ `write_file`), so a parent that granted either form has granted
+/// the child that form's counterpart. Matching is case-insensitive, mirroring
+/// the deny-list comparison.
+fn explicit_scope_permits(parent: &[String], name: &str) -> bool {
+    let matches = |candidate: &str| {
+        parent
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(candidate))
+    };
+    matches(name)
+        || CANONICAL_ACTION_ALIASES.iter().any(|(family, _, alias)| {
+            (name.eq_ignore_ascii_case(family) && matches(alias))
+                || (name.eq_ignore_ascii_case(alias) && matches(family))
+        })
+}
+
 struct SubAgentToolRegistry {
     /// `None` → full inheritance (no allowlist filter applied). `Some(list)` →
-    /// only the listed tools are visible to the model and callable.
+    /// only the listed tools are visible to the model and callable. An explicit
+    /// parent [`ToolScope`] is folded in here by
+    /// [`intersect_explicit_tool_scope`] so the parent's subset is enforced by
+    /// the same filter, rather than being recorded on a profile nobody reads.
     allowed_tools: Option<Vec<String>>,
     /// Tool deny-list inherited from the parent runtime's `worker_profile`
     /// (#4042). Deny always wins over allow, even when a tool is in both the
@@ -11519,6 +11720,14 @@ impl SubAgentToolRegistry {
         // review, and RLM, plus per-child fresh todo/plan state. `agent` is
         // retained only when depth budget remains.
         let can_spawn_child = !runtime.would_exceed_depth();
+        // An explicit parent tool subset has to *bind*, not merely be recorded
+        // on the profile. `derive_child` already intersects the parent's
+        // `ToolScope::Explicit` into the child's contract; until it is folded
+        // into the allowlist the registry actually consults, the child still
+        // sees and can call the parent's full surface — the profile says one
+        // thing and the runtime does another.
+        let allowed_tools =
+            intersect_explicit_tool_scope(&runtime.worker_profile.tools, explicit_allowed_tools);
         let context = runtime.context.clone();
         let coordination_manager = Arc::clone(&runtime.manager);
         let mut surface_options = runtime.agent_tool_surface_options.clone();
@@ -11552,7 +11761,7 @@ impl SubAgentToolRegistry {
         registry.remove_tool("update_goal");
 
         Self {
-            allowed_tools: explicit_allowed_tools,
+            allowed_tools,
             disallowed_tools: runtime.worker_profile.denied_tools.clone(),
             auto_approve: runtime.context.auto_approve,
             accept_edits: runtime.accept_edits,
@@ -11579,32 +11788,24 @@ impl SubAgentToolRegistry {
         matches!(agent_type, FleetRole::Builder | FleetRole::Custom)
     }
 
+    /// Whether a `Required`-level call is the delegated built-in verification
+    /// surface.
+    ///
+    /// `run_tests.args` is raw Cargo argv and can redirect manifests or inject
+    /// toolchain config, so it cannot be delegated wholesale. What *is*
+    /// delegated is decided by the one classifier the envelope also reads
+    /// ([`crate::tools::execution_envelope::classify_verification`]): the fixed
+    /// workspace-root command, and a pure test selection whose every token is
+    /// an allowlisted flag or a separator-free filter. Keeping the judgement in
+    /// one place is what stops this path and the envelope from disagreeing
+    /// about the same call.
     fn is_delegated_builtin_verification(name: &str, input: &Value) -> bool {
-        match name {
-            // `run_tests.args` is raw Cargo argv and can redirect manifests or
-            // inject toolchain config. Only the fixed workspace-root command
-            // (optionally with the structured all_features flag) is delegated.
-            "run_tests" => match input.get("args") {
-                None => true,
-                Some(Value::String(args)) => args.trim().is_empty(),
-                Some(_) => false,
-            },
-            "run_verifiers" => input
-                .get("commands")
-                .map(|commands| commands.as_array().is_some_and(Vec::is_empty))
-                .unwrap_or(true),
-            "Run" => match input.get("action").and_then(Value::as_str) {
-                Some("tests") => input
-                    .get("args")
-                    .is_none_or(|args| args.as_str().is_some_and(|args| args.trim().is_empty())),
-                Some("verifiers") => input
-                    .get("commands")
-                    .map(|commands| commands.as_array().is_some_and(Vec::is_empty))
-                    .unwrap_or(true),
-                _ => false,
-            },
-            _ => false,
-        }
+        use crate::tools::execution_envelope::{VerificationBound, classify_verification};
+
+        matches!(
+            classify_verification(canonical_action_alias(name, input), input),
+            Some(VerificationBound::Default | VerificationBound::Filter)
+        )
     }
 
     /// Whether the role posture permits a given registered tool, independent of
@@ -11699,6 +11900,105 @@ impl SubAgentToolRegistry {
         }
     }
 
+    /// Whether this child's posture removes the network.
+    ///
+    /// Read from both places the posture can arrive so neither has to be
+    /// trusted alone: the worker profile's capability set, and the deny list
+    /// that `network_tool = false` installs
+    /// ([`crate::fleet::exact::NETWORK_DENIAL_SENTINEL`]). Fleet plumbs the deny
+    /// list; ordinary spawn narrowing plumbs the permission set. Either one
+    /// saying "no network" is enough.
+    fn network_is_denied(&self) -> bool {
+        !self.runtime_profile.permissions.network
+            || self.is_tool_denied(crate::fleet::exact::NETWORK_DENIAL_SENTINEL)
+    }
+
+    /// Whether this child's posture removes workspace mutation.
+    fn write_is_denied(&self) -> bool {
+        !self.runtime_profile.permissions.write
+    }
+
+    /// Whether this child's posture removes arbitrary command execution.
+    ///
+    /// Read from both directions for the same reason [`Self::network_is_denied`]
+    /// is: a Fleet ceiling arrives as a deny list, an ordinary spawn narrowing
+    /// arrives as a `ShellPolicy`. Either one saying "no raw shell" is enough.
+    fn shell_is_denied(&self) -> bool {
+        !matches!(self.runtime_profile.shell, ShellPolicy::Full)
+            || self.is_tool_denied(crate::fleet::exact::SHELL_AUTHORITY_SENTINEL)
+    }
+
+    /// The child's real execution authority, assembled once from the posture so
+    /// visibility and dispatch cannot disagree about it.
+    ///
+    /// `network` is deliberately read from the **deny list only**, and not from
+    /// [`Self::network_is_denied`], which is broader. The two answer different
+    /// questions and conflating them was a live over-block:
+    /// `PermissionSet::read_only()` sets `network: false`, so every `scout` /
+    /// `planner` / `reviewer` / `consultant` child carries it — yet web search
+    /// is a normal and intended capability for a read-only researcher, and the
+    /// existing contract only refuses such a child a *URL-addressed* call (see
+    /// `reject_network_reaching_input`). Treating that advisory bit as a hard
+    /// capability denial here would have removed `web_search` from every scout.
+    ///
+    /// The deny-list sentinel means something stronger and narrower: a host
+    /// derived a ceiling (`network_tool = false`) and installed it. That is the
+    /// posture this envelope is entitled to enforce absolutely.
+    fn execution_envelope(&self) -> crate::tools::execution_envelope::ExecutionEnvelope {
+        crate::tools::execution_envelope::ExecutionEnvelope {
+            write: !self.write_is_denied(),
+            network: !self.is_tool_denied(crate::fleet::exact::NETWORK_DENIAL_SENTINEL),
+            shell: !self.shell_is_denied(),
+        }
+    }
+
+    /// The refusal `execute` would produce for this call, or `None` if it would
+    /// be authorized.
+    ///
+    /// Exists so the dispatch-authorization decision is testable without
+    /// standing up the async coordination machinery around it. It is not a
+    /// parallel implementation: it resolves the same spec out of the same
+    /// registry and calls the same guard with the same envelope that
+    /// [`Self::execute`] does.
+    #[cfg(test)]
+    pub(crate) fn envelope_refusal(&self, name: &str, input: &Value) -> Option<String> {
+        let spec = self.registry.get(name)?;
+        crate::tools::execution_envelope::enforce_execution_envelope(
+            name,
+            input,
+            spec.as_ref(),
+            self.execution_envelope(),
+        )
+        .err()
+    }
+
+    /// Whether the envelope permits a call, for the **visibility** filter.
+    ///
+    /// The model-visible catalog is pruned with the same function that refuses
+    /// the call at dispatch, evaluated against a representative input, so a tool
+    /// the child could never run is never advertised. A model that can see a
+    /// tool will try it, and a refusal is a worse experience than an absent
+    /// capability — but the dispatch guard stays authoritative, because only it
+    /// sees the real arguments.
+    fn envelope_permits(&self, name: &str, input: &Value) -> bool {
+        let envelope = self.execution_envelope();
+        if envelope.is_unrestricted() {
+            return true;
+        }
+        match self.registry.get(name) {
+            Some(spec) => crate::tools::execution_envelope::enforce_execution_envelope(
+                name,
+                input,
+                spec.as_ref(),
+                envelope,
+            )
+            .is_ok(),
+            // Unregistered names are handled by the allowlist/availability
+            // checks; this filter has nothing to say about them.
+            None => true,
+        }
+    }
+
     fn tools_for_model(&self, agent_type: &FleetRole) -> Vec<Tool> {
         let _ = agent_type;
         let api_tools = self.registry.to_api_tools();
@@ -11708,7 +12008,7 @@ impl SubAgentToolRegistry {
                 .into_iter()
                 .filter(|tool| {
                     list.contains(&tool.name)
-                        || ["Bash", "File", "Git", "Run", "Web"].contains(&tool.name.as_str())
+                        || is_action_family(&tool.name)
                             && tool.input_schema["properties"]["action"]["enum"]
                                 .as_array()
                                 .is_some_and(|actions| {
@@ -11735,10 +12035,20 @@ impl SubAgentToolRegistry {
             // even sees write/edit/patch (read-only roles) or shell (no-shell
             // roles). Defense-in-depth with the `execute` guard below.
             .filter(|tool| tool.name == "File" || self.posture_permits_tool(&tool.name, None))
+            // The envelope's visibility half. An action family survives here on
+            // the strength of any one permitted action and has its `action`
+            // enum pruned below; a plain tool the envelope refuses outright is
+            // simply absent.
+            .filter(|tool| {
+                if is_action_family(&tool.name) {
+                    return true;
+                }
+                self.envelope_permits(&tool.name, &json!({}))
+            })
             .collect::<Vec<_>>();
 
         for tool in &mut tools {
-            if !["Bash", "File", "Git", "Run", "Web"].contains(&tool.name.as_str()) {
+            if !is_action_family(&tool.name) {
                 continue;
             }
             if let Some(actions) = tool.input_schema["properties"]["action"]["enum"].as_array_mut()
@@ -11754,7 +12064,9 @@ impl SubAgentToolRegistry {
                                 ApprovalRequirement::Suggest,
                             ))
                         || matches!(action, "read" | "list" | "search_name" | "search_content");
-                    posture_allows && self.is_action_allowed(&tool.name, action)
+                    posture_allows
+                        && self.is_action_allowed(&tool.name, action)
+                        && self.envelope_permits(&tool.name, &json!({"action": action}))
                 });
             }
         }
@@ -11837,6 +12149,26 @@ impl SubAgentToolRegistry {
             }
         }
         reject_subagent_terminal_takeover(name, &input)?;
+        if self.network_is_denied() {
+            reject_network_reaching_input(name, &input)?;
+        }
+        if self.write_is_denied() {
+            reject_unbounded_verification(name, &input, !self.shell_is_denied())?;
+        }
+        // The centralized envelope check. Everything above is name- or
+        // shape-specific; this one is derived from the tool's real capabilities
+        // and this call's canonical action, so it also covers the tools no list
+        // in this file can name — repository plugins, runtime MCP server tools,
+        // and anything registered later.
+        if let Some(spec) = self.registry.get(name) {
+            crate::tools::execution_envelope::enforce_execution_envelope(
+                name,
+                &input,
+                spec.as_ref(),
+                self.execution_envelope(),
+            )
+            .map_err(|refusal| anyhow!(refusal))?;
+        }
         let scope_aware_write = matches!(
             name,
             "write_file" | "edit_file" | "apply_patch" | "fim_edit"
@@ -11902,6 +12234,146 @@ impl SubAgentToolRegistry {
 
 fn is_unbounded_shell_run(name: &str, input: &Value) -> bool {
     canonical_action_alias(name, input) == "exec_shell"
+}
+
+/// Parameter names whose *value* is a location to reach, rather than content.
+///
+/// Deliberately a name list and not a scan of every string: a network-denied
+/// child may perfectly well write a file whose body mentions `https://`, or grep
+/// for one. Refusing that would be a false positive with no security value. The
+/// question this guard asks is "is this call *addressed* somewhere remote", and
+/// only a field that names a destination can answer it.
+const URL_BEARING_FIELDS: &[&str] = &[
+    "url",
+    "urls",
+    "uri",
+    "href",
+    "link",
+    "endpoint",
+    "base_url",
+    "target",
+    "pr",
+    "pull_request",
+];
+
+/// Whether a string addresses a remote location over a network scheme.
+///
+/// Scheme-anchored, so a workspace path, a bare filename, or a `git@` remote is
+/// not mistaken for one. `file:` is deliberately absent: it names no host.
+fn is_network_url(value: &str) -> bool {
+    let value = value.trim();
+    let lowered = value.to_ascii_lowercase();
+    ["http://", "https://", "ws://", "wss://", "ftp://"]
+        .iter()
+        .any(|scheme| lowered.starts_with(scheme))
+}
+
+/// Whether any URL-bearing field in `input` addresses the network.
+///
+/// Scans the top level and one level of nesting (objects and arrays), which
+/// covers every shape the tool schemas here actually use — `{"url": ...}`,
+/// `{"urls": [...]}`, `{"source": {"url": ...}}` — without recursing into
+/// arbitrary model-supplied content.
+fn carries_network_url(input: &Value) -> bool {
+    fn field_reaches(key: &str, value: &Value) -> bool {
+        if !URL_BEARING_FIELDS.contains(&key) {
+            return false;
+        }
+        match value {
+            Value::String(text) => is_network_url(text),
+            Value::Array(items) => items
+                .iter()
+                .any(|item| item.as_str().is_some_and(is_network_url)),
+            _ => false,
+        }
+    }
+
+    let Some(object) = input.as_object() else {
+        return false;
+    };
+    object.iter().any(|(key, value)| {
+        field_reaches(key, value)
+            || match value {
+                Value::Object(nested) => nested
+                    .iter()
+                    .any(|(nested_key, nested_value)| field_reaches(nested_key, nested_value)),
+                Value::Array(items) => items.iter().any(|item| {
+                    item.as_object().is_some_and(|nested| {
+                        nested.iter().any(|(nested_key, nested_value)| {
+                            field_reaches(nested_key, nested_value)
+                        })
+                    })
+                }),
+                _ => false,
+            }
+    })
+}
+
+/// Refuse a call that reaches the network through a tool the name deny list
+/// does not consider a network tool.
+///
+/// The deny list is keyed on names, and that is sufficient for any tool whose
+/// whole purpose is the network — those are simply absent. It is not sufficient
+/// for a *mostly local* tool that reaches out only for certain inputs, because
+/// such a tool calls the fetch path itself, inside the process, under its own
+/// name. Two live examples, both real escapes before this guard existed:
+///
+/// - `rlm{action:"open", url:...}` calls `FetchUrlTool::execute` directly.
+/// - `review{target:"https://github.com/o/r/pull/1"}` shells out to `gh pr
+///   diff`, which is the network by way of a subprocess.
+///
+/// Both are now unreachable by name as well (`rlm_open` is denied outright;
+/// `review`'s local forms are the ones worth keeping), so this is the layer that
+/// catches the *next* one — a tool that grows a `url` field after this list was
+/// written. It fails closed and names the posture, so the refusal reads as a
+/// contract rather than a malfunction.
+fn reject_network_reaching_input(name: &str, input: &Value) -> Result<()> {
+    if !carries_network_url(input) {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "Tool {name} was called with a network address, but this agent runs with no network \
+         capability (`network_tool = false`). Local sources are still available; a remote one \
+         needs a member whose saved ceiling grants network tools."
+    ))
+}
+
+/// Refuse the unbounded forms of the verification surface for a write-denied
+/// child.
+///
+/// A read-only member keeps `Run` / `run_tests` / `run_verifiers` on purpose:
+/// running the checks is what a verifier is *for*, and removing them would make
+/// the role useless. But both tools accept an escape hatch that is not
+/// verification at all — `run_verifiers` takes `commands`, an array of arbitrary
+/// `program` + `args` pairs, and `run_tests` takes `args`, a raw cargo argv.
+/// `{"program": "bash", "args": ["-lc", "rm -rf src"]}` is exactly the raw shell
+/// that [`crate::fleet::exact::RAW_SHELL_DENYLIST`] just removed, re-entered
+/// through the one door that was left open for honest reasons.
+///
+/// So the tools stay and the arbitrary arguments go. The default form — the one
+/// the deny list's comment actually promises is bounded — keeps working.
+fn reject_unbounded_verification(name: &str, input: &Value, shell: bool) -> Result<()> {
+    use crate::tools::execution_envelope::{VerificationBound, classify_verification};
+
+    match classify_verification(canonical_action_alias(name, input), input) {
+        None | Some(VerificationBound::Default) => Ok(()),
+        // A pure test selection is what the shipped `verifier` role exists to
+        // run. It starts a process, so it costs shell authority — and nothing
+        // else, because `write` is not what a test filter needs.
+        Some(VerificationBound::Filter) if shell => Ok(()),
+        Some(VerificationBound::Filter) => Err(anyhow!(
+            "Tool {name} was called with test-selection arguments, which start a test process, \
+             and this agent has no shell authority. Drop `args` to run the default verification \
+             gate."
+        )),
+        Some(VerificationBound::Unbounded) => Err(anyhow!(
+            "Tool {name} was called with operator-supplied commands or arguments that can name a \
+             program or redirect what runs, which spawns arbitrary programs and can mutate the \
+             workspace. This agent runs read-only, so only the built-in verification gates and \
+             test-selection arguments are available. Drop `commands`, drop the redirecting flag, \
+             or use a write-capable role."
+        )),
+    }
 }
 
 fn is_internal_coordination_state_tool(name: &str) -> bool {

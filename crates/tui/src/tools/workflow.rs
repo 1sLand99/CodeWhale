@@ -17,7 +17,7 @@ use codewhale_workflow::{
     WorkflowExecution as IrWorkflowExecution, WorkflowMemoUsage, WorkflowNode,
     WorkflowRunStatus as IrWorkflowRunStatus, WorkflowSpec, WorkflowUsage,
     compile_javascript_workflow, compile_typescript_workflow, leaf_wants_worktree,
-    load_named_fleet, resolve_workflow_agent,
+    resolve_workflow_agent,
 };
 use codewhale_workflow_js::{
     BudgetSnapshot, DriverError, ProgressEvent, SpawnedTask, TaskCompletion, TaskRequest,
@@ -495,6 +495,13 @@ struct WorkflowTaskStartedEvent {
     workflow_task_label: Option<String>,
     /// 0-based admission order among children of this run (#4119).
     workflow_child_index: Option<u32>,
+    /// Durable exact-Fleet routing receipt: the fixed member identity, its
+    /// exact provider/model, the requested vs. selector vs. provider-effective
+    /// reasoning, where the decision came from, and the Router's exact identity
+    /// when a Router made it. `default` keeps events written before this field
+    /// existed — and every legacy/non-fleet task — readable unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fleet_receipt: Option<codewhale_workflow::FleetTaskReceipt>,
 }
 
 impl WorkflowUiEventKind {
@@ -741,7 +748,7 @@ impl ToolSpec for WorkflowTool {
                 },
                 "fleet": {
                     "type": "string",
-                    "description": "Named Fleet roster to resolve task({ role }) declarations, loaded from $CODEWHALE_HOME/fleets/ or workspace fleets/."
+                    "description": "Named Fleet to resolve task({ role }) declarations, loaded from $CODEWHALE_HOME/fleets/ or workspace fleets/. Accepts a qualified origin/name. A legacy roster maps roles to profiles. An exact Fleet (schema = \"exact\") is frozen at start: each member's provider, model, reasoning, and permission ceiling are fixed, and per-task model/model_strength/thinking overrides are rejected."
                 },
                 "plan": {
                     "type": "object",
@@ -915,7 +922,7 @@ async fn start_workflow(
     let token_budget = optional_u64(&input, "token_budget", 0);
     let token_budget = (token_budget > 0).then_some(token_budget);
     let verify_on_complete = optional_bool(&input, "verify", false);
-    let (fleet_name, fleet_roles) = workflow_fleet_roles(&input, context)?;
+    let fleet = workflow_fleet_binding(&input, context, runtime.api_config.as_deref())?;
     let run_id = format!("workflow_{}", &Uuid::new_v4().to_string()[..8]);
     let gate_specs = source
         .spec
@@ -1006,14 +1013,22 @@ async fn start_workflow(
         state.attach_lifecycle(&run_id, lifecycle);
     }
 
+    // An exact Fleet runs on a run-scoped roster projected from its immutable
+    // snapshot, so every child resolves its member (and that member's exact
+    // provider pin) from the value frozen at start rather than from whatever
+    // the session roster holds now.
+    let mut runtime = runtime;
+    if let Some(operation) = fleet.exact() {
+        runtime.fleet_roster = operation.roster().clone();
+    }
+
     let driver = SubAgentWorkflowDriver::new(
         run_id.clone(),
         manager,
         runtime,
         state.clone(),
         token_budget,
-        fleet_name,
-        fleet_roles,
+        fleet,
         gate_specs,
     );
     let vm_cancel = WorkflowRunCancel::new();
@@ -1193,41 +1208,93 @@ fn workflow_fleet_name(input: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-fn workflow_fleet_roles(
-    input: &Value,
-    context: &ToolContext,
-) -> Result<(Option<String>, Option<FleetRoleMap>), ToolError> {
-    let Some(name) = workflow_fleet_name(input) else {
-        return Ok((None, None));
-    };
-    let roots = workflow_fleet_search_roots(&context.workspace);
-    let fleet = load_named_fleet(&name, &roots).map_err(|err| {
-        ToolError::invalid_input(format!(
-            "Failed to load workflow fleet '{name}' from {}: {err}",
-            roots
-                .iter()
-                .map(|root| root.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))
-    })?;
-    let roles = FleetRoleMap::from_pairs(
-        fleet
-            .roles
-            .iter()
-            .map(|(role, profile)| (role.as_str(), profile.as_str())),
-    )
-    .map_err(|err| ToolError::invalid_input(err.to_string()))?;
-    Ok((Some(name), Some(roles)))
+/// How a Workflow run is bound to a named Fleet.
+///
+/// The two saved forms share one store and one `fleet: "<name>"` option. Legacy
+/// role maps keep their exact previous behavior; an exact fleet is frozen into
+/// an immutable Workflow snapshot at start and drives every task launch from
+/// that snapshot.
+#[derive(Debug, Clone, Default)]
+enum WorkflowFleetBinding {
+    #[default]
+    None,
+    Legacy {
+        name: String,
+        roles: FleetRoleMap,
+    },
+    Exact(Arc<crate::fleet::exact::ExactFleetWorkflow>),
 }
 
-fn workflow_fleet_search_roots(workspace: &Path) -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    if let Ok(home) = codewhale_config::codewhale_home() {
-        roots.push(home);
+impl WorkflowFleetBinding {
+    fn name(&self) -> Option<String> {
+        match self {
+            Self::None => None,
+            Self::Legacy { name, .. } => Some(name.clone()),
+            Self::Exact(operation) => Some(operation.snapshot().fleet().qualified()),
+        }
     }
-    roots.push(workspace.to_path_buf());
-    roots
+
+    fn legacy_roles(&self) -> Option<&FleetRoleMap> {
+        match self {
+            Self::Legacy { roles, .. } => Some(roles),
+            Self::None | Self::Exact(_) => None,
+        }
+    }
+
+    fn exact(&self) -> Option<&Arc<crate::fleet::exact::ExactFleetWorkflow>> {
+        match self {
+            Self::Exact(operation) => Some(operation),
+            Self::None | Self::Legacy { .. } => None,
+        }
+    }
+}
+
+fn workflow_fleet_binding(
+    input: &Value,
+    context: &ToolContext,
+    api_config: Option<&crate::config::Config>,
+) -> Result<WorkflowFleetBinding, ToolError> {
+    let Some(name) = workflow_fleet_name(input) else {
+        return Ok(WorkflowFleetBinding::None);
+    };
+    let roots = crate::fleet::exact::fleet_search_roots(&context.workspace);
+    let (document, id) = crate::fleet::exact::load_fleet_document(&name, &context.workspace)
+        .map_err(|err| {
+            ToolError::invalid_input(format!(
+                "Failed to load workflow fleet '{name}' from {}: {err}",
+                roots
+                    .iter()
+                    .map(|root| format!("{}/{}", root.origin, root.root.display()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })?;
+
+    if let Some(legacy) = document.legacy() {
+        let roles = FleetRoleMap::from_pairs(
+            legacy
+                .roles
+                .iter()
+                .map(|(role, profile)| (role.as_str(), profile.as_str())),
+        )
+        .map_err(|err| ToolError::invalid_input(err.to_string()))?;
+        return Ok(WorkflowFleetBinding::Legacy { name, roles });
+    }
+
+    // Exact: freeze the definition now. Everything the run launches afterwards
+    // comes from this value, so editing the file mid-run cannot move a route.
+    // The same labelled roots resolve the Fleet *and* the Reasoning Router
+    // profile it references, so a Router is qualified (`workspace/luna-low`)
+    // exactly the way a Fleet is and cannot be resolved by shadowing.
+    let operation = crate::fleet::exact::ExactFleetWorkflow::capture(
+        &document,
+        id,
+        chrono::Utc::now().to_rfc3339(),
+        api_config,
+        &roots,
+    )
+    .map_err(ToolError::invalid_input)?;
+    Ok(WorkflowFleetBinding::Exact(Arc::new(operation)))
 }
 
 fn apply_named_fleet_to_task_request(
@@ -1246,6 +1313,243 @@ fn apply_named_fleet_to_task_request(
     .map_err(|err| DriverError::Rejected(err.to_string()))?;
     request.role = resolved.resolved_role;
     request.profile = Some(resolved.resolved_profile);
+    Ok(())
+}
+
+/// **Phase one** of an exact-Fleet task: resolve the member and stamp its
+/// clamped authority onto the request, contacting nobody.
+///
+/// This runs *before* gate evaluation and before a concurrency slot is taken,
+/// which is what makes it safe: a task that is about to be rejected or queued
+/// must not have spent a router call or disclosed a summary to another
+/// provider. Everything that can cost money lives in
+/// [`route_admitted_exact_task`].
+fn bind_exact_fleet_task_request(
+    operation: &crate::fleet::exact::ExactFleetWorkflow,
+    session: codewhale_workflow::PermissionCeiling,
+    request: &mut TaskRequest,
+) -> Result<crate::fleet::exact::ExactMemberBinding, DriverError> {
+    let fleet = operation.snapshot().fleet().qualified();
+
+    // A saved exact Fleet is the authority on routing and on posture. A task
+    // that tries to re-route a member — or to widen it by asking for a
+    // different agent type or a broader tool surface — is rejected outright
+    // rather than silently ignored. `subagent_type` and `allowed_tools` matter
+    // as much as `model` here: the member's posture role is derived from its
+    // saved permission ceiling, and a task-supplied type would otherwise pick
+    // a different tool surface than the one the operator saved.
+    for (field, present) in [
+        ("model", request.model.is_some()),
+        ("model_strength", request.model_strength.is_some()),
+        ("thinking", request.thinking.is_some()),
+        ("subagent_type", request.subagent_type.is_some()),
+        ("allowed_tools", request.allowed_tools.is_some()),
+        ("write_authority", request.write_authority.is_some()),
+    ] {
+        if present {
+            return Err(DriverError::Rejected(format!(
+                "fleet `{fleet}` is an exact fleet: task option `{field}` is not allowed. Every \
+                 member's provider, model, reasoning, and permission ceiling are fixed by the \
+                 saved Fleet — switch Fleets or edit the Fleet, do not override a member per \
+                 task."
+            )));
+        }
+    }
+
+    let binding = operation
+        .bind_member(request.profile.as_deref(), request.role.as_deref(), session)
+        .map_err(|err| DriverError::Rejected(format!("fleet `{fleet}`: {err}")))?;
+
+    // Id and role are stamped **separately and semantically**. The member id
+    // addresses the run-scoped roster profile projected from the snapshot,
+    // which carries the exact provider pin and canonical wire model. The role
+    // stays the Fleet's semantic role, because that is what gates, handoffs,
+    // and records key on — overwriting it with the profile id (as an earlier
+    // pass did) silently broke every gate whose member id differs from its
+    // role.
+    request.profile = Some(binding.member_id.clone());
+    request.role = Some(binding.member_role.clone());
+
+    // Ceilings narrow the child; they never widen it. `subagent_type` is
+    // cleared rather than defaulted so the roster profile's posture role — the
+    // one derived from the saved ceiling — is what picks the tool surface.
+    request.subagent_type = None;
+    // The clamped authority becomes an actual tool policy the child runtime
+    // enforces: an empty allowlist when `tools = false`, and a deny list that
+    // removes every model-visible network surface when `network_tool = false`.
+    request.allowed_tools = binding.authority.allowed_tools.clone();
+    request.disallowed_tools = binding.authority.disallowed_tools.clone();
+    request.write_authority = Some(binding.authority.write_authority.to_string());
+    request.max_depth = Some(
+        request
+            .max_depth
+            .map_or(binding.authority.max_depth, |asked| {
+                asked.min(binding.authority.max_depth)
+            }),
+    );
+
+    // Everything the spawn boundary will reject *predictably* is rejected here,
+    // while the task has still cost nothing. The write-scope contract is the
+    // one that bites: a write-capable member launched with no declared scope
+    // fails at `validate_spawn_write_contract`, which runs long after the
+    // Router has been paid for a decision about a task that could never run.
+    validate_exact_write_scope(&fleet, &binding, request)?;
+    Ok(binding)
+}
+
+/// Which role a `task_started` event displays.
+///
+/// An exact-Fleet receipt wins over the spawn metadata, because the metadata's
+/// role is the roster profile's **permission posture** — the tool surface the
+/// clamped ceiling permits — and rendering that where the member's role belongs
+/// renames the operator's `auditor` to `scout` in the panel, the history card,
+/// and the journal. The posture is not lost: it rides the same receipt in its
+/// own field. Non-Fleet tasks keep the previous metadata-then-request order
+/// exactly.
+fn displayed_resolved_role(
+    fleet_receipt: Option<&codewhale_workflow::FleetTaskReceipt>,
+    metadata_role: Option<&str>,
+    request_role: Option<&str>,
+) -> Option<String> {
+    fleet_receipt
+        .map(|receipt| receipt.member_role.clone())
+        .or_else(|| metadata_role.map(str::to_string))
+        .or_else(|| request_role.map(str::to_string))
+}
+
+/// The visible line for a routing decision whose spawn then failed.
+///
+/// Kept separate from the recorder so the wording is testable without a live
+/// driver, and so the receipt's own content-free `line()` stays the single
+/// source of what a receipt may say.
+fn orphaned_fleet_receipt_line(
+    receipt: &codewhale_workflow::FleetTaskReceipt,
+    error: &str,
+) -> String {
+    format!(
+        "fleet route {} spawn_failed=true reason={}",
+        receipt.line(),
+        error.replace('\n', " ")
+    )
+}
+
+/// The write-scope half of the spawn contract, checked before anything costs.
+///
+/// Deliberately a mirror of the spawn-boundary rule rather than a replacement
+/// for it: the boundary stays authoritative (it is reachable by other callers),
+/// and this exists so an exact-Fleet task fails on the same terms *before* the
+/// Router call rather than after it.
+fn validate_exact_write_scope(
+    fleet: &str,
+    binding: &crate::fleet::exact::ExactMemberBinding,
+    request: &TaskRequest,
+) -> Result<(), DriverError> {
+    let declares_scope = !request.write_roots.is_empty()
+        || !request.exact_files.is_empty()
+        || !request.coordination_contracts.is_empty();
+
+    if binding.authority.write_authority == "read_only" {
+        if declares_scope {
+            return Err(DriverError::Rejected(format!(
+                "fleet `{fleet}`: member `{}` is read-only under the clamped ceiling, so this \
+                 task may not declare write_roots, exact_files, or coordination_contracts.",
+                binding.member_id
+            )));
+        }
+        return Ok(());
+    }
+
+    if !declares_scope {
+        return Err(DriverError::Rejected(format!(
+            "fleet `{fleet}`: member `{}` is write-capable, so this task must declare \
+             write_roots, exact_files, or coordination_contracts before it can start. An \
+             unbounded write claim is refused at the spawn boundary, and this task would spend a \
+             reasoning-router call on its way to that refusal.",
+            binding.member_id
+        )));
+    }
+    Ok(())
+}
+
+/// **Phase two**: route an already admitted task.
+///
+/// Only reachable once the task has passed its gates and holds a concurrency
+/// slot, so this is the one place a reasoning router call — and any
+/// cross-provider disclosure — can happen.
+async fn route_admitted_exact_task(
+    operation: &crate::fleet::exact::ExactFleetWorkflow,
+    binding: &crate::fleet::exact::ExactMemberBinding,
+    request: &mut TaskRequest,
+) -> Result<codewhale_workflow::FleetTaskReceipt, DriverError> {
+    let fleet = operation.snapshot().fleet().qualified();
+    let launch = operation
+        .route_admitted_task(binding, &request.description)
+        .await
+        .map_err(|err| DriverError::Rejected(format!("fleet `{fleet}`: {err}")))?;
+
+    request.thinking = Some(launch.thinking.clone());
+    // **The launch authority is what the child runs under.** Binding stamped a
+    // provisional copy so the write-scope contract could be checked for free;
+    // this re-stamps from the value `route_admitted_task` recomputed and
+    // verified, so the request that reaches the spawn boundary carries the
+    // launched envelope and not an older one. Without this the launch's
+    // `authority` was computed, put on a struct, and never read — a ceiling
+    // that existed only as a field.
+    apply_launch_authority(&fleet, &launch, request)?;
+    Ok(launch.receipt)
+}
+
+/// Stamp the launched authority onto the request and refuse any drift.
+///
+/// Two things happen here and both are load-bearing. The envelope fields are
+/// overwritten from `launch.authority`, so the spawn input is built from the
+/// launched value rather than the admitted one. And `max_depth` is intersected
+/// rather than replaced, because a task may legitimately ask for *less* nesting
+/// than its ceiling allows — but never more.
+fn apply_launch_authority(
+    fleet: &str,
+    launch: &crate::fleet::exact::ExactMemberLaunch,
+    request: &mut TaskRequest,
+) -> Result<(), DriverError> {
+    let authority = &launch.authority;
+
+    // Identity first: an envelope stamped onto the wrong member's request is a
+    // widening as surely as a wider envelope would be.
+    if request.profile.as_deref() != Some(launch.member_id.as_str())
+        || request.role.as_deref() != Some(launch.member_role.as_str())
+    {
+        return Err(DriverError::Rejected(format!(
+            "fleet `{fleet}`: task identity drifted between admission and launch (request \
+             profile={:?} role={:?}, launch member `{}` role `{}`); the launch is refused rather \
+             than run under an envelope resolved for a different member.",
+            request.profile, request.role, launch.member_id, launch.member_role,
+        )));
+    }
+
+    request.allowed_tools = authority.allowed_tools.clone();
+    request.disallowed_tools = authority.disallowed_tools.clone();
+    request.write_authority = Some(authority.write_authority.to_string());
+    request.subagent_type = None;
+    request.max_depth = Some(
+        request
+            .max_depth
+            .map_or(authority.max_depth, |asked| asked.min(authority.max_depth)),
+    );
+
+    // The receipt records the fingerprint; the request now carries the envelope
+    // it names. Recomputing the fingerprint from what was just stamped is the
+    // check that the two describe each other — a mismatch here means a field
+    // was added to the envelope and not to the stamping, which is exactly the
+    // silent-gap failure this whole seam exists to prevent.
+    let expected = authority.fingerprint();
+    if launch.receipt.authority_fingerprint.as_deref() != Some(expected.as_str()) {
+        return Err(DriverError::Rejected(format!(
+            "fleet `{fleet}`: member `{}` produced a receipt whose authority fingerprint does not \
+             match the envelope being installed (receipt={:?} envelope={expected}). Failing \
+             closed.",
+            launch.member_id, launch.receipt.authority_fingerprint,
+        )));
+    }
     Ok(())
 }
 
@@ -2694,7 +2998,10 @@ struct SubAgentWorkflowDriver {
     spawn_permits: Mutex<HashMap<String, OwnedSemaphorePermit>>,
     /// Optional named Fleet roster for resolving Workflow task roles (#4177/#4178).
     fleet_name: Option<String>,
-    fleet_roles: Option<FleetRoleMap>,
+    /// The Fleet this Workflow is bound to, frozen at start. For an exact
+    /// fleet this holds the immutable snapshot every task launch reads from,
+    /// which is why editing `fleets/<name>.toml` mid-run cannot move a route.
+    fleet: WorkflowFleetBinding,
 }
 
 impl SubAgentWorkflowDriver {
@@ -2705,10 +3012,10 @@ impl SubAgentWorkflowDriver {
         runtime: SubAgentRuntime,
         state: Arc<WorkflowWorkspaceState>,
         total_budget: Option<u64>,
-        fleet_name: Option<String>,
-        fleet_roles: Option<FleetRoleMap>,
+        fleet: WorkflowFleetBinding,
         gate_specs: Vec<GateSpec>,
     ) -> Arc<Self> {
+        let fleet_name = fleet.name();
         let (completion_tx, completion_rx) = mpsc::unbounded_channel();
         let mut gate_board = LaneGateBoard::new(run_id.clone());
         gate_board.install_gates(&gate_specs);
@@ -2730,7 +3037,7 @@ impl SubAgentWorkflowDriver {
             concurrent_gate: Arc::new(Semaphore::new(WORKFLOW_MAX_CONCURRENT.max(1))),
             spawn_permits: Mutex::new(HashMap::new()),
             fleet_name,
-            fleet_roles,
+            fleet,
         });
         spawn_completion_pump(driver.clone(), completion_rx);
         driver
@@ -3028,6 +3335,7 @@ impl SubAgentWorkflowDriver {
         request: &TaskRequest,
         metadata: &WorkflowTaskSpawnMetadata,
         result: &crate::tools::subagent::SubAgentResult,
+        fleet_receipt: Option<codewhale_workflow::FleetTaskReceipt>,
     ) {
         // Prefer typed spawn metadata over request fields so panel/history never
         // need to re-derive labels from the child prompt (#4119).
@@ -3053,10 +3361,18 @@ impl SubAgentWorkflowDriver {
                     .or_else(|| request.thinking.clone()),
                 effective_reasoning: metadata.effective_reasoning.clone(),
                 // Prefer spawn metadata (fleet-resolved); fall back to request.
-                resolved_role: metadata
-                    .resolved_role
-                    .clone()
-                    .or_else(|| request.role.clone()),
+                //
+                // An exact-Fleet receipt overrides both, because the spawn
+                // metadata's role is the roster profile's **posture** role —
+                // the tool surface the clamped ceiling permits — and displaying
+                // that where the member's role belongs silently renames the
+                // operator's `auditor` to `scout`. The posture is not lost: it
+                // rides the receipt as its own field.
+                resolved_role: displayed_resolved_role(
+                    fleet_receipt.as_ref(),
+                    metadata.resolved_role.as_deref(),
+                    request.role.as_deref(),
+                ),
                 resolved_profile: metadata
                     .resolved_profile
                     .clone()
@@ -3073,8 +3389,34 @@ impl SubAgentWorkflowDriver {
                 workflow_phase_id: metadata.workflow_phase_id.clone(),
                 workflow_task_label: metadata.workflow_task_label.clone(),
                 workflow_child_index: metadata.workflow_child_index,
+                fleet_receipt: fleet_receipt.clone(),
             }),
         )));
+        // Also surface the decision as a run log line, so the receipt is
+        // *visible* in the panel and transcript rather than only structured on
+        // an event a UI has to know to unpack.
+        if let Some(receipt) = fleet_receipt {
+            self.record_run_event(WorkflowUiEvent::new(WorkflowUiEventKind::Log {
+                message: format!("fleet route {}", receipt.line()),
+            }));
+        }
+    }
+
+    /// Preserve a routing receipt whose task never became a child.
+    ///
+    /// A receipt normally rides the `task_started` event, which a failed spawn
+    /// never emits. Recording it here keeps the run's history complete: the
+    /// decision happened, the tokens were spent, and — if the Router ran on
+    /// another provider — a bounded summary already left the host. Silence
+    /// would make all three unrecoverable.
+    fn record_orphaned_fleet_receipt(
+        &self,
+        receipt: &codewhale_workflow::FleetTaskReceipt,
+        error: &str,
+    ) {
+        self.record_run_event(WorkflowUiEvent::new(WorkflowUiEventKind::Log {
+            message: orphaned_fleet_receipt_line(receipt, error),
+        }));
     }
 
     fn record_task_request(&self, agent_id: &str, request: &TaskRequest) {
@@ -3207,15 +3549,50 @@ struct CompletionState {
 #[async_trait]
 impl WorkflowDriver for SubAgentWorkflowDriver {
     async fn spawn_task(&self, mut request: TaskRequest) -> Result<SpawnedTask, DriverError> {
-        apply_named_fleet_to_task_request(self.fleet_roles.as_ref(), &mut request).map_err(
-            |err| {
-                if let Some(fleet) = self.fleet_name.as_deref() {
-                    DriverError::Rejected(format!("fleet `{fleet}` role resolution failed: {err}"))
-                } else {
-                    err
-                }
-            },
-        )?;
+        // Exact fleets resolve from the frozen snapshot; legacy role maps keep
+        // their previous path unchanged.
+        //
+        // The exact path is deliberately split in two. **Binding** resolves the
+        // member, its frozen route, and its clamped authority, and contacts
+        // nobody. **Routing** — the half that may call the fleet's reasoning
+        // router, spend the operator's tokens, and disclose a bounded summary
+        // to another provider — happens only after this task has passed its
+        // gates and holds a concurrency slot. A task that is rejected or
+        // capacity-blocked therefore costs nothing and reveals nothing.
+        let exact_binding = if let Some(operation) = self.fleet.exact() {
+            // The depth budget is the other failure the spawn boundary can be
+            // predicted to raise, and it does not depend on the member. Check
+            // it here so an over-deep task is refused for free rather than
+            // after a routing request has already been paid for.
+            if self.runtime.would_exceed_depth() {
+                return Err(DriverError::Rejected(format!(
+                    "fleet `{}`: sub-agent depth limit reached (depth {}, max {}); this task \
+                     cannot spawn a child, so it is refused before the reasoning router is asked \
+                     anything.",
+                    operation.snapshot().fleet().qualified(),
+                    self.runtime.spawn_depth,
+                    self.runtime.max_spawn_depth,
+                )));
+            }
+            Some(bind_exact_fleet_task_request(
+                operation,
+                crate::fleet::exact::session_permission_ceiling(&self.runtime),
+                &mut request,
+            )?)
+        } else {
+            apply_named_fleet_to_task_request(self.fleet.legacy_roles(), &mut request).map_err(
+                |err| {
+                    if let Some(fleet) = self.fleet_name.as_deref() {
+                        DriverError::Rejected(format!(
+                            "fleet `{fleet}` role resolution failed: {err}"
+                        ))
+                    } else {
+                        err
+                    }
+                },
+            )?;
+            None
+        };
         let consumed_handoffs = self.prepare_request_for_gates(&mut request)?;
         // Wait for a concurrent slot (max 16 live children per run).
         let permit = self
@@ -3224,6 +3601,21 @@ impl WorkflowDriver for SubAgentWorkflowDriver {
             .acquire_owned()
             .await
             .map_err(|_| DriverError::Rejected("workflow concurrent admission closed".into()))?;
+
+        // Admitted. Only now may the reasoning router be consulted.
+        let fleet_receipt = match (self.fleet.exact(), exact_binding) {
+            (Some(operation), Some(binding)) => {
+                match route_admitted_exact_task(operation, &binding, &mut request).await {
+                    Ok(receipt) => Some(receipt),
+                    Err(err) => {
+                        drop(permit);
+                        return Err(err);
+                    }
+                }
+            }
+            _ => None,
+        };
+
         let runtime = self
             .runtime
             .clone()
@@ -3253,12 +3645,25 @@ impl WorkflowDriver for SubAgentWorkflowDriver {
             workflow_phase_id,
             workflow_task_label,
             workflow_child_index,
+            // The Fleet decision travels to the spawn boundary as a value that
+            // boundary re-checks, rather than as trust in the caller.
+            fleet_authority_fingerprint: fleet_receipt
+                .as_ref()
+                .and_then(|receipt| receipt.authority_fingerprint.clone()),
         };
         let result =
             match spawn_workflow_task(request, self.manager.clone(), runtime, identity).await {
                 Ok(result) => result,
                 Err(err) => {
                     drop(permit);
+                    // The Router decision was already made and already paid
+                    // for. Dropping the receipt with the failed spawn would
+                    // erase the only record that a routing request was spent —
+                    // and, when a bounded summary crossed to another provider,
+                    // the only disclosure that it did. It survives the failure.
+                    if let Some(receipt) = fleet_receipt {
+                        self.record_orphaned_fleet_receipt(&receipt, &err.to_string());
+                    }
                     return Err(DriverError::Rejected(err.to_string()));
                 }
             };
@@ -3267,7 +3672,13 @@ impl WorkflowDriver for SubAgentWorkflowDriver {
             permits.insert(task_id.clone(), permit);
         }
         self.record_child(&task_id);
-        self.record_task_started(&task_id, &request_record, &result.metadata, &result.result);
+        self.record_task_started(
+            &task_id,
+            &request_record,
+            &result.metadata,
+            &result.result,
+            fleet_receipt,
+        );
         for artifact in consumed_handoffs {
             self.record_run_event(WorkflowUiEvent::new(WorkflowUiEventKind::HandoffConsumed {
                 artifact_id: artifact.id,
@@ -4761,6 +5172,7 @@ mod tests {
             dependencies: Vec::new(),
             acceptance: Vec::new(),
             allowed_tools: None,
+            disallowed_tools: Vec::new(),
             max_depth: None,
             token_budget: None,
             max_steps: None,
@@ -4774,6 +5186,786 @@ mod tests {
 
         assert_eq!(request.role.as_deref(), Some("implementer"));
         assert_eq!(request.profile.as_deref(), Some("builder"));
+    }
+
+    // ── Exact named Fleet (schema = "exact") ────────────────────────────────
+
+    /// A Fleet that references a saved, reusable Reasoning Router service, and
+    /// whose members' ids differ from their semantic roles — the case a gate
+    /// keyed on a role has to keep working through.
+    const EXACT_GLM_FLEET: &str = r#"
+name = "glm-pair"
+schema = "exact"
+reasoning_router = "luna-low"
+
+[[members]]
+id = "implementer"
+role = "builder"
+provider = "zai"
+model = "glm-5"
+reasoning = "auto"
+permissions = "read_write"
+
+[[members]]
+id = "auditor"
+role = "reviewer"
+provider = "zai"
+model = "glm-5"
+reasoning = "high"
+permissions = "read_only"
+"#;
+
+    fn exact_task_request(role: &str) -> TaskRequest {
+        TaskRequest {
+            description: "land the fix".to_string(),
+            subagent_type: None,
+            role: Some(role.to_string()),
+            profile: None,
+            model: None,
+            model_strength: None,
+            thinking: None,
+            cwd: None,
+            worktree: false,
+            write_authority: None,
+            write_roots: Vec::new(),
+            exact_files: Vec::new(),
+            coordination_contracts: Vec::new(),
+            dependencies: Vec::new(),
+            acceptance: Vec::new(),
+            allowed_tools: None,
+            disallowed_tools: Vec::new(),
+            max_depth: None,
+            token_budget: None,
+            max_steps: None,
+            wall_time_secs: None,
+            response_schema: None,
+            label: None,
+            phase: None,
+        }
+    }
+
+    /// A task for a write-capable member. The spawn boundary refuses an
+    /// unbounded write claim, so a write-capable exact task always carries a
+    /// declared scope — the same contract, checked before the Router runs.
+    fn exact_write_task_request(role: &str) -> TaskRequest {
+        TaskRequest {
+            write_roots: vec!["crates/tui".to_string()],
+            ..exact_task_request(role)
+        }
+    }
+
+    fn exact_session() -> codewhale_workflow::PermissionCeiling {
+        codewhale_workflow::PermissionCeiling::preset("full").expect("preset")
+    }
+
+    fn exact_workflow_with(
+        text: &str,
+        router: Option<std::sync::Arc<crate::fleet::exact::StaticFleetRouter>>,
+    ) -> crate::fleet::exact::ExactFleetWorkflow {
+        let document = codewhale_workflow::FleetDocument::parse(text).expect("exact fleet parses");
+        crate::fleet::exact::ExactFleetWorkflow::for_tests(
+            &document,
+            codewhale_workflow::QualifiedFleetId {
+                name: "glm-pair".to_string(),
+                origin: "workspace".to_string(),
+            },
+            router,
+        )
+    }
+
+    fn exact_workflow(text: &str) -> crate::fleet::exact::ExactFleetWorkflow {
+        exact_workflow_with(
+            text,
+            Some(crate::fleet::exact::StaticFleetRouter::new(
+                r#"{"reasoning":"max"}"#,
+            )),
+        )
+    }
+
+    /// Binding resolves the member and its ceiling; routing resolves reasoning.
+    /// Both halves land on the request, in that order.
+    #[tokio::test]
+    async fn exact_fleet_task_launch_resolves_the_member_route_and_ceiling() {
+        let operation = exact_workflow(EXACT_GLM_FLEET);
+        let mut request = exact_write_task_request("builder");
+
+        let binding = bind_exact_fleet_task_request(&operation, exact_session(), &mut request)
+            .expect("exact member resolves");
+
+        // Addressed by member id, so the run-scoped roster profile (which
+        // carries the exact provider pin and canonical wire model) is what the
+        // spawn resolves…
+        assert_eq!(request.profile.as_deref(), Some("implementer"));
+        // …while the semantic role is preserved for gates and records.
+        assert_eq!(request.role.as_deref(), Some("builder"));
+        let member = operation.roster().get("implementer").expect("roster");
+        assert_eq!(member.profile.provider.as_deref(), Some("zai"));
+        assert_eq!(member.profile.model.as_deref(), Some("glm-5"));
+
+        // The saved ceiling reached the spawn request before any routing.
+        assert_eq!(request.write_authority.as_deref(), Some("workspace_write"));
+        assert_eq!(request.max_depth, Some(0));
+        assert!(request.thinking.is_none(), "reasoning is not decided yet");
+
+        route_admitted_exact_task(&operation, &binding, &mut request)
+            .await
+            .expect("routing");
+        // `auto` was resolved by the Router into a concrete tier — never the
+        // literal sentinel, and never the legacy local heuristic.
+        assert_eq!(request.thinking.as_deref(), Some("max"));
+
+        // A read-only member is launched read-only, with no router call.
+        let mut auditor = exact_task_request("reviewer");
+        let auditor_binding =
+            bind_exact_fleet_task_request(&operation, exact_session(), &mut auditor)
+                .expect("auditor resolves");
+        route_admitted_exact_task(&operation, &auditor_binding, &mut auditor)
+            .await
+            .expect("routing");
+        assert_eq!(auditor.write_authority.as_deref(), Some("read_only"));
+        assert_eq!(auditor.thinking.as_deref(), Some("high"));
+        assert_eq!(auditor.role.as_deref(), Some("reviewer"));
+        assert_eq!(auditor.profile.as_deref(), Some("auditor"));
+    }
+
+    /// The gate machinery keys on the **semantic role**. It must still fire
+    /// when a member's id differs from that role — the exact failure an earlier
+    /// pass introduced by stamping the profile id into `role`.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_role_keyed_gate_still_fires_when_the_member_id_differs() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
+        let runtime = SubAgentRuntime::new(
+            stub_client(),
+            "deepseek-v4-flash".to_string(),
+            ctx.clone(),
+            true,
+            None,
+            manager.clone(),
+        );
+        let state = WorkflowWorkspaceState::open(tmp.path());
+        let run_id = "workflow_exact_gate".to_string();
+        // The gate blocks the semantic role `builder`, whose member id is the
+        // *different* string `implementer`.
+        let gates = vec![GateSpec {
+            id: "scout-findings".to_string(),
+            role: "scout".to_string(),
+            on: GateOn::RoleComplete,
+            gate: GateKind::Approve,
+            on_fail: codewhale_workflow::GateOnFail::Block,
+            blocks_role: Some("builder".to_string()),
+            max_retries: 0,
+            artifact_kind: Some("findings".to_string()),
+            require_explicit_verdict: false,
+        }];
+        state.runs.lock().expect("runs").insert(
+            run_id.clone(),
+            WorkflowRunRecord::new(run_id.clone(), None, None, None),
+        );
+        let driver = SubAgentWorkflowDriver::new(
+            run_id.clone(),
+            manager,
+            runtime,
+            state.clone(),
+            None,
+            WorkflowFleetBinding::None,
+            gates,
+        );
+
+        // The upstream scout fails, which puts the gate into a blocking state.
+        driver.evaluate_gates_for_completed_role(&RuntimeTaskRecord {
+            agent_id: "scout-agent".to_string(),
+            label: Some("scout".to_string()),
+            role: Some("scout".to_string()),
+            status: IrWorkflowRunStatus::Failed,
+            output: None,
+            schema_error: None,
+            usage: None,
+        });
+
+        let operation = exact_workflow(EXACT_GLM_FLEET);
+        let mut request = exact_write_task_request("builder");
+        bind_exact_fleet_task_request(&operation, exact_session(), &mut request).expect("bind");
+
+        assert_ne!(
+            request.role.as_deref(),
+            request.profile.as_deref(),
+            "this fleet's ids and roles differ, which is the whole point"
+        );
+        assert_eq!(request.role.as_deref(), Some("builder"));
+
+        let err = driver
+            .prepare_request_for_gates(&mut request)
+            .expect_err("a blocking gate on `builder` must still see `builder`");
+        assert!(err.to_string().contains("builder"), "{err}");
+
+        // The same gate does *not* block a task carrying the member id, which
+        // is exactly why stamping the id into `role` silently disabled it.
+        let mut by_id = exact_task_request("builder");
+        by_id.role = Some("implementer".to_string());
+        by_id.profile = None;
+        assert!(
+            driver.prepare_request_for_gates(&mut by_id).is_ok(),
+            "the profile id is not the semantic role the gate keys on"
+        );
+    }
+
+    /// A task whose `role` and `profile` name different members is rejected
+    /// rather than resolved by precedence.
+    #[test]
+    fn exact_fleet_rejects_a_conflicting_task_role_and_profile() {
+        let operation = exact_workflow(EXACT_GLM_FLEET);
+        let mut request = exact_task_request("reviewer");
+        request.profile = Some("implementer".to_string());
+
+        let err = bind_exact_fleet_task_request(&operation, exact_session(), &mut request)
+            .expect_err("conflicting identity");
+        let message = format!("{err:?}");
+        assert!(message.contains("different members"), "{message}");
+    }
+
+    #[test]
+    fn exact_fleet_rejects_task_level_route_overrides() {
+        let operation = exact_workflow(EXACT_GLM_FLEET);
+
+        for mutate in [
+            (|request: &mut TaskRequest| request.model = Some("glm-4".to_string()))
+                as fn(&mut TaskRequest),
+            |request: &mut TaskRequest| request.model_strength = Some("faster".to_string()),
+            |request: &mut TaskRequest| request.thinking = Some("off".to_string()),
+        ] {
+            let mut request = exact_task_request("builder");
+            mutate(&mut request);
+            let err = bind_exact_fleet_task_request(&operation, exact_session(), &mut request)
+                .expect_err("an exact fleet member may not be re-routed per task");
+            let message = format!("{err:?}");
+            assert!(
+                message.contains("not allowed"),
+                "override must be rejected, not ignored: {message}"
+            );
+        }
+    }
+
+    /// A task must not be able to widen a member's saved ceiling by asking for
+    /// a different agent type, a broader tool surface, or write authority.
+    #[test]
+    fn exact_fleet_rejects_task_level_posture_widening() {
+        let operation = exact_workflow(EXACT_GLM_FLEET);
+
+        for (field, mutate) in [
+            (
+                "subagent_type",
+                (|request: &mut TaskRequest| {
+                    request.subagent_type = Some("general".to_string());
+                }) as fn(&mut TaskRequest),
+            ),
+            ("allowed_tools", |request: &mut TaskRequest| {
+                request.allowed_tools = Some(vec!["shell".to_string()]);
+            }),
+            ("write_authority", |request: &mut TaskRequest| {
+                request.write_authority = Some("workspace_write".to_string());
+            }),
+        ] {
+            // The read-only auditor is the interesting victim: its saved
+            // ceiling is the narrowest in the fleet.
+            let mut request = exact_task_request("reviewer");
+            mutate(&mut request);
+            let err = bind_exact_fleet_task_request(&operation, exact_session(), &mut request)
+                .expect_err("an exact ceiling must win over a task option");
+            let message = format!("{err:?}");
+            assert!(
+                message.contains(field) && message.contains("not allowed"),
+                "{field} must be rejected: {message}"
+            );
+        }
+
+        // And with no task options at all, the saved ceiling is what lands.
+        let mut clean = exact_task_request("reviewer");
+        bind_exact_fleet_task_request(&operation, exact_session(), &mut clean)
+            .expect("clean launch");
+        assert_eq!(clean.write_authority.as_deref(), Some("read_only"));
+        assert_eq!(clean.subagent_type, None);
+    }
+
+    /// The saved ceiling becomes a real tool policy on the spawn request: a
+    /// member with no network tool carries a deny list the child enforces.
+    #[test]
+    fn exact_fleet_ceilings_reach_the_spawn_request_as_a_tool_policy() {
+        let operation = exact_workflow(EXACT_GLM_FLEET);
+        let mut request = exact_task_request("reviewer");
+
+        bind_exact_fleet_task_request(&operation, exact_session(), &mut request).expect("bind");
+
+        // `read_only` has tools but no network tool.
+        assert_eq!(
+            request.allowed_tools, None,
+            "a tool-using member keeps full inheritance, narrowed by the deny list"
+        );
+        for denied in ["Web", "web_search", "fetch_url", "mcp*"] {
+            assert!(
+                request.disallowed_tools.iter().any(|name| name == denied),
+                "{denied} must be denied: {:?}",
+                request.disallowed_tools
+            );
+        }
+    }
+
+    /// A Router decision is paid for before the child exists. If the spawn then
+    /// fails, the receipt is the only record that tokens were spent and — for a
+    /// cross-provider Router — that a bounded summary already left the host. It
+    /// must survive the failure rather than being dropped with it.
+    #[tokio::test]
+    async fn a_routing_receipt_survives_a_failed_spawn() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
+        let runtime = SubAgentRuntime::new(
+            stub_client(),
+            "deepseek-v4-flash".to_string(),
+            ctx.clone(),
+            true,
+            None,
+            manager.clone(),
+        );
+        let state = WorkflowWorkspaceState::open(tmp.path());
+        let run_id = "workflow_orphaned_receipt".to_string();
+        state.runs.lock().expect("runs").insert(
+            run_id.clone(),
+            WorkflowRunRecord::new(run_id.clone(), None, None, None),
+        );
+        let driver = SubAgentWorkflowDriver::new(
+            run_id.clone(),
+            manager,
+            runtime,
+            state.clone(),
+            None,
+            WorkflowFleetBinding::None,
+            Vec::new(),
+        );
+
+        let operation = exact_workflow(EXACT_GLM_FLEET);
+        let mut request = exact_write_task_request("builder");
+        let binding =
+            bind_exact_fleet_task_request(&operation, exact_session(), &mut request).expect("bind");
+        let receipt = route_admitted_exact_task(&operation, &binding, &mut request)
+            .await
+            .expect("routing");
+
+        driver.record_orphaned_fleet_receipt(&receipt, "Sub-agent depth limit reached");
+
+        let events = state
+            .runs
+            .lock()
+            .expect("runs")
+            .get(&run_id)
+            .expect("run")
+            .events
+            .clone();
+        let logged = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                WorkflowUiEventKind::Log { message } => Some(message.clone()),
+                _ => None,
+            })
+            .find(|message| message.contains("spawn_failed=true"))
+            .expect("the receipt must outlive the failed spawn");
+
+        assert!(logged.contains("member=implementer"), "{logged}");
+        assert!(logged.contains("source=fleet_router"), "{logged}");
+        assert!(
+            logged.contains("reasoning_router:workspace/luna-low"),
+            "{logged}"
+        );
+        assert!(logged.contains("Sub-agent depth limit reached"), "{logged}");
+        // Still content-free: a failure line is no excuse to echo the task.
+        assert!(!logged.contains("land the fix"), "{logged}");
+    }
+
+    /// A member's semantic role is what the operator named and what gates key
+    /// on; the roster profile's role is the permission **posture** the clamped
+    /// ceiling permits. The started event must show the first, not the second.
+    #[tokio::test]
+    async fn a_started_event_shows_the_members_role_not_its_permission_posture() {
+        const AUDIT_FLEET: &str = r#"
+name = "glm-pair"
+schema = "exact"
+
+[[members]]
+id = "auditor"
+role = "auditor"
+provider = "zai"
+model = "glm-5"
+reasoning = "high"
+permissions = "read_only"
+"#;
+        let operation = exact_workflow_with(AUDIT_FLEET, None);
+        let mut request = exact_task_request("auditor");
+        let binding =
+            bind_exact_fleet_task_request(&operation, exact_session(), &mut request).expect("bind");
+        let receipt = route_admitted_exact_task(&operation, &binding, &mut request)
+            .await
+            .expect("routing");
+
+        // The roster profile — and therefore the spawn metadata — carries the
+        // posture role, because that is what picked the child's tool surface.
+        let posture = operation
+            .roster()
+            .get("auditor")
+            .expect("roster entry")
+            .profile
+            .role
+            .name
+            .clone();
+        assert_eq!(posture, "scout");
+        assert_eq!(receipt.posture_role.as_deref(), Some("scout"));
+
+        // What the run displays is the member's role, not that posture.
+        assert_eq!(
+            displayed_resolved_role(Some(&receipt), Some(&posture), request.role.as_deref()),
+            Some("auditor".to_string()),
+            "the panel must not rename the operator's member to its posture"
+        );
+
+        // A non-Fleet task keeps the previous precedence untouched.
+        assert_eq!(
+            displayed_resolved_role(None, Some("builder"), Some("reviewer")),
+            Some("builder".to_string())
+        );
+        assert_eq!(
+            displayed_resolved_role(None, None, Some("reviewer")),
+            Some("reviewer".to_string())
+        );
+    }
+
+    /// The spawn boundary refuses an unbounded write claim. A task that will
+    /// hit that refusal must be stopped while it is still free — before the
+    /// Router is asked anything — or the operator pays for a routing decision
+    /// about work that could never have started.
+    #[test]
+    fn a_predictably_invalid_write_scope_is_rejected_before_the_router_runs() {
+        let router = crate::fleet::exact::StaticFleetRouter::new(r#"{"reasoning":"max"}"#);
+        let operation = exact_workflow_with(EXACT_GLM_FLEET, Some(router.clone()));
+
+        // Write-capable member, no declared scope: refused at the spawn
+        // boundary, so refused here first.
+        let mut unbounded = exact_task_request("builder");
+        let err = bind_exact_fleet_task_request(&operation, exact_session(), &mut unbounded)
+            .expect_err("an unbounded write claim never reaches a spawn");
+        let message = format!("{err:?}");
+        assert!(message.contains("write_roots"), "{message}");
+
+        // Read-only member declaring a write scope is the mirror error.
+        let mut scoped_read_only = exact_task_request("reviewer");
+        scoped_read_only.exact_files = vec!["crates/tui/src/main.rs".to_string()];
+        let err = bind_exact_fleet_task_request(&operation, exact_session(), &mut scoped_read_only)
+            .expect_err("a read-only member may not claim files");
+        assert!(format!("{err:?}").contains("read-only"), "{err:?}");
+
+        // Neither spent a routing request.
+        assert_eq!(
+            router.call_count(),
+            0,
+            "validation that the spawn will fail must precede the router call"
+        );
+
+        // The same task with a declared scope binds cleanly.
+        let mut bounded = exact_write_task_request("builder");
+        bind_exact_fleet_task_request(&operation, exact_session(), &mut bounded)
+            .expect("a bounded write claim is valid");
+    }
+
+    /// The parent posture wins over the saved Fleet, in the request the child
+    /// actually receives.
+    #[test]
+    fn a_read_only_session_narrows_a_write_capable_exact_member() {
+        let operation = exact_workflow(EXACT_GLM_FLEET);
+        let session = codewhale_workflow::PermissionCeiling {
+            write: false,
+            network_tool: false,
+            shell: codewhale_workflow::ShellCeiling::ReadOnly,
+            delegation_depth: 0,
+            tools: true,
+        };
+
+        let mut request = exact_task_request("builder");
+        bind_exact_fleet_task_request(&operation, session, &mut request).expect("bind");
+
+        assert_eq!(
+            request.write_authority.as_deref(),
+            Some("read_only"),
+            "a saved read_write member must not write inside a read-only session"
+        );
+        assert_eq!(request.max_depth, Some(0));
+    }
+
+    /// A task that never reaches admission must never reach the Router.
+    #[test]
+    fn a_rejected_or_unadmitted_task_spends_no_router_call() {
+        let router = crate::fleet::exact::StaticFleetRouter::new(r#"{"reasoning":"max"}"#);
+        let operation = exact_workflow_with(EXACT_GLM_FLEET, Some(router.clone()));
+
+        // Rejected by an override check, before the member is even resolved.
+        let mut overridden = exact_task_request("builder");
+        overridden.model = Some("glm-4".to_string());
+        assert!(
+            bind_exact_fleet_task_request(&operation, exact_session(), &mut overridden).is_err()
+        );
+
+        // Rejected by member resolution.
+        let mut unknown = exact_task_request("wizard");
+        assert!(bind_exact_fleet_task_request(&operation, exact_session(), &mut unknown).is_err());
+
+        // Admitted-shaped but never routed: the capacity-blocked case.
+        let mut queued = exact_write_task_request("builder");
+        bind_exact_fleet_task_request(&operation, exact_session(), &mut queued).expect("bind");
+
+        assert_eq!(
+            router.call_count(),
+            0,
+            "binding must never contact the reasoning router"
+        );
+    }
+
+    /// The routing decision must survive the run as a durable, visible receipt
+    /// that carries no task content.
+    #[tokio::test]
+    async fn an_exact_fleet_launch_produces_a_durable_routing_receipt() {
+        let operation = exact_workflow(EXACT_GLM_FLEET);
+        let mut request = exact_write_task_request("builder");
+
+        let binding =
+            bind_exact_fleet_task_request(&operation, exact_session(), &mut request).expect("bind");
+        let receipt = route_admitted_exact_task(&operation, &binding, &mut request)
+            .await
+            .expect("routing");
+
+        assert_eq!(receipt.fleet, "workspace/glm-pair");
+        assert_eq!(receipt.member_id, "implementer");
+        assert_eq!(receipt.member_role, "builder");
+        assert_eq!(receipt.provider, "zai");
+        assert_eq!(receipt.model, "glm-5");
+        assert_eq!(receipt.requested_reasoning, "auto");
+        assert_eq!(receipt.effective_reasoning, "max");
+        assert_eq!(receipt.selection_source, "fleet_router");
+        let router = receipt.router.as_ref().expect("router identity");
+        assert_eq!(router.service_kind, "reasoning_router");
+        assert_eq!(router.qualified(), "workspace/luna-low");
+        let call = router.call.as_ref().expect("call disclosure");
+        assert_eq!(call.requested, "low");
+        assert_eq!(call.effective, "low");
+
+        // It rides the durable task_started event, and older consumers that
+        // never saw this field still deserialize.
+        let event = WorkflowUiEvent::new(WorkflowUiEventKind::TaskStarted(Box::new(
+            WorkflowTaskStartedEvent {
+                task_id: "t1".to_string(),
+                label: None,
+                role: request.role.clone(),
+                profile: request.profile.clone(),
+                model: None,
+                strength: None,
+                thinking: request.thinking.clone(),
+                // The #4039 reasoning fields carry the same requested →
+                // effective pair the receipt records, so the event and its
+                // receipt cannot disagree about what the child ran at.
+                requested_reasoning: Some(receipt.requested_reasoning.clone()),
+                effective_reasoning: Some(receipt.effective_reasoning.clone()),
+                resolved_role: None,
+                resolved_profile: None,
+                resolved_provider: "zai".to_string(),
+                resolved_model: "glm-5".to_string(),
+                route_source: "fleet".to_string(),
+                worktree: false,
+                workspace: None,
+                git_branch: None,
+                parent_task_id: None,
+                depth: 0,
+                workflow_run_id: None,
+                workflow_phase_id: None,
+                workflow_task_label: None,
+                workflow_child_index: None,
+                fleet_receipt: Some(receipt.clone()),
+            },
+        )));
+        let payload = serde_json::to_value(&event).expect("serialize");
+        let rendered = payload.to_string();
+        for expected in [
+            "fleet_receipt",
+            "\"selection_source\":\"fleet_router\"",
+            "\"provider_effective_reasoning\"",
+            "\"requested_reasoning\":\"auto\"",
+            "gpt-5.6-luna",
+            "\"service_kind\":\"reasoning_router\"",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "{expected} missing: {rendered}"
+            );
+        }
+        // No absolute paths, secrets, or task text on a durable event.
+        for forbidden in ["/Users/", "/home/", ".toml", "api_key", "land the fix"] {
+            assert!(!rendered.contains(forbidden), "{forbidden} in {rendered}");
+        }
+
+        // The visible one-line form names every side of the decision.
+        let line = receipt.line();
+        for expected in [
+            "requested=auto",
+            "effective=max",
+            "source=fleet_router",
+            "reasoning_router:workspace/luna-low",
+            "router_call_requested=low",
+        ] {
+            assert!(line.contains(expected), "{expected} missing from {line}");
+        }
+    }
+
+    #[test]
+    fn exact_fleet_rejects_an_unknown_member() {
+        let operation = exact_workflow(EXACT_GLM_FLEET);
+        let mut request = exact_task_request("wizard");
+
+        let err = bind_exact_fleet_task_request(&operation, exact_session(), &mut request)
+            .expect_err("unknown member");
+        let message = format!("{err:?}");
+        assert!(message.contains("wizard"), "{message}");
+        assert!(message.contains("implementer"), "{message}");
+
+        // The Reasoning Router is never dispatchable as a worker.
+        let mut router_request = exact_task_request("luna-low");
+        assert!(
+            bind_exact_fleet_task_request(&operation, exact_session(), &mut router_request)
+                .is_err(),
+            "the reasoning router must not be launchable as a worker"
+        );
+    }
+
+    /// One saved Router profile, referenced by two different Fleets.
+    #[tokio::test]
+    async fn one_reasoning_router_profile_serves_two_fleets() {
+        let first = exact_workflow(EXACT_GLM_FLEET);
+        let second = {
+            let text = EXACT_GLM_FLEET.replace("name = \"glm-pair\"", "name = \"glm-solo\"");
+            let document =
+                codewhale_workflow::FleetDocument::parse(&text).expect("second fleet parses");
+            crate::fleet::exact::ExactFleetWorkflow::for_tests(
+                &document,
+                codewhale_workflow::QualifiedFleetId {
+                    name: "glm-solo".to_string(),
+                    origin: "workspace".to_string(),
+                },
+                Some(crate::fleet::exact::StaticFleetRouter::new(
+                    r#"{"reasoning":"low"}"#,
+                )),
+            )
+        };
+
+        assert_eq!(
+            first.snapshot().router(),
+            second.snapshot().router(),
+            "both fleets reference the identical captured router service"
+        );
+        assert_ne!(
+            first.snapshot().fleet().qualified(),
+            second.snapshot().fleet().qualified()
+        );
+
+        // Both actually route through it, and both receipts name it.
+        for (operation, expected) in [(&first, "max"), (&second, "low")] {
+            let mut request = exact_write_task_request("builder");
+            let binding = bind_exact_fleet_task_request(operation, exact_session(), &mut request)
+                .expect("bind");
+            let receipt = route_admitted_exact_task(operation, &binding, &mut request)
+                .await
+                .expect("routing");
+            assert_eq!(receipt.effective_reasoning, expected);
+            assert_eq!(
+                receipt.router.as_ref().expect("router").qualified(),
+                "workspace/luna-low"
+            );
+        }
+    }
+
+    /// Editing the saved Fleet mid-run must not move the running Workflow's
+    /// routes. The snapshot owns copies; only the next Workflow sees the edit.
+    #[tokio::test]
+    async fn editing_the_fleet_file_after_start_does_not_move_a_running_route() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let fleets = tmp.path().join("fleets");
+        std::fs::create_dir_all(&fleets).expect("fleets dir");
+        let path = fleets.join("glm-pair.toml");
+        std::fs::write(&path, EXACT_GLM_FLEET).expect("write fleet");
+
+        let roots = vec![codewhale_workflow::FleetSearchRoot::new(
+            "workspace",
+            tmp.path(),
+        )];
+        let (document, id) =
+            codewhale_workflow::FleetDocument::load_by_name("glm-pair", &roots).expect("load");
+        let operation = crate::fleet::exact::ExactFleetWorkflow::for_tests(
+            &document,
+            id,
+            Some(crate::fleet::exact::StaticFleetRouter::new(
+                r#"{"reasoning":"max"}"#,
+            )),
+        );
+        let started_hash = operation.snapshot().content_hash().to_string();
+
+        // The operator rewrites the saved Fleet mid-run.
+        std::fs::write(
+            &path,
+            EXACT_GLM_FLEET
+                .replace(
+                    "model = \"glm-5\"\nreasoning = \"auto\"",
+                    "model = \"glm-4\"\nreasoning = \"off\"",
+                )
+                .replace("permissions = \"read_write\"", "permissions = \"full\""),
+        )
+        .expect("rewrite fleet");
+
+        let mut request = exact_write_task_request("builder");
+        let binding = bind_exact_fleet_task_request(&operation, exact_session(), &mut request)
+            .expect("bind after the edit");
+        route_admitted_exact_task(&operation, &binding, &mut request)
+            .await
+            .expect("launch after the edit");
+
+        let member = operation.roster().get("implementer").expect("roster");
+        assert_eq!(
+            member.profile.model.as_deref(),
+            Some("glm-5"),
+            "the in-flight snapshot must keep the model it started with"
+        );
+        assert_eq!(request.thinking.as_deref(), Some("max"));
+        assert_eq!(
+            request.write_authority.as_deref(),
+            Some("workspace_write"),
+            "the edit must not widen the running ceiling to `full`"
+        );
+        assert_eq!(operation.snapshot().content_hash(), started_hash);
+
+        // A fresh Workflow does see the edit.
+        let (reloaded, reloaded_id) =
+            codewhale_workflow::FleetDocument::load_by_name("glm-pair", &roots).expect("reload");
+        let next = crate::fleet::exact::ExactFleetWorkflow::for_tests(
+            &reloaded,
+            reloaded_id,
+            Some(crate::fleet::exact::StaticFleetRouter::new(
+                r#"{"reasoning":"max"}"#,
+            )),
+        );
+        assert_eq!(
+            next.roster()
+                .get("implementer")
+                .expect("roster")
+                .profile
+                .model
+                .as_deref(),
+            Some("glm-4")
+        );
+        assert_ne!(next.snapshot().content_hash(), started_hash);
     }
 
     #[test]
@@ -4796,6 +5988,7 @@ mod tests {
             dependencies: Vec::new(),
             acceptance: Vec::new(),
             allowed_tools: None,
+            disallowed_tools: Vec::new(),
             max_depth: None,
             token_budget: None,
             max_steps: None,
@@ -6142,8 +7335,7 @@ reviewer = "reviewer"
             runtime,
             state.clone(),
             None,
-            None,
-            None,
+            WorkflowFleetBinding::None,
             gates,
         );
 
@@ -6174,6 +7366,7 @@ reviewer = "reviewer"
             dependencies: Vec::new(),
             acceptance: Vec::new(),
             allowed_tools: Some(Vec::new()),
+            disallowed_tools: Vec::new(),
             max_depth: None,
             token_budget: None,
             max_steps: None,
@@ -6309,8 +7502,7 @@ reviewer = "reviewer"
             runtime,
             state.clone(),
             None,
-            None,
-            None,
+            WorkflowFleetBinding::None,
             gates,
         );
 
@@ -6341,6 +7533,7 @@ reviewer = "reviewer"
             dependencies: Vec::new(),
             acceptance: Vec::new(),
             allowed_tools: Some(Vec::new()),
+            disallowed_tools: Vec::new(),
             max_depth: None,
             token_budget: None,
             max_steps: None,
@@ -6434,8 +7627,7 @@ reviewer = "reviewer"
             runtime,
             state.clone(),
             None,
-            None,
-            None,
+            WorkflowFleetBinding::None,
             gates,
         );
         driver.gate_board.lock().expect("gate board").lane_id = "wrong-lane".to_string();
@@ -6467,6 +7659,7 @@ reviewer = "reviewer"
             dependencies: Vec::new(),
             acceptance: Vec::new(),
             allowed_tools: Some(Vec::new()),
+            disallowed_tools: Vec::new(),
             max_depth: None,
             token_budget: None,
             max_steps: None,
@@ -6743,8 +7936,15 @@ reviewer = "reviewer"
             run_id.clone(),
             WorkflowRunRecord::new(run_id.clone(), None, None, Some(&spec)),
         );
-        let driver =
-            SubAgentWorkflowDriver::new(run_id, manager, runtime, state, None, None, None, gates);
+        let driver = SubAgentWorkflowDriver::new(
+            run_id,
+            manager,
+            runtime,
+            state,
+            None,
+            WorkflowFleetBinding::None,
+            gates,
+        );
 
         driver.evaluate_gates_for_completed_role(&RuntimeTaskRecord {
             agent_id: "reviewer-block".to_string(),
@@ -6773,6 +7973,7 @@ reviewer = "reviewer"
             dependencies: Vec::new(),
             acceptance: Vec::new(),
             allowed_tools: Some(Vec::new()),
+            disallowed_tools: Vec::new(),
             max_depth: None,
             token_budget: None,
             max_steps: None,
