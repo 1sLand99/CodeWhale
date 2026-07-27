@@ -1175,5 +1175,18 @@
     "StartupDefaultSubjectMode": "mode startup",
     "StartupDefaultSubjectThinking": "level thinking",
     "StartupDefaultSubjectModel": "model",
-    "StartupDefaultSubjectAll": "default startup"
+    "StartupDefaultSubjectAll": "default startup",
+    "CmdCostReportSubtotal": "Biaya sesi:\n ─────────────────────────────\n Subtotal terharga: {cost}\n\n Satu atau lebih giliran berbayar tidak termasuk; lihat cakupan di bawah.",
+    "CmdCostReportUnknown": "Biaya sesi:\n ─────────────────────────────\n Perkiraan total: tidak diketahui\n\n Tidak ada giliran dengan harga otoritatif dalam mata uang terpilih.",
+    "CmdCostUnknownValue": "tidak diketahui",
+    "CmdCostEstimateOnly": "Ini perkiraan, bukan tagihan: dihitung secara lokal dari penggunaan token yang dilaporkan penyedia dan tarif terpublikasi, dan bisa berbeda dari faktur Anda.",
+    "CmdCostCoverage": "Tercakup: {priced} dari {turns} giliran berbayar terharga.",
+    "CmdCostUnpricedTurns": "Dikecualikan: {unpriced} giliran berbayar tanpa harga otoritatif ({reasons}); pengeluarannya tidak ada dalam total di atas.",
+    "CmdCostUnpricedClasses": "Kelas token tanpa harga pada sesi ini: {classes}. Giliran yang memakainya gagal-tertutup alih-alih melaporkan terlalu rendah.",
+    "CmdCostCoverageUnknownLegacy": "Cakupan: tidak diketahui. Sesi ini disimpan sebelum cakupan harga per giliran dicatat, jadi berapa bagian total di atas yang terhitung tidak dapat dipastikan.",
+    "CmdCostPricingProvenance": "Sumber harga yang digunakan: {sources}.",
+    "CmdCostLivePricingDowngraded": "Harga langsung penyedia tidak dapat diverifikasi untuk rute ini ({defects}); tarif terpublikasi bawaan digunakan.",
+    "CmdCostLivePricingUnavailable": "Harga langsung penyedia tidak dapat diverifikasi untuk rute ini ({defects}), dan tidak ada tarif bawaan yang dapat dipakai; pengeluaran ini tidak diketahui.",
+    "CmdCostRoutesHeader": "Rute teraudit (disunting):",
+    "CmdTokensCacheWriteTotal": "Token tulis-cache (cache-creation) sesi ini: {write}. Ditagih di atas tarif input bila penyedia memublikasikan premi tulis; lihat /cache untuk rincian per giliran."
 }

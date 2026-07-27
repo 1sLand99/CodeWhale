@@ -1175,5 +1175,18 @@
     "StartupDefaultSubjectMode": "le mode de démarrage",
     "StartupDefaultSubjectThinking": "le niveau de raisonnement",
     "StartupDefaultSubjectModel": "le modèle",
-    "StartupDefaultSubjectAll": "les défauts de démarrage"
+    "StartupDefaultSubjectAll": "les défauts de démarrage",
+    "CmdCostReportSubtotal": "Coût de la session :\n ─────────────────────────────\n Sous-total tarifé : {cost}\n\n Un ou plusieurs tours payants ne sont pas inclus ; voir la couverture ci-dessous.",
+    "CmdCostReportUnknown": "Coût de la session :\n ─────────────────────────────\n Total estimé : inconnu\n\n Aucun tour n'a de prix faisant autorité dans la devise choisie.",
+    "CmdCostUnknownValue": "inconnu",
+    "CmdCostEstimateOnly": "Ceci est une estimation, pas une facture : elle est calculée localement à partir de l'usage de tokens rapporté par le fournisseur et des tarifs publiés, et peut différer de votre facture.",
+    "CmdCostCoverage": "Couvert : {priced} tour(s) payant(s) tarifé(s) sur {turns}.",
+    "CmdCostUnpricedTurns": "Exclu : {unpriced} tour(s) payant(s) sans prix faisant autorité ({reasons}) ; leur dépense manque au total ci-dessus.",
+    "CmdCostUnpricedClasses": "Classes de tokens non tarifées vues cette session : {classes}. Les tours qui les utilisent échouent fermé plutôt que de sous-déclarer.",
+    "CmdCostCoverageUnknownLegacy": "Couverture : inconnue. Cette session a été enregistrée avant l'enregistrement de la couverture tarifaire par tour ; impossible d'établir quelle part du total est comptabilisée.",
+    "CmdCostPricingProvenance": "Sources de prix utilisées : {sources}.",
+    "CmdCostLivePricingDowngraded": "Les prix en direct du fournisseur n'ont pas pu être vérifiés pour cette route ({defects}) ; les tarifs publiés embarqués ont été utilisés.",
+    "CmdCostLivePricingUnavailable": "Les prix en direct du fournisseur n'ont pas pu être vérifiés pour cette route ({defects}), et aucun tarif embarqué utilisable n'était disponible ; cette dépense est inconnue.",
+    "CmdCostRoutesHeader": "Routes auditées (caviardées) :",
+    "CmdTokensCacheWriteTotal": "Tokens d'écriture en cache (cache-creation) cette session : {write}. Facturés au-dessus du tarif d'entrée lorsque le fournisseur publie une prime d'écriture ; voir /cache pour le détail par tour."
 }

@@ -1175,5 +1175,18 @@
     "StartupDefaultSubjectMode": "mode d'arrencada",
     "StartupDefaultSubjectThinking": "nivell de raonament",
     "StartupDefaultSubjectModel": "model",
-    "StartupDefaultSubjectAll": "valors per defecte d'arrencada"
+    "StartupDefaultSubjectAll": "valors per defecte d'arrencada",
+    "CmdCostReportSubtotal": "Cost de la sessió:\n ─────────────────────────────\n Subtotal valorat: {cost}\n\n Un o més torns de pagament no hi són inclosos; vegeu la cobertura a sota.",
+    "CmdCostReportUnknown": "Cost de la sessió:\n ─────────────────────────────\n Total estimat: desconegut\n\n Cap torn té un preu autoritzat en la moneda seleccionada.",
+    "CmdCostUnknownValue": "desconegut",
+    "CmdCostEstimateOnly": "Això és una estimació, no una factura: es calcula localment a partir de l'ús de tokens informat pel proveïdor i de les tarifes publicades, i pot diferir de la vostra factura.",
+    "CmdCostCoverage": "Cobert: {priced} de {turns} torn(s) de pagament valorats.",
+    "CmdCostUnpricedTurns": "Exclòs: {unpriced} torn(s) de pagament sense preu autoritzat ({reasons}); la seva despesa falta al total de dalt.",
+    "CmdCostUnpricedClasses": "Classes de tokens sense preu vistes en aquesta sessió: {classes}. Els torns que les usen fallen tancats en lloc d'infradeclarar.",
+    "CmdCostCoverageUnknownLegacy": "Cobertura: desconeguda. La sessió es va desar abans que es registrés la cobertura de preus per torn, així que no es pot establir quina part del total està comptabilitzada.",
+    "CmdCostPricingProvenance": "Fonts de preus emprades: {sources}.",
+    "CmdCostLivePricingDowngraded": "No s'han pogut verificar els preus en viu del proveïdor per a aquesta ruta ({defects}); s'han emprat les tarifes publicades incloses.",
+    "CmdCostLivePricingUnavailable": "No s'han pogut verificar els preus en viu del proveïdor per a aquesta ruta ({defects}), i no hi havia cap tarifa inclosa utilitzable; aquesta despesa és desconeguda.",
+    "CmdCostRoutesHeader": "Rutes auditades (redactades):",
+    "CmdTokensCacheWriteTotal": "Tokens d'escriptura a la memòria cau (cache-creation) aquesta sessió: {write}. Es facturen per sobre de la tarifa d'entrada quan el proveïdor publica una prima d'escriptura; vegeu /cache per al desglossament per torn."
 }

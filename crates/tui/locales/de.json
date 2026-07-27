@@ -1175,5 +1175,18 @@
     "StartupDefaultSubjectMode": "Start-Modus",
     "StartupDefaultSubjectThinking": "Thinking-Level",
     "StartupDefaultSubjectModel": "Modell",
-    "StartupDefaultSubjectAll": "Start-Defaults"
+    "StartupDefaultSubjectAll": "Start-Defaults",
+    "CmdCostReportSubtotal": "Sitzungskosten:\n ─────────────────────────────\n Bepreiste Zwischensumme: {cost}\n\n Ein oder mehrere kostenpflichtige Züge sind nicht enthalten; siehe Abdeckung unten.",
+    "CmdCostReportUnknown": "Sitzungskosten:\n ─────────────────────────────\n Geschätzte Summe: unbekannt\n\n Kein Zug hat einen verbindlichen Preis in der gewählten Währung.",
+    "CmdCostUnknownValue": "unbekannt",
+    "CmdCostEstimateOnly": "Dies ist eine Schätzung, keine Rechnung: Sie wird lokal aus der vom Anbieter gemeldeten Token-Nutzung und veröffentlichten Tarifen berechnet und kann von Ihrer Rechnung abweichen.",
+    "CmdCostCoverage": "Abgedeckt: {priced} von {turns} kostenpflichtigen Zügen bepreist.",
+    "CmdCostUnpricedTurns": "Ausgeschlossen: {unpriced} kostenpflichtige Züge ohne verbindlichen Preis ({reasons}); ihre Ausgaben fehlen in der Summe oben.",
+    "CmdCostUnpricedClasses": "Unbepreiste Token-Klassen in dieser Sitzung: {classes}. Züge damit schlagen geschlossen fehl, statt zu wenig zu melden.",
+    "CmdCostCoverageUnknownLegacy": "Abdeckung: unbekannt. Diese Sitzung wurde gespeichert, bevor die Preisabdeckung pro Zug erfasst wurde; wie viel der Summe oben erfasst ist, lässt sich nicht feststellen.",
+    "CmdCostPricingProvenance": "Verwendete Preisquellen: {sources}.",
+    "CmdCostLivePricingDowngraded": "Live-Preise des Anbieters konnten für diese Route nicht verifiziert werden ({defects}); die mitgelieferten veröffentlichten Tarife wurden verwendet.",
+    "CmdCostLivePricingUnavailable": "Live-Preise des Anbieters konnten für diese Route nicht verifiziert werden ({defects}), und kein brauchbarer mitgelieferter Tarif war verfügbar; diese Ausgabe ist unbekannt.",
+    "CmdCostRoutesHeader": "Geprüfte Routen (geschwärzt):",
+    "CmdTokensCacheWriteTotal": "Cache-Schreib-Tokens (cache-creation) in dieser Sitzung: {write}. Über dem Eingaberatensatz abgerechnet, wenn der Anbieter einen Schreibaufschlag veröffentlicht; Details pro Zug unter /cache."
 }
