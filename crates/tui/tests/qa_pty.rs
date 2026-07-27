@@ -903,6 +903,12 @@ web_search = true
     h.send(keys::key::enter())?;
     h.wait_for_text("Choose your language", BOOT_TIMEOUT)?;
     h.send(keys::key::enter())?;
+    // The Appearance step (#3937) sits between language and trust; Enter
+    // keeps the current theme and advances. This is also the only PTY-level
+    // execution of that step's event-loop wiring, so a hang here is a real
+    // wiring bug, not a script gap.
+    h.wait_for_text("Make It Yours", BOOT_TIMEOUT)?;
+    h.send(keys::key::enter())?;
     h.wait_for_text("Know this workspace", BOOT_TIMEOUT)?;
     h.wait_for_text("Press 1/Y to trust and continue", BOOT_TIMEOUT)?;
     // Decline through the explicit trust hotkey. Enter's fail-closed behavior
