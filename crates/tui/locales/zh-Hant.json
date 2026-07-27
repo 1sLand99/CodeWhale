@@ -146,6 +146,7 @@
     "ConfigDefaultReasoning": "(設定/預設)",
     "ConfigUnavailable": "(無法使用)",
     "ModelPickerAutoNetworkHint": "每回合 · 可用供應商 · 請求與近期內容 → DeepSeek / deepseek-v4-flash",
+    "ModelPickerAutoNetworkActiveProviderHint": "每回合 · 僅目前供應商 · 請求與近期內容 → {provider} / {model}",
     "ModelPickerAutoLocalHint": "每回合 · 本機啟發式 · 不傳送路由請求",
     "ModelPickerAutoLastRoute": "上次 {provider} · {model}",
     "AutoRouteSelectedToast": "Auto: {provider} / {model}（{source}）· Ctrl+O：路由詳情",

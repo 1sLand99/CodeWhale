@@ -162,6 +162,7 @@
     "ConfigActionEdit": "Enter로 편집",
     "ConfigActionReadOnly": "읽기 전용",
     "ModelPickerAutoNetworkHint": "턴별 · 실행 가능한 제공자 · 요청 + 최근 컨텍스트 → DeepSeek / deepseek-v4-flash",
+    "ModelPickerAutoNetworkActiveProviderHint": "턴별 · 활성 제공자만 · 요청 + 최근 컨텍스트 → {provider} / {model}",
     "ModelPickerAutoLocalHint": "턴별 · 로컬 휴리스틱 · 라우터 요청 없음",
     "ModelPickerAutoLastRoute": "최근 {provider} · {model}",
     "AutoRouteSelectedToast": "Auto: {provider} / {model} ({source}) · Ctrl+O: 경로 세부 정보",

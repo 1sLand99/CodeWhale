@@ -162,6 +162,7 @@
     "ConfigActionEdit": "Enter để sửa",
     "ConfigActionReadOnly": "chỉ đọc",
     "ModelPickerAutoNetworkHint": "mỗi lượt · nhà cung cấp khả dụng · yêu cầu + ngữ cảnh gần đây → DeepSeek / deepseek-v4-flash",
+    "ModelPickerAutoNetworkActiveProviderHint": "mỗi lượt · chỉ nhà cung cấp đang dùng · yêu cầu + ngữ cảnh gần đây → {provider} / {model}",
     "ModelPickerAutoLocalHint": "mỗi lượt · heuristic cục bộ · không gửi yêu cầu định tuyến",
     "ModelPickerAutoLastRoute": "lần trước {provider} · {model}",
     "AutoRouteSelectedToast": "Auto: {provider} / {model} qua {source} · Ctrl+O: chi tiết tuyến",
