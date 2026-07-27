@@ -166,6 +166,13 @@ pub fn for_route(config: &Config, provider: ApiProvider) -> BillingPresentation 
 pub fn capture_product(config: &Config, provider: ApiProvider) -> RouteProduct {
     let provider_config = config.provider_config_for(provider);
     match provider {
+        ApiProvider::Minimax | ApiProvider::MinimaxAnthropic => {
+            match minimax_credential_product(config, provider, provider_config) {
+                CredentialProduct::Plan => RouteProduct::Subscription("MiniMax Token Plan quota"),
+                CredentialProduct::PayAsYouGo => RouteProduct::Metered,
+                CredentialProduct::Unprovable => RouteProduct::Unproven,
+            }
+        }
         ApiProvider::XiaomiMimo => {
             if xiaomi_is_explicit_pay_as_you_go(provider_config) {
                 RouteProduct::Metered
@@ -305,6 +312,22 @@ fn classify(
             BillingPresentation::Metered
         }
         ApiProvider::Moonshot => BillingPresentation::Unknown,
+        // Both MiniMax dialects (`[providers.minimax]` chat-completions and
+        // `[providers.minimax_anthropic]` Messages) are reachable with the
+        // same MINIMAX_API_KEY and sell the same PAYG/Token Plan duality over
+        // the same endpoints, so the wire protocol must not change the billing
+        // story and the endpoint cannot settle it either. Only the credential
+        // product can, and when that is unprovable the route is Unknown.
+        // A MiniMax gateway sells its own product on its own terms, and the
+        // PAYG/Token Plan duality only describes MiniMax's own hosts. Settle
+        // the endpoint first: anything off the supported direct routes is
+        // Unknown no matter what credential was captured.
+        ApiProvider::Minimax | ApiProvider::MinimaxAnthropic
+            if !minimax_base_url_is_supported_direct(base_url) =>
+        {
+            BillingPresentation::Unknown
+        }
+        ApiProvider::Minimax | ApiProvider::MinimaxAnthropic => product_billing(product),
         ApiProvider::Xai | ApiProvider::Anthropic => product_billing(product),
         // A named custom route is billed from the identity and endpoint it
         // dispatched on. Without an identity there is no vendor to name, and
@@ -330,6 +353,11 @@ fn product_billing(product: RouteProduct) -> BillingPresentation {
         RouteProduct::Unproven => BillingPresentation::Unknown,
     }
 }
+
+// MiniMax's own hosted routes, for both wire dialects. Single-sourced in
+// `config` so billing classification and request shaping cannot disagree about
+// which hosts are first-party.
+use crate::config::minimax_base_url_is_supported_direct;
 
 /// StepFun already reduces an endpoint to a non-secret billing surface and
 /// fails closed on anything it does not recognize, so the resolved endpoint
@@ -514,6 +542,102 @@ fn uses_anthropic_oauth(config: &ProviderConfig) -> bool {
                 | "subscription"
         )
     })
+}
+
+/// What immutable, non-secret provenance can prove about the credential
+/// product behind a dual-product route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CredentialProduct {
+    /// A subscription / token-plan product is proven.
+    Plan,
+    /// An ordinary metered (pay-as-you-go) product is proven.
+    PayAsYouGo,
+    /// Neither can be proven from route/auth provenance. Classification must
+    /// fail closed rather than default to metered dollars.
+    Unprovable,
+}
+
+/// MiniMax sells both a pay-as-you-go API and a Token Plan subscription over
+/// the *same* endpoints and the same `MINIMAX_API_KEY`, so the product can
+/// only come from an explicit pay mode or the credential's own product prefix.
+///
+/// A key held in the Codewhale secret store / OS keyring is deliberately not
+/// probed: classification must never be a reason to open secret storage. When
+/// no product marker is visible the route is `Unprovable`, and [`for_route`]
+/// reports Unknown instead of inventing pay-as-you-go dollars.
+fn minimax_credential_product(
+    config: &Config,
+    provider: ApiProvider,
+    provider_config: Option<&ProviderConfig>,
+) -> CredentialProduct {
+    // An explicit operator-set pay mode is the strongest non-secret
+    // provenance available: the operator has told us how the account bills,
+    // and it wins over key shape in both directions. An unrecognized mode is
+    // not a product claim.
+    if let Some(mode) = provider_config
+        .and_then(|config| config.mode.as_deref())
+        .filter(|mode| !mode.trim().is_empty())
+        .map(normalized)
+    {
+        return match mode.as_str() {
+            "token_plan" | "tokenplan" | "plan" | "subscription" => CredentialProduct::Plan,
+            "pay_as_you_go" | "payg" | "paygo" | "pay_as_go" | "metered" | "standard" | "api"
+            | "api_key" | "default" => CredentialProduct::PayAsYouGo,
+            _ => CredentialProduct::Unprovable,
+        };
+    }
+    match visible_minimax_credential_is_plan_shaped(config, provider, provider_config) {
+        Some(true) => CredentialProduct::Plan,
+        Some(false) => CredentialProduct::PayAsYouGo,
+        None => CredentialProduct::Unprovable,
+    }
+}
+
+/// Whether a MiniMax credential is visible in non-secret-store provenance,
+/// and if so whether it carries the Token Plan (`sk-cp…`) product prefix.
+///
+/// Only the product marker is returned — the credential value never leaves
+/// this function, nothing is logged, and the secret store is never opened.
+/// `None` means "no visible credential", which is the honest answer for a
+/// key resolved from the keyring, from an OAuth/command source, or from
+/// nowhere at all.
+fn visible_minimax_credential_is_plan_shaped(
+    config: &Config,
+    provider: ApiProvider,
+    provider_config: Option<&ProviderConfig>,
+) -> Option<bool> {
+    let is_plan_shaped = |key: &str| key.trim_start().starts_with("sk-cp");
+    // 1. An explicit `[providers.minimax*] api_key` is file-owned route truth.
+    if let Some(key) = provider_config
+        .and_then(|config| config.api_key.as_deref())
+        .map(str::trim)
+        .filter(|key| !key.is_empty() && *key != crate::config::API_KEYRING_SENTINEL)
+    {
+        return Some(is_plan_shaped(key));
+    }
+    // 2. `api_key_env = "…"` binds one variable to this route by name, so the
+    //    binding itself is config-owned provenance even though the value is
+    //    ambient.
+    if let Some(value) = provider_config
+        .and_then(|config| config.api_key_env.as_deref())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .and_then(|name| std::env::var(name).ok())
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Some(is_plan_shaped(&value));
+    }
+    // 3. Ambient `MINIMAX_API_KEY` only describes the route when the route is
+    //    still an official MiniMax endpoint. Credential resolution refuses to
+    //    send ambient provider keys to a custom host, so on a custom endpoint
+    //    the exported key proves nothing about what this route bills.
+    if config.provider_uses_custom_endpoint(provider) {
+        return None;
+    }
+    std::env::var("MINIMAX_API_KEY")
+        .ok()
+        .filter(|key| !key.trim().is_empty())
+        .map(|key| is_plan_shaped(&key))
 }
 
 fn xiaomi_is_explicit_pay_as_you_go(config: Option<&ProviderConfig>) -> bool {
@@ -1472,6 +1596,349 @@ mod tests {
                 },
             ),
             BillingPresentation::Subscription("Codex OAuth quota")
+        );
+    }
+
+    #[test]
+    fn minimax_defaults_to_pay_as_you_go_metered() {
+        let _lock = crate::test_support::lock_test_env();
+        let _key = crate::test_support::EnvVarGuard::remove("MINIMAX_API_KEY");
+        let config = config_with(
+            ApiProvider::Minimax,
+            ProviderConfig {
+                base_url: Some("https://api.minimax.io/v1".to_string()),
+                api_key: Some("sk-test-payg-key".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        let billing = for_route(&config, ApiProvider::Minimax);
+        assert_eq!(billing, BillingPresentation::Metered);
+        assert!(billing.shows_money());
+        let chip = usage_chip(
+            billing,
+            ApiProvider::Minimax,
+            "MiniMax-M3",
+            0.42,
+            CostCurrency::Usd,
+            None,
+        );
+        assert!(matches!(chip, UsageChip::Money(_)));
+        assert!(format_usage_line(&chip).contains('$'));
+    }
+
+    #[test]
+    fn minimax_explicit_token_plan_mode_is_subscription_quota() {
+        let _lock = crate::test_support::lock_test_env();
+        let _key = crate::test_support::EnvVarGuard::remove("MINIMAX_API_KEY");
+        let config = config_with(
+            ApiProvider::Minimax,
+            ProviderConfig {
+                mode: Some("token-plan".to_string()),
+                api_key: Some("sk-test-payg-key".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        let billing = for_route(&config, ApiProvider::Minimax);
+        assert_eq!(
+            billing,
+            BillingPresentation::Subscription("MiniMax Token Plan quota")
+        );
+        assert!(!billing.shows_money());
+        // `MiniMax-M3` is priced on the metered route; the subscription
+        // classification must still win over the priced row.
+        let chip = usage_chip(
+            billing,
+            ApiProvider::Minimax,
+            "MiniMax-M3",
+            12.34,
+            CostCurrency::Usd,
+            None,
+        );
+        assert!(!matches!(chip, UsageChip::Money(_)));
+        assert!(!format_usage_line(&chip).contains('$'));
+    }
+
+    #[test]
+    fn minimax_sk_cp_config_key_is_subscription_quota() {
+        let _lock = crate::test_support::lock_test_env();
+        let _key = crate::test_support::EnvVarGuard::remove("MINIMAX_API_KEY");
+        let config = config_with(
+            ApiProvider::Minimax,
+            ProviderConfig {
+                api_key: Some("sk-cp-test-token-plan-key".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        let billing = for_route(&config, ApiProvider::Minimax);
+        assert_eq!(
+            billing,
+            BillingPresentation::Subscription("MiniMax Token Plan quota")
+        );
+        assert!(!billing.shows_money());
+    }
+
+    /// The Anthropic-dialect MiniMax route is the same product behind a
+    /// different wire protocol: same MINIMAX_API_KEY, same PAYG/Token Plan
+    /// duality. Classifying only the chat-completions dialect would show
+    /// invented dollars for a Token Plan key on `[providers.minimax_anthropic]`.
+    #[test]
+    fn minimax_anthropic_dialect_shares_the_token_plan_classification() {
+        let _lock = crate::test_support::lock_test_env();
+        let _key = crate::test_support::EnvVarGuard::remove("MINIMAX_API_KEY");
+
+        let plan = config_with(
+            ApiProvider::MinimaxAnthropic,
+            ProviderConfig {
+                api_key: Some("sk-cp-test-token-plan-key".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        let plan_billing = for_route(&plan, ApiProvider::MinimaxAnthropic);
+        assert_eq!(
+            plan_billing,
+            BillingPresentation::Subscription("MiniMax Token Plan quota")
+        );
+        assert!(!plan_billing.shows_money());
+
+        let explicit_plan = config_with(
+            ApiProvider::MinimaxAnthropic,
+            ProviderConfig {
+                mode: Some("token-plan".to_string()),
+                api_key: Some("sk-test-payg-key".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        assert_eq!(
+            for_route(&explicit_plan, ApiProvider::MinimaxAnthropic),
+            BillingPresentation::Subscription("MiniMax Token Plan quota")
+        );
+
+        // Pay-as-you-go on the same dialect stays metered.
+        let payg = config_with(
+            ApiProvider::MinimaxAnthropic,
+            ProviderConfig {
+                api_key: Some("sk-test-payg-key".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        let payg_billing = for_route(&payg, ApiProvider::MinimaxAnthropic);
+        assert_eq!(payg_billing, BillingPresentation::Metered);
+        assert!(payg_billing.shows_money());
+    }
+
+    #[test]
+    fn minimax_sk_cp_env_key_is_subscription_quota() {
+        let _lock = crate::test_support::lock_test_env();
+        let _key =
+            crate::test_support::EnvVarGuard::set("MINIMAX_API_KEY", "sk-cp-test-token-plan-key");
+        let config = config_with(ApiProvider::Minimax, ProviderConfig::default());
+        assert_eq!(
+            for_route(&config, ApiProvider::Minimax),
+            BillingPresentation::Subscription("MiniMax Token Plan quota")
+        );
+    }
+
+    #[test]
+    fn minimax_explicit_pay_as_you_go_wins_over_sk_cp_key() {
+        let _lock = crate::test_support::lock_test_env();
+        let _key = crate::test_support::EnvVarGuard::remove("MINIMAX_API_KEY");
+        for mode in ["pay-as-you-go", "payg", "metered"] {
+            let config = config_with(
+                ApiProvider::Minimax,
+                ProviderConfig {
+                    mode: Some(mode.to_string()),
+                    api_key: Some("sk-cp-test-token-plan-key".to_string()),
+                    ..ProviderConfig::default()
+                },
+            );
+            let billing = for_route(&config, ApiProvider::Minimax);
+            assert_eq!(
+                billing,
+                BillingPresentation::Metered,
+                "explicit mode {mode} must win over the sk-cp key shape"
+            );
+            assert!(billing.shows_money());
+        }
+    }
+
+    /// Clear the only ambient variable `minimax_credential_product` reads, so
+    /// a developer's real shell cannot decide a billing regression's outcome.
+    fn minimax_env_guard() -> crate::test_support::EnvVarGuard {
+        crate::test_support::EnvVarGuard::remove("MINIMAX_API_KEY")
+    }
+
+    /// The release blocker: a MiniMax key saved through `codewhale auth set`
+    /// lives in the secret store, so neither the config table nor
+    /// `MINIMAX_API_KEY` carries a product marker. Classification must not
+    /// open the secret store to find out, and must not silently call the
+    /// route pay-as-you-go — a Token Plan account would then accrue invented
+    /// dollars on every benchmark receipt.
+    #[test]
+    fn minimax_keyring_or_opaque_credential_is_unclassified_not_metered() {
+        let _lock = crate::test_support::lock_test_env();
+        let _env = minimax_env_guard();
+        for provider in [ApiProvider::Minimax, ApiProvider::MinimaxAnthropic] {
+            // No credential visible at all (keyring/OAuth/command-sourced).
+            let opaque = config_with(provider, ProviderConfig::default());
+            assert_eq!(
+                for_route(&opaque, provider),
+                BillingPresentation::Unknown,
+                "{provider:?} must not claim pay-as-you-go it cannot prove"
+            );
+            // The legacy keyring placeholder is not a credential and carries
+            // no product prefix.
+            let sentinel = config_with(
+                provider,
+                ProviderConfig {
+                    api_key: Some(crate::config::API_KEYRING_SENTINEL.to_string()),
+                    ..ProviderConfig::default()
+                },
+            );
+            assert_eq!(
+                for_route(&sentinel, provider),
+                BillingPresentation::Unknown,
+                "{provider:?} keyring sentinel is not a pay-as-you-go proof"
+            );
+            let chip = usage_chip(
+                for_route(&opaque, provider),
+                provider,
+                "MiniMax-M3",
+                12.34,
+                CostCurrency::Usd,
+                None,
+            );
+            assert_eq!(chip, UsageChip::Unknown);
+            assert!(!format_usage_line(&chip).contains('$'));
+        }
+    }
+
+    /// Provenance-by-source, both dialects: config value, route-bound
+    /// `api_key_env`, and ambient `MINIMAX_API_KEY` are each sufficient to
+    /// prove a product, and each proves it the same way.
+    #[test]
+    fn minimax_credential_provenance_classifies_both_dialects_identically() {
+        let _lock = crate::test_support::lock_test_env();
+        let _env = minimax_env_guard();
+        for provider in [ApiProvider::Minimax, ApiProvider::MinimaxAnthropic] {
+            // 1. Config-owned key.
+            for (key, expected) in [
+                (
+                    "sk-cp-plan-key",
+                    BillingPresentation::Subscription("MiniMax Token Plan quota"),
+                ),
+                ("sk-payg-key", BillingPresentation::Metered),
+            ] {
+                let config = config_with(
+                    provider,
+                    ProviderConfig {
+                        api_key: Some(key.to_string()),
+                        ..ProviderConfig::default()
+                    },
+                );
+                assert_eq!(for_route(&config, provider), expected, "{provider:?} {key}");
+            }
+
+            // 2. Route-bound `api_key_env`: the binding is config-owned even
+            //    though the value is ambient.
+            for (key, expected) in [
+                (
+                    "sk-cp-plan-key",
+                    BillingPresentation::Subscription("MiniMax Token Plan quota"),
+                ),
+                ("sk-payg-key", BillingPresentation::Metered),
+            ] {
+                let _bound =
+                    crate::test_support::EnvVarGuard::set("CW_TEST_MINIMAX_BOUND_KEY", key);
+                let config = config_with(
+                    provider,
+                    ProviderConfig {
+                        api_key_env: Some("CW_TEST_MINIMAX_BOUND_KEY".to_string()),
+                        ..ProviderConfig::default()
+                    },
+                );
+                assert_eq!(
+                    for_route(&config, provider),
+                    expected,
+                    "{provider:?} api_key_env {key}"
+                );
+            }
+
+            // 3. Ambient provider environment on an official endpoint.
+            for (key, expected) in [
+                (
+                    "sk-cp-plan-key",
+                    BillingPresentation::Subscription("MiniMax Token Plan quota"),
+                ),
+                ("sk-payg-key", BillingPresentation::Metered),
+            ] {
+                let _ambient = crate::test_support::EnvVarGuard::set("MINIMAX_API_KEY", key);
+                let config = config_with(provider, ProviderConfig::default());
+                assert_eq!(
+                    for_route(&config, provider),
+                    expected,
+                    "{provider:?} MINIMAX_API_KEY {key}"
+                );
+            }
+        }
+    }
+
+    /// Ambient provider credentials are never sent to a custom host, so an
+    /// exported `MINIMAX_API_KEY` proves nothing about what a gateway route
+    /// bills. That route is Unknown, not metered-by-default.
+    #[test]
+    fn minimax_ambient_key_does_not_classify_a_custom_endpoint() {
+        let _lock = crate::test_support::lock_test_env();
+        let _env = minimax_env_guard();
+        let _ambient = crate::test_support::EnvVarGuard::set("MINIMAX_API_KEY", "sk-payg-key");
+        let config = config_with(
+            ApiProvider::Minimax,
+            ProviderConfig {
+                base_url: Some("https://gateway.internal.example/v1".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        assert_eq!(
+            for_route(&config, ApiProvider::Minimax),
+            BillingPresentation::Unknown
+        );
+    }
+
+    /// An operator pay mode we do not recognize is not a product claim.
+    #[test]
+    fn minimax_unrecognized_pay_mode_is_unclassified() {
+        let _lock = crate::test_support::lock_test_env();
+        let _env = minimax_env_guard();
+        let config = config_with(
+            ApiProvider::Minimax,
+            ProviderConfig {
+                mode: Some("enterprise-committed-spend".to_string()),
+                api_key: Some("sk-cp-plan-key".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        assert_eq!(
+            for_route(&config, ApiProvider::Minimax),
+            BillingPresentation::Unknown
+        );
+    }
+
+    /// MiniMax billing is credential-shaped, not endpoint-shaped: a dispatch
+    /// receipt pointing at the shipped default URL still cannot invent a
+    /// product.
+    #[test]
+    fn dispatched_minimax_default_endpoint_does_not_invent_a_product() {
+        let _lock = crate::test_support::lock_test_env();
+        let _env = minimax_env_guard();
+        let config = config_with(ApiProvider::Minimax, ProviderConfig::default());
+        assert_eq!(
+            for_dispatched_route(
+                &config,
+                DispatchedRoute {
+                    provider: ApiProvider::Minimax,
+                    base_url: "https://api.minimax.io/v1",
+                },
+            ),
+            BillingPresentation::Unknown
         );
     }
 }

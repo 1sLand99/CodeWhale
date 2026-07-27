@@ -30,7 +30,10 @@ use subagent_limits::{resolve_subagent_api_timeout_secs, resolve_subagent_heartb
 mod models;
 pub use models::*;
 
-const API_KEYRING_SENTINEL: &str = "__KEYRING__";
+/// Legacy placeholder written into `api_key` when the real credential lives in
+/// the secret store. It is not a credential and must never be treated as one —
+/// including by billing classification, which reads credential *shape* only.
+pub(crate) const API_KEYRING_SENTINEL: &str = "__KEYRING__";
 pub const DEFAULT_ZAI_PROVIDER_MAX_CONCURRENCY: usize = 3;
 pub const MAX_PROVIDER_REQUEST_CONCURRENCY: usize = 64;
 
@@ -7853,6 +7856,23 @@ pub(crate) fn is_exact_known_zai_reasoning_route(
         || is_exact_zai_glm_5_turbo_route(provider, base_url, model)
         || (is_exact_zai_chat_route(provider, base_url)
             && model.trim().eq_ignore_ascii_case(ZAI_GLM_5_1_MODEL))
+}
+
+/// MiniMax's own hosted routes, for both wire dialects.
+///
+/// Kept as a pure string predicate so a dispatch receipt can be judged without
+/// a `Config`, and shared with billing classification so a MiniMax-compatible
+/// gateway cannot inherit the first-party PAYG/Token Plan duality. Both the
+/// `.io` and `.com` hosts are first-party; anything else is a gateway.
+#[must_use]
+pub(crate) fn minimax_base_url_is_supported_direct(base_url: &str) -> bool {
+    codewhale_config::provider::is_exact_minimax_chat_route(
+        codewhale_config::ProviderKind::Minimax,
+        base_url,
+    ) || codewhale_config::provider::is_exact_minimax_anthropic_route(
+        codewhale_config::ProviderKind::MinimaxAnthropic,
+        base_url,
+    )
 }
 
 /// Whether a route is exactly MiniMax-M3 on the first-party OpenAI-compatible
