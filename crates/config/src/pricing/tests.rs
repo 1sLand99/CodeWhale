@@ -75,6 +75,68 @@ fn malformed_catalog_prices_fail_closed_at_every_projection() {
     assert!(OfferingPricing::from_catalog_offering(&zero).is_some());
 }
 
+/// A price of an impossible magnitude is a unit error, not an expensive model.
+///
+/// The two ways this happens in the wild are a per-token price parsed as
+/// per-million (10^6 too large) and a minor-unit integer read as a major unit
+/// (10^2 too large). Both would bill the user orders of magnitude over, so the
+/// row is rejected at the same boundary that rejects NaN and negatives — and
+/// rejected *whole*, so the surviving fields cannot produce a quietly
+/// under-counted estimate instead.
+#[test]
+fn absurd_catalog_prices_fail_closed_at_every_projection() {
+    let absurd = [
+        // $3/token, mistakenly published as a per-million rate.
+        3_000_000.0,
+        // The declared bound itself is out, one ulp above is far out.
+        MAX_PLAUSIBLE_PRICE_PER_MILLION + 1.0,
+        f64::MAX,
+    ];
+    for price in absurd {
+        for field in 0..4 {
+            let mut offering = priced(CatalogSource::Bundled);
+            let cost = offering.cost.as_mut().expect("cost fixture");
+            match field {
+                0 => cost.input = Some(price),
+                1 => cost.output = Some(price),
+                2 => cost.cache_read = Some(price),
+                3 => cost.cache_write = Some(price),
+                _ => unreachable!(),
+            }
+            assert!(
+                !catalog_cost_is_valid(cost),
+                "field {field} accepted absurd price {price}"
+            );
+            assert!(
+                OfferingPricing::from_catalog_offering(&offering).is_none(),
+                "field {field} produced pricing from absurd price {price}"
+            );
+            assert_eq!(
+                route_pricing_sku(&offering),
+                PricingSku::UnknownOrStale,
+                "route projection accepted field {field} = {price}"
+            );
+        }
+    }
+
+    // The bound is generous on purpose: a genuinely expensive published rate
+    // stays priced. Rejecting a real price would be its own kind of lie.
+    let mut expensive = priced(CatalogSource::Bundled);
+    let cost = expensive.cost.as_mut().expect("cost fixture");
+    cost.input = Some(600.0);
+    cost.output = Some(2_400.0);
+    assert!(
+        OfferingPricing::from_catalog_offering(&expensive).is_some(),
+        "a plausible frontier rate must survive the magnitude bound"
+    );
+
+    // Exactly at the bound is still accepted; only values above it are not.
+    let mut boundary = priced(CatalogSource::Bundled);
+    let cost = boundary.cost.as_mut().expect("cost fixture");
+    cost.input = Some(MAX_PLAUSIBLE_PRICE_PER_MILLION);
+    assert!(OfferingPricing::from_catalog_offering(&boundary).is_some());
+}
+
 #[test]
 fn live_source_carries_provider_live_provenance_and_effective_at() {
     let src = CatalogSource::Live {
@@ -222,15 +284,36 @@ fn estimate_cost_with_zero_usage_is_zero() {
 
 #[test]
 fn finite_rates_that_overflow_the_computed_total_fail_closed() {
-    let mut offering = priced(CatalogSource::Bundled);
-    offering.cost.as_mut().expect("cost fixture").input = Some(f64::MAX);
-    let pricing = OfferingPricing::from_catalog_offering(&offering)
-        .expect("the finite row passes boundary validation");
+    // Constructed directly rather than through `from_catalog_offering`: the
+    // magnitude bound now rejects a rate this large at the catalog boundary, so
+    // the only way to reach the estimator with one is to bypass that boundary.
+    // The estimator keeps its own overflow guard regardless — it is the last
+    // check before a number becomes money, and it must not depend on an earlier
+    // layer having run.
+    let pricing = OfferingPricing {
+        provider: "deepseek".to_string(),
+        wire_model_id: "deepseek-v4-pro".to_string(),
+        canonical_model: Some("deepseek-v4-pro".to_string()),
+        currency: Currency::Usd,
+        input_per_million: Some(f64::MAX),
+        output_per_million: None,
+        cache_read_per_million: None,
+        cache_write_per_million: None,
+        provenance: PricingProvenance::ModelsDevBundled,
+        effective_at: None,
+        endpoint_fingerprint: None,
+    };
     let usage = TokenUsage {
         input: u64::MAX,
         ..TokenUsage::default()
     };
     assert_eq!(pricing.estimate_cost(&usage), None);
+
+    // And the boundary itself refuses to hand such a row over in the first
+    // place, so the guard above is defence in depth, not the only defence.
+    let mut offering = priced(CatalogSource::Bundled);
+    offering.cost.as_mut().expect("cost fixture").input = Some(f64::MAX);
+    assert!(OfferingPricing::from_catalog_offering(&offering).is_none());
 }
 
 #[test]

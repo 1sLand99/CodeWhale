@@ -466,16 +466,34 @@ pub(crate) fn route_pricing_sku_from_cost(cost: Option<&ModelsDevCost>) -> Prici
     }
 }
 
-/// Whether every numeric field in a catalog price is finite and non-negative.
+/// Upper bound, per million tokens, on a price CodeWhale will treat as real.
+///
+/// Published frontier rates are in the single-to-triple digits per million.
+/// A value four orders of magnitude above that is not an expensive model, it is
+/// a unit error — a per-token price parsed as per-million, or a minor-unit
+/// integer (cents, fen) read as a major unit. Both mistakes bill the user
+/// 10^6 or 10^2 times over, so the row is rejected rather than believed.
+///
+/// The bound is deliberately generous: it exists to catch impossible
+/// magnitudes, not to second-guess a provider's pricing.
+pub const MAX_PLAUSIBLE_PRICE_PER_MILLION: f64 = 100_000.0;
+
+/// Whether every numeric field in a catalog price is finite, non-negative, and
+/// of a plausible magnitude.
 ///
 /// Kept at the catalog boundary so every projection (routing SKU and runtime
-/// cost audit) applies the same validation rule.
+/// cost audit) applies the same validation rule. Catalog prices are untrusted
+/// numeric input: they arrive from a bundled snapshot, a live provider
+/// `/models` response, or a user override file, and any of the three can carry
+/// a malformed value. The whole row is rejected on a single bad field —
+/// accepting the fields that happen to parse would turn a malformed row into a
+/// silently under-counted bill, which is worse than no price at all.
 #[must_use]
 pub fn catalog_cost_is_valid(cost: &ModelsDevCost) -> bool {
     [cost.input, cost.output, cost.cache_read, cost.cache_write]
         .into_iter()
         .flatten()
-        .all(|price| price.is_finite() && price >= 0.0)
+        .all(|price| price.is_finite() && price >= 0.0 && price <= MAX_PLAUSIBLE_PRICE_PER_MILLION)
 }
 
 fn provenance_from_source(source: &CatalogSource) -> PricingProvenance {
