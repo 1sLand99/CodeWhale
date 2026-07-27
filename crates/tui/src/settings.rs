@@ -1307,6 +1307,10 @@ impl Settings {
             self.mention_menu_behavior
         ));
         lines.push(format!("  show_thinking:      {}", self.show_thinking));
+        lines.push(format!(
+            "  thinking_expanded:   {}",
+            self.thinking_default_expanded
+        ));
         lines.push(format!("  thinking_highlight: {}", self.thinking_highlight));
         lines.push(format!("  show_tool_details:  {}", self.show_tool_details));
         lines.push(format!("  inline_diffs:      {}", self.inline_diffs));
@@ -1451,6 +1455,10 @@ impl Settings {
                 "@-mention completion behavior: fuzzy/browser (default fuzzy)",
             ),
             ("show_thinking", "Show model thinking: on/off"),
+            (
+                "thinking_default_expanded",
+                "Expand model thinking by default; Space still toggles: on/off",
+            ),
             (
                 "thinking_highlight",
                 "Fill the thinking/reasoning background: on/off",
@@ -2199,6 +2207,22 @@ mod tests {
             toml::from_str(&toml::to_string(&settings).expect("serialize settings"))
                 .expect("restore settings");
         assert!(!restored.thinking_highlight);
+    }
+
+    #[test]
+    fn thinking_default_expanded_is_opt_in_and_persisted() {
+        let mut settings = Settings::default();
+        assert!(!settings.thinking_default_expanded);
+
+        settings
+            .set("thinking_default_expanded", "true")
+            .expect("valid thinking expansion setting");
+        assert!(settings.thinking_default_expanded);
+
+        let restored: Settings =
+            toml::from_str(&toml::to_string(&settings).expect("serialize settings"))
+                .expect("restore settings");
+        assert!(restored.thinking_default_expanded);
     }
 
     /// Explicit animated baseline for env-force tests (#4095 flipped defaults to calm).

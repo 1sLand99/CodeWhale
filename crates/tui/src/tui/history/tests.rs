@@ -2500,6 +2500,37 @@ fn completed_reasoning_receipt_hides_internal_function_names_until_expanded() {
 }
 
 #[test]
+fn thinking_default_expanded_inverts_but_preserves_the_space_toggle() {
+    let cell = HistoryCell::Thinking {
+        content: "I will call refresh_catalog_cache to refresh the model list.".to_string(),
+        streaming: false,
+        duration_secs: Some(1.0),
+    };
+    let options = TranscriptRenderOptions {
+        thinking_default_expanded: true,
+        low_motion: true,
+        ..TranscriptRenderOptions::default()
+    };
+
+    let expanded = cell.lines_with_options_folded(80, options, false);
+    assert!(
+        lines_text(&expanded).contains("refresh_catalog_cache"),
+        "the configured default must show the full reasoning body"
+    );
+
+    let collapsed = cell.lines_with_options_folded(80, options, true);
+    let collapsed_text = lines_text(&collapsed);
+    assert!(
+        !collapsed_text.contains("refresh_catalog_cache"),
+        "Space must still collapse a default-expanded reasoning cell"
+    );
+    assert!(
+        collapsed_text.contains("Ctrl+O: full reasoning"),
+        "the collapsed state must retain the full-reasoning affordance"
+    );
+}
+
+#[test]
 fn tool_exec_live_caps_failed_output_transcript_does_not() {
     // A *failed* exec keeps its output in live mode, capped to head+tail
     // with a "lines omitted" marker. Transcript mode emits it uncapped.
