@@ -334,10 +334,10 @@ pub const TOKYO_NIGHT_UI_THEME: UiTheme = UiTheme {
     selection_bg: Color::Rgb(0x28, 0x34, 0x57), // visual selection
     header_bg: Color::Rgb(0x16, 0x16, 0x1e),
     footer_bg: Color::Rgb(0x16, 0x16, 0x1e),
-    text_dim: Color::Rgb(0x56, 0x5f, 0x89),   // comment
-    text_hint: Color::Rgb(0x73, 0x7a, 0xa2),  // dark5
+    text_dim: Color::Rgb(0x5c, 0x65, 0x8d), // comment, lifted to 3:1 on bg
+    text_hint: Color::Rgb(0x73, 0x7a, 0xa2), // dark5
     text_muted: Color::Rgb(0xa9, 0xb1, 0xd6), // fg_dark
-    text_body: Color::Rgb(0xc0, 0xca, 0xf5),  // fg
+    text_body: Color::Rgb(0xc0, 0xca, 0xf5), // fg
     text_soft: Color::Rgb(0xbb, 0xc2, 0xe0),
     border: Color::Rgb(0x41, 0x48, 0x68), // terminal_black
     accent_primary: Color::Rgb(0x7a, 0xa2, 0xf7), // blue
@@ -358,7 +358,7 @@ pub const TOKYO_NIGHT_UI_THEME: UiTheme = UiTheme {
     permission_ask: Color::Rgb(0xe0, 0xaf, 0x68),
     permission_auto_review: Color::Rgb(0xff, 0x9e, 0x64),
     permission_full_access: Color::Rgb(0xf7, 0x76, 0x8e),
-    status_ready: Color::Rgb(0x56, 0x5f, 0x89), // comment
+    status_ready: Color::Rgb(0x5c, 0x65, 0x8d), // comment, lifted to 3:1 on bg
     status_working: Color::Rgb(0x7d, 0xcf, 0xff), // cyan
     status_warning: Color::Rgb(0xe0, 0xaf, 0x68), // yellow
     diff_added_fg: Color::Rgb(0x9e, 0xce, 0x6a), // green
@@ -488,7 +488,7 @@ pub const GRUVBOX_DARK_UI_THEME: UiTheme = UiTheme {
     footer_bg: Color::Rgb(0x1d, 0x20, 0x21),
     text_dim: Color::Rgb(0x92, 0x83, 0x74),         // gray
     text_hint: Color::Rgb(0xa8, 0x99, 0x84),        // fg4
-    text_muted: Color::Rgb(0xbd, 0xae, 0x93),       // fg3
+    text_muted: Color::Rgb(0xc5, 0xb8, 0xa0),       // fg3, lifted to 4.5:1 on bg2
     text_body: Color::Rgb(0xeb, 0xdb, 0xb2),        // fg1
     text_soft: Color::Rgb(0xd5, 0xc4, 0xa1),        // fg2
     border: Color::Rgb(0x66, 0x5c, 0x54),           // bg3
@@ -667,7 +667,7 @@ pub const MATRIX_UI_THEME: UiTheme = UiTheme {
     permission_ask: Color::Rgb(204, 204, 0),
     permission_auto_review: Color::Rgb(255, 170, 60),
     permission_full_access: Color::Rgb(255, 100, 100),
-    status_ready: Color::Rgb(0, 85, 0),
+    status_ready: Color::Rgb(0, 108, 0),
     status_working: Color::Rgb(
         MATRIX_TEXT_BODY_RGB.0,
         MATRIX_TEXT_BODY_RGB.1,
@@ -675,7 +675,7 @@ pub const MATRIX_UI_THEME: UiTheme = UiTheme {
     ),
     status_warning: Color::Rgb(204, 204, 0),
     diff_added_fg: Color::Rgb(0x88, 0xff, 0x88),
-    diff_deleted_fg: Color::Rgb(0xb4, 0, 0),
+    diff_deleted_fg: Color::Rgb(0xbc, 0x1d, 0x1d), // lifted to 3:1 on diff_deleted_bg
     diff_added_bg: Color::Rgb(0x0d, 0x1a, 0x0d),
     diff_deleted_bg: Color::Rgb(0x1a, 0x0d, 0x0d),
     tool_running: Color::Rgb(0x88, 0xff, 0x88),

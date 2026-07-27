@@ -20,6 +20,35 @@ visual motion and density for screen-reader and low-motion users.
 | `show_tool_details` setting | `false` | Set to `true` to expand tool calls inline; details remain available on demand either way. |
 | `inline_diffs` setting | `full` | Use `summary` or `off` to reduce inline File-change density. Exact applied evidence remains available with Alt/Option+V in every mode. |
 
+## Color contrast guarantees
+
+The palette enforces WCAG contrast floors in two places, and this is what
+the code actually guarantees — no more:
+
+* **At draw time**, every text cell is lifted to a 4.5:1 contrast ratio
+  against the surface it will actually render on (`enforce_cell_contrast` in
+  the terminal backend). Frame chrome (borders, block glyphs) is not clamped,
+  and community presets that own a full custom palette (Catppuccin, Tokyo
+  Night, Dracula, Gruvbox, Claude, Matrix, Solarized Light, Terminal) are
+  exempt from this draw-time pass because their authors tuned those pairs.
+* **Per theme**, an audit (`theme_contrast_violations`) holds every
+  selectable preset to the same floors: body, soft, and muted text at 4.5:1
+  on every primary surface (including selection and error surfaces); hint and
+  dim text at 3:1; status, warning, success, and info roles at 3:1 because
+  they are redundant — every status also carries a glyph and a word label,
+  so color is never the only channel. Diff foreground/background pairs are
+  held to 3:1.
+* The **Terminal** (transparent) theme is exempt by design: it paints
+  `Color::Reset` surfaces and ANSI accents so the host terminal's own scheme
+  shows through. Those colors are terminal-owned and cannot be measured, so
+  the audit skips them rather than claiming a pass
+  (`theme_uses_terminal_owned_surfaces` makes the exemption explicit).
+* The **Grayscale** theme's "Color-minimal high contrast" tagline is
+  enforced: its body text hierarchy clears 4.5:1 on every surface.
+* The ASCII tier (`CODEWHALE_ASCII_SAFE=1`) keeps labels, focus, and state
+  available without decorative glyphs, so the non-color redundancy above
+  survives in the plainest rendering mode.
+
 ## Standard env-var surface
 
 Set these in your shell profile so they apply to every session:

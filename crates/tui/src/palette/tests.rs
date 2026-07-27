@@ -617,7 +617,8 @@ fn color_depth_detect_is_safe_without_env() {
 
 use super::contrast::{
     AA_BODY_CONTRAST, contrast_ratio, effective_surface, enforce_contrast, meets_contrast,
-    relative_luminance, symbol_needs_text_contrast,
+    relative_luminance, symbol_needs_text_contrast, theme_contrast_violations,
+    theme_uses_terminal_owned_surfaces,
 };
 use super::detect::TerminalBackground;
 use super::osc11::parse_osc11_reply;
@@ -957,4 +958,85 @@ fn measured_light_background_selects_the_light_theme_end_to_end() {
     assert_eq!(UiTheme::for_mode(measured.mode()), LIGHT_UI_THEME);
     let dark = resolve_terminal_background(Some((0x1E, 0x1E, 0x1E)), None, None);
     assert_eq!(UiTheme::for_mode(dark.mode()), UI_THEME);
+}
+
+// === #4813: cross-theme contrast audit ===
+
+#[test]
+fn every_selectable_theme_clears_the_text_floor() {
+    let mut terminal_owned = Vec::new();
+    for theme_id in SELECTABLE_THEMES {
+        let theme = theme_id.ui_theme();
+        if theme_uses_terminal_owned_surfaces(&theme) {
+            terminal_owned.push(theme_id.name());
+            continue;
+        }
+        let violations = theme_contrast_violations(&theme);
+        assert!(
+            violations.is_empty(),
+            "theme '{}' fails the contrast audit: {violations:?}",
+            theme_id.name(),
+        );
+    }
+    // The transparent-terminal exemption is exactly one theme, by design.
+    assert_eq!(terminal_owned, ["terminal"]);
+}
+
+#[test]
+fn transparent_terminal_theme_is_explicitly_terminal_owned() {
+    // The Terminal theme paints `Color::Reset` surfaces and named-ANSI text:
+    // every audited pair is terminal-defined, so the audit records zero
+    // violations. That is *not* a pass — unresolvable pairs are skipped,
+    // never counted as clearing the floor. `theme_uses_terminal_owned_surfaces`
+    // is what keeps the exemption explicit instead of silent.
+    assert!(theme_uses_terminal_owned_surfaces(&TERMINAL_UI_THEME));
+    assert_eq!(TERMINAL_UI_THEME.surface_bg, Color::Reset);
+    assert!(theme_contrast_violations(&TERMINAL_UI_THEME).is_empty());
+    // A theme with resolvable RGB surfaces never gets the exemption.
+    assert!(!theme_uses_terminal_owned_surfaces(&UI_THEME));
+}
+
+#[test]
+fn high_contrast_grayscale_theme_clears_body_floor_on_every_surface() {
+    // The picker tagline claims "Color-minimal high contrast" — hold the
+    // grayscale theme to the full body-text floor on every surface, not the
+    // 3:1 secondary-chrome floor.
+    let theme = GRAYSCALE_UI_THEME;
+    for fg in [theme.text_body, theme.text_soft, theme.text_muted] {
+        for bg in [
+            theme.surface_bg,
+            theme.panel_bg,
+            theme.composer_bg,
+            theme.elevated_bg,
+        ] {
+            let ratio = contrast_ratio(fg, bg).expect("grayscale colors are all resolvable RGB");
+            assert!(
+                ratio >= AA_BODY_CONTRAST,
+                "grayscale {fg:?} on {bg:?} is {ratio}:1, below the {AA_BODY_CONTRAST}:1 floor",
+            );
+        }
+    }
+}
+
+#[test]
+fn violation_report_names_pair_and_ratio() {
+    let mut bad = UI_THEME;
+    bad.text_muted = bad.surface_bg;
+    let violations = theme_contrast_violations(&bad);
+    // The muted-on-surface color fails against all four text surfaces.
+    let muted_pairs: Vec<_> = violations
+        .iter()
+        .filter(|violation| violation.pair.starts_with("text_muted on "))
+        .collect();
+    assert_eq!(muted_pairs.len(), 4);
+    let violation = violations
+        .iter()
+        .find(|violation| violation.pair == "text_muted on surface_bg")
+        .expect("the report must name the failing pair");
+    assert_eq!(violation.fg, bad.text_muted);
+    assert_eq!(violation.bg, bad.surface_bg);
+    // Identical colors sit at 1:1 — far under the floor the report carries.
+    assert!(violation.ratio < 1.1);
+    assert!(violation.ratio < violation.floor);
+    assert_eq!(violation.floor, AA_BODY_CONTRAST);
 }
