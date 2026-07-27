@@ -119,7 +119,7 @@ const MODEL_INHERIT: Choice = Choice {
     label: Cow::Borrowed("inherit"),
     summary: Cow::Borrowed("Same model as now"),
     description: Cow::Borrowed(
-        "Reuse the active provider, model, and reasoning for this worker — the operator's route. Recommended default.",
+        "Use the operator's current route — provider, model, and reasoning included. Recommended default.",
     ),
 };
 
@@ -1275,7 +1275,7 @@ impl FleetSetupView {
 
     fn review_policy_summary(&self) -> String {
         format!(
-            "Workers run without a token cap by default · {}s api, {}s heartbeat. Fleet -> exec runs the workers. /fleet status (or /subagents) shows sub-agents in the current interactive session; codewhale fleet status reads the persistent .codewhale/fleet.jsonl ledger.",
+            "Workers run without a token cap by default · {}s api, {}s heartbeat. Launch with Fleet → exec; /fleet status (or /subagents) shows sub-agents in the current interactive session; codewhale fleet status reads the persistent .codewhale/fleet.jsonl ledger.",
             self.snapshot.api_timeout_secs, self.snapshot.heartbeat_timeout_secs
         )
     }
@@ -1335,14 +1335,14 @@ fn render_choice_step(
         (rows[0], rows[1])
     };
 
-    // List: labels are identifiers, so a `>`-marked single line each is safe.
+    // List: labels are identifiers, so a `▸`-marked single line each is safe.
     let list_width = usize::from(list_area.width);
     let visible = choices.len().min(usize::from(list_area.height));
     let row_start = choice_window_start(choices.len(), selected, visible);
     let mut list_lines: Vec<Line> = Vec::with_capacity(visible);
     for (idx, choice) in choices.iter().enumerate().skip(row_start).take(visible) {
         let is_selected = idx == selected;
-        let pointer = if is_selected { "> " } else { "  " };
+        let pointer = format!("{} ", crate::tui::glyphs::selection_marker(is_selected));
         let style = if is_selected {
             Style::default()
                 .fg(palette::SELECTION_TEXT)
@@ -1880,7 +1880,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(rendered.contains("> custom"), "{rendered}");
+        assert!(rendered.contains("▸ custom"), "{rendered}");
         assert!(
             view.row_hitboxes
                 .borrow()
@@ -2307,7 +2307,7 @@ mod tests {
 
         let manager_row = rows
             .iter()
-            .position(|row| row.contains("> manager"))
+            .position(|row| row.contains("▸ manager"))
             .expect("manager row should render");
         let custom_row = rows
             .iter()

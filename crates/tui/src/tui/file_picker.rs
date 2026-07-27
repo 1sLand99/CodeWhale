@@ -470,9 +470,9 @@ impl ModalView for FilePickerView {
             inner,
             buf,
             &[
-                ActionHint::new("↑/↓", "select"),
+                ActionHint::new("↑/↓", "move"),
                 ActionHint::new("Enter", "insert @path"),
-                ActionHint::new("Esc", "close"),
+                ActionHint::new("Esc", "cancel"),
             ],
         );
         let visible = VISIBLE_ROWS.min(content.height.saturating_sub(2) as usize);
@@ -523,7 +523,7 @@ impl ModalView for FilePickerView {
                 } else {
                     Style::default().fg(palette::TEXT_PRIMARY)
                 };
-                let prefix = if selected { "▶ " } else { "  " };
+                let prefix = format!("{} ", crate::tui::glyphs::selection_marker(selected));
                 let marker_field = if content.width >= 18 {
                     format!("{} ", self.relevance.markers_for(path))
                 } else {
@@ -1032,7 +1032,7 @@ mod tests {
                 .collect();
             let text = rows.join("\n");
 
-            for label in ["select", "insert @path", "close"] {
+            for label in ["move", "insert @path", "cancel"] {
                 assert!(text.contains(label), "{w}x{h}: missing footer '{label}'");
             }
             assert!(

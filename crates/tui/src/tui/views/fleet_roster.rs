@@ -137,7 +137,7 @@ impl FleetRosterView {
 
     fn footer_hints(&self) -> Vec<ActionHint> {
         vec![
-            ActionHint::new("↑/↓", "select"),
+            ActionHint::new("↑/↓", "move"),
             ActionHint::new("s/Enter", "setup"),
             ActionHint::new("w", tr(self.locale, MessageId::FleetRosterWorkers)),
             ActionHint::new("PgUp/PgDn", "scroll detail"),
@@ -308,7 +308,7 @@ impl FleetRosterView {
         let mut list_lines: Vec<Line> = Vec::with_capacity(visible_rows);
         for idx in first..(first + visible_rows).min(self.row_count()) {
             let is_selected = idx == self.selected;
-            let pointer = if is_selected { "▸ " } else { "  " };
+            let pointer = format!("{} ", crate::tui::glyphs::selection_marker(is_selected));
             let (text, base_style) = if idx == 0 {
                 (
                     format!(
@@ -417,9 +417,8 @@ fn operator_detail_lines(operator: &OperatorInfo) -> Vec<Line<'static>> {
     detail_field(
         &mut lines,
         "Description",
-        "Your main session model is the operator. Fleet members are the workers it dispatches \
-         — via `agent` profile spawns and Workflow task({profile}). Change the operator's \
-         route via /model or /provider."
+        "The operator is your main session model; it dispatches Fleet workers via `agent` \
+         profile spawns and Workflow task({profile}). Change its route with /model or /provider."
             .to_string(),
     );
     lines

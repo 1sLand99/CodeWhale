@@ -1949,12 +1949,12 @@ impl ProviderPickerView {
     fn selected_row_style(fg: Color) -> Style {
         Style::default()
             .fg(fg)
-            .bg(palette::SURFACE_ELEVATED)
+            .bg(palette::SELECTION_BG)
             .add_modifier(Modifier::BOLD)
     }
 
     fn selected_row_bg_style() -> Style {
-        Style::default().bg(palette::SURFACE_ELEVATED)
+        Style::default().bg(palette::SELECTION_BG)
     }
 
     fn render_list(&self, area: Rect, buf: &mut Buffer) {
@@ -2004,12 +2004,20 @@ impl ProviderPickerView {
                 inner,
                 buf,
                 &[
-                    ActionHint::new("Esc", self.tr(MessageId::PickerActionClear)),
+                    // Two-stage Esc (clear the query, then cancel) reads as one
+                    // hint instead of a duplicated key.
+                    ActionHint::new(
+                        "Esc",
+                        format!(
+                            "{} / {}",
+                            self.tr(MessageId::PickerActionClear),
+                            self.tr(MessageId::PickerActionCancel)
+                        ),
+                    ),
                     ActionHint::new("↑↓", self.tr(MessageId::PickerActionMove)),
                     ActionHint::new("Enter", enter_action),
                     ActionHint::new("A", view_action.clone()),
                     ActionHint::new("C", self.tr(MessageId::PickerActionCustom)),
-                    ActionHint::new("Esc", self.tr(MessageId::PickerActionCancel)),
                 ],
             )
         } else {
@@ -2076,7 +2084,7 @@ impl ProviderPickerView {
                 Style::default()
             };
             let label_style = if is_selected {
-                Self::selected_row_style(palette::TEXT_PRIMARY)
+                Self::selected_row_style(palette::SELECTION_TEXT)
             } else {
                 Style::default().fg(palette::TEXT_PRIMARY)
             };
@@ -2627,7 +2635,7 @@ impl ProviderPickerView {
             let is_selected = idx == self.model_selected_idx;
             let arrow = crate::tui::glyphs::selection_marker(is_selected);
             let label_style = if is_selected {
-                Self::selected_row_style(palette::TEXT_PRIMARY)
+                Self::selected_row_style(palette::SELECTION_TEXT)
             } else {
                 Style::default().fg(palette::TEXT_PRIMARY)
             };
@@ -2859,7 +2867,7 @@ impl ProviderPickerView {
         let value = self.custom_form_field_value(field);
         let display = if value.is_empty() { placeholder } else { value };
         let value_style = if selected {
-            Self::selected_row_style(palette::TEXT_PRIMARY)
+            Self::selected_row_style(palette::SELECTION_TEXT)
         } else if value.is_empty() {
             Style::default().fg(palette::TEXT_MUTED)
         } else {
@@ -6234,13 +6242,36 @@ mod tests {
             .positions()
             .filter(|position| {
                 let cell = &buf[*position];
-                cell.bg == palette::SURFACE_ELEVATED
+                cell.bg == palette::SELECTION_BG
             })
             .count();
         assert!(
             highlighted_cells >= 32,
             "selected provider row should use a visible continuous highlight"
         );
+    }
+
+    #[test]
+    fn search_footer_shows_two_stage_esc_as_a_single_hint() {
+        let config = Config::default();
+        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
+        picker.query = "deep".to_string();
+        let area = Rect::new(0, 0, 100, 24);
+        let mut buf = Buffer::empty(area);
+
+        picker.render(area, &mut buf);
+
+        let text = area
+            .positions()
+            .map(|position| buf[position].symbol())
+            .collect::<String>();
+        // The key appears once, with both stages spelled out in its label.
+        assert_eq!(
+            text.matches(" Esc ").count(),
+            1,
+            "search footer must not duplicate the Esc key: {text}"
+        );
+        assert!(text.contains("clear / cancel"), "{text}");
     }
 
     #[test]

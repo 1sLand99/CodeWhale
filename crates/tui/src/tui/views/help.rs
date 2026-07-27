@@ -627,7 +627,8 @@ impl ModalView for HelpView {
                         } else {
                             Style::default().fg(palette::TEXT_PRIMARY)
                         };
-                        let cursor = if is_selected { "▶ " } else { "  " };
+                        let cursor =
+                            format!("{} ", crate::tui::glyphs::selection_marker(is_selected));
                         let label = truncate_to_width(&entry.label, label_width);
                         let desc = truncate_to_width(&entry.description, desc_capacity);
                         let line_text = format!("{cursor}{label:<label_width$}  {desc}",);

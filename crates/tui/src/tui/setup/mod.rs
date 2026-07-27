@@ -2599,7 +2599,7 @@ impl ModalView for SetupWizardView {
                 | StepStatus::Deferred
                 | StepStatus::Skipped => palette::TEXT_MUTED,
             };
-            let marker = if selected { ">" } else { " " };
+            let marker = crate::tui::glyphs::selection_marker(selected);
             let style = if selected {
                 Style::default()
                     .fg(palette::TEXT_PRIMARY)

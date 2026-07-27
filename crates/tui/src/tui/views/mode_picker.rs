@@ -174,7 +174,7 @@ impl ModalView for ModePickerView {
             } else {
                 Style::default().fg(palette::TEXT_MUTED)
             };
-            let pointer = if is_cursor { ">" } else { " " };
+            let pointer = crate::tui::glyphs::selection_marker(is_cursor);
             let name = mode.display_name_localized(self.locale);
             let hint = mode.picker_hint_localized(self.locale);
             // Pad by terminal columns, not scalar count, so wide (CJK) mode
@@ -270,6 +270,12 @@ mod tests {
             assert!(text.contains("move"), "{w}x{h}: missing 'move' hint");
             assert!(text.contains("select"), "{w}x{h}: missing 'select' hint");
             assert!(text.contains("cancel"), "{w}x{h}: missing 'cancel' hint");
+
+            // The cursor row carries the charter selection pointer.
+            assert!(
+                text.contains(crate::tui::glyphs::SELECTION),
+                "{w}x{h}: missing charter selection pointer"
+            );
 
             // Composited frame is fully opaque: no sentinel survives and every
             // cell carries the modal/backdrop ink background.

@@ -360,7 +360,7 @@ async fn underwater_theme_picker_emits_each_live_palette_to_the_terminal() -> Re
         ));
     }
     if tui
-        .wait_for_text("Pick a theme", Duration::from_secs(1))
+        .wait_for_text("live preview", Duration::from_secs(1))
         .is_err()
     {
         // A PTY can deliver the first Enter inside the paste guard's trailing
@@ -369,7 +369,7 @@ async fn underwater_theme_picker_emits_each_live_palette_to_the_terminal() -> Re
         std::thread::sleep(PASTE_GUARD_SETTLE);
         tui.pump();
         tui.send(keys::key::enter())?;
-        tui.wait_for_text("Pick a theme", INTERACTION_TIMEOUT)?;
+        tui.wait_for_text("live preview", INTERACTION_TIMEOUT)?;
     }
 
     let labels = [
@@ -388,7 +388,7 @@ async fn underwater_theme_picker_emits_each_live_palette_to_the_terminal() -> Re
     ];
     let mut previous_signature = None;
     for (index, label) in labels.iter().enumerate() {
-        let selected = format!("▶ {}.", index + 1);
+        let selected = format!("▸ {}.", index + 1);
         tui.wait_for(
             |frame| frame.text().contains(&selected),
             INTERACTION_TIMEOUT,
@@ -397,7 +397,7 @@ async fn underwater_theme_picker_emits_each_live_palette_to_the_terminal() -> Re
         let signature = (
             frame.colors_at(0, 0).expect("theme surface cell"),
             frame
-                .first_symbol_colors("▶")
+                .first_symbol_colors("▸")
                 .expect("selected theme pointer cell"),
         );
         assert!(

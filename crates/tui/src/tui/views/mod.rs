@@ -3427,7 +3427,7 @@ impl ModalView for ConfigView {
 
                 for (choice_idx, choice) in choices.iter().enumerate().take(end).skip(start) {
                     let selected = choice_idx == edit.selected_choice;
-                    let marker = if selected { "›" } else { " " };
+                    let marker = crate::tui::glyphs::selection_marker(selected);
                     let label = config_choice_label(self.locale, &edit.key, choice);
                     let line_y = inner.y.saturating_add(lines.len() as u16);
                     hitboxes.push((line_y, choice_idx));
@@ -3976,7 +3976,7 @@ impl ModalView for SubAgentsView {
                 Style::default().fg(palette::TEXT_MUTED),
             )));
             lines.push(Line::from(Span::styled(
-                "Use /fleet to configure role profiles and launch posture.",
+                "Configure roles and launch posture with /fleet.",
                 Style::default().fg(palette::TEXT_DIM),
             )));
         } else {

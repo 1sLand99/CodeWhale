@@ -771,7 +771,7 @@ impl WorkflowPanel {
             let mut chips = Vec::new();
             for (idx, phase) in self.phases.iter().take(MAX_PHASE_SUMMARY).enumerate() {
                 let (done, running, failed, cancelled) = phase.counts();
-                let marker = if idx == self.selected_phase { ">" } else { " " };
+                let marker = crate::tui::glyphs::selection_marker(idx == self.selected_phase);
                 chips.push(format!(
                     "{marker}{title}[{done}✓ {running}… {failed}! {cancelled}⊘]",
                     title = short_label(&phase.title, 14),
@@ -1353,7 +1353,7 @@ impl WorkflowPanel {
             let mut chips = Vec::new();
             for (idx, phase) in self.phases.iter().take(MAX_PHASE_SUMMARY).enumerate() {
                 let (done, running, failed, cancelled) = phase.counts();
-                let marker = if idx == self.selected_phase { ">" } else { " " };
+                let marker = crate::tui::glyphs::selection_marker(idx == self.selected_phase);
                 chips.push(format!(
                     "{marker}{title}[{done}✓ {running}… {failed}! {cancelled}⊘]",
                     title = short_label(&phase.title, 14),

@@ -64,7 +64,7 @@ fn theme_options(original_name: &str) -> Vec<SettingOption> {
             SettingOption::builder(name, id.display_name())
                 .summary(id.tagline())
                 .detail(id.tagline())
-                .help("Pick a theme — preview is live; Enter saves to settings.toml.")
+                .help("Pick a theme with live preview")
                 .values(SettingValues::new(
                     Cow::Owned(current.clone()),
                     Cow::Borrowed("system"),
@@ -291,13 +291,7 @@ impl ModalView for ThemePickerView {
         // Theme rows prefer list-when-narrow; layout still drives scroll math.
         let _layout = SettingsPickerLayout::resolve(content, 34, self.controller.selected_option());
 
-        let mut lines: Vec<Line> = Vec::with_capacity(SELECTABLE_THEMES.len() + 5);
-        lines.push(Line::from(Span::styled(
-            "Pick a theme — preview is live; Enter saves to settings.toml.",
-            Style::default().fg(live.text_muted),
-        )));
-        lines.push(Line::from(""));
-
+        let mut lines: Vec<Line> = Vec::with_capacity(SELECTABLE_THEMES.len() + 3);
         let treatment = if matches!(self.current(), ThemeId::Terminal) {
             tr(self.locale, MessageId::ThemeTreatmentOmbreUnavailable)
         } else if self.ocean_treatment.is_flat()
@@ -370,7 +364,7 @@ impl ModalView for ThemePickerView {
             } else {
                 Style::default().fg(live.text_hint)
             };
-            let pointer = if is_selected { "▶" } else { " " };
+            let pointer = crate::tui::glyphs::selection_marker(is_selected);
 
             // 3-cell color swatch per row using the candidate theme's own
             // accent + panel + border colors so the picker doubles as a
