@@ -161,6 +161,7 @@ impl SubAgentCell {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TranscriptRenderOptions {
     pub show_thinking: bool,
+    pub thinking_default_expanded: bool,
     pub thinking_highlight: bool,
     pub verbose: bool,
     pub show_tool_details: bool,
@@ -179,6 +180,7 @@ impl Default for TranscriptRenderOptions {
         Self {
             show_thinking: true,
             thinking_highlight: true,
+            thinking_default_expanded: false,
             verbose: false,
             show_tool_details: true,
             inline_diff_mode: crate::settings::InlineDiffMode::Full,
@@ -319,7 +321,7 @@ impl HistoryCell {
                 width,
                 *streaming,
                 *duration_secs,
-                folded ^ !options.verbose,
+                folded ^ !options.verbose ^ options.thinking_default_expanded,
                 options.low_motion,
                 options.thinking_highlight,
             ),

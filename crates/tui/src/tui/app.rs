@@ -1223,6 +1223,7 @@ pub struct App {
     pub status_indicator: String,
     pub show_thinking: bool,
     pub thinking_highlight: bool,
+    pub thinking_default_expanded: bool,
     pub verbose_transcript: bool,
     pub show_tool_details: bool,
     /// Inline presentation mode for successful structured File mutations.
@@ -3430,6 +3431,7 @@ impl App {
         TranscriptRenderOptions {
             show_thinking: self.show_thinking,
             thinking_highlight: self.thinking_highlight,
+            thinking_default_expanded: self.thinking_default_expanded,
             verbose: self.verbose_transcript,
             show_tool_details: self.show_tool_details,
             inline_diff_mode: self.inline_diff_mode,

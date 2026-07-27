@@ -332,6 +332,11 @@ pub struct Settings {
     pub mention_menu_behavior: String,
     /// Show thinking blocks from the model
     pub show_thinking: bool,
+    /// When true, thinking blocks render expanded by default instead of
+    /// collapsed. Space still toggles collapse/expand. Useful for SSH/tmux
+    /// users where the Space key may be captured by the terminal layer.
+    #[serde(default)]
+    pub thinking_default_expanded: bool,
     /// Keep thinking visible while disabling its filled background treatment.
     pub thinking_highlight: bool,
     /// Show detailed tool output
@@ -515,6 +520,7 @@ impl Default for Settings {
             // Reasoning is useful when explicitly requested, but it should
             // never displace the actual conversation in the default TUI.
             show_thinking: false,
+            thinking_default_expanded: false,
             thinking_highlight: true,
             show_tool_details: false,
             inline_diffs: "full".to_string(),
@@ -1030,6 +1036,9 @@ impl Settings {
             }
             "show_thinking" | "thinking" => {
                 self.show_thinking = parse_bool(value)?;
+            }
+            "thinking_default_expanded" | "thinking_expanded" => {
+                self.thinking_default_expanded = parse_bool(value)?;
             }
             "thinking_highlight" | "reasoning_highlight" => {
                 self.thinking_highlight = parse_bool(value)?;

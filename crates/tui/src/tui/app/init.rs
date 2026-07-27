@@ -210,6 +210,7 @@ impl App {
         let status_indicator = settings.status_indicator.clone();
         let show_thinking = settings.show_thinking;
         let thinking_highlight = settings.thinking_highlight;
+        let thinking_default_expanded = settings.thinking_default_expanded;
         let show_tool_details = settings.show_tool_details;
         let inline_diff_mode = InlineDiffMode::parse(&settings.inline_diffs);
         let ui_locale = resolve_locale(&settings.locale);
@@ -639,6 +640,7 @@ impl App {
             status_indicator,
             show_thinking,
             thinking_highlight,
+            thinking_default_expanded,
             verbose_transcript: false,
             show_tool_details,
             inline_diff_mode,
