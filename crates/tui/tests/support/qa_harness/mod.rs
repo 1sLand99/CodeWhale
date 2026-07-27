@@ -23,7 +23,7 @@ pub mod modes;
 pub mod pty;
 pub mod view_log;
 
-pub use frame::Frame;
+pub use frame::{Color, Frame};
 pub use keys::paste;
 pub use modes::TerminalModeLedger;
 pub use pty::PtySession;

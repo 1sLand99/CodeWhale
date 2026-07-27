@@ -21,7 +21,7 @@ spin up a PTY just to assert a function returns the right value.
 - `pty.rs` — `PtySession`. Spawns a binary in a real PTY (via `portable-pty`),
   pumps the child's stdout into a buffer on a background thread, exposes
   `write_bytes`, `drain`, `shutdown`.
-- `frame.rs` — `Frame`. Wraps `vt100::Parser`. Feed bytes in, ask questions
+- `frame.rs` — `Frame`. Wraps `rio-vt`. Feed bytes in, ask questions
   out: `text()`, `row(y)`, `contains(s)`, `cursor()`, `debug_dump()`.
 - `keys.rs` — byte-sequence builders for keys (`key::ch('/')`,
   `key::enter()`, `key::text("hello")`) and for paste (`paste::bracketed(s)`,
