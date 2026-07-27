@@ -3,6 +3,7 @@
 //! This intentionally covers UI chrome only. It does not change model prompts,
 //! model output language, provider behavior, or media payload semantics.
 use std::borrow::Cow;
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -2645,13 +2646,17 @@ pub fn truncate_to_width(text: &str, max_width: usize) -> String {
     let limit = max_width - ellipsis_width;
     let mut out = String::new();
     let mut width = 0usize;
-    for ch in text.chars() {
-        let ch_width = ch.width().unwrap_or(0);
-        if width + ch_width > limit {
+    // Iterate extended grapheme clusters, not chars: a Devanagari conjunct
+    // (क + ् + ष), a combined mark (e + ́), or a ZWJ emoji sequence must
+    // never be cut apart — a trailing virama or orphaned combining mark
+    // renders as visibly broken shaping in the terminal.
+    for cluster in text.graphemes(true) {
+        let cluster_width = UnicodeWidthStr::width(cluster);
+        if width + cluster_width > limit {
             break;
         }
-        out.push(ch);
-        width += ch_width;
+        out.push_str(cluster);
+        width += cluster_width;
     }
     out.push('…');
     out
@@ -3317,6 +3322,92 @@ mod tests {
                 assert!(
                     saw_text,
                     "width={width}: mixed fixture produced an empty render"
+                );
+            }
+        }
+    }
+
+    // --- Devanagari grapheme safety (#4790 spike) --------------------------
+
+    #[test]
+    fn truncate_to_width_never_splits_devanagari_clusters() {
+        // क्ष is क + ् + ष — a single cluster. A budget landing inside it
+        // must drop the whole cluster; a dangling virama (U+094D) renders as
+        // visibly broken shaping (क् instead of a conjunct).
+        let conjuncts = "क्षत्रिय ज्ञान श्रृंखला प्रत्यक्ष";
+        for budget in [1usize, 2, 3, 5, 7, 40, 60, 80] {
+            let out = truncate_to_width(conjuncts, budget);
+            assert!(
+                UnicodeWidthStr::width(out.as_str()) <= budget,
+                "budget={budget}: overflowed: {out:?}"
+            );
+            assert!(!out.contains('\u{FFFD}'), "budget={budget}: {out:?}");
+            let body = out.strip_suffix('…').unwrap_or(&out);
+            assert!(
+                !body.ends_with('\u{094D}'),
+                "budget={budget}: dangling virama: {out:?}"
+            );
+            assert!(
+                !body.ends_with('\u{200D}'),
+                "budget={budget}: dangling ZWJ: {out:?}"
+            );
+            if let Some(last) = body.chars().last() {
+                let cp = last as u32;
+                let combining = (0x0900..=0x0903).contains(&cp) || (0x093A..=0x094F).contains(&cp);
+                assert!(
+                    !combining,
+                    "budget={budget}: trailing combining mark: {out:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cyrillic_latin_extended_and_devanagari_rows_wrap_within_terminal_columns() {
+        // Width/grapheme QA for the v0.9.2 scripts at narrow (40), medium
+        // (60), and standard (80) terminal columns: truncation clips by
+        // display width and wrapped rows never overflow the buffer.
+        let fixtures = [
+            ("ru", "Задача: миграция базы данных — проверка маршрутизации провайдера #3092"),
+            ("uk", "Завдання: міграція бази даних — перевірка маршрутизації провайдера #4791"),
+            ("de", "Aufgabe: Datenbankmigration — Anbieter-Routing für #4788 prüfen"),
+            ("fr", "Tâche : migration de la base — vérifier le routage fournisseur #4788"),
+            ("ca", "Tasca: migració de la base de dades — comprovar l'encaminament #4788"),
+            ("id", "Tugas: migrasi basis data — periksa perutean penyedia untuk #4789"),
+            ("hi", "कार्य: डेटाबेस माइग्रेशन — प्रदाता रूटिंग की जांच करें #4790"),
+        ];
+
+        for width in [40usize, 60, 80] {
+            for (tag, fixture) in fixtures {
+                let out = truncate_to_width(fixture, width);
+                assert!(
+                    UnicodeWidthStr::width(out.as_str()) <= width,
+                    "{tag} width={width}: truncated row overflowed: {out:?}"
+                );
+                assert!(
+                    !out.contains('\u{FFFD}'),
+                    "{tag} width={width}: split a glyph: {out:?}"
+                );
+
+                let area = Rect::new(0, 0, width as u16, 6);
+                let mut buf = Buffer::empty(area);
+                Paragraph::new(fixture)
+                    .wrap(Wrap { trim: false })
+                    .render(area, &mut buf);
+                let mut saw_text = false;
+                for (row_idx, y) in (area.top()..area.bottom()).enumerate() {
+                    let row = visible_row_text(&buf, area, y);
+                    let trimmed = row.trim_end_matches('\u{0}').trim_end();
+                    assert!(
+                        UnicodeWidthStr::width(trimmed) <= width,
+                        "{tag} width={width} row {row_idx}: wrapped row overflowed ({} cols): {trimmed:?}",
+                        UnicodeWidthStr::width(trimmed)
+                    );
+                    saw_text |= trimmed.chars().any(|ch| !ch.is_whitespace());
+                }
+                assert!(
+                    saw_text,
+                    "{tag} width={width}: fixture produced an empty render"
                 );
             }
         }
