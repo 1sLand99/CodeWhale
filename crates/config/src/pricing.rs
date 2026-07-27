@@ -493,7 +493,7 @@ pub fn catalog_cost_is_valid(cost: &ModelsDevCost) -> bool {
     [cost.input, cost.output, cost.cache_read, cost.cache_write]
         .into_iter()
         .flatten()
-        .all(|price| price.is_finite() && price >= 0.0 && price <= MAX_PLAUSIBLE_PRICE_PER_MILLION)
+        .all(|price| price.is_finite() && (0.0..=MAX_PLAUSIBLE_PRICE_PER_MILLION).contains(&price))
 }
 
 fn provenance_from_source(source: &CatalogSource) -> PricingProvenance {
