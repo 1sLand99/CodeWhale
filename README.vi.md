@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:797a23968c31 -->
+<!-- source: README.md sha256:1b8a6eb93218 -->
 # Codewhale
 
 Một coding agent mã nguồn mở cho terminal của bạn — mang theo model của riêng bạn.
@@ -74,6 +74,9 @@ duyệt bình thường.
 - [docs/FLEET.md](docs/FLEET.md) — fleet, sổ cái và resume
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`, hook và
   constitution
+- [docs/HOOKS.md](docs/HOOKS.md) — mười một sự kiện hook trong vòng đời TUI,
+  payload của chúng và ba sự kiện có thể điều hướng một lượt (`codewhale exec`
+  và các lệnh con CLI không kích hoạt hook)
 - [docs/WEB.md](docs/WEB.md) — trình duyệt nhúng chỉ chạy trên loopback và
   ranh giới xác thực dùng một lần
 

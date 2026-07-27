@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:797a23968c31 -->
+<!-- source: README.md sha256:1b8a6eb93218 -->
 # Codewhale
 
 터미널에서 쓰는 오픈소스 코딩 에이전트 — 모델은 당신이 가져옵니다.
@@ -49,6 +49,9 @@ TUI 안에서: `/model`은 프로바이더와 모델을 함께 전환하고, `/f
 - [docs/FLEET.md](docs/FLEET.md) — Fleet, 원장, 재개
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`, 훅,
   constitution
+- [docs/HOOKS.md](docs/HOOKS.md) — 11개의 TUI 수명 주기 훅 이벤트, 해당
+  페이로드, 턴을 조정할 수 있는 3개 이벤트 (`codewhale exec`와 CLI 하위
+  명령은 훅을 실행하지 않음)
 - [docs/WEB.md](docs/WEB.md) — 루프백 전용 내장 브라우저 클라이언트와 일회성
   인증 경계
 
