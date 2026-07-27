@@ -1188,5 +1188,7 @@
     "CmdCostLivePricingDowngraded": "Les prix en direct du fournisseur n'ont pas pu être vérifiés pour cette route ({defects}) ; les tarifs publiés embarqués ont été utilisés.",
     "CmdCostLivePricingUnavailable": "Les prix en direct du fournisseur n'ont pas pu être vérifiés pour cette route ({defects}), et aucun tarif embarqué utilisable n'était disponible ; cette dépense est inconnue.",
     "CmdCostRoutesHeader": "Routes auditées (caviardées) :",
-    "CmdTokensCacheWriteTotal": "Tokens d'écriture en cache (cache-creation) cette session : {write}. Facturés au-dessus du tarif d'entrée lorsque le fournisseur publie une prime d'écriture ; voir /cache pour le détail par tour."
+    "CmdTokensCacheWriteTotal": "Tokens d'écriture en cache (cache-creation) cette session : {write}. Facturés au-dessus du tarif d'entrée lorsque le fournisseur publie une prime d'écriture ; voir /cache pour le détail par tour.",
+    "ModelPickerAutoNetworkActiveProviderHint": "par tour · fournisseur actif uniquement · requête + contexte récent → {provider} / {model}",
+    "CmdLaneDescription": "Gérer les Lanes actives : interrupt, restart, resume"
 }

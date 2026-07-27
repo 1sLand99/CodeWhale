@@ -1188,5 +1188,7 @@
     "CmdCostLivePricingDowngraded": "Live-Preise des Anbieters konnten für diese Route nicht verifiziert werden ({defects}); die mitgelieferten veröffentlichten Tarife wurden verwendet.",
     "CmdCostLivePricingUnavailable": "Live-Preise des Anbieters konnten für diese Route nicht verifiziert werden ({defects}), und kein brauchbarer mitgelieferter Tarif war verfügbar; diese Ausgabe ist unbekannt.",
     "CmdCostRoutesHeader": "Geprüfte Routen (geschwärzt):",
-    "CmdTokensCacheWriteTotal": "Cache-Schreib-Tokens (cache-creation) in dieser Sitzung: {write}. Über dem Eingaberatensatz abgerechnet, wenn der Anbieter einen Schreibaufschlag veröffentlicht; Details pro Zug unter /cache."
+    "CmdTokensCacheWriteTotal": "Cache-Schreib-Tokens (cache-creation) in dieser Sitzung: {write}. Über dem Eingaberatensatz abgerechnet, wenn der Anbieter einen Schreibaufschlag veröffentlicht; Details pro Zug unter /cache.",
+    "ModelPickerAutoNetworkActiveProviderHint": "pro Zug · nur aktiver Anbieter · Anfrage + jüngster Kontext → {provider} / {model}",
+    "CmdLaneDescription": "Aktive Lanes verwalten: interrupt, restart, resume"
 }

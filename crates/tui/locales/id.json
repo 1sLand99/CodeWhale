@@ -1188,5 +1188,7 @@
     "CmdCostLivePricingDowngraded": "Harga langsung penyedia tidak dapat diverifikasi untuk rute ini ({defects}); tarif terpublikasi bawaan digunakan.",
     "CmdCostLivePricingUnavailable": "Harga langsung penyedia tidak dapat diverifikasi untuk rute ini ({defects}), dan tidak ada tarif bawaan yang dapat dipakai; pengeluaran ini tidak diketahui.",
     "CmdCostRoutesHeader": "Rute teraudit (disunting):",
-    "CmdTokensCacheWriteTotal": "Token tulis-cache (cache-creation) sesi ini: {write}. Ditagih di atas tarif input bila penyedia memublikasikan premi tulis; lihat /cache untuk rincian per giliran."
+    "CmdTokensCacheWriteTotal": "Token tulis-cache (cache-creation) sesi ini: {write}. Ditagih di atas tarif input bila penyedia memublikasikan premi tulis; lihat /cache untuk rincian per giliran.",
+    "ModelPickerAutoNetworkActiveProviderHint": "per giliran · hanya penyedia aktif · permintaan + konteks terbaru → {provider} / {model}",
+    "CmdLaneDescription": "Kelola Lane aktif: interrupt, restart, resume"
 }

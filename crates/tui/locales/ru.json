@@ -1188,5 +1188,7 @@
     "CmdCostLivePricingDowngraded": "Актуальные цены провайдера для этого маршрута не удалось проверить ({defects}); использованы встроенные опубликованные тарифы.",
     "CmdCostLivePricingUnavailable": "Актуальные цены провайдера для этого маршрута не удалось проверить ({defects}), и пригодного встроенного тарифа нет; этот расход неизвестен.",
     "CmdCostRoutesHeader": "Проверенные маршруты (данные скрыты):",
-    "CmdTokensCacheWriteTotal": "Токены записи в кэш (cache-creation) за сеанс: {write}. Тарифицируются выше входной ставки, если провайдер публикует надбавку за запись; по-ходовая разбивка — /cache."
+    "CmdTokensCacheWriteTotal": "Токены записи в кэш (cache-creation) за сеанс: {write}. Тарифицируются выше входной ставки, если провайдер публикует надбавку за запись; по-ходовая разбивка — /cache.",
+    "ModelPickerAutoNetworkActiveProviderHint": "за ход · только активный провайдер · запрос + недавний контекст → {provider} / {model}",
+    "CmdLaneDescription": "Управление активными Lane: interrupt, restart, resume"
 }

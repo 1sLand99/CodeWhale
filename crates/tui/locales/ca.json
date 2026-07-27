@@ -1188,5 +1188,7 @@
     "CmdCostLivePricingDowngraded": "No s'han pogut verificar els preus en viu del proveïdor per a aquesta ruta ({defects}); s'han emprat les tarifes publicades incloses.",
     "CmdCostLivePricingUnavailable": "No s'han pogut verificar els preus en viu del proveïdor per a aquesta ruta ({defects}), i no hi havia cap tarifa inclosa utilitzable; aquesta despesa és desconeguda.",
     "CmdCostRoutesHeader": "Rutes auditades (redactades):",
-    "CmdTokensCacheWriteTotal": "Tokens d'escriptura a la memòria cau (cache-creation) aquesta sessió: {write}. Es facturen per sobre de la tarifa d'entrada quan el proveïdor publica una prima d'escriptura; vegeu /cache per al desglossament per torn."
+    "CmdTokensCacheWriteTotal": "Tokens d'escriptura a la memòria cau (cache-creation) aquesta sessió: {write}. Es facturen per sobre de la tarifa d'entrada quan el proveïdor publica una prima d'escriptura; vegeu /cache per al desglossament per torn.",
+    "ModelPickerAutoNetworkActiveProviderHint": "per torn · només el proveïdor actiu · petició + context recent → {provider} / {model}",
+    "CmdLaneDescription": "Gestiona les Lane actives: interrupt, restart, resume"
 }
