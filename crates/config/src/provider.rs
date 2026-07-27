@@ -16,17 +16,17 @@ use super::{
     DEFAULT_NOVITA_MODEL, DEFAULT_NVIDIA_NIM_BASE_URL, DEFAULT_NVIDIA_NIM_MODEL,
     DEFAULT_OLLAMA_BASE_URL, DEFAULT_OLLAMA_MODEL, DEFAULT_OPENAI_BASE_URL,
     DEFAULT_OPENAI_CODEX_BASE_URL, DEFAULT_OPENAI_CODEX_MODEL, DEFAULT_OPENAI_MODEL,
-    DEFAULT_OPENCODE_GO_BASE_URL, DEFAULT_OPENCODE_GO_MODEL, DEFAULT_OPENMODEL_BASE_URL,
-    DEFAULT_OPENMODEL_MODEL, DEFAULT_OPENROUTER_BASE_URL, DEFAULT_OPENROUTER_MODEL,
-    DEFAULT_QIANFAN_BASE_URL, DEFAULT_QIANFAN_MODEL, DEFAULT_SAKANA_BASE_URL, DEFAULT_SAKANA_MODEL,
-    DEFAULT_SGLANG_BASE_URL, DEFAULT_SGLANG_MODEL, DEFAULT_SILICONFLOW_BASE_URL,
-    DEFAULT_SILICONFLOW_CN_BASE_URL, DEFAULT_SILICONFLOW_MODEL, DEFAULT_STEPFUN_BASE_URL,
-    DEFAULT_STEPFUN_MODEL, DEFAULT_TELECOMJS_BASE_URL, DEFAULT_TELECOMJS_MODEL,
-    DEFAULT_TOGETHER_BASE_URL, DEFAULT_TOGETHER_MODEL, DEFAULT_VLLM_BASE_URL, DEFAULT_VLLM_MODEL,
-    DEFAULT_VOLCENGINE_BASE_URL, DEFAULT_VOLCENGINE_MODEL, DEFAULT_WANJIE_ARK_BASE_URL,
-    DEFAULT_WANJIE_ARK_MODEL, DEFAULT_XAI_BASE_URL, DEFAULT_XAI_MODEL,
-    DEFAULT_XIAOMI_MIMO_BASE_URL, DEFAULT_XIAOMI_MIMO_MODEL, DEFAULT_ZAI_BASE_URL,
-    DEFAULT_ZAI_MODEL, ProviderKind,
+    DEFAULT_OPENCODE_GO_BASE_URL, DEFAULT_OPENCODE_GO_MODEL, DEFAULT_OPENCODE_ZEN_BASE_URL,
+    DEFAULT_OPENCODE_ZEN_MODEL, DEFAULT_OPENMODEL_BASE_URL, DEFAULT_OPENMODEL_MODEL,
+    DEFAULT_OPENROUTER_BASE_URL, DEFAULT_OPENROUTER_MODEL, DEFAULT_QIANFAN_BASE_URL,
+    DEFAULT_QIANFAN_MODEL, DEFAULT_SAKANA_BASE_URL, DEFAULT_SAKANA_MODEL, DEFAULT_SGLANG_BASE_URL,
+    DEFAULT_SGLANG_MODEL, DEFAULT_SILICONFLOW_BASE_URL, DEFAULT_SILICONFLOW_CN_BASE_URL,
+    DEFAULT_SILICONFLOW_MODEL, DEFAULT_STEPFUN_BASE_URL, DEFAULT_STEPFUN_MODEL,
+    DEFAULT_TELECOMJS_BASE_URL, DEFAULT_TELECOMJS_MODEL, DEFAULT_TOGETHER_BASE_URL,
+    DEFAULT_TOGETHER_MODEL, DEFAULT_VLLM_BASE_URL, DEFAULT_VLLM_MODEL, DEFAULT_VOLCENGINE_BASE_URL,
+    DEFAULT_VOLCENGINE_MODEL, DEFAULT_WANJIE_ARK_BASE_URL, DEFAULT_WANJIE_ARK_MODEL,
+    DEFAULT_XAI_BASE_URL, DEFAULT_XAI_MODEL, DEFAULT_XIAOMI_MIMO_BASE_URL,
+    DEFAULT_XIAOMI_MIMO_MODEL, DEFAULT_ZAI_BASE_URL, DEFAULT_ZAI_MODEL, ProviderKind,
 };
 
 /// Wire protocol spoken by a provider.
@@ -70,6 +70,43 @@ impl CredentialAcquisition {
             Self::LocalOptional => "local_optional",
             Self::OAuth => "oauth",
             Self::Configuration => "configuration",
+        }
+    }
+}
+
+/// How a provider selects its request wire format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WirePolicy {
+    /// Every model served by the provider uses the same wire format.
+    Fixed(WireFormat),
+    /// The provider catalog selects a wire format per model/endpoint.
+    ModelAware,
+}
+
+impl WirePolicy {
+    /// Return the fixed format, or `None` for model-aware providers.
+    #[must_use]
+    pub const fn fixed(self) -> Option<WireFormat> {
+        match self {
+            Self::Fixed(format) => Some(format),
+            Self::ModelAware => None,
+        }
+    }
+
+    /// Resolve a concrete format from an offering endpoint key.
+    #[must_use]
+    pub fn resolve(self, endpoint_key: &str) -> Option<WireFormat> {
+        if let Self::Fixed(format) = self {
+            return Some(format);
+        }
+
+        match endpoint_key.trim().to_ascii_lowercase().as_str() {
+            "chat" | "chat_completions" | "chat-completions" => Some(WireFormat::ChatCompletions),
+            "responses" => Some(WireFormat::Responses),
+            "messages" | "anthropic_messages" | "anthropic-messages" => {
+                Some(WireFormat::AnthropicMessages)
+            }
+            _ => None,
         }
     }
 }
@@ -126,9 +163,9 @@ pub trait Provider: Send + Sync {
         &[]
     }
 
-    /// Wire format used by the provider.
-    fn wire(&self) -> WireFormat {
-        WireFormat::ChatCompletions
+    /// Policy used to select the request wire format.
+    fn wire_policy(&self) -> WirePolicy {
+        WirePolicy::Fixed(WireFormat::ChatCompletions)
     }
 
     /// Credential acquisition metadata shared by onboarding, setup, diagnostics,
@@ -333,6 +370,12 @@ pub const fn credential_help(kind: ProviderKind) -> CredentialHelp {
             docs_url: Some("https://opencode.ai/docs/go/"),
             guidance: "Create or copy an OpenCode Go subscription key from OpenCode Zen.",
         },
+        ProviderKind::OpencodeZen => CredentialHelp {
+            acquisition: ApiKey,
+            credential_url: Some("https://opencode.ai/zen/"),
+            docs_url: Some("https://opencode.ai/docs/zen/"),
+            guidance: "Create or copy an OpenCode Zen API key from OpenCode Zen.",
+        },
         ProviderKind::Meta => CredentialHelp {
             acquisition: ApiKey,
             credential_url: Some("https://developer.meta.com/ai/"),
@@ -401,6 +444,44 @@ pub fn is_exact_kimi_code_route(kind: ProviderKind, base_url: &str) -> bool {
 #[must_use]
 pub fn is_exact_moonshot_platform_route(kind: ProviderKind, base_url: &str) -> bool {
     kind == ProviderKind::Moonshot && is_exact_https_route(base_url, "api.moonshot.ai", "v1")
+}
+
+/// Whether a configured route is one of Z.ai's exact first-party Chat
+/// Completions endpoints.
+///
+/// Z.ai-only request fields must not leak to compatible gateways merely
+/// because they expose the same model id. Both the Coding Plan and general
+/// platform endpoints are first-party; neighboring paths remain distinct.
+#[must_use]
+pub fn is_exact_zai_chat_route(kind: ProviderKind, base_url: &str) -> bool {
+    kind == ProviderKind::Zai
+        && (is_exact_https_route(base_url, "api.z.ai", "api/coding/paas/v4")
+            || is_exact_https_route(base_url, "api.z.ai", "api/paas/v4"))
+}
+
+/// Whether a configured route is one of MiniMax's exact first-party OpenAI
+/// Chat Completions endpoints.
+///
+/// This deliberately excludes the `/anthropic` routes: those use the native
+/// Messages adapter and do not share Chat Completions token-limit fields.
+#[must_use]
+pub fn is_exact_minimax_chat_route(kind: ProviderKind, base_url: &str) -> bool {
+    kind == ProviderKind::Minimax
+        && (is_exact_https_route(base_url, "api.minimax.io", "v1")
+            || is_exact_https_route(base_url, "api.minimaxi.com", "v1"))
+}
+
+/// Whether a configured route is one of MiniMax's exact first-party
+/// Anthropic-compatible Messages endpoints.
+///
+/// M3 exposes only adaptive/disabled thinking on these routes; it does not
+/// expose distinct effort tiers. Keep the guard exact so a compatible gateway
+/// cannot inherit first-party effective-state claims from its provider label.
+#[must_use]
+pub fn is_exact_minimax_anthropic_route(kind: ProviderKind, base_url: &str) -> bool {
+    kind == ProviderKind::MinimaxAnthropic
+        && (is_exact_https_route(base_url, "api.minimax.io", "anthropic")
+            || is_exact_https_route(base_url, "api.minimaxi.com", "anthropic"))
 }
 
 /// Return credential help for one concrete provider route.
@@ -521,8 +602,8 @@ impl Provider for DeepseekAnthropic {
         &["deepseek_anthropic", "deepseek-claude", "deepseek_claude"]
     }
 
-    fn wire(&self) -> WireFormat {
-        WireFormat::AnthropicMessages
+    fn wire_policy(&self) -> WirePolicy {
+        WirePolicy::Fixed(WireFormat::AnthropicMessages)
     }
 }
 provider!(
@@ -809,8 +890,8 @@ impl Provider for OpenaiCodex {
         ]
     }
 
-    fn wire(&self) -> WireFormat {
-        WireFormat::Responses
+    fn wire_policy(&self) -> WirePolicy {
+        WirePolicy::Fixed(WireFormat::Responses)
     }
 }
 
@@ -846,8 +927,8 @@ impl Provider for Anthropic {
         "anthropic"
     }
 
-    fn wire(&self) -> WireFormat {
-        WireFormat::AnthropicMessages
+    fn wire_policy(&self) -> WirePolicy {
+        WirePolicy::Fixed(WireFormat::AnthropicMessages)
     }
 }
 
@@ -887,8 +968,8 @@ impl Provider for Openmodel {
         &["open-model", "open_model"]
     }
 
-    fn wire(&self) -> WireFormat {
-        WireFormat::AnthropicMessages
+    fn wire_policy(&self) -> WirePolicy {
+        WirePolicy::Fixed(WireFormat::AnthropicMessages)
     }
 }
 
@@ -968,8 +1049,8 @@ impl Provider for MinimaxAnthropic {
         ]
     }
 
-    fn wire(&self) -> WireFormat {
-        WireFormat::AnthropicMessages
+    fn wire_policy(&self) -> WirePolicy {
+        WirePolicy::Fixed(WireFormat::AnthropicMessages)
     }
 }
 
@@ -1020,6 +1101,47 @@ provider!(
     "opencode_go",
     aliases: ["opencode_go", "opencodego"]
 );
+
+/// OpenCode Zen gateway with a model-scoped wire protocol.
+pub struct OpencodeZen;
+
+impl Provider for OpencodeZen {
+    fn id(&self) -> &'static str {
+        "opencode-zen"
+    }
+
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::OpencodeZen
+    }
+
+    fn display_name(&self) -> &'static str {
+        "OpenCode Zen"
+    }
+
+    fn default_base_url(&self) -> &'static str {
+        DEFAULT_OPENCODE_ZEN_BASE_URL
+    }
+
+    fn default_model(&self) -> &'static str {
+        DEFAULT_OPENCODE_ZEN_MODEL
+    }
+
+    fn env_vars(&self) -> &'static [&'static str] {
+        &["OPENCODE_ZEN_API_KEY", "OPENCODE_API_KEY"]
+    }
+
+    fn provider_config_key(&self) -> &'static str {
+        "opencode_zen"
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["opencode_zen", "opencodezen", "zen", "opencode"]
+    }
+
+    fn wire_policy(&self) -> WirePolicy {
+        WirePolicy::ModelAware
+    }
+}
 
 provider!(
     Meta,
@@ -1112,8 +1234,8 @@ impl Provider for Custom {
         "custom"
     }
 
-    fn wire(&self) -> WireFormat {
-        WireFormat::ChatCompletions
+    fn wire_policy(&self) -> WirePolicy {
+        WirePolicy::Fixed(WireFormat::ChatCompletions)
     }
 }
 
@@ -1149,12 +1271,13 @@ static DEEPINFRA: Deepinfra = Deepinfra;
 static SAKANA: Sakana = Sakana;
 static LONGCAT: LongCat = LongCat;
 static OPENCODE_GO: OpencodeGo = OpencodeGo;
+static OPENCODE_ZEN: OpencodeZen = OpencodeZen;
 static META: Meta = Meta;
 static XAI: Xai = Xai;
 static TELECOMJS: Telecomjs = Telecomjs;
 static CUSTOM: Custom = Custom;
 
-static PROVIDER_REGISTRY: [&dyn Provider; 36] = [
+static PROVIDER_REGISTRY: [&dyn Provider; 37] = [
     &DEEPSEEK,
     &DEEPSEEK_ANTHROPIC,
     &NVIDIA_NIM,
@@ -1187,6 +1310,7 @@ static PROVIDER_REGISTRY: [&dyn Provider; 36] = [
     &SAKANA,
     &LONGCAT,
     &OPENCODE_GO,
+    &OPENCODE_ZEN,
     &META,
     &XAI,
     &TELECOMJS,
@@ -1381,6 +1505,108 @@ mod tests {
     }
 
     #[test]
+    fn zai_chat_route_matching_is_exact() {
+        for route in [
+            "https://api.z.ai/api/coding/paas/v4",
+            "https://api.z.ai/api/paas/v4/",
+            "HTTPS://API.Z.AI/api/paas/v4",
+        ] {
+            assert!(is_exact_zai_chat_route(ProviderKind::Zai, route), "{route}");
+        }
+        for neighboring_route in [
+            "http://api.z.ai/api/paas/v4",
+            "https://api.z.ai:443/api/paas/v4",
+            "https://api.z.ai/API/paas/v4",
+            "https://api.z.ai/api/paas/v4?preview=1",
+            "https://api.z.ai/api/paas/v4#fragment",
+            "https://api.z.ai/api/paas/v4//",
+            "https://api.z.ai/api/paas/v4/chat/completions",
+            "https://gateway.example/v1",
+        ] {
+            assert!(
+                !is_exact_zai_chat_route(ProviderKind::Zai, neighboring_route),
+                "{neighboring_route} must not inherit Z.ai-only request fields"
+            );
+        }
+        assert!(!is_exact_zai_chat_route(
+            ProviderKind::Openai,
+            DEFAULT_ZAI_BASE_URL
+        ));
+    }
+
+    #[test]
+    fn minimax_chat_route_matching_is_exact_and_excludes_messages() {
+        for route in [
+            "https://api.minimax.io/v1",
+            "https://api.minimaxi.com/v1/",
+            "HTTPS://API.MINIMAX.IO/v1",
+        ] {
+            assert!(
+                is_exact_minimax_chat_route(ProviderKind::Minimax, route),
+                "{route}"
+            );
+        }
+        for neighboring_route in [
+            "http://api.minimax.io/v1",
+            "https://api.minimax.io:443/v1",
+            "https://api.minimax.io/V1",
+            "https://api.minimax.io/v1?preview=1",
+            "https://api.minimax.io/v1#fragment",
+            "https://api.minimax.io/v1//",
+            "https://api.minimax.io/v1/chat/completions",
+            "https://api.minimax.io/anthropic",
+            "https://api.minimaxi.com/anthropic",
+            "https://gateway.example/v1",
+        ] {
+            assert!(
+                !is_exact_minimax_chat_route(ProviderKind::Minimax, neighboring_route),
+                "{neighboring_route} must not inherit MiniMax Chat request fields"
+            );
+        }
+        assert!(!is_exact_minimax_chat_route(
+            ProviderKind::MinimaxAnthropic,
+            DEFAULT_MINIMAX_BASE_URL
+        ));
+    }
+
+    #[test]
+    fn minimax_anthropic_route_matching_is_exact_and_excludes_chat() {
+        for route in [
+            "https://api.minimax.io/anthropic",
+            "https://api.minimaxi.com/anthropic/",
+            "HTTPS://API.MINIMAX.IO/anthropic",
+        ] {
+            assert!(
+                is_exact_minimax_anthropic_route(ProviderKind::MinimaxAnthropic, route),
+                "{route}"
+            );
+        }
+        for neighboring_route in [
+            "http://api.minimax.io/anthropic",
+            "https://api.minimax.io:443/anthropic",
+            "https://api.minimax.io/Anthropic",
+            "https://api.minimax.io/anthropic?preview=1",
+            "https://api.minimax.io/anthropic#fragment",
+            "https://api.minimax.io/anthropic//",
+            "https://api.minimax.io/anthropic/v1/messages",
+            "https://api.minimax.io/v1",
+            "https://gateway.example/anthropic",
+        ] {
+            assert!(
+                !is_exact_minimax_anthropic_route(
+                    ProviderKind::MinimaxAnthropic,
+                    neighboring_route
+                ),
+                "{neighboring_route} must not inherit MiniMax Messages semantics"
+            );
+        }
+        assert!(!is_exact_minimax_anthropic_route(
+            ProviderKind::Minimax,
+            DEFAULT_MINIMAX_ANTHROPIC_BASE_URL
+        ));
+    }
+
+    #[test]
     fn non_key_and_mixed_routes_are_typed_explicitly() {
         for kind in [
             ProviderKind::Sglang,
@@ -1433,6 +1659,26 @@ mod tests {
             sakana.docs_url,
             Some("https://console.sakana.ai/get-started")
         );
+    }
+
+    #[test]
+    fn model_aware_wire_policy_resolves_only_supported_endpoint_keys() {
+        let policy = WirePolicy::ModelAware;
+        assert_eq!(policy.resolve("chat"), Some(WireFormat::ChatCompletions));
+        assert_eq!(policy.resolve("responses"), Some(WireFormat::Responses));
+        assert_eq!(
+            policy.resolve("messages"),
+            Some(WireFormat::AnthropicMessages)
+        );
+        assert_eq!(policy.resolve("models/gemini-3.1-pro"), None);
+        assert_eq!(policy.resolve(""), None);
+    }
+
+    #[test]
+    fn fixed_wire_policy_ignores_catalog_endpoint_keys() {
+        let policy = WirePolicy::Fixed(WireFormat::Responses);
+        assert_eq!(policy.resolve("chat"), Some(WireFormat::Responses));
+        assert_eq!(policy.resolve("unknown"), Some(WireFormat::Responses));
     }
 
     #[test]

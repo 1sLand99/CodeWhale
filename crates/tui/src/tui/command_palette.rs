@@ -23,6 +23,7 @@ use crate::skills;
 use crate::tools::spec::ApprovalRequirement;
 use crate::tools::spec::ToolCapability;
 use crate::tools::{ToolContext, ToolRegistryBuilder};
+use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, CommandPaletteAction, ModalKind, ModalView, ViewAction, ViewEvent,
     centered_modal_area, render_modal_footer, render_modal_surface,
@@ -724,7 +725,7 @@ impl CommandPaletteView {
     }
 
     fn scope_hint_lines() -> Line<'static> {
-        let hint = "scope: c:/cmd: , s:/skill: , t:/tool: , m:/mcp:";
+        let hint = "scope: c:cmd · s:skill · t:tool · m:mcp";
         Line::from(Span::styled(
             hint,
             Style::default()
@@ -747,28 +748,6 @@ impl CommandPaletteView {
                 .fg(palette::WHALE_INFO)
                 .add_modifier(Modifier::BOLD),
         )])
-    }
-
-    fn scope_examples() -> Vec<Line<'static>> {
-        vec![
-            Line::from(Span::styled("Try:", Style::default().fg(palette::TEXT_DIM))),
-            Line::from(Span::styled(
-                "  c:<term>  Command-only   e.g. c:agent",
-                Style::default().fg(palette::TEXT_MUTED),
-            )),
-            Line::from(Span::styled(
-                "  s:<term>  Skill-only     e.g. s:search",
-                Style::default().fg(palette::TEXT_MUTED),
-            )),
-            Line::from(Span::styled(
-                "  t:<term>  Tool-only      e.g. t:git",
-                Style::default().fg(palette::TEXT_MUTED),
-            )),
-            Line::from(Span::styled(
-                "  m:<term>  MCP-only       e.g. m:filesystem",
-                Style::default().fg(palette::TEXT_MUTED),
-            )),
-        ]
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -903,16 +882,16 @@ impl ModalView for CommandPaletteView {
             inner,
             buf,
             &[
-                ActionHint::new("↑/↓/j/k", "move"),
-                ActionHint::new("Enter", "run"),
-                ActionHint::new("Esc", "close"),
+                ActionHint::new("↑/↓", "move"),
+                ActionHint::new("Enter", "select"),
+                ActionHint::new("Esc", "cancel"),
             ],
         );
 
         let mut lines = Vec::new();
         let mut entry_line_indices = Vec::new();
         let query_label = if self.query.is_empty() {
-            "Type to find and run one action".to_string()
+            "Type to filter".to_string()
         } else {
             format!("Filter: {}", self.query)
         };
@@ -934,7 +913,6 @@ impl ModalView for CommandPaletteView {
             Style::default().fg(palette::TEXT_DIM).italic(),
         )));
         lines.push(Self::scope_hint_lines());
-        lines.extend(Self::scope_examples());
         lines.push(Line::from(""));
 
         // Rows the bordered popup can show for the list, minus the header that
@@ -959,7 +937,7 @@ impl ModalView for CommandPaletteView {
         }
         if self.filtered.is_empty() {
             lines.push(Line::from(Span::styled(
-                "No matches.",
+                "No matches",
                 Style::default().fg(palette::TEXT_MUTED).italic(),
             )));
         } else {
@@ -992,14 +970,13 @@ impl ModalView for CommandPaletteView {
                 }
 
                 let style = if is_selected {
-                    Style::default()
-                        .fg(palette::SELECTION_TEXT)
-                        .bg(palette::SELECTION_BG)
+                    menu_style::selected_row_style()
                 } else {
                     Style::default().fg(palette::TEXT_PRIMARY)
                 };
 
-                let mut line = format!("  {:<label_width$}", entry.label);
+                let pointer = crate::tui::glyphs::selection_marker(is_selected);
+                let mut line = format!("{pointer} {:<label_width$}", entry.label);
                 let desc_capacity = popup_width as usize - (label_width + 4);
                 let desc = if entry.description.width() > desc_capacity {
                     let mut shortened = String::new();
@@ -1013,9 +990,6 @@ impl ModalView for CommandPaletteView {
                 } else {
                     entry.description.clone()
                 };
-                if is_selected {
-                    line = format!("> {:<label_width$}", entry.label);
-                }
                 line.push_str("  ");
                 line.push_str(&desc);
                 entry_line_indices.push((lines.len(), absolute));
@@ -2032,8 +2006,22 @@ mod tests {
 
             // Footer keeps every action.
             assert!(text.contains("move"), "{w}x{h}: missing 'move' hint");
-            assert!(text.contains("run"), "{w}x{h}: missing 'run' hint");
-            assert!(text.contains("close"), "{w}x{h}: missing 'close' hint");
+            assert!(text.contains("select"), "{w}x{h}: missing 'select' hint");
+            assert!(text.contains("cancel"), "{w}x{h}: missing 'cancel' hint");
+
+            // The selected row carries the charter pointer glyph.
+            assert!(
+                text.contains(crate::tui::glyphs::SELECTION),
+                "{w}x{h}: selected row missing charter pointer"
+            );
+
+            // Header stays compact: scope help is a single line, with no
+            // multi-line "Try:" example block crowding out entries.
+            assert!(text.contains("Type to filter"), "{w}x{h}: missing prompt");
+            assert!(
+                !text.contains("Try:"),
+                "{w}x{h}: scope example block should stay collapsed"
+            );
 
             // Composited frame is fully opaque.
             assert!(!text.contains('X'), "{w}x{h}: background bleed-through");
@@ -2050,6 +2038,39 @@ mod tests {
                     "{w}x{h}: row {y} overflows width: {row:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn command_palette_selected_row_uses_shared_selection_style_at_blocker_sizes() {
+        use crate::tui::views::ViewStack;
+        for (w, h) in BLOCKER_SIZES {
+            let area = Rect::new(0, 0, w, h);
+            let mut buf = Buffer::empty(area);
+            let mut stack = ViewStack::new();
+            stack.push(sample_palette_view());
+            stack.render(area, &mut buf);
+
+            // The first entry ("/config") is selected by default; find its row.
+            let selected_y = (0..h)
+                .find(|&y| {
+                    let row: String = (0..w).map(|x| buf[(x, y)].symbol()).collect();
+                    row.contains("/config")
+                })
+                .unwrap_or_else(|| panic!("{w}x{h}: selected entry should render"));
+            let selected_cells = (0..w)
+                .filter(|&x| {
+                    let cell = &buf[(x, selected_y)];
+                    !cell.symbol().trim().is_empty()
+                        && cell.bg == palette::SELECTION_BG
+                        && cell.fg == palette::SELECTION_TEXT
+                })
+                .count();
+            assert!(
+                selected_cells >= "/config".len(),
+                "{w}x{h}: selected row must render with the shared selection style \
+                 (palette::SELECTION_TEXT on palette::SELECTION_BG)"
+            );
         }
     }
 }

@@ -912,7 +912,10 @@ pub fn render_header(area: Rect, buf: &mut Buffer, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled(route_label, Style::default().fg(app.ui_theme.text_muted)),
+        Span::styled(
+            route_label.clone(),
+            Style::default().fg(app.ui_theme.text_muted),
+        ),
         Span::styled(" · ", Style::default().fg(app.ui_theme.text_dim)),
         Span::styled(
             mode_label(app.ui_locale, app.mode),
@@ -965,6 +968,7 @@ pub fn render_header(area: Rect, buf: &mut Buffer, app: &App) {
     let token_breakdown = (tier != ShellTier::Compact)
         .then(|| session_token_breakdown(app))
         .flatten();
+    let token_breakdown_requested = token_breakdown.is_some();
     let version = (tier == ShellTier::Wide).then(|| {
         Span::styled(
             format!("v{}", env!("DEEPSEEK_BUILD_VERSION")),
@@ -976,9 +980,8 @@ pub fn render_header(area: Rect, buf: &mut Buffer, app: &App) {
     let git_label = crate::tui::git_status::chrome_label(&crate::tui::git_status::cached_status())
         .map(|label| Span::styled(label, Style::default().fg(app.ui_theme.text_muted)));
 
-    // Baseline right-hand chrome: git, context meter, version. Configured
-    // header items may use spare width, but falling back must restore this
-    // baseline rather than eliding git, context, or version information.
+    // Baseline right-hand chrome: git, context meter, version. Exact route
+    // identity outranks this auxiliary chrome when the full line cannot fit.
     let mut right = Vec::new();
     if let Some(git_label) = git_label.clone() {
         push_chrome(&mut right, git_label);
@@ -1007,14 +1010,14 @@ pub fn render_header(area: Rect, buf: &mut Buffer, app: &App) {
     // enough to keep the whole baseline plus the guaranteed-left minimum.
     if let Some(token_breakdown) = token_breakdown {
         let mut enhanced_right = Vec::new();
-        if let Some(git_label) = git_label {
+        if let Some(git_label) = git_label.clone() {
             push_chrome(&mut enhanced_right, git_label);
         }
         push_chrome(&mut enhanced_right, token_breakdown);
-        if let Some(context_meter) = context_meter {
+        if let Some(context_meter) = context_meter.clone() {
             push_chrome(&mut enhanced_right, context_meter);
         }
-        if let Some(version) = version {
+        if let Some(version) = version.clone() {
             push_chrome(&mut enhanced_right, version);
         }
         let enhanced_width = span_width(&enhanced_right);
@@ -1026,6 +1029,48 @@ pub fn render_header(area: Rect, buf: &mut Buffer, app: &App) {
         {
             right = enhanced_right;
         }
+    }
+
+    // Provider + model are routing truth. Shed auxiliary right-hand chrome in
+    // least-important-first order before shortening that identity on a normal
+    // 100+ column shell. Narrow shells keep the context meter, and an explicit
+    // token-breakdown opt-in keeps its documented width priority.
+    let full_left_width = span_width(&left);
+    let route_identity_priority = available >= 100
+        && !token_breakdown_requested
+        && app.api_provider == crate::config::ApiProvider::Custom;
+    if route_identity_priority
+        && full_left_width
+            .saturating_add(usize::from(!right.is_empty()))
+            .saturating_add(span_width(&right))
+            > available
+    {
+        right.clear();
+        if let Some(context_meter) = context_meter.clone() {
+            push_chrome(&mut right, context_meter);
+        }
+        if let Some(version) = version.clone() {
+            push_chrome(&mut right, version);
+        }
+    }
+    if route_identity_priority
+        && full_left_width
+            .saturating_add(usize::from(!right.is_empty()))
+            .saturating_add(span_width(&right))
+            > available
+    {
+        right.clear();
+        if let Some(context_meter) = context_meter {
+            push_chrome(&mut right, context_meter);
+        }
+    }
+    if route_identity_priority
+        && full_left_width
+            .saturating_add(usize::from(!right.is_empty()))
+            .saturating_add(span_width(&right))
+            > available
+    {
+        right.clear();
     }
 
     let right_width = span_width(&right);
@@ -1050,7 +1095,7 @@ pub fn render_header(area: Rect, buf: &mut Buffer, app: &App) {
         let fixed_width = 4usize
             .saturating_add(indicator_width)
             .saturating_add(span_width(&suffix));
-        let model_budget = left_budget.saturating_sub(fixed_width);
+        let route_budget = left_budget.saturating_sub(fixed_width);
         left = vec![Span::styled(
             "cw",
             Style::default()
@@ -1068,7 +1113,7 @@ pub fn render_header(area: Rect, buf: &mut Buffer, app: &App) {
         }
         left.push(Span::raw("  "));
         left.push(Span::styled(
-            truncate_to_width(&app.model_display_label(), model_budget),
+            truncate_to_width(&route_label, route_budget),
             Style::default().fg(app.ui_theme.text_muted),
         ));
         left.extend(suffix);

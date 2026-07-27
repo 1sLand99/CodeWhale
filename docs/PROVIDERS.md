@@ -33,7 +33,7 @@ The canonical provider IDs are:
 `siliconflow`, `arcee`, `siliconflow-CN`, `moonshot`, `sglang`, `vllm`,
 `ollama`, `huggingface`, `together`, `qianfan`, `openai-codex`, `anthropic`,
 `openmodel`, `zai`, `stepfun`, `minimax`, `deepinfra`, `sakana`, `longcat`,
-`opencode-go`, `meta`, `telecomjs`, and `xai`.
+`opencode-go`, `opencode-zen`, `meta`, `telecomjs`, and `xai`.
 
 Use any of these surfaces to select a provider:
 
@@ -113,6 +113,7 @@ the listed provider env vars.
 | `sakana` | `[providers.sakana]` | OpenAI Chat Completions | `FUGU_API_KEY`, `SAKANA_API_KEY` |
 | `longcat` | `[providers.longcat]` | OpenAI Chat Completions | `LONGCAT_API_KEY` |
 | `opencode-go` | `[providers.opencode_go]` | OpenAI Chat Completions | `OPENCODE_GO_API_KEY` |
+| `opencode-zen` | `[providers.opencode_zen]` | Model-aware: OpenAI Responses, Anthropic Messages, or OpenAI Chat Completions | `OPENCODE_ZEN_API_KEY`, `OPENCODE_API_KEY` |
 | `meta` | `[providers.meta]` | OpenAI Chat Completions | `META_MODEL_API_KEY`, `MODEL_API_KEY` |
 | `telecomjs` | `[providers.telecomjs]` | OpenAI Chat Completions | `TELECOMJS_API_KEY` |
 | `xai` | `[providers.xai]` | OpenAI Chat Completions | `XAI_API_KEY` |
@@ -120,8 +121,9 @@ the listed provider env vars.
 Default base URLs and models for each route are listed in the shipped provider
 table below. The wire protocol values above are derived from
 `crates/config/src/provider.rs`: `ChatCompletions` is the default,
-`openai-codex` overrides to `Responses`, and `deepseek-anthropic`,
-`anthropic`, plus `openmodel` override to `AnthropicMessages`.
+`openai-codex` overrides to `Responses`; `deepseek-anthropic`, `anthropic`, and
+`openmodel` override to `AnthropicMessages`; and `opencode-zen` resolves the
+protocol from the selected model's curated offering.
 
 ## Auth And Env Rules
 
@@ -253,7 +255,8 @@ configuration path instead of guessing a vendor page.
 | `sglang`, `vllm`, `ollama` | Local OpenAI-compatible endpoints are keyless by default; configure a key only when the server requires one. |
 | `sakana` | [Sakana AI API keys](https://console.sakana.ai/api-keys) ([get started](https://console.sakana.ai/get-started)) |
 | `longcat` | [Meituan LongCat platform](https://longcat.chat/platform) |
-| `opencode-go` | [OpenCode Zen](https://opencode.ai/zen/) |
+| `opencode-go` | [OpenCode Go](https://opencode.ai/docs/go/) |
+| `opencode-zen` | [OpenCode Zen](https://opencode.ai/docs/zen/) |
 | `meta` | [Meta Model API](https://developer.meta.com/ai/) |
 | `telecomjs` | [TelecomJS TokenHub](https://aigw.telecomjs.com/) |
 | `xai` | [xAI Console](https://console.x.ai/) for an API key, Codewhale-owned device login, or explicitly consented read-only Grok CLI credentials. |
@@ -322,10 +325,10 @@ Kimi remains API-key-only; external consent for Kimi is rejected.
 | `siliconflow` | `[providers.siliconflow]` | `SILICONFLOW_API_KEY` | `SILICONFLOW_BASE_URL`; default `https://api.siliconflow.com/v1` | `deepseek-ai/DeepSeek-V4-Pro`, `deepseek-ai/DeepSeek-V4-Flash` | OpenAI-compatible hosted route. Official docs use the `.com` endpoint. `SILICONFLOW_MODEL` is accepted. Reasoning aliases `deepseek-reasoner` and `deepseek-r1` map to Pro; `deepseek-chat` and `deepseek-v3` map to Flash. |
 | `siliconflow-CN` | `[providers.siliconflow_cn]` | `SILICONFLOW_API_KEY` | `SILICONFLOW_BASE_URL`; default `https://api.siliconflow.cn/v1` | Uses the SiliconFlow model set | China regional SiliconFlow route. Falls back to `[providers.siliconflow]` for api_key / base_url / model when unset. Select it with `provider = "siliconflow-CN"` or `CODEWHALE_PROVIDER=siliconflow-CN`. |
 | `arcee` | `[providers.arcee]` | `ARCEE_API_KEY` | `ARCEE_BASE_URL`; default `https://api.arcee.ai/api/v1` | `trinity-large-thinking`, `trinity-large-preview` | Arcee AI direct OpenAI-compatible route, tracked as 256K-context BF16 serving. `ARCEE_MODEL` is accepted. OpenRouter's `arcee-ai/trinity-large-thinking` remains the OpenRouter namespaced model ID; direct Arcee uses the bare `trinity-large-thinking` ID. |
-| `moonshot` | `[providers.moonshot]` | `MOONSHOT_API_KEY`, `KIMI_API_KEY` | `MOONSHOT_BASE_URL`, `KIMI_BASE_URL`; default `https://api.moonshot.ai/v1` | Direct Moonshot: `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`; Kimi Code membership: `k3`, `kimi-for-coding` at `https://api.kimi.com/coding/v1` | Moonshot/Kimi route. `kimi` and `kimi-k2` aliases select `kimi-k2.7-code`; `MOONSHOT_MODEL`, `KIMI_MODEL_NAME`, and `KIMI_MODEL` are accepted. Kimi thinking streams through `reasoning_content`; Codewhale keeps it in Thinking cells and replays it for thinking/tool-call continuity. For direct K3, use exact `base_url = "https://api.moonshot.ai/v1"` and `model = "kimi-k3"`; it is always-thinking and receives top-level `reasoning_effort = "low" | "high" | "max"` (`off` normalizes to `low`), uses only `max_completion_tokens`, and omits `temperature`/`top_p` per the [K3 quickstart](https://platform.kimi.ai/docs/guide/kimi-k3-quickstart). For Kimi Code K3, use a key from the [Kimi Code console](https://www.kimi.com/code/console), exact `base_url = "https://api.kimi.com/coding/v1"`, and bare `model = "k3"`; `off` becomes enabled `low`, while normal dispatched `auto` selects and sends a concrete Codewhale tier. Only an omitted reasoning setting leaves the provider default in control. That membership route defaults safely to 262,144 context tokens; the [Kimi Code model-tier table](https://www.kimi.com/code/docs/en/kimi-code/models.html) grants Allegretto and higher plans up to 1M, which those plans may express as `context_window = 1048576`. `k3[1m]` is Claude Code-only and Codewhale rejects it. `kimi-for-coding` remains the valid K2.7 membership route. Legacy `auth_mode = "kimi_oauth"` fails to API-key guidance without probing Kimi CLI files. Codewhale does not impersonate `kimi_cli` or `kimi_code_cli`. |
+| `moonshot` | `[providers.moonshot]` | `MOONSHOT_API_KEY`, `KIMI_API_KEY` | `MOONSHOT_BASE_URL`, `KIMI_BASE_URL`; default `https://api.moonshot.ai/v1` | Direct Moonshot: `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`; Kimi Code membership: `k3`, `kimi-for-coding`, `kimi-for-coding-highspeed` at `https://api.kimi.com/coding/v1` | Moonshot/Kimi route. `kimi` and `kimi-k2` aliases select `kimi-k2.7-code`; `MOONSHOT_MODEL`, `KIMI_MODEL_NAME`, and `KIMI_MODEL` are accepted. Kimi thinking streams through `reasoning_content`; Codewhale keeps it in Thinking cells and replays it for thinking/tool-call continuity. For direct K3, use exact `base_url = "https://api.moonshot.ai/v1"` and `model = "kimi-k3"`; it is always-thinking and receives top-level `reasoning_effort = "low" | "high" | "max"` (`off` normalizes to `low`), uses only `max_completion_tokens`, and omits `temperature`/`top_p` per the [K3 quickstart](https://platform.kimi.ai/docs/guide/kimi-k3-quickstart). For Kimi Code K3, use a key from the [Kimi Code console](https://www.kimi.com/code/console), exact `base_url = "https://api.kimi.com/coding/v1"`, and bare `model = "k3"`; `off` becomes enabled `low`, while normal dispatched `auto` selects and sends a concrete Codewhale tier. Only an omitted reasoning setting leaves the provider default in control. That membership route defaults safely to 262,144 context tokens; the [Kimi Code model-tier table](https://www.kimi.com/code/docs/en/kimi-code/models.html) grants Allegretto and higher plans up to 1M, which those plans may express as `context_window = 1048576`. `k3[1m]` is Claude Code-only and Codewhale rejects it. `kimi-for-coding` remains the valid K2.7 membership route, and `kimi-for-coding-highspeed` is its own high-speed roster entry (262,144 context); membership ids are rejected on the direct platform endpoint, and `kimi-k3` stays rejected on the membership endpoint. Billing is decided by the endpoint the route resolves to, judged once against the two exact product endpoints: direct Moonshot (`https://api.moonshot.ai/v1` or the default) bills metered with dollar estimates, the exact Kimi Code membership endpoint bills as Kimi Code quota and never shows dollar estimates, and anything else — a gateway host, a neighboring Kimi-hosted path — reports `cost: unknown` rather than borrowing either product. An imported Kimi Code token with no `base_url` in its table still resolves to the membership endpoint, so it bills as Kimi Code quota and never accrues dollars. A completed turn, parent or sub-agent, is billed from the immutable endpoint receipt its own client was built with, never from a later config re-read: `MOONSHOT_BASE_URL`/`KIMI_BASE_URL` are merged into the *active* provider's table only, and an in-turn provider switch can move the ambient config off the route that actually ran. Legacy `auth_mode = "kimi_oauth"` fails to API-key guidance without probing Kimi CLI files. Codewhale does not impersonate `kimi_cli` or `kimi_code_cli`. |
 | `zai` | `[providers.zai]` | `ZAI_API_KEY`, `Z_AI_API_KEY` | `ZAI_BASE_URL`, `Z_AI_BASE_URL`; default `https://api.z.ai/api/coding/paas/v4`; general API `https://api.z.ai/api/paas/v4` | `GLM-5.2` default; `GLM-5.1`, `GLM-5-Turbo` available | Z.AI GLM Coding Plan route. `GLM-5.2` is the default; set `model = "GLM-5.1"` or `ZAI_MODEL=GLM-5.1` for the smaller model, or `GLM-5-Turbo` for the fast variant used by faster/explore sub-agents. |
-| `stepfun` | `[providers.stepfun]` | `STEPFUN_API_KEY`, `STEP_API_KEY` | `STEPFUN_BASE_URL`, `STEP_BASE_URL`; default `https://api.stepfun.ai/v1`; Coding Plan endpoint `https://api.stepfun.ai/step_plan/v1` | `step-3.7-flash` | StepFun / StepFlash direct OpenAI-compatible route. Set `[providers.stepfun].base_url` or `STEP_BASE_URL` to the Coding Plan URL when using that plan. Offline accounting labels recognized routes as `stepfun-payg` or `stepfun-plan` without persisting the raw endpoint, and only the standard PAYG route receives token pricing. `STEPFUN_MODEL` and `STEP_MODEL` are accepted. |
-| `minimax` | `[providers.minimax]` | `MINIMAX_API_KEY` | `MINIMAX_BASE_URL`; default `https://api.minimax.io/v1`; China `https://api.minimaxi.com/v1` | `MiniMax-M3`, `MiniMax-M2.7`, `MiniMax-M2.7-highspeed`, `MiniMax-M2.5`, `MiniMax-M2.5-highspeed`, `MiniMax-M2.1`, `MiniMax-M2.1-highspeed`, `MiniMax-M2` | MiniMax direct OpenAI-compatible route. Codewhale sends `reasoning_split = true` so MiniMax thinking arrives separately from answer text. Official M3 input modalities are text, image, and video; M2.7 is text-only. |
+| `stepfun` | `[providers.stepfun]` | `STEPFUN_API_KEY`, `STEP_API_KEY` | `STEPFUN_BASE_URL`, `STEP_BASE_URL`; default `https://api.stepfun.ai/v1`; Coding Plan endpoint `https://api.stepfun.ai/step_plan/v1` | `step-3.7-flash` | StepFun / StepFlash direct OpenAI-compatible route. `/provider` setup asks which billing route the key belongs to — pay-as-you-go or Step Plan — validates the key against the chosen endpoint, and writes the answer to `[providers.stepfun].base_url` only. A base URL that is neither recognized route is left alone and the question is skipped. You can also set `[providers.stepfun].base_url` or `STEP_BASE_URL` to the Coding Plan URL by hand. Offline accounting labels recognized routes as `stepfun-payg` or `stepfun-plan` without persisting the raw endpoint, and only the standard PAYG route receives token pricing. `STEPFUN_MODEL` and `STEP_MODEL` are accepted. |
+| `minimax` | `[providers.minimax]` | `MINIMAX_API_KEY` | `MINIMAX_BASE_URL`; default `https://api.minimax.io/v1`; China `https://api.minimaxi.com/v1` | `MiniMax-M3`, `MiniMax-M2.7`, `MiniMax-M2.7-highspeed`, `MiniMax-M2.5`, `MiniMax-M2.5-highspeed`, `MiniMax-M2.1`, `MiniMax-M2.1-highspeed`, `MiniMax-M2` | MiniMax direct OpenAI-compatible route. Codewhale sends `reasoning_split = true` so MiniMax thinking arrives separately from answer text. Both MiniMax dialects sell pay-as-you-go and Token Plan over the same endpoints and the same key, so billing is classified from the credential *product*, never from the endpoint or from a default. `mode = "token-plan"` in `[providers.minimax]`/`[providers.minimax_anthropic]`, or a Token Plan key shaped `sk-cp…`, bills as MiniMax Token Plan quota with no dollar estimates; an explicit pay-as-you-go mode (`pay-as-you-go`/`payg`/`metered`) wins over key shape. The key's product prefix is only visible when the key is in config, bound by `api_key_env`, or exported as `MINIMAX_API_KEY` on an official endpoint — a key saved through `codewhale auth set` (secret store / OS keyring) is deliberately not read to classify billing. With no explicit mode and no visible product marker the route reports `cost: unknown` rather than assuming pay-as-you-go, so a Token Plan account is never charged invented dollars. Custom/gateway endpoints also fail closed with `cost: unknown`. Official M3 input modalities are text, image, and video; M2.7 is text-only. |
 | `minimax-anthropic` | `[providers.minimax_anthropic]` | `MINIMAX_API_KEY` | `MINIMAX_ANTHROPIC_BASE_URL`; default `https://api.minimax.io/anthropic`; China `https://api.minimaxi.com/anthropic` | `MiniMax-M3`, `MiniMax-M2.7` | MiniMax direct Anthropic-compatible Messages route. Keep the `/anthropic` suffix because Codewhale appends `/v1/messages`; the route uses `x-api-key`. M3 supports adaptive or disabled thinking. M2.7 always keeps thinking enabled. |
 | `sglang` | `[providers.sglang]` | Optional `SGLANG_API_KEY` | `SGLANG_BASE_URL`; default `http://localhost:30000/v1` | `deepseek-ai/DeepSeek-V4-Pro`, `deepseek-ai/DeepSeek-V4-Flash` | Self-hosted OpenAI-compatible route. Localhost deployments commonly omit auth. `SGLANG_MODEL` is accepted. |
 | `vllm` | `[providers.vllm]` | Optional `VLLM_API_KEY` | `VLLM_BASE_URL`; default `http://localhost:8000/v1` | `deepseek-ai/DeepSeek-V4-Pro`, `deepseek-ai/DeepSeek-V4-Flash` | Self-hosted vLLM OpenAI-compatible route. Localhost deployments commonly omit auth. `VLLM_MODEL` is accepted. |
@@ -340,9 +343,40 @@ Kimi remains API-key-only; external consent for Kimi is rejected.
 | `sakana` | `[providers.sakana]` | `FUGU_API_KEY`, `SAKANA_API_KEY` | `SAKANA_BASE_URL`; default `https://api.sakana.ai/v1` | `fugu` (default), `fugu-ultra-20260615` | Sakana AI Fugu OpenAI-compatible route. Standard Chat Completions wire protocol; streaming supported. `fugu-ultra-20260615` is the heavy/reasoning variant. Env var aliases: `FUGU_API_KEY` (primary), `SAKANA_API_KEY`; provider aliases: `sakana-ai`, `sakana_ai`, `fugu`. |
 | `longcat` | `[providers.longcat]` | `LONGCAT_API_KEY` | `LONGCAT_BASE_URL`; default `https://api.longcat.chat/openai/v1` | `LongCat-2.0` (default) | Meituan LongCat curated model gateway. OpenAI-compatible Chat Completions wire protocol. Sign up at https://longcat.chat/platform for an API key. Provider aliases: `long-cat`, `meituan-longcat`, `meituan`. |
 | `opencode-go` | `[providers.opencode_go]` | `OPENCODE_GO_API_KEY` | `OPENCODE_GO_BASE_URL`; default `https://opencode.ai/zen/go/v1` | `deepseek-v4-pro` (default), `grok-4.5`, `glm-5.2`, `glm-5.1`, `kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`, `deepseek-v4-flash`, `mimo-v2.5`, `mimo-v2.5-pro` | [OpenCode Go](https://opencode.ai/docs/go/) subscription route using OpenAI-compatible Chat Completions. `OPENCODE_GO_MODEL` is accepted. Codewhale uses bare wire IDs; familiar `opencode-go/<model-id>` input aliases normalize to the bare ID. Go models documented only on the Anthropic `/messages` endpoint are deliberately not advertised by this route until Codewhale supports per-model wire selection. Billing surfaces show the Go allowance instead of token-price estimates. |
+| `opencode-zen` | `[providers.opencode_zen]` | `OPENCODE_ZEN_API_KEY`, fallback `OPENCODE_API_KEY` | `OPENCODE_ZEN_BASE_URL`; default `https://opencode.ai/zen/v1` | `gpt-5.5` (default); current documented GPT, Claude, Qwen, DeepSeek, MiniMax, GLM, Kimi, Grok, and free-model IDs | [OpenCode Zen](https://opencode.ai/docs/zen/) model-aware gateway. `OPENCODE_ZEN_MODEL` is accepted, and official `opencode/<model-id>` selectors normalize to bare wire IDs. GPT rows use `/responses`; Claude and Qwen rows use `/messages`; DeepSeek, MiniMax, GLM, Kimi, Grok, and the listed free rows use `/chat/completions`. Responses and Chat Completions authenticate with Bearer `Authorization`, while Anthropic Messages uses `x-api-key`; none of these routes use ChatGPT/Codex OAuth guidance or headers. Gemini currently fails closed because its model-specific Google wire protocol is not implemented. Unknown models also fail closed until their protocol is present in the curated catalog. |
 | `meta` | `[providers.meta]` | `META_MODEL_API_KEY`, `MODEL_API_KEY` | `META_MODEL_API_BASE_URL`, `MODEL_API_BASE_URL`; default `https://api.meta.ai/v1` | `muse-spark-1.1` (default) | [Meta Model API](https://developer.meta.com/ai/resources/blog/build-with-muse-spark/) public-preview route using OpenAI-compatible Chat Completions. Muse Spark 1.1 keeps its wire ID, tool support, 1M context, 32K output metadata, and `none` through `xhigh` reasoning effort. `META_MODEL_API_MODEL` and `MODEL_API_MODEL` are accepted. Provider aliases: `meta-ai`, `meta_model_api`, `muse`, `muse-spark`. |
 | `telecomjs` | `[providers.telecomjs]` | `TELECOMJS_API_KEY` | `TELECOMJS_BASE_URL`; default `https://aigw.telecomjs.com/v1` | `deepseek-v4-pro` conservative fallback; authenticated `/models` rows when a key is configured | TelecomJS TokenHub OpenAI-compatible Chat Completions route. Live catalogs are isolated by provider and key fingerprint, stale rows survive transient refresh failures, and unsupported reasoning request fields are omitted. `TELECOMJS_MODEL` is accepted. Provider aliases: `telecom-js`, `telecom_js`, `telecomjs-cn`, `tokenhub`. |
 | `xai` | `[providers.xai]` | `XAI_API_KEY`, Codewhale-owned device OAuth, or explicit read-only Grok CLI consent | `XAI_BASE_URL`; default `https://api.x.ai/v1` | `grok-4.5` (default), `grok-4.3`, `grok-build`, `grok-composer-2.5-fast`, `grok-4.20-0309-reasoning`, `grok-4.20-0309-non-reasoning` | xAI/Grok OpenAI-compatible Chat Completions route. **API-key** (default): Bearer token from console.x.ai via `XAI_API_KEY` / keyring / `api_key`. **OAuth**: `codewhale auth xai-device` uses SSH-friendly device login and Codewhale-owned storage, which may refresh itself. Existing Grok CLI credentials require `codewhale auth external-consent --provider xai --mode read-only`; the granted external file is never refreshed or rewritten. OAuth may return HTTP 403 on some SuperGrok tiers — keep API-key as the reliable fallback. `XAI_MODEL` is accepted. Provider aliases: `x-ai`, `x_ai`, `grok`. |
+
+### OpenCode Zen protocol catalog
+
+Zen Responses and Chat Completions requests authenticate with Bearer
+`Authorization`; Zen Anthropic Messages requests use `x-api-key`. None of these
+routes add ChatGPT/Codex OAuth headers.
+
+The bundled Zen transport snapshot follows the [official endpoint
+table](https://opencode.ai/docs/zen/) and is intentionally explicit:
+
+- Responses: `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`,
+  `gpt-5.5-pro`, `gpt-5.4`, `gpt-5.4-pro`, `gpt-5.4-mini`, `gpt-5.4-nano`,
+  `gpt-5.3-codex`, `gpt-5.3-codex-spark`, `gpt-5.2`, `gpt-5.2-codex`,
+  `gpt-5.1`, `gpt-5.1-codex`, `gpt-5.1-codex-max`,
+  `gpt-5.1-codex-mini`, `gpt-5`, `gpt-5-codex`, `gpt-5-nano`.
+- Anthropic Messages: `claude-fable-5`, `claude-opus-4-8`,
+  `claude-opus-4-7`, `claude-opus-4-6`, `claude-opus-4-5`,
+  `claude-sonnet-5`, `claude-sonnet-4-6`, `claude-sonnet-4-5`,
+  `claude-haiku-4-5`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`,
+  `qwen3.5-plus`.
+- Chat Completions: `deepseek-v4-pro`, `deepseek-v4-flash`, `minimax-m3`,
+  `minimax-m2.7`, `minimax-m2.5`, `glm-5.2`, `glm-5.1`, `glm-5`,
+  `kimi-k2.5`, `kimi-k2.6`, `kimi-k2.7-code`, `grok-4.5`,
+  `grok-build-0.1`, `big-pickle`, `mimo-v2.5-free`,
+  `north-mini-code-free`, `nemotron-3-ultra-free`,
+  `deepseek-v4-flash-free`.
+
+Gemini entries are excluded because the official table assigns them Google's
+model-specific protocol. A catalog miss never falls back to another Zen wire
+shape, including when a custom Zen base URL is configured.
 
 ### Hugging Face Provider vs MCP vs Hub
 
@@ -504,6 +538,17 @@ differs from the static table, set `[providers.<name>] context_window = N`.
 The configured value becomes the route-effective context window for prompts,
 context-pressure checks, compaction, and output-cap budgeting.
 
+`max_output` is optional and truthful: it is `null` (and omitted from the
+capability struct on the wire) when the route publishes no output maximum we
+can stand behind — the Kimi Code membership `kimi-for-coding` family is the
+canonical example, since the membership catalog owns their limits. An unknown
+output ceiling is never backfilled with a placeholder, and it applies **no**
+compatibility clamp to a turn's requested `max_tokens`; only a concrete
+route/offering maximum narrows the request. A model the catalogue simply has no
+row for is a different fact — absence is not permission, so an uncatalogued id
+keeps a conservative ceiling. The "Max output metadata" column below reads
+`unknown` wherever no documented maximum exists.
+
 | Provider/model class | Context window | Max output metadata | Thinking support | Cache telemetry | FIM endpoint |
 | --- | --- | --- | --- | --- | --- |
 | DeepSeek V4 (`deepseek-v4-pro`, `deepseek-v4-flash`) | 1,000,000 | 384,000 | yes | yes | DeepSeek beta only |
@@ -520,22 +565,23 @@ context-pressure checks, compaction, and output-cap budgeting.
 | Meta Model API `muse-spark-1.1` | 1,000,000 | 32,000 | yes | no | not documented in code |
 | OpenAI Codex / ChatGPT route (`openai-codex`) | 400,000 effective | 128,000 | yes | no | route uses Responses payload at `/codex/responses` |
 | OpenModel default/custom model IDs | 200,000 fallback unless model metadata or config overrides it | 64,000 fallback | model-dependent | no | route uses Messages payload at `/v1/messages` |
-| Wanjie Ark `reasoner` / `r1` model IDs | 128,000 | 4,096 | yes | no | not documented in code |
+| Wanjie Ark `reasoner` / `r1` model IDs | 128,000 | unknown (no documented maximum) | yes | no | not documented in code |
 | Direct Arcee API `trinity-large-thinking` | 262,144 | 262,144 | yes | no | not documented in code |
-| Direct Arcee API `trinity-large-preview` | 262,144 | 4,096 | no in doctor capability metadata | no | not documented in code |
+| Direct Arcee API `trinity-large-preview` | 262,144 | unknown (no documented maximum) | no in doctor capability metadata | no | not documented in code |
 | Direct Moonshot `kimi-k3` | 1,048,576 | 1,048,576 documented maximum; 131,072 provider default | yes | no | exact route uses `max_completion_tokens` and omits fixed sampling fields ([K3 quickstart](https://platform.kimi.ai/docs/guide/kimi-k3-quickstart)) |
 | Kimi Code membership `k3` | 262,144 safe baseline; 1,048,576 with an explicit entitled-plan override | 131,072 conservative default ceiling; membership maximum is not published | yes | no | exact `https://api.kimi.com/coding/v1` route |
-| Moonshot/Kimi K2.7/K2.6 (`kimi-k2.7-code`, `kimi-k2.6`, Kimi Code `kimi-for-coding`) | 262,144 | 32,768 | yes | no | not documented in code |
+| Direct Moonshot/Kimi K2.7/K2.6 (`kimi-k2.7-code`, `kimi-k2.6`) | 262,144 | 32,768 | yes | no | provider-reported bundled catalog |
+| Kimi Code membership `kimi-for-coding`, `kimi-for-coding-highspeed` | 262,144 | unknown — the membership catalog owns these limits and no client-side ceiling is claimed | yes | no | exact `https://api.kimi.com/coding/v1` route |
 | Direct Z.AI `GLM-5.2` (default) | 1,000,000 | 131,072 | yes | no | not documented in code |
 | Direct Z.AI `GLM-5.1` | 202,752 | 131,072 | yes | no | not documented in code |
 | Direct Z.AI `GLM-5-Turbo` | 202,752 | 131,072 | yes | no | faster/explore sub-agent sibling |
 | Direct MiniMax `MiniMax-M3` | 1,000,000 | 524,288 | yes | no | not documented in code |
-| Direct MiniMax M2.x models | 204,800 | 4,096 fallback until MiniMax output metadata is promoted | yes | no | not documented in code |
+| Direct MiniMax M2.x models | 204,800 | unknown until MiniMax output metadata is promoted | yes | no | not documented in code |
 | MiniMax Messages route (`MiniMax-M3`, `MiniMax-M2.7`) | model-specific values above | model-specific values above | yes | no | route uses `/anthropic/v1/messages` |
-| Generic `openai` and AtlasCloud | 128,000 | 4,096 | no in doctor capability metadata | no | not documented in code |
-| Ollama | 8,192 | 4,096 | no | no | not documented in code |
-| Hugging Face Inference Providers V4 model IDs | 131,072 | 4,096 | yes | no | not documented in code |
-| Other recognized DeepSeek model IDs | 128,000 unless the model name carries an explicit `Nk` hint | 4,096 | no unless V4/reasoner logic matches | DeepSeek/NIM only | DeepSeek beta only |
+| Generic `openai` and AtlasCloud | 128,000 | unknown (no documented maximum) | no in doctor capability metadata | no | not documented in code |
+| Ollama | 8,192 | unknown (no documented maximum) | no | no | not documented in code |
+| Hugging Face Inference Providers V4 model IDs | 131,072 | unknown (no documented maximum) | yes | no | not documented in code |
+| Other recognized DeepSeek model IDs | 128,000 unless the model name carries an explicit `Nk` hint | unknown (no documented maximum) | no unless V4/reasoner logic matches | DeepSeek/NIM only | DeepSeek beta only |
 
 MiniMax M3 uses input-length and service tiers. Codewhale omits
 `service_tier`, so requests use the standard tier and cost estimates select the
@@ -608,8 +654,22 @@ custom endpoints continue to own their model ids.
 
 `/reasoning <effort>` (and the `reasoning_effort` config key) is translated to
 each provider's wire dialect by the client before the request is sent. `off`
-disables thinking where the route supports it. Both exact K3 routes preserve
-K3 by mapping `off` to their lowest supported tier, `low`. Normal dispatched
+disables thinking where the route supports it. Both exact K3 routes map `off`
+to their lowest supported tier, `low`, and the model is never switched to
+satisfy `off` — but they do so for different reasons:
+
+- **Kimi Code membership K3** (exact `https://api.kimi.com/coding/v1` with bare
+  `model = "k3"`) — the membership roster declares K3 always-thinking, so `off`
+  cannot be honored without changing what the model is. The clamp preserves the
+  fixed K3 identity.
+- **Direct Moonshot K3** (exact `https://api.moonshot.ai/v1` with
+  `model = "kimi-k3"`) — this clamp is *defensive*, not a documented contract.
+  The direct platform publishes no `off` state for K3, and Codewhale will not
+  assert a fixed-thinking guarantee it cannot verify for a given key's
+  entitlement, so the requested `off` is normalized to the lowest tier with the
+  live entitlement left unknown.
+
+Normal dispatched
 `auto` uses Codewhale's auto-reasoning selector and sends a concrete tier;
 only an omitted reasoning setting leaves the provider default in control.
 Providers marked "omitted" receive no reasoning fields at all for that tier.
@@ -624,7 +684,10 @@ Providers marked "omitted" receive no reasoning fields at all for that tier.
 | Other `moonshot` routes | `thinking: {type: disabled}` | `thinking: {type: enabled}` | `thinking: {type: enabled}` |
 | `ollama` | `think: false` | `think: true` | `think: true` |
 | `xiaomi-mimo` | `thinking: {type: disabled}` | `thinking: {type: enabled}` | `thinking: {type: enabled}` |
-| `minimax` | `reasoning_split: true` + `thinking: {type: disabled}` | `reasoning_split: true` + `thinking: {type: adaptive}` | `reasoning_split: true` + `thinking: {type: adaptive}` |
+| First-party `minimax` `MiniMax-M3` | `reasoning_split: true` + `thinking: {type: disabled}` | `reasoning_split: true` + `thinking: {type: adaptive}`; effective tier granularity unavailable | `reasoning_split: true` + `thinking: {type: adaptive}`; effective tier granularity unavailable |
+| First-party Z.ai `GLM-5.2` | `thinking: {type: disabled}`; no `reasoning_effort` | enabled thinking; only effective `high` adds `reasoning_effort: "high"` | enabled thinking + `reasoning_effort: "max"` |
+| First-party Z.ai `GLM-5-Turbo` | `thinking: {type: disabled}` | enabled thinking; effort granularity unavailable | enabled thinking; effort granularity unavailable |
+| Compatible gateways configured as `zai` | omitted; effective unavailable | omitted; effective unavailable | omitted; effective unavailable |
 | `nvidia-nim` | `chat_template_kwargs.thinking: false` | `chat_template_kwargs`: `thinking: true` + `reasoning_effort: "high"` | `chat_template_kwargs`: `thinking: true` + `reasoning_effort: "max"` |
 | `vllm` | `chat_template_kwargs.enable_thinking: false` | `chat_template_kwargs.enable_thinking: true` + `reasoning_effort` low/medium/high | `chat_template_kwargs.enable_thinking: true` + `reasoning_effort: "high"` (vLLM has no max tier) |
 | `arcee`, `huggingface` | omitted | `reasoning_effort` pass-through | `reasoning_effort: "high"` |
@@ -635,6 +698,11 @@ Providers marked "omitted" receive no reasoning fields at all for that tier.
 
 AtlasCloud serves DeepSeek models, so it speaks the DeepSeek reasoning dialect,
 including the `max` tier (#3024).
+
+On the exact MiniMax OpenAI-compatible Chat endpoints, `MiniMax-M3` uses
+`max_completion_tokens`. Other MiniMax models and compatible gateways retain
+`max_tokens`; the MiniMax Anthropic endpoints use the separate Messages
+adapter.
 
 ## Drift Check
 

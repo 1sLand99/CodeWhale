@@ -19,6 +19,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
 use crate::palette;
+use crate::tui::menu_style;
 use crate::tui::widgets::Renderable;
 
 /// Per-item line cap before we collapse the rest into a `…` overflow row.
@@ -121,7 +122,7 @@ impl PendingInputPreview {
             );
             let controls = crate::localization::truncate_to_width(
                 &format!(
-                    "Ctrl+G send · {} edit · /queue drop 1",
+                    "Enter send now · {} edit · /queue drop 1",
                     self.edit_binding.label
                 ),
                 usize::from(width),
@@ -206,7 +207,7 @@ impl PendingInputPreview {
             if !self.queued_messages.is_empty() {
                 lines.push(Line::from(vec![Span::styled(
                     format!(
-                        "    Ctrl+G send now · {} edit last queued",
+                        "    Enter send now · {} edit last queued",
                         self.edit_binding.label
                     ),
                     dim,
@@ -257,19 +258,14 @@ fn push_section_header(lines: &mut Vec<Line<'static>>, header: Line<'static>) {
 
 fn push_context_item(lines: &mut Vec<Line<'static>>, item: &ContextPreviewItem, width: u16) {
     let status_style = if item.selected {
-        Style::default()
-            .fg(palette::SELECTION_TEXT)
-            .bg(palette::SELECTION_BG)
-            .add_modifier(Modifier::BOLD)
+        menu_style::selected_row_style()
     } else if item.included {
         Style::default().fg(palette::TEXT_MUTED)
     } else {
         Style::default().fg(palette::STATUS_WARNING)
     };
     let label_style = if item.selected {
-        Style::default()
-            .fg(palette::SELECTION_TEXT)
-            .bg(palette::SELECTION_BG)
+        menu_style::selected_row_bg_style().fg(palette::SELECTION_TEXT)
     } else if item.included {
         Style::default().fg(palette::TEXT_PRIMARY)
     } else {
@@ -448,7 +444,7 @@ mod tests {
         let rows = render_to_string(&preview, 40);
         assert_eq!(rows.len(), 2, "got rows: {rows:?}");
         assert!(rows[0].contains("Queued #1: Hello, world!"));
-        assert!(rows[1].contains("Ctrl+G send"));
+        assert!(rows[1].contains("Enter send now"));
         assert!(rows[1].contains("↑ edit"));
         assert!(rows[1].contains("/queue drop 1"));
     }
@@ -463,7 +459,7 @@ mod tests {
         for (width, height) in [(40, 1), (40, 2), (60, 3)] {
             let rows = render_in_area(&preview, width, height);
             assert!(
-                rows.iter().any(|row| row.contains("Ctrl+G send")),
+                rows.iter().any(|row| row.contains("Enter send now")),
                 "send control clipped at {width}x{height}: {rows:?}"
             );
         }
@@ -574,7 +570,7 @@ mod tests {
         assert!(rows.iter().any(|r| r.contains("rejected")));
         assert!(rows.iter().any(|r| r.contains("queued")));
         assert!(rows.iter().any(|r| r.contains("↑")));
-        assert!(rows.iter().any(|r| r.contains("Ctrl+G")));
+        assert!(rows.iter().any(|r| r.contains("Enter send now")));
     }
 
     #[test]
@@ -621,7 +617,7 @@ mod tests {
         assert_eq!(rows.len(), 2, "got rows: {rows:?}");
         assert!(rows[0].contains("Queued #1: alpha"));
         assert!(rows[0].contains('…'));
-        assert!(rows[1].contains("Ctrl+G send"));
+        assert!(rows[1].contains("Enter send now"));
     }
 
     #[test]
@@ -634,7 +630,7 @@ mod tests {
         assert_eq!(rows.len(), 2, "got rows: {rows:?}");
         assert!(rows[0].contains("Queued #1: line1 line2"));
         assert!(rows[0].contains('…'));
-        assert!(rows[1].contains("Ctrl+G send"));
+        assert!(rows[1].contains("Enter send now"));
         assert!(rows[1].contains("↑ edit"));
     }
 
@@ -648,7 +644,7 @@ mod tests {
         let rows = render_to_string(&preview, 36);
         assert_eq!(rows.len(), 2, "got rows: {rows:?}");
         assert!(rows[0].contains("Queued #1:"));
-        assert!(rows[1].contains("Ctrl+G send"));
+        assert!(rows[1].contains("Enter send now"));
     }
 
     #[test]

@@ -300,7 +300,6 @@ pub trait ExternalTool {
     fn resolve() -> Option<String>;
 
     /// Quick availability check — true when the tool was found on PATH.
-    #[allow(dead_code)]
     fn available() -> bool {
         Self::resolve().is_some()
     }

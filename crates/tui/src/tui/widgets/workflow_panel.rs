@@ -19,7 +19,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 use serde_json::{Value, json};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
@@ -152,6 +152,156 @@ impl WorkflowRowStatus {
     }
 }
 
+/// Closed route-source vocabulary minted by the spawn resolver. Persisted
+/// journals are untrusted input: an unrecognized value stays unknown rather
+/// than becoming UI copy (#4039).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowRouteSource {
+    TaskModel,
+    TaskModelStrength,
+    AgentProfileModel,
+    AgentProfileLoadout,
+    RoleDefault,
+    RunModel,
+}
+
+impl WorkflowRouteSource {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "task.model" => Some(Self::TaskModel),
+            "task.model_strength" => Some(Self::TaskModelStrength),
+            "agent_profile.model" => Some(Self::AgentProfileModel),
+            "agent_profile.loadout" => Some(Self::AgentProfileLoadout),
+            "role.default" => Some(Self::RoleDefault),
+            "run.model" => Some(Self::RunModel),
+            _ => None,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::TaskModel => "task.model",
+            Self::TaskModelStrength => "task.model_strength",
+            Self::AgentProfileModel => "agent_profile.model",
+            Self::AgentProfileLoadout => "agent_profile.loadout",
+            Self::RoleDefault => "role.default",
+            Self::RunModel => "run.model",
+        }
+    }
+}
+
+/// Closed token provenance carried by a terminal usage receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowTokenSource {
+    ProviderReported,
+    Estimated,
+}
+
+impl WorkflowTokenSource {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "provider_reported" => Some(Self::ProviderReported),
+            "estimated" => Some(Self::Estimated),
+            _ => None,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ProviderReported => "provider_reported",
+            Self::Estimated => "estimated",
+        }
+    }
+}
+
+/// Immutable launch receipt for one row, consumed verbatim from the
+/// `task_started` event the Workflow runtime emitted at spawn (#4039).
+///
+/// Nothing here is ever re-derived from current session configuration: a row
+/// launched on provider A at `high` keeps saying so after the user switches the
+/// session to provider B, because these strings were copied out of the event
+/// that admitted the task.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkflowRowRoute {
+    /// Fleet role resolved for the worker (`resolved_role`, else `role`).
+    pub role: Option<String>,
+    /// Provider identity the child client was installed on.
+    pub provider: Option<String>,
+    /// Wire model the child was launched with.
+    pub model: Option<String>,
+    /// Reasoning the task asked for (`inherit`/`auto`/effort).
+    pub requested_reasoning: Option<String>,
+    /// Reasoning the child runtime actually carried.
+    pub effective_reasoning: Option<String>,
+    /// Which closed spawn decision produced the route (`task.model`,
+    /// `agent_profile.model`, …).
+    pub route_source: Option<WorkflowRouteSource>,
+}
+
+impl WorkflowRowRoute {
+    fn field(value: Option<&String>, locale: Locale) -> String {
+        value
+            .map(String::as_str)
+            .map(crate::tui::app::bound_agent_activity_text)
+            // Route metadata is untrusted persisted input. Flatten every
+            // whitespace/control run before packing it into a ratatui Line so
+            // CR/LF/tab cannot inject rows or evade display-width accounting.
+            .map(|value| {
+                value
+                    .chars()
+                    .map(|ch| if ch.is_control() { ' ' } else { ch })
+                    .collect::<String>()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| tr(locale, MessageId::WorkflowReceiptUnknown).into_owned())
+    }
+}
+
+/// Terminal usage receipt for one row, consumed from `task_completed` (#4039).
+///
+/// Every counter is optional on purpose. A provider that reported no usage
+/// leaves the token fields `None`, and the row says `tokens unknown` — the one
+/// thing it must never do is render that as `0`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkflowRowUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub tool_calls: Option<u32>,
+    pub duration_ms: Option<u64>,
+    /// `provider_reported` / `estimated` as stated by the runtime; `None` when
+    /// the tokens are unknown.
+    pub token_source: Option<WorkflowTokenSource>,
+}
+
+impl WorkflowRowUsage {
+    fn token_total(&self) -> Option<u64> {
+        self.total_tokens.or_else(|| {
+            match (self.input_tokens, self.output_tokens) {
+                // Only a real pair sums to a real total; one half alone is not
+                // a total and must not be presented as one.
+                (Some(input), Some(output)) => Some(input.saturating_add(output)),
+                _ => None,
+            }
+        })
+    }
+
+    fn token_source_label(&self, locale: Locale) -> String {
+        match self.token_source {
+            Some(WorkflowTokenSource::ProviderReported) => {
+                tr(locale, MessageId::WorkflowReceiptProviderReported).into_owned()
+            }
+            Some(WorkflowTokenSource::Estimated) => {
+                tr(locale, MessageId::WorkflowReceiptEstimated).into_owned()
+            }
+            None => tr(locale, MessageId::WorkflowReceiptUnknown).into_owned(),
+        }
+    }
+}
+
 /// One worker/task row under a phase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowPanelRow {
@@ -167,6 +317,12 @@ pub struct WorkflowPanelRow {
     pub completed_at_ms: Option<u64>,
     pub error: Option<String>,
     pub schema_error: Option<String>,
+    /// Launch receipt copied from `task_started` (#4039).
+    pub route: WorkflowRowRoute,
+    /// Terminal usage receipt copied from `task_completed` (#4039). `None`
+    /// while the row is still running — a running row reports no totals rather
+    /// than provisional ones.
+    pub usage: Option<WorkflowRowUsage>,
 }
 
 /// One lane gate status line surfaced by the Workflow runtime (#4179).
@@ -248,11 +404,15 @@ pub enum WorkflowPanelEvent {
         resolved_model: Option<String>,
         worktree: bool,
         workspace: Option<PathBuf>,
+        /// Launch receipt carried by this event (#4039).
+        route: WorkflowRowRoute,
         at_ms: u64,
     },
     TaskCompleted {
         task_id: String,
         status: WorkflowRowStatus,
+        /// Terminal usage receipt carried by this event, if any (#4039).
+        usage: Option<WorkflowRowUsage>,
         at_ms: u64,
     },
     GateUpdated {
@@ -332,6 +492,20 @@ impl WorkflowPanelEvent {
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
                 workspace: opt_str(value, "workspace").map(PathBuf::from),
+                // #4039: the receipt is read only out of this event.
+                route: WorkflowRowRoute {
+                    role: opt_str(value, "resolved_role").or_else(|| opt_str(value, "role")),
+                    provider: opt_str(value, "resolved_provider"),
+                    // Requested `model` is useful for the compact status row,
+                    // but is not proof of the effective launch model.
+                    model: opt_str(value, "resolved_model"),
+                    requested_reasoning: opt_str(value, "requested_reasoning")
+                        .or_else(|| opt_str(value, "thinking")),
+                    effective_reasoning: opt_str(value, "effective_reasoning"),
+                    route_source: opt_str(value, "route_source")
+                        .as_deref()
+                        .and_then(WorkflowRouteSource::parse),
+                },
                 at_ms,
             }),
             "task_completed" => {
@@ -343,6 +517,7 @@ impl WorkflowPanelEvent {
                 Some(Self::TaskCompleted {
                     task_id: opt_str(value, "task_id")?,
                     status,
+                    usage: value.get("usage").and_then(usage_from_json),
                     at_ms,
                 })
             }
@@ -401,6 +576,10 @@ pub struct WorkflowPanel {
     /// UI locale for rendered copy. Defaults to English; hosts with app
     /// access set it after construction (#4057 wave 2).
     pub locale: Locale,
+    /// Direct-agent cards reuse the Workflow history layout but do not carry a
+    /// Workflow launch receipt. Keep that distinction explicit so the shared
+    /// renderer never invents unknown Workflow provenance for them (#4039).
+    show_workflow_receipts: bool,
 }
 
 /// Extra fields the history card can show that are not part of the live panel
@@ -435,6 +614,7 @@ impl WorkflowPanel {
             source_path: None,
             spillover_path: None,
             locale: Locale::En,
+            show_workflow_receipts: true,
         }
     }
 
@@ -516,6 +696,17 @@ impl WorkflowPanel {
                             completed_at_ms: row.get("completed_at_ms").and_then(Value::as_u64),
                             error: opt_str(row, "error"),
                             schema_error: opt_str(row, "schema_error"),
+                            route: WorkflowRowRoute {
+                                role: opt_str(row, "role"),
+                                provider: opt_str(row, "provider"),
+                                model: opt_str(row, "resolved_model"),
+                                requested_reasoning: opt_str(row, "requested_reasoning"),
+                                effective_reasoning: opt_str(row, "effective_reasoning"),
+                                route_source: opt_str(row, "route_source")
+                                    .as_deref()
+                                    .and_then(WorkflowRouteSource::parse),
+                            },
+                            usage: row.get("usage").and_then(usage_from_json),
                         });
                     }
                 }
@@ -559,6 +750,10 @@ impl WorkflowPanel {
                         completed_at_ms: value.get("completed_at_ms").and_then(Value::as_u64),
                         error: None,
                         schema_error: None,
+                        // A bare child-count summary carries no receipt at all;
+                        // the row must show that rather than infer one (#4039).
+                        route: WorkflowRowRoute::default(),
+                        usage: Some(WorkflowRowUsage::default()),
                     });
                 }
                 panel.phases.push(phase);
@@ -681,27 +876,7 @@ impl WorkflowPanel {
                     "blocked_reason": gate.blocked_reason.as_deref(),
                 })
             }).collect::<Vec<_>>(),
-            "phases": self.phases.iter().map(|phase| {
-                json!({
-                    "title": phase.title,
-                    "rows": phase.rows.iter().map(|row| {
-                        json!({
-                            "task_id": row.task_id,
-                            "label": row.label,
-                            "profile": row.profile,
-                            "model": row.model,
-                            "strength": row.strength,
-                            "worktree": row.worktree,
-                            "workspace": row.workspace.as_ref().map(|p| p.display().to_string()),
-                            "status": row.status.label(),
-                            "started_at_ms": row.started_at_ms,
-                            "completed_at_ms": row.completed_at_ms,
-                            "error": row.error,
-                            "schema_error": row.schema_error,
-                        })
-                    }).collect::<Vec<_>>(),
-                })
-            }).collect::<Vec<_>>(),
+            "phases": self.phases.iter().map(workflow_phase_run_json).collect::<Vec<_>>(),
         })
     }
 
@@ -771,7 +946,7 @@ impl WorkflowPanel {
             let mut chips = Vec::new();
             for (idx, phase) in self.phases.iter().take(MAX_PHASE_SUMMARY).enumerate() {
                 let (done, running, failed, cancelled) = phase.counts();
-                let marker = if idx == self.selected_phase { ">" } else { " " };
+                let marker = crate::tui::glyphs::selection_marker(idx == self.selected_phase);
                 chips.push(format!(
                     "{marker}{title}[{done}✓ {running}… {failed}! {cancelled}⊘]",
                     title = short_label(&phase.title, 14),
@@ -850,6 +1025,17 @@ impl WorkflowPanel {
                 ),
                 Style::default().fg(row.status.color()),
             )));
+            // #4039: the history card shows the same immutable receipt as the
+            // live panel, so a finished run stays auditable after the fact.
+            if self.show_workflow_receipts {
+                lines.extend(
+                    receipt_line_strings(row, self.locale, content_width, 2)
+                        .into_iter()
+                        .map(|text| {
+                            Line::from(Span::styled(text, Style::default().fg(palette::TEXT_MUTED)))
+                        }),
+                );
+            }
         }
 
         if self.lifecycle.is_terminal() {
@@ -1005,6 +1191,7 @@ impl WorkflowPanel {
         panel.lifecycle = lifecycle;
         panel.completed_at_ms = completed_at_ms;
         panel.expanded = false;
+        panel.show_workflow_receipts = false;
         panel.result_summary = summary.clone();
         panel.error = error.clone();
         let status = match lifecycle {
@@ -1028,6 +1215,10 @@ impl WorkflowPanel {
             completed_at_ms,
             error,
             schema_error: None,
+            // A direct sub-agent card projects a single agent, not a Workflow
+            // task, so it carries no Workflow launch/usage receipt (#4039).
+            route: WorkflowRowRoute::default(),
+            usage: completed_at_ms.map(|_| WorkflowRowUsage::default()),
         });
         panel.phases.push(phase);
         panel
@@ -1097,6 +1288,7 @@ impl WorkflowPanel {
                 resolved_model,
                 worktree,
                 workspace,
+                route,
                 at_ms,
             } => {
                 if self.phases.is_empty() {
@@ -1120,6 +1312,8 @@ impl WorkflowPanel {
                     completed_at_ms: None,
                     error: None,
                     schema_error: None,
+                    route,
+                    usage: None,
                 };
                 if let Some(existing) = self.find_row_mut(&task_id) {
                     *existing = row;
@@ -1132,11 +1326,15 @@ impl WorkflowPanel {
             WorkflowPanelEvent::TaskCompleted {
                 task_id,
                 status,
+                usage,
                 at_ms,
             } => {
                 if let Some(row) = self.find_row_mut(&task_id) {
                     row.status = status;
                     row.completed_at_ms = Some(at_ms);
+                    // A completed row always carries a usage receipt, even when
+                    // every counter in it is unknown (#4039).
+                    row.usage = Some(usage.unwrap_or_default());
                 }
             }
             WorkflowPanelEvent::GateUpdated {
@@ -1189,6 +1387,10 @@ impl WorkflowPanel {
                             completed_at_ms: Some(at_ms),
                             error: None,
                             schema_error: Some(message),
+                            // Schema failure without a task_started: nothing was
+                            // received about the route, so nothing is claimed.
+                            route: WorkflowRowRoute::default(),
+                            usage: Some(WorkflowRowUsage::default()),
                         });
                     }
                 }
@@ -1335,6 +1537,13 @@ impl WorkflowPanel {
 
     #[must_use]
     pub fn render_lines(&self, width: u16) -> Vec<Line<'static>> {
+        self.render_lines_bounded(width, None)
+    }
+
+    fn render_lines_bounded(&self, width: u16, max_height: Option<usize>) -> Vec<Line<'static>> {
+        if max_height == Some(0) {
+            return Vec::new();
+        }
         let content_width = usize::from(width).max(1);
         let mut lines = Vec::with_capacity(12);
         lines.push(Line::from(Span::styled(
@@ -1353,7 +1562,7 @@ impl WorkflowPanel {
             let mut chips = Vec::new();
             for (idx, phase) in self.phases.iter().take(MAX_PHASE_SUMMARY).enumerate() {
                 let (done, running, failed, cancelled) = phase.counts();
-                let marker = if idx == self.selected_phase { ">" } else { " " };
+                let marker = crate::tui::glyphs::selection_marker(idx == self.selected_phase);
                 chips.push(format!(
                     "{marker}{title}[{done}✓ {running}… {failed}! {cancelled}⊘]",
                     title = short_label(&phase.title, 14),
@@ -1388,9 +1597,20 @@ impl WorkflowPanel {
             )));
 
             let now = now_ms();
-            let shown = phase.rows.len().min(MAX_VISIBLE_ROWS);
-            for row in phase.rows.iter().take(shown) {
-                lines.push(self.render_row_line(row, content_width, now));
+            let mut shown = 0usize;
+            for row in phase.rows.iter().take(MAX_VISIBLE_ROWS) {
+                let block = self.render_row_lines(row, content_width, now);
+                let more_after = phase.rows.len() > shown + 1;
+                let reserved_tail = usize::from(more_after)
+                    + usize::from(self.error.is_some())
+                    + usize::from(self.keyboard_focus);
+                if max_height
+                    .is_some_and(|height| lines.len() + block.len() + reserved_tail > height)
+                {
+                    break;
+                }
+                lines.extend(block);
+                shown += 1;
             }
             if phase.rows.len() > shown {
                 lines.push(Line::from(Span::styled(
@@ -1424,6 +1644,34 @@ impl WorkflowPanel {
             )));
         }
 
+        // Every producer above is independently useful, but the terminal owns
+        // the final hard boundary. This also covers headers and tail rows,
+        // which cannot be accounted for solely by the per-worker row budget.
+        if let Some(height) = max_height {
+            lines.truncate(height);
+        }
+        lines
+    }
+
+    /// One row renders as its status line plus its receipt line (#4039).
+    ///
+    /// The receipt is not optional and not hover-gated: a row that is live or
+    /// completed always states the route it was launched on, and a completed
+    /// row always states what that route cost.
+    fn render_row_lines(
+        &self,
+        row: &WorkflowPanelRow,
+        width: usize,
+        now_ms: u64,
+    ) -> Vec<Line<'static>> {
+        let mut lines = vec![self.render_row_line(row, width, now_ms)];
+        lines.extend(
+            receipt_line_strings(row, self.locale, width, 4)
+                .into_iter()
+                .map(|text| {
+                    Line::from(Span::styled(text, Style::default().fg(palette::TEXT_MUTED)))
+                }),
+        );
         lines
     }
 
@@ -1515,10 +1763,58 @@ impl WorkflowPanel {
                 if row.status.is_running() {
                     row.status = status;
                     row.completed_at_ms = Some(at_ms);
+                    // A terminal Workflow row must keep the receipt shape even
+                    // when cancellation arrived before provider telemetry.
+                    // Unknown counters remain unknown; they never disappear or
+                    // become fabricated zeros (#4039).
+                    row.usage.get_or_insert_with(WorkflowRowUsage::default);
                 }
             }
         }
     }
+}
+
+fn workflow_phase_run_json(phase: &WorkflowPanelPhase) -> Value {
+    json!({
+        "title": phase.title,
+        "rows": phase.rows.iter().map(workflow_row_run_json).collect::<Vec<_>>(),
+    })
+}
+
+fn workflow_row_run_json(row: &WorkflowPanelRow) -> Value {
+    let usage = row.usage.as_ref().map(|usage| {
+        json!({
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "total_tokens": usage.total_tokens,
+            "tool_calls": usage.tool_calls,
+            "duration_ms": usage.duration_ms,
+            "token_source": usage.token_source.map(WorkflowTokenSource::as_str),
+        })
+    });
+    json!({
+        "task_id": row.task_id,
+        "label": row.label,
+        "profile": row.profile,
+        "model": row.model,
+        "strength": row.strength,
+        "worktree": row.worktree,
+        "workspace": row.workspace.as_ref().map(|p| p.display().to_string()),
+        "status": row.status.label(),
+        "started_at_ms": row.started_at_ms,
+        "completed_at_ms": row.completed_at_ms,
+        "error": row.error,
+        "schema_error": row.schema_error,
+        // #4039 receipts survive the history round trip; absent fields stay
+        // absent, never defaulted.
+        "role": row.route.role,
+        "provider": row.route.provider,
+        "resolved_model": row.route.model,
+        "requested_reasoning": row.route.requested_reasoning,
+        "effective_reasoning": row.route.effective_reasoning,
+        "route_source": row.route.route_source.map(WorkflowRouteSource::as_str),
+        "usage": usage,
+    })
 }
 
 impl Renderable for WorkflowPanel {
@@ -1526,7 +1822,7 @@ impl Renderable for WorkflowPanel {
         if area.width == 0 || area.height == 0 {
             return;
         }
-        let lines = self.render_lines(area.width);
+        let lines = self.render_lines_bounded(area.width, Some(usize::from(area.height)));
         let paragraph = Paragraph::new(lines);
         paragraph.render(area, buf);
     }
@@ -1548,6 +1844,149 @@ fn lifecycle_from_status(status: &str) -> WorkflowPanelLifecycle {
         "pending" => WorkflowPanelLifecycle::Pending,
         _ => WorkflowPanelLifecycle::Failed,
     }
+}
+
+fn localized_field(locale: Locale, id: MessageId, value: &str) -> String {
+    tr(locale, id).replace("{value}", value)
+}
+
+fn receipt_parts(row: &WorkflowPanelRow, locale: Locale) -> Vec<String> {
+    let unknown = tr(locale, MessageId::WorkflowReceiptUnknown).into_owned();
+    let role = WorkflowRowRoute::field(row.route.role.as_ref(), locale);
+    let provider = WorkflowRowRoute::field(row.route.provider.as_ref(), locale);
+    let model = WorkflowRowRoute::field(row.route.model.as_ref(), locale);
+    let requested = WorkflowRowRoute::field(row.route.requested_reasoning.as_ref(), locale);
+    let effective = WorkflowRowRoute::field(row.route.effective_reasoning.as_ref(), locale);
+    let source = row
+        .route
+        .route_source
+        .map(WorkflowRouteSource::as_str)
+        .unwrap_or(unknown.as_str());
+    let mut parts = vec![
+        localized_field(locale, MessageId::WorkflowReceiptRole, &role),
+        format!("{provider}/{model}"),
+        localized_field(
+            locale,
+            MessageId::WorkflowReceiptReasoning,
+            &format!("{requested}→{effective}"),
+        ),
+        localized_field(locale, MessageId::WorkflowReceiptVia, source),
+    ];
+
+    if let Some(usage) = row.usage.as_ref() {
+        let tokens = usage.token_total().map_or_else(
+            || unknown.clone(),
+            |total| format!("{total} ({})", usage.token_source_label(locale)),
+        );
+        let tools = usage
+            .tool_calls
+            .map_or_else(|| unknown.clone(), |calls| calls.to_string());
+        let duration = usage
+            .duration_ms
+            .map_or_else(|| unknown.clone(), crate::elapsed::format_elapsed_ms);
+        parts.extend([
+            localized_field(locale, MessageId::WorkflowReceiptTokens, &tokens),
+            localized_field(locale, MessageId::WorkflowReceiptTools, &tools),
+            localized_field(locale, MessageId::WorkflowReceiptDuration, &duration),
+        ]);
+    }
+    parts
+}
+
+/// Full English receipt retained for history serialization tests and text
+/// exports. Renderers use [`receipt_line_strings`] so narrow terminals wrap
+/// fields instead of dropping them.
+#[must_use]
+#[cfg(test)]
+pub fn row_receipt_text(row: &WorkflowPanelRow) -> String {
+    receipt_parts(row, Locale::En).join(" · ")
+}
+
+fn receipt_line_strings(
+    row: &WorkflowPanelRow,
+    locale: Locale,
+    width: usize,
+    requested_indent: usize,
+) -> Vec<String> {
+    let indent = requested_indent.min(width.saturating_sub(1));
+    let prefix = " ".repeat(indent);
+    let available = width.saturating_sub(indent).max(1);
+    let mut packed = Vec::new();
+    let mut current = String::new();
+
+    for part in receipt_parts(row, locale) {
+        if UnicodeWidthStr::width(part.as_str()) > available {
+            if !current.is_empty() {
+                packed.push(std::mem::take(&mut current));
+            }
+            packed.extend(hard_wrap_display(&part, available));
+            continue;
+        }
+        let combined_width = if current.is_empty() {
+            UnicodeWidthStr::width(part.as_str())
+        } else {
+            UnicodeWidthStr::width(current.as_str()) + 3 + UnicodeWidthStr::width(part.as_str())
+        };
+        if !current.is_empty() && combined_width > available {
+            packed.push(std::mem::take(&mut current));
+        }
+        if current.is_empty() {
+            current = part;
+        } else {
+            current.push_str(" · ");
+            current.push_str(&part);
+        }
+    }
+    if !current.is_empty() {
+        packed.push(current);
+    }
+    packed
+        .into_iter()
+        .map(|line| format!("{prefix}{line}"))
+        .collect()
+}
+
+fn hard_wrap_display(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        if !line.is_empty() && used + ch_width > width {
+            lines.push(std::mem::take(&mut line));
+            used = 0;
+        }
+        line.push(ch);
+        used += ch_width;
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+/// Read a terminal usage receipt out of a `task_completed` payload (#4039).
+///
+/// Absent counters stay `None`. An object that carries no counter at all still
+/// produces a receipt so the row can say `unknown` in every column instead of
+/// silently omitting the line.
+fn usage_from_json(value: &Value) -> Option<WorkflowRowUsage> {
+    let object = value.as_object()?;
+    let number = |key: &str| object.get(key).and_then(Value::as_u64);
+    Some(WorkflowRowUsage {
+        input_tokens: number("input_tokens"),
+        output_tokens: number("output_tokens"),
+        total_tokens: number("total_tokens"),
+        tool_calls: number("tool_calls").and_then(|calls| u32::try_from(calls).ok()),
+        duration_ms: number("duration_ms"),
+        token_source: opt_str(value, "token_source")
+            .as_deref()
+            .and_then(WorkflowTokenSource::parse),
+    })
 }
 
 fn opt_str(value: &Value, key: &str) -> Option<String> {
@@ -1692,6 +2131,360 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Exactly the flattened `task_started` payload the Workflow runtime emits
+    /// (`WorkflowTaskStartedEvent` + `run_id`), so the projection is tested on
+    /// the production wire shape rather than a hand-shaped struct.
+    fn task_started_json(task_id: &str, provider: &str, model: &str) -> Value {
+        json!({
+            "type": "task_started",
+            "at_ms": 1_200,
+            "run_id": "workflow_abc",
+            "task_id": task_id,
+            "label": task_id,
+            "role": "implementer",
+            "profile": "impl-1",
+            "model": "flash",
+            "strength": "same",
+            "thinking": "high",
+            "requested_reasoning": "high",
+            "effective_reasoning": "max",
+            "resolved_role": "verifier",
+            "resolved_profile": "verify-1",
+            "resolved_provider": provider,
+            "resolved_model": model,
+            "route_source": "agent_profile.model",
+            "worktree": false,
+            "depth": 1,
+            "workflow_run_id": "workflow_abc",
+            "workflow_task_label": task_id,
+        })
+    }
+
+    fn rendered(panel: &WorkflowPanel, width: u16) -> String {
+        panel
+            .render_lines(width)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// #4039: a live row states the exact role, provider, model, requested →
+    /// effective reasoning, and route source the runtime reported — and keeps
+    /// stating them after the session routes somewhere else.
+    #[test]
+    fn row_route_receipt_is_exact_and_survives_a_later_model_switch() {
+        let mut panel = WorkflowPanel::new("workflow_abc", "audit", 1_000);
+        panel.apply_json_event(&task_started_json("t1", "deepseek", "deepseek-v4-flash"));
+        let before = rendered(&panel, 200);
+        assert!(before.contains("role verifier"), "{before}");
+        assert!(before.contains("deepseek/deepseek-v4-flash"), "{before}");
+        assert!(before.contains("reasoning high→max"), "{before}");
+        assert!(before.contains("via agent_profile.model"), "{before}");
+        // A running row claims no totals at all.
+        assert!(!before.contains("tokens"), "{before}");
+
+        // The session now routes elsewhere: a later task lands on another
+        // provider/model. The already-launched row must not follow it.
+        panel.apply_json_event(&task_started_json("t2", "moonshot", "kimi-k3"));
+        let after = rendered(&panel, 200);
+        assert!(after.contains("deepseek/deepseek-v4-flash"), "{after}");
+        assert!(after.contains("moonshot/kimi-k3"), "{after}");
+        let t1 = panel
+            .phases
+            .iter()
+            .flat_map(|phase| phase.rows.iter())
+            .find(|row| row.task_id == "t1")
+            .expect("t1 row");
+        assert_eq!(t1.route.provider.as_deref(), Some("deepseek"));
+        assert_eq!(t1.route.model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(t1.route.requested_reasoning.as_deref(), Some("high"));
+        assert_eq!(t1.route.effective_reasoning.as_deref(), Some("max"));
+        assert_eq!(
+            t1.route.route_source,
+            Some(WorkflowRouteSource::AgentProfileModel)
+        );
+    }
+
+    /// #4039: completed rows show provider-reported totals with their
+    /// provenance, and unreported telemetry stays `unknown` — never `0`.
+    #[test]
+    fn completed_row_usage_is_reported_or_unknown_but_never_a_fabricated_zero() {
+        let mut panel = WorkflowPanel::new("workflow_abc", "audit", 1_000);
+        panel.apply_json_event(&task_started_json("t1", "deepseek", "deepseek-v4-flash"));
+        panel.apply_json_event(&task_started_json("t2", "deepseek", "deepseek-v4-flash"));
+        panel.apply_json_event(&json!({
+            "type": "task_completed",
+            "at_ms": 3_200,
+            "task_id": "t1",
+            "status": "succeeded",
+            "usage": {
+                "input_tokens": 128,
+                "output_tokens": 32,
+                "total_tokens": 160,
+                "tool_calls": 3,
+                "duration_ms": 2_000,
+                "token_source": "provider_reported",
+            },
+        }));
+        // A provider that reported nothing: the runtime omits `usage`.
+        panel.apply_json_event(&json!({
+            "type": "task_completed",
+            "at_ms": 3_400,
+            "task_id": "t2",
+            "status": "succeeded",
+        }));
+
+        let text = rendered(&panel, 200);
+        assert!(text.contains("tokens 160 (provider-reported)"), "{text}");
+        assert!(text.contains("tools 3"), "{text}");
+        assert!(text.contains("tokens unknown · tools unknown"), "{text}");
+        let t2 = panel
+            .phases
+            .iter()
+            .flat_map(|phase| phase.rows.iter())
+            .find(|row| row.task_id == "t2")
+            .expect("t2 row");
+        let usage = t2.usage.as_ref().expect("completed rows carry a receipt");
+        assert_eq!(usage.total_tokens, None);
+        assert_eq!(usage.tool_calls, None);
+    }
+
+    /// #4039: the projection is built once from the events already applied —
+    /// the history round trip must carry the receipts rather than force a
+    /// re-scan of the durable journal.
+    #[test]
+    fn row_receipts_survive_the_history_round_trip() {
+        let mut panel = WorkflowPanel::new("workflow_abc", "audit", 1_000);
+        panel.apply_json_event(&task_started_json("t1", "deepseek", "deepseek-v4-flash"));
+        panel.apply_json_event(&json!({
+            "type": "task_completed",
+            "at_ms": 3_200,
+            "task_id": "t1",
+            "status": "succeeded",
+            "usage": {
+                "total_tokens": 160,
+                "tool_calls": 3,
+                "duration_ms": 2_000,
+                "token_source": "provider_reported",
+            },
+        }));
+        let original = panel
+            .phases
+            .iter()
+            .flat_map(|phase| phase.rows.iter())
+            .map(row_receipt_text)
+            .collect::<Vec<_>>();
+
+        let rehydrated = WorkflowPanel::from_run_json(&panel.to_run_json()).expect("rehydrate");
+        let round_tripped = rehydrated
+            .phases
+            .iter()
+            .flat_map(|phase| phase.rows.iter())
+            .map(row_receipt_text)
+            .collect::<Vec<_>>();
+        assert_eq!(original, round_tripped);
+    }
+
+    /// #4039 compatibility: journals written before the receipt fields existed
+    /// still project, and every missing field reads `unknown`.
+    #[test]
+    fn legacy_task_events_project_as_unknown_not_as_defaults() {
+        let mut panel = WorkflowPanel::new("workflow_abc", "audit", 1_000);
+        panel.apply_json_event(&json!({
+            "type": "task_started",
+            "at_ms": 1_200,
+            "task_id": "t1",
+            "label": "legacy",
+            "worktree": false,
+        }));
+        panel.apply_json_event(&json!({
+            "type": "task_completed",
+            "at_ms": 1_900,
+            "task_id": "t1",
+            "status": "succeeded",
+        }));
+        let text = rendered(&panel, 200);
+        let unknown_route = "role unknown · unknown/unknown · reasoning unknown→unknown";
+        assert!(text.contains(unknown_route), "{text}");
+        assert!(text.contains("via unknown"), "{text}");
+        assert!(
+            text.contains("tokens unknown · tools unknown · duration unknown"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn requested_model_and_foreign_provenance_never_become_effective_receipts() {
+        let mut panel = WorkflowPanel::new("workflow_abc", "audit", 1_000);
+        panel.apply_json_event(&json!({
+            "type": "task_started",
+            "at_ms": 1_200,
+            "task_id": "legacy",
+            "model": "requested-only",
+            "thinking": "high",
+            "route_source": "foreign.source",
+            "worktree": false,
+        }));
+        let row = panel
+            .phases
+            .iter()
+            .flat_map(|phase| phase.rows.iter())
+            .find(|row| row.task_id == "legacy")
+            .expect("legacy row");
+        assert_eq!(row.model.as_deref(), Some("requested-only"));
+        assert_eq!(row.route.model, None);
+        assert_eq!(row.route.route_source, None);
+        let receipt = row_receipt_text(row);
+        assert!(receipt.contains("unknown/unknown"), "{receipt}");
+        assert!(receipt.contains("reasoning high→unknown"), "{receipt}");
+        assert!(receipt.contains("via unknown"), "{receipt}");
+    }
+
+    #[test]
+    fn receipt_provenance_is_closed_and_a_reported_zero_stays_zero() {
+        let mut panel = WorkflowPanel::new("workflow_abc", "audit", 1_000);
+        panel.apply_json_event(&task_started_json("t1", "deepseek", "deepseek-v4-flash"));
+        panel.apply_json_event(&json!({
+            "type": "task_completed",
+            "at_ms": 1_300,
+            "task_id": "t1",
+            "status": "succeeded",
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "tool_calls": 0,
+                "duration_ms": 0,
+                "token_source": "foreign-source",
+            },
+        }));
+        let text = rendered(&panel, 200);
+        assert!(text.contains("tokens 0 (unknown)"), "{text}");
+        assert!(!text.contains("foreign-source"), "{text}");
+    }
+
+    #[test]
+    fn required_receipt_fields_survive_release_terminal_sizes() {
+        let mut panel = WorkflowPanel::new("workflow_abc", "audit", 1_000);
+        panel.apply_json_event(&task_started_json("t1", "deepseek", "deepseek-v4-flash"));
+        panel.apply_json_event(&json!({
+            "type": "task_completed",
+            "at_ms": 3_200,
+            "task_id": "t1",
+            "status": "succeeded",
+            "usage": {
+                "total_tokens": 160,
+                "tool_calls": 3,
+                "duration_ms": 2_000,
+                "token_source": "provider_reported",
+            },
+        }));
+
+        for (width, height) in [(40_u16, 12_usize), (60, 16), (80, 24)] {
+            let lines = panel.render_lines_bounded(width, Some(height));
+            assert!(
+                lines.len() <= height,
+                "{width}x{height}: {} lines",
+                lines.len()
+            );
+            let text = lines
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            for required in [
+                "role verifier",
+                "deepseek/deepseek-v4-flash",
+                "reasoning high→max",
+                "via agent_profile.model",
+                "tokens 160 (provider-reported)",
+                "tools 3",
+                "duration 2s",
+            ] {
+                assert!(
+                    text.contains(required),
+                    "{width}x{height} lost {required}: {text}"
+                );
+            }
+            assert!(lines.iter().all(|line| line.width() <= usize::from(width)));
+        }
+    }
+
+    #[test]
+    fn bounded_renderer_never_exceeds_tiny_height_with_all_tails() {
+        let mut panel = WorkflowPanel::new("workflow_abc", "audit", 1_000);
+        panel.apply_json_event(&task_started_json("t1", "deepseek", "deepseek-v4-flash"));
+        panel.apply_json_event(&task_started_json("t2", "deepseek", "deepseek-v4-flash"));
+        panel.gates.push(WorkflowPanelGateLine {
+            gate_id: "review".to_string(),
+            role: Some("verifier".to_string()),
+            gate: Some("approval".to_string()),
+            state: "blocked".to_string(),
+            blocked_role: Some("implementer".to_string()),
+            blocked_reason: Some("needs review".to_string()),
+        });
+        panel.error = Some("terminal failure".to_string());
+        panel.keyboard_focus = true;
+
+        for height in 0..=3 {
+            let lines = panel.render_lines_bounded(40, Some(height));
+            assert!(
+                lines.len() <= height,
+                "height {height} rendered {} lines: {lines:?}",
+                lines.len()
+            );
+        }
+
+        panel.expanded = false;
+        assert!(panel.render_lines_bounded(40, Some(0)).is_empty());
+        assert_eq!(panel.render_lines_bounded(40, Some(1)).len(), 1);
+    }
+
+    #[test]
+    fn receipt_fields_flatten_controls_strip_ansi_and_redact_secrets() {
+        let mut panel = WorkflowPanel::new("workflow_abc", "audit", 1_000);
+        panel.apply_json_event(&json!({
+            "type": "task_started",
+            "at_ms": 1_200,
+            "task_id": "hostile",
+            "resolved_role": "verifier\r\nFORGED ROLE",
+            "resolved_provider": "\u{1b}[31mdeepseek\u{1b}[0m\tFORGED PROVIDER",
+            "resolved_model": "model\napi_key=sk-receipt-secret-1234567890",
+            "requested_reasoning": "high\rFORGED REASONING",
+            "effective_reasoning": "max\tFORGED EFFECTIVE",
+            "route_source": "task.model",
+            "worktree": false,
+        }));
+        let row = panel
+            .phases
+            .iter()
+            .flat_map(|phase| phase.rows.iter())
+            .find(|row| row.task_id == "hostile")
+            .expect("hostile row");
+        let receipt = row_receipt_text(row);
+
+        assert!(receipt.contains("verifier FORGED ROLE"), "{receipt:?}");
+        assert!(receipt.contains("deepseek FORGED PROVIDER"), "{receipt:?}");
+        assert!(receipt.contains("api_key=[redacted]"), "{receipt:?}");
+        assert!(!receipt.contains("sk-receipt-secret"), "{receipt:?}");
+        assert!(!receipt.chars().any(char::is_control), "{receipt:?}");
+        for line in receipt_line_strings(row, Locale::En, 18, 2) {
+            assert!(!line.chars().any(char::is_control), "{line:?}");
+            assert!(line.width() <= 18, "{line:?}");
+        }
+    }
+
     fn started_panel() -> WorkflowPanel {
         let mut panel = WorkflowPanel::new("workflow_abc", "ship v0.8.68", 1_000);
         panel.apply_event(WorkflowPanelEvent::PhaseStarted {
@@ -1707,6 +2500,7 @@ mod tests {
             resolved_model: Some("deepseek-v4-flash".to_string()),
             worktree: true,
             workspace: Some(PathBuf::from("/tmp/wt-1")),
+            route: WorkflowRowRoute::default(),
             at_ms: 1_200,
         });
         panel
@@ -1747,12 +2541,14 @@ mod tests {
                     resolved_model: None,
                     worktree: false,
                     workspace: None,
+                    route: WorkflowRowRoute::default(),
                     at_ms: 1_400,
                 });
             }
             panel.apply_event(WorkflowPanelEvent::TaskCompleted {
                 task_id: task_id.to_string(),
                 status,
+                usage: None,
                 at_ms: 2_500,
             });
         }
@@ -1843,6 +2639,7 @@ mod tests {
             resolved_model: None,
             worktree: false,
             workspace: None,
+            route: WorkflowRowRoute::default(),
             at_ms: 2_100,
         });
         // selected phase is Verify (latest)
@@ -1909,6 +2706,7 @@ mod tests {
             resolved_model: None,
             worktree: false,
             workspace: None,
+            route: WorkflowRowRoute::default(),
             at_ms: 1_400,
         });
         assert!(panel.expanded);
@@ -1916,11 +2714,13 @@ mod tests {
         panel.apply_event(WorkflowPanelEvent::TaskCompleted {
             task_id: "t1".to_string(),
             status: WorkflowRowStatus::Succeeded,
+            usage: None,
             at_ms: 2_000,
         });
         panel.apply_event(WorkflowPanelEvent::TaskCompleted {
             task_id: "t3".to_string(),
             status: WorkflowRowStatus::Succeeded,
+            usage: None,
             at_ms: 2_100,
         });
         panel.apply_event(WorkflowPanelEvent::RunCompleted {
@@ -1962,11 +2762,13 @@ mod tests {
             resolved_model: None,
             worktree: false,
             workspace: None,
+            route: WorkflowRowRoute::default(),
             at_ms: 1_300,
         });
         panel.apply_event(WorkflowPanelEvent::TaskCompleted {
             task_id: "t1".to_string(),
             status: WorkflowRowStatus::Succeeded,
+            usage: None,
             at_ms: 1_400,
         });
         panel.finalize_interrupt();
@@ -1985,6 +2787,23 @@ mod tests {
             .expect("t2");
         assert_eq!(t1.status, WorkflowRowStatus::Succeeded);
         assert_eq!(t2.status, WorkflowRowStatus::Cancelled);
+        assert!(
+            t2.usage.is_some(),
+            "cancelled row must retain an unknown usage receipt"
+        );
+        let cancelled_receipt = row_receipt_text(t2);
+        assert!(
+            cancelled_receipt.contains("tokens unknown"),
+            "{cancelled_receipt}"
+        );
+        assert!(
+            cancelled_receipt.contains("tools unknown"),
+            "{cancelled_receipt}"
+        );
+        assert!(
+            cancelled_receipt.contains("duration unknown"),
+            "{cancelled_receipt}"
+        );
         let (failed, cancelled) = panel.failure_cancel_counts();
         assert_eq!(failed, 0);
         assert_eq!(cancelled, 1);
@@ -2096,16 +2915,19 @@ mod tests {
             resolved_model: None,
             worktree: false,
             workspace: None,
+            route: WorkflowRowRoute::default(),
             at_ms: 1_300,
         });
         panel.apply_event(WorkflowPanelEvent::TaskCompleted {
             task_id: "t1".to_string(),
             status: WorkflowRowStatus::Failed,
+            usage: None,
             at_ms: 1_400,
         });
         panel.apply_event(WorkflowPanelEvent::TaskCompleted {
             task_id: "t2".to_string(),
             status: WorkflowRowStatus::Cancelled,
+            usage: None,
             at_ms: 1_500,
         });
         let (failed, cancelled) = panel.failure_cancel_counts();
@@ -2161,6 +2983,7 @@ mod tests {
         panel.apply_event(WorkflowPanelEvent::TaskCompleted {
             task_id: "t1".to_string(),
             status: WorkflowRowStatus::Failed,
+            usage: None,
             at_ms: 2_000,
         });
         panel.apply_event(WorkflowPanelEvent::RunCompleted {
@@ -2202,6 +3025,7 @@ mod tests {
         panel.apply_event(WorkflowPanelEvent::TaskCompleted {
             task_id: "t1".to_string(),
             status: WorkflowRowStatus::Failed,
+            usage: None,
             at_ms: 2_000,
         });
         if let Some(row) = panel.find_row_mut("t1") {
@@ -2288,6 +3112,9 @@ mod tests {
         assert!(joined.contains("children:"), "{joined}");
         assert!(joined.contains("result:"), "{joined}");
         assert!(joined.contains("found 3 call sites"), "{joined}");
+        assert!(!joined.contains("reasoning unknown"), "{joined}");
+        assert!(!joined.contains("via unknown"), "{joined}");
+        assert!(!joined.contains("tokens unknown"), "{joined}");
         assert!(
             joined.contains(crate::tui::shell_key_routing::tool_details_chord().as_ref()),
             "history details hint must use the platform chord: {joined}"
@@ -2369,11 +3196,13 @@ mod tests {
                 resolved_model: Some("deepseek-v4-flash".to_string()),
                 worktree: false,
                 workspace: None,
+                route: WorkflowRowRoute::default(),
                 at_ms: 1_200,
             });
             panel.apply_event(WorkflowPanelEvent::TaskCompleted {
                 task_id: id.to_string(),
                 status: WorkflowRowStatus::Succeeded,
+                usage: None,
                 at_ms: 1_500,
             });
         }
@@ -2390,11 +3219,13 @@ mod tests {
             resolved_model: None,
             worktree: false,
             workspace: None,
+            route: WorkflowRowRoute::default(),
             at_ms: 1_700,
         });
         panel.apply_event(WorkflowPanelEvent::TaskCompleted {
             task_id: "t4".to_string(),
             status: WorkflowRowStatus::Succeeded,
+            usage: None,
             at_ms: 2_000,
         });
         panel.apply_event(WorkflowPanelEvent::RunCompleted {
@@ -2475,11 +3306,13 @@ mod tests {
             resolved_model: Some("deepseek-v4-pro".to_string()),
             worktree: true,
             workspace: Some(PathBuf::from("/tmp/wt-impl")),
+            route: WorkflowRowRoute::default(),
             at_ms: 1_200,
         });
         panel.apply_event(WorkflowPanelEvent::TaskCompleted {
             task_id: "impl".to_string(),
             status: WorkflowRowStatus::Succeeded,
+            usage: None,
             at_ms: 2_000,
         });
         panel.apply_event(WorkflowPanelEvent::PhaseStarted {
@@ -2495,11 +3328,13 @@ mod tests {
             resolved_model: None,
             worktree: false,
             workspace: None,
+            route: WorkflowRowRoute::default(),
             at_ms: 2_200,
         });
         panel.apply_event(WorkflowPanelEvent::TaskCompleted {
             task_id: "ver".to_string(),
             status: WorkflowRowStatus::Succeeded,
+            usage: None,
             at_ms: 3_000,
         });
         panel.apply_event(WorkflowPanelEvent::RunCompleted {
@@ -2568,11 +3403,13 @@ mod tests {
                 resolved_model: None,
                 worktree: false,
                 workspace: None,
+                route: WorkflowRowRoute::default(),
                 at_ms: 1_200,
             });
             panel.apply_event(WorkflowPanelEvent::TaskCompleted {
                 task_id: id.to_string(),
                 status,
+                usage: None,
                 at_ms: 1_500,
             });
         }
@@ -2592,11 +3429,13 @@ mod tests {
             resolved_model: None,
             worktree: false,
             workspace: None,
+            route: WorkflowRowRoute::default(),
             at_ms: 1_700,
         });
         panel.apply_event(WorkflowPanelEvent::TaskCompleted {
             task_id: "syn".to_string(),
             status: WorkflowRowStatus::Succeeded,
+            usage: None,
             at_ms: 2_000,
         });
         // Partial success at run level: completed with surviving synthesis.
@@ -2649,6 +3488,7 @@ mod tests {
             resolved_model: None,
             worktree: false,
             workspace: None,
+            route: WorkflowRowRoute::default(),
             at_ms: 1_200,
         });
         panel.apply_event(WorkflowPanelEvent::TaskStarted {
@@ -2660,11 +3500,13 @@ mod tests {
             resolved_model: None,
             worktree: false,
             workspace: None,
+            route: WorkflowRowRoute::default(),
             at_ms: 1_210,
         });
         panel.apply_event(WorkflowPanelEvent::TaskCompleted {
             task_id: "slow-1".to_string(),
             status: WorkflowRowStatus::Succeeded,
+            usage: None,
             at_ms: 1_500,
         });
 

@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:797a23968c31 -->
+<!-- source: README.md sha256:7e05c7acd044 -->
 # Codewhale
 
 ターミナルで動くオープンソースのコーディングエージェント — モデルはあなたが持ち込む。
@@ -9,7 +9,7 @@ Codewhale は DeepSeek のためのネイティブ体験として始まりまし
 
 私たちは常にコントリビューターと改善の方法を探しています。使っているモデルやプロバイダが見当たらないとき、あるいは何かが壊れたときは、それを知らせてもらえることが最も役に立つことのひとつです — [コントリビューション](#コントリビューション)を見てください。
 
-[English](README.md) · [简体中文](README.zh-CN.md) · [Tiếng Việt](README.vi.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md)
+[English](README.md) · [简体中文](README.zh-CN.md) · [Tiếng Việt](README.vi.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md)
 
 [![CI](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml/badge.svg)](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/codewhale-cli?label=crates.io)](https://crates.io/crates/codewhale-cli)
@@ -49,6 +49,9 @@ TUI では、`/model` がプロバイダとモデルをまとめて切り替え�
 - [docs/FLEET.md](docs/FLEET.md) — Fleet、台帳、再開
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`、フック、
   constitution
+- [docs/HOOKS.md](docs/HOOKS.md) — 11 個の TUI ライフサイクルフックイベント、
+  そのペイロード、ターンを誘導できる 3 イベント（`codewhale exec` と CLI
+  サブコマンドではフックは発火しません）
 - [docs/WEB.md](docs/WEB.md) — ループバック専用の組み込みブラウザクライアントと
   ワンタイム認証境界
 

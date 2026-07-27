@@ -16,7 +16,9 @@
 //! - [`BoundedVec`] / [`BoundedSet`] are small deterministic FIFO containers
 //!   (oldest entry evicted first); no hashing, so iteration order is stable.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+use crate::config::ApiProvider;
 
 use super::events::{ChangeReceipt, ObservationSummary, WorkGraphProposal};
 use super::ids::{BindingId, WorkEdgeId, WorkNodeId};
@@ -49,20 +51,169 @@ pub enum ReasoningEffortTier {
     High,
     Auto,
     Max,
+    /// Thinking is enabled, but the provider route exposes no supported
+    /// effort tiers. This is an effective receipt, never a requested setting.
+    ThinkingEnabledGranularityUnavailable,
+    /// The configured route exposes no verified reasoning-control contract.
+    /// This is an effective receipt, never a requested setting.
+    Unavailable,
 }
 
 /// Bounded, receipt-only activity attached to the session graph.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WorkActivityEvent {
     ReasoningEffortChanged {
         requested: ReasoningEffortTier,
         effective: ReasoningEffortTier,
+        /// Immutable routing kind, distinct from the exact provider identity.
+        /// A custom table may legally use a built-in slug as its identity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_kind: Option<ApiProvider>,
         provider: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        endpoint_identity: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
         ts: Ts,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         operation: Option<WorkNodeId>,
     },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum WorkActivityEventWire {
+    ReasoningEffortChanged {
+        requested: ReasoningEffortTier,
+        effective: ReasoningEffortTier,
+        #[serde(default)]
+        provider_kind: Option<ApiProvider>,
+        provider: String,
+        #[serde(default)]
+        endpoint_identity: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+        ts: Ts,
+        #[serde(default)]
+        operation: Option<WorkNodeId>,
+    },
+}
+
+impl<'de> Deserialize<'de> for WorkActivityEvent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        match WorkActivityEventWire::deserialize(deserializer)? {
+            WorkActivityEventWire::ReasoningEffortChanged {
+                requested,
+                mut effective,
+                provider_kind,
+                provider,
+                endpoint_identity,
+                model,
+                ts,
+                operation,
+            } => {
+                // Pre-provenance snapshots cannot prove what route received
+                // the control. Keep them loadable, but never preserve a
+                // claimed effective tier as if kind/endpoint/model were known.
+                // In particular, reparsing `provider` is unsafe because a
+                // custom table may legally be named after a built-in slug.
+                if provider_kind.is_none() || endpoint_identity.is_none() || model.is_none() {
+                    effective = ReasoningEffortTier::Unavailable;
+                }
+                Ok(Self::ReasoningEffortChanged {
+                    requested,
+                    effective,
+                    provider_kind,
+                    provider,
+                    endpoint_identity,
+                    model,
+                    ts,
+                    operation,
+                })
+            }
+        }
+    }
+}
+
+/// Return the only valid effective receipt for routes whose reasoning-control
+/// dialect is narrower than the generic provider normalization.
+#[must_use]
+pub(crate) fn constrained_effective_reasoning_for_route(
+    requested: ReasoningEffortTier,
+    provider: ApiProvider,
+    endpoint_identity: &str,
+    model: &str,
+) -> Option<ReasoningEffortTier> {
+    use ReasoningEffortTier::{
+        Auto, High, Low, Medium, Off, ThinkingEnabledGranularityUnavailable, Unavailable,
+    };
+
+    if provider == ApiProvider::Zai {
+        if !crate::config::is_exact_zai_chat_route(provider, endpoint_identity) {
+            return Some(Unavailable);
+        }
+        if crate::config::is_exact_zai_glm_5_2_route(provider, endpoint_identity, model) {
+            return Some(match requested {
+                Low | Medium => High,
+                other => other,
+            });
+        }
+        if crate::config::is_exact_known_zai_reasoning_route(provider, endpoint_identity, model) {
+            return Some(match requested {
+                Off | Auto => requested,
+                _ => ThinkingEnabledGranularityUnavailable,
+            });
+        }
+        return Some(Unavailable);
+    }
+
+    if provider == ApiProvider::Minimax {
+        if crate::config::is_exact_minimax_m3_route(provider, endpoint_identity, model) {
+            return Some(match requested {
+                Off | Auto => requested,
+                _ => ThinkingEnabledGranularityUnavailable,
+            });
+        }
+        return Some(Unavailable);
+    }
+
+    if provider == ApiProvider::MinimaxAnthropic {
+        if crate::config::is_exact_minimax_anthropic_m3_route(provider, endpoint_identity, model) {
+            return Some(match requested {
+                Off | Auto => requested,
+                _ => ThinkingEnabledGranularityUnavailable,
+            });
+        }
+        return Some(Unavailable);
+    }
+
+    // A named OpenAI-compatible endpoint has no verified reasoning dialect
+    // merely because it has a bounded URL and model string. Until immutable
+    // route provenance carries a validated capability contract, its effective
+    // tier must remain unavailable.
+    if provider == ApiProvider::Custom {
+        return Some(Unavailable);
+    }
+
+    if crate::config::is_exact_kimi_code_k3_route(provider, endpoint_identity, model) {
+        return Some(match requested {
+            Off => Low,
+            other => other,
+        });
+    }
+    if crate::config::is_exact_direct_moonshot_k3_route(provider, endpoint_identity, model) {
+        return Some(match requested {
+            Off => Low,
+            Medium => High,
+            other => other,
+        });
+    }
+
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -54,7 +54,7 @@ pub fn tokens(app: &mut App) -> CommandResult {
     let message_count = app.api_messages.len();
     let chat_count = app.history.len();
 
-    let report = tr(locale, MessageId::CmdTokensReport)
+    let mut report = tr(locale, MessageId::CmdTokensReport)
         .replace("{active}", &active_context_summary(app, locale))
         .replace(
             "{input}",
@@ -66,24 +66,165 @@ pub fn tokens(app: &mut App) -> CommandResult {
         )
         .replace("{cache}", &cache_summary(app, locale))
         .replace("{total}", &app.session.total_tokens.to_string())
-        .replace(
-            "{cost}",
-            &app.format_cost_amount_precise(
-                app.displayed_session_cost_for_currency(app.cost_currency),
-            ),
-        )
+        .replace("{cost}", &cost_report_amount(app, locale))
         .replace("{api_messages}", &message_count.to_string())
         .replace("{chat_messages}", &chat_count.to_string())
         .replace("{model}", &app.model);
+    // `/tokens` quotes the same cost figure as `/cost`, so it carries the same
+    // estimate disclaimer and the same coverage state. Two surfaces showing one
+    // number must not disagree about how complete that number is (#4318).
+    report.push_str(&cache_write_summary(app, locale));
+    report.push_str(&cost_coverage_report(app, locale));
     CommandResult::message(report)
 }
 
-/// Show session cost breakdown
+/// Session cache-write total, reported as its own class with a pointer to
+/// `/cache` for the per-turn breakdown.
+///
+/// Cache-write is billed at a premium on the providers that publish one, so it
+/// is neither folded into input nor hidden: `/tokens` shows the total and says
+/// where the detail lives.
+fn cache_write_summary(app: &App, locale: Locale) -> String {
+    let write = app.session.total_cache_write_tokens;
+    let mut out = String::from("\n");
+    out.push_str(&tr(locale, MessageId::CmdTokensCacheWriteTotal).replace(
+        "{write}",
+        &if write > 0 {
+            write.to_string()
+        } else {
+            tr(locale, MessageId::CmdTokensNotReported).to_string()
+        },
+    ));
+    out
+}
+
+/// Show session cost breakdown.
+///
+/// The figure is an **estimate** computed from provider-reported usage and
+/// published rates; it is never an invoice. Turns whose route produced no
+/// authoritative price are missing from it entirely, so the coverage of the
+/// number is reported alongside it rather than left implicit (#4318).
 pub fn cost(app: &mut App) -> CommandResult {
-    let total = app.displayed_session_cost_for_currency(app.cost_currency);
-    let report = tr(app.ui_locale, MessageId::CmdCostReport)
-        .replace("{cost}", &app.format_cost_amount_precise(total));
+    let locale = app.ui_locale;
+    let (priced, unpriced) = cost_coverage_counts(app);
+    let has_saved_legacy_subtotal = app.session.cost_coverage_unknown_legacy
+        && app.displayed_session_cost_for_currency(app.cost_currency) > 0.0;
+    let headline = if priced == 0 && !has_saved_legacy_subtotal {
+        MessageId::CmdCostReportUnknown
+    } else if app.session.cost_coverage_unknown_legacy || unpriced > 0 {
+        MessageId::CmdCostReportSubtotal
+    } else {
+        MessageId::CmdCostReport
+    };
+    let mut report = tr(locale, headline).replace("{cost}", &cost_report_amount(app, locale));
+    report.push_str(&cost_coverage_report(app, locale));
     CommandResult::message(report)
+}
+
+fn cost_report_amount(app: &App, locale: Locale) -> String {
+    let (priced, _) = cost_coverage_counts(app);
+    let total = app.displayed_session_cost_for_currency(app.cost_currency);
+    if priced > 0 || (app.session.cost_coverage_unknown_legacy && total > 0.0) {
+        app.format_cost_amount_precise(total)
+    } else {
+        tr(locale, MessageId::CmdCostUnknownValue).to_string()
+    }
+}
+
+fn joined(values: &std::collections::BTreeSet<String>) -> String {
+    values
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The honesty block appended to `/cost` and `/tokens`: what the estimate covers
+/// and what it cannot.
+///
+/// Both surfaces render the same block from the same session counters, so they
+/// cannot disagree about completeness (#4318).
+pub(crate) fn cost_coverage_report(app: &App, locale: Locale) -> String {
+    let (priced, unpriced) = cost_coverage_counts(app);
+    let mut out = String::from("\n\n");
+    out.push_str(&tr(locale, MessageId::CmdCostEstimateOnly));
+    out.push('\n');
+    if app.session.cost_coverage_unknown_legacy {
+        // A restored pre-coverage session has real money and no evidence of what
+        // it covers. Saying "0 of 0 priced" here would assert the total is
+        // complete, so the unknown state is stated instead.
+        out.push_str(&tr(locale, MessageId::CmdCostCoverageUnknownLegacy));
+    } else {
+        out.push_str(
+            &tr(locale, MessageId::CmdCostCoverage)
+                .replace("{priced}", &priced.to_string())
+                .replace("{turns}", &(priced.saturating_add(unpriced)).to_string()),
+        );
+    }
+    if unpriced > 0 {
+        let reasons = match app.cost_display_currency(app.cost_currency) {
+            crate::pricing::CostCurrency::Usd => &app.session.cost_unpriced_reasons,
+            crate::pricing::CostCurrency::Cny => &app.session.cost_cny_unpriced_reasons,
+        };
+        out.push('\n');
+        out.push_str(
+            &tr(locale, MessageId::CmdCostUnpricedTurns)
+                .replace("{unpriced}", &unpriced.to_string())
+                .replace("{reasons}", &joined(reasons)),
+        );
+    }
+    if !app.session.cost_unpriced_classes.is_empty() {
+        out.push('\n');
+        out.push_str(
+            &tr(locale, MessageId::CmdCostUnpricedClasses)
+                .replace("{classes}", &joined(&app.session.cost_unpriced_classes)),
+        );
+    }
+    if !app.session.cost_pricing_provenances.is_empty() {
+        out.push('\n');
+        out.push_str(
+            &tr(locale, MessageId::CmdCostPricingProvenance)
+                .replace("{sources}", &joined(&app.session.cost_pricing_provenances)),
+        );
+    }
+    if !app.session.cost_live_pricing_defects.is_empty() {
+        out.push('\n');
+        out.push_str(
+            &tr(locale, MessageId::CmdCostLivePricingDowngraded)
+                .replace("{defects}", &joined(&app.session.cost_live_pricing_defects)),
+        );
+    }
+    if !app.session.cost_live_pricing_unusable_defects.is_empty() {
+        out.push('\n');
+        out.push_str(
+            &tr(locale, MessageId::CmdCostLivePricingUnavailable).replace(
+                "{defects}",
+                &joined(&app.session.cost_live_pricing_unusable_defects),
+            ),
+        );
+    }
+    if !app.session.cost_route_receipts.is_empty() {
+        out.push('\n');
+        out.push_str(&tr(locale, MessageId::CmdCostRoutesHeader));
+        for receipt in &app.session.cost_route_receipts {
+            out.push_str("\n  ");
+            out.push_str(receipt);
+        }
+    }
+    out
+}
+
+fn cost_coverage_counts(app: &App) -> (u32, u32) {
+    match app.cost_display_currency(app.cost_currency) {
+        crate::pricing::CostCurrency::Usd => (
+            app.session.cost_priced_turns,
+            app.session.cost_unpriced_turns,
+        ),
+        crate::pricing::CostCurrency::Cny => (
+            app.session.cost_cny_priced_turns,
+            app.session.cost_cny_unpriced_turns,
+        ),
+    }
 }
 
 /// Show current system prompt

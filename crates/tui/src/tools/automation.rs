@@ -209,9 +209,21 @@ impl ToolSpec for AutomationTool {
     fn capabilities(&self) -> Vec<ToolCapability> {
         match self.forced_action {
             Some(action) if Self::action_is_read(action) => vec![ToolCapability::ReadOnly],
-            Some(_) => vec![ToolCapability::RequiresApproval],
+            // `run` executes a stored automation now; the other mutating
+            // actions schedule one to execute later, with its own prompt, cwd,
+            // and task mode. Declaring only `RequiresApproval` described the
+            // *approval* consequence and hid the *execution* one, which left
+            // every capability-derived policy — including the child execution
+            // envelope — unable to see that this family spawns agent runs.
+            Some(_) => vec![
+                ToolCapability::ExecutesCode,
+                ToolCapability::RequiresApproval,
+            ],
             None if self.read_only => vec![ToolCapability::ReadOnly],
-            None => vec![ToolCapability::RequiresApproval],
+            None => vec![
+                ToolCapability::ExecutesCode,
+                ToolCapability::RequiresApproval,
+            ],
         }
     }
 

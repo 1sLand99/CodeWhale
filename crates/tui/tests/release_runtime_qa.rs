@@ -2,8 +2,7 @@
 //!
 //! These scenarios cover the live TUI checks that unit tests cannot prove:
 //! six-worker fanout liveness/cancellation, multi-terminal route isolation,
-//! and queued steering via the terminal-safe Ctrl+G shortcut. Every provider is a loopback
-//! wiremock
+//! and the explicit Enter-queue / Ctrl+Enter-steer contract. Every provider is a loopback wiremock
 //! server and every process receives a sealed HOME.
 
 #![cfg(unix)]
@@ -285,13 +284,6 @@ fn type_and_submit(harness: &mut Harness, text: &str) -> Result<()> {
     Ok(())
 }
 
-fn type_and_tab(harness: &mut Harness, text: &str) -> Result<()> {
-    harness.send(keys::key::text(text))?;
-    harness.wait_for_text(text, Duration::from_secs(3))?;
-    harness.send(b"\t")?;
-    Ok(())
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn underwater_footer_moves_from_working_through_one_shot_completion() -> Result<()> {
     let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
@@ -368,7 +360,7 @@ async fn underwater_theme_picker_emits_each_live_palette_to_the_terminal() -> Re
         ));
     }
     if tui
-        .wait_for_text("Pick a theme", Duration::from_secs(1))
+        .wait_for_text("live preview", Duration::from_secs(1))
         .is_err()
     {
         // A PTY can deliver the first Enter inside the paste guard's trailing
@@ -377,7 +369,7 @@ async fn underwater_theme_picker_emits_each_live_palette_to_the_terminal() -> Re
         std::thread::sleep(PASTE_GUARD_SETTLE);
         tui.pump();
         tui.send(keys::key::enter())?;
-        tui.wait_for_text("Pick a theme", INTERACTION_TIMEOUT)?;
+        tui.wait_for_text("live preview", INTERACTION_TIMEOUT)?;
     }
 
     let labels = [
@@ -396,7 +388,7 @@ async fn underwater_theme_picker_emits_each_live_palette_to_the_terminal() -> Re
     ];
     let mut previous_signature = None;
     for (index, label) in labels.iter().enumerate() {
-        let selected = format!("▶ {}.", index + 1);
+        let selected = format!("▸ {}.", index + 1);
         tui.wait_for(
             |frame| frame.text().contains(&selected),
             INTERACTION_TIMEOUT,
@@ -405,7 +397,7 @@ async fn underwater_theme_picker_emits_each_live_palette_to_the_terminal() -> Re
         let signature = (
             frame.colors_at(0, 0).expect("theme surface cell"),
             frame
-                .first_symbol_colors("▶")
+                .first_symbol_colors("▸")
                 .expect("selected theme pointer cell"),
         );
         assert!(
@@ -782,9 +774,13 @@ impl Respond for SteeringResponder {
     fn respond(&self, request: &Request) -> ResponseTemplate {
         let body = request.body_json::<Value>().unwrap_or(Value::Null);
         let raw = body.to_string();
-        if raw.contains("queued steering from ctrl-g") {
+        if raw.contains("queued steering from enter") {
             self.steer_requests.fetch_add(1, Ordering::SeqCst);
             return sse_response(text_sse(DEEPSEEK_TEST_MODEL, "steering-applied"));
+        }
+        if raw.contains("direct steering from ctrl-enter") {
+            self.steer_requests.fetch_add(1, Ordering::SeqCst);
+            return sse_response(text_sse(DEEPSEEK_TEST_MODEL, "direct-steering-applied"));
         }
         if raw.contains("initial slow turn") {
             self.initial_requests.fetch_add(1, Ordering::SeqCst);
@@ -798,7 +794,7 @@ impl Respond for SteeringResponder {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn release_queued_steering_ctrl_g_sends_now_with_clear_status() -> Result<()> {
+async fn release_empty_enter_promotes_queued_follow_up() -> Result<()> {
     let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
     let server = MockServer::start().await;
     mount_models(&server, &[DEEPSEEK_TEST_MODEL]).await;
@@ -829,21 +825,279 @@ async fn release_queued_steering_ctrl_g_sends_now_with_clear_status() -> Result<
     // A dead engine still fails closed because the counter never advances.
     wait_for_counter(&mut tui, &initial_requests, 1, INTERACTION_TIMEOUT)?;
 
-    type_and_tab(&mut tui, "queued steering from ctrl-g")?;
-    tui.wait_for_text("Ctrl+G send", Duration::from_secs(5))?;
+    tui.send(keys::key::text("queued steering from enter"))?;
+    tui.wait_for_text("queued steering from enter", Duration::from_secs(3))?;
+    tui.send(b"\t")?;
+    std::thread::sleep(PASTE_GUARD_SETTLE);
+    tui.pump();
     assert!(
-        tui.frame().contains("queued steering from ctrl-g"),
+        tui.frame().contains("queued steering from enter"),
+        "Tab must leave a busy-turn draft in the composer:\n{}",
+        tui.debug_dump()
+    );
+    tui.send(keys::key::enter())?;
+    tui.wait_for_text("Enter send now", Duration::from_secs(5))?;
+    assert!(
+        tui.frame().contains("queued steering from enter"),
         "queued steering preview was not readable:\n{}",
         tui.debug_dump()
     );
 
+    tui.send(keys::key::text("stash this draft, do not steer"))?;
+    tui.wait_for_text("stash this draft, do not steer", Duration::from_secs(3))?;
+    tui.send(keys::key::ctrl_g())?;
+    tui.wait_for_text("Draft stashed", Duration::from_secs(3))?;
+    assert_eq!(
+        steer_requests.load(Ordering::SeqCst),
+        0,
+        "Ctrl+G must not send a queued follow-up"
+    );
+    tui.wait_for_text("Enter send now", Duration::from_secs(3))?;
+
     let steer_started = Instant::now();
-    tui.send(b"\x07")?;
+    tui.send(keys::key::enter())?;
     wait_for_counter(&mut tui, &steer_requests, 1, INTERACTION_TIMEOUT)?;
     tui.wait_for_text("steering-applied", INTERACTION_TIMEOUT)?;
     assert!(
         steer_started.elapsed() < Duration::from_secs(10),
-        "Ctrl+G steering was not incorporated promptly"
+        "empty Enter queue promotion was not incorporated promptly"
+    );
+
+    let _ = tui.shutdown();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn release_ctrl_enter_steers_running_turn() -> Result<()> {
+    let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
+    let server = MockServer::start().await;
+    mount_models(&server, &[DEEPSEEK_TEST_MODEL]).await;
+    let initial_requests = Arc::new(AtomicUsize::new(0));
+    let steer_requests = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(SteeringResponder {
+            initial_requests: Arc::clone(&initial_requests),
+            steer_requests: Arc::clone(&steer_requests),
+        })
+        .mount(&server)
+        .await;
+
+    let ws = make_sealed_workspace()?;
+    let mut tui = common_tui_builder(&ws)
+        .env("CODEWHALE_PROVIDER", "deepseek")
+        .env("DEEPSEEK_API_KEY", "deepseek-local-test-key")
+        .env("DEEPSEEK_BASE_URL", server.uri())
+        .env("DEEPSEEK_MODEL", DEEPSEEK_TEST_MODEL)
+        .spawn()?;
+    enter_launch_session(&mut tui)?;
+
+    type_and_submit(&mut tui, "initial slow turn")?;
+    wait_for_counter(&mut tui, &initial_requests, 1, INTERACTION_TIMEOUT)?;
+
+    tui.send(keys::key::text("busy-shift-line"))?;
+    tui.send(keys::key::shift_enter())?;
+    tui.send(keys::key::text("busy-alt-line"))?;
+    tui.send(keys::key::alt_enter())?;
+    tui.send(keys::key::text("busy-ctrl-j-line"))?;
+    tui.send(keys::key::ctrl_j())?;
+    tui.send(keys::key::text("direct steering from ctrl-enter"))?;
+    tui.wait_for_text("direct steering from ctrl-enter", Duration::from_secs(3))?;
+    let frame = tui.frame();
+    let rows = [
+        "busy-shift-line",
+        "busy-alt-line",
+        "busy-ctrl-j-line",
+        "direct steering from ctrl-enter",
+    ]
+    .map(|line| {
+        frame
+            .find_text(line)
+            .expect("busy multiline draft stays visible")
+            .0
+    });
+    assert!(
+        rows.windows(2).all(|pair| pair[0] < pair[1]),
+        "newline chords must stay newlines during a running turn:\n{}",
+        frame.debug_dump()
+    );
+    tui.wait_for_text("Ctrl+↵ steer", Duration::from_secs(3))?;
+    let steer_started = Instant::now();
+    tui.send(keys::key::ctrl_enter())?;
+    wait_for_counter(&mut tui, &steer_requests, 1, INTERACTION_TIMEOUT)?;
+    tui.wait_for_text("direct-steering-applied", INTERACTION_TIMEOUT)?;
+    assert!(
+        steer_started.elapsed() < Duration::from_secs(10),
+        "Ctrl+Enter steering was not incorporated promptly"
+    );
+
+    let _ = tui.shutdown();
+    Ok(())
+}
+
+/// Records, for every chat request, the highest-numbered follow-up marker
+/// present in the serialized body. Because history accumulates, request `k`
+/// contains markers `1..=k`, so the sequence of maxima is an exact record of
+/// which follow-up each request carried — which makes a dropped message and a
+/// double-sent message both visible, and distinguishable from each other.
+#[derive(Clone)]
+struct QueueOrderResponder {
+    markers: Vec<String>,
+    observed: Arc<std::sync::Mutex<Vec<usize>>>,
+    initial_delay: Duration,
+}
+
+impl QueueOrderResponder {
+    fn observed(&self) -> Vec<usize> {
+        self.observed
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+}
+
+impl Respond for QueueOrderResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let raw = request
+            .body_json::<Value>()
+            .unwrap_or(Value::Null)
+            .to_string();
+        let highest = self
+            .markers
+            .iter()
+            .enumerate()
+            .filter(|(_, marker)| raw.contains(marker.as_str()))
+            .map(|(index, _)| index + 1)
+            .max()
+            .unwrap_or(0);
+        self.observed
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(highest);
+        if highest == 0 {
+            return sse_response(text_sse(DEEPSEEK_TEST_MODEL, "initial-turn-output"))
+                .set_delay(self.initial_delay);
+        }
+        sse_response(text_sse(
+            DEEPSEEK_TEST_MODEL,
+            &format!("follow-up-{highest}-done"),
+        ))
+    }
+}
+
+/// The running-turn contract, end to end: while a turn is in flight, bare
+/// Enter queues rather than steering, the composer says so, and every queued
+/// follow-up dispatches exactly once, in order, after the turn completes.
+///
+/// This is the mailbox-backpressure row of #3758. Queueing six follow-ups
+/// against a busy engine puts several ops in flight behind the
+/// `dispatch_in_flight` guard (#4605); the failure modes it rules out are a
+/// silently dropped follow-up and a follow-up sent twice, which look identical
+/// on the transcript but are opposite bugs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn release_queued_follow_ups_dispatch_exactly_once_and_in_order() -> Result<()> {
+    let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
+    let server = MockServer::start().await;
+    mount_models(&server, &[DEEPSEEK_TEST_MODEL]).await;
+
+    // Six markers, none a prefix of another, so "contains" cannot confuse
+    // marker 1 with marker 10.
+    let markers: Vec<String> = (1..=6).map(|n| format!("queue-marker-{n}-end")).collect();
+    let responder = QueueOrderResponder {
+        markers: markers.clone(),
+        observed: Arc::new(std::sync::Mutex::new(Vec::new())),
+        initial_delay: Duration::from_secs(14),
+    };
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(responder.clone())
+        .mount(&server)
+        .await;
+
+    let ws = make_sealed_workspace()?;
+    let mut tui = common_tui_builder(&ws)
+        .env("CODEWHALE_PROVIDER", "deepseek")
+        .env("DEEPSEEK_API_KEY", "deepseek-local-test-key")
+        .env("DEEPSEEK_BASE_URL", server.uri())
+        .env("DEEPSEEK_MODEL", DEEPSEEK_TEST_MODEL)
+        .spawn()?;
+    enter_launch_session(&mut tui)?;
+
+    type_and_submit(&mut tui, "queue backpressure initial turn")?;
+    // Start the busy-state clock when the loopback server has actually
+    // received the request. Cold debug launches may spend most of the generic
+    // interaction budget before the request reaches wiremock; the responder's
+    // 14-second delay begins only after this signal.
+    let request_deadline = Instant::now() + INTERACTION_TIMEOUT;
+    while responder.observed().is_empty() {
+        tui.pump();
+        if Instant::now() >= request_deadline {
+            return Err(anyhow!(
+                "initial queue-order request never reached the mock server\n{}",
+                tui.debug_dump()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    let first_marker = markers.first().expect("queue matrix has a marker");
+    tui.send(keys::key::text(first_marker))?;
+    tui.wait_for_text(first_marker, Duration::from_secs(3))?;
+    tui.wait_for_text("Ctrl+↵ steer", Duration::from_secs(3))?;
+
+    // While the turn is running the composer must advertise queueing, and it
+    // must not advertise the stash chords as a way to send (#440 / #3758).
+    let busy_frame = tui.frame();
+    let busy_dump = busy_frame.debug_dump();
+    assert!(
+        busy_frame.contains("↵ queue"),
+        "busy composer must say Enter queues:\n{busy_dump}"
+    );
+    for line in busy_frame.text().lines() {
+        if !(line.contains("Ctrl+G") || line.contains("Ctrl+S")) {
+            continue;
+        }
+        let lowered = line.to_ascii_lowercase();
+        for forbidden in ["send", "queue", "steer", "submit"] {
+            assert!(
+                !lowered.contains(forbidden),
+                "stash chords must not be advertised as a send/queue/steer path: {line:?}"
+            );
+        }
+    }
+
+    std::thread::sleep(PASTE_GUARD_SETTLE);
+    tui.pump();
+    tui.send(keys::key::enter())?;
+    for marker in markers.iter().skip(1) {
+        type_and_submit(&mut tui, marker)?;
+    }
+
+    // One request for the initial turn plus one per follow-up.
+    let expected_requests = markers.len() + 1;
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        tui.pump();
+        if responder.observed().len() >= expected_requests {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(anyhow!(
+                "only {:?} of {expected_requests} requests arrived\n{}",
+                responder.observed(),
+                tui.debug_dump()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(80));
+    }
+
+    let observed = responder.observed();
+    let expected: Vec<usize> = (0..=markers.len()).collect();
+    assert_eq!(
+        observed,
+        expected,
+        "queued follow-ups must dispatch exactly once each, in order; \
+         a missing index is a dropped message and a repeated one is a double send\n{}",
+        tui.debug_dump()
     );
 
     let _ = tui.shutdown();

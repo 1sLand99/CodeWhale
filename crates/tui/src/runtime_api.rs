@@ -79,8 +79,8 @@ mod workspace;
 use self::auth::{ResolvedRuntimeAuth, token_from_cookie_header};
 use self::auth::{require_runtime_token, resolve_runtime_auth, runtime_auth_status_lines};
 use self::sessions::{
-    create_session_from_thread, delete_session, get_session, list_sessions, resume_session_thread,
-    save_current_session,
+    create_session_from_thread, delete_session, get_session, list_sessions, list_sessions_summary,
+    patch_session, resume_session_thread, save_current_session,
 };
 #[cfg(test)]
 use self::sessions::{messages_from_thread_detail, session_to_detail};
@@ -609,7 +609,11 @@ pub fn build_router(state: RuntimeApiState) -> Router {
                 .post(create_session_from_thread)
                 .put(save_current_session),
         )
-        .route("/v1/sessions/{id}", get(get_session).delete(delete_session))
+        .route("/v1/sessions/summary", get(list_sessions_summary))
+        .route(
+            "/v1/sessions/{id}",
+            get(get_session).patch(patch_session).delete(delete_session),
+        )
         .route(
             "/v1/sessions/{id}/resume-thread",
             post(resume_session_thread),
@@ -3339,13 +3343,13 @@ async fn switch_provider(
         // provider→model mapping, and for DeepSeek also pin the global
         // `default_model`. Failures here are non-fatal — the config.toml
         // write above is the source of truth.
-        if let Ok(mut settings) = crate::settings::Settings::load_persisted() {
+        let _ = crate::settings::Settings::transact(|settings| {
             settings.set_model_for_provider(target.as_str(), model);
             if matches!(target, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
                 let _ = settings.set("default_model", model);
             }
-            let _ = settings.save();
-        }
+            Ok(())
+        });
     }
 
     // Reload config from disk and sync to active engines. This matches
@@ -3450,13 +3454,16 @@ struct SetConfigResponse {
 }
 
 fn persist_runtime_tui_setting(key: &str, value: &str) -> Result<(), ApiError> {
-    let mut settings = crate::settings::Settings::load_persisted()
+    // Validate against a throwaway copy first, so an invalid value is still a
+    // 400 rather than an internal error raised from inside the transaction.
+    let mut probe = crate::settings::Settings::load_persisted()
         .map_err(|e| ApiError::internal(format!("Failed to load settings: {e}")))?;
-    settings
+    probe
         .set(key, value)
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
-    settings
-        .save()
+    // The write itself re-applies the key inside `Settings::transact`, so it
+    // cannot save the stale snapshot above over a concurrent writer's field.
+    crate::settings::Settings::transact(|settings| settings.set(key, value))
         .map_err(|e| ApiError::internal(format!("Failed to save settings: {e}")))
 }
 

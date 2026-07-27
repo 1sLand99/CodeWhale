@@ -41,22 +41,42 @@ logs and adapter logs are stored under `.codewhale/fleet/` and
 
 ### Interactive and persistent status
 
-Codewhale has two similarly named status surfaces with different scopes:
+`/fleet status` and `codewhale fleet status` are the **same** command on two
+surfaces. Both read the durable `.codewhale/fleet.jsonl` ledger for the
+workspace, through one shared control-plane contract, and both report the same
+verb id (`fleet.status`), read-vs-write authority, persistence scope, and
+receipt. When the workspace has no ledger they say so with a typed reason
+(`no_fleet_ledger`) instead of rendering an empty-looking "all clear" — and
+neither creates the ledger as a side effect of reading it.
 
-- In the TUI, `/fleet status` (or `/subagents`) shows the sub-agents attached
-  to the current interactive session. It does not read the persistent Fleet
-  ledger.
-- In a shell, `codewhale fleet status` reads durable Fleet run history from
-  the workspace's `.codewhale/fleet.jsonl` ledger.
+The current interactive session's sub-agents are a **different set**, and now
+have their own name:
+
+- `/fleet workers` (or `/subagents`, or `n`) shows sub-agents attached to the
+  current TUI session. It does not read the persistent ledger.
+- `/fleet list|status|interrupt|resume` and `codewhale fleet
+  list|status|interrupt|resume` act on the durable ledger.
+- `codewhale fleet restart <worker-id>` is CLI-only: it re-leases the task and
+  then drives the manager loop to completion. `/fleet restart` does not
+  silently do a smaller thing — it reports `surface_not_supported` and names
+  the CLI command.
+
+Before v0.9.2, `/fleet status` showed session sub-agents. That reading is gone;
+`/fleet workers` replaces it.
+
+The contract behind this — descriptors, availability reasons, exact-identity
+targets, receipts, typed unknowns, and bounds — is documented in
+[`docs/COMMAND_CONTROL_PLANE.md`](COMMAND_CONTROL_PLANE.md).
 
 ## Authoring agent profiles (`/fleet setup`)
 
 `/fleet setup` (also `/fleet setup edit` / `new`) opens an in-TUI wizard for
 authoring a reusable agent-team profile. Bare `/fleet` and the
 `roster`/`roles`/`profiles`/`party` aliases open the roster (the saved profiles).
-`/fleet status` opens the current-session worker view; `/subagents` is a
-compatibility shortcut for that view. For durable run history, use the shell
-command `codewhale fleet status` described above.
+`/fleet workers` opens the current-session worker view; `/subagents` is a
+compatibility shortcut for that view. For durable run history, use
+`/fleet status` or the shell command `codewhale fleet status` described above —
+they are the same command.
 
 The wizard is progressive: you make one focused choice at a time — a **role**,
 then a **model** (`inherit`, or a concrete model from *any configured
@@ -145,10 +165,135 @@ counts, receipts, and nested indentation for child workers. Use the whale mark
 sparingly as an active header/status signal; avoid repeating emoji-heavy rows
 for every worker.
 
-## Manager-owned operations
+## Exact Fleets and the Reasoning Router
+
+An exact Fleet freezes the provider, model, reasoning policy, and permission
+ceiling of every worker before a Workflow starts. Save it as
+`fleets/<name>.toml` in the workspace or under `$CODEWHALE_HOME`. Models cannot
+replace those assignments at runtime:
+
+```toml
+name = "release"
+schema = "exact"
+schema_revision = 1
+reasoning_router = "luna-low"
+
+[[members]]
+id = "implementer"
+role = "builder"
+provider = "zai"
+model = "glm-5.2"
+reasoning = "auto"
+permissions = "read_write"
+
+[[members]]
+id = "advice"
+role = "consultant"
+provider = "openai"
+model = "gpt-5.6"
+reasoning = "high"
+permissions = "read_only"
+```
+
+The optional Reasoning Router is a reusable service, not a Fleet member. Save
+one profile at `routers/<name>.toml` in either search root and reference it from
+any number of Fleets:
+
+```toml
+name = "luna-low"
+schema = "reasoning_router"
+schema_revision = 1
+provider = "openai"
+model = "gpt-5.6-luna"
+call_reasoning = "low"
+```
+
+At runtime it may choose only the reasoning tier for an already-frozen worker
+route. It cannot change the worker, provider, model, role, tools, or permissions.
+The Router call itself is capped at `off` or `low`; more expensive values are
+rejected. A manually selected worker reasoning tier makes no Router call. Route
+and reasoning receipts name the worker model and, when used, the Router's exact
+provider/model so the operator can see which model did which job. If the same
+bare Router or Fleet name exists in both roots, qualify it as
+`workspace/<name>` or `codewhale_home/<name>` instead of relying on shadowing.
+
+Each member's `permissions` preset is a **ceiling**, never a grant: it is
+intersected with the live session posture, so a `read_write` member inside a
+read-only session runs read-only. The intersection becomes the child's real tool
+envelope — `permissions = "none"` leaves it with no tools at all, and a member
+without a network tool loses every web, fetch, browse, `web.run`, and MCP
+surface rather than merely being refused at call time. A member that cannot
+write loses the mutating file tools, and — when it kept `shell = "full"` so it
+can run checks — the raw shell as well, keeping the bounded verification tools
+(`run_tests`, `run_verifiers`) it exists for: an arbitrary shell command mutates
+a workspace just as surely as `write_file`, so leaving it would make
+`write = false` untrue. That verification surface is bounded only in its
+*default* form, so the unbounded arguments go with the shell: a write-denied
+member may run the built-in gates, but not `run_verifiers` with an explicit
+`commands` array or `run_tests` with a raw `args` string, both of which spawn
+operator-supplied programs and are the raw shell by another name.
+
+Two of these denials are narrower than a tool name, because two tools reach past
+their name. `rlm` loads a `url` by calling the fetch tool *inside the process*,
+under its own name, and `rlm`'s `eval` action runs Python against a live kernel
+— sockets and filesystem both. So the family is denied **per action**, not
+wholesale:
+
+- **No network tool** removes `rlm_open` and `rlm_eval`, by the legacy alias and
+  by the `rlm {action: ...}` spelling alike. This is deliberately narrower than
+  the capability it protects: `rlm_open` picks its source from *input fields*
+  (`file_path`, `content`, `url`, `session_object`), not from the action name,
+  and the action-policy seam resolves names rather than field shapes — it cannot
+  prove a source is local before the tool runs. Rather than leave a URL-shaped
+  hole, a network-denied member loses RLM loading entirely, **including the
+  purely local `file_path` form**, and keeps only the bounded metadata actions
+  (`session_objects`, `configure`, `close`).
+- **No write** removes `rlm_eval` only. Loading a large local file into a kernel
+  and reading it is analysis, not mutation, so the rest of the family stays.
+
+Beyond those names, a network-denied member is refused at call time whenever any
+tool is handed a URL-bearing field (`url`, `urls`, `endpoint`, `target`, …)
+holding an `http`/`https`/`ws`/`wss`/`ftp` address. A URL appearing in file
+*content* or a search pattern is data, not a destination, and is untouched.
+
+A member's `role` picks the worker
+posture (and system prompt) when that role already fits inside the ceiling —
+`reviewer`, `verifier`, `consultant`, `planner` — and a domain-specific role
+such as `auditor` falls back to the narrowest posture the ceiling allows. Tasks
+cannot override any of it: `model`, `model_strength`, `thinking`,
+`subagent_type`, `allowed_tools`, and `write_authority` are rejected on an exact
+Fleet rather than silently ignored.
+
+Reasoning receipts record the requested tier *and* the tier the provider was
+actually asked for. Those differ whenever a route cannot express the requested
+one — CodeWhale's route normalizer sends `high` for a requested `low` on most
+routes, and Z.AI's GLM routes express only thinking on/off — so the receipt
+reports the real request rather than the label that was selected. The value a
+call actually carries is spelled by that route's own normalizer, not by the tier
+label: an OpenAI Codex route is asked for `xhigh`, not `max`, and cannot be
+asked for `off` at all.
+
+A receipt also keeps a member's **semantic role** and its **permission posture**
+apart. `member_role` is what the operator named and what gates key on;
+`posture_role` (present only when it differs) is the built-in tool surface the
+clamped ceiling permits — so a member named `auditor` running under the `scout`
+posture is displayed as `auditor` and enforced as `scout`, and neither fact is
+substituted for the other.
+
+A Workflow start fails closed on anything decidable locally: an unresolvable
+provider or model, a missing credential, a client that cannot be built for a
+member's route, or an `auto` member with no usable Reasoning Router. Per-task
+validation that the spawn boundary would refuse anyway — notably a write-capable
+member with no declared `write_roots`/`exact_files`/`coordination_contracts` —
+is checked before the Router is called, so an invalid task never spends a
+routing request. If a spawn fails *after* a Router decision, the receipt is
+still recorded: the tokens were spent, and any cross-provider disclosure already
+happened.
+
+## Manager-owned Workflow fan-in
 
 When parallel work must return one combined answer, use a manager-owned
-operation instead of a flat `agent` fan-out:
+Workflow instead of a flat `agent` fan-out:
 
 1. **Cast one manager** (operator or workflow orchestrator).
 2. **Fan out** child tasks through `workflow` (`task()`, `parallel()`,

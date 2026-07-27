@@ -1,0 +1,60 @@
+import type { HomeDict } from "../types";
+
+export const home: HomeDict = {
+  kicker: "Um oceano de dados e código",
+  heroTitleA: "Mergulhe nas profundezas",
+  heroTitleB: "para que você não precise.",
+  heroIntro:
+    "O Codewhale dá às pessoas comuns a alavancagem dos LLMs para construir coisas. No seu terminal, ele lê o repositório, edita arquivos, executa verificações e deixa um recibo — sem assumir que você já fala a língua do código. Roda na sua máquina.",
+  install: "Instalar",
+  docs: "Documentação",
+  copy: "Copiar",
+  copied: "Copiado ✓",
+  latestRelease: "Último lançamento {tag}",
+  releaseUnavailable: "Status do lançamento indisponível",
+  currentSource: "Fonte atual",
+  sourceCandidate: "Candidato da fonte",
+  providerRoutes: "{count} rotas de provedores",
+  screenshotAlt:
+    "Nova sessão de terminal do Codewhale v{version} usando uma rota Ollama local, sem barra Work vazia",
+  figcaption: "v{version} {state} · rota Ollama local · Plan / Act / Operate",
+  publishedRelease: "lançamento publicado",
+  figcaptionSourceCandidate: "candidato da fonte",
+  proofHeading: "Um terminal subaquático. Neutro a modelos. Local primeiro.",
+  proofBody:
+    "Traga o modelo hospedado, de gateway ou local que você já usa. O Codewhale roda na sua máquina e trata o modelo como um componente selecionável — não o produto. Plan / Act / Operate e posturas de permissão explícitas mantêm o mergulho profundo sob seu controle.",
+  workflowHeading: "Da tarefa à mudança verificada.",
+  workflow: [
+    ["Inspecionar", "Lê o repositório, suas instruções e a tarefa."],
+    ["Agir", "Edita arquivos dentro de limites de aprovação explícitos."],
+    ["Verificar", "Executa verificações e inspeciona o resultado."],
+    ["Relatar", "Deixa um recibo conciso e duradouro."],
+  ],
+  receiptAria: "Exemplo de recibo de trabalho",
+  boundariesHeadingA: "Seu modelo.",
+  boundariesHeadingB: "Seus limites.",
+  boundariesBody:
+    "Escolha explicitamente o modelo, o modo de trabalho e a postura de permissão. Custo desconhecido permanece desconhecido, e recursos em prévia ficam rotulados como tal.",
+  hostedGatewayLocal: "Modelos hospedados, de gateway e locais",
+  planActOperateDesc: "Do planejamento somente leitura à operação autônoma",
+  askAutoReviewDesc: "Escolha a postura de permissão para o trabalho",
+  tuiExecWebDesc: "Interfaces de runtime interativas e headless",
+  surfacesHeading: "Use o runtime onde o trabalho acontece.",
+  surfaces: [
+    ["TUI", "Trabalho interativo no terminal"],
+    ["codewhale exec", "Scripts e CI"],
+    ["Cliente web", "Cliente de navegador apenas loopback"],
+    ["Runtime API + MCP", "Integrações locais"],
+    ["Fleet", "Trabalho multiagente duradouro"],
+  ],
+  runtimeLink: "Ver interfaces de runtime e notas de estabilidade →",
+  installBandHeading: "Comece com um comando.",
+  binaries: "Binários",
+  chinaMirrors: "espelhos da China",
+  installGuideLink: "Ler o guia de instalação →",
+  communityHeading: "Construído em público",
+  communityBody:
+    "Licenciado sob MIT e moldado por contribuidores de runtimes, provedores, plataformas, documentação e testes.",
+  communityLinksAria: "Links da comunidade",
+  contribute: "Contribuir",
+};

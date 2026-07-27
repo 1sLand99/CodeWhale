@@ -225,6 +225,15 @@ pub fn notify_done_to<W: Write>(
         "emitting desktop notification"
     );
 
+    // Opt-in event-sound policy (#4817). A no-op unless
+    // `[notifications.event_sound].enabled = true`; errors are swallowed
+    // like every other best-effort terminal write in this module.
+    crate::tui::sound_policy::handle_notification_kind_to(
+        payload.kind(),
+        crate::tui::sound_policy::epoch_millis_now(),
+        sink,
+    );
+
     // macOS Notification Center: handled via osascript, not terminal escapes.
     #[cfg(target_os = "macos")]
     if Method::MacOS == effective {
@@ -768,6 +777,13 @@ pub fn settings(config: &crate::config::Config) -> Option<(Method, Duration, boo
     let notif = config.notifications_config();
     // Initialize completion sound mode from config.
     set_completion_sound(notif.completion_sound, notif.sound_file);
+    // Initialize the opt-in event-sound policy (#4817) from the sibling
+    // `[notifications.event_sound]` table. `completion_sound` active means
+    // the policy defers `turn-complete` to that channel (no double ding).
+    crate::tui::sound_policy::configure(crate::tui::sound_policy::EventSoundPolicy::from_config(
+        &notif.event_sound,
+        notif.completion_sound != crate::config::CompletionSound::Off,
+    ));
     let method = match notif.method {
         crate::config::NotificationMethod::Auto => Method::Auto,
         crate::config::NotificationMethod::Osc9 => Method::Osc9,

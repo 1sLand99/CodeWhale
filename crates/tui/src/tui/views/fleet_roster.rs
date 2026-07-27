@@ -30,6 +30,7 @@ use crate::fleet::worker_runtime::roster_member_agent_type;
 use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
 use crate::tui::app::App;
+use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,
     truncate_view_text,
@@ -137,7 +138,7 @@ impl FleetRosterView {
 
     fn footer_hints(&self) -> Vec<ActionHint> {
         vec![
-            ActionHint::new("↑/↓", "select"),
+            ActionHint::new("↑/↓", "move"),
             ActionHint::new("s/Enter", "setup"),
             ActionHint::new("w", tr(self.locale, MessageId::FleetRosterWorkers)),
             ActionHint::new("PgUp/PgDn", "scroll detail"),
@@ -308,7 +309,7 @@ impl FleetRosterView {
         let mut list_lines: Vec<Line> = Vec::with_capacity(visible_rows);
         for idx in first..(first + visible_rows).min(self.row_count()) {
             let is_selected = idx == self.selected;
-            let pointer = if is_selected { "▸ " } else { "  " };
+            let pointer = format!("{} ", crate::tui::glyphs::selection_marker(is_selected));
             let (text, base_style) = if idx == 0 {
                 (
                     format!(
@@ -329,10 +330,7 @@ impl FleetRosterView {
                 )
             };
             let style = if is_selected {
-                Style::default()
-                    .fg(palette::SELECTION_TEXT)
-                    .bg(palette::SELECTION_BG)
-                    .add_modifier(Modifier::BOLD)
+                menu_style::selected_row_style()
             } else {
                 base_style
             };
@@ -417,9 +415,8 @@ fn operator_detail_lines(operator: &OperatorInfo) -> Vec<Line<'static>> {
     detail_field(
         &mut lines,
         "Description",
-        "Your main session model is the operator. Fleet members are the workers it dispatches \
-         — via `agent` profile spawns and Workflow task({profile}). Change the operator's \
-         route via /model or /provider."
+        "The operator is your main session model; it dispatches Fleet workers via `agent` \
+         profile spawns and Workflow task({profile}). Change its route with /model or /provider."
             .to_string(),
     );
     lines
@@ -751,6 +748,7 @@ mod tests {
                 "builder",
                 "reviewer",
                 "verifier",
+                "consultant",
                 "synthesizer",
                 "general"
             ]

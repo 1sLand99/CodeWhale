@@ -3,6 +3,7 @@ import Link from "next/link";
 import { InstallCodeBlock } from "@/components/install-code-block";
 import { Whale } from "@/components/whale";
 import { getFacts } from "@/lib/facts";
+import { fill, getHome } from "@/lib/i18n/dictionaries";
 
 const REPO = "https://github.com/Hmbown/CodeWhale";
 
@@ -55,6 +56,11 @@ const SURFACES = [
 export default async function HomePage({ params }: { params: Promise<{ locale: string }> }) {
   const { locale } = await params;
   const isZh = locale === "zh";
+  // en/zh copy stays inline (copy-contract tests read it from this file);
+  // every other routed locale renders from the dictionary layer with the
+  // English dictionary as the build-time-guaranteed fallback.
+  const foreign = !isZh && locale !== "en";
+  const d = getHome(locale);
   const facts = await getFacts();
   const sourceVersion = facts.version ?? "unknown";
   const publishedRelease = facts.latestPublishedRelease;
@@ -75,7 +81,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
         <div className="product-container product-hero-grid">
           <div className="product-hero-copy">
             <p className="product-kicker">
-              {isZh ? "数据与代码如海" : "An ocean of data and code"}
+              {isZh ? "数据与代码如海" : foreign ? d.kicker : "An ocean of data and code"}
             </p>
             <h1>
               {isZh ? (
@@ -83,6 +89,12 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
                   潜入深海，
                   <br />
                   <span>你不必亲自下潜。</span>
+                </>
+              ) : foreign ? (
+                <>
+                  {d.heroTitleA}
+                  <br />
+                  <span>{d.heroTitleB}</span>
                 </>
               ) : (
                 <>
@@ -95,14 +107,16 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
             <p>
               {isZh
                 ? "Codewhale 把大模型的杠杆交给普通人：在你的终端里读取仓库、修改文件、运行检查、留下收据。不必已经是程序员，也能把东西做出来——运行在你自己的机器上。"
-                : "Codewhale gives ordinary people the leverage of LLMs to build things. In your terminal it reads the repo, edits files, runs checks, and leaves a receipt — without assuming you already speak code. It runs on your machine."}
+                : foreign
+                  ? d.heroIntro
+                  : "Codewhale gives ordinary people the leverage of LLMs to build things. In your terminal it reads the repo, edits files, runs checks, and leaves a receipt — without assuming you already speak code. It runs on your machine."}
             </p>
             <div className="product-actions">
               <Link href={`/${locale}/install`} className="product-button product-button-primary">
-                {isZh ? "安装" : "Install"}
+                {isZh ? "安装" : foreign ? d.install : "Install"}
               </Link>
               <Link href={`/${locale}/docs`} className="product-button">
-                {isZh ? "文档" : "Docs"}
+                {isZh ? "文档" : foreign ? d.docs : "Docs"}
               </Link>
               <a href={REPO} className="product-button">
                 GitHub
@@ -111,23 +125,35 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
             <div className="product-install">
               <InstallCodeBlock
                 cmd="npm install -g codewhale"
-                copyLabel={isZh ? "复制" : "Copy"}
-                copiedLabel={isZh ? "已复制 ✓" : "Copied ✓"}
+                copyLabel={isZh ? "复制" : foreign ? d.copy : "Copy"}
+                copiedLabel={isZh ? "已复制 ✓" : foreign ? d.copied : "Copied ✓"}
               />
             </div>
             <p className="product-facts">
               {publishedRelease
                 ? isZh
                   ? `最新发布 ${publishedRelease.tag}`
-                  : `Latest release ${publishedRelease.tag}`
+                  : foreign
+                    ? fill(d.latestRelease, { tag: publishedRelease.tag })
+                    : `Latest release ${publishedRelease.tag}`
                 : isZh
                   ? "发布状态暂不可用"
-                  : "Release status unavailable"}{" "}
+                  : foreign
+                    ? d.releaseUnavailable
+                    : "Release status unavailable"}{" "}
               <span>·</span>{" "}
               {isZh
                 ? `${sourceIsPublished ? "当前源码" : "源码候选版"} v${sourceVersion}：`
-                : `${sourceIsPublished ? "Current source" : "Source candidate"} v${sourceVersion}: `}
-              {providerCount} {isZh ? "个提供商路由" : "provider routes"}{" "}
+                : foreign
+                  ? `${sourceIsPublished ? d.currentSource : d.sourceCandidate} v${sourceVersion}: `
+                  : `${sourceIsPublished ? "Current source" : "Source candidate"} v${sourceVersion}: `}
+              {isZh ? (
+                `${providerCount} 个提供商路由`
+              ) : foreign ? (
+                fill(d.providerRoutes, { count: providerCount })
+              ) : (
+                `${providerCount} provider routes`
+              )}{" "}
               <span>·</span> {facts.license ?? "MIT"}
             </p>
           </div>
@@ -138,7 +164,9 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
               alt={
                 isZh
                   ? `Codewhale v${sourceVersion} 的全新终端会话，使用本地 Ollama 路由且没有空的 Work 栏`
-                  : `Fresh Codewhale v${sourceVersion} terminal session using a local Ollama route, with no empty Work bar`
+                  : foreign
+                    ? fill(d.screenshotAlt, { version: sourceVersion })
+                    : `Fresh Codewhale v${sourceVersion} terminal session using a local Ollama route, with no empty Work bar`
               }
               width={1280}
               height={720}
@@ -148,7 +176,12 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
             <figcaption>
               {isZh
                 ? `v${sourceVersion} ${sourceIsPublished ? "已发布版" : "源码候选"} · 本地 Ollama 路由 · Plan / Act / Operate`
-                : `v${sourceVersion} ${sourceIsPublished ? "published release" : "source candidate"} · local Ollama route · Plan / Act / Operate`}
+                : foreign
+                  ? fill(d.figcaption, {
+                      version: sourceVersion,
+                      state: sourceIsPublished ? d.publishedRelease : d.figcaptionSourceCandidate,
+                    })
+                  : `v${sourceVersion} ${sourceIsPublished ? "published release" : "source candidate"} · local Ollama route · Plan / Act / Operate`}
             </figcaption>
           </figure>
         </div>
@@ -159,6 +192,8 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
           <h2>
             {isZh ? (
               <>终端原生的水下壳。模型与提供商中立。本地优先。</>
+            ) : foreign ? (
+              <>{d.proofHeading}</>
             ) : (
               <>An underwater terminal shell. Model-neutral. Local-first.</>
             )}
@@ -166,7 +201,9 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
           <p>
             {isZh
               ? "连接你已有的托管、网关或本地模型。Codewhale 在你的机器上运行；模型是可选择的组件，不是产品本身。Plan / Act / Operate 与明确的审批边界，让深潜也保持可控。"
-              : "Bring the hosted, gateway, or local model you already use. Codewhale runs on your machine and treats the model as a selectable component—not the product. Plan / Act / Operate and explicit permission postures keep the deep dive under your control."}
+              : foreign
+                ? d.proofBody
+                : "Bring the hosted, gateway, or local model you already use. Codewhale runs on your machine and treats the model as a selectable component—not the product. Plan / Act / Operate and explicit permission postures keep the deep dive under your control."}
           </p>
         </div>
       </section>
@@ -174,11 +211,15 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
       <section className="product-workflow">
         <div className="product-container">
           <h2>
-            {isZh ? "从任务到经过验证的改动。" : "From task to verified change."}
+            {isZh ? "从任务到经过验证的改动。" : foreign ? d.workflowHeading : "From task to verified change."}
           </h2>
           <ol className="product-workflow-steps">
             {WORKFLOW.map((step, index) => {
-              const [title, description] = isZh ? step.zh : step.en;
+              const [title, description] = isZh
+                ? step.zh
+                : foreign
+                  ? d.workflow[index]
+                  : step.en;
               return (
                 <li key={title}>
                   <span>{String(index + 1).padStart(2, "0")}</span>
@@ -188,7 +229,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
               );
             })}
           </ol>
-          <div className="product-receipt" aria-label={isZh ? "工作流程示例" : "Example work receipt"}>
+          <div className="product-receipt" aria-label={isZh ? "工作流程示例" : foreign ? d.receiptAria : "Example work receipt"}>
             <span>$ codewhale exec &quot;fix the failing test&quot;</span>
             <span>inspect&nbsp;&nbsp; repository and instructions</span>
             <span>act&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; edit through the selected permission posture</span>
@@ -208,6 +249,12 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
                   <br />
                   <span>你的边界。</span>
                 </>
+              ) : foreign ? (
+                <>
+                  {d.boundariesHeadingA}
+                  <br />
+                  <span>{d.boundariesHeadingB}</span>
+                </>
               ) : (
                 <>
                   Your model.
@@ -219,25 +266,33 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
             <p>
               {isZh
                 ? "显式选择模型、工作模式与权限姿态。Codewhale 不会把未知成本显示成零，也不会把预览功能说成已发布产品。"
-                : "Choose the model, working mode, and permission posture explicitly. Unknown cost stays unknown, and preview surfaces stay labeled as such."}
+                : foreign
+                  ? d.boundariesBody
+                  : "Choose the model, working mode, and permission posture explicitly. Unknown cost stays unknown, and preview surfaces stay labeled as such."}
             </p>
           </div>
           <dl className="product-boundary-list">
             <div>
-              <dt>{providerCount} {isZh ? "个提供商路由" : "provider routes"}</dt>
-              <dd>{isZh ? "托管、网关与本地模型" : "Hosted, gateway, and local models"}</dd>
+              <dt>
+                {isZh
+                  ? `${providerCount} 个提供商路由`
+                  : foreign
+                    ? fill(d.providerRoutes, { count: providerCount })
+                    : `${providerCount} provider routes`}
+              </dt>
+              <dd>{isZh ? "托管、网关与本地模型" : foreign ? d.hostedGatewayLocal : "Hosted, gateway, and local models"}</dd>
             </div>
             <div>
               <dt>Plan · Act · Operate</dt>
-              <dd>{isZh ? "从只读规划到自主执行" : "Read-only planning through autonomous operation"}</dd>
+              <dd>{isZh ? "从只读规划到自主执行" : foreign ? d.planActOperateDesc : "Read-only planning through autonomous operation"}</dd>
             </div>
             <div>
               <dt>Ask · Auto-Review · Full Access</dt>
-              <dd>{isZh ? "为任务选择权限姿态" : "Choose the permission posture for the work"}</dd>
+              <dd>{isZh ? "为任务选择权限姿态" : foreign ? d.askAutoReviewDesc : "Choose the permission posture for the work"}</dd>
             </div>
             <div>
               <dt>TUI · exec · web · API</dt>
-              <dd>{isZh ? "交互式与无头运行时界面" : "Interactive and headless runtime surfaces"}</dd>
+              <dd>{isZh ? "交互式与无头运行时界面" : foreign ? d.tuiExecWebDesc : "Interactive and headless runtime surfaces"}</dd>
             </div>
           </dl>
         </div>
@@ -246,11 +301,15 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
       <section className="product-surfaces">
         <div className="product-container">
           <h2>
-            {isZh ? "在工作发生的地方使用运行时。" : "Use the runtime where the work happens."}
+            {isZh ? "在工作发生的地方使用运行时。" : foreign ? d.surfacesHeading : "Use the runtime where the work happens."}
           </h2>
           <div className="product-surface-list">
-            {SURFACES.map((surface) => {
-              const [name, description] = isZh ? surface.zh : surface.en;
+            {SURFACES.map((surface, index) => {
+              const [name, description] = isZh
+                ? surface.zh
+                : foreign
+                  ? d.surfaces[index]
+                  : surface.en;
               return (
                 <div key={name}>
                   <strong>{name}</strong>
@@ -260,26 +319,26 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
             })}
           </div>
           <Link href={`/${locale}/runtime`}>
-            {isZh ? "查看运行时界面与稳定性说明 →" : "See runtime surfaces and stability notes →"}
+            {isZh ? "查看运行时界面与稳定性说明 →" : foreign ? d.runtimeLink : "See runtime surfaces and stability notes →"}
           </Link>
         </div>
       </section>
 
       <section className="product-install-band">
         <div className="product-container product-install-grid">
-          <h2>{isZh ? "从一条命令开始。" : "Start with one command."}</h2>
+          <h2>{isZh ? "从一条命令开始。" : foreign ? d.installBandHeading : "Start with one command."}</h2>
           <div>
             <InstallCodeBlock
               cmd="npm install -g codewhale"
-              copyLabel={isZh ? "复制" : "Copy"}
-              copiedLabel={isZh ? "已复制 ✓" : "Copied ✓"}
+              copyLabel={isZh ? "复制" : foreign ? d.copy : "Copy"}
+              copiedLabel={isZh ? "已复制 ✓" : foreign ? d.copied : "Copied ✓"}
             />
             <p>
-              Cargo · {isZh ? "预编译包" : "Binaries"} · Docker · Nix · Windows · Android / Termux ·{" "}
-              {isZh ? "中国镜像" : "China mirrors"}
+              Cargo · {isZh ? "预编译包" : foreign ? d.binaries : "Binaries"} · Docker · Nix · Windows · Android / Termux ·{" "}
+              {isZh ? "中国镜像" : foreign ? d.chinaMirrors : "China mirrors"}
             </p>
             <Link href={`/${locale}/install`}>
-              {isZh ? "阅读安装指南 →" : "Read the install guide →"}
+              {isZh ? "阅读安装指南 →" : foreign ? d.installGuideLink : "Read the install guide →"}
             </Link>
           </div>
         </div>
@@ -292,17 +351,19 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
             <Whale size={180} />
           </div>
           <div>
-            <h2>{isZh ? "公开构建" : "Built in public"}</h2>
+            <h2>{isZh ? "公开构建" : foreign ? d.communityHeading : "Built in public"}</h2>
             <p>
               {isZh
                 ? "Codewhale 采用 MIT 许可证，由来自不同时区、语言和技术背景的贡献者共同塑造。"
-                : "MIT-licensed and shaped by contributors across runtimes, providers, platforms, documentation, and tests."}
+                : foreign
+                  ? d.communityBody
+                  : "MIT-licensed and shaped by contributors across runtimes, providers, platforms, documentation, and tests."}
             </p>
           </div>
-          <nav aria-label={isZh ? "社区链接" : "Community links"}>
+          <nav aria-label={isZh ? "社区链接" : foreign ? d.communityLinksAria : "Community links"}>
             <a href={REPO}>GitHub</a>
             <a href={`${REPO}/issues`}>Issues</a>
-            <Link href={`/${locale}/contribute`}>{isZh ? "参与贡献" : "Contribute"}</Link>
+            <Link href={`/${locale}/contribute`}>{isZh ? "参与贡献" : foreign ? d.contribute : "Contribute"}</Link>
             {publishedRelease ? (
               <a href={publishedRelease.url}>{publishedRelease.tag}</a>
             ) : (

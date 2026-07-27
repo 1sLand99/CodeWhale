@@ -18,6 +18,7 @@ use ratatui::{
 
 use crate::deepseek_theme::Theme;
 use crate::palette;
+use crate::tui::menu_style;
 use crate::tui::ui_text::truncate_line_to_width;
 
 // ---------------------------------------------------------------------------
@@ -526,9 +527,7 @@ pub fn render_file_tree(
             let display = truncate_line_to_width(&raw, content_width.max(1));
 
             let style = if is_selected {
-                Style::default()
-                    .fg(palette::SELECTION_TEXT)
-                    .bg(palette::SELECTION_BG)
+                menu_style::selected_row_bg_style().fg(palette::SELECTION_TEXT)
             } else {
                 Style::default().fg(palette::TEXT_PRIMARY)
             };

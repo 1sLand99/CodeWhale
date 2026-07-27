@@ -26,7 +26,7 @@ pub enum TurnOutcomeStatus {
 
 /// Provider/model route resolved for a model-backed turn.
 ///
-/// Carried with `TurnStarted` so hosts can retain provenance until the matching
+/// Emitted at `RouteDispatched` so hosts retain provenance until the matching
 /// `TurnComplete` without relying on mutable global selection state. Non-model
 /// turns such as composer `!` shell commands use no route.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +37,90 @@ pub struct TurnRoute {
     pub provider_identity: String,
     pub model: String,
     pub auto_model: bool,
+    /// Secret-free proof of the endpoint and credential generation the turn's
+    /// client was *installed* on, minted from that client rather than re-read
+    /// from config later.
+    ///
+    /// Hosts that dispatch follow-up work derived from this turn's context must
+    /// authorize it against this receipt: config is mutable and web config
+    /// events are drained ahead of engine events, so anything a host resolves
+    /// while handling `TurnStarted` may already describe a different route.
+    /// `None` when no concrete client was installed (injected-client engines,
+    /// or a client that failed to construct).
+    pub receipt: Option<crate::route_receipt::TurnRouteReceipt>,
+    /// Billing evidence for the request that was actually put on the wire.
+    ///
+    /// `None` at `TurnStarted`: a lifecycle start is not a dispatch, and a
+    /// route that has not been sent has no billing time, no metering surface,
+    /// and no endpoint to attest. Populated exactly once, at the wire
+    /// boundary, and delivered on `RouteDispatched`. Consumers that price a
+    /// turn must treat `None` as *unknown*, never as a zero-cost turn.
+    pub billing: Option<RouteBillingEnvelope>,
+    /// Endpoint this turn's client was frozen against, verbatim.
+    ///
+    /// [`crate::route_receipt::TurnRouteReceipt`] deliberately keeps only a
+    /// redacted endpoint identity, which billing cannot classify from, so the
+    /// non-secret URL travels here. Captured from the resolved route candidate
+    /// at the client-freeze boundary, before any ambient selection state can
+    /// move. Empty only when no endpoint was captured, which bills Unknown
+    /// rather than guessing.
+    pub base_url: String,
+    /// Credential/pay-mode product truth captured from the route-scoped config
+    /// at the same instant.
+    ///
+    /// Together with `provider_identity` and `base_url` this is a complete
+    /// [`crate::route_billing::DispatchedReceipt`]: every fact billing needs,
+    /// frozen at the client-freeze boundary. Consumers must classify from
+    /// these fields and must never re-read an ambient `Config` after the turn
+    /// starts — by `TurnComplete` a provider switch, an auto-router hop, or a
+    /// `/provider` change can have moved it elsewhere.
+    pub billing_product: crate::route_billing::RouteProduct,
+}
+
+/// Dispatch-time billing evidence. Separate from [`TurnRoute`] so the type
+/// system — not a convention — enforces that no caller can read a billing
+/// surface, endpoint fingerprint, or dispatch instant off a route that was
+/// only *planned*.
+///
+/// This is deliberately *not* the same thing as the classification receipt
+/// carried by [`TurnRoute::base_url`] / [`TurnRoute::billing_product`], and
+/// the two are not merged. They are captured at different instants and answer
+/// different questions:
+///
+/// - `base_url` + `billing_product` + `provider_identity` are frozen at the
+///   **client-freeze** boundary and answer *which route is this and how does
+///   it bill* — a [`crate::route_billing::DispatchedReceipt`]. They must be
+///   readable from `TurnStarted` onward so a child turn arriving mid-flight
+///   can be billed against the parent's frozen route.
+/// - This envelope is stamped at the **wire** boundary and answers *what was
+///   actually put on the wire, when*. A planned-but-unsent route has no
+///   metering surface and no dispatch instant, so it must be structurally
+///   absent rather than defaulted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteBillingEnvelope {
+    pub billing_surface: Option<String>,
+    pub endpoint_fingerprint: Option<String>,
+    pub billing_mode: crate::cost_status::RouteBillingMode,
+    pub dispatched_at: DateTime<Utc>,
+}
+
+impl TurnRoute {
+    /// Priceable envelope for this route, or `None` when the route was never
+    /// dispatched. Deliberately not a `Default`-filled envelope: an undispatched
+    /// route has no cost, and "no cost" is not "zero cost".
+    #[must_use]
+    pub fn cost_envelope(&self) -> Option<crate::cost_status::EffectiveRouteEnvelope> {
+        let billing = self.billing.as_ref()?;
+        Some(crate::cost_status::EffectiveRouteEnvelope {
+            provider: self.provider,
+            provider_identity: self.provider_identity.clone(),
+            model: self.model.clone(),
+            billing_surface: billing.billing_surface.clone(),
+            endpoint_fingerprint: billing.endpoint_fingerprint.clone(),
+            billing_mode: billing.billing_mode,
+            dispatched_at: billing.dispatched_at,
+        })
+    }
 }
 
 /// Structured lifecycle metadata paired with a human-readable
@@ -145,8 +229,20 @@ pub enum Event {
     TurnStarted {
         turn_id: String,
         created_at: DateTime<Utc>,
+        /// Legacy/non-model hosts may still attach a route at start. Model
+        /// turns emit it separately at the real provider dispatch boundary.
         route: Option<TurnRoute>,
     },
+
+    /// Bounded tool-field projection from a prepared model-client request.
+    /// Delivery remains unknown; this event is emitted before connection setup.
+    ToolRequestSnapshot {
+        snapshot: crate::tool_inspection::ToolInspectionSnapshot,
+    },
+
+    /// Immutable billing route captured immediately before the first provider
+    /// request, after snapshots and other potentially slow pre-dispatch work.
+    RouteDispatched { turn_id: String, route: TurnRoute },
 
     /// The turn is complete (no more tool calls)
     TurnComplete {
@@ -251,6 +347,10 @@ pub enum Event {
     /// monotonic seq + the typed `MailboxMessage` so the UI can route each
     /// envelope to the correct in-transcript card.
     SubAgentMailbox {
+        /// Engine turn identity. Sequence numbers restart for every mailbox,
+        /// so consumers must deduplicate on `(turn_id, seq)`, never `seq`
+        /// alone.
+        turn_id: String,
         seq: u64,
         message: crate::tools::subagent::MailboxMessage,
     },
@@ -275,6 +375,17 @@ pub enum Event {
 
     /// Status message for UI display
     Status { message: String },
+
+    /// Rendered `/preview-request` manifest (#1004).
+    ///
+    /// The engine is the only authority that can rebuild the exact next-turn
+    /// request, so the manifest is rendered there and delivered as text. The
+    /// payload is normally a redacted, typed manifest — never a request body.
+    /// The explicit `base-prompt` mode may instead carry only the exact base
+    /// prompt; it never carries runtime/system additions. There is no error
+    /// variant: a manifest that cannot describe something says so in a typed
+    /// unavailable section instead.
+    RequestManifestReady { rendered: String },
 
     /// Pause terminal input events (for interactive subprocesses).
     PauseEvents {

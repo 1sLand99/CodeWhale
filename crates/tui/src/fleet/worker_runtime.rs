@@ -19,7 +19,7 @@ use codewhale_protocol::fleet::{
     FleetWorkerSpec,
 };
 
-use super::profile::AgentProfile;
+use super::profile::{AgentProfile, canonical_public_role_name};
 use crate::config::{ApiProvider, Config};
 use crate::route_runtime::{resolve_route_candidate, resolve_runtime_route};
 use crate::tools::subagent::{AgentWorkerSpec, AgentWorkerToolProfile, FleetRole};
@@ -37,6 +37,18 @@ pub fn validate_task_agent_profiles(
         resolve_task_agent_profile(task, agent_profiles)?;
     }
     Ok(())
+}
+
+/// Rewrite compatibility-only advisory role names before a Fleet run is
+/// persisted. Replayed older ledgers are still canonicalized at projection
+/// boundaries, but every newly created durable task records `consultant`.
+pub(crate) fn canonicalize_fleet_task_roles(tasks: &mut [FleetTaskSpec]) {
+    for task in tasks {
+        let Some(role) = task.worker.as_mut().and_then(|worker| worker.role.as_mut()) else {
+            continue;
+        };
+        *role = canonical_public_role_name(role.trim());
+    }
 }
 
 /// Validate that every task's pinned model route actually resolves before any
@@ -109,7 +121,9 @@ fn validate_fleet_reasoning_effort(
     let agent_profile = resolve_task_agent_profile(task, agent_profiles)
         .ok()
         .flatten();
-    let Some(effort) = effective_fleet_reasoning_effort(agent_profile) else {
+    let Some(effort) =
+        effective_fleet_reasoning_effort_for_role(task.worker.as_ref(), agent_profile)
+    else {
         return Ok(());
     };
     if matches!(effort.as_str(), "inherit" | "auto" | "off") {
@@ -171,7 +185,9 @@ pub fn fleet_task_to_worker_spec_with_profiles(
         model_source,
     );
     requested_runtime.provider = explicit_fleet_provider_id(agent_profile);
-    requested_runtime.reasoning_effort = effective_fleet_reasoning_effort(agent_profile);
+    if let Some(reasoning_effort) = effective_fleet_reasoning_effort(agent_profile) {
+        requested_runtime.reasoning_effort = Some(reasoning_effort);
+    }
     if let Some(agent_profile) = agent_profile
         && let Some(profile_depth) = agent_profile.profile.delegation.max_spawn_depth
     {
@@ -475,7 +491,7 @@ pub(crate) fn resolve_fleet_route_with_config(
             ))
             .to_string(),
         ),
-        reasoning_effort: effective_fleet_reasoning_effort(agent_profile),
+        reasoning_effort: effective_fleet_reasoning_effort_for_role(worker_profile, agent_profile),
         role_source: role_source.map(str::to_string),
         loadout_source: loadout_source.map(str::to_string),
         model_class_source: model_class_source.map(str::to_string),
@@ -537,7 +553,7 @@ pub(crate) fn resolve_fleet_route_from_worker_report(
             ))
             .to_string(),
         ),
-        reasoning_effort: effective_fleet_reasoning_effort(agent_profile),
+        reasoning_effort: effective_fleet_reasoning_effort_for_role(worker_profile, agent_profile),
         role_source: role_source.map(str::to_string),
         loadout_source: loadout_source.map(str::to_string),
         model_class_source: model_class_source.map(str::to_string),
@@ -590,17 +606,11 @@ fn fleet_task_prompt_with_profile(
     task_spec: &FleetTaskSpec,
     agent_profile: Option<&AgentProfile>,
 ) -> String {
-    let role = task_spec
-        .worker
-        .as_ref()
-        .and_then(|worker| worker.role.as_deref())
-        .or_else(|| agent_profile.map(|profile| profile.profile.role.name.as_str()))
-        .map(str::trim)
-        .filter(|role| !role.is_empty())
-        .unwrap_or("general");
+    let role = effective_fleet_role(task_spec.worker.as_ref(), agent_profile)
+        .unwrap_or_else(|| "general".to_string());
     let mut prompt = String::new();
     prompt.push_str("You have been summoned as a Codewhale Fleet member (");
-    prompt.push_str(role);
+    prompt.push_str(&role);
     prompt.push_str(") by the Fleet orchestrator.\n\n");
     prompt.push_str("Fleet operating contract:\n");
     prompt.push_str("- Work only the assigned slice; keep sibling or topology assumptions out of your answer.\n");
@@ -702,13 +712,13 @@ fn effective_fleet_role_with_source(
         .and_then(|worker| worker.role.as_deref())
         .map(str::trim)
         .filter(|role| !role.is_empty())
-        .map(str::to_string)
+        .map(canonical_public_role_name)
         .map(|role| (Some(role), Some("task.role")))
         .unwrap_or_else(|| {
             agent_profile
                 .map(|profile| {
                     (
-                        Some(profile.profile.role.name.clone()),
+                        Some(canonical_public_role_name(&profile.profile.role.name)),
                         Some("agent_profile.role"),
                     )
                 })
@@ -831,11 +841,21 @@ pub(crate) fn effective_fleet_reasoning_effort(
         .map(str::to_string)
 }
 
-/// The explicit reasoning/thinking tier a fleet worker should launch with.
+fn effective_fleet_reasoning_effort_for_role(
+    worker_profile: Option<&FleetTaskWorkerProfile>,
+    agent_profile: Option<&AgentProfile>,
+) -> Option<String> {
+    effective_fleet_reasoning_effort(agent_profile).or_else(|| {
+        let role = effective_fleet_role(worker_profile, agent_profile);
+        WorkerRuntimeProfile::for_role(fleet_role_to_agent_type(role.as_deref())).reasoning_effort
+    })
+}
+
+/// The effective reasoning/thinking tier a Fleet worker should launch with.
 ///
-/// This is the launch-side twin of the receipt/runtime-profile field: it reads
-/// only the resolved AgentProfile tier, so task model overrides can change the
-/// model without accidentally inventing a thinking tier.
+/// This is the launch-side twin of the receipt/runtime-profile field: an
+/// explicit resolved AgentProfile tier wins, otherwise the selected role's
+/// documented default applies. Task model overrides do not invent a tier.
 pub(crate) fn fleet_worker_launch_reasoning_effort(
     task_spec: &FleetTaskSpec,
     agent_profiles: &[AgentProfile],
@@ -843,7 +863,7 @@ pub(crate) fn fleet_worker_launch_reasoning_effort(
     let agent_profile = resolve_task_agent_profile(task_spec, agent_profiles)
         .ok()
         .flatten();
-    effective_fleet_reasoning_effort(agent_profile)
+    effective_fleet_reasoning_effort_for_role(task_spec.worker.as_ref(), agent_profile)
 }
 
 /// The route (model selector + optional explicit provider id) that a fleet
@@ -919,14 +939,14 @@ pub(crate) fn fleet_role_to_agent_type(role: Option<&str>) -> FleetRole {
         Some("builder") => FleetRole::Builder,
         Some("verifier") | Some("tester") => FleetRole::Verifier,
         Some("planner") => FleetRole::Planner,
-        // Advisory counsel (#4752). "advisor" is accepted because that is what
-        // people call it before they learn the roster name.
-        Some("oracle") | Some("advisor") => FleetRole::Oracle,
+        // Advisory counsel (#4752). `oracle` and `advisor` are compatibility
+        // aliases for the canonical public role name, `consultant`.
+        Some("consultant") | Some("oracle") | Some("advisor") => FleetRole::Consultant,
         Some("explorer") => FleetRole::Scout,
         // Coordination happens through delegation, which needs the full
         // General surface (#fleet-roster cutover (v0.8.67)). The operator is
-        // the helm of the whole operation (it assigns managers to workflows);
-        // the manager is the middle manager of one workflow. Both coordinate,
+        // the helm of the overall work (it assigns managers to Workflows);
+        // the manager is the middle manager of one Workflow. Both coordinate,
         // so both get the General surface — explicitly, not by fall-through.
         Some("manager") | Some("coordinator") | Some("operator") => FleetRole::Worker,
         // Synthesis is read-only, no shell: it must never fall through to
@@ -1515,13 +1535,24 @@ mod tests {
 
     #[test]
     fn fleet_role_operator_maps_to_general_explicitly() {
-        // The operator coordinates the whole operation (assigns managers to
+        // The operator coordinates the overall work (assigns managers to
         // workflows), so it needs the full General surface — by an explicit
         // match arm, not the unknown-role fall-through.
         assert_eq!(
             fleet_role_to_agent_type(Some("operator")),
             FleetRole::Worker
         );
+    }
+
+    #[test]
+    fn consultant_and_legacy_advisory_aliases_share_the_consultant_posture() {
+        for role in ["consultant", "oracle", "advisor"] {
+            assert_eq!(
+                fleet_role_to_agent_type(Some(role)),
+                FleetRole::Consultant,
+                "role {role}"
+            );
+        }
     }
 
     #[test]
@@ -1647,6 +1678,50 @@ mod tests {
         assert_eq!(route.loadout_source, None);
         assert_eq!(route.model_route.as_deref(), Some("inherit"));
         assert_eq!(route.model_source.as_deref(), Some("resolver.default"));
+    }
+
+    #[test]
+    fn advisory_task_aliases_emit_consultant_in_prompts_and_route_receipts() {
+        for alias in ["oracle", "advisor"] {
+            let task = fleet_task(
+                &format!("legacy-{alias}"),
+                Some(worker_profile(
+                    None,
+                    Some(alias),
+                    None,
+                    None,
+                    None,
+                    vec!["read_file"],
+                )),
+            );
+
+            let prompt = fleet_task_prompt(&task);
+            assert!(
+                prompt.contains("Fleet member (consultant)"),
+                "prompt must canonicalize {alias}: {prompt}"
+            );
+            assert!(
+                !prompt.contains(&format!("Fleet member ({alias})")),
+                "prompt must not emit compatibility alias {alias}: {prompt}"
+            );
+
+            let resolved = resolve_fleet_route(&task, &[], None)
+                .expect("compatibility role should resolve a receipt route");
+            assert_eq!(resolved.role.as_deref(), Some("consultant"));
+            assert_eq!(resolved.role_source.as_deref(), Some("task.role"));
+
+            let reported = resolve_fleet_route_from_worker_report(
+                &task,
+                &[],
+                None,
+                "deepseek",
+                None,
+                "deepseek-v4-pro",
+            )
+            .expect("worker-reported route should retain canonical role metadata");
+            assert_eq!(reported.role.as_deref(), Some("consultant"));
+            assert_eq!(reported.role_source.as_deref(), Some("task.role"));
+        }
     }
 
     #[test]
@@ -1858,6 +1933,69 @@ mod tests {
         assert_eq!(permissions.profile_id.as_deref(), Some("reviewer"));
         assert_eq!(permissions.profile_origin.as_deref(), Some("workspace"));
         assert_eq!(permissions.source, "worker_runtime_profile");
+    }
+
+    #[test]
+    fn role_only_consultant_aliases_keep_high_reasoning_and_locked_posture() {
+        let worker = FleetWorkerSpec {
+            id: "worker-1".to_string(),
+            name: "Worker".to_string(),
+            host: FleetHostSpec::Local,
+            trust_level: None,
+            labels: Default::default(),
+            capabilities: vec![],
+            max_concurrent_tasks: None,
+        };
+
+        for parent_effort in [None, Some("low")] {
+            for role in ["consultant", "oracle", "advisor"] {
+                let task = fleet_task(
+                    &format!("advice-{role}"),
+                    Some(worker_profile(None, Some(role), None, None, None, vec![])),
+                );
+                let mut parent = WorkerRuntimeProfile::for_role(FleetRole::Worker);
+                parent.reasoning_effort = parent_effort.map(str::to_string);
+                let spec = fleet_task_to_worker_spec_with_profiles(
+                    "worker-1",
+                    "run-1",
+                    &task,
+                    &worker,
+                    "deepseek-v4-pro",
+                    std::path::Path::new("/tmp"),
+                    &[],
+                    Some(&parent),
+                )
+                .expect("role-only consultant should produce a worker spec");
+
+                assert_eq!(spec.role.as_deref(), Some("consultant"));
+                assert_eq!(spec.agent_type, FleetRole::Consultant);
+                assert_eq!(spec.model, "deepseek-v4-pro", "session model is inherited");
+                assert_eq!(spec.runtime_profile.model, ModelRoute::Inherit);
+                assert_eq!(
+                    spec.runtime_profile.provider, None,
+                    "provider is not invented"
+                );
+                assert_eq!(
+                    spec.runtime_profile.reasoning_effort.as_deref(),
+                    Some("high"),
+                    "role={role}, parent={parent_effort:?}"
+                );
+                assert!(!spec.runtime_profile.permissions.write);
+                assert!(!spec.runtime_profile.permissions.network);
+                assert_eq!(
+                    spec.runtime_profile.shell,
+                    crate::worker_profile::ShellPolicy::None
+                );
+                assert_eq!(
+                    fleet_worker_launch_reasoning_effort(&task, &[]).as_deref(),
+                    Some("high")
+                );
+                let route = resolve_fleet_route(&task, &[], Some("deepseek-v4-pro"))
+                    .expect("receipt route resolves");
+                assert_eq!(route.role.as_deref(), Some("consultant"));
+                assert_eq!(route.reasoning_effort.as_deref(), Some("high"));
+            }
+        }
     }
 
     #[test]

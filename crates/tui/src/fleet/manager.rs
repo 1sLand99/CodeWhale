@@ -113,6 +113,21 @@ pub struct FleetExecutorTickReport {
     pub terminals: usize,
 }
 
+/// Typed Fleet control-plane refusals.
+///
+/// These are *state conflicts*, not transient backend faults, and the control
+/// surface classifies them by type. Matching on the message text instead made
+/// the classification depend on prose that any refactor could silently change.
+#[derive(Debug, thiserror::Error)]
+pub enum FleetControlError {
+    /// The exact worker exists (or does not) but has no leased task to cancel.
+    #[error("worker {worker_id} has no running fleet task")]
+    NoActiveTask { worker_id: String },
+    /// No durable run with that exact id in this workspace's ledger.
+    #[error("no fleet run with id {run_id}")]
+    UnknownRun { run_id: String },
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct FleetStatusSnapshot {
     pub runs: usize,
@@ -299,6 +314,7 @@ impl FleetManager {
         max_workers: usize,
     ) -> Result<FleetRunReport> {
         validate_task_spec_document(&doc)?;
+        worker_runtime::canonicalize_fleet_task_roles(&mut doc.tasks);
         let roster = self.agent_roster();
         worker_runtime::validate_task_agent_profiles(&doc.tasks, roster.members())?;
         worker_runtime::validate_fleet_task_routes(
@@ -755,7 +771,10 @@ impl FleetManager {
             .map(|task_spec| {
                 (
                     task_spec.objective.or(task_spec.description),
-                    task_spec.worker.and_then(|worker| worker.role),
+                    task_spec
+                        .worker
+                        .and_then(|worker| worker.role)
+                        .map(|role| super::profile::canonical_public_role_name(role.trim())),
                 )
             })
             .unwrap_or((None, None));
@@ -837,7 +856,10 @@ impl FleetManager {
     pub fn interrupt_worker(&self, worker_id: &str) -> Result<FleetWorkerInspection> {
         let state = self.ledger.rebuild_state()?;
         let Some(task) = active_task_for_worker(&state, worker_id) else {
-            bail!("worker {worker_id} has no running fleet task");
+            return Err(FleetControlError::NoActiveTask {
+                worker_id: worker_id.to_string(),
+            }
+            .into());
         };
         let cancelled = self.ledger.cancel_task_if_active(
             &task.entry.run_id,
@@ -3059,6 +3081,34 @@ mod tests {
         );
         let status = manager.run_status(&report.run_id).unwrap();
         assert_eq!(status.cancelled, 1);
+    }
+
+    #[test]
+    fn fleet_manager_inspect_canonicalizes_advisory_role_aliases() {
+        for alias in ["oracle", "advisor"] {
+            let tmp = TempDir::new().unwrap();
+            let manager = FleetManager::open(tmp.path()).unwrap();
+            let path = task_spec_file(&tmp, vec![role_task_with_retry("advice", alias, 1)]);
+            let report = manager.create_run_from_task_spec_path(&path, 1).unwrap();
+
+            let inspection = manager.inspect_worker(&report.worker_ids[0]).unwrap();
+            assert_eq!(
+                inspection.role.as_deref(),
+                Some("consultant"),
+                "inspection must not emit compatibility alias {alias}"
+            );
+            let state = manager.rebuild_state().unwrap();
+            let persisted_role = state
+                .runs
+                .get(&report.run_id.0)
+                .and_then(|run| run.task_specs[0].worker.as_ref())
+                .and_then(|worker| worker.role.as_deref());
+            assert_eq!(
+                persisted_role,
+                Some("consultant"),
+                "new durable task must not persist compatibility alias {alias}"
+            );
+        }
     }
 
     #[cfg(unix)]

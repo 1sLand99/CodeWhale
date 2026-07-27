@@ -27,6 +27,7 @@ use ratatui::{
 
 use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
+use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,
     render_panel_scroll_rail, render_underwater_surface,
@@ -470,9 +471,9 @@ impl ModalView for FilePickerView {
             inner,
             buf,
             &[
-                ActionHint::new("↑/↓", "select"),
+                ActionHint::new("↑/↓", "move"),
                 ActionHint::new("Enter", "insert @path"),
-                ActionHint::new("Esc", "close"),
+                ActionHint::new("Esc", "cancel"),
             ],
         );
         let visible = VISIBLE_ROWS.min(content.height.saturating_sub(2) as usize);
@@ -517,13 +518,11 @@ impl ModalView for FilePickerView {
                 let path = &self.candidates[self.filtered[idx]];
                 let selected = idx == self.selected;
                 let style = if selected {
-                    Style::default()
-                        .fg(palette::SELECTION_TEXT)
-                        .bg(palette::SELECTION_BG)
+                    menu_style::selected_row_bg_style().fg(palette::SELECTION_TEXT)
                 } else {
                     Style::default().fg(palette::TEXT_PRIMARY)
                 };
-                let prefix = if selected { "▶ " } else { "  " };
+                let prefix = format!("{} ", crate::tui::glyphs::selection_marker(selected));
                 let marker_field = if content.width >= 18 {
                     format!("{} ", self.relevance.markers_for(path))
                 } else {
@@ -1032,7 +1031,7 @@ mod tests {
                 .collect();
             let text = rows.join("\n");
 
-            for label in ["select", "insert @path", "close"] {
+            for label in ["move", "insert @path", "cancel"] {
                 assert!(text.contains(label), "{w}x{h}: missing footer '{label}'");
             }
             assert!(

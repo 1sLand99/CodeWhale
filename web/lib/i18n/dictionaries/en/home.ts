@@ -1,0 +1,60 @@
+import type { HomeDict } from "../types";
+
+export const home: HomeDict = {
+  kicker: "An ocean of data and code",
+  heroTitleA: "Dive into the deep",
+  heroTitleB: "so you don't have to.",
+  heroIntro:
+    "Codewhale gives ordinary people the leverage of LLMs to build things. In your terminal it reads the repo, edits files, runs checks, and leaves a receipt — without assuming you already speak code. It runs on your machine.",
+  install: "Install",
+  docs: "Docs",
+  copy: "Copy",
+  copied: "Copied ✓",
+  latestRelease: "Latest release {tag}",
+  releaseUnavailable: "Release status unavailable",
+  currentSource: "Current source",
+  sourceCandidate: "Source candidate",
+  providerRoutes: "{count} provider routes",
+  screenshotAlt:
+    "Fresh Codewhale v{version} terminal session using a local Ollama route, with no empty Work bar",
+  figcaption: "v{version} {state} · local Ollama route · Plan / Act / Operate",
+  publishedRelease: "published release",
+  figcaptionSourceCandidate: "source candidate",
+  proofHeading: "An underwater terminal shell. Model-neutral. Local-first.",
+  proofBody:
+    "Bring the hosted, gateway, or local model you already use. Codewhale runs on your machine and treats the model as a selectable component—not the product. Plan / Act / Operate and explicit permission postures keep the deep dive under your control.",
+  workflowHeading: "From task to verified change.",
+  workflow: [
+    ["Inspect", "Read the repository, its instructions, and the task."],
+    ["Act", "Edit files through explicit approval boundaries."],
+    ["Verify", "Run checks and inspect the result."],
+    ["Report", "Leave a concise, durable receipt."],
+  ],
+  receiptAria: "Example work receipt",
+  boundariesHeadingA: "Your model.",
+  boundariesHeadingB: "Your boundaries.",
+  boundariesBody:
+    "Choose the model, working mode, and permission posture explicitly. Unknown cost stays unknown, and preview surfaces stay labeled as such.",
+  hostedGatewayLocal: "Hosted, gateway, and local models",
+  planActOperateDesc: "Read-only planning through autonomous operation",
+  askAutoReviewDesc: "Choose the permission posture for the work",
+  tuiExecWebDesc: "Interactive and headless runtime surfaces",
+  surfacesHeading: "Use the runtime where the work happens.",
+  surfaces: [
+    ["TUI", "Interactive terminal work"],
+    ["codewhale exec", "Scripts and CI"],
+    ["Web client", "Loopback-only browser client"],
+    ["Runtime API + MCP", "Local integrations"],
+    ["Fleet", "Durable multi-agent work"],
+  ],
+  runtimeLink: "See runtime surfaces and stability notes →",
+  installBandHeading: "Start with one command.",
+  binaries: "Binaries",
+  chinaMirrors: "China mirrors",
+  installGuideLink: "Read the install guide →",
+  communityHeading: "Built in public",
+  communityBody:
+    "MIT-licensed and shaped by contributors across runtimes, providers, platforms, documentation, and tests.",
+  communityLinksAria: "Community links",
+  contribute: "Contribute",
+};

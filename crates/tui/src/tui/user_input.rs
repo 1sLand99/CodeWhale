@@ -9,6 +9,7 @@ use crate::palette;
 use crate::tools::user_input::{
     UserInputAnswer, UserInputQuestion, UserInputRequest, UserInputResponse,
 };
+use crate::tui::menu_style;
 use crate::tui::views::{ModalKind, ModalView, ViewAction, ViewEvent, render_modal_surface};
 
 fn modal_block(title: &str) -> Block<'static> {
@@ -36,10 +37,7 @@ fn push_option_lines(
     ticked: bool,
 ) {
     let row_style = if selected {
-        Style::default()
-            .fg(palette::SELECTION_TEXT)
-            .bg(palette::SELECTION_BG)
-            .bold()
+        menu_style::selected_row_style()
     } else {
         Style::default().fg(palette::TEXT_PRIMARY)
     };
@@ -48,7 +46,7 @@ fn push_option_lines(
     } else {
         Style::default().fg(palette::TEXT_MUTED)
     };
-    let prefix = if selected { ">" } else { " " };
+    let prefix = crate::tui::glyphs::selection_marker(selected);
     // Multi-select rows get a check-mark gutter when toggled into the pending
     // set, mirroring the affordance used in other multi-option pickers.
     let mark = if ticked { "✔ " } else { "  " };
@@ -459,7 +457,7 @@ impl ModalView for UserInputView {
                     ),
                     Span::styled(" quick pick", Style::default().fg(palette::TEXT_MUTED)),
                     Span::raw("  "),
-                    Span::styled("Up/Down", Style::default().fg(palette::WHALE_INFO).bold()),
+                    Span::styled("↑/↓", Style::default().fg(palette::WHALE_INFO).bold()),
                     Span::styled(" move", Style::default().fg(palette::TEXT_MUTED)),
                     Span::raw("  "),
                     Span::styled("Enter", Style::default().fg(palette::WHALE_INFO).bold()),
@@ -608,7 +606,7 @@ mod tests {
         assert!(rendered.contains("Submit 1 selected"));
         assert!(rendered.contains("toggle"));
         assert!(
-            rendered.contains(">  3) Confirm selection"),
+            rendered.contains("▸  3) Confirm selection"),
             "confirm row should display selected focus at its real quick-pick index"
         );
         assert!(
@@ -627,7 +625,7 @@ mod tests {
         let rendered = render_view(&view, 120, 40);
         assert!(rendered.contains("3) Other"));
         assert!(
-            rendered.contains(">  4) Confirm selection"),
+            rendered.contains("▸  4) Confirm selection"),
             "confirm should follow the optional Other row with selected focus"
         );
         assert!(!rendered.contains("5) Confirm selection"));

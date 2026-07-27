@@ -8,8 +8,8 @@ export async function generateMetadata({ params }: { params: Promise<{ locale: s
     locale,
     title: isZh ? "工作面板 · Codewhale 文档" : "Work Surface · Codewhale Docs",
     description: isZh
-      ? "带计数的 To-do 执行台账、update_plan 策略上下文，以及同一份工作状态的延续路径。"
-      : "The counted To-do execution ledger, update_plan strategy context, and how one work state stays continuous.",
+      ? "唯一的 To-do 执行台账、模型可见的 Work grounding，以及同一份工作状态的延续路径。"
+      : "The single canonical To-do ledger, model-facing Work grounding, and how one work state stays continuous.",
   });
 }
 
@@ -26,14 +26,14 @@ export default async function WorkSurfacePage({ params }: { params: Promise<{ lo
         <h2 className="font-display text-3xl mb-1">{isZh ? "工作面板" : "The Work surface"}</h2>
         <p className={`${bodyClass} mt-3`}>
           {isZh
-            ? "Codewhale 的 TUI 侧栏有一块 Work 区域，显示当前工作的实时状态。它不只是视觉上的待办清单：同一份工作状态同时由模型可见的工具、会话接力（relay）和子 Agent 交接共同维护。它由两层构成——一个带计数的执行台账（To-do），和一层可选的策略上下文（update_plan 元数据）。"
-            : "The TUI sidebar has a Work area that shows live state for the current job. It is more than a visual to-do list: the same work state is maintained by model-visible tools, session relay, and sub-agent handoff. It has two layers — a counted execution ledger (the To-do) and an optional strategy context (update_plan metadata)."}
+            ? "Codewhale 的 TUI 侧栏有一块 Work 区域，显示当前工作的实时状态。它不只是视觉上的待办清单：同一份工作状态同时由模型可见的工具、会话接力（relay）和子 Agent 交接共同维护。Codewhale 只有一个 Work 面板——带计数的 To-do 执行台账。update_plan 是对话式的推理笔记，不是第二个进度面板。"
+            : "The TUI sidebar has a Work area that shows live state for the current job. It is more than a visual to-do list: the same work state is maintained by model-visible tools, session relay, and sub-agent handoff. Codewhale has exactly one Work surface — the counted To-do execution ledger. update_plan is conversational reasoning, not a second progress surface."}
         </p>
       </section>
 
       <section id="checklist" className="scroll-mt-32">
         <h2 className="font-display text-2xl mb-1">
-          {isZh ? "To-do：带计数的执行台账" : "Checklist: the counted execution ledger"}
+          {isZh ? "To-do：唯一的执行台账" : "To-do: the sole canonical ledger"}
         </h2>
         <p className={`${bodyClass} mt-3`}>
           {isZh ? (
@@ -63,12 +63,12 @@ export default async function WorkSurfacePage({ params }: { params: Promise<{ lo
 
       <section id="strategy" className="scroll-mt-32">
         <h2 className="font-display text-2xl mb-1">
-          {isZh ? "策略上下文：update_plan 元数据" : "Strategy context: update_plan metadata"}
+          {isZh ? "策略是对话式推理：update_plan" : "Strategy is conversational reasoning: update_plan"}
         </h2>
         <p className={`${bodyClass} mt-3`}>
           {isZh
-            ? "update_plan 承载的是可选的高层策略，不是第二个清单。它的字段面向阶段级理解：标题、目标、上下文摘要、说明、来源、关键文件、约束、推荐方案、验证计划、风险与未知、交接包，以及一组步骤。它帮助父会话或后续 worker 理解“为什么这么做”；具体执行进度始终属于 To-do 台账。侧栏有意不把策略状态渲染成第二条进度列表——两份进度并存只会制造歧义。"
-            : "update_plan carries optional high-level strategy — it is not a second checklist. Its fields serve phase-level understanding: title, objective, context summary, explanation, sources, critical files, constraints, recommended approach, verification plan, risks and unknowns, a handoff packet, and a list of steps. It helps a parent session or a later worker understand the approach; concrete execution progress always belongs to the To-do ledger. The sidebar deliberately does not render strategy state as a second progress list — two competing progress surfaces would only create ambiguity."}
+            ? "update_plan 承载的是可选的高层策略，不是第二个台账。它的字段面向阶段级理解：标题、目标、上下文摘要、说明、来源、关键文件、约束、推荐方案、验证计划、风险与未知、交接包，以及一组步骤。它帮助父会话或后续 worker 理解“为什么这么做”；具体执行进度始终属于 To-do 台账。侧栏有意不把策略状态渲染成第二条进度列表，模型可见的 Work grounding 也不会包含它——只有 update_plan 而 To-do 为空时，不会产生任何 Work 状态。"
+            : "update_plan carries optional high-level strategy — it is not a second ledger. Its fields serve phase-level understanding: title, objective, context summary, explanation, sources, critical files, constraints, recommended approach, verification plan, risks and unknowns, a handoff packet, and a list of steps. It helps a parent session or a later worker understand the approach; concrete execution progress always belongs to the To-do ledger. The sidebar deliberately does not render strategy state as a second progress list, and model-facing Work grounding excludes it entirely — plan state with an empty To-do produces no Work state at all."}
         </p>
       </section>
 
@@ -78,8 +78,8 @@ export default async function WorkSurfacePage({ params }: { params: Promise<{ lo
         </h2>
         <p className={`${bodyClass} mt-3`}>
           {isZh
-            ? "同一份工作状态喂给多个出口：侧栏的 To-do 区域实时渲染它；/relay 让模型把 To-do 快照和 update_plan 策略元数据写进交接文件，供下一个线程接续；分叉（fork_context）的子 Agent 会在其前缀里收到一份结构化状态块，其中的 Work 小节就是这份 To-do 快照——子 Agent 因此从父级真实的进度位置继续，而不是从转述的摘要开始。"
-            : "The same work state feeds several surfaces: the sidebar's To-do area renders it live; /relay has the model write the To-do snapshot and the update_plan strategy metadata into a handoff artifact for the next thread; and a forked (fork_context) sub-agent receives a structured state block in its prefix whose Work section is this To-do snapshot — the child continues from the parent's real progress position instead of a paraphrased summary."}
+            ? "同一份工作状态喂给多个出口，而且用的是同一个渲染器：每个父回合循环和子 Agent 步骤请求的尾部会附加一个瞬时的 <codewhale:work_state> 块；分叉（fork_context）的子 Agent 在其前缀的结构化状态块里收到同样的正文；/relay 把同样的正文写进交接指令。三处的 To-do 正文逐字节一致——子 Agent 与下一个线程因此从父级真实的进度位置继续，而不是从转述的摘要开始。侧栏的 To-do 区域则实时渲染同一份状态。"
+            : "The same work state feeds several surfaces through one renderer: a transient <codewhale:work_state> block is appended to each parent turn-loop and sub-agent step request; a forked (fork_context) sub-agent receives the same body inside its structured state block; and /relay writes the same body into the handoff instruction. The To-do body is byte-identical in all three, so a child agent and the next thread continue from the parent's real progress position instead of a paraphrased summary. The sidebar renders that same state live."}
         </p>
       </section>
 
@@ -126,40 +126,13 @@ elapsed: 18m
         </h2>
         <p className={`${bodyClass} mt-3`}>
           {isZh
-            ? "已被实现和测试证实的模型可见路径有三条：work_update 工具本身是模型目录里的活跃工具；分叉子 Agent 的结构化状态块（<codewhale:fork_state> 中的 Work 小节，有针对它的引擎测试）；以及 /relay 输出，它把同一份 To-do 快照和策略元数据注入交接指令。侧栏渲染是视觉呈现——它给人看，不注入模型上下文。"
-            : "Three model-facing paths are implemented and covered by tests: the work_update tool itself, which is active in the model catalog; the forked sub-agent's structured state block (the Work section inside <codewhale:fork_state>, pinned by an engine test); and /relay output, which injects the same To-do snapshot and strategy metadata into the handoff instruction. The sidebar rendering is a visual presentation — it informs the operator and is not injected into model context."}
+            ? "已被实现和测试证实的模型可见路径有五条：work_update 工具本身是模型目录里的活跃工具；每个父回合循环请求尾部的 <codewhale:work_state> 块（#3983）；每个子 Agent 步骤请求尾部的同一个块——渲染自它自己的清单；分叉子 Agent 的结构化状态块（<codewhale:fork_state> 中的 Work 小节，在真正 fork 的那一刻解析）；以及 /relay 输出。侧栏渲染是视觉呈现——它给人看，不注入模型上下文。"
+            : "Five model-facing paths are implemented and covered by tests: the work_update tool itself, which is active in the model catalog; the <codewhale:work_state> block appended to each parent turn-loop request (#3983); the same block on each sub-agent step request, rendered from that agent's own list; the forked sub-agent's structured state block (the Work section inside <codewhale:fork_state>, resolved at the moment of the fork); and /relay output. The sidebar rendering is a visual presentation — it informs the operator and is not injected into model context."}
         </p>
         <p className={`${bodyClass} mt-3`}>
-          {isZh ? (
-            <>
-              有一项能力我们刻意不宣称：把当前 Work 状态注入普通父回合的模型上下文（父回合级
-              grounding）。它取决于{" "}
-              <a
-                href="https://github.com/Hmbown/CodeWhale/issues/3983"
-                target="_blank"
-                rel="noreferrer"
-                className="body-link"
-              >
-                issue #3983
-              </a>{" "}
-              的运行时测试落地；在那之前，本页只描述已证实的行为。
-            </>
-          ) : (
-            <>
-              One capability is deliberately not claimed: injecting the current Work state into a
-              normal parent turn's model context (parent-turn grounding). That depends on the runtime
-              test tracked in{" "}
-              <a
-                href="https://github.com/Hmbown/CodeWhale/issues/3983"
-                target="_blank"
-                rel="noreferrer"
-                className="body-link"
-              >
-                issue #3983
-              </a>
-              ; until it lands, this page describes only proven behavior.
-            </>
-          )}
+          {isZh
+            ? "边界值得说清楚：这个块是瞬时的——它只属于当次请求，既不写进会话历史，也不进入稳定系统前缀，因此稳定的系统与工具前缀仍可参与前缀缓存；各提供商对最新用户消息的缓存方式仍以其自身协议为准。它会在每个父回合循环和子 Agent 步骤请求前重建，读取的是权威状态（有 work graph 时读它暂存的投影，而不是尚未发布的旧视图），所以工具循环中途的一次 work_update 会在下一步出现。父回合循环的上下文预检按真正会发出的那一份尾部计费，因此不会先放行、再因为附加这个块而超限；离线计数一律偏保守。条目数与字符数都有硬上限，进行中的条目优先保留，被省略的部分带省略标记。To-do 为空时不输出任何块。渲染器只保证包裹结构、控制字符与上限这三件事——它不会审查条目文本的含义，任意 To-do 内容不因此变成可信指令。"
+            : "The boundaries are worth stating: the block is transient — it belongs to a single request, is never written to session history, and never enters the stable system prefix, so the stable system-and-tool prefix remains eligible for prefix caching; each provider's treatment of the latest user message still depends on its wire protocol. It is rebuilt before each parent turn-loop and sub-agent step request from the authoritative state (the work graph's staged projection where one exists, not the not-yet-published legacy view), so a work_update made mid tool-loop appears on the following step. The parent turn-loop context preflight is charged for the exact tail that will be sent, so it cannot approve a request that goes over-limit only once the block is appended; offline counts stay conservative. Item count and character count are both hard-bounded, the in-progress item is preserved preferentially, and elided content is marked. An empty To-do emits no block at all. The renderer guarantees exactly three things — wrapper framing cannot be closed early, control characters cannot forge the line format, and the bounds hold. It does not vet what item text says, so arbitrary To-do content is not thereby made safe to follow as instructions."}
         </p>
       </section>
 

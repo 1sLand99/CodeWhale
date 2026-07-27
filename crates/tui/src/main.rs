@@ -56,6 +56,7 @@ mod fleet;
 mod goal_loop;
 mod hashing;
 mod hooks;
+mod lane_control;
 mod llm_client;
 mod llm_response_cache;
 mod localization;
@@ -90,23 +91,34 @@ mod regex_cache;
 mod remote_setup;
 pub mod repl;
 mod repo_law;
+mod request_manifest;
 mod request_tuning;
 mod resource_telemetry;
 mod retry_status;
 pub mod rlm;
 mod route_billing;
 mod route_budget;
+mod route_receipt;
 mod route_runtime;
 mod runtime_api;
 mod runtime_handoff;
 mod runtime_log;
 mod runtime_threads;
+mod safe_label;
 mod sandbox;
 mod scorecard;
 #[allow(dead_code)]
 mod session_diagnostics;
+// Acceptance matrix for #2934 / #4397. Test-only: the table documents the
+// contract for reviewers and is enforced by the tests beside it, so it does
+// not need to exist in a shipped binary.
+#[cfg(test)]
+mod session_control_acceptance;
 #[allow(dead_code)]
 mod session_manager;
+mod session_peek;
+mod session_projection;
+mod session_resume;
 mod settings;
 mod shell_dispatcher;
 mod skill_state;
@@ -119,12 +131,15 @@ mod task_manager;
 mod test_support;
 mod tls;
 mod tool_history_repair;
+mod tool_inspection;
 mod tool_output_receipts;
 mod tools;
 mod tui;
+mod turn_route_plan;
 mod utils;
 mod vision;
 mod work_graph;
+mod work_grounding;
 mod worker_profile;
 mod working_set;
 mod workspace_discovery;
@@ -525,6 +540,8 @@ enum FleetCommand {
     Init,
     /// Create a run from a task spec and start the foreground manager loop
     Run(FleetRunArgs),
+    /// List durable Fleet runs from this workspace's ledger
+    List,
     /// Show queued/running/completed/failed/stale fleet counts
     Status,
     /// Inspect one worker's status, heartbeat, latest event, and artifacts
@@ -1794,6 +1811,7 @@ async fn run_async_main(
 
     // Handle session resume. Plain `codewhale` starts fresh: interrupted
     // snapshots are preserved for explicit resume, but never auto-attached.
+    let mut startup_notice = None;
     let resume_session_id = if cli.continue_session {
         let workspace = resolve_workspace(&cli);
         recover_interrupted_checkpoint_for_resume(&workspace)
@@ -1803,14 +1821,54 @@ async fn run_async_main(
     } else if !cli.fresh {
         let workspace = resolve_workspace(&cli);
         preserve_interrupted_checkpoint_for_explicit_resume(&workspace);
-        None
+        // Opt-in auto-resume (#2934). Off by default, so the historical
+        // "plain `codewhale` starts fresh" behaviour is unchanged unless the
+        // user asked for something else. The decision never resumes an
+        // archived, unreadable, or foreign-workspace session; every fallback
+        // carries a receipt rather than silently starting blank.
+        let (session_id, notice) = resolve_auto_resume(&workspace);
+        startup_notice = notice;
+        session_id
     } else {
         None
     };
 
     // Default: Interactive TUI
     // --yolo starts in YOLO mode (auto-approve; shell enabled)
-    run_interactive(&cli, &config, resume_session_id, None, plugin_registry).await
+    run_interactive_with_notice(
+        &cli,
+        &config,
+        resume_session_id,
+        None,
+        startup_notice,
+        plugin_registry,
+    )
+    .await
+}
+
+/// Resolve the opt-in auto-resume setting into a session id plus a receipt.
+///
+/// Deliberately scoped to the plain interactive launch. `codewhale "do X"`
+/// (top-level prompt) and `codewhale exec` are not covered: silently prefixing
+/// a one-shot task with a prior conversation would change what is sent to the
+/// model, which is not a layout preference the user opted into.
+fn resolve_auto_resume(workspace: &Path) -> (Option<String>, Option<String>) {
+    use crate::session_resume::{ResumeRequest, decide_auto_resume};
+
+    let enabled = crate::settings::Settings::load_persisted()
+        .map(|settings| settings.session_auto_resume)
+        .unwrap_or(false);
+    if !enabled {
+        return (None, None);
+    }
+    let Ok(manager) = SessionManager::default_location() else {
+        return (None, None);
+    };
+    let decision = decide_auto_resume(true, &ResumeRequest::default(), workspace, &manager);
+    (
+        decision.session_id().map(str::to_string),
+        decision.status_message(),
+    )
 }
 
 fn prepare_cli_startup(
@@ -2281,196 +2339,40 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
         FleetAlertAdapterConfig, FleetAlertConfig, FleetAlertDispatcher, FleetAlertEvent,
         FleetEnvSecretResolver,
     };
+    use crate::fleet::control as fleet_control;
     use crate::fleet::executor::FleetExecutor;
     use crate::fleet::manager::{FleetManager, FleetStatusSnapshot, FleetWorkerInspection};
-    use codewhale_protocol::fleet::{
-        FleetAlertEventClass, FleetArtifactKind, FleetRunId, FleetWorkerEventPayload,
-        FleetWorkerStatus,
-    };
+    use codewhale_lane::{ControlOperation, ControlSurface};
+    use codewhale_protocol::fleet::{FleetAlertEventClass, FleetArtifactKind, FleetRunId};
 
-    fn worker_status_label(status: &FleetWorkerStatus) -> &'static str {
-        match status {
-            FleetWorkerStatus::Unknown => "unknown",
-            FleetWorkerStatus::Online => "online",
-            FleetWorkerStatus::Busy => "busy",
-            FleetWorkerStatus::Offline => "offline",
-            FleetWorkerStatus::Unhealthy => "unhealthy",
-            FleetWorkerStatus::Draining => "draining",
-            FleetWorkerStatus::Retired => "retired",
-        }
-    }
-
-    fn artifact_kind_label(kind: &FleetArtifactKind) -> String {
-        match kind {
-            FleetArtifactKind::Log => "log".to_string(),
-            FleetArtifactKind::Patch => "patch".to_string(),
-            FleetArtifactKind::TestResult => "test_result".to_string(),
-            FleetArtifactKind::Report => "report".to_string(),
-            FleetArtifactKind::Checkpoint => "checkpoint".to_string(),
-            FleetArtifactKind::Receipt => "receipt".to_string(),
-            FleetArtifactKind::Other(value) => value.clone(),
-        }
-    }
-
-    fn event_label(payload: &FleetWorkerEventPayload) -> String {
-        match payload {
-            FleetWorkerEventPayload::Queued => "queued".to_string(),
-            FleetWorkerEventPayload::Leased { .. } => "leased".to_string(),
-            FleetWorkerEventPayload::Starting => "starting".to_string(),
-            FleetWorkerEventPayload::Running => "running".to_string(),
-            FleetWorkerEventPayload::ModelWait { model } => model
-                .as_ref()
-                .map(|model| format!("model_wait model={model}"))
-                .unwrap_or_else(|| "model_wait".to_string()),
-            FleetWorkerEventPayload::RunningTool { tool, call_id } => call_id
-                .as_ref()
-                .map(|call_id| format!("running_tool tool={tool} call_id={call_id}"))
-                .unwrap_or_else(|| format!("running_tool tool={tool}")),
-            FleetWorkerEventPayload::WorkflowEvent {
-                workflow_run_id,
-                event,
-            } => event
-                .get("type")
-                .and_then(serde_json::Value::as_str)
-                .map(|kind| format!("workflow_event run_id={workflow_run_id} type={kind}"))
-                .unwrap_or_else(|| format!("workflow_event run_id={workflow_run_id}")),
-            FleetWorkerEventPayload::Heartbeat { .. } => "heartbeat".to_string(),
-            FleetWorkerEventPayload::Artifact(artifact) => {
-                format!("artifact kind={}", artifact_kind_label(&artifact.kind))
-            }
-            FleetWorkerEventPayload::Completed { exit_code, summary } => match (exit_code, summary)
-            {
-                (Some(code), Some(summary)) => format!("completed exit_code={code} {summary}"),
-                (Some(code), None) => format!("completed exit_code={code}"),
-                (None, Some(summary)) => format!("completed {summary}"),
-                (None, None) => "completed".to_string(),
-            },
-            FleetWorkerEventPayload::Failed {
-                reason,
-                recoverable,
-            } => {
-                format!("failed recoverable={recoverable} reason={reason}")
-            }
-            FleetWorkerEventPayload::Cancelled { cancelled_by } => cancelled_by
-                .as_ref()
-                .map(|by| format!("cancelled by={by}"))
-                .unwrap_or_else(|| "cancelled".to_string()),
-            FleetWorkerEventPayload::Interrupted { signal } => signal
-                .as_ref()
-                .map(|signal| format!("interrupted signal={signal}"))
-                .unwrap_or_else(|| "interrupted".to_string()),
-            FleetWorkerEventPayload::Stale { last_heartbeat_at } => last_heartbeat_at
-                .as_ref()
-                .map(|ts| format!("stale last_heartbeat_at={ts}"))
-                .unwrap_or_else(|| "stale".to_string()),
-            FleetWorkerEventPayload::Restarted { restart_count } => {
-                format!("restarted count={restart_count}")
-            }
-            FleetWorkerEventPayload::Escalated { channel, alert_id } => alert_id
-                .as_ref()
-                .map(|alert_id| format!("escalated channel={channel} alert_id={alert_id}"))
-                .unwrap_or_else(|| format!("escalated channel={channel}")),
-        }
-    }
-
+    // Every label and every row below comes from the shared Fleet control
+    // surface, so `codewhale fleet …` and `/fleet …` cannot drift in how they
+    // describe the same durable ledger (#1888, #4022).
     fn print_status(status: &FleetStatusSnapshot) {
-        println!(
-            "fleet: runs={} queued={} running={} completed={} partial={} failed={} restarted={} escalated={} transport_failed={} task_failed={} verifier_failed={} cancelled={} stale={}",
-            status.runs,
-            status.queued,
-            status.running,
-            status.completed,
-            status.partial,
-            status.failed,
-            status.restarted,
-            status.escalated,
-            status.transport_failed,
-            status.task_failed,
-            status.verifier_failed,
-            status.cancelled,
-            status.stale
-        );
-        if !status.workers.is_empty() {
-            println!("workers:");
-            for (worker_id, worker_status) in &status.workers {
-                println!("  {worker_id} {}", worker_status_label(worker_status));
-            }
-        }
+        println!("{}", fleet_control::render_fleet_status_snapshot(status));
     }
 
     fn print_inspection(inspection: &FleetWorkerInspection) {
-        println!("worker: {}", inspection.worker_id);
-        println!("status: {}", worker_status_label(&inspection.status));
-        if let Some(run_id) = &inspection.current_run_id {
-            println!("run: {}", run_id.0);
-        }
-        if let Some(task_id) = &inspection.current_task_id {
-            println!("task: {task_id}");
-        }
-        if let Some(objective) = &inspection.objective {
-            println!("objective: {objective}");
-        }
-        if let Some(role) = &inspection.role {
-            println!("role: {role}");
-        }
-        if let Some(host) = &inspection.host {
-            println!("host: {host}");
-        }
-        if let Some(heartbeat) = &inspection.latest_heartbeat_at {
-            println!("heartbeat: {heartbeat}");
-        }
-        if let Some(event) = &inspection.latest_event {
-            println!(
-                "latest_event: seq={} {}",
-                event.seq,
-                event_label(&event.payload)
-            );
-        }
-        if !inspection.artifacts.is_empty() {
-            println!("artifacts:");
-            for artifact in &inspection.artifacts {
-                println!(
-                    "  {} {}",
-                    artifact_kind_label(&artifact.kind),
-                    artifact.path.display()
-                );
-            }
-        }
-        if let Some(receipt) = &inspection.receipt_summary {
-            println!("receipt: {receipt}");
-        }
-        if let Some(error) = &inspection.last_error {
-            println!("last_error: {error}");
-        }
-        if let Some(alert) = &inspection.alert_state {
-            println!("alert: {alert}");
-        }
+        println!("{}", fleet_control::render_inspection(inspection));
     }
 
     fn print_artifacts(inspection: &FleetWorkerInspection) {
-        if inspection.artifacts.is_empty() {
-            println!("artifacts: none");
-            return;
-        }
-        println!("artifacts:");
-        for artifact in &inspection.artifacts {
-            let size = artifact
-                .size_bytes
-                .map(|size| format!(" size={size}"))
-                .unwrap_or_default();
-            let mime = artifact
-                .mime_type
+        println!("{}", fleet_control::render_artifacts(inspection));
+    }
+
+    /// Print one shared control receipt on the CLI surface.
+    fn emit_fleet_receipt(receipt: &codewhale_lane::ControlReceipt) -> Result<()> {
+        if receipt.is_error() {
+            eprintln!("{}", receipt.render());
+            let detail = receipt
+                .failure
                 .as_ref()
-                .map(|mime| format!(" mime={mime}"))
-                .unwrap_or_default();
-            println!(
-                "  {} {}{}{}",
-                artifact_kind_label(&artifact.kind),
-                artifact.path.display(),
-                size,
-                mime
-            );
+                .map(ToString::to_string)
+                .unwrap_or_else(|| receipt.outcome.as_str().to_string());
+            bail!("{}: {detail}", receipt.operation_id);
         }
+        println!("{}", receipt.render());
+        Ok(())
     }
 
     fn print_logs(workspace: &Path, inspection: &FleetWorkerInspection) -> Result<()> {
@@ -2555,6 +2457,37 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
         config.launch_concurrency_for_provider(provider),
         config.subagent_token_budget_for_provider(provider),
     );
+    // Probe the durable ledger *before* opening the manager: FleetManager::open
+    // creates `.codewhale/fleet.jsonl` as a side effect, so a later probe would
+    // always find a ledger and the CLI would report availability differently
+    // from the slash surface for the same workspace (#4022).
+    let fleet_context = fleet_control::fleet_control_context(workspace);
+    // Probing is not enough on its own: `FleetManager::open` *creates* the
+    // ledger, and it used to run for every subcommand before this match. That
+    // made `codewhale fleet status` in a ledgerless workspace print
+    // "no_fleet_ledger" while simultaneously creating the file it said was
+    // missing — and the next invocation then reported an empty ledger as if a
+    // Fleet had existed all along. Refuse the control verbs here, before the
+    // manager exists, so the CLI and `/fleet` agree and neither surface
+    // conjures the store it is reporting on (#4022).
+    if let Some(operation) = match &args.command {
+        FleetCommand::List => Some(ControlOperation::FleetList),
+        FleetCommand::Status => Some(ControlOperation::FleetStatus),
+        FleetCommand::Interrupt { .. } => Some(ControlOperation::FleetInterrupt),
+        FleetCommand::Resume { .. } => Some(ControlOperation::FleetResume),
+        _ => None,
+    } {
+        let descriptor = operation.descriptor();
+        let availability = descriptor.availability(ControlSurface::Cli, fleet_context);
+        if !availability.is_available() {
+            return emit_fleet_receipt(&codewhale_lane::ControlReceipt::unavailable(
+                descriptor,
+                ControlSurface::Cli,
+                availability,
+            ));
+        }
+    }
+
     // The configured route is the operator: fleet workers without a
     // task/profile model pin inherit the session's active model.
     let manager = FleetManager::open(workspace)?
@@ -2606,10 +2539,22 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
             print_status(&status);
             Ok(())
         }
-        FleetCommand::Status => {
-            print_status(&manager.status()?);
-            Ok(())
-        }
+        FleetCommand::List => emit_fleet_receipt(&fleet_control::execute_fleet_control_with(
+            ControlSurface::Cli,
+            workspace,
+            fleet_context,
+            &manager,
+            ControlOperation::FleetList,
+            None,
+        )),
+        FleetCommand::Status => emit_fleet_receipt(&fleet_control::execute_fleet_control_with(
+            ControlSurface::Cli,
+            workspace,
+            fleet_context,
+            &manager,
+            ControlOperation::FleetStatus,
+            None,
+        )),
         FleetCommand::Inspect { worker_id } => {
             print_inspection(&manager.inspect_worker(&worker_id)?);
             Ok(())
@@ -2624,9 +2569,14 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
             Ok(())
         }
         FleetCommand::Interrupt { worker_id } => {
-            let inspection = manager.interrupt_worker(&worker_id)?;
-            print_inspection(&inspection);
-            Ok(())
+            emit_fleet_receipt(&fleet_control::execute_fleet_control_with(
+                ControlSurface::Cli,
+                workspace,
+                fleet_context,
+                &manager,
+                ControlOperation::FleetInterrupt,
+                Some(&worker_id),
+            ))
         }
         FleetCommand::Restart { worker_id } => {
             let report = manager.restart_worker(&worker_id)?;
@@ -2655,17 +2605,14 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
             stale_after_seconds,
         } => {
             let manager = manager.with_stale_after(Duration::from_secs(stale_after_seconds.max(1)));
-            let report = manager.resume_run(&FleetRunId::from(run_id))?;
-            println!(
-                "fleet resume: {} reclaimed_stale={} restarted={} failed={} escalated={}",
-                report.run_id.0,
-                report.reclaimed_stale,
-                report.restarted,
-                report.failed,
-                report.escalated
-            );
-            print_status(&report.status);
-            Ok(())
+            emit_fleet_receipt(&fleet_control::execute_fleet_control_with(
+                ControlSurface::Cli,
+                workspace,
+                fleet_context,
+                &manager,
+                ControlOperation::FleetResume,
+                Some(&run_id),
+            ))
         }
         FleetCommand::Stop { all } => {
             if !all {
@@ -6229,10 +6176,12 @@ fn provider_capability_report(config: &Config) -> serde_json::Value {
         crate::route_runtime::ContextWindowSource::Fallback.label(),
         |route| route.context_window.source.label(),
     );
+    // `null` when neither the resolved route nor the compatibility matrix
+    // publishes an output ceiling — doctor must not invent one.
     let max_output = route_profile
         .as_ref()
         .and_then(|profile| profile.max_output)
-        .unwrap_or(cap.max_output);
+        .or(cap.max_output);
     let is_exact_kimi_code_k3 = route.as_ref().is_some_and(|route| {
         crate::config::is_exact_kimi_code_k3_route(
             provider,
@@ -6344,14 +6293,17 @@ fn doctor_provider_source(config: &Config) -> &'static str {
 }
 
 fn doctor_wire_protocol(provider: crate::config::ApiProvider) -> &'static str {
-    match provider
+    let policy = provider
         .metadata()
-        .map(|metadata| metadata.wire())
-        .unwrap_or(codewhale_config::provider::WireFormat::ChatCompletions)
-    {
-        codewhale_config::provider::WireFormat::ChatCompletions => "chat_completions",
-        codewhale_config::provider::WireFormat::Responses => "responses",
-        codewhale_config::provider::WireFormat::AnthropicMessages => "anthropic_messages",
+        .map(|metadata| metadata.wire_policy())
+        .unwrap_or(codewhale_config::provider::WirePolicy::Fixed(
+            codewhale_config::provider::WireFormat::ChatCompletions,
+        ));
+    match policy.fixed() {
+        Some(codewhale_config::provider::WireFormat::ChatCompletions) => "chat_completions",
+        Some(codewhale_config::provider::WireFormat::Responses) => "responses",
+        Some(codewhale_config::provider::WireFormat::AnthropicMessages) => "anthropic_messages",
+        None => "model_aware",
     }
 }
 
@@ -8973,6 +8925,28 @@ async fn run_interactive(
     initial_input: Option<tui::InitialInput>,
     plugin_registry: std::sync::Arc<crate::plugins::PluginRegistry>,
 ) -> Result<()> {
+    run_interactive_with_notice(
+        cli,
+        config,
+        resume_session_id,
+        initial_input,
+        None,
+        plugin_registry,
+    )
+    .await
+}
+
+/// As [`run_interactive`], but carrying a one-line startup receipt to show in
+/// the transcript — used by auto-resume to explain why it did or did not
+/// reattach to a previous session (#2934).
+async fn run_interactive_with_notice(
+    cli: &Cli,
+    config: &Config,
+    resume_session_id: Option<String>,
+    initial_input: Option<tui::InitialInput>,
+    startup_notice: Option<String>,
+    plugin_registry: std::sync::Arc<crate::plugins::PluginRegistry>,
+) -> Result<()> {
     let workspace = cli
         .workspace
         .clone()
@@ -9114,6 +9088,7 @@ async fn run_interactive(
             yolo, // YOLO mode auto-approves all tool executions
             resume_session_id,
             initial_input,
+            startup_notice,
             max_subagents,
         },
         plugin_registry,
@@ -9151,6 +9126,23 @@ fn cli_reasoning_effort_value_for_prompt(
         effort
     };
     cli_reasoning_effort_value(config, model, resolved)
+}
+
+/// Whether a CLI launch is an Auto *reasoning* request.
+///
+/// Auto reasoning and Auto model are independent decisions. A Fleet worker
+/// subprocess launches with `--model <exact> --reasoning-effort auto`: the
+/// model is pinned (so `auto_model` is false) while the reasoning tier is
+/// still Auto. Reading the flag off `auto_model` alone therefore mislabels
+/// exactly the launch shape the exact-Fleet path uses.
+const fn cli_reasoning_is_auto(
+    reasoning_effort: Option<crate::tui::app::ReasoningEffort>,
+    auto_model: bool,
+) -> bool {
+    matches!(
+        reasoning_effort,
+        Some(crate::tui::app::ReasoningEffort::Auto)
+    ) || auto_model
 }
 
 fn normalize_cli_reasoning_effort(value: &str) -> Result<Option<String>> {
@@ -9943,6 +9935,13 @@ async fn build_direct_workflow_tool(
     surface.goal_state = Some(new_shared_goal_state());
 
     let client = DeepSeekClient::new(config)?;
+    // A FIXED model with `reasoning_effort = auto` (the shape a Fleet worker
+    // subprocess launches with: `--model <exact> --reasoning-effort auto`) is
+    // still Auto. Deriving the auto flag from `route.auto_model` alone left it
+    // raw AND non-auto: the runtime carried the literal string `"auto"` while
+    // nothing was allowed to resolve it. Auto is a reasoning decision, not a
+    // model decision — it does not require `--model auto`.
+    let reasoning_effort_auto = cli_reasoning_is_auto(route.reasoning_effort, route.auto_model);
     let reasoning_effort = route
         .reasoning_effort
         .and_then(|effort| cli_reasoning_effort_value(config, &route.model, effort));
@@ -9981,7 +9980,7 @@ async fn build_direct_workflow_tool(
     .with_api_config(config.clone())
     .with_fleet_roster(roster)
     .with_auto_model(route.auto_model)
-    .with_reasoning_effort(reasoning_effort, route.auto_model)
+    .with_reasoning_effort(reasoning_effort, reasoning_effort_auto)
     .with_agent_tool_surface_options(surface)
     .with_max_spawn_depth(config.subagent_max_spawn_depth_for_provider(provider))
     .with_step_api_timeout(Duration::from_secs(
@@ -10305,6 +10304,42 @@ fn validate_exec_tool_authority_resume(
     Ok(())
 }
 
+fn exec_network_policy(
+    config: &Config,
+    outer_network_access: Option<bool>,
+) -> Option<crate::network_policy::NetworkPolicyDecider> {
+    // Fleet caps are an outer authority boundary: user configuration may
+    // narrow them further, but it may never widen an explicit network denial.
+    if outer_network_access == Some(false) {
+        return Some(crate::network_policy::NetworkPolicyDecider::new(
+            crate::network_policy::NetworkPolicy {
+                default: crate::network_policy::DecisionToml::Deny,
+                ..crate::network_policy::NetworkPolicy::default()
+            },
+            None,
+        ));
+    }
+    config.network.clone().map(|toml_cfg| {
+        crate::network_policy::NetworkPolicyDecider::with_default_audit(toml_cfg.into_runtime())
+    })
+}
+
+fn apply_fleet_engine_feature_caps(
+    features: &mut crate::features::Features,
+    fleet_authority_active: bool,
+    outer_network_access: Option<bool>,
+) {
+    if fleet_authority_active {
+        features
+            .disable(crate::features::Feature::ShellTool)
+            .disable(crate::features::Feature::Subagents)
+            .disable(crate::features::Feature::Mcp);
+    }
+    if outer_network_access == Some(false) {
+        features.disable(crate::features::Feature::WebSearch);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_exec_agent(
     config: &Config,
@@ -10336,11 +10371,17 @@ async fn run_exec_agent(
     use crate::tui::app::AppMode;
 
     validate_exec_tool_authority_resume(tool_authority_json.as_deref(), resume_session.is_some())?;
-    let fleet_authority_active = tool_authority_json.is_some();
+    let fleet_authority = tool_authority_json
+        .as_deref()
+        .map(crate::tools::spec::ToolAuthorityEnvelope::from_json)
+        .transpose()
+        .map_err(anyhow::Error::msg)?;
+    let fleet_authority_active = fleet_authority.is_some();
+    let outer_network_access = fleet_authority
+        .as_ref()
+        .and_then(|authority| authority.network_access);
 
-    if let Some(raw) = tool_authority_json.as_deref() {
-        let envelope = crate::tools::spec::ToolAuthorityEnvelope::from_json(raw)
-            .map_err(anyhow::Error::msg)?;
+    if let Some(envelope) = fleet_authority {
         crate::tools::spec::install_process_tool_authority(envelope).map_err(anyhow::Error::msg)?;
     }
 
@@ -10382,9 +10423,19 @@ async fn run_exec_agent(
     } else {
         max_subagents
     };
-    let effective_reasoning_effort = route
-        .reasoning_effort
-        .and_then(|effort| cli_reasoning_effort_value(&execution_config, &effective_model, effort));
+    // A FIXED model with `--reasoning-effort auto` (the exact shape a Fleet
+    // worker subprocess launches with: `--model <exact> --reasoning-effort
+    // auto`) is still Auto. `auto_model` is a *model* decision and is false
+    // here, so deriving the auto flag from it left this path both raw and
+    // non-auto: the literal string `"auto"` travelled to the engine while the
+    // receipt claimed no Auto was in play.
+    let reasoning_effort_auto = cli_reasoning_is_auto(route.reasoning_effort, auto_model);
+    // Resolve Auto against this run's prompt at the CLI boundary, exactly like
+    // `run_one_shot`/`run_one_shot_json` and the interactive launch path do,
+    // so the tier the engine (and the receipt below) sees is concrete.
+    let effective_reasoning_effort = route.reasoning_effort.and_then(|effort| {
+        cli_reasoning_effort_value_for_prompt(&execution_config, &effective_model, effort, prompt)
+    });
 
     let settings = crate::settings::Settings::load().unwrap_or_default();
     let auto_compact_enabled = if crate::settings::Settings::auto_compact_explicitly_configured() {
@@ -10413,9 +10464,7 @@ async fn run_exec_agent(
         ..Default::default()
     };
 
-    let network_policy = execution_config.network.clone().map(|toml_cfg| {
-        crate::network_policy::NetworkPolicyDecider::with_default_audit(toml_cfg.into_runtime())
-    });
+    let network_policy = exec_network_policy(&execution_config, outer_network_access);
 
     let lsp_config = (!fleet_authority_active)
         .then(|| {
@@ -10426,12 +10475,11 @@ async fn run_exec_agent(
         })
         .flatten();
     let mut engine_features = execution_config.features();
-    if fleet_authority_active {
-        engine_features
-            .disable(crate::features::Feature::ShellTool)
-            .disable(crate::features::Feature::Subagents)
-            .disable(crate::features::Feature::Mcp);
-    }
+    apply_fleet_engine_feature_caps(
+        &mut engine_features,
+        fleet_authority_active,
+        outer_network_access,
+    );
     let engine_plugin_registry = if fleet_authority_active {
         std::sync::Arc::new(crate::plugins::PluginRegistry::empty(&workspace))
     } else {
@@ -10599,7 +10647,7 @@ async fn run_exec_agent(
             dynamic_tools: Vec::new(),
             hook_executor: None,
             reasoning_effort: effective_reasoning_effort,
-            reasoning_effort_auto: auto_model,
+            reasoning_effort_auto,
             auto_model,
             allow_shell: auto_approve || execution_config.allow_shell(),
             trust_mode,
@@ -12709,6 +12757,52 @@ mod terminal_mode_tests {
     }
 
     #[test]
+    fn headless_consultant_authority_overrides_network_allow_and_disables_web_search() {
+        let config = Config {
+            network: Some(crate::config::NetworkPolicyToml {
+                default: "allow".to_string(),
+                audit: false,
+                ..crate::config::NetworkPolicyToml::default()
+            }),
+            ..Config::default()
+        };
+        let authority = crate::tools::spec::ToolAuthorityEnvelope {
+            schema_version: 1,
+            owner: "consultant-1".to_string(),
+            authority: crate::tools::spec::ToolMutationAuthority::ReadOnly,
+            network_access: Some(false),
+            writable_roots: Vec::new(),
+            writable_files: Vec::new(),
+            coordination_contracts: Vec::new(),
+        }
+        .normalized()
+        .expect("Consultant authority");
+
+        let policy = exec_network_policy(&config, authority.network_access)
+            .expect("explicit network=false always installs a policy");
+        assert_eq!(
+            policy.evaluate("example.com", "web_search"),
+            crate::network_policy::Decision::Deny,
+            "the permissive user config must not widen Consultant network authority"
+        );
+        let mut features = crate::features::Features::default();
+        features.enable(crate::features::Feature::WebSearch);
+        apply_fleet_engine_feature_caps(&mut features, true, authority.network_access);
+        assert!(!features.enabled(crate::features::Feature::WebSearch));
+
+        let worker_policy = exec_network_policy(&config, Some(true)).expect("configured policy");
+        assert_eq!(
+            worker_policy.evaluate("example.com", "web_search"),
+            crate::network_policy::Decision::Allow,
+            "a network-capable role keeps the configured policy"
+        );
+        let mut worker_features = crate::features::Features::default();
+        worker_features.enable(crate::features::Feature::WebSearch);
+        apply_fleet_engine_feature_caps(&mut worker_features, true, Some(true));
+        assert!(worker_features.enabled(crate::features::Feature::WebSearch));
+    }
+
+    #[test]
     fn plugin_registry_discovery_is_route_independent_and_read_only() {
         let _env_lock = crate::test_support::lock_test_env();
         let temp = tempfile::tempdir().unwrap();
@@ -13710,6 +13804,53 @@ mod terminal_mode_tests {
             .as_deref(),
             Some("low"),
             "membership K3 still applies its exact-route always-thinking floor"
+        );
+    }
+
+    /// The exact shape a Fleet worker subprocess launches with:
+    /// `codewhale exec --model <exact> --reasoning-effort auto`. The model is
+    /// pinned, so `auto_model` is false — but the run is still an Auto
+    /// *reasoning* request and must be labelled and resolved as one.
+    #[test]
+    fn a_fixed_model_exec_with_reasoning_auto_is_still_an_auto_reasoning_run() {
+        use crate::tui::app::ReasoningEffort;
+
+        assert!(
+            cli_reasoning_is_auto(Some(ReasoningEffort::Auto), false),
+            "--model <exact> --reasoning-effort auto is an Auto reasoning run"
+        );
+        assert!(
+            cli_reasoning_is_auto(None, true),
+            "an Auto model route keeps its historic Auto labelling"
+        );
+        assert!(!cli_reasoning_is_auto(Some(ReasoningEffort::High), false));
+        assert!(!cli_reasoning_is_auto(None, false));
+    }
+
+    /// `run_exec_agent` must hand the engine a concrete tier, never the literal
+    /// `"auto"` sentinel, for a fixed-model Auto launch.
+    #[test]
+    fn fixed_model_exec_auto_resolves_to_a_concrete_tier_not_the_auto_sentinel() {
+        let config = Config {
+            provider: Some("zai".to_string()),
+            ..Default::default()
+        };
+
+        let resolved = cli_reasoning_effort_value_for_prompt(
+            &config,
+            crate::config::ZAI_GLM_5_2_MODEL,
+            crate::tui::app::ReasoningEffort::Auto,
+            "debug this failing integration test",
+        )
+        .expect("Auto must resolve to a concrete tier");
+
+        assert_ne!(
+            resolved, "auto",
+            "the literal auto sentinel must never reach a provider"
+        );
+        assert!(
+            matches!(resolved.as_str(), "off" | "low" | "medium" | "high" | "max"),
+            "unexpected resolved tier: {resolved}"
         );
     }
 

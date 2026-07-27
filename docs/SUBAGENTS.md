@@ -1,11 +1,11 @@
 # Fleet Workers and Sub-Agent Compatibility
 
 Fleet roles are the user-facing vocabulary for delegated work: a parent
-launches a focused `worker`, `scout`, `planner`, `reviewer`, `builder`, or
-`verifier` through `agent` and gets back an `agent_id` plus transcript handle
+launches a focused `worker`, `scout`, `planner`, `reviewer`, `builder`,
+`verifier`, or `consultant` through `agent` and gets back an `agent_id` plus transcript handle
 while the worker runs. The internal runtime type is `FleetRole` (formerly
 `SubAgentType`); the older role spellings (`general`, `explore`, `plan`,
-`review`, `implementer`, …) remain accepted only as a persisted/deserialize
+`review`, `implementer`, `oracle`, …) remain accepted only as a persisted/deserialize
 compatibility adapter during v0.9.x. New prompts and config should use Fleet
 names.
 
@@ -62,11 +62,12 @@ stewardship.
 | `reviewer`    | read-and-grade with severity scores    | no      | read-only     | "audit this PR for bugs"                     |
 | `builder`     | land a specific change with min edit   | yes     | yes           | "rewrite `bar.rs::Foo::bar` to do X"         |
 | `verifier`    | run tests / validation, report outcome | no      | test-focused  | "run cargo test --workspace, report"         |
+| `consultant`  | short-lived, high-reasoning counsel     | no      | none          | "what are we missing in this design?"        |
 | `custom`      | explicit narrow tool allowlist         | depends | depends       | locked-down dispatch with hand-picked tools  |
 
 Each role's full system prompt lives in
 `crates/tui/src/tools/subagent/mod.rs` (search for
-`*_AGENT_PROMPT`). The prompt prefix loads automatically when the
+`*_AGENT_INTRO`). The prompt prefix loads automatically when the
 child agent boots; the parent's assignment prompt becomes the first
 turn's user message.
 
@@ -84,11 +85,41 @@ Use fresh sessions for independent exploration. Use forked sessions when the
 task depends on decisions, files, todos, or plan state already in the parent
 transcript.
 
-Forked state renders concrete Work progress through the canonical
-`checklist_*` surface. The durable task/Fleet ledger owns lifecycle state;
-checklist entries are the model-visible progress projection. Use `update_plan`
-only for strategy metadata that helps a parent or later worker understand the
-approach.
+Forked state renders concrete Work progress from the To-do ledger — the sole
+canonical Work surface, written by `work_update`. The child's
+`<codewhale:fork_state>` block carries the same bounded body
+(`crates/tui/src/work_grounding.rs`) that the parent's own requests carry, so a
+fork continues from the parent's real progress position rather than a
+paraphrase. That Work section is resolved when the spawn happens, so a
+`work_update` earlier in the same parent turn is included.
+
+Each agent then grounds on **its own** ledger: every sub-agent request carries
+the same transient `<codewhale:work_state>` tail rendered from that agent's
+private To-do list (#4810), refreshed after the agent's own `work_update`. It is
+request-scoped — never stored in the child transcript or its system prefix — so
+a worker can never read or write a parent's or sibling's **private transient
+tail**. A deliberately forked child still receives the bounded immutable parent
+ledger snapshot described above as part of its fork context; it cannot mutate
+that snapshot or keep reading later parent changes.
+
+That same private ledger is what the child's in-transcript card shows. A
+delegate card renders a bounded projection of **its own** agent's To-do — the
+settled/total count, the in-progress item always included, up to three rows, and an
+explicit `… +N more` when the bound elides the rest — built by
+`card_todo_projection` from the same snapshot, priority order, and sanitizer the
+model-facing body uses. A card only ever consumes an envelope whose `agent_id`
+matches it, so a parent's list never appears under a child and no sibling's list
+appears under another. An agent that has stated no work shows no To-do rows at
+all rather than a placeholder task, and a terminal card keeps the last snapshot
+its agent actually published. Fanout cards stay a dot grid and do not show child
+To-do: with many workers behind one card there is no truthful place to hang a
+single ledger. A child To-do appears only when the runtime already represents
+that child as its own delegate card.
+
+The durable task/Fleet ledger still owns lifecycle state. Use
+`update_plan` only for conversational strategy that helps a parent or later
+worker understand the approach; it is not a second Work ledger and never
+becomes Work grounding on its own.
 
 ## Worktree isolation
 
@@ -180,8 +211,8 @@ OUTPUT: VERDICT, EVIDENCE, GAPS, NEXT.
   likely scope, and return `path:line-range` evidence instead of a narrative
   tour. The role name to use is `scout`.
 - **`planner`** — when the parent has an objective but no executable
-  decomposition. Planners write artifacts (`update_plan` rows,
-  `checklist_write` entries) but don't carry them out.
+  decomposition. Planners write artifacts (`work_update` items for the ledger,
+  `update_plan` notes for strategy) but don't carry them out.
 - **`reviewer`** — when there's already a change and the parent wants
   it graded. Reviewers don't patch — they describe the fix in the
   finding so the parent can dispatch a builder if the verdict
@@ -193,6 +224,11 @@ OUTPUT: VERDICT, EVIDENCE, GAPS, NEXT.
   on the test suite or other validation. Verifiers don't fix
   failures; they capture the failing assertion + stack and put fix
   candidates under RISKS.
+- **`consultant`** — when the operator wants a high-leverage second opinion
+  before cheaper execution continues. Consultants read enough to ground a
+  recommendation, but cannot write or run shell commands. `oracle` and
+  `advisor` remain accepted only when loading older requests or persisted
+  records; new prompts, receipts, and UI use `consultant`.
 - **`custom`** — only when the parent needs to constrain the tool
   set explicitly. Pass the allowlist via the `allowed_tools` field
   on legacy/internal sub-agent records; the model-facing `agent` tool keeps the
@@ -210,6 +246,7 @@ The model can spell each role multiple ways:
 | `reviewer`    | `review`, `code-review`, `code_review`                           |
 | `builder`     | `implementer`, `implement`, `implementation`                     |
 | `verifier`    | `verify`, `verification`, `validator`, `tester`                  |
+| `consultant`  | `oracle`, `advisor` (compatibility input only)                    |
 | `custom`      | (none; explicit `allowed_tools` array required)                  |
 
 All matching is case-insensitive. Unknown values produce a typed

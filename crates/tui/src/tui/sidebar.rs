@@ -9,14 +9,14 @@ use std::fmt::Write;
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
-use crate::localization::Locale;
+use crate::localization::{Locale, MessageId, tr};
 use crate::tui::app::HuntVerdict;
 
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
     prelude::Widget,
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Paragraph, Wrap},
 };
@@ -190,8 +190,114 @@ fn render_sidebar_panel_stack(
             AutoSidebarPanel::Tasks => render_sidebar_tasks(f, *rect, app),
             AutoSidebarPanel::Agents => render_sidebar_subagents(f, *rect, app),
             AutoSidebarPanel::Context => render_context_panel(f, *rect, app),
+            AutoSidebarPanel::Sessions => render_sidebar_sessions(f, *rect, app),
         }
     }
+}
+
+/// Render the persistent Sessions rail (#2934).
+///
+/// Rows are projected from cached metadata (see
+/// [`crate::tui::sessions_rail`]); this function never reads a session file.
+/// Each row dispatches `/sessions open <id>`, which opens the existing picker
+/// preselected on that session — the rail navigates, the picker owns resume.
+fn render_sidebar_sessions(f: &mut Frame, area: Rect, app: &mut App) {
+    let max_rows = crate::tui::sessions_rail::rows_for_height(area.height);
+    refresh_sessions_rail_cache(app, max_rows);
+
+    let width = usize::from(area.width.saturating_sub(4)).max(1);
+    let locale = app.ui_locale;
+    let Some(cache) = app.sessions_rail_cache.as_ref() else {
+        return;
+    };
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut full_texts: Vec<String> = Vec::new();
+    let mut actions: Vec<Option<SidebarRowAction>> = Vec::new();
+
+    if let Some(error) = cache.error() {
+        lines.push(Line::from(Span::styled(
+            truncate_line_to_width(
+                &tr(locale, MessageId::SessionsRailUnavailable).replace("{error}", error),
+                width,
+            ),
+            Style::default().fg(app.ui_theme.text_dim),
+        )));
+        full_texts.push(error.to_string());
+        actions.push(None);
+    } else if cache.rows().is_empty() {
+        lines.push(Line::from(Span::styled(
+            truncate_line_to_width(&tr(locale, MessageId::SessionsRailEmpty), width),
+            Style::default().fg(app.ui_theme.text_dim),
+        )));
+        full_texts.push(tr(locale, MessageId::SessionsRailEmpty).into_owned());
+        actions.push(None);
+    } else {
+        for row in cache.rows() {
+            let age = crate::tui::session_picker::format_relative_time(&row.updated_at, locale);
+            // The current session is marked with a glyph rather than colour
+            // alone so the distinction survives monochrome terminals and
+            // colour-vision differences.
+            let marker = if row.is_current { "▸ " } else { "  " };
+            let text = format!("{marker}{} · {age}", row.title);
+            let style = if row.is_current {
+                Style::default()
+                    .fg(app.ui_theme.text_body)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(app.ui_theme.text_body)
+            };
+            lines.push(Line::from(Span::styled(
+                truncate_line_to_width(&text, width),
+                style,
+            )));
+            full_texts.push(text);
+            actions.push(Some(SidebarRowAction::Command(
+                crate::tui::sessions_rail::row_command(&row.id),
+            )));
+        }
+    }
+
+    let shown = cache.rows().len();
+    let total = cache.total_in_scope();
+    let footer = if total > shown {
+        tr(locale, MessageId::SessionsRailShowingCount)
+            .replace("{shown}", &shown.to_string())
+            .replace("{total}", &total.to_string())
+    } else {
+        tr(locale, MessageId::SessionsRailBrowseAll).into_owned()
+    };
+    lines.push(Line::from(Span::styled(
+        truncate_line_to_width(&footer, width),
+        Style::default().fg(app.ui_theme.text_dim),
+    )));
+    full_texts.push(footer);
+    actions.push(Some(SidebarRowAction::Command(
+        crate::tui::sessions_rail::browse_all_command().to_string(),
+    )));
+
+    let title = tr(locale, MessageId::SessionsRailTitle).into_owned();
+    render_sidebar_section(f, area, &title, lines, full_texts, actions, app);
+}
+
+/// Refresh the rail cache when it is missing, stale, or computed for a
+/// different workspace/active session.
+fn refresh_sessions_rail_cache(app: &mut App, max_rows: usize) {
+    let now = std::time::Instant::now();
+    let workspace = app.workspace.clone();
+    let current = app.current_session_id.clone();
+    let fresh = app
+        .sessions_rail_cache
+        .as_ref()
+        .is_some_and(|cache| cache.is_fresh(&workspace, current.as_deref(), max_rows, now));
+    if fresh {
+        return;
+    }
+    app.sessions_rail_cache = Some(crate::tui::sessions_rail::load_rail_cache(
+        &workspace,
+        current.as_deref(),
+        max_rows,
+    ));
 }
 
 /// Compute the Auto-mode panel signals. Shared by `render_sidebar_auto` (which
@@ -212,6 +318,7 @@ fn auto_sidebar_state(app: &mut App) -> AutoSidebarState {
             && active_fanout_counts(app).is_none()
             && !foreground_rlm_running(app),
         context_enabled: app.context_panel,
+        sessions_rail_enabled: app.sessions_rail,
     }
 }
 
@@ -226,7 +333,13 @@ pub(crate) fn sidebar_auto_idle(app: &mut App) -> bool {
         return false;
     }
     let state = auto_sidebar_state(app);
-    !state.work_has_content && state.tasks_empty && state.agents_empty && !state.context_enabled
+    !state.work_has_content
+        && state.tasks_empty
+        && state.agents_empty
+        && !state.context_enabled
+        // An enabled rail is durable content: collapsing it away on idle would
+        // hide the very surface the user turned on to browse between sessions.
+        && !state.sessions_rail_enabled
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,6 +348,11 @@ enum AutoSidebarPanel {
     Tasks,
     Agents,
     Context,
+    /// Persistent Sessions rail (#2934). Opt-in via the `sessions_rail`
+    /// setting; unlike the content-gated panels it stays visible while
+    /// enabled, because "there are no sessions yet" is itself the thing a
+    /// browsing surface needs to say.
+    Sessions,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -243,11 +361,15 @@ struct AutoSidebarState {
     tasks_empty: bool,
     agents_empty: bool,
     context_enabled: bool,
+    sessions_rail_enabled: bool,
 }
 
 fn auto_sidebar_panels(state: AutoSidebarState) -> Vec<AutoSidebarPanel> {
-    let nothing_else_active = state.tasks_empty && state.agents_empty && !state.context_enabled;
-    let mut visible = Vec::with_capacity(4);
+    let nothing_else_active = state.tasks_empty
+        && state.agents_empty
+        && !state.context_enabled
+        && !state.sessions_rail_enabled;
+    let mut visible = Vec::with_capacity(5);
 
     if state.work_has_content || nothing_else_active {
         visible.push(AutoSidebarPanel::Work);
@@ -260,6 +382,11 @@ fn auto_sidebar_panels(state: AutoSidebarState) -> Vec<AutoSidebarPanel> {
     }
     if state.context_enabled {
         visible.push(AutoSidebarPanel::Context);
+    }
+    // Last in the stack: the rail is a navigation aid, so live work keeps the
+    // rows above it.
+    if state.sessions_rail_enabled {
+        visible.push(AutoSidebarPanel::Sessions);
     }
 
     visible
@@ -2638,9 +2765,10 @@ fn subagent_output_handle(row: &SidebarAgentRow) -> Option<String> {
 }
 
 /// Build the Agents panel lines together with a parallel per-line
-/// click-action vector (#3028). Agent label rows open the Fleet worker status
-/// view via `/fleet status`; header, role-mix, detail, and RLM lines are not
-/// clickable.
+/// click-action vector (#3028). Agent label rows open the current-session
+/// Fleet worker view (`/fleet workers`, formerly spelled `/fleet status`
+/// before that name moved to the durable ledger in #4022); header, role-mix,
+/// detail, and RLM lines are not clickable.
 fn subagent_panel_rows(
     summary: &SidebarSubagentSummary,
     rows: &[SidebarAgentRow],
@@ -3121,14 +3249,7 @@ fn render_context_panel(f: &mut Frame, area: Rect, app: &mut App) {
 
 fn context_panel_cost_line(app: &App) -> String {
     let displayed_total = app.displayed_session_cost_for_currency(app.cost_currency);
-    let chip = crate::route_billing::usage_chip(
-        app.billing_presentation,
-        app.api_provider,
-        &app.model,
-        displayed_total,
-        app.cost_display_currency(app.cost_currency),
-        None,
-    );
+    let chip = app.cumulative_usage_chip();
     match &chip {
         crate::route_billing::UsageChip::Money(_)
             if crate::route_billing::has_priced_metered_basis(
@@ -3333,11 +3454,11 @@ mod tests {
         auto_sidebar_panels, background_task_spinner_prefix, cached_agent_activity_is_live,
         context_panel_cost_line, editorial_tool_rows, hotbar_panel_enabled,
         hotbar_panel_hover_texts, hotbar_panel_lines, hotbar_panel_slots, is_hotbar_disabled,
-        normalize_activity_text, render_sidebar, sidebar_agent_rows, sidebar_hover_rows,
-        sidebar_work_summary, sort_sidebar_agent_rows_as_tree, subagent_output_handle,
-        subagent_panel_hover_texts, subagent_panel_lines, subagent_panel_rows,
-        task_panel_hover_texts, task_panel_lines, task_panel_row_sets, task_panel_rows,
-        work_panel_empty_hint, work_panel_hover_texts, work_panel_lines,
+        normalize_activity_text, render_sidebar, sidebar_agent_rows, sidebar_auto_idle,
+        sidebar_hover_rows, sidebar_work_summary, sort_sidebar_agent_rows_as_tree,
+        subagent_output_handle, subagent_panel_hover_texts, subagent_panel_lines,
+        subagent_panel_rows, task_panel_hover_texts, task_panel_lines, task_panel_row_sets,
+        task_panel_rows, work_panel_empty_hint, work_panel_hover_texts, work_panel_lines,
     };
     use crate::config::Config;
     use crate::localization::Locale;
@@ -3426,6 +3547,15 @@ mod tests {
         assert_eq!(context_panel_cost_line(&app), "cost: unknown");
     }
 
+    /// A route priced only in USD, displayed in CNY mode, must show the USD
+    /// figure. The alternative — rendering the CNY accumulator, which is a
+    /// structural zero for a USD-only route — would report ¥0.00 as if the
+    /// turn were free.
+    ///
+    /// The USD amount and the coverage that qualifies it are recorded through
+    /// the same audit production uses. Bumping the raw accumulator instead
+    /// would leave the session with money and no evidence of what it covers,
+    /// which is a different (and separately tested) state.
     #[test]
     fn context_panel_cost_line_uses_usd_for_usd_only_model_in_cny_mode() {
         let mut app = create_test_app();
@@ -3437,6 +3567,7 @@ mod tests {
         app.api_provider = crate::config::ApiProvider::Moonshot;
         app.billing_presentation = crate::route_billing::BillingPresentation::Metered;
         app.cost_currency = crate::pricing::CostCurrency::Cny;
+        app.record_turn_cost_audit(&usd_only_priced_audit(0.42));
         app.accrue_session_cost_estimate(crate::pricing::CostEstimate::usd_only(0.42));
 
         let line = context_panel_cost_line(&app);
@@ -3446,6 +3577,112 @@ mod tests {
             !line.contains('¥'),
             "must not render CNY zero, got {line:?}"
         );
+    }
+
+    /// The same session, before any turn has been priced, must not present the
+    /// USD accumulator as a CNY figure or as a total. With no coverage at all
+    /// there is nothing to report.
+    #[test]
+    fn context_panel_cost_line_reports_unknown_before_any_turn_is_priced() {
+        let mut app = create_test_app();
+        app.model = "kimi-k2.6".to_string();
+        app.api_provider = crate::config::ApiProvider::Moonshot;
+        app.billing_presentation = crate::route_billing::BillingPresentation::Metered;
+        app.cost_currency = crate::pricing::CostCurrency::Cny;
+
+        // Money with no audit behind it: the accumulator moved, coverage did
+        // not. This is exactly the shape a legacy/unaudited path produces.
+        app.accrue_session_cost_estimate(crate::pricing::CostEstimate::usd_only(0.42));
+
+        let line = context_panel_cost_line(&app);
+        assert!(
+            !line.contains("0.42"),
+            "an unqualified accumulator is not a reportable total: {line:?}"
+        );
+        assert!(!line.contains('¥'), "must not render CNY zero: {line:?}");
+    }
+
+    /// A route priced in CNY reports CNY in CNY mode — the fallback to USD is
+    /// for USD-only coverage, not a blanket preference for dollars.
+    #[test]
+    fn context_panel_cost_line_keeps_cny_when_the_route_is_priced_in_cny() {
+        let mut app = create_test_app();
+        app.model = "deepseek-v4-flash".to_string();
+        app.api_provider = crate::config::ApiProvider::Deepseek;
+        app.billing_presentation = crate::route_billing::BillingPresentation::Metered;
+        app.cost_currency = crate::pricing::CostCurrency::Cny;
+        app.record_turn_cost_audit(&dual_currency_priced_audit(0.42, 3.0));
+        app.accrue_session_cost_estimate(crate::pricing::CostEstimate {
+            usd: 0.42,
+            cny: 3.0,
+        });
+
+        let line = context_panel_cost_line(&app);
+        assert!(line.contains('¥'), "expected a CNY amount, got {line:?}");
+        assert!(!line.contains('$'), "must not fall back to USD: {line:?}");
+    }
+
+    /// An authoritatively priced turn that cost nothing is a *known* zero, and
+    /// is reported separately from a route whose spend could not be
+    /// established. Both currencies are checked so neither can be the one that
+    /// quietly reports a fabricated zero.
+    #[test]
+    fn context_panel_cost_line_separates_a_priced_zero_from_unknown_spend() {
+        let mut priced_zero = create_test_app();
+        priced_zero.api_provider = crate::config::ApiProvider::Deepseek;
+        priced_zero.model = "deepseek-v4-flash".to_string();
+        priced_zero.billing_presentation = crate::route_billing::BillingPresentation::Metered;
+        priced_zero.record_turn_cost_audit(&dual_currency_priced_audit(0.0, 0.0));
+        let priced_zero_line = context_panel_cost_line(&priced_zero);
+
+        let mut unknown = create_test_app();
+        unknown.api_provider = crate::config::ApiProvider::Deepseek;
+        unknown.model = "deepseek-v4-flash".to_string();
+        unknown.billing_presentation = crate::route_billing::BillingPresentation::Metered;
+        unknown.record_turn_cost_audit(&unpriced_audit());
+        let unknown_line = context_panel_cost_line(&unknown);
+
+        assert_eq!(unknown_line, "cost: unknown");
+        assert_ne!(
+            priced_zero_line, unknown_line,
+            "a provider-reported zero must not render as missing data"
+        );
+    }
+
+    fn usd_only_priced_audit(usd: f64) -> crate::pricing::TurnCostAudit {
+        crate::pricing::TurnCostAudit {
+            estimate: Some(crate::pricing::CostEstimate::usd_only(usd)),
+            provenance: Some(codewhale_config::pricing::PricingProvenance::ModelsDevBundled),
+            unpriced_classes: Vec::new(),
+            unpriced_reason: None,
+            live_pricing_defect: None,
+            usd_priced: true,
+            cny_priced: false,
+        }
+    }
+
+    fn dual_currency_priced_audit(usd: f64, cny: f64) -> crate::pricing::TurnCostAudit {
+        crate::pricing::TurnCostAudit {
+            estimate: Some(crate::pricing::CostEstimate { usd, cny }),
+            provenance: Some(codewhale_config::pricing::PricingProvenance::ModelsDevBundled),
+            unpriced_classes: Vec::new(),
+            unpriced_reason: None,
+            live_pricing_defect: None,
+            usd_priced: true,
+            cny_priced: true,
+        }
+    }
+
+    fn unpriced_audit() -> crate::pricing::TurnCostAudit {
+        crate::pricing::TurnCostAudit {
+            estimate: None,
+            provenance: None,
+            unpriced_classes: Vec::new(),
+            unpriced_reason: Some(crate::pricing::UnpricedReason::NoPricingRow),
+            live_pricing_defect: None,
+            usd_priced: false,
+            cny_priced: false,
+        }
     }
 
     #[test]
@@ -3518,6 +3755,7 @@ mod tests {
             tasks_empty: false,
             agents_empty: true,
             context_enabled: false,
+            sessions_rail_enabled: false,
         });
 
         assert_eq!(panels, vec![AutoSidebarPanel::Tasks]);
@@ -3530,9 +3768,71 @@ mod tests {
             tasks_empty: true,
             agents_empty: true,
             context_enabled: false,
+            sessions_rail_enabled: false,
         });
 
         assert_eq!(panels, vec![AutoSidebarPanel::Work]);
+    }
+
+    #[test]
+    fn sessions_rail_is_absent_until_the_setting_opts_in() {
+        let without = auto_sidebar_panels(AutoSidebarState {
+            work_has_content: true,
+            tasks_empty: true,
+            agents_empty: true,
+            context_enabled: false,
+            sessions_rail_enabled: false,
+        });
+        assert!(!without.contains(&AutoSidebarPanel::Sessions));
+
+        let with = auto_sidebar_panels(AutoSidebarState {
+            work_has_content: true,
+            tasks_empty: true,
+            agents_empty: true,
+            context_enabled: false,
+            sessions_rail_enabled: true,
+        });
+        assert_eq!(
+            with,
+            vec![AutoSidebarPanel::Work, AutoSidebarPanel::Sessions],
+            "the rail renders last so live work keeps the rows above it"
+        );
+    }
+
+    #[test]
+    fn an_enabled_rail_keeps_the_empty_work_placeholder_from_taking_the_slot() {
+        // With nothing live and the rail on, the rail is the content — the
+        // "one quiet empty state" Work placeholder must not also appear.
+        let panels = auto_sidebar_panels(AutoSidebarState {
+            work_has_content: false,
+            tasks_empty: true,
+            agents_empty: true,
+            context_enabled: false,
+            sessions_rail_enabled: true,
+        });
+
+        assert_eq!(panels, vec![AutoSidebarPanel::Sessions]);
+    }
+
+    #[test]
+    fn an_enabled_rail_prevents_idle_auto_collapse() {
+        let mut app = create_test_app();
+        app.sidebar_focus = SidebarFocus::Auto;
+        // Pin both opt-in panels off: `App::new` reads the developer's real
+        // persisted settings, so the baseline has to be set, not assumed.
+        app.context_panel = false;
+        app.sessions_rail = false;
+
+        assert!(
+            sidebar_auto_idle(&mut app),
+            "an idle session with no rail should still auto-collapse"
+        );
+
+        app.sessions_rail = true;
+        assert!(
+            !sidebar_auto_idle(&mut app),
+            "an enabled rail is durable content and must survive idle collapse"
+        );
     }
 
     #[test]
@@ -5389,7 +5689,8 @@ mod tests {
     fn subagent_panel_actions_skip_role_mix_slot_for_progress_only_agents() {
         // Progress-only agents have no cached role counts, so there is no
         // role-mix line — the first agent row sits directly under the count
-        // header and must still resolve to /fleet status (#3028 audit fix).
+        // header and must still resolve to the session worker view (#3028
+        // audit fix).
         let summary = SidebarSubagentSummary {
             progress_only_count: 1,
             ..SidebarSubagentSummary::default()

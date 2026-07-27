@@ -180,6 +180,11 @@ pub const KEYBINDINGS: &[KeybindingEntry] = &[
         section: KeybindingSection::Submission,
     },
     KeybindingEntry {
+        chord: "Ctrl+Enter / Cmd+Enter",
+        description_id: crate::localization::MessageId::KbSteerCurrentTurn,
+        section: KeybindingSection::Submission,
+    },
+    KeybindingEntry {
         chord: "Esc",
         description_id: crate::localization::MessageId::KbCloseMenu,
         section: KeybindingSection::Submission,
@@ -384,6 +389,45 @@ mod tests {
     }
 
     #[test]
+    fn composer_catalog_assigns_one_stable_role_to_each_chord() {
+        let chord_for = |id| {
+            KEYBINDINGS
+                .iter()
+                .find(|entry| entry.description_id == id)
+                .expect("composer binding should be documented")
+                .chord
+        };
+
+        assert_eq!(
+            chord_for(crate::localization::MessageId::KbInsertNewline),
+            "Ctrl+J / Alt+Enter / Shift+Enter"
+        );
+        assert_eq!(
+            chord_for(crate::localization::MessageId::KbSteerCurrentTurn),
+            "Ctrl+Enter / Cmd+Enter"
+        );
+        assert_eq!(
+            chord_for(crate::localization::MessageId::KbStashDraft),
+            "Ctrl+G / Ctrl+S"
+        );
+        assert_eq!(
+            chord_for(crate::localization::MessageId::KbSendDraft),
+            "Enter"
+        );
+
+        let tab_copy = crate::localization::tr(
+            crate::localization::Locale::En,
+            crate::localization::MessageId::KbCompleteCycleModes,
+        );
+        assert!(!tab_copy.to_ascii_lowercase().contains("queue"));
+        let stash_copy = crate::localization::tr(
+            crate::localization::Locale::En,
+            crate::localization::MessageId::KbStashDraft,
+        );
+        assert!(!stash_copy.to_ascii_lowercase().contains("send"));
+    }
+
+    #[test]
     fn clipboard_help_distinguishes_terminal_text_graphical_image_and_in_app_copy() {
         let terminal_paste = KEYBINDINGS
             .iter()
@@ -535,6 +579,159 @@ mod tests {
                 .all(|entry| entry.chord != "v" && !entry.chord.starts_with("v /")),
             "bare `v` must not be advertised — composer typing owns it"
         );
+    }
+
+    /// #3758: a user who reads the help overlay must be able to answer "what
+    /// does this key do?" with one answer. A key may appear twice only when
+    /// every occurrence but one names its context in parentheses — the way
+    /// `Ctrl+C` and `Ctrl+C (selection)` do — so the reader is told which
+    /// reading applies. Two unqualified entries for the same key is the
+    /// ambiguity this guard exists to reject.
+    #[test]
+    fn every_advertised_key_names_exactly_one_canonical_action() {
+        struct Use {
+            chord: &'static str,
+            alternative: String,
+            description_id: crate::localization::MessageId,
+        }
+
+        let mut uses_by_key: std::collections::BTreeMap<String, Vec<Use>> =
+            std::collections::BTreeMap::new();
+        for entry in KEYBINDINGS {
+            for alternative in entry.chord.split(" / ") {
+                let alternative = alternative.trim();
+                // `Ctrl+C (selection)` → base key `Ctrl+C`, qualifier retained
+                // on the alternative so the check below can see it.
+                let base = alternative
+                    .split_once(" (")
+                    .map(|(head, _)| head)
+                    .unwrap_or(alternative)
+                    .trim()
+                    .to_string();
+                uses_by_key.entry(base).or_default().push(Use {
+                    chord: entry.chord,
+                    alternative: alternative.to_string(),
+                    description_id: entry.description_id,
+                });
+            }
+        }
+
+        for (key, uses) in &uses_by_key {
+            if uses.len() == 1 {
+                continue;
+            }
+            let single_action = uses
+                .iter()
+                .all(|entry| entry.description_id == uses[0].description_id);
+            if single_action {
+                // The same action documented from two spellings is fine —
+                // `Home / End` and `Ctrl+A / Ctrl+E` both jump to line edges.
+                continue;
+            }
+            let unqualified: Vec<&str> = uses
+                .iter()
+                .filter(|entry| !entry.alternative.contains('('))
+                .map(|entry| entry.chord)
+                .collect();
+            assert!(
+                unqualified.len() <= 1,
+                "{key} is advertised for more than one action without naming the \
+                 context that selects between them: {unqualified:?}"
+            );
+        }
+    }
+
+    /// #440 / #3758: `Ctrl+G` and `Ctrl+S` stash the draft. They are not a
+    /// send, a queue, a steer, or a file save, and a real-terminal report that
+    /// says otherwise is reading ambiguous copy, not misusing the key.
+    #[test]
+    fn stash_chords_advertise_stashing_and_nothing_else() {
+        let stash_entries: Vec<&KeybindingEntry> = KEYBINDINGS
+            .iter()
+            .filter(|entry| {
+                entry
+                    .chord
+                    .split(" / ")
+                    .map(str::trim)
+                    .any(|chord| matches!(chord, "Ctrl+G" | "Ctrl+S"))
+            })
+            .collect();
+
+        assert_eq!(
+            stash_entries.len(),
+            1,
+            "Ctrl+G / Ctrl+S must be documented exactly once, together"
+        );
+        assert_eq!(stash_entries[0].chord, "Ctrl+G / Ctrl+S");
+        assert_eq!(
+            stash_entries[0].description_id,
+            crate::localization::MessageId::KbStashDraft
+        );
+
+        let copy = crate::localization::tr(
+            crate::localization::Locale::En,
+            crate::localization::MessageId::KbStashDraft,
+        )
+        .to_ascii_lowercase();
+        for forbidden in ["send", "queue", "steer", "submit", "save"] {
+            assert!(
+                !copy.contains(forbidden),
+                "stash copy must not read as {forbidden:?}: {copy:?}"
+            );
+        }
+        assert!(
+            copy.contains("stash"),
+            "stash copy must name the action it performs: {copy:?}"
+        );
+    }
+
+    /// The running-turn contract has exactly three composer gestures, and each
+    /// one is advertised for exactly one of them: Enter sends or queues,
+    /// Ctrl+Enter steers, and the newline chords stay newlines. Nothing else
+    /// may claim any of those verbs.
+    #[test]
+    fn running_turn_verbs_belong_to_one_chord_each() {
+        let entry_for = |id| {
+            KEYBINDINGS
+                .iter()
+                .find(|entry| entry.description_id == id)
+                .expect("running-turn binding should be documented")
+        };
+
+        assert_eq!(
+            entry_for(crate::localization::MessageId::KbSendDraft).chord,
+            "Enter"
+        );
+        assert_eq!(
+            entry_for(crate::localization::MessageId::KbSteerCurrentTurn).chord,
+            "Ctrl+Enter / Cmd+Enter"
+        );
+        assert_eq!(
+            entry_for(crate::localization::MessageId::KbInsertNewline).chord,
+            "Ctrl+J / Alt+Enter / Shift+Enter"
+        );
+
+        let steer_copy = crate::localization::tr(
+            crate::localization::Locale::En,
+            crate::localization::MessageId::KbSteerCurrentTurn,
+        )
+        .to_ascii_lowercase();
+        assert!(
+            steer_copy.contains("steer"),
+            "the steer chord must say it steers: {steer_copy:?}"
+        );
+
+        let newline_copy = crate::localization::tr(
+            crate::localization::Locale::En,
+            crate::localization::MessageId::KbInsertNewline,
+        )
+        .to_ascii_lowercase();
+        for forbidden in ["send", "steer", "queue"] {
+            assert!(
+                !newline_copy.contains(forbidden),
+                "newline chords must not read as {forbidden:?}: {newline_copy:?}"
+            );
+        }
     }
 
     #[test]

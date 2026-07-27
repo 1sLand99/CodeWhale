@@ -18,7 +18,9 @@ use crate::config::ApiProvider;
 #[cfg(test)]
 use crate::config::{DEEPSEEK_ALIAS_REPLACEMENT, DEEPSEEK_ALIAS_RETIREMENT_UTC};
 use crate::models::Usage;
-use crate::pricing::{calculate_turn_cost_estimate_for_route_at, token_usage_for_pricing};
+use crate::pricing::{
+    CostEstimate, TurnCostAudit, audit_turn_cost_for_route_at, token_usage_for_pricing,
+};
 
 /// One turn's normalized token economics.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -43,6 +45,16 @@ pub struct TurnScore {
     pub output_tokens: u64,
     /// Cache-read (cache-hit) input tokens.
     pub cache_read_tokens: u64,
+    /// Cache-write (cache-creation) input tokens. Billed at a premium on the
+    /// providers that publish one, so it is audited as its own class rather
+    /// than folded into input. Defaults to 0 for legacy records.
+    #[serde(default)]
+    pub cache_write_tokens: u64,
+    /// Reasoning tokens reported for the turn. **Informational only** — every
+    /// provider counts these inside `output_tokens`, so adding them here would
+    /// double-bill. Kept so a reasoning-heavy run can still be inspected.
+    #[serde(default)]
+    pub reasoning_tokens: u64,
     pub cost_usd: f64,
     pub cost_cny: f64,
     /// True when provider provenance is missing/unknown or no authoritative USD
@@ -53,14 +65,46 @@ pub struct TurnScore {
     /// USD, so their CNY value is unavailable rather than a real zero.
     #[serde(default)]
     pub cost_cny_unpriced: bool,
+    /// Why USD cost is unavailable, when it is (`no_pricing_row`,
+    /// `missing_class_price`, `not_money_metered`, …). `None` for priced turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_unpriced_reason: Option<String>,
+    /// Token classes this turn used that carry no published price. Non-empty
+    /// means the estimate failed closed on purpose.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unpriced_classes: Vec<String>,
+    /// Provenance of the pricing row that was applied or attempted
+    /// (`models_dev_bundled`, `provider_live`, `provider_docs`,
+    /// `user_override`). `None` when no row was found at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing_provenance: Option<String>,
+    /// Live-pricing downgrade receipt: the live catalog row for this route could
+    /// not be verified (stale, or fetched from a different endpoint), so the
+    /// bundled published rates were used. Present even on priced turns, because
+    /// it explains *which* row the number came from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_pricing_defect: Option<String>,
+    /// Whether this turn is inside the money-metered coverage denominator.
+    ///
+    /// False only for routes exactly identified as non-metered. Serialized so a
+    /// re-read scorecard can reproduce the coverage split without re-deriving it
+    /// from `provider` + `billing_surface`, which are also preserved above.
+    #[serde(default)]
+    pub money_metered: bool,
 }
 
 /// Aggregate metrics for a run. Serializes/deserializes as the baseline file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ScorecardMetrics {
     pub turns: usize,
-    /// Turns whose provider/model route could not be priced authoritatively in
-    /// USD.
+    /// Turns whose route meters money, or whose billing basis could not be
+    /// established. This — not `turns` — is the denominator the USD total is
+    /// meant to cover: a local or subscription turn owes no dollars, so counting
+    /// it would understate coverage, while an unknown-basis turn must stay in
+    /// (#4318). Defaults to zero so existing baseline JSON stays readable.
+    #[serde(default)]
+    pub money_metered_turns: usize,
+    /// Money-metered turns that could not be priced authoritatively in USD.
     /// Defaults to zero so existing baseline JSON remains readable.
     #[serde(default)]
     pub unpriced_turns: usize,
@@ -76,9 +120,22 @@ pub struct ScorecardMetrics {
     /// Whether every turn contributed authoritative CNY pricing.
     #[serde(default)]
     pub cny_cost_complete: bool,
+    /// Token classes used somewhere in the run that had no published price, in
+    /// stable order. Non-empty means `cost_complete` is false *because* of a
+    /// class-level pricing gap, not merely an unknown route.
+    #[serde(default)]
+    pub unpriced_classes: Vec<String>,
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub total_cache_read_tokens: u64,
+    /// Cache-write (cache-creation) tokens across the run. Defaults to zero so
+    /// existing baseline JSON stays readable.
+    #[serde(default)]
+    pub total_cache_write_tokens: u64,
+    /// Reasoning tokens across the run. Informational: already inside
+    /// `total_output_tokens`, never added to it.
+    #[serde(default)]
+    pub total_reasoning_tokens: u64,
     pub total_cost_usd: f64,
     pub total_cost_cny: f64,
     /// `cache_read / (input + cache_read)`; `0.0` when there are no input
@@ -96,6 +153,10 @@ pub struct Regression {
     pub pct_increase: f64,
 }
 
+fn cacheable_token_total(input: u64, cache_read: u64, cache_write: u64) -> u64 {
+    input.saturating_add(cache_read).saturating_add(cache_write)
+}
+
 /// Full scorecard: per-turn breakdown plus aggregates.
 #[derive(Debug, Clone, Serialize)]
 pub struct Scorecard {
@@ -105,11 +166,21 @@ pub struct Scorecard {
 
 /// One row of input to the scorecard: a turn id, the model that served it, and
 /// the turn's recorded usage.
+///
+/// `billing_surface` is explicit and has no default. The scorecard has two
+/// entry modes, and they must agree: if this fixture mode could silently supply
+/// an official first-party surface, every scorecard test would be asserting
+/// against a route classification that `from_recorded_turns` never invents, and
+/// the fail-closed path would go unexercised in the mode the tests use.
 #[cfg(test)]
 pub struct TurnInput<'a> {
     pub turn_id: String,
     pub created_at: Option<&'a DateTime<Utc>>,
     pub provider: Option<&'a str>,
+    /// The route's recorded billing surface, or `None` when the recording did
+    /// not establish one. `None` must price exactly as it does for a recorded
+    /// turn: unknown, never official.
+    pub billing_surface: Option<&'a str>,
     pub model: String,
     pub usage: &'a Usage,
 }
@@ -157,10 +228,72 @@ impl RecordedTurn {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct AvailableCost {
     usd: Option<f64>,
     cny: Option<f64>,
+    unpriced_reason: Option<String>,
+    unpriced_classes: Vec<String>,
+    provenance: Option<String>,
+    /// Live-pricing downgrade receipt, when the row used was a bundled fallback
+    /// for an unverifiable live row.
+    live_pricing_defect: Option<String>,
+    /// Whether this turn belongs in the money-metered coverage denominator.
+    /// False only for routes *exactly* identified as non-metered.
+    counts_toward_money_coverage: bool,
+}
+
+impl AvailableCost {
+    /// Legacy/unknown provenance: no route to price against at all.
+    ///
+    /// This still counts toward money coverage. A recording whose provider text
+    /// CodeWhale cannot parse is a turn whose spend is unknown, not a turn that
+    /// cost nothing — excusing it would let a legacy input file report a complete
+    /// total (#4318).
+    fn unknown_route() -> Self {
+        Self {
+            unpriced_reason: Some("unknown_route".to_string()),
+            counts_toward_money_coverage: true,
+            ..Self::default()
+        }
+    }
+
+    /// Fails closed with an explicit reason, still inside money coverage.
+    fn failed_closed(reason: &str) -> Self {
+        Self {
+            unpriced_reason: Some(reason.to_string()),
+            counts_toward_money_coverage: true,
+            ..Self::default()
+        }
+    }
+
+    fn from_audit(audit: &TurnCostAudit) -> Self {
+        Self {
+            usd: audit
+                .estimate
+                .and_then(|cost| audit.usd_priced.then_some(cost.usd)),
+            cny: audit
+                .estimate
+                .and_then(|cost| audit.cny_priced.then_some(cost.cny)),
+            unpriced_reason: audit
+                .unpriced_reason
+                .map(|reason| reason.label().to_string()),
+            unpriced_classes: audit
+                .unpriced_classes
+                .iter()
+                .map(|class| class.label().to_string())
+                .collect(),
+            provenance: audit
+                .provenance
+                .as_ref()
+                .map(|provenance| provenance.label().to_string()),
+            live_pricing_defect: audit
+                .live_pricing_defect
+                .as_ref()
+                .map(|defect| defect.label().to_string()),
+            counts_toward_money_coverage: audit.counts_toward_money_coverage(),
+        }
+    }
 }
 
 fn provider_scoped_cost(
@@ -170,6 +303,38 @@ fn provider_scoped_cost(
     created_at: Option<&DateTime<Utc>>,
     billing_surface: Option<&str>,
 ) -> AvailableCost {
+    // These provider identities are themselves exact billing provenance and
+    // override stale/junk recorded surfaces: they cannot become PAYG merely
+    // because an older recorder wrote a bogus endpoint classification.
+    let intrinsic_surface = match provider {
+        ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm => {
+            Some(crate::pricing::LOCAL_BILLING_SURFACE)
+        }
+        ApiProvider::OpenaiCodex | ApiProvider::OpencodeGo => {
+            Some(crate::pricing::OAUTH_SUBSCRIPTION_BILLING_SURFACE)
+        }
+        _ => None,
+    };
+    let billing_surface = intrinsic_surface.or(billing_surface);
+    // Every provider that supports both PAYG and plan/OAuth routes needs the
+    // recorded surface to choose between them. A model id or provider name is
+    // not sufficient evidence in an offline scorecard.
+    if billing_surface.is_none()
+        && matches!(
+            provider,
+            ApiProvider::Zai
+                | ApiProvider::Moonshot
+                | ApiProvider::Anthropic
+                | ApiProvider::XiaomiMimo
+                | ApiProvider::Xai
+                | ApiProvider::Minimax
+                | ApiProvider::MinimaxAnthropic
+                | ApiProvider::Stepfun
+                | ApiProvider::Custom
+        )
+    {
+        return AvailableCost::failed_closed("missing_billing_surface");
+    }
     let direct_deepseek = matches!(
         provider,
         ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::DeepseekAnthropic
@@ -181,25 +346,54 @@ fn provider_scoped_cost(
         || (provider == ApiProvider::Anthropic && model_lower == "claude-sonnet-5");
     let recorded_at = match (created_at, needs_recorded_time) {
         (Some(recorded_at), _) => recorded_at.to_owned(),
-        (None, true) => return AvailableCost::default(),
+        // A time-windowed rate without a recorded time cannot be resolved to a
+        // single price; fail closed rather than guess a window.
+        (None, true) => return AvailableCost::failed_closed("missing_recorded_time"),
         (None, false) => Utc::now(),
     };
 
+    // The billing surface recorded with the turn is authoritative over any
+    // provider-level assumption, and it now covers every classification a route
+    // can carry — Z.ai Coding Plan, Kimi Code, MiniMax Token Plan, MiMo token
+    // plan, OAuth brokers, local runtimes, aggregators, first-party PAYG, and
+    // "unclassified" — not just StepFun's two surfaces (#4318).
+    match crate::pricing::endpoint_metering_for_billing_surface(billing_surface) {
+        // Exactly identified as non-metered: no dollar figure is owed, and the
+        // turn leaves the money-coverage denominator.
+        crate::pricing::EndpointMetering::ExactSubscription
+        | crate::pricing::EndpointMetering::LocalNoBill => {
+            return AvailableCost {
+                unpriced_reason: Some(
+                    crate::pricing::UnpricedReason::NotMoneyMetered
+                        .label()
+                        .to_string(),
+                ),
+                counts_toward_money_coverage: false,
+                ..AvailableCost::default()
+            };
+        }
+        // A recorded surface CodeWhale cannot place must not inherit the
+        // provider's default rates.
+        crate::pricing::EndpointMetering::Unknown if billing_surface.is_some() => {
+            return AvailableCost::failed_closed(
+                crate::pricing::UnpricedReason::UnknownBillingBasis.label(),
+            );
+        }
+        crate::pricing::EndpointMetering::Unknown | crate::pricing::EndpointMetering::Money => {}
+    }
+
     // The pricing layer owns the exact provider/model catalog gate, explicit
     // first-party hand-price allowlist, cache-class completeness checks, and
-    // endpoint-derived StepFun surface. Keeping one route-aware path prevents
+    // endpoint-derived billing surfaces. Keeping one route-aware path prevents
     // the scorecard from drifting back to model-only pricing.
-    calculate_turn_cost_estimate_for_route_at(
+    let audit = audit_turn_cost_for_route_at(
         provider,
         normalized_model,
         billing_surface,
         usage,
         recorded_at,
-    )
-    .map_or_else(AvailableCost::default, |cost| AvailableCost {
-        usd: Some(cost.usd),
-        cny: direct_deepseek.then_some(cost.cny),
-    })
+    );
+    AvailableCost::from_audit(&audit)
 }
 
 impl Scorecard {
@@ -212,7 +406,7 @@ impl Scorecard {
             turn_id: &turn.turn_id,
             created_at: turn.created_at,
             provider: turn.provider,
-            billing_surface: None,
+            billing_surface: turn.billing_surface,
             model: &turn.model,
             usage: turn.usage,
         }))
@@ -242,6 +436,7 @@ impl Scorecard {
         let turns = turns.into_iter();
         let mut per_turn = Vec::with_capacity(turns.size_hint().0);
         let mut metrics = ScorecardMetrics::default();
+        let mut unpriced_classes = std::collections::BTreeSet::new();
 
         for turn in turns {
             // Normalize provider usage into canonical billable classes once.
@@ -251,7 +446,7 @@ impl Scorecard {
                 .map(str::trim)
                 .filter(|value| !value.is_empty());
             let cost = provider.and_then(ApiProvider::parse).map_or_else(
-                AvailableCost::default,
+                AvailableCost::unknown_route,
                 |provider| {
                     provider_scoped_cost(
                         provider,
@@ -266,15 +461,45 @@ impl Scorecard {
             let cost_cny_unpriced = cost.cny.is_none();
             let cost_usd = cost.usd.unwrap_or(0.0);
             let cost_cny = cost.cny.unwrap_or(0.0);
+            let reasoning_tokens = u64::from(turn.usage.reasoning_tokens.unwrap_or(0));
+            unpriced_classes.extend(cost.unpriced_classes.iter().cloned());
 
-            metrics.turns += 1;
-            metrics.unpriced_turns += usize::from(cost_unpriced);
-            metrics.cny_unpriced_turns += usize::from(cost_cny_unpriced);
-            metrics.total_input_tokens += classes.input;
-            metrics.total_output_tokens += classes.output;
-            metrics.total_cache_read_tokens += classes.cache_read;
-            metrics.total_cost_usd += cost_usd;
-            metrics.total_cost_cny += cost_cny;
+            metrics.turns = metrics.turns.saturating_add(1);
+            // Only money-metered turns can make a dollar total incomplete. A
+            // local or plan turn is not an unpriced dollar; an *unknown* one is.
+            if cost.counts_toward_money_coverage {
+                metrics.money_metered_turns = metrics.money_metered_turns.saturating_add(1);
+                metrics.unpriced_turns = metrics
+                    .unpriced_turns
+                    .saturating_add(usize::from(cost_unpriced));
+                metrics.cny_unpriced_turns = metrics
+                    .cny_unpriced_turns
+                    .saturating_add(usize::from(cost_cny_unpriced));
+            }
+            metrics.total_input_tokens = metrics.total_input_tokens.saturating_add(classes.input);
+            metrics.total_output_tokens =
+                metrics.total_output_tokens.saturating_add(classes.output);
+            metrics.total_cache_read_tokens = metrics
+                .total_cache_read_tokens
+                .saturating_add(classes.cache_read);
+            metrics.total_cache_write_tokens = metrics
+                .total_cache_write_tokens
+                .saturating_add(classes.cache_write);
+            metrics.total_reasoning_tokens = metrics
+                .total_reasoning_tokens
+                .saturating_add(reasoning_tokens);
+            metrics.total_cost_usd = CostEstimate::usd_only(metrics.total_cost_usd)
+                .saturating_add(CostEstimate::usd_only(cost_usd))
+                .usd;
+            metrics.total_cost_cny = CostEstimate {
+                usd: 0.0,
+                cny: metrics.total_cost_cny,
+            }
+            .saturating_add(CostEstimate {
+                usd: 0.0,
+                cny: cost_cny,
+            })
+            .cny;
 
             per_turn.push(TurnScore {
                 turn_id: turn.turn_id.to_string(),
@@ -285,14 +510,33 @@ impl Scorecard {
                 input_tokens: classes.input,
                 output_tokens: classes.output,
                 cache_read_tokens: classes.cache_read,
+                cache_write_tokens: classes.cache_write,
+                reasoning_tokens,
                 cost_usd,
                 cost_cny,
                 cost_unpriced,
                 cost_cny_unpriced,
+                cost_unpriced_reason: cost.unpriced_reason,
+                unpriced_classes: cost.unpriced_classes,
+                pricing_provenance: cost.provenance,
+                live_pricing_defect: cost.live_pricing_defect,
+                money_metered: cost.counts_toward_money_coverage,
             });
         }
+        metrics.unpriced_classes = unpriced_classes.into_iter().collect();
 
-        let cacheable = metrics.total_input_tokens + metrics.total_cache_read_tokens;
+        // Canonical denominator: hit / (non-cached input + hit + write).
+        // `total_input_tokens` here is already the *non-cached* input, because
+        // `token_usage_for_pricing` splits hits and writes out of the reported
+        // prompt total. Cache-write tokens were previously missing from the
+        // denominator, which reported a better hit ratio on precisely the turns
+        // that paid to populate the cache (#4318). Write stays a separate
+        // reported total so the premium is not hidden inside the ratio.
+        let cacheable = cacheable_token_total(
+            metrics.total_input_tokens,
+            metrics.total_cache_read_tokens,
+            metrics.total_cache_write_tokens,
+        );
         metrics.cache_hit_ratio = if cacheable > 0 {
             metrics.total_cache_read_tokens as f64 / cacheable as f64
         } else {
@@ -310,10 +554,20 @@ impl Scorecard {
         let m = &self.metrics;
         let mut out = String::new();
         out.push_str("Token / cache / cost scorecard\n");
-        out.push_str(&format!("turns: {}\n", m.turns));
         out.push_str(&format!(
-            "input_tokens: {}  output_tokens: {}  cache_read_tokens: {}\n",
-            m.total_input_tokens, m.total_output_tokens, m.total_cache_read_tokens
+            "turns: {}  money_metered_turns: {}\n",
+            m.turns, m.money_metered_turns
+        ));
+        out.push_str(&format!(
+            "input_tokens: {}  output_tokens: {}  cache_read_tokens: {}  cache_write_tokens: {}\n",
+            m.total_input_tokens,
+            m.total_output_tokens,
+            m.total_cache_read_tokens,
+            m.total_cache_write_tokens
+        ));
+        out.push_str(&format!(
+            "reasoning_tokens: {} (informational; already inside output_tokens)\n",
+            m.total_reasoning_tokens
         ));
         out.push_str(&format!(
             "cache_hit_ratio: {:.1}%\n",
@@ -326,7 +580,10 @@ impl Scorecard {
             "$",
             m.total_cost_usd,
             m.unpriced_turns,
-            m.turns,
+            // Coverage is reported against the money-metered turns, not every
+            // turn: a local or plan turn owes no dollars, so including it in the
+            // denominator would understate how complete the figure is.
+            m.money_metered_turns,
         );
         append_currency_summary(
             &mut out,
@@ -335,7 +592,7 @@ impl Scorecard {
             "¥",
             m.total_cost_cny,
             m.cny_unpriced_turns,
-            m.turns,
+            m.money_metered_turns,
         );
         if m.unpriced_turns > 0 {
             out.push_str(&format!(
@@ -347,6 +604,12 @@ impl Scorecard {
             out.push_str(&format!(
                 "note: {} turn(s) had no authoritative CNY pricing row; their CNY cost is unavailable and excluded.\n",
                 m.cny_unpriced_turns
+            ));
+        }
+        if !m.unpriced_classes.is_empty() {
+            out.push_str(&format!(
+                "note: token class(es) with no published price on a used route: {}. Those turns fail closed rather than under-report.\n",
+                m.unpriced_classes.join(", ")
             ));
         }
         out
@@ -491,6 +754,291 @@ mod tests {
         }
     }
 
+    /// The scorecard has two entry modes and they must classify identically.
+    ///
+    /// `from_turns` is the fixture mode used by this test module;
+    /// `from_recorded_turns` is the mode that reads real recordings. The
+    /// fixture mode used to inject `first-party-payg` for every row, which
+    /// meant the whole suite was asserting against a route classification the
+    /// real mode never produces — the fail-closed path was untested precisely
+    /// where it mattered. Neither mode may invent an official surface.
+    #[test]
+    fn both_scorecard_entry_modes_agree_on_an_unestablished_billing_surface() {
+        let sample = usage(10_000, 1_000, 0);
+
+        let fixture = Scorecard::from_turns(&[TurnInput {
+            turn_id: "t1".into(),
+            created_at: None,
+            provider: Some("anthropic"),
+            billing_surface: None,
+            model: "claude-haiku-4-5".into(),
+            usage: &sample,
+        }]);
+        let recorded = Scorecard::from_recorded_turns(&[RecordedTurn {
+            turn_id: "t1".to_string(),
+            created_at: None,
+            model_backed: None,
+            provider: Some("anthropic".to_string()),
+            billing_surface: None,
+            model: "claude-haiku-4-5".to_string(),
+            usage: Some(sample.clone()),
+        }]);
+
+        assert_eq!(fixture.per_turn, recorded.per_turn);
+        assert_eq!(fixture.metrics, recorded.metrics);
+        assert!(
+            fixture.per_turn[0].cost_unpriced,
+            "a route with no established surface must not be priced"
+        );
+        assert_eq!(fixture.per_turn[0].cost_usd, 0.0);
+        assert!(!fixture.metrics.cost_complete);
+        assert_eq!(fixture.metrics.money_metered_turns, 1);
+        assert_eq!(fixture.metrics.unpriced_turns, 1);
+        let summary = fixture.to_summary();
+        assert!(summary.contains("cost_usd: unavailable"), "{summary}");
+        assert!(summary.contains("cost_cny: unavailable"), "{summary}");
+        assert!(
+            !summary.contains('$') && !summary.contains('¥'),
+            "an unpriced-only run must name no amount at all: {summary}"
+        );
+
+        // With the surface actually established, both modes price it — and
+        // still agree.
+        let priced_fixture = Scorecard::from_turns(&[TurnInput {
+            turn_id: "t1".into(),
+            created_at: None,
+            provider: Some("anthropic"),
+            billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
+            model: "claude-haiku-4-5".into(),
+            usage: &sample,
+        }]);
+        let priced_recorded = Scorecard::from_recorded_turns(&[RecordedTurn {
+            turn_id: "t1".to_string(),
+            created_at: None,
+            model_backed: None,
+            provider: Some("anthropic".to_string()),
+            billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+            model: "claude-haiku-4-5".to_string(),
+            usage: Some(sample),
+        }]);
+        assert_eq!(priced_fixture.per_turn, priced_recorded.per_turn);
+        assert!(!priced_fixture.per_turn[0].cost_unpriced);
+        assert!(priced_fixture.metrics.cost_complete);
+    }
+
+    #[test]
+    fn dual_mode_routes_require_surface_but_intrinsic_routes_override_junk() {
+        let usage = usage(10_000, 1_000, 0);
+        for (provider, model) in [
+            (ApiProvider::Anthropic, "claude-haiku-4-5"),
+            (ApiProvider::Moonshot, "kimi-k2.7-code"),
+            (ApiProvider::Zai, "glm-5.2"),
+            (ApiProvider::Minimax, "minimax-m3"),
+        ] {
+            let cost = provider_scoped_cost(provider, model, &usage, None, None);
+            assert_eq!(
+                cost.unpriced_reason.as_deref(),
+                Some("missing_billing_surface"),
+                "{provider:?}"
+            );
+            assert!(cost.usd.is_none(), "{provider:?}");
+        }
+
+        for provider in [ApiProvider::OpenaiCodex, ApiProvider::OpencodeGo] {
+            let cost = provider_scoped_cost(
+                provider,
+                "gpt-5.5",
+                &usage,
+                None,
+                Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
+            );
+            assert_eq!(cost.unpriced_reason.as_deref(), Some("not_money_metered"));
+            assert!(!cost.counts_toward_money_coverage);
+        }
+        let local = provider_scoped_cost(
+            ApiProvider::Ollama,
+            "llama3.2",
+            &usage,
+            None,
+            Some(crate::pricing::UNCLASSIFIED_BILLING_SURFACE),
+        );
+        assert_eq!(local.unpriced_reason.as_deref(), Some("not_money_metered"));
+        assert!(!local.counts_toward_money_coverage);
+    }
+
+    fn cache_write_usage(input: u32, output: u32, cache_hit: u32, cache_write: u32) -> Usage {
+        Usage {
+            input_tokens: input,
+            output_tokens: output,
+            prompt_cache_hit_tokens: Some(cache_hit),
+            prompt_cache_write_tokens: Some(cache_write),
+            reasoning_tokens: Some(output / 2),
+            ..Default::default()
+        }
+    }
+
+    /// A mixed-route run: one fully-priced cache-write turn, one turn whose
+    /// route publishes no cache-write rate, and one non-metered OAuth turn.
+    /// The priced subtotal stays honest, `cost_complete` fails closed, and the
+    /// audit names the class and provenance behind each gap.
+    #[test]
+    fn mixed_route_run_audits_cache_write_classes_and_fails_closed() {
+        // 1M input of which 200k is a cache read, 100k is a cache write.
+        let priced = cache_write_usage(1_000_000, 100_000, 200_000, 100_000);
+        let unpriced_write = cache_write_usage(1_000_000, 100_000, 200_000, 100_000);
+        let oauth = cache_write_usage(1_000_000, 100_000, 200_000, 100_000);
+        let turns = [
+            TurnInput {
+                turn_id: "anthropic".into(),
+                created_at: None,
+                provider: Some("anthropic"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
+                model: "claude-haiku-4-5".into(),
+                usage: &priced,
+            },
+            TurnInput {
+                turn_id: "moonshot".into(),
+                created_at: None,
+                provider: Some("moonshot"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
+                model: "kimi-k2.7-code".into(),
+                usage: &unpriced_write,
+            },
+            TurnInput {
+                turn_id: "oauth".into(),
+                created_at: None,
+                provider: Some("openai-codex"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
+                model: "gpt-5.5".into(),
+                usage: &oauth,
+            },
+        ];
+
+        let card = Scorecard::from_turns(&turns);
+
+        // Cache-write tokens are their own audited class on every turn.
+        for turn in &card.per_turn {
+            assert_eq!(turn.cache_write_tokens, 100_000, "{}", turn.turn_id);
+            assert_eq!(turn.input_tokens, 700_000, "{}", turn.turn_id);
+            assert_eq!(turn.cache_read_tokens, 200_000, "{}", turn.turn_id);
+            // Reasoning stays informational: never added to billable output.
+            assert_eq!(turn.output_tokens, 100_000, "{}", turn.turn_id);
+            assert_eq!(turn.reasoning_tokens, 50_000, "{}", turn.turn_id);
+        }
+        assert_eq!(card.metrics.total_cache_write_tokens, 300_000);
+        assert_eq!(card.metrics.total_output_tokens, 300_000);
+        assert_eq!(card.metrics.total_reasoning_tokens, 150_000);
+
+        // Anthropic publishes a 1.25/M cache-write rate, so the write premium
+        // is billed rather than silently charged at the input rate.
+        let anthropic = &card.per_turn[0];
+        assert!(!anthropic.cost_unpriced);
+        assert_eq!(anthropic.cost_unpriced_reason, None);
+        assert!(anthropic.unpriced_classes.is_empty());
+        // Provenance is recorded (bundled snapshot offline, live after a
+        // catalog refresh); the point is that it is never absent for a
+        // priced turn.
+        assert!(anthropic.pricing_provenance.is_some());
+        let expected = 0.7 * 1.0 + 0.1 * 5.0 + 0.2 * 0.1 + 0.1 * 1.25;
+        assert!((anthropic.cost_usd - expected).abs() < 1e-9);
+
+        // Moonshot's row has no published cache-write rate: the whole turn
+        // fails closed instead of under-reporting the write tokens.
+        let moonshot = &card.per_turn[1];
+        assert!(moonshot.cost_unpriced);
+        assert_eq!(moonshot.cost_usd, 0.0);
+        assert_eq!(
+            moonshot.cost_unpriced_reason.as_deref(),
+            Some("missing_class_price")
+        );
+        assert_eq!(moonshot.unpriced_classes, vec!["cache_write".to_string()]);
+        assert!(moonshot.pricing_provenance.is_some());
+
+        // A subscription route is not "free"; it is not money-metered.
+        let oauth = &card.per_turn[2];
+        assert!(oauth.cost_unpriced);
+        assert_eq!(
+            oauth.cost_unpriced_reason.as_deref(),
+            Some("not_money_metered")
+        );
+        assert!(oauth.unpriced_classes.is_empty());
+        assert_eq!(oauth.pricing_provenance, None);
+
+        // Aggregates stay honest about what the number covers. Two of the three
+        // turns owe money (Anthropic and Moonshot); the OAuth turn does not, so
+        // it is outside the denominator rather than counted as an unpriced dollar.
+        assert_eq!(card.metrics.turns, 3);
+        assert_eq!(card.metrics.money_metered_turns, 2);
+        assert_eq!(card.metrics.unpriced_turns, 1);
+        assert!(!card.metrics.cost_complete);
+        assert_eq!(
+            card.metrics.unpriced_classes,
+            vec!["cache_write".to_string()]
+        );
+        assert!((card.metrics.total_cost_usd - expected).abs() < 1e-9);
+        assert!(card.per_turn[0].money_metered);
+        assert!(card.per_turn[1].money_metered);
+        assert!(!card.per_turn[2].money_metered);
+
+        let summary = card.to_summary();
+        assert!(summary.contains("priced_cost_subtotal_usd"));
+        assert!(summary.contains("cache_write_tokens: 300000"));
+        assert!(summary.contains("no published price"));
+        // Coverage reads against the money-metered turns, not all three.
+        assert!(summary.contains("money_metered_turns: 2"), "{summary}");
+
+        let json = serde_json::to_value(&card).expect("serialize scorecard");
+        assert_eq!(json["per_turn"][1]["unpriced_classes"][0], "cache_write");
+        assert_eq!(json["metrics"]["total_cache_write_tokens"], 300_000);
+        assert_eq!(json["metrics"]["cost_complete"], false);
+        assert_eq!(json["metrics"]["money_metered_turns"], 2);
+        // Route identity survives serialization, so a re-read scorecard can be
+        // re-explained without the original input file.
+        assert_eq!(json["per_turn"][1]["provider"], "moonshot");
+        assert_eq!(json["per_turn"][2]["money_metered"], false);
+    }
+
+    /// Legacy baselines and per-turn records that predate the class audit must
+    /// still deserialize; the new fields default rather than fail.
+    #[test]
+    fn legacy_turn_score_json_defaults_the_new_audit_fields() {
+        let score: TurnScore = serde_json::from_value(serde_json::json!({
+            "turn_id": "t1",
+            "model": "gpt-5.5",
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "cache_read_tokens": 0,
+            "cost_usd": 0.1,
+            "cost_cny": 0.0,
+            "cost_unpriced": false
+        }))
+        .expect("legacy per-turn record stays readable");
+        assert_eq!(score.cache_write_tokens, 0);
+        assert_eq!(score.reasoning_tokens, 0);
+        assert!(score.unpriced_classes.is_empty());
+        assert_eq!(score.pricing_provenance, None);
+        assert_eq!(score.cost_unpriced_reason, None);
+        assert_eq!(score.live_pricing_defect, None);
+        // A legacy row carries no coverage evidence, so `money_metered` defaults
+        // to false rather than asserting the row was inside a complete total.
+        assert!(!score.money_metered);
+
+        // Legacy aggregate baselines stay readable too, defaulting the new
+        // coverage denominator rather than failing the parse.
+        let metrics: ScorecardMetrics = serde_json::from_value(serde_json::json!({
+            "turns": 3,
+            "total_input_tokens": 10,
+            "total_output_tokens": 5,
+            "total_cache_read_tokens": 0,
+            "total_cost_usd": 0.1,
+            "total_cost_cny": 0.0,
+            "cache_hit_ratio": 0.0
+        }))
+        .expect("legacy baseline stays readable");
+        assert_eq!(metrics.money_metered_turns, 0);
+        assert_eq!(metrics.total_cache_write_tokens, 0);
+    }
+
     #[test]
     fn aggregates_tokens_and_cache_hit_ratio_independent_of_pricing() {
         // input_tokens includes cache hits; token_usage_for_pricing splits them:
@@ -502,6 +1050,7 @@ mod tests {
                 turn_id: "t1".into(),
                 created_at: None,
                 provider: None,
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "unpriced-x".into(),
                 usage: &u1,
             },
@@ -509,6 +1058,7 @@ mod tests {
                 turn_id: "t2".into(),
                 created_at: None,
                 provider: None,
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "unpriced-x".into(),
                 usage: &u2,
             },
@@ -525,6 +1075,68 @@ mod tests {
         assert!((card.metrics.cache_hit_ratio - expected).abs() < 1e-9);
     }
 
+    /// The canonical cache-efficiency denominator is
+    /// `hit / (non-cached input + hit + write)`. Cache-write tokens are prompt
+    /// tokens that were not served from cache, so omitting them reported a
+    /// flattering ratio on exactly the turns that paid to populate the cache.
+    #[test]
+    fn cache_hit_ratio_counts_cache_write_in_the_denominator() {
+        fn card_for(usage: &Usage) -> Scorecard {
+            Scorecard::from_turns(&[TurnInput {
+                turn_id: "t1".into(),
+                created_at: None,
+                provider: None,
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
+                model: "unpriced-x".into(),
+                usage,
+            }])
+        }
+
+        // Zero everything: a ratio is undefined, reported as 0.0 rather than NaN.
+        let empty = Usage::default();
+        let card = card_for(&empty);
+        assert_eq!(card.metrics.cache_hit_ratio, 0.0);
+        assert_eq!(card.metrics.total_cache_write_tokens, 0);
+
+        // Write-only: a turn that populated the cache and read nothing from it
+        // has a 0% hit ratio, not an undefined-and-therefore-zero one that a
+        // write-blind denominator would produce by accident.
+        let write_only = Usage {
+            input_tokens: 1_000,
+            output_tokens: 10,
+            prompt_cache_hit_tokens: Some(0),
+            prompt_cache_write_tokens: Some(1_000),
+            ..Default::default()
+        };
+        let card = card_for(&write_only);
+        assert_eq!(card.metrics.total_cache_write_tokens, 1_000);
+        assert_eq!(card.metrics.total_cache_read_tokens, 0);
+        assert_eq!(card.metrics.cache_hit_ratio, 0.0);
+
+        // Mixed: 1000 prompt tokens = 200 read + 300 write + 500 non-cached.
+        let mixed = Usage {
+            input_tokens: 1_000,
+            output_tokens: 10,
+            prompt_cache_hit_tokens: Some(200),
+            prompt_cache_write_tokens: Some(300),
+            ..Default::default()
+        };
+        let card = card_for(&mixed);
+        assert_eq!(card.metrics.total_input_tokens, 500);
+        assert_eq!(card.metrics.total_cache_read_tokens, 200);
+        assert_eq!(card.metrics.total_cache_write_tokens, 300);
+        let expected = 200.0 / (500.0 + 200.0 + 300.0);
+        assert!(
+            (card.metrics.cache_hit_ratio - expected).abs() < 1e-9,
+            "got {}, want {expected}",
+            card.metrics.cache_hit_ratio
+        );
+        // The write-blind denominator would have said 200/700 — assert the two
+        // are distinguishable so a regression is unambiguous.
+        let write_blind = 200.0 / 700.0;
+        assert!((card.metrics.cache_hit_ratio - write_blind).abs() > 1e-6);
+    }
+
     #[test]
     fn unknown_model_is_marked_unpriced_with_zero_cost() {
         let u = usage(1000, 500, 0);
@@ -532,6 +1144,7 @@ mod tests {
             turn_id: "t1".into(),
             created_at: None,
             provider: Some("openai"),
+            billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
             model: "definitely-not-a-real-model".into(),
             usage: &u,
         }];
@@ -550,6 +1163,7 @@ mod tests {
                 turn_id: "api".into(),
                 created_at: None,
                 provider: Some("openai"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "gpt-5.5".into(),
                 usage: &u,
             },
@@ -557,6 +1171,7 @@ mod tests {
                 turn_id: "oauth".into(),
                 created_at: None,
                 provider: Some("openai-codex"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "gpt-5.5".into(),
                 usage: &u,
             },
@@ -564,6 +1179,7 @@ mod tests {
                 turn_id: "local".into(),
                 created_at: None,
                 provider: Some("ollama"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "gpt-5.5".into(),
                 usage: &u,
             },
@@ -577,19 +1193,39 @@ mod tests {
         assert_eq!(card.per_turn[1].cost_usd, 0.0);
         assert!(card.per_turn[2].cost_unpriced);
         assert_eq!(card.per_turn[2].cost_usd, 0.0);
-        assert_eq!(card.metrics.unpriced_turns, 2);
-        assert_eq!(card.metrics.cny_unpriced_turns, 3);
-        assert!(!card.metrics.cost_complete);
+        // Codex OAuth and Ollama are *exactly* non-metered, so they leave the
+        // money-coverage denominator entirely rather than counting as unpriced
+        // dollars: only the OpenAI turn owes money, and it is priced. The USD
+        // total is therefore genuinely complete for the spend it covers (#4318).
+        assert_eq!(card.metrics.money_metered_turns, 1);
+        assert_eq!(card.metrics.unpriced_turns, 0);
+        assert!(card.metrics.cost_complete);
+        for (index, expected) in [(1_usize, false), (2_usize, false)] {
+            assert_eq!(
+                card.per_turn[index].money_metered, expected,
+                "turn {index} money-metered"
+            );
+            assert_eq!(
+                card.per_turn[index].cost_unpriced_reason.as_deref(),
+                Some("not_money_metered"),
+                "turn {index} reason"
+            );
+        }
+        assert!(card.per_turn[0].money_metered);
+        // CNY is only published by direct DeepSeek, so the single metered turn
+        // still has no authoritative CNY figure.
+        assert_eq!(card.metrics.cny_unpriced_turns, 1);
         assert!(!card.metrics.cny_cost_complete);
-        assert!(card.to_summary().contains("priced_cost_subtotal_usd"));
+        assert!(card.to_summary().contains("money_metered_turns: 1"));
         assert!(card.to_summary().contains("cost_cny: unavailable"));
 
         let json = serde_json::to_value(&card).expect("serialize scorecard");
         assert_eq!(json["per_turn"][0]["provider"], "openai");
         assert_eq!(json["per_turn"][1]["provider"], "openai-codex");
         assert_eq!(json["per_turn"][2]["provider"], "ollama");
-        assert_eq!(json["metrics"]["unpriced_turns"], 2);
-        assert_eq!(json["metrics"]["cost_complete"], false);
+        assert_eq!(json["metrics"]["money_metered_turns"], 1);
+        assert_eq!(json["metrics"]["unpriced_turns"], 0);
+        assert_eq!(json["metrics"]["cost_complete"], true);
         assert_eq!(json["metrics"]["cny_cost_complete"], false);
     }
 
@@ -601,6 +1237,7 @@ mod tests {
                 turn_id: "openai-api".into(),
                 created_at: None,
                 provider: Some("openai"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "gpt-5-codex".into(),
                 usage: &u,
             },
@@ -608,6 +1245,7 @@ mod tests {
                 turn_id: "foreign-route".into(),
                 created_at: None,
                 provider: Some("ollama"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "gpt-5-codex".into(),
                 usage: &u,
             },
@@ -634,6 +1272,7 @@ mod tests {
                 turn_id: "documented-no-discount".into(),
                 created_at: None,
                 provider: Some("openai"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "gpt-5.5-pro".into(),
                 usage: &u,
             },
@@ -641,6 +1280,7 @@ mod tests {
                 turn_id: "missing-cache-rate".into(),
                 created_at: None,
                 provider: Some("meta"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "muse-spark-1.1".into(),
                 usage: &u,
             },
@@ -670,6 +1310,7 @@ mod tests {
                 turn_id: "sonnet-intro".into(),
                 created_at: Some(&intro_at),
                 provider: Some("anthropic"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: " claude-sonnet-5 ".into(),
                 usage: &u,
             },
@@ -677,6 +1318,7 @@ mod tests {
                 turn_id: "sonnet-standard".into(),
                 created_at: Some(&standard_at),
                 provider: Some("anthropic"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "claude-sonnet-5".into(),
                 usage: &u,
             },
@@ -684,6 +1326,7 @@ mod tests {
                 turn_id: "sonnet-missing-time".into(),
                 created_at: None,
                 provider: Some("anthropic"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "claude-sonnet-5".into(),
                 usage: &u,
             },
@@ -708,6 +1351,7 @@ mod tests {
             turn_id: "zero".into(),
             created_at: None,
             provider: Some("openai"),
+            billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
             model: "gpt-5.5".into(),
             usage: &u,
         }];
@@ -732,6 +1376,7 @@ mod tests {
             turn_id: "deepseek".into(),
             created_at: None,
             provider: Some("deepseek"),
+            billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
             model: "deepseek-v4-pro".into(),
             usage: &u,
         }];
@@ -763,6 +1408,7 @@ mod tests {
                 turn_id: (*model).into(),
                 created_at: None,
                 provider: Some("deepseek"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: (*model).into(),
                 usage: &u,
             })
@@ -795,6 +1441,7 @@ mod tests {
                 turn_id: "chat-alias".into(),
                 created_at: Some(&before_retirement),
                 provider: Some("deepseek"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "deepseek-chat".into(),
                 usage: &u,
             },
@@ -802,6 +1449,7 @@ mod tests {
                 turn_id: "reasoner-alias".into(),
                 created_at: Some(&before_retirement),
                 provider: Some("deepseek"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "deepseek-reasoner".into(),
                 usage: &u,
             },
@@ -809,6 +1457,7 @@ mod tests {
                 turn_id: "canonical".into(),
                 created_at: None,
                 provider: Some("deepseek"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: DEEPSEEK_ALIAS_REPLACEMENT.into(),
                 usage: &u,
             },
@@ -816,6 +1465,7 @@ mod tests {
                 turn_id: "retired-alias".into(),
                 created_at: Some(&at_retirement),
                 provider: Some("deepseek"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "deepseek-chat".into(),
                 usage: &u,
             },
@@ -823,6 +1473,7 @@ mod tests {
                 turn_id: "undated-alias".into(),
                 created_at: None,
                 provider: Some("deepseek"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "deepseek-reasoner".into(),
                 usage: &u,
             },
@@ -858,6 +1509,7 @@ mod tests {
                 turn_id: "canonical-direct".into(),
                 created_at: None,
                 provider: Some("arcee"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "trinity-large-thinking".into(),
                 usage: &u,
             },
@@ -865,6 +1517,7 @@ mod tests {
                 turn_id: "direct-alias".into(),
                 created_at: None,
                 provider: Some("arcee"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "arcee-trinity-large-thinking".into(),
                 usage: &u,
             },
@@ -872,6 +1525,7 @@ mod tests {
                 turn_id: "openrouter-namespace".into(),
                 created_at: None,
                 provider: Some("arcee"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "arcee-ai/trinity-large-thinking".into(),
                 usage: &u,
             },
@@ -900,6 +1554,7 @@ mod tests {
                 turn_id: "arcee-mini".into(),
                 created_at: None,
                 provider: Some("arcee"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "trinity-mini".into(),
                 usage: &u,
             },
@@ -907,6 +1562,7 @@ mod tests {
                 turn_id: "minimax-m2.7".into(),
                 created_at: None,
                 provider: Some("minimax"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "minimax-m2.7".into(),
                 usage: &u,
             },
@@ -914,6 +1570,7 @@ mod tests {
                 turn_id: "foreign-route".into(),
                 created_at: None,
                 provider: Some("ollama"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "trinity-mini".into(),
                 usage: &u,
             },
@@ -921,6 +1578,7 @@ mod tests {
                 turn_id: "openai-hosted-deepseek".into(),
                 created_at: None,
                 provider: Some("openai"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "deepseek-v4-pro".into(),
                 usage: &u,
             },
@@ -928,6 +1586,7 @@ mod tests {
                 turn_id: "openrouter-hosted-zai".into(),
                 created_at: None,
                 provider: Some("openrouter"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "z-ai/glm-5.2".into(),
                 usage: &u,
             },
@@ -1114,6 +1773,7 @@ mod tests {
                 turn_id: "blank".into(),
                 created_at: None,
                 provider: Some("   "),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "gpt-5.5".into(),
                 usage: &u,
             },
@@ -1121,6 +1781,7 @@ mod tests {
                 turn_id: "named-custom".into(),
                 created_at: None,
                 provider: Some("my-openai-proxy"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "gpt-5.5".into(),
                 usage: &u,
             },
@@ -1128,6 +1789,7 @@ mod tests {
                 turn_id: "generic-custom".into(),
                 created_at: None,
                 provider: Some("custom"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "gpt-5.5".into(),
                 usage: &u,
             },
@@ -1151,13 +1813,17 @@ mod tests {
     fn regression_flags_cost_and_token_increases_over_threshold() {
         let baseline = ScorecardMetrics {
             turns: 1,
+            money_metered_turns: 1,
             unpriced_turns: 0,
             cny_unpriced_turns: 0,
             cost_complete: true,
             cny_cost_complete: true,
+            unpriced_classes: Vec::new(),
             total_input_tokens: 1000,
             total_output_tokens: 1000,
             total_cache_read_tokens: 0,
+            total_cache_write_tokens: 0,
+            total_reasoning_tokens: 0,
             total_cost_usd: 0.10,
             total_cost_cny: 0.7,
             cache_hit_ratio: 0.5,
@@ -1282,5 +1948,11 @@ mod tests {
         };
         let current = baseline.clone();
         assert!(current.regressions_against(&baseline, 5.0).is_empty());
+    }
+
+    #[test]
+    fn cache_hit_denominator_saturates_instead_of_wrapping() {
+        assert_eq!(cacheable_token_total(u64::MAX, 1, 1), u64::MAX);
+        assert_eq!(cacheable_token_total(1, u64::MAX, 1), u64::MAX);
     }
 }

@@ -157,6 +157,127 @@ fn an_explicit_provider_flag_is_reported_as_the_source() {
     );
 }
 
+/// Run `model resolve` with global flags placed before the subcommand, which
+/// is where `--provider` / `--model` actually go.
+fn resolve_with_global_flags(
+    config: &str,
+    global: &[&str],
+    args: &[&str],
+) -> BTreeMap<String, String> {
+    let fixture = TempDir::new().expect("fixture root");
+    let home = fixture.path().join("sealed-home");
+    fs::create_dir_all(home.join(".codewhale")).expect("sealed config dir");
+    fs::write(home.join(".codewhale").join("config.toml"), config).expect("seed config");
+
+    let mut command = Command::new(codewhale_binary());
+    command.args(global).arg("model").arg("resolve").args(args);
+    let output = command
+        .env_clear()
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("CODEWHALE_HOME", home.join(".codewhale"))
+        .env("CODEWHALE_SECRET_BACKEND", "file")
+        .output()
+        .expect("run model resolve");
+
+    assert!(
+        output.status.success(),
+        "model resolve {global:?} {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split_once(": "))
+        .map(|(key, value)| (key.trim().to_string(), value.trim().to_string()))
+        .collect()
+}
+
+/// v0.9.1 kimi-k3 dogfood report: `codewhale --provider moonshot --model kimi-k3 model resolve`
+/// reported `kimi-k2.7-code`. The top-level flags are the route this process
+/// is on, not a hypothetical, so the diagnostic has to answer with the runtime
+/// resolution instead of re-deriving a registry default and ignoring `--model`.
+#[test]
+fn top_level_provider_and_model_flags_report_the_runtime_route() {
+    let report = resolve_with_global_flags(
+        "provider = \"zai\"\n\n[providers.zai]\napi_key = \"k\"\n",
+        &["--provider", "moonshot", "--model", "kimi-k3"],
+        &[],
+    );
+
+    assert_eq!(report.get("provider").map(String::as_str), Some("moonshot"));
+    assert_eq!(
+        report.get("resolved").map(String::as_str),
+        Some("kimi-k3"),
+        "the diagnostic must not contradict the model the run will use: {report:?}"
+    );
+    assert_eq!(
+        report.get("requested").map(String::as_str),
+        Some("kimi-k3"),
+        "{report:?}"
+    );
+    assert_eq!(
+        report.get("used_fallback").map(String::as_str),
+        Some("false"),
+        "{report:?}"
+    );
+    assert_eq!(
+        report.get("model_source").map(String::as_str),
+        Some("--model"),
+        "{report:?}"
+    );
+}
+
+/// Moonshot ships `kimi-k3` on the direct platform API and `k3` on the Kimi
+/// Code coding-plan API. Both must resolve, and neither may be answered by
+/// another provider's identically named model (OpenCode Go also serves a
+/// `kimi-k3`).
+#[test]
+fn moonshot_k3_products_resolve_without_crossing_providers() {
+    for model in ["kimi-k3", "k3"] {
+        let report = resolve_with_global_flags(
+            "provider = \"moonshot\"\n\n[providers.moonshot]\napi_key = \"k\"\n",
+            &[],
+            &[model, "--provider", "moonshot"],
+        );
+
+        assert_eq!(
+            report.get("provider").map(String::as_str),
+            Some("moonshot"),
+            "a Moonshot question must not be answered by another provider: {report:?}"
+        );
+        assert_eq!(
+            report.get("resolved").map(String::as_str),
+            Some(model),
+            "{report:?}"
+        );
+        assert_eq!(
+            report.get("used_fallback").map(String::as_str),
+            Some("false"),
+            "{report:?}"
+        );
+    }
+}
+
+/// An id the selected provider cannot serve must be reported as a fallback,
+/// never as if the request had been honoured.
+#[test]
+fn an_unservable_model_on_the_selected_provider_is_reported_as_a_fallback() {
+    let report = resolve_with_global_flags(
+        "provider = \"moonshot\"\n\n[providers.moonshot]\napi_key = \"k\"\n",
+        &[],
+        &["glm-5.2", "--provider", "moonshot"],
+    );
+
+    assert_eq!(report.get("provider").map(String::as_str), Some("moonshot"));
+    assert_eq!(
+        report.get("used_fallback").map(String::as_str),
+        Some("true"),
+        "an unservable id must not be presented as an honoured request: {report:?}"
+    );
+}
+
 fn codewhale_binary() -> PathBuf {
     if let Some(path) = option_env!("CARGO_BIN_EXE_codewhale") {
         return PathBuf::from(path);

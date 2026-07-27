@@ -76,6 +76,38 @@ pub trait LlmClient: Send + Sync {
     fn health_check(&self) -> impl Future<Output = Result<bool>> + Send {
         async { Ok(true) }
     }
+
+    /// The concrete base URL requests go to, when the implementation knows it.
+    ///
+    /// Background cost accrual uses this for billing provenance only: it is
+    /// reduced to a non-secret surface classification and a SHA-256 fingerprint
+    /// before being recorded, and the URL itself is never persisted or logged
+    /// (#4318). The default is `None` so an implementation that cannot report a
+    /// stable endpoint yields "unknown endpoint" — which fails closed — rather
+    /// than being assumed to be the provider's public API.
+    fn billing_base_url(&self) -> Option<&str> {
+        None
+    }
+
+    /// Freeze the non-secret effective route immediately before a request is
+    /// dispatched. Implementations with richer configured identity/billing
+    /// facts should override this fail-closed default.
+    fn effective_route_envelope(
+        &self,
+        requested_model: &str,
+        dispatched_at: chrono::DateTime<chrono::Utc>,
+    ) -> crate::cost_status::EffectiveRouteEnvelope {
+        let provider = crate::config::ApiProvider::parse(self.provider_name())
+            .unwrap_or(crate::config::ApiProvider::Custom);
+        crate::cost_status::EffectiveRouteEnvelope::capture(
+            None,
+            provider,
+            self.provider_name(),
+            requested_model,
+            self.billing_base_url(),
+            dispatched_at,
+        )
+    }
 }
 
 // === Authentication diagnostics ===

@@ -35,6 +35,31 @@ Tailscale Funnel is public internet exposure and must stay advanced.
 
 ## Current implementation checkpoint
 
+### `/setup` → Remote runtime step (#3409)
+
+The setup wizard's `RemoteRuntime` card presents exactly four modes, each with a
+status derived from observable state — never from intent:
+
+| mode | status source |
+|------|---------------|
+| this machine only | always `ready`; nothing is exposed and nothing to configure |
+| runtime API | presence (never value) of `CODEWHALE_RUNTIME_TOKEN` / `DEEPSEEK_RUNTIME_TOKEN` |
+| phone on your network | `disabled` unless `CODEWHALE_RUNTIME_HOST` is set, because the shipped unit binds loopback |
+| chat app | per-bridge `secret_keys` presence from `remote_setup::registry` |
+
+Contract for that step:
+
+- **Secret values are never read or rendered.** Only variable *names* and
+  set/unset are used, so a hostile token cannot reach the UI or the persisted
+  step result.
+- **`R` renders a plan preview in memory** through `remote_setup::bundle::render_bundle`
+  with every secret replaced by `<redacted>`. It never calls `write_bundle`,
+  never runs a provisioning command, and creates no files.
+- **Missing tokens/config are `NeedsAction`, never blocking.** Local-only is the
+  default and settles the step in one key, so a user who wants no remote access
+  is finished immediately. `/setup`'s report and `doctor` inherit the recorded
+  status verbatim.
+
 Verified against the codebase:
 
 - `codewhale app-server --http` is the canonical HTTP/SSE runtime API entrypoint.

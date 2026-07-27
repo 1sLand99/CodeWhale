@@ -1,6 +1,8 @@
 //! Agent Fleet control plane — local-first manager, ledger, and workers.
 
 pub mod alerts;
+pub mod control;
+pub mod exact;
 pub mod executor;
 pub mod host;
 pub mod ledger;

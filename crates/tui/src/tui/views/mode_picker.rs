@@ -15,6 +15,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::localization::Locale;
 use crate::palette;
 use crate::tui::app::AppMode;
+use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, centered_modal_area,
     render_modal_footer, render_modal_surface,
@@ -160,21 +161,16 @@ impl ModalView for ModePickerView {
         for (idx, mode) in VISIBLE_MODES.iter().copied().enumerate() {
             let is_cursor = idx == self.cursor;
             let row_style = if is_cursor {
-                Style::default()
-                    .fg(palette::SELECTION_TEXT)
-                    .bg(palette::SELECTION_BG)
-                    .add_modifier(Modifier::BOLD)
+                menu_style::selected_row_style()
             } else {
                 Style::default().fg(palette::TEXT_PRIMARY)
             };
             let hint_style = if is_cursor {
-                Style::default()
-                    .fg(palette::SELECTION_TEXT)
-                    .bg(palette::SELECTION_BG)
+                menu_style::selected_row_bg_style().fg(palette::SELECTION_TEXT)
             } else {
                 Style::default().fg(palette::TEXT_MUTED)
             };
-            let pointer = if is_cursor { ">" } else { " " };
+            let pointer = crate::tui::glyphs::selection_marker(is_cursor);
             let name = mode.display_name_localized(self.locale);
             let hint = mode.picker_hint_localized(self.locale);
             // Pad by terminal columns, not scalar count, so wide (CJK) mode
@@ -270,6 +266,12 @@ mod tests {
             assert!(text.contains("move"), "{w}x{h}: missing 'move' hint");
             assert!(text.contains("select"), "{w}x{h}: missing 'select' hint");
             assert!(text.contains("cancel"), "{w}x{h}: missing 'cancel' hint");
+
+            // The cursor row carries the charter selection pointer.
+            assert!(
+                text.contains(crate::tui::glyphs::SELECTION),
+                "{w}x{h}: missing charter selection pointer"
+            );
 
             // Composited frame is fully opaque: no sentinel survives and every
             // cell carries the modal/backdrop ink background.

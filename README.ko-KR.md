@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:797a23968c31 -->
+<!-- source: README.md sha256:7e05c7acd044 -->
 # Codewhale
 
 터미널에서 쓰는 오픈소스 코딩 에이전트 — 모델은 당신이 가져옵니다.
@@ -9,7 +9,7 @@ Codewhale은 DeepSeek을 위한 네이티브 경험으로 시작했습니다. �
 
 우리는 항상 기여자와 개선할 방법을 찾고 있습니다. 사용하는 모델이나 프로바이더가 빠져 있거나 무언가가 깨진다면, 그것을 알려 주는 일이 할 수 있는 가장 유용한 일 중 하나입니다 — [기여](#기여)를 참고하세요.
 
-[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md)
+[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md)
 
 [![CI](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml/badge.svg)](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/codewhale-cli?label=crates.io)](https://crates.io/crates/codewhale-cli)
@@ -49,6 +49,9 @@ TUI 안에서: `/model`은 프로바이더와 모델을 함께 전환하고, `/f
 - [docs/FLEET.md](docs/FLEET.md) — Fleet, 원장, 재개
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`, 훅,
   constitution
+- [docs/HOOKS.md](docs/HOOKS.md) — 11개의 TUI 수명 주기 훅 이벤트, 해당
+  페이로드, 턴을 조정할 수 있는 3개 이벤트 (`codewhale exec`와 CLI 하위
+  명령은 훅을 실행하지 않음)
 - [docs/WEB.md](docs/WEB.md) — 루프백 전용 내장 브라우저 클라이언트와 일회성
   인증 경계
 

@@ -1691,18 +1691,16 @@ fn turn_route_lines(app: &App) -> Vec<String> {
         }
     }
 
-    let cost = app.displayed_session_cost_for_currency(app.cost_currency);
-    let chip = crate::route_billing::usage_chip(
-        app.billing_presentation,
-        app.api_provider,
-        &app.model,
-        cost,
-        app.cost_currency,
-        None,
-    );
-    match chip {
+    let chip = app.cumulative_usage_chip();
+    match &chip {
         crate::route_billing::UsageChip::Money(amount) => {
             lines.push(format!("Cost (session): {amount}"));
+        }
+        crate::route_billing::UsageChip::PricedSubtotal { .. } => {
+            lines.push(format!(
+                "Cost (session): {}",
+                crate::route_billing::format_usage_chip(&chip).unwrap_or_default()
+            ));
         }
         crate::route_billing::UsageChip::Allowance { label, used_pct } => {
             lines.push(match used_pct {

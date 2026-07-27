@@ -29,7 +29,10 @@ pub(crate) struct ModelRouteCandidate {
     pub(crate) provider_display_name: &'static str,
     pub(crate) model: String,
     pub(crate) context_window: u32,
-    pub(crate) max_output: u32,
+    /// Known output ceiling, or `None` when this route publishes none. The
+    /// classifier is told "unknown" rather than a fabricated number.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) max_output: Option<u32>,
     pub(crate) thinking_supported: bool,
     pub(crate) cache_telemetry_supported: bool,
     pub(crate) auth_source: ModelAuthSource,
@@ -45,7 +48,17 @@ pub(crate) struct ModelInventory {
     pub(crate) router_model: String,
     /// Thinking tier for the classifier call (None = off) (#auto.router).
     pub(crate) router_thinking: Option<String>,
+    /// Whether an explicit legacy `[auto.router]` classifier route is
+    /// configured. Absent configuration means legacy Auto stays local/free —
+    /// holding a provider key never elects a network classifier by itself.
+    pub(crate) router_configured: bool,
     pub(crate) router_available: bool,
+    /// `[auto] cross_provider = true` opt-in (#4411). When false (the
+    /// default), Auto routing — classifier payload included — is confined to
+    /// `active_provider`. The full candidate list still carries every
+    /// authenticated provider because pickers and explicit `/model` lookups
+    /// legitimately need it; only the Auto paths are scoped.
+    pub(crate) cross_provider_auto: bool,
     pub(crate) candidates: Vec<ModelRouteCandidate>,
 }
 
@@ -95,6 +108,18 @@ impl ModelInventory {
                 {
                     if let Some(context_window) = route.candidate.limits().context_tokens {
                         capability.context_window = context_window.min(u64::from(u32::MAX)) as u32;
+                    }
+                    // A concrete offering maximum is a stronger fact than the
+                    // static compatibility matrix — and is the only way a
+                    // membership route (no static cap) gets a known ceiling.
+                    if let Some(max_output) = route
+                        .candidate
+                        .limits()
+                        .output_tokens
+                        .and_then(|tokens| u32::try_from(tokens).ok())
+                        .filter(|tokens| *tokens > 0)
+                    {
+                        capability.max_output = Some(max_output);
                     }
                     // Do not promote bare `k3` into the global capability
                     // catalog. Its thinking trace contract belongs only to
@@ -148,10 +173,15 @@ impl ModelInventory {
             }
         }
 
-        // [auto.router]: an explicit classifier route wins over the legacy
-        // DeepSeek flash default. When unset, keep the historic behavior:
-        // deepseek-v4-flash when a DeepSeek key exists, else heuristic-only.
-        let (router_provider, router_model, router_thinking) = config
+        // `[auto.router]` is legacy `model = auto` configuration and stays that
+        // way — it is NOT a Fleet Router. Explicit configuration still works.
+        //
+        // What is gone is the implicit half: merely holding a DeepSeek key used
+        // to silently elect `deepseek-v4-flash` as a network classifier for
+        // every Auto turn, spending a user's tokens on a route they never asked
+        // for and privileging one provider. With no explicit `[auto.router]`,
+        // legacy Auto is now local/free (heuristic-only).
+        let explicit_router = config
             .auto
             .as_ref()
             .and_then(|auto| auto.router.as_ref())
@@ -172,17 +202,30 @@ impl ModelInventory {
                         .filter(|t| !t.is_empty())
                         .map(str::to_string),
                 ))
-            })
+            });
+        let router_configured = explicit_router.is_some();
+        let (router_provider, router_model, router_thinking) = explicit_router
+            // Kept only as an inert display/default label for the router fields;
+            // `router_available` below is what gates any classifier call.
             .unwrap_or_else(|| (ApiProvider::Deepseek, "deepseek-v4-flash".to_string(), None));
+
+        let cross_provider_auto = config.auto_cross_provider();
 
         Self {
             active_provider,
             router_provider,
-            router_available: has_api_key_for(config, router_provider),
+            router_configured,
+            router_available: router_configured && has_api_key_for(config, router_provider),
             router_model,
             router_thinking,
+            cross_provider_auto,
             candidates,
         }
+    }
+
+    /// Whether Auto routing may select `provider` (#4411).
+    pub(crate) fn auto_scope_allows(&self, provider: ApiProvider) -> bool {
+        self.cross_provider_auto || provider == self.active_provider
     }
 
     pub(crate) fn candidate(
@@ -207,9 +250,18 @@ impl ModelInventory {
                 })
             })
             .or_else(|| {
-                self.candidates
-                    .iter()
-                    .find(|candidate| candidate.readiness.can_attempt())
+                // Falling through to another provider is a cross-provider Auto
+                // route (#4411): allowed only under the persisted opt-in. With
+                // it off, an unusable active provider surfaces as "no runnable
+                // candidate" instead of silently borrowing another provider's
+                // credentials.
+                self.cross_provider_auto
+                    .then(|| {
+                        self.candidates
+                            .iter()
+                            .find(|candidate| candidate.readiness.can_attempt())
+                    })
+                    .flatten()
             })
     }
 
@@ -227,7 +279,8 @@ impl ModelInventory {
             provider_display_name: &'a str,
             model: &'a str,
             context_window: u32,
-            max_output: u32,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            max_output: Option<u32>,
             thinking_supported: bool,
             cache_telemetry_supported: bool,
             default_for_provider: bool,
@@ -237,10 +290,17 @@ impl ModelInventory {
         // The classifier needs route capabilities, not credentials, endpoint
         // configuration, or provider error text. Filter to runnable candidates
         // and project only non-secret routing facts before serializing.
+        //
+        // Scope (#4411): without the persisted `[auto] cross_provider` opt-in,
+        // the payload names only the active provider's routes. Which other
+        // providers a user has credentials for is not something Auto discloses
+        // to a classifier by default.
         let candidates = self
             .candidates
             .iter()
-            .filter(|candidate| candidate.readiness.can_attempt())
+            .filter(|candidate| {
+                candidate.readiness.can_attempt() && self.auto_scope_allows(candidate.provider)
+            })
             .map(|candidate| RouterCandidateContext {
                 provider: candidate.provider,
                 provider_name: candidate.provider_name,
@@ -415,7 +475,10 @@ mod tests {
 
         let inventory = ModelInventory::from_config(&config);
 
-        assert!(inventory.router_available);
+        // A DeepSeek key alone no longer elects a network classifier: with no
+        // explicit `[auto.router]`, legacy Auto stays local/free.
+        assert!(!inventory.router_configured);
+        assert!(!inventory.router_available);
         assert!(
             inventory
                 .candidate(ApiProvider::Zai, crate::config::ZAI_GLM_5_2_MODEL)
@@ -595,6 +658,7 @@ mod tests {
         let config = Config {
             auto: Some(crate::config::AutoConfig {
                 cost_saving: None,
+                cross_provider: None,
                 router: Some(crate::config::AutoRouterConfig {
                     provider: Some("zai".to_string()),
                     model: Some("glm-5-turbo".to_string()),
@@ -605,17 +669,58 @@ mod tests {
         };
 
         let inventory = ModelInventory::from_config(&config);
+        assert!(inventory.router_configured);
         assert_eq!(inventory.router_provider, ApiProvider::Zai);
         assert_eq!(inventory.router_model, "glm-5-turbo");
         assert_eq!(inventory.router_thinking.as_deref(), Some("low"));
     }
 
+    /// A DeepSeek key must never, on its own, turn on a network classifier.
+    /// `[auto.router]` stays legacy `model = auto` configuration; absent it,
+    /// legacy Auto is local/free.
     #[test]
-    fn auto_router_config_defaults_to_deepseek_flash_when_unset() {
-        let inventory = ModelInventory::from_config(&Config::default());
-        assert_eq!(inventory.router_provider, ApiProvider::Deepseek);
-        assert_eq!(inventory.router_model, "deepseek-v4-flash");
-        assert_eq!(inventory.router_thinking, None);
+    fn a_deepseek_key_alone_never_elects_an_implicit_flash_classifier() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let _deepseek = crate::test_support::EnvVarGuard::set("DEEPSEEK_API_KEY", "ds-key");
+        let config = Config {
+            provider: Some("deepseek".to_string()),
+            ..Default::default()
+        };
+
+        let inventory = ModelInventory::from_config(&config);
+
+        assert!(
+            !inventory.router_configured,
+            "no [auto.router] means no configured classifier"
+        );
+        assert!(
+            !inventory.router_available,
+            "holding a DeepSeek key must not silently select deepseek-v4-flash as a classifier"
+        );
+    }
+
+    #[test]
+    fn an_explicit_legacy_auto_router_still_works_when_its_key_is_present() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let _zai = crate::test_support::EnvVarGuard::set("ZAI_API_KEY", "zai-key");
+        let config = Config {
+            auto: Some(crate::config::AutoConfig {
+                cost_saving: None,
+                router: Some(crate::config::AutoRouterConfig {
+                    provider: Some("zai".to_string()),
+                    model: Some("glm-5-turbo".to_string()),
+                    thinking: None,
+                }),
+                cross_provider: None,
+            }),
+            ..Default::default()
+        };
+
+        let inventory = ModelInventory::from_config(&config);
+
+        assert!(inventory.router_configured);
+        assert!(inventory.router_available);
+        assert_eq!(inventory.router_model, "glm-5-turbo");
     }
 
     #[test]
@@ -655,7 +760,7 @@ mod tests {
             provider_display_name: "OpenAI",
             model: "gpt-5.5".to_string(),
             context_window: 128_000,
-            max_output: 16_384,
+            max_output: Some(16_384),
             thinking_supported: true,
             cache_telemetry_supported: false,
             auth_source: ModelAuthSource::Config,
@@ -675,14 +780,16 @@ mod tests {
             router_provider: ApiProvider::Deepseek,
             router_model: "deepseek-v4-flash".to_string(),
             router_thinking: None,
+            router_configured: false,
             router_available: false,
+            cross_provider_auto: false,
             candidates: vec![ModelRouteCandidate {
                 provider: ApiProvider::Openai,
                 provider_name: "openai",
                 provider_display_name: "OpenAI",
                 model: "unsupported-model".to_string(),
                 context_window: 1,
-                max_output: 1,
+                max_output: Some(1),
                 thinking_supported: false,
                 cache_telemetry_supported: false,
                 auth_source: ModelAuthSource::Config,
@@ -716,7 +823,7 @@ mod tests {
             provider_display_name: "OpenAI",
             model: "unsupported-model".to_string(),
             context_window: 1,
-            max_output: 1,
+            max_output: Some(1),
             thinking_supported: false,
             cache_telemetry_supported: false,
             auth_source: ModelAuthSource::Config,
@@ -731,5 +838,122 @@ mod tests {
         assert!(!json.contains("super-secret-router-token"));
         assert!(!json.contains("auth_source"));
         assert!(!json.contains("unsupported-model"));
+    }
+
+    #[test]
+    fn router_context_names_only_the_active_provider_by_default() {
+        // #4411: a Z.ai session with a DeepSeek key in the environment must
+        // not disclose the DeepSeek routes — or the fact that a DeepSeek
+        // credential exists — to the classifier.
+        let _env_lock = crate::test_support::lock_test_env();
+        let _deepseek = crate::test_support::EnvVarGuard::set("DEEPSEEK_API_KEY", "ds-key");
+        let _zai = crate::test_support::EnvVarGuard::set("ZAI_API_KEY", "zai-key");
+        let config = Config {
+            provider: Some("zai".to_string()),
+            ..Default::default()
+        };
+
+        let inventory = ModelInventory::from_config(&config);
+        assert!(
+            inventory
+                .candidates
+                .iter()
+                .any(|candidate| candidate.provider == ApiProvider::Deepseek),
+            "the full inventory still knows about DeepSeek for pickers/explicit routes"
+        );
+
+        let json = inventory.router_context_json();
+        let payload: serde_json::Value =
+            serde_json::from_str(&json).expect("router context is JSON");
+        let providers: Vec<&str> = payload["candidates"]
+            .as_array()
+            .expect("candidate array")
+            .iter()
+            .map(|candidate| candidate["provider_name"].as_str().expect("provider name"))
+            .collect();
+
+        assert!(!providers.is_empty(), "active provider routes must remain");
+        assert!(
+            providers.iter().all(|provider| *provider == "zai"),
+            "classifier payload leaked another provider: {json}"
+        );
+        assert!(!json.contains("deepseek"), "{json}");
+    }
+
+    #[test]
+    fn router_context_includes_other_providers_under_persisted_opt_in() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let _deepseek = crate::test_support::EnvVarGuard::set("DEEPSEEK_API_KEY", "ds-key");
+        let _zai = crate::test_support::EnvVarGuard::set("ZAI_API_KEY", "zai-key");
+        let config = Config {
+            provider: Some("zai".to_string()),
+            auto: Some(crate::config::AutoConfig {
+                cost_saving: None,
+                cross_provider: Some(true),
+                router: None,
+            }),
+            ..Default::default()
+        };
+
+        let json = ModelInventory::from_config(&config).router_context_json();
+
+        assert!(json.contains("\"zai\""), "{json}");
+        assert!(json.contains("deepseek"), "{json}");
+    }
+
+    #[test]
+    fn implicit_deepseek_classifier_is_out_of_scope_for_another_active_provider() {
+        // #4411: the default classifier route is DeepSeek flash. Calling it
+        // from a Z.ai session would send the turn's prompt to a second
+        // provider, so it stays unavailable without an explicit opt-in.
+        let _env_lock = crate::test_support::lock_test_env();
+        let _deepseek = crate::test_support::EnvVarGuard::set("DEEPSEEK_API_KEY", "ds-key");
+        let _zai = crate::test_support::EnvVarGuard::set("ZAI_API_KEY", "zai-key");
+        let zai = Config {
+            provider: Some("zai".to_string()),
+            ..Default::default()
+        };
+        assert!(!ModelInventory::from_config(&zai).router_available);
+
+        // `cross_provider = true` widens which candidates Auto may pick; it is
+        // NOT a classifier election. With the implicit DeepSeek-flash default
+        // removed, no network classifier runs without an explicit
+        // `[auto.router]` route — a scope opt-in alone stays local/free.
+        let opted_in = Config {
+            auto: Some(crate::config::AutoConfig {
+                cost_saving: None,
+                cross_provider: Some(true),
+                router: None,
+            }),
+            ..zai.clone()
+        };
+        let widened = ModelInventory::from_config(&opted_in);
+        assert!(!widened.router_available);
+        assert!(widened.auto_scope_allows(ApiProvider::Deepseek));
+
+        // An explicitly configured `[auto.router]` is itself a persisted
+        // opt-in for that classifier route.
+        let explicit_router = Config {
+            auto: Some(crate::config::AutoConfig {
+                cost_saving: None,
+                cross_provider: None,
+                router: Some(crate::config::AutoRouterConfig {
+                    provider: Some("deepseek".to_string()),
+                    model: Some("deepseek-v4-flash".to_string()),
+                    thinking: None,
+                }),
+            }),
+            ..zai.clone()
+        };
+        assert!(ModelInventory::from_config(&explicit_router).router_available);
+
+        // A DeepSeek session gets no free classifier either: with the
+        // implicit flash default removed, only an explicit `[auto.router]`
+        // elects a network classifier, active provider or not.
+        let deepseek = Config {
+            provider: Some("deepseek".to_string()),
+            ..Default::default()
+        };
+        assert!(!ModelInventory::from_config(&deepseek).router_available);
     }
 }

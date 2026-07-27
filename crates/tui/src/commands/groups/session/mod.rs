@@ -15,6 +15,7 @@ mod rename;
 pub(crate) use rename::rename_with_manager;
 mod save;
 mod sessions;
+mod structcopy;
 // This group dir intentionally has a `session.rs` child module with the same
 // name. The module_inception allow is a permanent structure rationale, not
 // migration scaffolding; see docs/architecture/command-dispatch.md.
@@ -68,6 +69,10 @@ impl CommandGroup for SessionCommands {
             Box::new(FunctionCommand::new(
                 export::ExportCmd::info(),
                 export::ExportCmd::execute,
+            )),
+            Box::new(FunctionCommand::new(
+                structcopy::StructcopyCmd::info(),
+                structcopy::StructcopyCmd::execute,
             )),
         ])
     }

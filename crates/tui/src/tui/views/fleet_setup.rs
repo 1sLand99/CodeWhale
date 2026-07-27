@@ -30,6 +30,7 @@ use crate::fleet::profile::FleetProfileScope;
 use crate::localization::{MessageId, tr};
 use crate::palette;
 use crate::tui::app::App;
+use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, centered_modal_area,
     render_modal_footer_with_gutter, render_modal_surface, truncate_view_text,
@@ -52,7 +53,7 @@ const CHOICE_TWO_COLUMN_MIN_WIDTH: u16 = CHOICE_LIST_WIDTH + CHOICE_DETAIL_MIN_W
 
 /// Agent-team roles. `label` doubles as the profile `role_hint` and file stem,
 /// so these strings are part of the generated-profile contract.
-const ROLES: [Choice; 8] = [
+const ROLES: [Choice; 9] = [
     Choice {
         label: Cow::Borrowed("manager"),
         summary: Cow::Borrowed("Plan & split queued work"),
@@ -89,6 +90,13 @@ const ROLES: [Choice; 8] = [
         ),
     },
     Choice {
+        label: Cow::Borrowed("consultant"),
+        summary: Cow::Borrowed("Read-only second opinion"),
+        description: Cow::Borrowed(
+            "Short-lived, high-reasoning counsel for difficult decisions and overlooked risks. Read-only and shell-less.",
+        ),
+    },
+    Choice {
         label: Cow::Borrowed("synthesizer"),
         summary: Cow::Borrowed("Reduce receipts to handoff"),
         description: Cow::Borrowed(
@@ -119,7 +127,7 @@ const MODEL_INHERIT: Choice = Choice {
     label: Cow::Borrowed("inherit"),
     summary: Cow::Borrowed("Same model as now"),
     description: Cow::Borrowed(
-        "Reuse the active provider, model, and reasoning for this worker — the operator's route. Recommended default.",
+        "Use the operator's current route — provider, model, and reasoning included. Recommended default.",
     ),
 };
 
@@ -1275,7 +1283,7 @@ impl FleetSetupView {
 
     fn review_policy_summary(&self) -> String {
         format!(
-            "Workers run without a token cap by default · {}s api, {}s heartbeat. Fleet -> exec runs the workers. /fleet status (or /subagents) shows sub-agents in the current interactive session; codewhale fleet status reads the persistent .codewhale/fleet.jsonl ledger.",
+            "Workers run without a token cap by default · {}s api, {}s heartbeat. Launch with Fleet → exec; /fleet workers (or /subagents) shows sub-agents in the current interactive session; /fleet status and codewhale fleet status both read the persistent .codewhale/fleet.jsonl ledger.",
             self.snapshot.api_timeout_secs, self.snapshot.heartbeat_timeout_secs
         )
     }
@@ -1327,7 +1335,7 @@ fn render_choice_step(
             .split(area);
         (cols[0], cols[1])
     } else {
-        let list_height = (choices.len() as u16 + 1).min(area.height.saturating_sub(1).max(1));
+        let list_height = (choices.len() as u16).min(area.height.saturating_sub(1).max(1));
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(list_height), Constraint::Min(1)])
@@ -1335,19 +1343,16 @@ fn render_choice_step(
         (rows[0], rows[1])
     };
 
-    // List: labels are identifiers, so a `>`-marked single line each is safe.
+    // List: labels are identifiers, so a `▸`-marked single line each is safe.
     let list_width = usize::from(list_area.width);
     let visible = choices.len().min(usize::from(list_area.height));
     let row_start = choice_window_start(choices.len(), selected, visible);
     let mut list_lines: Vec<Line> = Vec::with_capacity(visible);
     for (idx, choice) in choices.iter().enumerate().skip(row_start).take(visible) {
         let is_selected = idx == selected;
-        let pointer = if is_selected { "> " } else { "  " };
+        let pointer = format!("{} ", crate::tui::glyphs::selection_marker(is_selected));
         let style = if is_selected {
-            Style::default()
-                .fg(palette::SELECTION_TEXT)
-                .bg(palette::SELECTION_BG)
-                .add_modifier(Modifier::BOLD)
+            menu_style::selected_row_style()
         } else {
             Style::default().fg(palette::TEXT_PRIMARY)
         };
@@ -1405,7 +1410,7 @@ fn register_choice_hitboxes(
             ])
             .split(area)[0]
     } else {
-        let list_height = (choice_count as u16 + 1).min(area.height.saturating_sub(1).max(1));
+        let list_height = (choice_count as u16).min(area.height.saturating_sub(1).max(1));
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(list_height), Constraint::Min(1)])
@@ -1880,7 +1885,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(rendered.contains("> custom"), "{rendered}");
+        assert!(rendered.contains("▸ custom"), "{rendered}");
         assert!(
             view.row_hitboxes
                 .borrow()
@@ -2103,7 +2108,7 @@ mod tests {
 
         // "custom" matches no roster member: no override note anywhere.
         let mut custom_view = FleetSetupView::from_snapshot(snapshot());
-        for _ in 0..7 {
+        for _ in 0..8 {
             custom_view.handle_key(key(KeyCode::Down));
         }
         assert_eq!(custom_view.selected_role(), "custom");
@@ -2307,7 +2312,7 @@ mod tests {
 
         let manager_row = rows
             .iter()
-            .position(|row| row.contains("> manager"))
+            .position(|row| row.contains("▸ manager"))
             .expect("manager row should render");
         let custom_row = rows
             .iter()

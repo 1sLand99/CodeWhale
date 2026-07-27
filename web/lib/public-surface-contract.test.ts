@@ -135,7 +135,17 @@ describe("public surface contracts", () => {
     expect(matrix.latestPublishedRelease).not.toHaveProperty("toolCount");
     expect(matrix.surfaces).not.toHaveProperty("stable");
     expect(matrix.surfaces.availableInSourceCandidate).toContain("Web client");
-    expect(matrix.screenshot.sourceVersion).toBe(FACTS.version);
+    // A real screenshot may truthfully lag the source candidate until the
+    // release's visual capture is refreshed. It must identify the version it
+    // actually shows and may never claim a version newer than the candidate.
+    const screenshotSourceVersion = matrix.screenshot.sourceVersion;
+    expect(screenshotSourceVersion).not.toBeNull();
+    if (screenshotSourceVersion === null) {
+      throw new Error("the public screenshot must identify its source version");
+    }
+    expect(comparableVersion(screenshotSourceVersion)).toBeLessThanOrEqual(
+      comparableVersion(matrix.sourceCandidate.version),
+    );
     expect(matrix.screenshot.sourceCommit).toMatch(/^[0-9a-f]{40}$/);
   });
 

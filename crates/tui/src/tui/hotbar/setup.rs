@@ -571,7 +571,7 @@ impl HotbarSetupView {
         max_width: u16,
     ) -> Line<'static> {
         let selected = idx == self.selected_action_idx(source);
-        let marker = if selected { ">" } else { " " };
+        let marker = crate::tui::glyphs::selection_marker(selected);
         let checked = if self
             .draft_bindings
             .values()
@@ -892,7 +892,7 @@ impl ModalView for HotbarSetupView {
             buf,
             &[
                 ActionHint::new("Tab/Shift+Tab", "source"),
-                ActionHint::new("Up/Down", "action"),
+                ActionHint::new("↑/↓", "action"),
                 ActionHint::new("1-8", "slot"),
                 ActionHint::new("/", "filter"),
                 ActionHint::new("Enter/A", "assign"),
@@ -1453,9 +1453,10 @@ mod tests {
         assert_ne!(selected.metadata.id, "slash.export");
 
         let rendered = rendered_text_at(&view, 80, 24);
+        let marker = crate::tui::glyphs::selection_marker(true);
         assert!(
             rendered.lines().any(|line| {
-                line.contains('>') && line.contains(&selected.metadata.display_name)
+                line.contains(marker) && line.contains(&selected.metadata.display_name)
             }),
             "focused action {} must remain visible after moving past /export:\n{rendered}",
             selected.metadata.id

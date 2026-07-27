@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { Locale } from "@/lib/i18n/config";
+import { getChrome } from "@/lib/i18n/dictionaries";
 import { LocaleSwitcher } from "./locale-switcher";
 import { MobileMenu } from "./mobile-menu";
 import { NavLinks } from "./nav-links";
@@ -22,12 +23,27 @@ const ZH_LINKS = [
 
 export function Nav({ locale = "en" }: { locale?: Locale }) {
   const isZh = locale === "zh";
-  const links = isZh ? ZH_LINKS : EN_LINKS;
+  // en/zh stay inline (copy-contract tests read them from this file); every
+  // other routed locale resolves its chrome from the dictionary layer with
+  // English as the fallback.
+  const chrome = getChrome(locale);
+  const links = isZh
+    ? ZH_LINKS
+    : locale === "en"
+      ? EN_LINKS
+      : [
+          { href: `/${locale}/docs`, label: chrome.navDocs },
+          { href: `/${locale}/install`, label: chrome.navInstall },
+          { href: `/${locale}/community`, label: chrome.navCommunity },
+          { href: `/${locale}/contribute`, label: chrome.navContribute },
+        ];
+  const homeHref = `/${locale}`;
+  const installCta = isZh ? "安装 →" : chrome.installCta;
 
   return (
     <header className="site-nav">
       <div className="site-nav-inner">
-        <Link href={isZh ? "/zh" : "/en"} className="site-wordmark" aria-label="Codewhale home">
+        <Link href={homeHref} className="site-wordmark" aria-label="Codewhale home">
           <Whale size={31} className="text-current" />
           <span>Codewhale</span>
         </Link>
@@ -41,8 +57,8 @@ export function Nav({ locale = "en" }: { locale?: Locale }) {
             GitHub
           </Link>
           <MobileMenu
-            installHref={isZh ? "/zh/install" : "/en/install"}
-            installLabel={isZh ? "安装 →" : "Install →"}
+            installHref={`/${locale}/install`}
+            installLabel={installCta}
             links={links}
           />
         </div>

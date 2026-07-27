@@ -59,9 +59,42 @@ active runtime thread or durable task.
 `task_*` and the Fleet/Workflow ledger remain the durable lifecycle owners.
 Checklist metadata is the model-visible projection of progress:
 `task_updates.checklist` carries the current items, completion percentage, and
-in-progress item. `update_plan` is optional Strategy metadata/context/route for
-complex initiatives; it must not duplicate To-do items or become a parallel
-progress store.
+in-progress item.
+
+**The To-do is the only canonical Work ledger.** `update_plan` is conversational
+reasoning — strategy, context, and route notes for complex initiatives. It is
+not a progress surface, must not duplicate To-do items, and plan-only state is
+never rendered as Work grounding.
+
+Work grounding is one seam (#3983): `crates/tui/src/work_grounding.rs` renders
+the To-do snapshot once, hard-bounded in both item count and characters, with
+the in-progress item preserved preferentially and any elision marked. That body
+is appended to each parent turn-loop and sub-agent step request as a transient
+`<codewhale:work_state>` block — rebuilt per request, so a mid-turn
+`work_update` is visible on the next step — and is never written to session
+history or the stable system prefix.
+Forked agents (`<codewhale:fork_state>`) and `/relay` reuse the same body.
+
+Three properties of that seam are load-bearing:
+
+- **Authority.** The snapshot is read from the `WorkRuntime` graph projection
+  when a runtime owns that list, because `work_update` stages there and only
+  publishes into the legacy `SharedTodoList` view later. Sessions with no
+  attached runtime read the list directly.
+- **Per-agent isolation.** Every sub-agent gets the same tail rendered from
+  *its own* list (`#4810`), so a worker sees its own progress and never a
+  parent's or sibling's. The parent's ledger reaches a forked child only as the
+  immutable `<codewhale:fork_state>` Work section, resolved at the spawn seam so
+  a same-turn `work_update` is included.
+- **Context accounting.** The parent turn-loop preflight token estimate runs
+  over the tail message that request actually carries, so it cannot approve a
+  request that goes over-limit once the block is appended. Offline counts stay
+  conservative estimates.
+
+The renderer bounds and frames the ledger; it does not vet To-do content. It
+guarantees that item text cannot close the wrapper early, cannot forge the line
+format with control characters, and cannot exceed the item/character bounds —
+not that arbitrary item text is safe to follow as instructions.
 
 The legacy `checklist_*` and older `todo_*` names are hidden compatibility
 aliases. They remain registered and dispatchable against the same To-do state

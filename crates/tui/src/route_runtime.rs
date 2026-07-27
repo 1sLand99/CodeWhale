@@ -580,8 +580,8 @@ mod tests {
         // legacy fallback or the 131K max-output field.
         let cap = crate::config::provider_capability(ApiProvider::OpencodeGo, "kimi-k3");
         assert_eq!(cap.context_window, 1_048_576);
-        assert_eq!(cap.max_output, 131_072);
-        assert_ne!(cap.context_window, cap.max_output);
+        assert_eq!(cap.max_output, Some(131_072));
+        assert_ne!(Some(cap.context_window), cap.max_output);
 
         let candidate =
             resolve_route_candidate(ApiProvider::OpencodeGo, Some("kimi-k3"), None, None, None)

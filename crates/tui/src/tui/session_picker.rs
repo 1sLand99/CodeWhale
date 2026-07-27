@@ -18,9 +18,11 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
 use crate::session_manager::{
-    SavedSession, SessionManager, SessionMetadata, extract_title, extract_user_prompt,
-    strip_thinking_tags,
+    SavedSession, SessionListFilter, SessionManager, SessionMetadata, extract_title,
+    extract_user_prompt, strip_thinking_tags,
 };
+use crate::session_projection::{MAX_PROJECTED_SESSIONS, SessionQuery, SessionSortMode};
+use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, action_footer_lines, render_modal_footer, render_panel_scroll_rail,
     render_underwater_surface,
@@ -41,13 +43,6 @@ fn section_block(title: &str) -> Block<'static> {
         .padding(Padding::uniform(1))
 }
 
-#[derive(Debug, Clone, Copy)]
-enum SortMode {
-    Recent,
-    Name,
-    Size,
-}
-
 pub struct SessionPickerView {
     /// Every session loaded from disk. The picker filters from this set.
     sessions: Vec<SessionMetadata>,
@@ -60,7 +55,7 @@ pub struct SessionPickerView {
     history_visible_rows: Cell<usize>,
     search_input: String,
     search_mode: bool,
-    sort_mode: SortMode,
+    sort_mode: SessionSortMode,
     preview_cache: HashMap<String, Vec<String>>,
     current_preview: Vec<String>,
     confirm_delete: bool,
@@ -75,6 +70,10 @@ pub struct SessionPickerView {
     /// `false`, only sessions whose recorded `workspace` matches the
     /// canonicalised `workspace_scope`.
     show_all_workspaces: bool,
+    /// When `true`, archived sessions are listed alongside active ones
+    /// (#2934 / #4397). Defaults to `false`: archiving is the user putting a
+    /// session away, and the browse default should honour that.
+    show_archived: bool,
     /// Screen rows owned by the visible session list. Keeping this local to
     /// the view gives mouse and keyboard the same selection/resume contract.
     last_row_hitboxes: RefCell<Vec<(u16, usize)>>,
@@ -102,7 +101,7 @@ impl SessionPickerView {
             history_visible_rows: Cell::new(12),
             search_input: String::new(),
             search_mode: false,
-            sort_mode: SortMode::Recent,
+            sort_mode: SessionSortMode::Recent,
             preview_cache: HashMap::new(),
             current_preview: Vec::new(),
             confirm_delete: false,
@@ -111,6 +110,7 @@ impl SessionPickerView {
             status: None,
             workspace_scope: Some(canonical_or_self(workspace.to_path_buf())),
             show_all_workspaces: false,
+            show_archived: false,
             last_row_hitboxes: RefCell::new(Vec::new()),
             locale,
         };
@@ -119,14 +119,73 @@ impl SessionPickerView {
         view
     }
 
-    fn matches_workspace_scope(&self, session: &SessionMetadata) -> bool {
-        if self.show_all_workspaces {
-            return true;
+    /// As [`Self::new`], but with `session_id` preselected.
+    ///
+    /// This is how the sidebar Sessions rail hands off (#2934): the rail
+    /// navigates, the picker keeps ownership of preview, resume, rename,
+    /// archive, and delete. A row whose session is outside the current
+    /// workspace scope, or archived, widens the corresponding filter rather
+    /// than silently landing on the wrong row — but it never *resumes*
+    /// anything, so widening the view cannot cross a workspace boundary
+    /// behind the user's back.
+    pub fn new_selecting(workspace: &Path, locale: Locale, session_id: &str) -> Self {
+        let mut view = Self::new(workspace, locale);
+        if view.select_session_id(session_id) {
+            return view;
         }
-        match self.workspace_scope.as_deref() {
-            None => true,
-            Some(scope) => canonical_or_self(session.workspace.clone()) == scope,
+        if !view.show_archived {
+            view.show_archived = true;
+            view.apply_sort_and_filter();
+            if view.select_session_id(session_id) {
+                view.status =
+                    Some(tr(view.locale, MessageId::SessionsShowingArchived).into_owned());
+                return view;
+            }
         }
+        if !view.show_all_workspaces {
+            view.show_all_workspaces = true;
+            view.apply_sort_and_filter();
+            if view.select_session_id(session_id) {
+                view.status =
+                    Some(tr(view.locale, MessageId::SessionsShowingAllWorkspaces).into_owned());
+                return view;
+            }
+        }
+        // Not found at all: leave the default view rather than pretending.
+        view.status = Some(tr(view.locale, MessageId::SessionsNoResults).into_owned());
+        view
+    }
+
+    /// Move the selection onto `session_id` if it is in the filtered list.
+    fn select_session_id(&mut self, session_id: &str) -> bool {
+        let Some(index) = self.filtered.iter().position(|s| s.id == session_id) else {
+            return false;
+        };
+        self.selected = index;
+        self.ensure_selected_visible();
+        self.refresh_preview();
+        true
+    }
+
+    /// The query this picker's current view represents.
+    ///
+    /// Built here and handed to [`crate::session_projection::select_sessions`]
+    /// so the picker's list is literally the same selection the rail and
+    /// `/v1/sessions` compute — filter, workspace scope, fuzzy search, sort,
+    /// and tie-breaks included. The picker used to own private copies of all
+    /// five; that was the second backend.
+    fn view_query(&self) -> SessionQuery {
+        let mut query = SessionQuery::default()
+            .with_filter(self.archive_filter())
+            .with_sort(self.sort_mode)
+            .with_search(self.search_input.trim().to_string())
+            .with_limit(MAX_PROJECTED_SESSIONS);
+        if !self.show_all_workspaces
+            && let Some(scope) = self.workspace_scope.as_deref()
+        {
+            query = query.scoped_to(scope);
+        }
+        query
     }
 
     /// Flip between current-workspace-only and all-workspaces view
@@ -144,29 +203,46 @@ impl SessionPickerView {
         self.apply_sort_and_filter();
     }
 
-    fn apply_sort_and_filter(&mut self) {
-        match self.sort_mode {
-            SortMode::Recent => {
-                self.sessions
-                    .sort_by_key(|s| std::cmp::Reverse(s.updated_at));
-            }
-            SortMode::Name => {
-                self.sessions.sort_by(|a, b| a.title.cmp(&b.title));
-            }
-            SortMode::Size => {
-                self.sessions
-                    .sort_by_key(|s| std::cmp::Reverse(s.message_count));
-            }
+    /// Which archive states the list currently admits.
+    fn archive_filter(&self) -> SessionListFilter {
+        if self.show_archived {
+            SessionListFilter::IncludeArchived
+        } else {
+            SessionListFilter::ActiveOnly
         }
+    }
 
-        let query = self.search_input.trim().to_ascii_lowercase();
-        self.filtered = self
-            .sessions
-            .iter()
-            .filter(|session| {
-                self.matches_workspace_scope(session)
-                    && (query.is_empty() || fuzzy_match(&query, session))
-            })
+    /// Ids currently visible in the list, top to bottom.
+    ///
+    /// Exposed so the shared acceptance matrix can compare the picker's real
+    /// filtered view against the API's projection instead of comparing the
+    /// projection to itself.
+    #[cfg(test)]
+    pub fn visible_session_ids(&self) -> Vec<String> {
+        self.filtered.iter().map(|s| s.id.clone()).collect()
+    }
+
+    /// The query behind [`Self::visible_session_ids`].
+    #[cfg(test)]
+    pub fn view_query_for_test(&self) -> SessionQuery {
+        self.view_query()
+    }
+
+    #[cfg(test)]
+    pub fn cycle_sort_for_test(&mut self) {
+        self.cycle_sort();
+    }
+
+    #[cfg(test)]
+    pub fn set_search_for_test(&mut self, query: &str) {
+        self.search_input = query.to_string();
+        self.apply_sort_and_filter();
+    }
+
+    fn apply_sort_and_filter(&mut self) {
+        let query = self.view_query();
+        self.filtered = crate::session_projection::select_sessions(&self.sessions, &query)
+            .into_iter()
             .cloned()
             .collect();
 
@@ -273,11 +349,7 @@ impl SessionPickerView {
     }
 
     fn cycle_sort(&mut self) {
-        self.sort_mode = match self.sort_mode {
-            SortMode::Recent => SortMode::Name,
-            SortMode::Name => SortMode::Size,
-            SortMode::Size => SortMode::Recent,
-        };
+        self.sort_mode = self.sort_mode.next();
         self.apply_sort_and_filter();
         self.status = Some(
             tr(self.locale, MessageId::SessionsSortStatus).replace("{sort}", &self.sort_label()),
@@ -286,9 +358,9 @@ impl SessionPickerView {
 
     fn sort_label(&self) -> String {
         match self.sort_mode {
-            SortMode::Recent => tr(self.locale, MessageId::SessionsSortRecent),
-            SortMode::Name => tr(self.locale, MessageId::SessionsSortName),
-            SortMode::Size => tr(self.locale, MessageId::SessionsSortSize),
+            SessionSortMode::Recent => tr(self.locale, MessageId::SessionsSortRecent),
+            SessionSortMode::Name => tr(self.locale, MessageId::SessionsSortName),
+            SessionSortMode::Size => tr(self.locale, MessageId::SessionsSortSize),
         }
         .into_owned()
     }
@@ -326,6 +398,74 @@ impl SessionPickerView {
             session_id: session.id,
             title: session.title,
         })
+    }
+
+    /// Archive or restore the selected session (#2934 / #4397).
+    ///
+    /// Writes through [`SessionManager::set_session_archived`] — the same
+    /// single writer `PATCH /v1/sessions/{id}` uses — so the picker and the
+    /// dashboard cannot disagree about what "archived" means. Emits a
+    /// `SessionRenamed` event carrying the saved metadata so the app-level
+    /// caches (and the sidebar rail) see the new lifecycle state without
+    /// re-reading disk.
+    fn toggle_archive_selected(&mut self) -> ViewAction {
+        let Some(session) = self.selected_session().cloned() else {
+            self.status = Some(tr(self.locale, MessageId::SessionsNoSelection).into_owned());
+            return ViewAction::None;
+        };
+        let manager = match SessionManager::default_location() {
+            Ok(manager) => manager,
+            Err(err) => {
+                self.status = Some(
+                    tr(self.locale, MessageId::SessionsOpenFailed)
+                        .replace("{error}", &err.to_string()),
+                );
+                return ViewAction::None;
+            }
+        };
+        let archived = !session.archived;
+        let metadata = match manager.set_session_archived(
+            &session.id,
+            archived,
+            crate::session_manager::SessionMutator::Owner,
+        ) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                self.status = Some(
+                    tr(self.locale, MessageId::SessionsArchiveFailed)
+                        .replace("{error}", &err.to_string()),
+                );
+                return ViewAction::None;
+            }
+        };
+
+        if let Some(local) = self.sessions.iter_mut().find(|s| s.id == session.id) {
+            local.archived = metadata.archived;
+        }
+        self.apply_sort_and_filter();
+        let message_id = if archived {
+            MessageId::SessionsArchived
+        } else {
+            MessageId::SessionsRestored
+        };
+        self.status = Some(
+            tr(self.locale, message_id)
+                .replace("{id}", crate::session_manager::truncate_id(&session.id)),
+        );
+        ViewAction::Emit(ViewEvent::SessionArchived { metadata })
+    }
+
+    /// Flip whether archived sessions appear in the list.
+    fn toggle_show_archived(&mut self) {
+        self.show_archived = !self.show_archived;
+        let label = if self.show_archived {
+            tr(self.locale, MessageId::SessionsShowingArchived)
+        } else {
+            tr(self.locale, MessageId::SessionsHidingArchived)
+        };
+        self.status = Some(label.into_owned());
+        self.selected = 0;
+        self.apply_sort_and_filter();
     }
 
     fn rename_selected(&mut self, new_title: &str) -> ViewAction {
@@ -373,7 +513,7 @@ impl SessionPickerView {
         self.status =
             Some(tr(self.locale, MessageId::SessionsRenamed).replace("{title}", new_title));
         ViewAction::Emit(ViewEvent::SessionRenamed {
-            metadata: saved.metadata,
+            metadata: Box::new(saved.metadata),
         })
     }
 
@@ -574,6 +714,15 @@ impl ModalView for SessionPickerView {
                 self.status = Some(tr(self.locale, MessageId::SessionsDeletePrompt).into_owned());
                 ViewAction::None
             }
+            // `e` archives or restores the selected session, `x` toggles
+            // whether archived sessions are listed at all. Archive is
+            // deliberately undestructive and needs no confirmation — unlike
+            // `d`, nothing is lost and `e` puts it straight back.
+            KeyCode::Char('e') | KeyCode::Char('E') => self.toggle_archive_selected(),
+            KeyCode::Char('x') | KeyCode::Char('X') => {
+                self.toggle_show_archived();
+                ViewAction::None
+            }
             KeyCode::Char(c) if self.select_visible_shortcut(c) => ViewAction::None,
             KeyCode::Enter => {
                 if let Some(session) = self.selected_session() {
@@ -597,6 +746,8 @@ impl ModalView for SessionPickerView {
             ActionHint::new("s", tr(self.locale, MessageId::SessionsActionSort)),
             ActionHint::new("r", tr(self.locale, MessageId::SessionsActionRename)),
             ActionHint::new("a", tr(self.locale, MessageId::SessionsActionAllWorkspaces)),
+            ActionHint::new("e", tr(self.locale, MessageId::SessionsActionArchive)),
+            ActionHint::new("x", tr(self.locale, MessageId::SessionsActionShowArchived)),
             ActionHint::new("d", tr(self.locale, MessageId::SessionsActionDelete)),
             ActionHint::new("Esc", tr(self.locale, MessageId::SessionsActionClose)),
         ];
@@ -826,10 +977,7 @@ fn build_list_lines(
         let mut line = format!("{prefix}{}", format_session_line(session, locale));
         line = truncate(&line, width);
         let style = if idx == selected {
-            Style::default()
-                .fg(palette::SELECTION_TEXT)
-                .bg(palette::SELECTION_BG)
-                .add_modifier(Modifier::BOLD)
+            menu_style::selected_row_style()
         } else {
             Style::default().fg(palette::TEXT_PRIMARY)
         };
@@ -874,6 +1022,16 @@ fn format_session_line(session: &SessionMetadata, locale: Locale) -> String {
         format!(" | {}", tr(locale, MessageId::SessionsForkCompact))
     } else {
         String::new()
+    };
+    // Archived rows are labelled in text, not by colour alone, so the state
+    // survives monochrome terminals and screen readers.
+    let fork_label = if session.archived {
+        format!(
+            "{fork_label} | {}",
+            tr(locale, MessageId::SessionsArchivedCompact)
+        )
+    } else {
+        fork_label
     };
     format!(
         "{} | {} | {}{} | {} | {}",
@@ -1040,7 +1198,9 @@ fn visible_preview_lines(lines: &[String], scroll: usize, visible_rows: usize) -
     out
 }
 
-fn format_relative_time(dt: &DateTime<chrono::Utc>, locale: Locale) -> String {
+/// Localized "2h ago" label. Shared with the sidebar Sessions rail so both
+/// surfaces age a session with the same words.
+pub(crate) fn format_relative_time(dt: &DateTime<chrono::Utc>, locale: Locale) -> String {
     let now = chrono::Utc::now();
     let duration = now.signed_duration_since(*dt);
     if duration.num_minutes() < 1 {
@@ -1084,38 +1244,6 @@ fn canonical_or_self(path: PathBuf) -> PathBuf {
     std::fs::canonicalize(&path).unwrap_or(path)
 }
 
-fn fuzzy_match(query: &str, session: &SessionMetadata) -> bool {
-    let haystack = format!(
-        "{} {} {}",
-        session.title,
-        session.id,
-        session.workspace.display()
-    )
-    .to_ascii_lowercase();
-    if haystack.contains(query) {
-        return true;
-    }
-    is_subsequence(query, &haystack)
-}
-
-fn is_subsequence(needle: &str, haystack: &str) -> bool {
-    let mut chars = needle.chars();
-    let mut current = match chars.next() {
-        Some(c) => c,
-        None => return true,
-    };
-    for ch in haystack.chars() {
-        if ch == current {
-            if let Some(next) = chars.next() {
-                current = next;
-            } else {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1139,6 +1267,7 @@ mod tests {
             parent_session_id: None,
             forked_from_message_count: None,
             cumulative_turn_secs: 0,
+            archived: false,
         }
     }
 
@@ -1183,7 +1312,7 @@ mod tests {
             history_visible_rows: Cell::new(12),
             search_input: String::new(),
             search_mode: false,
-            sort_mode: SortMode::Recent,
+            sort_mode: SessionSortMode::Recent,
             preview_cache: HashMap::new(),
             current_preview: Vec::new(),
             confirm_delete: false,
@@ -1192,6 +1321,7 @@ mod tests {
             status: None,
             workspace_scope,
             show_all_workspaces: false,
+            show_archived: false,
             last_row_hitboxes: RefCell::new(Vec::new()),
             locale: Locale::En,
         };
@@ -1226,6 +1356,112 @@ mod tests {
                 .metadata
                 .title,
             "After"
+        );
+    }
+
+    #[test]
+    fn archive_toggle_persists_hides_the_row_and_emits_an_archive_receipt() {
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", tmp.path());
+        let manager = SessionManager::default_location().expect("session manager");
+        let mut saved = saved_session_with_messages(vec![text_message("user", "hello")]);
+        saved.metadata.id = "session-01".to_string();
+        saved.metadata.title = "Finished work".to_string();
+        manager.save_session(&saved).expect("save session");
+        let mut view = picker_with(vec![saved.metadata.clone()], None);
+
+        let action = view.toggle_archive_selected();
+
+        // The event is `SessionArchived`, not `SessionRenamed`: the receipt has
+        // to describe what actually happened.
+        let ViewAction::Emit(ViewEvent::SessionArchived { metadata }) = action else {
+            panic!("expected SessionArchived event");
+        };
+        assert!(metadata.archived);
+        assert!(
+            manager
+                .load_session("session-01")
+                .expect("reload")
+                .metadata
+                .archived,
+            "archive must be durable, not view-local"
+        );
+        assert!(
+            view.filtered.is_empty(),
+            "an archived session leaves the default (active-only) list"
+        );
+
+        // `x` brings archived rows back into view without un-archiving them.
+        view.toggle_show_archived();
+        assert_eq!(view.filtered.len(), 1);
+        assert!(view.filtered[0].archived);
+
+        // And archiving is reversible from the same key.
+        let restored = view.toggle_archive_selected();
+        let ViewAction::Emit(ViewEvent::SessionArchived { metadata }) = restored else {
+            panic!("expected SessionArchived event");
+        };
+        assert!(!metadata.archived);
+        assert!(
+            !manager
+                .load_session("session-01")
+                .expect("reload")
+                .metadata
+                .archived
+        );
+    }
+
+    #[test]
+    fn preselecting_a_row_lands_on_it_without_resuming_anything() {
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", tmp.path());
+        let manager = SessionManager::default_location().expect("session manager");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        for (id, title) in [("session-01", "First"), ("session-02", "Second")] {
+            let mut saved = saved_session_with_messages(vec![text_message("user", "hello")]);
+            saved.metadata.id = id.to_string();
+            saved.metadata.title = title.to_string();
+            saved.metadata.workspace.clone_from(&workspace);
+            manager.save_session(&saved).expect("save session");
+        }
+
+        let view = SessionPickerView::new_selecting(&workspace, Locale::En, "session-02");
+
+        assert_eq!(
+            view.selected_session().map(|s| s.id.as_str()),
+            Some("session-02"),
+            "the rail hands off a target row; the picker must land on it"
+        );
+    }
+
+    #[test]
+    fn preselecting_an_archived_row_widens_the_archive_filter_only() {
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", tmp.path());
+        let manager = SessionManager::default_location().expect("session manager");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let mut saved = saved_session_with_messages(vec![text_message("user", "hello")]);
+        saved.metadata.id = "session-01".to_string();
+        saved.metadata.title = "Put away".to_string();
+        saved.metadata.workspace.clone_from(&workspace);
+        saved.metadata.archived = true;
+        manager.save_session(&saved).expect("save session");
+
+        let view = SessionPickerView::new_selecting(&workspace, Locale::En, "session-01");
+
+        assert_eq!(
+            view.selected_session().map(|s| s.id.as_str()),
+            Some("session-01")
+        );
+        assert!(view.show_archived, "archived rows had to be revealed");
+        assert!(
+            !view.show_all_workspaces,
+            "revealing an archived row must not also broaden the workspace scope"
         );
     }
 
@@ -1765,7 +2001,7 @@ mod tests {
             history_visible_rows: Cell::new(12),
             search_input: String::new(),
             search_mode: false,
-            sort_mode: SortMode::Recent,
+            sort_mode: SessionSortMode::Recent,
             preview_cache: HashMap::new(),
             current_preview: Vec::new(),
             confirm_delete: false,
@@ -1774,6 +2010,7 @@ mod tests {
             status: None,
             workspace_scope: None,
             show_all_workspaces: true,
+            show_archived: false,
             last_row_hitboxes: RefCell::new(Vec::new()),
             locale: Locale::En,
         };

@@ -43,6 +43,9 @@ impl App {
             yolo,
             resume_session_id,
             initial_input,
+            // Consumed by `run_app` after the App exists, so it can be shown
+            // alongside (or instead of) the resume receipt.
+            startup_notice: _,
         } = options;
 
         // Start from disk-only preferences so one-time migrations can never
@@ -58,7 +61,7 @@ impl App {
             );
             match control {
                 crate::config::ApprovalPolicyControl::Unset => {
-                    if let Err(error) = settings.save() {
+                    if let Err(error) = normalize_legacy_yolo_settings() {
                         tracing::warn!(
                             "failed to normalize legacy YOLO settings; retrying next launch: {error:#}"
                         );
@@ -73,7 +76,7 @@ impl App {
                         "approval_policy",
                     ) {
                         Ok(_) => {
-                            if let Err(error) = settings.save() {
+                            if let Err(error) = normalize_legacy_yolo_settings() {
                                 tracing::warn!(
                                     "removed legacy approval_policy but could not normalize settings; retrying next launch: {error:#}"
                                 );
@@ -202,6 +205,9 @@ impl App {
         let constrained_frame_rate = settings.constrained_frame_rate;
         let fancy_animations = settings.fancy_animations;
         let ocean_treatment = crate::tui::ocean::OceanTreatment::parse(&settings.ocean_treatment);
+        let focus_texture =
+            crate::tui::focus_texture::FocusTextureMode::parse(&settings.focus_texture)
+                .unwrap_or_default();
         let work_surface_placement =
             crate::tui::work_surface::WorkSurfacePlacement::parse(&settings.work_surface_placement);
         let work_surface_top_height = settings.work_surface_top_height;
@@ -254,19 +260,29 @@ impl App {
             (id.name().to_string(), id, theme)
         });
         let provider_models = settings.provider_models.clone().unwrap_or_default();
-        let model = provider_models
-            .get(&provider_identity)
-            .cloned()
-            .or_else(|| {
-                // default_model is a DeepSeek-centric setting; other providers
-                // get their model from config.toml / env (e.g. OPENAI_MODEL).
-                if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
-                    settings.default_model.clone()
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(model);
+        // `provider_models` remembers the last `/model` pick per provider. It
+        // is a convenience default, not an override: when this launch named a
+        // model explicitly (`--model`, forwarded as `CODEWHALE_MODEL`), that
+        // request wins. Before this fix the memory won unconditionally, so
+        // `codewhale --provider moonshot --model kimi-k3` silently kept running
+        // the remembered `kimi-k2.7-code` while `doctor` reported `kimi-k3`.
+        let model = if crate::config::explicit_launch_model_override().is_some() {
+            model
+        } else {
+            provider_models
+                .get(&provider_identity)
+                .cloned()
+                .or_else(|| {
+                    // default_model is a DeepSeek-centric setting; other providers
+                    // get their model from config.toml / env (e.g. OPENAI_MODEL).
+                    if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
+                        settings.default_model.clone()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(model)
+        };
         let auto_model = model.trim().eq_ignore_ascii_case("auto");
         let mut enabled_provider_models = settings.enabled_models.clone().unwrap_or_default();
         for (saved_provider, saved_model) in &provider_models {
@@ -601,6 +617,9 @@ impl App {
             reasoning_effort_explicit,
             last_effective_reasoning_effort: None,
             workspace,
+            // #4022: the worker thread is spawned lazily on first submit, so
+            // constructing an App never costs a thread.
+            lane_control: crate::lane_control::LaneControlQueue::new(),
             plugin_registry,
             config_path,
             config_profile,
@@ -633,6 +652,7 @@ impl App {
             ocean_receipt_settle_start: None,
             fancy_animations,
             ocean_treatment,
+            focus_texture,
             launch,
             pending_launch_action: None,
             pending_hotbar_slot: None,
@@ -672,6 +692,8 @@ impl App {
             sidebar_width_dirty: false,
             sidebar_focus_dirty: false,
             context_panel: settings.context_panel,
+            sessions_rail: settings.sessions_rail,
+            sessions_rail_cache: None,
             tool_collapse_threshold: 3,
             expanded_tool_runs: HashSet::new(),
             tool_collapse_mode: ToolCollapseMode::from_setting(&settings.tool_collapse_mode),
@@ -704,6 +726,7 @@ impl App {
             onboarding_provider: provider,
             onboarding_workspace_trust_gate,
             onboarding_missing_key_recovery,
+            onboarding_explore_offline: false,
             onboarding_had_api_key_step: !was_onboarded && needs_api_key,
             onboarding_had_trust_step: !was_onboarded && needs_workspace_trust,
             api_key_env_only,
@@ -712,6 +735,7 @@ impl App {
             hooks,
             yolo: yolo_compat,
             yolo_compat_notified: false,
+            startup_defaults: Default::default(),
             keybinding_migration_notified: false,
             mode_prefs,
             approval_policy_locked,
@@ -778,6 +802,7 @@ impl App {
             ignored_tool_calls: HashSet::new(),
             last_exec_wait_command: None,
             streaming_message_index: None,
+            streaming_source_receipt: None,
             suppress_stream_events_until_turn_complete: false,
             streaming_thinking_active_entry: None,
             thinking_revision_last_bump_at: None,
@@ -855,4 +880,18 @@ impl App {
         }
         app
     }
+}
+
+/// Rewrite `settings.toml` with the legacy `default_mode = "yolo"` value
+/// normalized away.
+///
+/// The normalization happens during parsing, so an empty transaction *is* the
+/// migration: load (which normalizes), then save. Doing it as its own
+/// [`crate::settings::Settings::transact`] rather than saving the snapshot
+/// `App::new` already loaded matters twice over. It cannot write back a stale
+/// pre-image, and — because `App::new` runs on the same hot path as several
+/// hundred tests — it keeps the transaction lock out of the common construction
+/// path entirely, taking it only when a legacy file actually needs migrating.
+fn normalize_legacy_yolo_settings() -> anyhow::Result<()> {
+    crate::settings::Settings::transact(|_normalized_on_load| Ok(()))
 }

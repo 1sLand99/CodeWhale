@@ -32,8 +32,8 @@ use std::sync::OnceLock;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{FontStyle, Theme, ThemeSet};
-use syntect::parsing::SyntaxSet;
+use syntect::highlighting::{FontStyle, HighlightState, Theme, ThemeSet};
+use syntect::parsing::{ParseState as SyntectParseState, SyntaxSet};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -278,8 +278,209 @@ impl ParseState {
             && self.committed_prefix_matches(content)
     }
 
+    /// Resume after the caller has proved that the only source mutation was an
+    /// append. The live transcript obtains that proof at the `push_str` seam;
+    /// avoiding a byte-for-byte prefix comparison is essential because such a
+    /// comparison on every chunk would itself retain the quadratic curve.
+    fn can_resume_verified_append(&self, content: &str) -> bool {
+        content.len() >= self.consumed && content.is_char_boundary(self.consumed)
+    }
+
     fn committed_prefix_matches(&self, content: &str) -> bool {
         self.prefix == content[..self.consumed]
+    }
+}
+
+/// Deterministic work receipts for the live incremental renderer.
+///
+/// These count source lines classified and stable/tail blocks rendered. They
+/// deliberately do not use wall-clock time, allocator counters, or sampling,
+/// so regression tests are stable on every machine.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct MarkdownRenderWork {
+    pub classified_lines: u64,
+    pub stable_blocks_rendered: u64,
+    pub tail_blocks_rendered: u64,
+    pub invalidations: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IncrementalRenderKey {
+    width: u16,
+    base_style: Style,
+    palette_mode: palette::PaletteMode,
+}
+
+#[derive(Debug, Clone)]
+struct IncrementalCodeHighlighter {
+    block_id: usize,
+    language: Option<String>,
+    state: Option<(HighlightState, SyntectParseState)>,
+}
+
+/// Persistent state for the one changing Markdown cell in the transcript.
+///
+/// Stable rendered lines live in the owning `CachedCell`; this object retains
+/// only parser/highlighter carry plus the line index at which its replaceable
+/// tail begins. That lets each append truncate and replace the old tail without
+/// cloning or re-rendering the committed prefix.
+#[derive(Debug, Default)]
+pub(crate) struct IncrementalMarkdownRenderCache {
+    parser: ParseState,
+    key: Option<IncrementalRenderKey>,
+    source_len: usize,
+    stable_rendered_line_count: usize,
+    code_highlighter: Option<IncrementalCodeHighlighter>,
+    work: MarkdownRenderWork,
+}
+
+pub(crate) struct IncrementalMarkdownRenderDelta {
+    pub replace_from: usize,
+    pub lines: Vec<RenderedMarkdownLine>,
+}
+
+impl IncrementalMarkdownRenderCache {
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn work(&self) -> MarkdownRenderWork {
+        self.work
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn retained_source_bytes(&self) -> usize {
+        self.parser.prefix.len()
+    }
+
+    /// Update from a source mutation whose append-only provenance was recorded
+    /// by the live event loop. `verified_append` must be false for edits,
+    /// replacement text, cell reuse, or any unknown mutation.
+    pub(crate) fn update(
+        &mut self,
+        content: &str,
+        width: u16,
+        base_style: Style,
+        palette_mode: palette::PaletteMode,
+        verified_append: bool,
+    ) -> IncrementalMarkdownRenderDelta {
+        let key = IncrementalRenderKey {
+            width: width.max(1),
+            base_style,
+            palette_mode,
+        };
+
+        let can_resume = self.key == Some(key)
+            && verified_append
+            && content.len() >= self.source_len
+            && self.parser.can_resume_verified_append(content);
+        let replace_from = if can_resume {
+            self.stable_rendered_line_count
+        } else {
+            self.reset_for_invalidation();
+            self.work.invalidations = self.work.invalidations.saturating_add(1);
+            0
+        };
+        self.key = Some(key);
+
+        let before_consumed = self.parser.consumed;
+        self.parser.commit_complete_lines(content);
+        self.work.classified_lines = self.work.classified_lines.saturating_add(
+            content[before_consumed..self.parser.consumed]
+                .lines()
+                .count() as u64,
+        );
+        self.source_len = content.len();
+        // Append provenance is carried by the event-loop receipt, so the live
+        // cache does not need a second copy of already committed source. The
+        // absolute byte offset and parser carry are enough to resume.
+        self.parser.prefix.clear();
+
+        let stable_end = stable_block_prefix_len(&self.parser.blocks);
+        let mut lines = self.render_stable_prefix(stable_end, key);
+        self.stable_rendered_line_count =
+            self.stable_rendered_line_count.saturating_add(lines.len());
+
+        let mut tail_blocks = self.parser.blocks.clone();
+        tail_blocks.extend(self.parser.snapshot_tail(content));
+        if !tail_blocks.is_empty() {
+            self.work.tail_blocks_rendered = self
+                .work
+                .tail_blocks_rendered
+                .saturating_add(tail_blocks.len() as u64);
+            let mut tail_highlighter = self.code_highlighter.clone();
+            lines.extend(render_incremental_blocks(
+                &tail_blocks,
+                key,
+                &mut tail_highlighter,
+            ));
+        }
+
+        if lines.is_empty() && self.stable_rendered_line_count == 0 {
+            lines.push(empty_rendered_markdown_line());
+        }
+
+        IncrementalMarkdownRenderDelta {
+            replace_from,
+            lines,
+        }
+    }
+
+    fn render_stable_prefix(
+        &mut self,
+        end: usize,
+        key: IncrementalRenderKey,
+    ) -> Vec<RenderedMarkdownLine> {
+        if end == 0 {
+            return Vec::new();
+        }
+        self.work.stable_blocks_rendered =
+            self.work.stable_blocks_rendered.saturating_add(end as u64);
+        let lines =
+            render_incremental_blocks(&self.parser.blocks[..end], key, &mut self.code_highlighter);
+        self.parser.blocks.drain(..end);
+        lines
+    }
+
+    fn reset_for_invalidation(&mut self) {
+        self.parser = ParseState::default();
+        self.key = None;
+        self.source_len = 0;
+        self.stable_rendered_line_count = 0;
+        self.code_highlighter = None;
+    }
+}
+
+impl ParseState {
+    fn snapshot_tail(&self, content: &str) -> Vec<Block> {
+        let tail = content.get(self.consumed..).unwrap_or_default();
+        let mut blocks = Vec::new();
+        let mut in_code_block = self.in_code_block;
+        let mut code_language = self.code_language.clone();
+        let mut code_block_id = self.code_block_id;
+        for raw_line in tail.lines() {
+            push_parsed_line(
+                raw_line,
+                &mut blocks,
+                &mut in_code_block,
+                &mut code_language,
+                &mut code_block_id,
+            );
+        }
+        blocks
+    }
+}
+
+fn stable_block_prefix_len(blocks: &[Block]) -> usize {
+    let Some(last_non_table) = blocks
+        .iter()
+        .rposition(|block| !matches!(block, Block::TableRow(_) | Block::TableSeparator))
+    else {
+        return 0;
+    };
+    if last_non_table + 1 == blocks.len() {
+        blocks.len()
+    } else {
+        last_non_table + 1
     }
 }
 
@@ -537,6 +738,120 @@ pub(crate) fn render_parsed_tagged_with_palette(
     }
 
     out
+}
+
+fn empty_rendered_markdown_line() -> RenderedMarkdownLine {
+    RenderedMarkdownLine {
+        line: Line::from(""),
+        links: Vec::new(),
+        is_code: false,
+        copy_prefix_width: 0,
+        copy_separator_after: CopyLineSeparator::Newline,
+    }
+}
+
+/// Render a block suffix while carrying syntax state across calls.
+///
+/// Non-code blocks use the canonical batch renderer unchanged. Code lines are
+/// the only group whose styling depends on preceding blocks, so their syntect
+/// parse/highlight state is retained explicitly and cloned for the replaceable
+/// tail. This keeps an open fence incremental without sacrificing exact final
+/// highlighting.
+fn render_incremental_blocks(
+    blocks: &[Block],
+    key: IncrementalRenderKey,
+    code_highlighter: &mut Option<IncrementalCodeHighlighter>,
+) -> Vec<RenderedMarkdownLine> {
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < blocks.len() {
+        if let Block::Code {
+            line,
+            language,
+            block_id,
+        } = &blocks[index]
+        {
+            let spans = highlight_incremental_code_line(
+                *block_id,
+                language.as_deref(),
+                line,
+                key.base_style,
+                key.palette_mode,
+                code_highlighter,
+            );
+            out.extend(render_wrapped_code_spans_tagged(
+                spans,
+                usize::from(key.width),
+            ));
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        while index < blocks.len() && !matches!(blocks[index], Block::Code { .. }) {
+            index += 1;
+        }
+        out.extend(render_parsed_tagged_with_palette(
+            &ParsedMarkdown {
+                blocks: blocks[start..index].to_vec(),
+            },
+            key.width,
+            key.base_style,
+            key.palette_mode,
+        ));
+    }
+    out
+}
+
+fn highlight_incremental_code_line(
+    block_id: usize,
+    language: Option<&str>,
+    line: &str,
+    base_style: Style,
+    palette_mode: palette::PaletteMode,
+    cache: &mut Option<IncrementalCodeHighlighter>,
+) -> Vec<Span<'static>> {
+    let language_owned = language.map(str::to_owned);
+    let needs_reset = cache
+        .as_ref()
+        .is_none_or(|current| current.block_id != block_id || current.language != language_owned);
+    if needs_reset {
+        let state = language
+            .and_then(find_code_syntax)
+            .map(|syntax| HighlightLines::new(syntax, selected_syntax_theme(palette_mode)).state());
+        *cache = Some(IncrementalCodeHighlighter {
+            block_id,
+            language: language_owned,
+            state,
+        });
+    }
+
+    let plain_style = base_style.fg(palette::TEXT_TOOL_OUTPUT);
+    let Some(current) = cache.as_mut() else {
+        return vec![Span::styled(line.to_string(), plain_style)];
+    };
+    let Some((highlight_state, parse_state)) = current.state.take() else {
+        return vec![Span::styled(line.to_string(), plain_style)];
+    };
+    let mut highlighter = HighlightLines::from_state(
+        selected_syntax_theme(palette_mode),
+        highlight_state,
+        parse_state,
+    );
+    let highlighted = match highlighter.highlight_line(line, syntax_set()) {
+        Ok(ranges) if !ranges.is_empty() => ranges
+            .into_iter()
+            .map(|(style, text)| {
+                Span::styled(
+                    text.to_string(),
+                    syntax_style_to_ratatui(style, base_style, palette_mode),
+                )
+            })
+            .collect(),
+        _ => vec![Span::styled(line.to_string(), plain_style)],
+    };
+    current.state = Some(highlighter.state());
+    highlighted
 }
 
 /// Convenience wrapper: parse + render in one call.
@@ -846,16 +1161,7 @@ fn highlight_code_block(
             .collect();
     };
     let syntaxes = syntax_set();
-    let Some(syntax) = syntaxes
-        .find_syntax_by_token(language)
-        .or_else(|| syntaxes.find_syntax_by_extension(language))
-        .or_else(|| {
-            syntaxes
-                .syntaxes()
-                .iter()
-                .find(|syntax| syntax.name.eq_ignore_ascii_case(language))
-        })
-    else {
+    let Some(syntax) = find_code_syntax(language) else {
         return lines
             .iter()
             .map(|line| vec![Span::styled((*line).to_string(), plain_style)])
@@ -878,6 +1184,19 @@ fn highlight_code_block(
             _ => vec![Span::styled((*line).to_string(), plain_style)],
         })
         .collect()
+}
+
+fn find_code_syntax(language: &str) -> Option<&'static syntect::parsing::SyntaxReference> {
+    let syntaxes = syntax_set();
+    syntaxes
+        .find_syntax_by_token(language)
+        .or_else(|| syntaxes.find_syntax_by_extension(language))
+        .or_else(|| {
+            syntaxes
+                .syntaxes()
+                .iter()
+                .find(|syntax| syntax.name.eq_ignore_ascii_case(language))
+        })
 }
 
 fn render_wrapped_code_spans_tagged(
@@ -1848,6 +2167,206 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    fn rendered_fingerprint(lines: &[RenderedMarkdownLine]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| {
+                format!(
+                    "{:?}|{:?}|{}|{}|{:?}",
+                    line.line,
+                    line.links,
+                    line.is_code,
+                    line.copy_prefix_width,
+                    line.copy_separator_after
+                )
+            })
+            .collect()
+    }
+
+    fn update_incremental_render(
+        cache: &mut IncrementalMarkdownRenderCache,
+        rendered: &mut Vec<RenderedMarkdownLine>,
+        source: &str,
+        width: u16,
+        palette_mode: palette::PaletteMode,
+        verified_append: bool,
+    ) {
+        update_incremental_render_with_style(
+            cache,
+            rendered,
+            source,
+            width,
+            Style::default(),
+            palette_mode,
+            verified_append,
+        );
+    }
+
+    fn update_incremental_render_with_style(
+        cache: &mut IncrementalMarkdownRenderCache,
+        rendered: &mut Vec<RenderedMarkdownLine>,
+        source: &str,
+        width: u16,
+        base_style: Style,
+        palette_mode: palette::PaletteMode,
+        verified_append: bool,
+    ) {
+        let delta = cache.update(source, width, base_style, palette_mode, verified_append);
+        rendered.truncate(delta.replace_from);
+        rendered.extend(delta.lines);
+    }
+
+    #[test]
+    fn incremental_render_is_exact_and_linear_for_unicode_fences_and_tables() {
+        let mut cache = IncrementalMarkdownRenderCache::default();
+        let mut rendered = Vec::new();
+        let mut source = String::new();
+        let chunks = 80usize;
+
+        for index in 0..chunks {
+            source.push_str(&format!(
+                "## 段落 {index}\nUnicode e\u{301} 世界 🚀\n```rust\nlet 値_{index}: usize = {index}; // 注釈\n```\n| key | value |\n|---|---|\n| {index} | 世界 |\n\n"
+            ));
+            update_incremental_render(
+                &mut cache,
+                &mut rendered,
+                &source,
+                96,
+                palette::PaletteMode::Dark,
+                index > 0,
+            );
+            let cold = render_markdown_tagged_with_palette(
+                &source,
+                96,
+                Style::default(),
+                palette::PaletteMode::Dark,
+            );
+            assert_eq!(
+                rendered_fingerprint(&rendered),
+                rendered_fingerprint(&cold),
+                "incremental output diverged after chunk {index}"
+            );
+        }
+
+        let work = cache.work();
+        let parsed = reference_parse(&source);
+        assert_eq!(work.classified_lines as usize, source.lines().count());
+        assert_eq!(work.stable_blocks_rendered as usize, parsed.blocks.len());
+        assert_eq!(work.tail_blocks_rendered, 0);
+        assert_eq!(work.invalidations, 1);
+    }
+
+    #[test]
+    fn incremental_render_invalidates_on_mutation_width_theme_and_style() {
+        let mut cache = IncrementalMarkdownRenderCache::default();
+        let mut rendered = Vec::new();
+        let mut source = "alpha\n```rust\nlet value = 1;\n```\n".to_string();
+        update_incremental_render(
+            &mut cache,
+            &mut rendered,
+            &source,
+            80,
+            palette::PaletteMode::Dark,
+            false,
+        );
+
+        source.push_str("tail 世界\n");
+        update_incremental_render(
+            &mut cache,
+            &mut rendered,
+            &source,
+            80,
+            palette::PaletteMode::Dark,
+            true,
+        );
+
+        source.replace_range(..5, "ALPHA");
+        update_incremental_render(
+            &mut cache,
+            &mut rendered,
+            &source,
+            80,
+            palette::PaletteMode::Dark,
+            false,
+        );
+        let mutated = render_markdown_tagged_with_palette(
+            &source,
+            80,
+            Style::default(),
+            palette::PaletteMode::Dark,
+        );
+        assert_eq!(
+            rendered_fingerprint(&rendered),
+            rendered_fingerprint(&mutated)
+        );
+
+        update_incremental_render(
+            &mut cache,
+            &mut rendered,
+            &source,
+            37,
+            palette::PaletteMode::Dark,
+            true,
+        );
+        update_incremental_render(
+            &mut cache,
+            &mut rendered,
+            &source,
+            37,
+            palette::PaletteMode::Light,
+            true,
+        );
+
+        let changed_style = Style::default().add_modifier(Modifier::ITALIC);
+        update_incremental_render_with_style(
+            &mut cache,
+            &mut rendered,
+            &source,
+            37,
+            changed_style,
+            palette::PaletteMode::Light,
+            true,
+        );
+        let rethemed = render_markdown_tagged_with_palette(
+            &source,
+            37,
+            changed_style,
+            palette::PaletteMode::Light,
+        );
+        assert_eq!(
+            rendered_fingerprint(&rendered),
+            rendered_fingerprint(&rethemed)
+        );
+        assert_eq!(cache.work().invalidations, 5);
+    }
+
+    #[test]
+    fn incremental_render_drops_committed_source_without_a_large_answer_cliff() {
+        let line = format!("{}\n", "x".repeat(16 * 1024));
+        let mut source = String::new();
+        let mut cache = IncrementalMarkdownRenderCache::default();
+        let mut rendered = Vec::new();
+
+        for index in 0..80 {
+            source.push_str(&line);
+            update_incremental_render(
+                &mut cache,
+                &mut rendered,
+                &source,
+                u16::MAX,
+                palette::PaletteMode::Dark,
+                index > 0,
+            );
+            assert_eq!(cache.retained_source_bytes(), 0);
+        }
+
+        assert!(source.len() > 1024 * 1024);
+        assert_eq!(cache.retained_source_bytes(), 0);
+        assert_eq!(cache.work().classified_lines, 80);
+        assert_eq!(cache.work().stable_blocks_rendered, 80);
+        assert_eq!(cache.work().invalidations, 1);
     }
 
     #[test]

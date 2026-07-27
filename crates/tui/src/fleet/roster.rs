@@ -69,6 +69,16 @@ impl FleetRoster {
         }
     }
 
+    /// A roster built from an explicit member list.
+    ///
+    /// Used for run-scoped rosters that are not a merge of the config layers —
+    /// notably an exact named Fleet, whose members are frozen at Workflow
+    /// start and must not pick up built-in or workspace profiles by name.
+    #[must_use]
+    pub fn from_members(members: Vec<AgentProfile>) -> Self {
+        Self { members }
+    }
+
     /// Load and merge the full roster for a workspace.
     ///
     /// Config members come from `[fleet.profiles]` (id = map key). Personal
@@ -90,11 +100,14 @@ impl FleetRoster {
         let mut extras: Vec<AgentProfile> = Vec::new();
 
         for (id, profile) in &fleet_config.profiles {
+            let mut profile = profile.clone();
+            profile.role.name = super::profile::canonical_public_role_name(&profile.role.name);
+            profile.slot = FleetSlot::from_name(&profile.role.name);
             let member = AgentProfile {
                 id: id.clone(),
                 display_name: None,
                 description: profile.role.description.clone(),
-                profile: profile.clone(),
+                profile,
                 source: PathBuf::from("config.toml"),
                 origin: ProfileOrigin::Config,
             };
@@ -150,8 +163,8 @@ impl FleetRoster {
     /// The default party. Built-ins carry no permission grants (permissions
     /// stay at the [`FleetProfilePermissions::default`] floor); behavior comes
     /// from the role posture / system prompts plus the role `instructions`
-    /// below, which encode the operation hierarchy: the **operator** (the
-    /// session's `/model` selection) runs the operation and assigns managers
+    /// below, which encode the coordination hierarchy: the **operator** (the
+    /// session's `/model` selection) directs the work and assigns managers
     /// to workflows; a **manager** is the middle manager of one workflow.
     #[must_use]
     pub fn built_in_members() -> Vec<AgentProfile> {
@@ -169,9 +182,9 @@ impl FleetRoster {
                 "operator",
                 FleetSlot::Operator,
                 FleetLoadout::Inherit,
-                "The helm of the operation — the session's /model selection. Assigns managers to workflows, routes work between them, arbitrates conflicts, and reviews what comes back.",
+                "The helm of the session — the session's /model selection. Assigns managers to Workflows, routes work between them, arbitrates conflicts, and reviews what comes back.",
                 Some(
-                    "You run the operation, not individual workflows. Assign a manager per workflow, route work and context between them, arbitrate conflicts and priorities, review the receipts that come back, and decide what runs next. Delegate execution; keep judgment.",
+                    "You direct the overall work, not individual Workflow steps. Assign a manager per Workflow, route work and context between them, arbitrate conflicts and priorities, review the receipts that come back, and decide what runs next. Delegate execution; keep judgment.",
                 ),
             ),
             (
@@ -205,6 +218,15 @@ impl FleetRoster {
                 None,
             ),
             (
+                "consultant",
+                FleetSlot::Custom("consultant".to_string()),
+                FleetLoadout::Inherit,
+                "Short-lived, high-reasoning, read-only counsel for difficult decisions and overlooked risks.",
+                Some(
+                    "Give the operator a direct second opinion grounded in what you can read. Surface the decisive tradeoff, overlooked failure mode, and your recommendation. Advise only: do not edit files or run commands.",
+                ),
+            ),
+            (
                 "synthesizer",
                 FleetSlot::Summarizer,
                 FleetLoadout::Inherit,
@@ -234,7 +256,7 @@ impl FleetRoster {
                 loadout,
                 model: None,
                 provider: None,
-                reasoning_effort: None,
+                reasoning_effort: (id == "consultant").then(|| "high".to_string()),
                 permissions: FleetProfilePermissions::default(),
                 delegation: FleetDelegationHints::default(),
             },
@@ -343,6 +365,7 @@ mod tests {
                 "builder",
                 "reviewer",
                 "verifier",
+                "consultant",
                 "synthesizer",
                 "general"
             ]
@@ -362,11 +385,19 @@ mod tests {
                 member.id
             );
             assert!(member.profile.model.is_none(), "{}", member.id);
+            assert_eq!(
+                member.profile.reasoning_effort.as_deref(),
+                (member.id == "consultant").then_some("high"),
+                "built-in {} reasoning",
+                member.id
+            );
             // The coordination hierarchy (operator/manager) and the
             // adversarial reviewer carry role doctrine; the remaining
             // built-ins get behavior from posture / system prompts alone.
-            let carries_doctrine =
-                matches!(member.id.as_str(), "manager" | "operator" | "reviewer");
+            let carries_doctrine = matches!(
+                member.id.as_str(),
+                "manager" | "operator" | "reviewer" | "consultant"
+            );
             assert_eq!(
                 member.profile.role.instructions.is_some(),
                 carries_doctrine,
@@ -378,8 +409,9 @@ mod tests {
         assert_eq!(members[0].profile.slot, FleetSlot::Manager);
         assert_eq!(members[1].profile.slot, FleetSlot::Operator);
         assert_eq!(members[2].profile.loadout, FleetLoadout::Inherit);
-        assert_eq!(members[6].profile.slot, FleetSlot::Summarizer);
-        assert_eq!(members[6].profile.loadout, FleetLoadout::Inherit);
+        assert_eq!(members[6].profile.slot.as_str(), "consultant");
+        assert_eq!(members[7].profile.slot, FleetSlot::Summarizer);
+        assert_eq!(members[7].profile.loadout, FleetLoadout::Inherit);
     }
 
     #[test]
@@ -406,6 +438,7 @@ mod tests {
                 "builder",
                 "reviewer",
                 "verifier",
+                "consultant",
                 "synthesizer",
                 "general",
                 "alpha",

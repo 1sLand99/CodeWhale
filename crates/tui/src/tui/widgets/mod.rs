@@ -36,6 +36,7 @@ use crate::tui::approval::{
     ToolCategory,
 };
 use crate::tui::history::{GenericToolCell, HistoryCell, ToolCell, ToolRun, ToolStatus};
+use crate::tui::menu_style;
 use crate::tui::scrolling::TranscriptLineMeta;
 use crate::tui::ui_text::{grapheme_display_width, text_display_width};
 use crate::tui::underwater::ShellPhase;
@@ -196,6 +197,16 @@ impl ChatWidget {
         // cell forces only those rows to re-render — committed history rows
         // are unaffected.
         app.resync_history_revisions();
+        app.viewport.transcript_cache.set_streaming_source_receipt(
+            app.streaming_source_receipt.map(|receipt| {
+                crate::tui::transcript::StreamingSourceReceipt {
+                    cell_index: receipt.cell_index,
+                    from_revision: history_entry_revision(receipt.from_revision),
+                    to_revision: history_entry_revision(receipt.to_revision),
+                    content_len: receipt.content_len,
+                }
+            }),
+        );
         let active_entries: &[HistoryCell] = app
             .active_cell
             .as_ref()
@@ -368,6 +379,14 @@ impl ChatWidget {
                 &app.folded_thinking,
                 Some(&app.collapsed_cell_map),
             );
+        }
+
+        // The cache has now observed this revision (or the cell was filtered,
+        // in which case a later reveal must cold-render). Start the next append
+        // receipt from the current revision instead of chaining across an
+        // already-consumed proof.
+        if let Some(receipt) = app.streaming_source_receipt.as_mut() {
+            receipt.from_revision = receipt.to_revision;
         }
 
         let total_lines = app.viewport.transcript_cache.total_lines();
@@ -831,7 +850,10 @@ impl ChatWidget {
                 anchor_x: area.x.saturating_add(area.width / 2),
                 anchor_y: area.y.saturating_add(area.height.saturating_mul(2) / 3),
             };
-            crate::tui::ambient_life::render_ambient_life(
+            // Per-frame budget counters (built/painted/skipped/clipped);
+            // consumed by ambient-life tests and debug tooling, not by the
+            // widget itself.
+            let _ambient_stats = crate::tui::ambient_life::render_ambient_life(
                 area,
                 buf,
                 inks,
@@ -1159,9 +1181,8 @@ impl Renderable for ComposerWidget<'_> {
             } else if !input_text.trim().is_empty() {
                 // Live disambiguation for #345: when there's content in the
                 // composer, show what `Enter` will do RIGHT NOW so the user
-                // never has to guess between Immediate / Steer / QueueFollowUp /
-                // Queue. The disposition flips with engine state so this hint
-                // is the only reliable cue before pressing Enter.
+                // never has to guess between Immediate / QueueFollowUp /
+                // Queue. Ctrl+Enter is the separate, stable steer gesture.
                 use crate::tui::app::SubmitDisposition;
                 let queue_count = self.app.queued_message_count();
                 let (label, color) = match self.app.decide_submit_disposition() {
@@ -1177,41 +1198,48 @@ impl Renderable for ComposerWidget<'_> {
                     }
                     SubmitDisposition::Queue => {
                         if self.app.offline_mode {
-                            (Some("↵ offline queue".to_string()), palette::STATUS_WARNING)
+                            // #3927: an explicitly chosen offline session keeps
+                            // naming its one recovery command, not just its
+                            // queue behavior.
+                            let label = if self.app.onboarding_explore_offline {
+                                "↵ offline queue · /provider connects".to_string()
+                            } else {
+                                "↵ offline queue".to_string()
+                            };
+                            (Some(label), palette::STATUS_WARNING)
                         } else if self.app.mode == crate::tui::app::AppMode::Operate {
-                            // Ctrl+G sends an already-queued item now; with only
-                            // composer text it stashes the draft (#440). Steer is
-                            // an explicit Shift+Enter / Ctrl+Enter gesture.
+                            // Enter queues while busy; Ctrl+Enter explicitly
+                            // steers. Ctrl+G/Ctrl+S only stash drafts (#440).
                             let label = if queue_count > 0 {
                                 format!(
-                                    "↵ queue task ({} waiting) · ⇧↵ steer · Ctrl+G send queued",
+                                    "↵ queue task ({} waiting) · Ctrl+↵ steer",
                                     queue_count.saturating_add(1)
                                 )
                             } else {
-                                "↵ queue task · ⇧↵ steer".to_string()
+                                "↵ queue task · Ctrl+↵ steer".to_string()
                             };
                             (Some(label), palette::WHALE_INFO)
                         } else {
                             let label = if queue_count > 0 {
                                 format!(
-                                    "↵ queue ({} waiting) · ⇧↵ steer · Ctrl+G send queued",
+                                    "↵ queue ({} waiting) · Ctrl+↵ steer",
                                     queue_count.saturating_add(1)
                                 )
                             } else {
-                                "↵ queue · ⇧↵ steer".to_string()
+                                "↵ queue · Ctrl+↵ steer".to_string()
                             };
                             (Some(label), palette::TEXT_MUTED)
                         }
                     }
-                    // Steer is reached via Shift+Enter or Ctrl+Enter only.
+                    // Steer is reached via Ctrl+Enter only.
                     SubmitDisposition::Steer => {
                         (Some("↵ steering".to_string()), palette::WHALE_INFO)
                     }
                     SubmitDisposition::QueueFollowUp => (
                         Some(if self.app.mode == crate::tui::app::AppMode::Operate {
-                            "↵ queued task · ⇧↵ steer · Ctrl+G send queued".to_string()
+                            "↵ queued task · Ctrl+↵ steer".to_string()
                         } else {
-                            "↵ queued · ⇧↵ steer · Ctrl+G send queued".to_string()
+                            "↵ queued · Ctrl+↵ steer".to_string()
                         }),
                         palette::TEXT_MUTED,
                     ),
@@ -1398,9 +1426,7 @@ impl Renderable for ComposerWidget<'_> {
                 {
                     let is_selected = idx == selected;
                     let style = if is_selected {
-                        Style::default()
-                            .fg(palette::SELECTION_TEXT)
-                            .bg(palette::SELECTION_BG)
+                        menu_style::selected_row_bg_style().fg(palette::SELECTION_TEXT)
                     } else {
                         Style::default().fg(palette::TEXT_MUTED)
                     };
@@ -1448,9 +1474,7 @@ impl Renderable for ComposerWidget<'_> {
             {
                 let is_selected = idx == selected;
                 let style = if is_selected {
-                    Style::default()
-                        .fg(palette::SELECTION_TEXT)
-                        .bg(palette::SELECTION_BG)
+                    menu_style::selected_row_bg_style().fg(palette::SELECTION_TEXT)
                 } else {
                     Style::default().fg(palette::TEXT_MUTED)
                 };
@@ -1515,9 +1539,7 @@ impl Renderable for ComposerWidget<'_> {
             {
                 let is_selected = idx == selected;
                 let sel_style = if is_selected {
-                    Style::default()
-                        .fg(palette::SELECTION_TEXT)
-                        .bg(palette::SELECTION_BG)
+                    menu_style::selected_row_bg_style().fg(palette::SELECTION_TEXT)
                 } else {
                     Style::default().fg(palette::TEXT_MUTED)
                 };
@@ -1532,9 +1554,7 @@ impl Renderable for ComposerWidget<'_> {
 
                 // Description column (muted when not selected, secondary when selected)
                 let desc_style = if is_selected {
-                    Style::default()
-                        .fg(palette::SELECTION_TEXT)
-                        .bg(palette::SELECTION_BG)
+                    menu_style::selected_row_bg_style().fg(palette::SELECTION_TEXT)
                 } else {
                     Style::default().fg(palette::TEXT_DIM)
                 };
@@ -2313,10 +2333,7 @@ fn repo_law_approval_palette() -> ApprovalColors {
 }
 
 fn approval_selected_style() -> Style {
-    Style::default()
-        .fg(palette::SELECTION_TEXT)
-        .bg(palette::SELECTION_BG)
-        .add_modifier(Modifier::BOLD)
+    menu_style::selected_row_style()
 }
 
 fn approval_option_style(is_selected: bool, color: Color) -> Style {
@@ -2912,9 +2929,7 @@ impl Renderable for ElevationWidget<'_> {
         for (i, option) in self.request.options.iter().enumerate() {
             let is_selected = i == self.selected;
             let style = if is_selected {
-                Style::default()
-                    .fg(palette::SELECTION_TEXT)
-                    .bg(palette::SELECTION_BG)
+                menu_style::selected_row_bg_style().fg(palette::SELECTION_TEXT)
             } else {
                 Style::default()
             };

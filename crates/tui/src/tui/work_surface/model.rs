@@ -12,6 +12,7 @@ use crate::tui::app::{AgentCurrentActivityStatus, App, SidebarRowAction};
 use crate::tui::history::{
     FileActivityKind, FileActivitySummary, FileMutationReceipt, HistoryCell, ToolCell,
 };
+use crate::tui::menu_style::{StatusKind, status_mark};
 use crate::work_graph::{
     AcceptanceRequirement, EdgeKind, EvidenceKind, EvidenceKindTag, NodeKind, NodeState,
     OperationBinding, OwnerState, Provenance, WorkGraphSnapshot, WorkNode,
@@ -1308,12 +1309,18 @@ fn graph_node_row(snapshot: &WorkGraphSnapshot, node: &WorkNode) -> WorkRow {
         NodeState::Initializing => (crate::tui::glyphs::SELECTION, WorkTone::Live),
         NodeState::Active => (crate::tui::glyphs::SELECTION, WorkTone::Live),
         NodeState::Waiting => (crate::tui::glyphs::ATTENTION, WorkTone::Attention),
-        NodeState::Blocked => ("!", WorkTone::Attention),
+        NodeState::Blocked => (
+            status_mark(StatusKind::Attention).glyph,
+            WorkTone::Attention,
+        ),
         NodeState::Completed if node.acceptance.is_empty() => {
-            (crate::tui::glyphs::DONE, WorkTone::Success)
+            (status_mark(StatusKind::Done).glyph, WorkTone::Success)
         }
-        NodeState::Completed => ("!", WorkTone::Attention),
-        NodeState::Verified => (crate::tui::glyphs::DONE, WorkTone::Success),
+        NodeState::Completed => (
+            status_mark(StatusKind::Attention).glyph,
+            WorkTone::Attention,
+        ),
+        NodeState::Verified => (status_mark(StatusKind::Done).glyph, WorkTone::Success),
         NodeState::Stale => ("?", WorkTone::Attention),
         NodeState::Superseded | NodeState::Cancelled => ("−", WorkTone::Muted),
         NodeState::Failed => (crate::tui::glyphs::FAILED, WorkTone::Attention),

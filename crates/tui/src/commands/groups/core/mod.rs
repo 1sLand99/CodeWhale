@@ -20,6 +20,7 @@ mod hf;
 mod home;
 mod hooks;
 mod hotbar;
+mod lane;
 mod links;
 mod model;
 mod modeldb;
@@ -99,6 +100,10 @@ impl CommandGroup for CoreCommands {
             Box::new(FunctionCommand::new(
                 fleet::FleetCmd::info(),
                 fleet::FleetCmd::execute,
+            )),
+            Box::new(FunctionCommand::new(
+                lane::LaneCmd::info(),
+                lane::LaneCmd::execute,
             )),
             Box::new(FunctionCommand::new(
                 workflow::WorkflowCmd::info(),

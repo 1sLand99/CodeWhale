@@ -1,0 +1,60 @@
+import type { HomeDict } from "../types";
+
+export const home: HomeDict = {
+  kicker: "데이터와 코드의 바다",
+  heroTitleA: "깊은 바다로 잠수하고,",
+  heroTitleB: "당신은 잠수하지 않아도 됩니다.",
+  heroIntro:
+    "Codewhale은 평범한 사람들에게 LLM의 지렛대를 건네줍니다. 터미널에서 저장소를 읽고, 파일을 수정하고, 검사를 실행하고, 기록을 남깁니다 — 코드를 이미 알 필요는 없습니다. 당신의 머신에서 실행됩니다.",
+  install: "설치",
+  docs: "문서",
+  copy: "복사",
+  copied: "복사됨 ✓",
+  latestRelease: "최신 릴리스 {tag}",
+  releaseUnavailable: "릴리스 상태를 사용할 수 없습니다",
+  currentSource: "현재 소스",
+  sourceCandidate: "소스 후보",
+  providerRoutes: "프로바이더 라우트 {count}개",
+  screenshotAlt:
+    "로컬 Ollama 라우트를 사용하는 새로운 Codewhale v{version} 터미널 세션, 빈 Work 바 없음",
+  figcaption: "v{version} {state} · 로컬 Ollama 라우트 · Plan / Act / Operate",
+  publishedRelease: "공개 릴리스",
+  figcaptionSourceCandidate: "소스 후보",
+  proofHeading: "수중 터미널 셸. 모델 중립. 로컬 우선.",
+  proofBody:
+    "이미 사용 중인 호스티드, 게이트웨이 또는 로컬 모델을 그대로 사용하세요. Codewhale은 당신의 머신에서 실행되며 모델을 제품이 아닌 선택 가능한 구성 요소로 취급합니다. Plan / Act / Operate와 명시적 권한 상태로 깊은 잠수도 통제할 수 있습니다.",
+  workflowHeading: "작업에서 검증된 변경까지.",
+  workflow: [
+    ["검사", "저장소, 지침, 작업을 읽습니다."],
+    ["실행", "명시적 승인 경계 안에서 파일을 수정합니다."],
+    ["검증", "검사를 실행하고 결과를 확인합니다."],
+    ["보고", "간결하고 지속 가능한 기록을 남깁니다."],
+  ],
+  receiptAria: "작업 기록 예시",
+  boundariesHeadingA: "당신의 모델.",
+  boundariesHeadingB: "당신의 경계.",
+  boundariesBody:
+    "모델, 작업 모드, 권한 상태를 명시적으로 선택하세요. 알 수 없는 비용은 알 수 없는 상태로 유지하고, 미리보기 기능은 그렇게 표시합니다.",
+  hostedGatewayLocal: "호스티드, 게이트웨이, 로컬 모델",
+  planActOperateDesc: "읽기 전용 계획부터 자율 실행까지",
+  askAutoReviewDesc: "작업에 맞는 권한 상태 선택",
+  tuiExecWebDesc: "대화형 및 헤드리스 런타임 화면",
+  surfacesHeading: "작업이 일어나는 곳에서 런타임을 사용하세요.",
+  surfaces: [
+    ["TUI", "대화형 터미널 작업"],
+    ["codewhale exec", "스크립트와 CI"],
+    ["웹 클라이언트", "루프백 전용 브라우저 클라이언트"],
+    ["Runtime API + MCP", "로컬 통합"],
+    ["Fleet", "지속적인 멀티 에이전트 작업"],
+  ],
+  runtimeLink: "런타임 화면과 안정성 노트 보기 →",
+  installBandHeading: "하나의 명령으로 시작하세요.",
+  binaries: "바이너리",
+  chinaMirrors: "중국 미러",
+  installGuideLink: "설치 가이드 읽기 →",
+  communityHeading: "공개적으로 개발",
+  communityBody:
+    "MIT 라이선스이며 런타임, 프로바이더, 플랫폼, 문서, 테스트 전반의 기여자들이 함께 만들어 갑니다.",
+  communityLinksAria: "커뮤니티 링크",
+  contribute: "기여",
+};

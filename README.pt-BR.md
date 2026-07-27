@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:797a23968c31 -->
+<!-- source: README.md sha256:7e05c7acd044 -->
 # Codewhale
 
 Um agente de programação de código aberto para o seu terminal — traga o seu próprio modelo.
@@ -19,7 +19,7 @@ Estamos sempre em busca de pessoas que contribuam e de formas de melhorar. Se um
 modelo ou provedor que você usa está faltando, ou se algo quebra, nos contar é
 uma das coisas mais úteis que você pode fazer — veja [Contribuindo](#contribuindo).
 
-[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md)
+[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md)
 
 [![CI](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml/badge.svg)](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/codewhale-cli?label=crates.io)](https://crates.io/crates/codewhale-cli)
@@ -77,6 +77,9 @@ de aprovação.
 - [docs/FLEET.md](docs/FLEET.md) — fleets, o livro-razão e resume
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`, hooks e a
   constitution
+- [docs/HOOKS.md](docs/HOOKS.md) — os onze eventos de hook do ciclo de vida da
+  TUI, seus payloads e os três que podem direcionar um turno (`codewhale exec`
+  e os subcomandos da CLI não disparam hooks)
 - [docs/WEB.md](docs/WEB.md) — cliente de navegador incorporado apenas em
   loopback e sua fronteira de autenticação de uso único
 

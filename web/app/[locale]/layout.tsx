@@ -7,21 +7,21 @@ import { buildPageMetadata } from "@/lib/page-meta";
 import "../globals.css";
 
 const display = Space_Grotesk({
-  subsets: ["latin"],
+  subsets: ["latin", "vietnamese"],
   weight: ["400", "500", "600", "700"],
   variable: "--font-display",
   display: "swap",
 });
 
 const body = IBM_Plex_Sans({
-  subsets: ["latin"],
+  subsets: ["latin", "cyrillic", "vietnamese"],
   weight: ["400", "500", "600"],
   variable: "--font-body",
   display: "swap",
 });
 
 const mono = JetBrains_Mono({
-  subsets: ["latin"],
+  subsets: ["latin", "cyrillic"],
   weight: ["400", "500", "600"],
   variable: "--font-mono",
   display: "swap",
@@ -66,7 +66,7 @@ export default async function LocaleLayout({
 
   return (
     <html
-      lang={locale === "zh" ? "zh" : "en"}
+      lang={locale}
       className={`${display.variable} ${body.variable} ${mono.variable} ${cjk.variable}`}
       suppressHydrationWarning
     >

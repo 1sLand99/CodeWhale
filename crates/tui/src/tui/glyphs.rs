@@ -72,6 +72,8 @@ pub fn ascii_fallback(symbol: &str) -> Option<&'static str> {
         "✓" | "✔" | "☑" => Some("Y"),
         "✕" | "×" | "⊘" | "✗" | "✘" | "☒" => Some("X"),
         "⏸" => Some("="),
+        "≈≈>" => Some("~>"),
+        "≈" | "～" => Some("~"),
         "🐳" | "🐋" => Some("w"),
         "…" => Some("."),
         _ => None,
@@ -108,6 +110,9 @@ mod tests {
             (DONE, "Y"),
             (FAILED, "X"),
             (ATTENTION, "*"),
+            ("≈≈>", "~>"),
+            ("≈", "~"),
+            ("～", "~"),
         ] {
             assert_eq!(ascii_fallback(rich), Some(safe));
         }

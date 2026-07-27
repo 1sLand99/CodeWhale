@@ -268,6 +268,26 @@ impl Harness {
         self.pump();
         self.frame.debug_dump()
     }
+
+    /// Every byte the child has written, from spawn to now. Survives `pump`,
+    /// so terminal-mode assertions stay valid after the frame parser has
+    /// consumed the stream.
+    pub fn transcript(&self) -> Vec<u8> {
+        self.pty.transcript()
+    }
+
+    /// Replay the transcript into a [`TerminalModeLedger`].
+    pub fn terminal_modes(&self) -> super::TerminalModeLedger {
+        super::TerminalModeLedger::from_transcript(&self.transcript())
+    }
+
+    /// Frame dump plus terminal-mode ledger. Every bounded wait in the matrix
+    /// fails with this rather than a bare `assertion failed`, so a CI timeout
+    /// carries the screen *and* the control-stream state that produced it.
+    pub fn diagnostics(&mut self) -> String {
+        let modes = self.terminal_modes().debug_dump();
+        format!("{}{modes}", self.debug_dump())
+    }
 }
 
 /// Construct a sealed-`HOME` workspace under a `tempfile::TempDir` so the

@@ -16,6 +16,9 @@ use crate::tui::app::App;
 /// Each entry is `(hotkey, settings_tag, native_name, english_label)`.
 /// `settings_tag` is what `Settings::set("locale", …)` accepts and what
 /// `localization::Locale` resolves on next read.
+///
+/// Hotkeys run `1..=9` then `a`, `b`, … so more than nine shipped locales
+/// stay single-keystroke selectable.
 pub const LANGUAGE_OPTIONS: &[(char, &str, &str, &str)] = &[
     ('1', "auto", "Auto-detect", "(LC_ALL / LANG)"),
     ('2', "en", "English", ""),
@@ -31,6 +34,13 @@ pub const LANGUAGE_OPTIONS: &[(char, &str, &str, &str)] = &[
     ),
     ('8', "vi", "Tiếng Việt", "(Vietnamese)"),
     ('9', "ko", "한국어", "(Korean)"),
+    ('a', "ca", "Català", "(Catalan)"),
+    ('b', "de", "Deutsch", "(German)"),
+    ('c', "fr", "Français", "(French)"),
+    ('d', "id", "Bahasa Indonesia", "(Indonesian)"),
+    ('e', "hi", "हिन्दी", "(Hindi)"),
+    ('f', "ru", "Русский", "(Russian)"),
+    ('g', "uk", "Українська", "(Ukrainian)"),
 ];
 
 pub fn lines(app: &App) -> Vec<Line<'static>> {
@@ -119,12 +129,17 @@ mod tests {
         }
     }
 
-    /// Hotkeys must be the contiguous digits `1..=N` so the footer's "1-N"
-    /// range stays truthful and `KeyCode::Char` lookups resolve.
+    /// Hotkeys must be the contiguous run `1..=9` followed by contiguous
+    /// lowercase letters `a`, `b`, … so the footer hint stays truthful and
+    /// `KeyCode::Char` lookups resolve for every option.
     #[test]
-    fn picker_hotkeys_are_contiguous_digits() {
+    fn picker_hotkeys_are_contiguous_digits_then_letters() {
         for (idx, (hotkey, tag, _, _)) in LANGUAGE_OPTIONS.iter().enumerate() {
-            let expected = char::from_digit((idx + 1) as u32, 10).expect("digit");
+            let expected = if idx < 9 {
+                char::from_digit((idx + 1) as u32, 10).expect("digit")
+            } else {
+                char::from_u32('a' as u32 + (idx - 9) as u32).expect("letter")
+            };
             assert_eq!(
                 *hotkey, expected,
                 "option {tag} should use hotkey {expected}, not {hotkey}"

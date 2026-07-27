@@ -10,6 +10,7 @@ use ratatui::{
 };
 
 use crate::palette;
+use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, CommandPaletteAction, ModalKind, ModalView, ViewAction, ViewEvent,
     centered_modal_area, render_modal_footer, render_modal_surface,
@@ -141,40 +142,31 @@ impl ModalView for FeedbackPickerView {
             inner,
             buf,
             &[
-                ActionHint::new("Up/Down", "move"),
+                ActionHint::new("↑/↓", "move"),
                 ActionHint::new("Enter", "open"),
                 ActionHint::new("Esc", "cancel"),
             ],
         );
 
         let mut lines = Vec::with_capacity(OPTIONS.len() + 2);
-        lines.push(Line::from(Span::styled(
-            "Choose where to send feedback:",
-            Style::default().fg(palette::TEXT_MUTED),
-        )));
         lines.push(Line::from(""));
 
         for (idx, option) in OPTIONS.iter().enumerate() {
             let is_selected = idx == self.selected;
             let row_style = if is_selected {
-                Style::default()
-                    .fg(palette::SELECTION_TEXT)
-                    .bg(palette::SELECTION_BG)
-                    .add_modifier(Modifier::BOLD)
+                menu_style::selected_row_style()
             } else {
                 Style::default().fg(palette::TEXT_PRIMARY)
             };
             let desc_style = if is_selected {
-                Style::default()
-                    .fg(palette::SELECTION_TEXT)
-                    .bg(palette::SELECTION_BG)
+                menu_style::selected_row_bg_style().fg(palette::SELECTION_TEXT)
             } else {
                 Style::default().fg(palette::TEXT_MUTED)
             };
-            let pointer = if is_selected { ">" } else { " " };
+            let pointer = crate::tui::glyphs::selection_marker(is_selected);
 
             lines.push(Line::from(vec![
-                Span::styled(format!(" {pointer} {}. ", option.number), row_style),
+                Span::styled(format!("{pointer} {}. ", option.number), row_style),
                 Span::styled(option.label, row_style),
                 Span::raw("    "),
                 Span::styled(option.description, desc_style),
@@ -266,6 +258,10 @@ mod tests {
             for label in ["move", "open", "cancel"] {
                 assert!(text.contains(label), "{w}x{h}: missing footer '{label}'");
             }
+            assert!(
+                text.contains(crate::tui::glyphs::SELECTION),
+                "{w}x{h}: missing charter selection pointer"
+            );
             assert!(
                 !text.contains('X'),
                 "{w}x{h}: background bleed-through into modal surface"

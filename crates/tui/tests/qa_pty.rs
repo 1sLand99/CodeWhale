@@ -97,6 +97,55 @@ fn enter_launch_session(h: &mut Harness) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn composer_newline_and_stash_chords_keep_stable_roles() -> anyhow::Result<()> {
+    let _guard = qa_pty_test_lock();
+    let (ws, mut h) = boot_minimal()?;
+
+    h.send(keys::key::text("shift-line"))?;
+    h.send(keys::key::shift_enter())?;
+    h.send(keys::key::text("alt-line"))?;
+    h.send(keys::key::alt_enter())?;
+    h.send(keys::key::text("ctrl-j-line"))?;
+    h.send(keys::key::ctrl_j())?;
+    h.send(keys::key::text("last-line"))?;
+    h.wait_for_text("last-line", KEY_TIMEOUT)?;
+
+    let frame = h.frame();
+    let rows = ["shift-line", "alt-line", "ctrl-j-line", "last-line"].map(|line| {
+        frame
+            .find_text(line)
+            .expect("multiline draft stays visible")
+            .0
+    });
+    assert!(
+        rows.windows(2).all(|pair| pair[0] < pair[1]),
+        "Shift+Enter, Alt+Enter, and Ctrl+J must each add a line:\n{}",
+        frame.debug_dump()
+    );
+
+    h.send(keys::key::ctrl_g())?;
+    h.wait_for_text("Draft stashed", KEY_TIMEOUT)?;
+    h.wait_for_text(COMPOSER_READY_TEXT, KEY_TIMEOUT)?;
+    let stash_path = ws.home().join(".codewhale/composer_stash.jsonl");
+    let first_stash = std::fs::read_to_string(&stash_path)?;
+    assert!(first_stash.contains("shift-line\\nalt-line\\nctrl-j-line\\nlast-line"));
+
+    h.send(keys::key::text("/stash pop"))?;
+    h.wait_for_text("/stash pop", KEY_TIMEOUT)?;
+    std::thread::sleep(Duration::from_millis(180));
+    h.send(keys::key::enter())?;
+    h.wait_for_text("last-line", KEY_TIMEOUT)?;
+
+    h.send(keys::key::ctrl_s())?;
+    h.wait_for_text(COMPOSER_READY_TEXT, KEY_TIMEOUT)?;
+    let second_stash = std::fs::read_to_string(&stash_path)?;
+    assert!(second_stash.contains("shift-line\\nalt-line\\nctrl-j-line\\nlast-line"));
+
+    let _ = h.shutdown();
+    Ok(())
+}
+
 fn write_skill(root: std::path::PathBuf, name: &str, description: &str) -> anyhow::Result<()> {
     let dir = root.join(name);
     std::fs::create_dir_all(&dir)?;
@@ -853,6 +902,12 @@ web_search = true
     h.wait_for_text("Press Enter to continue", BOOT_TIMEOUT)?;
     h.send(keys::key::enter())?;
     h.wait_for_text("Choose your language", BOOT_TIMEOUT)?;
+    h.send(keys::key::enter())?;
+    // The Appearance step (#3937) sits between language and trust; Enter
+    // keeps the current theme and advances. This is also the only PTY-level
+    // execution of that step's event-loop wiring, so a hang here is a real
+    // wiring bug, not a script gap.
+    h.wait_for_text("Make It Yours", BOOT_TIMEOUT)?;
     h.send(keys::key::enter())?;
     h.wait_for_text("Know this workspace", BOOT_TIMEOUT)?;
     h.wait_for_text("Press 1/Y to trust and continue", BOOT_TIMEOUT)?;
@@ -1658,6 +1713,16 @@ fn legacy_work_ctrl_t_save_export_and_restart_are_consistent() -> anyhow::Result
 
     let mut restored = spawn()?;
     enter_launch_session(&mut restored)?;
+    // The Ctrl+T selection above is the user's last explicit choice, so it is
+    // the startup default the next launch must come up with — before any
+    // session is loaded. Asserting it here separates the two mechanisms that
+    // could otherwise both explain a `max` header after `/load`: a persisted
+    // startup default, or session-restored state.
+    assert!(
+        restored.frame().row(0).contains(" · max "),
+        "fresh launch lost the persisted effort selection:\n{}",
+        restored.frame().debug_dump()
+    );
     restored.send(keys::key::text(&format!(
         "/load {}",
         after_path.to_string_lossy()
@@ -1676,7 +1741,7 @@ fn legacy_work_ctrl_t_save_export_and_restart_are_consistent() -> anyhow::Result
         frame.debug_dump()
     );
     assert!(
-        frame.row(0).contains(" · high ") && frame.row(0).contains("Full Access"),
+        frame.row(0).contains(" · max ") && frame.row(0).contains("Full Access"),
         "restart lost narrow effort/permission truth:\n{}",
         frame.debug_dump()
     );
@@ -2037,6 +2102,97 @@ fn paste_unbracketed_with_trailing_newline_does_not_autosubmit() -> anyhow::Resu
         f.contains("first line"),
         "pasted text should be on-screen somewhere:\n{dump}"
     );
+
+    let _ = h.shutdown();
+    Ok(())
+}
+
+/// Markers the TUI paints once a turn has actually been dispatched. The PTY
+/// scenarios point at `127.0.0.1:1`, so a submitted turn fails immediately and
+/// leaves one of these on screen; an Enter that was swallowed by paste-burst
+/// suppression leaves none of them.
+fn frame_shows_dispatched_turn(frame: &qa_harness::Frame) -> bool {
+    frame.contains("Turn failed") || frame.contains("Connection refused") || frame.contains("error")
+}
+
+/// Paste-burst Enter suppression must be *bounded*. After an unbracketed
+/// paste flushes, the ~120ms window may absorb one Enter as the paste's
+/// possible trailing newline — but absorbing it must not re-arm the window.
+/// It used to, so every Enter bought another 120ms and a user pressing Enter
+/// to send just watched newlines pile up in a composer that never submitted.
+#[test]
+fn paste_unbracketed_then_repeated_enter_still_submits() -> anyhow::Result<()> {
+    let _guard = qa_pty_test_lock();
+    let (_ws, mut h) = boot_minimal_without_retry()?;
+    h.wait_for_text(COMPOSER_READY_TEXT, BOOT_TIMEOUT)?;
+    h.wait_for_idle(Duration::from_millis(300), Duration::from_secs(3))?;
+
+    // No trailing newline: the user pastes a prompt and then presses Enter
+    // themselves. This is the gesture the suppression window used to eat.
+    h.paste_unbracketed("qa paste burst enter release payload")?;
+    h.wait_for_text("qa paste burst enter release payload", KEY_TIMEOUT)?;
+    let frame = h.frame();
+    let dump = frame.debug_dump();
+    assert!(
+        !frame_shows_dispatched_turn(frame),
+        "nothing may be dispatched before Enter is pressed:\n{dump}"
+    );
+
+    // Press Enter repeatedly at a human "it didn't send?" cadence. The gaps
+    // are shorter than the 120ms window, so the old re-arming behaviour kept
+    // suppression alive indefinitely and none of these ever submitted.
+    for _ in 0..6 {
+        std::thread::sleep(Duration::from_millis(60));
+        h.send(keys::key::enter())?;
+    }
+
+    h.wait_for(frame_shows_dispatched_turn, Duration::from_secs(15))
+        .map_err(|error| {
+            anyhow::anyhow!("pasted prompt never submitted despite repeated Enter: {error:#}")
+        })?;
+
+    let _ = h.shutdown();
+    Ok(())
+}
+
+/// IME Enter ambiguity: a CJK message typed one candidate commit at a time is
+/// ordinary typing, not a paste. Each commit used to re-arm the full ~120ms
+/// Enter-suppression window, so the Enter that follows a Chinese sentence was
+/// swallowed into a newline and the message never sent.
+#[test]
+fn ime_committed_cjk_then_enter_submits() -> anyhow::Result<()> {
+    let _guard = qa_pty_test_lock();
+    let (_ws, mut h) = boot_minimal_without_retry()?;
+    h.wait_for_text(COMPOSER_READY_TEXT, BOOT_TIMEOUT)?;
+    h.wait_for_idle(Duration::from_millis(300), Duration::from_secs(3))?;
+
+    // An IME delivers each committed character as its own key event, with
+    // human-scale gaps between them — far slower than the 8ms burst interval.
+    for ch in "你好世".chars() {
+        h.send(keys::key::ch(ch))?;
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    // Sync on the echo so the child is provably caught up before the last
+    // commit — the gap that follows must be measured from when the TUI
+    // *processes* that character, not from when we wrote it.
+    h.wait_for_text("你好世", KEY_TIMEOUT)?;
+    let frame = h.frame();
+    let dump = frame.debug_dump();
+    assert!(
+        !frame_shows_dispatched_turn(frame),
+        "nothing may be dispatched before Enter is pressed:\n{dump}"
+    );
+
+    // Final commit, then one Enter at a realistic remove from it: far beyond
+    // the 8ms burst interval, comfortably inside the old 120ms window.
+    h.send(keys::key::ch('界'))?;
+    std::thread::sleep(Duration::from_millis(50));
+    h.send(keys::key::enter())?;
+
+    h.wait_for(frame_shows_dispatched_turn, Duration::from_secs(15))
+        .map_err(|error| {
+            anyhow::anyhow!("IME-typed CJK message never submitted on Enter: {error:#}")
+        })?;
 
     let _ = h.shutdown();
     Ok(())

@@ -20,27 +20,15 @@
 
 /** Contributors whose PRs were merged or harvested into this release. */
 export const RELEASE_CONTRIBUTORS: string[] = [
-  "@h3c-hexin",
-  "@gaord",
-  "@shenjackyuanjie",
-  "@shenyongqing",
-  "@sternelee",
+  "@greyfreedom",
   "@nightt5879",
-  "@luismateusvargas",
-  "@redjade75723",
-  "@w1w218",
-  "@zhangweiii",
-  "@Angel-Hair",
-  "@dmitri-0",
-  "@fleitz",
-  "@baendlorel",
-  "@SamhandsomeLee",
-  "@aboimpinto",
+  "@XhesicaFrost",
+  "@cyq1017",
+  "@snailoniu",
+  "@SparkofSpike",
+  "@GTC2080",
+  "@h3c-hexin",
 ];
 
 /** Contributors who helped with reports, reproductions, and verification. */
-export const RELEASE_HELPERS: string[] = [
-  "@AiurArtanis",
-  "@seanthefuturegorilla",
-  "@SparkofSpike",
-];
+export const RELEASE_HELPERS: string[] = ["@fleitz"];

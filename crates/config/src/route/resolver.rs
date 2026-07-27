@@ -37,6 +37,7 @@ use super::errors::RouteError;
 use super::ids::{LogicalModelRef, ModelId, ProviderId, WireModelId};
 use super::offering::{ProviderModelOffering, RouteLimits, bundled_offerings};
 use crate::catalog::{CatalogOffering, bundled_catalog_offerings};
+use crate::provider::WirePolicy;
 use crate::{ProviderKind, opencode_go_chat_model_id, provider_preserves_custom_base_url_model};
 
 /// A request to resolve into an executable route.
@@ -188,17 +189,27 @@ impl RouteResolver {
         } else {
             classify(provider_kind)
         };
+        let model_aware = descriptor.wire_policy() == WirePolicy::ModelAware;
         let mut selected = if is_auto {
-            default_offering.map_or_else(
-                || {
-                    // No offering in hand on the default branch: capability
-                    // and pricing facts are honestly unknown.
-                    ResolvedOffering::unknown(descriptor.default_wire_model())
-                },
-                ResolvedOffering::from_offering,
-            )
+            match default_offering {
+                None if model_aware => {
+                    return Err(RouteError::UnsupportedModelProtocol {
+                        provider: provider_id.clone(),
+                        model: descriptor.default_wire_model().as_str().to_string(),
+                        endpoint_key: "unproven".to_string(),
+                    });
+                }
+                None => ResolvedOffering::unknown(descriptor.default_wire_model()),
+                Some(offering) => ResolvedOffering::from_offering(offering),
+            }
         } else {
-            self.scope_selector(provider_kind, &provider_id, &logical_model, class)?
+            self.scope_selector(
+                provider_kind,
+                &provider_id,
+                &logical_model,
+                class,
+                model_aware,
+            )?
         };
         if custom_endpoint {
             // A documented first-party server tool is an endpoint-owned fact.
@@ -208,13 +219,20 @@ impl RouteResolver {
                 super::capabilities::CapabilityState::Unknown;
         }
 
+        let protocol = descriptor
+            .protocol_for_endpoint(&selected.endpoint_key)
+            .ok_or_else(|| RouteError::UnsupportedModelProtocol {
+                provider: provider_id.clone(),
+                model: selected.wire_model_id.as_str().to_string(),
+                endpoint_key: selected.endpoint_key.clone(),
+            })?;
         let endpoint = ResolvedEndpoint {
             base_url: req
                 .base_url_override
                 .clone()
                 .unwrap_or_else(|| descriptor.default_base_url().to_string()),
             endpoint_key: selected.endpoint_key,
-            protocol: descriptor.protocol(),
+            protocol,
         };
 
         // Advisory validation (#1519): a non-loopback `http://` endpoint sends
@@ -250,7 +268,7 @@ impl RouteResolver {
             // The resolver never inspects credentials: auth is honestly
             // `Unresolved` at resolution time, not a claimed `Missing`.
             ResolvedAuthSource::Unresolved,
-            descriptor.protocol(),
+            protocol,
             limits,
             selected.capabilities,
             // #3085: honest pricing projected from the matched offering (the
@@ -269,6 +287,7 @@ impl RouteResolver {
         provider_id: &ProviderId,
         logical_model: &LogicalModelRef,
         class: ProviderClass,
+        require_catalog_match: bool,
     ) -> Result<ResolvedOffering, RouteError> {
         // OpenCode Go publishes one combined model roster across two wire
         // protocols. Codewhale's provider is deliberately Chat Completions
@@ -282,6 +301,12 @@ impl RouteResolver {
                     model: logical_model.raw().to_string(),
                 }
             })?
+        } else if provider_kind == ProviderKind::OpencodeZen {
+            logical_model
+                .raw()
+                .strip_prefix("opencode/")
+                .or_else(|| logical_model.raw().strip_prefix("opencode-zen/"))
+                .unwrap_or_else(|| logical_model.raw())
         } else {
             provider_scoped_wire_alias(provider_kind, logical_model.raw(), class)
         };
@@ -301,6 +326,14 @@ impl RouteResolver {
             if matches_canonical || matches_wire {
                 return Ok(ResolvedOffering::from_offering(offering));
             }
+        }
+
+        if require_catalog_match {
+            return Err(RouteError::UnsupportedModelProtocol {
+                provider: provider_id.clone(),
+                model: raw.to_string(),
+                endpoint_key: "unproven".to_string(),
+            });
         }
 
         // No catalog match. Apply class-specific pass-through rules.
@@ -395,9 +428,8 @@ fn provider_scoped_wire_alias(
 
 /// Build the default resolver offerings from the bundled Models.dev asset.
 ///
-/// [`bundled_offerings`] is an empty override seam (#4139): when it later gains
-/// curated rows again, those win a `(provider, wire id)` collision over the
-/// asset. Today the asset is the sole bundled source of truth.
+/// Curated transport rows win a `(provider, wire id)` collision over the asset;
+/// all other offerings continue to come from Models.dev.
 fn default_offerings() -> Vec<ProviderModelOffering> {
     let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     let mut out = Vec::new();

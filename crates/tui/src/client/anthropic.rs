@@ -123,13 +123,19 @@ impl DeepSeekClient {
         // not Anthropic's output_config effort field; native Anthropic routes
         // keep the existing effort mapping.
         let thinking_capable = crate::models::model_supports_reasoning(&model);
-        let is_minimax = self.api_provider == ApiProvider::MinimaxAnthropic;
+        let is_minimax_provider = self.api_provider == ApiProvider::MinimaxAnthropic;
+        let is_minimax = crate::config::is_exact_minimax_anthropic_m3_route(
+            self.api_provider,
+            &self.base_url,
+            &model,
+        );
         let is_deepseek = self.api_provider == ApiProvider::DeepseekAnthropic;
         let effort = request
             .reasoning_effort
             .as_deref()
             .map(|raw| raw.trim().to_ascii_lowercase());
         match effort.as_deref() {
+            _ if is_minimax_provider && !is_minimax => {}
             Some("off" | "disabled" | "none" | "false")
                 if (is_minimax || is_deepseek) && thinking_capable =>
             {
@@ -169,8 +175,8 @@ impl DeepSeekClient {
         body
     }
 
-    async fn send_anthropic_request(&self, body: &Value) -> Result<reqwest::Response> {
-        let url = anthropic_messages_url(&self.base_url);
+    async fn send_anthropic_request(&self, url: &str, body: &Value) -> Result<reqwest::Response> {
+        let url = self.messages_transport_url(url);
         self.wait_for_rate_limit().await;
         let response = self
             .http_client
@@ -206,8 +212,12 @@ impl DeepSeekClient {
     /// most one HTTP/1.1 fallback retry on a classified H2 header stall.
     /// Wire-specific request construction (headers, endpoint, body) stays
     /// here at the adapter edge.
-    async fn open_anthropic_stream_response(&self, body: &Value) -> Result<reqwest::Response> {
-        let url = anthropic_messages_url(&self.base_url);
+    async fn open_anthropic_stream_response(
+        &self,
+        url: &str,
+        body: &Value,
+    ) -> Result<reqwest::Response> {
+        let url = self.messages_transport_url(url);
         let open_req = super::stream_entry::StreamOpenRequest::new(
             super::stream_entry::stream_open_timeout(),
             self.stream_idle_timeout,
@@ -245,10 +255,14 @@ impl DeepSeekClient {
     /// Handle a streaming Messages API request.
     pub(super) async fn handle_anthropic_stream(
         &self,
-        request: MessageRequest,
+        prepared: &super::PreparedOutboundRequest,
     ) -> Result<StreamEventBox> {
-        let body = self.build_anthropic_body(&request, true);
-        let response = self.open_anthropic_stream_response(&body).await?;
+        // Body and endpoint come from the shared prepared-request seam
+        // (`prepare_outbound_request`), never from a second builder.
+        let body = &prepared.body;
+        let response = self
+            .open_anthropic_stream_response(&prepared.endpoint.url, body)
+            .await?;
 
         let stream_idle_timeout = self.stream_idle_timeout;
         let byte_stream = response.bytes_stream();
@@ -327,10 +341,11 @@ impl DeepSeekClient {
     /// Handle a non-streaming Messages API request.
     pub(super) async fn handle_anthropic_message(
         &self,
-        request: MessageRequest,
+        prepared: &super::PreparedOutboundRequest,
     ) -> Result<MessageResponse> {
-        let body = self.build_anthropic_body(&request, false);
-        let response = self.send_anthropic_request(&body).await?;
+        let response = self
+            .send_anthropic_request(&prepared.endpoint.url, &prepared.body)
+            .await?;
         let mut value: Value = response
             .json()
             .await
@@ -344,7 +359,7 @@ impl DeepSeekClient {
 
 /// Build the `/v1/messages` endpoint URL, tolerating base URLs that already
 /// carry a `/v1` suffix.
-fn anthropic_messages_url(base_url: &str) -> String {
+pub(super) fn anthropic_messages_url(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
     if trimmed.ends_with("/v1") {
         format!("{trimmed}/messages")
@@ -692,12 +707,17 @@ mod tests {
     }
 
     fn minimax_test_client() -> DeepSeekClient {
+        minimax_test_client_for(crate::config::DEFAULT_MINIMAX_ANTHROPIC_BASE_URL)
+    }
+
+    fn minimax_test_client_for(base_url: &str) -> DeepSeekClient {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let config = crate::config::Config {
             provider: Some("minimax-anthropic".to_string()),
             providers: Some(crate::config::ProvidersConfig {
                 minimax_anthropic: crate::config::ProviderConfig {
                     api_key: Some("test-key".to_string()),
+                    base_url: Some(base_url.to_string()),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -923,13 +943,51 @@ mod tests {
         );
         assert!(body.get("output_config").is_none(), "{body}");
 
-        let body = client
-            .build_anthropic_body(&request_with("MiniMax-M3", Some("high"), None, None), true);
+        let mut enabled_bodies = Vec::new();
+        for effort in ["high", "max"] {
+            let body = client
+                .build_anthropic_body(&request_with("MiniMax-M3", Some(effort), None, None), true);
+            assert_eq!(
+                body.pointer("/thinking/type").and_then(Value::as_str),
+                Some("adaptive"),
+                "{effort}: {body}"
+            );
+            assert!(body.get("output_config").is_none(), "{effort}: {body}");
+            enabled_bodies.push(body);
+        }
         assert_eq!(
-            body.pointer("/thinking/type").and_then(Value::as_str),
-            Some("adaptive")
+            enabled_bodies[0].get("thinking"),
+            enabled_bodies[1].get("thinking"),
+            "MiniMax high/max select the same untiered adaptive wire control"
         );
-        assert!(body.get("output_config").is_none(), "{body}");
+    }
+
+    #[test]
+    fn minimax_messages_reasoning_controls_require_exact_first_party_m3_route() {
+        for (base_url, model) in [
+            (
+                "https://gateway.example/anthropic",
+                crate::config::DEFAULT_MINIMAX_MODEL,
+            ),
+            (
+                crate::config::DEFAULT_MINIMAX_ANTHROPIC_BASE_URL,
+                "MiniMax-M2",
+            ),
+        ] {
+            let client = minimax_test_client_for(base_url);
+            for effort in ["off", "high", "max"] {
+                let body = client
+                    .build_anthropic_body(&request_with(model, Some(effort), None, None), true);
+                assert!(
+                    body.get("thinking").is_none(),
+                    "{base_url} {model} {effort}: {body}"
+                );
+                assert!(
+                    body.get("output_config").is_none(),
+                    "{base_url} {model} {effort}: {body}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1288,7 +1346,11 @@ mod tests {
 
         let client = deepseek_test_client(&server.uri());
         let mut stream = client
-            .handle_anthropic_stream(request_with("deepseek-v4", None, None, None))
+            .handle_anthropic_stream(
+                &client
+                    .prepare_outbound_request(request_with("deepseek-v4", None, None, None), true)
+                    .expect("anthropic request prepares"),
+            )
             .await
             .expect("stream opens through the shared seam");
 
@@ -1324,7 +1386,11 @@ mod tests {
 
         let client = deepseek_test_client(&server.uri());
         let err = match client
-            .handle_anthropic_stream(request_with("deepseek-v4", None, None, None))
+            .handle_anthropic_stream(
+                &client
+                    .prepare_outbound_request(request_with("deepseek-v4", None, None, None), true)
+                    .expect("anthropic request prepares"),
+            )
             .await
         {
             Ok(_) => panic!("auth errors must fail fast"),

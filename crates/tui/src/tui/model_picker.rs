@@ -40,6 +40,7 @@ use crate::provider_lake::{
 };
 use crate::settings::PinnedModel;
 use crate::tui::app::{App, ReasoningEffort};
+use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, ListDetailLayout, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,
     render_underwater_surface,
@@ -764,15 +765,9 @@ impl ModelPickerView {
                 crate::tui::glyphs::selection_marker(is_selected)
             };
             let label_style = if is_selected && !locked {
-                Style::default()
-                    .fg(palette::SELECTION_TEXT)
-                    .bg(palette::SELECTION_BG)
-                    .add_modifier(Modifier::BOLD)
+                menu_style::selected_row_style()
             } else if is_selected && locked {
-                Style::default()
-                    .fg(palette::TEXT_MUTED)
-                    .bg(palette::SURFACE_ELEVATED)
-                    .add_modifier(Modifier::DIM)
+                menu_style::disabled_selected_row_style()
             } else if locked {
                 Style::default()
                     .fg(palette::TEXT_MUTED)
@@ -781,9 +776,7 @@ impl ModelPickerView {
                 Style::default().fg(palette::TEXT_PRIMARY)
             };
             let hint_style = if is_selected && !locked {
-                Style::default()
-                    .fg(palette::SELECTION_TEXT)
-                    .bg(palette::SELECTION_BG)
+                menu_style::selected_row_bg_style().fg(palette::SELECTION_TEXT)
             } else {
                 Style::default().fg(palette::TEXT_MUTED)
             };
@@ -1124,12 +1117,19 @@ fn push_auto_model_row(rows: &mut Vec<ModelPickerRow>, app: &App, config: &Confi
 
 fn auto_picker_hint(app: &App, config: &Config) -> String {
     let inventory = crate::model_inventory::ModelInventory::from_config(config);
-    let hint_id = if inventory.router_available {
-        MessageId::ModelPickerAutoNetworkHint
-    } else {
-        MessageId::ModelPickerAutoLocalHint
+    // #4411: the classifier only sees other providers under the persisted
+    // `[auto] cross_provider` opt-in, so the default hint says active provider
+    // only and names the classifier route it will actually call.
+    let hint_id = match (inventory.router_available, inventory.cross_provider_auto) {
+        (true, true) => MessageId::ModelPickerAutoNetworkHint,
+        (true, false) => MessageId::ModelPickerAutoNetworkActiveProviderHint,
+        (false, _) => MessageId::ModelPickerAutoLocalHint,
     };
-    let mut hint = app.tr(hint_id).into_owned();
+    let mut hint = app
+        .tr(hint_id)
+        .into_owned()
+        .replace("{provider}", inventory.router_provider.display_name())
+        .replace("{model}", &inventory.router_model);
     if let (Some(provider), Some(model)) = (
         app.last_effective_provider,
         app.last_effective_model.as_deref(),
@@ -2446,9 +2446,40 @@ mod tests {
             "{local}"
         );
 
+        // A provider key is not a request for a network classifier. Holding a
+        // DeepSeek key used to silently elect `deepseek-v4-flash` for every
+        // Auto turn; the hint must keep saying "local heuristic" so the
+        // disclosure matches what actually runs.
         let _deepseek =
             crate::test_support::EnvVarGuard::set("DEEPSEEK_API_KEY", "test-router-key");
-        let network = auto_picker_hint(&app, &config);
+        let still_local = auto_picker_hint(&app, &config);
+        assert!(still_local.contains("local heuristic"), "{still_local}");
+        assert!(still_local.contains("no router request"), "{still_local}");
+        assert!(!still_local.contains("test-router-key"), "{still_local}");
+
+        // …an explicit `[auto.router]` turns the classifier on, and #4411
+        // keeps its default scope confined to the active provider — the hint
+        // must not advertise the wider "runnable providers" scope.
+        let mut routed = config.clone();
+        routed.auto = Some(crate::config::AutoConfig {
+            cost_saving: None,
+            router: Some(crate::config::AutoRouterConfig {
+                provider: Some("deepseek".to_string()),
+                model: Some("deepseek-v4-flash".to_string()),
+                thinking: None,
+            }),
+            cross_provider: None,
+        });
+        let network = auto_picker_hint(&app, &routed);
+        assert!(network.contains("active provider only"), "{network}");
+        assert!(!network.contains("runnable providers"), "{network}");
+
+        // Only the persisted `[auto] cross_provider = true` opt-in widens it.
+        let mut widened = routed.clone();
+        if let Some(auto) = widened.auto.as_mut() {
+            auto.cross_provider = Some(true);
+        }
+        let network = auto_picker_hint(&app, &widened);
         assert!(network.contains("runnable providers"), "{network}");
         assert!(network.contains("request + recent context"), "{network}");
         assert!(
@@ -2456,6 +2487,21 @@ mod tests {
             "{network}"
         );
         assert!(!network.contains("test-router-key"), "{network}");
+
+        // A scope opt-in without an explicit `[auto.router]` widens which
+        // candidates Auto may pick but elects no network classifier — the
+        // implicit DeepSeek-flash default is gone, so the hint stays local.
+        let opted_in = Config {
+            auto: Some(crate::config::AutoConfig {
+                cost_saving: None,
+                cross_provider: Some(true),
+                router: None,
+            }),
+            ..config.clone()
+        };
+        let scope_only = auto_picker_hint(&app, &opted_in);
+        assert!(scope_only.contains("local heuristic"), "{scope_only}");
+        assert!(scope_only.contains("no router request"), "{scope_only}");
     }
 
     #[test]
