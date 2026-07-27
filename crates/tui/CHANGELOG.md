@@ -17,6 +17,29 @@ already claimed to.
 
 ### Added
 
+- `/preview-request` (aliases `/dryrun` and `/preview_request`) is a human-only,
+  provider-free inspection of the next primary turn. Production dispatch and
+  preview share one prepared-request seam across Chat Completions, Anthropic
+  Messages, and OpenAI Responses, so the manifest reads the final wire model,
+  reasoning controls, tool choice, tool schemas, and body hash from the same
+  value production sends. Route, tool, or body facts that require Auto's
+  provider classifier, an MCP connection, mutable hooks, compaction, or queued
+  runtime injections remain typed unavailable. The manifest reports exact
+  primary role/lane identity, upstream route-source provenance, requested and
+  effective reasoning, canonical JSON sizes, conservative offline estimates,
+  and provider-reported usage as unavailable because no request ran. It never
+  adds a model-visible tool, sends a provider call, or prints prompt, message,
+  credential, endpoint-path, or workspace-path content. The explicit
+  `/preview-request base-prompt` mode prints only the exact effective base
+  prompt; effective system text remains protected behind its final hash. The
+  exact body includes the same authoritative transient Work/To-do tail used by
+  production, including graph-backed state newer than the legacy projection.
+  Preflight preserves production's separately framed base-plus-Work estimate,
+  and fails closed when the authoritative projection is unavailable. An
+  exhausted active goal token budget also produces a typed unavailable result
+  before any outbound request is built.
+  (#1004, #3928; dry-run concept harvested from PR #1099 by @GTC2080 / TaoMu.)
+
 - The bundled skill pack now ships a `help` skill (catalog generation 7). It is
   `invocation: explicit-only`, so it never enters the model's ambient catalogue
   and costs no prompt budget. Its body is a routing card that points at the
