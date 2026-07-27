@@ -3,6 +3,7 @@
 //! This intentionally covers UI chrome only. It does not change model prompts,
 //! model output language, provider behavior, or media payload semantics.
 use std::borrow::Cow;
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -15,6 +16,13 @@ pub enum Locale {
     Es419,
     Vi,
     Ko,
+    Ca,
+    De,
+    Fr,
+    Id,
+    Hi,
+    Ru,
+    Uk,
 }
 
 impl Locale {
@@ -28,6 +36,13 @@ impl Locale {
             Self::Es419 => "es-419",
             Self::Vi => "vi",
             Self::Ko => "ko",
+            Self::Ca => "ca",
+            Self::De => "de",
+            Self::Fr => "fr",
+            Self::Id => "id",
+            Self::Hi => "hi",
+            Self::Ru => "ru",
+            Self::Uk => "uk",
         }
     }
 
@@ -41,6 +56,13 @@ impl Locale {
             Self::Es419 => "Latin American Spanish (Español latinoamericano)",
             Self::Vi => "Vietnamese (Tiếng Việt)",
             Self::Ko => "Korean (한국어)",
+            Self::Ca => "Catalan (Català)",
+            Self::De => "German (Deutsch)",
+            Self::Fr => "French (Français)",
+            Self::Id => "Indonesian (Bahasa Indonesia)",
+            Self::Hi => "Hindi (हिन्दी)",
+            Self::Ru => "Russian (Русский)",
+            Self::Uk => "Ukrainian (Українська)",
         }
     }
 
@@ -55,6 +77,13 @@ impl Locale {
             Self::Es419,
             Self::Vi,
             Self::Ko,
+            Self::Ca,
+            Self::De,
+            Self::Fr,
+            Self::Id,
+            Self::Hi,
+            Self::Ru,
+            Self::Uk,
         ]
     }
 
@@ -70,6 +99,13 @@ impl Locale {
             Self::Es419,
             Self::Vi,
             Self::Ko,
+            Self::Ca,
+            Self::De,
+            Self::Fr,
+            Self::Id,
+            Self::Hi,
+            Self::Ru,
+            Self::Uk,
         ]
     }
 
@@ -2513,6 +2549,13 @@ pub fn thinking_translation_placeholder(locale: Locale) -> &'static str {
         Locale::Es419 => "Pensando; traduciendo al finalizar...",
         Locale::Vi => "Đang suy nghĩ; sẽ dịch sau khi hoàn thành...",
         Locale::Ko => "생각하는 중입니다. 완료되면 번역합니다...",
+        Locale::Ca => "S'està pensant; es traduirà en acabar...",
+        Locale::De => "Denkt nach; Übersetzung folgt nach Abschluss...",
+        Locale::Fr => "Réflexion en cours ; traduction à la fin...",
+        Locale::Id => "Sedang berpikir; akan diterjemahkan setelah selesai...",
+        Locale::Hi => "सोच रहा है; पूरा होने पर अनुवाद होगा...",
+        Locale::Ru => "Идут размышления; перевод будет после завершения...",
+        Locale::Uk => "Тривають роздуми; переклад буде після завершення...",
     }
 }
 
@@ -2526,6 +2569,13 @@ pub fn thinking_translation_in_progress(locale: Locale) -> &'static str {
         Locale::Es419 => "Traduciendo el contenido de razonamiento...",
         Locale::Vi => "Đang dịch nội dung suy nghĩ...",
         Locale::Ko => "생각 내용을 번역하는 중...",
+        Locale::Ca => "S'està traduint el contingut del raonament...",
+        Locale::De => "Denkinhalte werden übersetzt...",
+        Locale::Fr => "Traduction du contenu de réflexion...",
+        Locale::Id => "Menerjemahkan konten pemikiran...",
+        Locale::Hi => "विचार सामग्री का अनुवाद हो रहा है...",
+        Locale::Ru => "Перевод содержимого рассуждений...",
+        Locale::Uk => "Переклад вмісту міркувань...",
     }
 }
 
@@ -2539,6 +2589,13 @@ pub fn thinking_translation_complete(locale: Locale) -> &'static str {
         Locale::Es419 => "Traducción del razonamiento completada",
         Locale::Vi => "Đã dịch xong nội dung suy nghĩ",
         Locale::Ko => "생각 내용 번역 완료",
+        Locale::Ca => "Traducció del raonament completada",
+        Locale::De => "Übersetzung der Denkinhalte abgeschlossen",
+        Locale::Fr => "Traduction de la réflexion terminée",
+        Locale::Id => "Terjemahan pemikiran selesai",
+        Locale::Hi => "विचार अनुवाद पूरा हुआ",
+        Locale::Ru => "Перевод рассуждений завершён",
+        Locale::Uk => "Переклад міркувань завершено",
     }
 }
 
@@ -2552,6 +2609,13 @@ pub fn thinking_translation_failed(locale: Locale) -> &'static str {
         Locale::Es419 => "Falló la traducción del razonamiento",
         Locale::Vi => "Dịch nội dung suy nghĩ thất bại",
         Locale::Ko => "생각 내용 번역 실패",
+        Locale::Ca => "Ha fallat la traducció del raonament",
+        Locale::De => "Übersetzung der Denkinhalte fehlgeschlagen",
+        Locale::Fr => "Échec de la traduction de la réflexion",
+        Locale::Id => "Terjemahan pemikiran gagal",
+        Locale::Hi => "विचार अनुवाद विफल",
+        Locale::Ru => "Не удалось перевести рассуждения",
+        Locale::Uk => "Не вдалося перекласти міркування",
     }
 }
 
@@ -2565,6 +2629,13 @@ pub fn hidden_translation_failed(locale: Locale) -> &'static str {
         Locale::Es419 => "La traducción falló; el texto original está oculto.",
         Locale::Vi => "Dịch thất bại; văn bản gốc đã bị ẩn.",
         Locale::Ko => "번역에 실패했습니다. 원문은 숨겨져 있습니다.",
+        Locale::Ca => "La traducció ha fallat; el text original està amagat.",
+        Locale::De => "Übersetzung fehlgeschlagen; der Originaltext ist ausgeblendet.",
+        Locale::Fr => "La traduction a échoué ; le texte original est masqué.",
+        Locale::Id => "Terjemahan gagal; teks asli disembunyikan.",
+        Locale::Hi => "अनुवाद विफल; मूल पाठ छिपा हुआ है.",
+        Locale::Ru => "Перевод не удался; исходный текст скрыт.",
+        Locale::Uk => "Переклад не вдався; оригінальний текст приховано.",
     }
 }
 
@@ -2645,13 +2716,17 @@ pub fn truncate_to_width(text: &str, max_width: usize) -> String {
     let limit = max_width - ellipsis_width;
     let mut out = String::new();
     let mut width = 0usize;
-    for ch in text.chars() {
-        let ch_width = ch.width().unwrap_or(0);
-        if width + ch_width > limit {
+    // Iterate extended grapheme clusters, not chars: a Devanagari conjunct
+    // (क + ् + ष), a combined mark (e + ́), or a ZWJ emoji sequence must
+    // never be cut apart — a trailing virama or orphaned combining mark
+    // renders as visibly broken shaping in the terminal.
+    for cluster in text.graphemes(true) {
+        let cluster_width = UnicodeWidthStr::width(cluster);
+        if width + cluster_width > limit {
             break;
         }
-        out.push(ch);
-        width += ch_width;
+        out.push_str(cluster);
+        width += cluster_width;
     }
     out.push('…');
     out
@@ -2699,6 +2774,27 @@ fn parse_locale(value: &str) -> Option<Locale> {
     if value.starts_with("ko") {
         return Some(Locale::Ko);
     }
+    if value.starts_with("ca") {
+        return Some(Locale::Ca);
+    }
+    if value.starts_with("de") {
+        return Some(Locale::De);
+    }
+    if value.starts_with("fr") {
+        return Some(Locale::Fr);
+    }
+    if value.starts_with("id") {
+        return Some(Locale::Id);
+    }
+    if value.starts_with("hi") {
+        return Some(Locale::Hi);
+    }
+    if value.starts_with("ru") {
+        return Some(Locale::Ru);
+    }
+    if value.starts_with("uk") {
+        return Some(Locale::Uk);
+    }
     None
 }
 
@@ -2722,6 +2818,13 @@ mod tests {
         assert_eq!(normalize_configured_locale("pt-PT"), Some("pt-BR"));
         assert_eq!(normalize_configured_locale("es"), Some("es-419"));
         assert_eq!(normalize_configured_locale("es-MX"), Some("es-419"));
+        assert_eq!(normalize_configured_locale("ca-ES"), Some("ca"));
+        assert_eq!(normalize_configured_locale("de_DE.UTF-8"), Some("de"));
+        assert_eq!(normalize_configured_locale("fr-FR"), Some("fr"));
+        assert_eq!(normalize_configured_locale("id-ID"), Some("id"));
+        assert_eq!(normalize_configured_locale("hi_IN.UTF-8"), Some("hi"));
+        assert_eq!(normalize_configured_locale("ru-RU"), Some("ru"));
+        assert_eq!(normalize_configured_locale("uk_UA.UTF-8"), Some("uk"));
     }
 
     #[test]
@@ -2788,6 +2891,13 @@ mod tests {
             Locale::Es419 => include_str!("../locales/es-419.json"),
             Locale::Vi => include_str!("../locales/vi.json"),
             Locale::Ko => include_str!("../locales/ko.json"),
+            Locale::Ca => include_str!("../locales/ca.json"),
+            Locale::De => include_str!("../locales/de.json"),
+            Locale::Fr => include_str!("../locales/fr.json"),
+            Locale::Id => include_str!("../locales/id.json"),
+            Locale::Hi => include_str!("../locales/hi.json"),
+            Locale::Ru => include_str!("../locales/ru.json"),
+            Locale::Uk => include_str!("../locales/uk.json"),
         }
     }
 
@@ -3059,6 +3169,12 @@ mod tests {
             for id in ids {
                 let localized = tr(*locale, id);
                 assert!(!localized.is_empty(), "{} empty for {id:?}", locale.tag());
+                // Catalan "models" is the correct translation of the English
+                // picker action — the words coincide. Every other id must
+                // differ from English, or the pack is leaking the fallback.
+                if matches!((*locale, id), (Locale::Ca, MessageId::PickerActionModels)) {
+                    continue;
+                }
                 assert_ne!(
                     localized,
                     tr(Locale::En, id),
@@ -3317,6 +3433,360 @@ mod tests {
                 assert!(
                     saw_text,
                     "width={width}: mixed fixture produced an empty render"
+                );
+            }
+        }
+    }
+
+    // --- Cyrillic script fixtures (ru/uk, #3092 / #4791) -------------------
+    // Russian and Ukrainian share the Cyrillic script but are different
+    // languages. These fixtures lock the failure modes seen in real
+    // machine-translated packs: Russian-only letters (ы/э/ъ) leaking into
+    // the Ukrainian pack, Ukrainian-only letters (і/ї/є/ґ) leaking into the
+    // Russian pack, untranslated English prose hiding behind the fallback,
+    // and one pack copied into the other.
+
+    fn has_cyrillic(value: &str) -> bool {
+        value
+            .chars()
+            .any(|ch| ('\u{0400}'..='\u{04FF}').contains(&ch))
+    }
+
+    fn has_devanagari(value: &str) -> bool {
+        value
+            .chars()
+            .any(|ch| ('\u{0900}'..='\u{097F}').contains(&ch))
+    }
+
+    /// Latin words remaining after the exempt categories are stripped:
+    /// `code spans`, {placeholders}, URLs, slash commands, env-style
+    /// ALL-CAPS tokens, and the product-term allowlist from
+    /// `locales/AGENTS.md`. Anything left over in a Cyrillic or Devanagari
+    /// string is mixed-language copy.
+    fn latin_words_in_translated_copy(value: &str) -> Vec<String> {
+        const ALLOWED: &[&str] = &[
+            "codewhale",
+            "deepseek",
+            "fleet",
+            "plan",
+            "act",
+            "operate",
+            "ask",
+            "auto",
+            "review",
+            "full",
+            "access",
+            "enter",
+            "esc",
+            "alt",
+            "ctrl",
+            "shift",
+            "tab",
+            "space",
+            "backspace",
+            "delete",
+            "api",
+            "json",
+            "toml",
+            "yaml",
+            "yml",
+            "tui",
+            "ci",
+            "cd",
+            "mcp",
+            "url",
+            "uri",
+            "dns",
+            "ssh",
+            "http",
+            "https",
+            "git",
+            "github",
+            "gitee",
+            "openai",
+            "anthropic",
+            "gemini",
+            "kimi",
+            "codex",
+            "claude",
+            "vllm",
+            "ollama",
+            "sglang",
+            "npm",
+            "rust",
+            "cargo",
+            "linux",
+            "macos",
+            "windows",
+            "id",
+            "ok",
+            "true",
+            "false",
+            "utf",
+            "ascii",
+            "cli",
+            "ui",
+            "md",
+            "ai",
+            "llm",
+            "gpt",
+            "faq",
+            "docs",
+            "admin",
+            "oauth",
+            "ssl",
+            "tls",
+            "jwt",
+            "svg",
+            "png",
+            "wasm",
+            "app",
+            "slash",
+            "skill",
+            "plugin",
+            "shell",
+        ];
+        let mut scrubbed = String::with_capacity(value.len());
+        let mut chars = value.chars();
+        let mut in_backtick = false;
+        let mut in_brace = false;
+        for ch in chars.by_ref() {
+            match ch {
+                '`' => in_backtick = !in_backtick,
+                '{' if !in_backtick => in_brace = true,
+                '}' if in_brace => in_brace = false,
+                _ if !in_backtick && !in_brace => scrubbed.push(ch),
+                _ => {}
+            }
+        }
+        scrubbed
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '/')
+            .filter(|token| token.len() >= 2)
+            .filter(|token| !token.contains('/') && !token.contains("://"))
+            .filter(|token| token.chars().all(|c| c.is_ascii()))
+            .filter(|token| !token.chars().any(|c| c.is_ascii_digit()))
+            .filter(|token| !token.chars().all(|c| c.is_ascii_uppercase()))
+            .filter(|token| !ALLOWED.contains(&token.to_ascii_lowercase().as_str()))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// High-visibility chrome where mixed-language copy is most visible.
+    const SCRIPT_FIXTURE_IDS: &[MessageId] = &[
+        MessageId::ComposerPlaceholder,
+        MessageId::HistorySearchTitle,
+        MessageId::HistorySearchPlaceholder,
+        MessageId::StatusPickerTitle,
+        MessageId::StatusPickerInstruction,
+        MessageId::ConfigTitle,
+        MessageId::CommandPaletteTitle,
+        MessageId::AppModeAgentHint,
+        MessageId::AppModePlanHint,
+        MessageId::RouteNoModels,
+        MessageId::ProviderNoMatchesTitle,
+        MessageId::SessionsOpenedHistory,
+    ];
+
+    #[test]
+    fn cyrillic_packs_have_script_purity_and_no_mixed_language_fixtures() {
+        for locale in [Locale::Ru, Locale::Uk] {
+            let messages = raw_locale_messages(locale);
+            let total = messages.len();
+            let with_cyrillic = messages
+                .values()
+                .filter(|v| v.as_str().is_some_and(has_cyrillic))
+                .count();
+            assert!(
+                with_cyrillic * 100 >= total * 85,
+                "{}: only {with_cyrillic}/{total} values contain Cyrillic — pack looks under-translated",
+                locale.tag()
+            );
+            for (key, value) in &messages {
+                let Some(value) = value.as_str() else {
+                    continue;
+                };
+                if locale == Locale::Uk {
+                    assert!(
+                        !value.chars().any(|c| "ыэъЫЭЪ".contains(c)),
+                        "uk {key} contains a Russian-only letter: {value}"
+                    );
+                } else {
+                    assert!(
+                        !value.chars().any(|c| "іІїЇєЄґҐ".contains(c)),
+                        "ru {key} contains a Ukrainian-only letter: {value}"
+                    );
+                }
+            }
+            for id in SCRIPT_FIXTURE_IDS {
+                let value = tr(locale, *id);
+                assert!(
+                    has_cyrillic(&value),
+                    "{} {id:?} fixture has no Cyrillic: {value}",
+                    locale.tag()
+                );
+                let leaked = latin_words_in_translated_copy(&value);
+                assert!(
+                    leaked.is_empty(),
+                    "{} {id:?} mixes Latin prose into Cyrillic copy: {leaked:?} in {value}",
+                    locale.tag()
+                );
+            }
+        }
+        // The two packs are translations of the same source, not copies of
+        // each other: sentence-length fixtures must differ between ru and uk.
+        for id in [
+            MessageId::ComposerPlaceholder,
+            MessageId::StatusPickerInstruction,
+            MessageId::AppModeAgentHint,
+            MessageId::AppModePlanHint,
+            MessageId::ProviderNoMatchesTitle,
+        ] {
+            assert_ne!(
+                tr(Locale::Ru, id),
+                tr(Locale::Uk, id),
+                "ru and uk share an identical sentence for {id:?} — one pack was copied from the other"
+            );
+        }
+    }
+
+    #[test]
+    fn hindi_pack_uses_devanagari_for_prose_fixtures() {
+        let messages = raw_locale_messages(Locale::Hi);
+        let total = messages.len();
+        let with_devanagari = messages
+            .values()
+            .filter(|v| v.as_str().is_some_and(has_devanagari))
+            .count();
+        assert!(
+            with_devanagari * 100 >= total * 80,
+            "hi: only {with_devanagari}/{total} values contain Devanagari — pack looks under-translated"
+        );
+        for id in SCRIPT_FIXTURE_IDS {
+            let value = tr(Locale::Hi, *id);
+            assert!(
+                has_devanagari(&value),
+                "hi {id:?} fixture has no Devanagari: {value}"
+            );
+            let leaked = latin_words_in_translated_copy(&value);
+            assert!(
+                leaked.is_empty(),
+                "hi {id:?} mixes Latin prose into Devanagari copy: {leaked:?} in {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_shipped_locale_renders_a_missing_message_marker() {
+        // rust_i18n falls back to en for absent keys, so a "{MessageId}"
+        // debug string in the UI would mean the fallback chain itself broke.
+        for locale in Locale::shipped() {
+            assert!(
+                missing_message_ids(*locale).is_empty(),
+                "{} renders raw message ids (missing-marker UI)",
+                locale.tag()
+            );
+        }
+    }
+
+    // --- Devanagari grapheme safety (#4790 spike) --------------------------
+
+    #[test]
+    fn truncate_to_width_never_splits_devanagari_clusters() {
+        // क्ष is क + ् + ष — a single cluster. A budget landing inside it
+        // must drop the whole cluster; a dangling virama (U+094D) renders as
+        // visibly broken shaping (क् instead of a conjunct).
+        let conjuncts = "क्षत्रिय ज्ञान श्रृंखला प्रत्यक्ष";
+        for budget in [1usize, 2, 3, 5, 7, 40, 60, 80] {
+            let out = truncate_to_width(conjuncts, budget);
+            assert!(
+                UnicodeWidthStr::width(out.as_str()) <= budget,
+                "budget={budget}: overflowed: {out:?}"
+            );
+            assert!(!out.contains('\u{FFFD}'), "budget={budget}: {out:?}");
+            let body = out.strip_suffix('…').unwrap_or(&out);
+            assert!(
+                !body.ends_with('\u{094D}'),
+                "budget={budget}: dangling virama: {out:?}"
+            );
+            assert!(
+                !body.ends_with('\u{200D}'),
+                "budget={budget}: dangling ZWJ: {out:?}"
+            );
+            if let Some(last) = body.chars().last() {
+                let cp = last as u32;
+                let combining = (0x0900..=0x0903).contains(&cp) || (0x093A..=0x094F).contains(&cp);
+                assert!(
+                    !combining,
+                    "budget={budget}: trailing combining mark: {out:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cyrillic_latin_extended_and_devanagari_rows_wrap_within_terminal_columns() {
+        // Width/grapheme QA for the v0.9.2 scripts at narrow (40), medium
+        // (60), and standard (80) terminal columns: truncation clips by
+        // display width and wrapped rows never overflow the buffer.
+        let fixtures = [
+            (
+                "ru",
+                "Задача: миграция базы данных — проверка маршрутизации провайдера #3092",
+            ),
+            (
+                "uk",
+                "Завдання: міграція бази даних — перевірка маршрутизації провайдера #4791",
+            ),
+            (
+                "de",
+                "Aufgabe: Datenbankmigration — Anbieter-Routing für #4788 prüfen",
+            ),
+            (
+                "fr",
+                "Tâche : migration de la base — vérifier le routage fournisseur #4788",
+            ),
+            (
+                "ca",
+                "Tasca: migració de la base de dades — comprovar l'encaminament #4788",
+            ),
+            (
+                "id",
+                "Tugas: migrasi basis data — periksa perutean penyedia untuk #4789",
+            ),
+            ("hi", "कार्य: डेटाबेस माइग्रेशन — प्रदाता रूटिंग की जांच करें #4790"),
+        ];
+
+        for width in [40usize, 60, 80] {
+            for (tag, fixture) in fixtures {
+                let out = truncate_to_width(fixture, width);
+                assert!(
+                    UnicodeWidthStr::width(out.as_str()) <= width,
+                    "{tag} width={width}: truncated row overflowed: {out:?}"
+                );
+                assert!(
+                    !out.contains('\u{FFFD}'),
+                    "{tag} width={width}: split a glyph: {out:?}"
+                );
+
+                let area = Rect::new(0, 0, width as u16, 6);
+                let mut buf = Buffer::empty(area);
+                Paragraph::new(fixture)
+                    .wrap(Wrap { trim: false })
+                    .render(area, &mut buf);
+                let mut saw_text = false;
+                for (row_idx, y) in (area.top()..area.bottom()).enumerate() {
+                    let row = visible_row_text(&buf, area, y);
+                    let trimmed = row.trim_end_matches('\u{0}').trim_end();
+                    assert!(
+                        UnicodeWidthStr::width(trimmed) <= width,
+                        "{tag} width={width} row {row_idx}: wrapped row overflowed ({} cols): {trimmed:?}",
+                        UnicodeWidthStr::width(trimmed)
+                    );
+                    saw_text |= trimmed.chars().any(|ch| !ch.is_whitespace());
+                }
+                assert!(
+                    saw_text,
+                    "{tag} width={width}: fixture produced an empty render"
                 );
             }
         }

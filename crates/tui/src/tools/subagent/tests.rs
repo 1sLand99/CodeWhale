@@ -17,6 +17,13 @@ fn built_in_whale_name_that_cannot_be_generated_for(agent_id: &str) -> &'static 
         .chain(WHALE_NICKNAMES_ES_419)
         .chain(WHALE_NICKNAMES_VI)
         .chain(WHALE_NICKNAMES_KO)
+        .chain(WHALE_NICKNAMES_CA)
+        .chain(WHALE_NICKNAMES_DE)
+        .chain(WHALE_NICKNAMES_FR)
+        .chain(WHALE_NICKNAMES_ID)
+        .chain(WHALE_NICKNAMES_HI)
+        .chain(WHALE_NICKNAMES_RU)
+        .chain(WHALE_NICKNAMES_UK)
         .copied()
         .find(|name| generated_whale_name_base(agent_id, name).is_none())
         .expect("the combined pools contain labels not generated for one id")
@@ -31,6 +38,13 @@ fn generated_whale_names_follow_session_language_without_mixing() {
         ("es-419", WHALE_NICKNAMES_ES_419),
         ("vi", WHALE_NICKNAMES_VI),
         ("ko", WHALE_NICKNAMES_KO),
+        ("ca", WHALE_NICKNAMES_CA),
+        ("de", WHALE_NICKNAMES_DE),
+        ("fr", WHALE_NICKNAMES_FR),
+        ("id", WHALE_NICKNAMES_ID),
+        ("hi", WHALE_NICKNAMES_HI),
+        ("ru", WHALE_NICKNAMES_RU),
+        ("uk", WHALE_NICKNAMES_UK),
     ];
 
     for index in 0..64 {

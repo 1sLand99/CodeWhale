@@ -565,6 +565,13 @@ mod tests {
             Locale::PtBr,
             Locale::Es419,
             Locale::Vi,
+            Locale::Ca,
+            Locale::De,
+            Locale::Fr,
+            Locale::Id,
+            Locale::Hi,
+            Locale::Ru,
+            Locale::Uk,
         ] {
             for (id, eng, _) in checks {
                 let msg = tr(locale, *id);
@@ -596,6 +603,13 @@ mod tests {
             Locale::PtBr,
             Locale::Es419,
             Locale::Vi,
+            Locale::Ca,
+            Locale::De,
+            Locale::Fr,
+            Locale::Id,
+            Locale::Hi,
+            Locale::Ru,
+            Locale::Uk,
         ] {
             for (tool, eng) in known.iter().zip(english_labels.iter()) {
                 let label = tool_activity_label_for_name(tool, locale);

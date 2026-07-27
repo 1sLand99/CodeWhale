@@ -435,7 +435,7 @@
     "HomeGoalModeTip": "Goal 追跡 - /goal <目標> で持続的な目標を追跡",
     "OnboardLanguageTitle": "言語を選択",
     "OnboardLanguageBlurb": "UI 言語を選んでください。`/settings set locale <tag>` でいつでも変更できます。",
-    "OnboardLanguageFooter": "1〜9 で選択、または Enter で現在の設定を維持",
+    "OnboardLanguageFooter": "言語の横のキーで選択、または Enter で現在の設定を維持",
     "OnboardProviderTitle": "モデルプロバイダーを選択",
     "OnboardProviderBlurb": "モデルの実行先を選びます。ホステッドプロバイダーにはキーが必要ですが、ローカルランタイムはキーなしで続行できます。",
     "OnboardProviderFooter": "Enter でプロバイダー一覧を開く · Esc で戻る · Ctrl+C で終了。",

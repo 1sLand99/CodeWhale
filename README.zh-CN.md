@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:1b8a6eb93218 -->
+<!-- source: README.md sha256:7e05c7acd044 -->
 # Codewhale
 
 一个面向终端的开源编程智能体——模型由你自带。
@@ -9,7 +9,7 @@ Codewhale 最初是为 DeepSeek 打造的原生体验,如今已成长为一个�
 
 我们一直在寻找贡献者和改进的方式。如果你在用的某个模型或 provider 还不支持,或者有什么东西坏了,告诉我们就是你能做的最有用的事之一——见[贡献](#贡献)。
 
-[English](README.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md)
+[English](README.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md)
 
 [![CI](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml/badge.svg)](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/codewhale-cli?label=crates.io)](https://crates.io/crates/codewhale-cli)

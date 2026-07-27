@@ -803,6 +803,34 @@ impl GuidedConstitutionDraft {
                     "\n사용자 자유 원칙: {}",
                     bounded_freeform_note(note, MAX_NOTES_LEN)
                 ),
+                Locale::Ca => format!(
+                    "\nPrincipi lliure de l'usuari: {}",
+                    bounded_freeform_note(note, MAX_NOTES_LEN)
+                ),
+                Locale::De => format!(
+                    "\nFreitext-Prinzip des Nutzers: {}",
+                    bounded_freeform_note(note, MAX_NOTES_LEN)
+                ),
+                Locale::Fr => format!(
+                    "\nPrincipe en texte libre de l'utilisateur : {}",
+                    bounded_freeform_note(note, MAX_NOTES_LEN)
+                ),
+                Locale::Id => format!(
+                    "\nPrinsip bebas pengguna: {}",
+                    bounded_freeform_note(note, MAX_NOTES_LEN)
+                ),
+                Locale::Hi => format!(
+                    "\nउपयोगकर्ता मुक्त-पाठ सिद्धांत: {}",
+                    bounded_freeform_note(note, MAX_NOTES_LEN)
+                ),
+                Locale::Ru => format!(
+                    "\nСвободный принцип пользователя: {}",
+                    bounded_freeform_note(note, MAX_NOTES_LEN)
+                ),
+                Locale::Uk => format!(
+                    "\nВільний принцип користувача: {}",
+                    bounded_freeform_note(note, MAX_NOTES_LEN)
+                ),
                 _ => format!(
                     "\nUser freeform principle: {}",
                     bounded_freeform_note(note, MAX_NOTES_LEN)
@@ -975,6 +1003,69 @@ impl GuidedEvidence {
             (Locale::Ko, Self::ReleaseReceipts) => {
                 "중요한 주장과 릴리스 근거에는 파일 경로, 명령어, 스크린샷, CI, 출처를 제시한다."
             }
+            (Locale::Ca, Self::Assumptions) => {
+                "Resumeix supòsits, incògnites i risc pendent abans de dir que has acabat."
+            }
+            (Locale::Ca, Self::TestsAndReceipts) => {
+                "Fes servir ordres, tests, captures de pantalla o citacions quan redueixin materialment la incertesa."
+            }
+            (Locale::Ca, Self::ReleaseReceipts) => {
+                "Cita rutes de fitxers, ordres, captures de pantalla, CI o fonts per a afirmacions materials i evidència de release."
+            }
+            (Locale::De, Self::Assumptions) => {
+                "Fasse Annahmen, Unbekannte und Restrisiken zusammen, bevor du Fertigstellung behauptest."
+            }
+            (Locale::De, Self::TestsAndReceipts) => {
+                "Nutze Befehle, Tests, Screenshots oder Zitate, wenn sie die Unsicherheit wesentlich verringern."
+            }
+            (Locale::De, Self::ReleaseReceipts) => {
+                "Nenne Dateipfade, Befehle, Screenshots, CI oder Quellen für wesentliche Aussagen und Release-Nachweise."
+            }
+            (Locale::Fr, Self::Assumptions) => {
+                "Résumez les hypothèses, les inconnues et le risque restant avant d'annoncer la fin du travail."
+            }
+            (Locale::Fr, Self::TestsAndReceipts) => {
+                "Utilisez commandes, tests, captures d'écran ou citations quand ils réduisent sensiblement l'incertitude."
+            }
+            (Locale::Fr, Self::ReleaseReceipts) => {
+                "Citez chemins de fichiers, commandes, captures d'écran, CI ou sources pour les affirmations importantes et les preuves de release."
+            }
+            (Locale::Id, Self::Assumptions) => {
+                "Ringkas asumsi, hal yang belum diketahui, dan risiko tersisa sebelum mengklaim selesai."
+            }
+            (Locale::Id, Self::TestsAndReceipts) => {
+                "Gunakan perintah, tes, tangkapan layar, atau kutipan bila secara nyata mengurangi ketidakpastian."
+            }
+            (Locale::Id, Self::ReleaseReceipts) => {
+                "Kutip path file, perintah, tangkapan layar, CI, atau sumber untuk klaim material dan bukti rilis."
+            }
+            (Locale::Hi, Self::Assumptions) => {
+                "पूर्णता का दावा करने से पहले धारणाएँ, अज्ञात बातें और शेष जोखिम सारांशित करें।"
+            }
+            (Locale::Hi, Self::TestsAndReceipts) => {
+                "जब वे अनिश्चितता सार्थक रूप से घटाएँ तो कमांड, टेस्ट, स्क्रीनशॉट या उद्धरण उपयोग करें।"
+            }
+            (Locale::Hi, Self::ReleaseReceipts) => {
+                "महत्वपूर्ण दावों और रिलीज़ साक्ष्य के लिए फ़ाइल पथ, कमांड, स्क्रीनशॉट, CI या स्रोत उद्धृत करें।"
+            }
+            (Locale::Ru, Self::Assumptions) => {
+                "Прежде чем заявить о завершении, перечислите предположения, неизвестные и оставшиеся риски."
+            }
+            (Locale::Ru, Self::TestsAndReceipts) => {
+                "Используйте команды, тесты, скриншоты или цитаты, когда они существенно снижают неопределённость."
+            }
+            (Locale::Ru, Self::ReleaseReceipts) => {
+                "Указывайте пути файлов, команды, скриншоты, CI или источники для существенных утверждений и доказательств релиза."
+            }
+            (Locale::Uk, Self::Assumptions) => {
+                "Перш ніж заявити про завершення, підсумуйте припущення, невідомі та залишкові ризики."
+            }
+            (Locale::Uk, Self::TestsAndReceipts) => {
+                "Використовуйте команди, тести, скриншоти або цитати, коли вони суттєво зменшують невизначеність."
+            }
+            (Locale::Uk, Self::ReleaseReceipts) => {
+                "Посилайтеся на шляхи файлів, команди, скриншоти, CI або джерела для суттєвих тверджень і доказів релізу."
+            }
             (_, Self::Assumptions) => {
                 "Summarize assumptions, unknowns, and remaining risk before claiming completion."
             }
@@ -1027,6 +1118,27 @@ impl GuidedCommunication {
             (Locale::Ko, Self::Concise) => "간결함",
             (Locale::Ko, Self::Teaching) => "설명 중심",
             (Locale::Ko, Self::Direct) => "직설적",
+            (Locale::Ca, Self::Concise) => "concís",
+            (Locale::Ca, Self::Teaching) => "didàctic",
+            (Locale::Ca, Self::Direct) => "directe",
+            (Locale::De, Self::Concise) => "prägnant",
+            (Locale::De, Self::Teaching) => "lehrend",
+            (Locale::De, Self::Direct) => "direkt",
+            (Locale::Fr, Self::Concise) => "concis",
+            (Locale::Fr, Self::Teaching) => "pédagogique",
+            (Locale::Fr, Self::Direct) => "direct",
+            (Locale::Id, Self::Concise) => "ringkas",
+            (Locale::Id, Self::Teaching) => "mengajar",
+            (Locale::Id, Self::Direct) => "langsung",
+            (Locale::Hi, Self::Concise) => "संक्षिप्त",
+            (Locale::Hi, Self::Teaching) => "शिक्षणपरक",
+            (Locale::Hi, Self::Direct) => "सीधा",
+            (Locale::Ru, Self::Concise) => "краткий",
+            (Locale::Ru, Self::Teaching) => "обучающий",
+            (Locale::Ru, Self::Direct) => "прямой",
+            (Locale::Uk, Self::Concise) => "стислий",
+            (Locale::Uk, Self::Teaching) => "навчальний",
+            (Locale::Uk, Self::Direct) => "прямий",
             (_, Self::Concise) => "concise",
             (_, Self::Teaching) => "teaching",
             (_, Self::Direct) => "direct",
@@ -1084,6 +1196,67 @@ impl GuidedCommunication {
             (Locale::Ko, Self::Direct) => {
                 "차단 요인, 위험, 불확실성을 직설적으로 말하고 장식적인 표현은 피한다."
             }
+            (Locale::Ca, Self::Concise) => {
+                "Mantén les actualitzacions concises i explica breument només els compromisos importants."
+            }
+            (Locale::Ca, Self::Teaching) => {
+                "Explica el raonament i els compromisos clau prou perquè l'usuari pugui entendre el sistema."
+            }
+            (Locale::Ca, Self::Direct) => {
+                "Sigues directe sobre bloquejos, risc i incertesa; evita el text ornamental."
+            }
+            (Locale::De, Self::Concise) => {
+                "Halte Aktualisierungen knapp und erkläre wichtige Trade-offs nur kurz."
+            }
+            (Locale::De, Self::Teaching) => {
+                "Erkläre zentrale Begründungen und Trade-offs so weit, dass der Nutzer das System verstehen kann."
+            }
+            (Locale::De, Self::Direct) => {
+                "Sei direkt bei Blockern, Risiken und Unsicherheit; vermeide dekorative Formulierungen."
+            }
+            (Locale::Fr, Self::Concise) => {
+                "Gardez les mises à jour concises et n'expliquez que brièvement les arbitrages importants."
+            }
+            (Locale::Fr, Self::Teaching) => {
+                "Expliquez le raisonnement et les arbitrages clés assez pour que l'utilisateur comprenne le système."
+            }
+            (Locale::Fr, Self::Direct) => {
+                "Soyez direct sur les blocages, les risques et l'incertitude ; évitez le texte ornemental."
+            }
+            (Locale::Id, Self::Concise) => {
+                "Jaga pembaruan tetap ringkas dan jelaskan tradeoff penting secara singkat."
+            }
+            (Locale::Id, Self::Teaching) => {
+                "Jelaskan penalaran dan tradeoff kunci secukupnya agar pengguna dapat memahami sistem."
+            }
+            (Locale::Id, Self::Direct) => {
+                "Bicara langsung soal penghambat, risiko, dan ketidakpastian; hindari teks hiasan."
+            }
+            (Locale::Hi, Self::Concise) => "अपडेट संक्षिप्त रखें और महत्वपूर्ण ट्रेडऑफ़ संक्षेप में समझाएँ।",
+            (Locale::Hi, Self::Teaching) => {
+                "मुख्य तर्क और ट्रेडऑफ़ इतना समझाएँ कि उपयोगकर्ता सिस्टम समझ सके।"
+            }
+            (Locale::Hi, Self::Direct) => {
+                "रुकावटों, जोखिम और अनिश्चितता के बारे में सीधे बोलें; सजावटी भाषा से बचें।"
+            }
+            (Locale::Ru, Self::Concise) => {
+                "Держите обновления краткими и лишь коротко поясняйте важные компромиссы."
+            }
+            (Locale::Ru, Self::Teaching) => {
+                "Объясняйте ключевые рассуждения и компромиссы настолько, чтобы пользователь мог понять систему."
+            }
+            (Locale::Ru, Self::Direct) => {
+                "Говорите прямо о блокерах, рисках и неопределённости; избегайте декоративных формулировок."
+            }
+            (Locale::Uk, Self::Concise) => {
+                "Тримайте оновлення стислими й лише коротко пояснюйте важливі компроміси."
+            }
+            (Locale::Uk, Self::Teaching) => {
+                "Пояснюйте ключові міркування та компроміси настільки, щоб користувач міг зрозуміти систему."
+            }
+            (Locale::Uk, Self::Direct) => {
+                "Говоріть прямо про блокери, ризики та невизначеність; уникайте декоративних формулювань."
+            }
             (_, Self::Concise) => "Keep updates concise and explain important tradeoffs briefly.",
             (_, Self::Teaching) => {
                 "Explain key reasoning and tradeoffs enough that the user can learn the system."
@@ -1134,6 +1307,27 @@ impl GuidedPrivacy {
             (Locale::Ko, Self::StandardCare) => "표준 보호",
             (Locale::Ko, Self::StrictBoundaries) => "엄격한 경계",
             (Locale::Ko, Self::ProjectLocal) => "프로젝트 내 메모리",
+            (Locale::Ca, Self::StandardCare) => "cura estàndard",
+            (Locale::Ca, Self::StrictBoundaries) => "límits estrictes",
+            (Locale::Ca, Self::ProjectLocal) => "memòria local del projecte",
+            (Locale::De, Self::StandardCare) => "Standardvorsorge",
+            (Locale::De, Self::StrictBoundaries) => "strenge Grenzen",
+            (Locale::De, Self::ProjectLocal) => "projektlokaler Speicher",
+            (Locale::Fr, Self::StandardCare) => "soin standard",
+            (Locale::Fr, Self::StrictBoundaries) => "limites strictes",
+            (Locale::Fr, Self::ProjectLocal) => "mémoire locale au projet",
+            (Locale::Id, Self::StandardCare) => "perlindungan standar",
+            (Locale::Id, Self::StrictBoundaries) => "batasan ketat",
+            (Locale::Id, Self::ProjectLocal) => "memori lokal proyek",
+            (Locale::Hi, Self::StandardCare) => "मानक सावधानी",
+            (Locale::Hi, Self::StrictBoundaries) => "सख्त सीमाएँ",
+            (Locale::Hi, Self::ProjectLocal) => "प्रोजेक्ट-स्थानीय मेमोरी",
+            (Locale::Ru, Self::StandardCare) => "стандартная осторожность",
+            (Locale::Ru, Self::StrictBoundaries) => "строгие границы",
+            (Locale::Ru, Self::ProjectLocal) => "память внутри проекта",
+            (Locale::Uk, Self::StandardCare) => "стандартна обережність",
+            (Locale::Uk, Self::StrictBoundaries) => "суворі межі",
+            (Locale::Uk, Self::ProjectLocal) => "пам'ять у межах проєкту",
             (_, Self::StandardCare) => "standard care",
             (_, Self::StrictBoundaries) => "strict boundaries",
             (_, Self::ProjectLocal) => "project-local memory",
@@ -1204,6 +1398,69 @@ impl GuidedPrivacy {
             }
             (Locale::Ko, Self::ProjectLocal) => {
                 "프로젝트 고유 맥락은 프로젝트 안에 두고, 명시적으로 요청받지 않는 한 메모리에 쓰지 않는다."
+            }
+            (Locale::Ca, Self::StandardCare) => {
+                "Protegeix secrets, fitxers de l'usuari, historial de git, sistemes de producció, cost, privacitat i temps."
+            }
+            (Locale::Ca, Self::StrictBoundaries) => {
+                "Tracta secrets, dades personals, credencials, estat de producció, diners i accions de publicació com a límits que cal confirmar primer."
+            }
+            (Locale::Ca, Self::ProjectLocal) => {
+                "Mantén el context específic del projecte dins del projecte; evita portar-lo a la memòria si no se't demana explícitament."
+            }
+            (Locale::De, Self::StandardCare) => {
+                "Schütze Geheimnisse, Nutzerdateien, Git-Verlauf, Produktionssysteme, Kosten, Privatsphäre und Zeit."
+            }
+            (Locale::De, Self::StrictBoundaries) => {
+                "Behandle Geheimnisse, persönliche Daten, Zugangsdaten, Produktionszustand, Geld und Veröffentlichungen als Grenzen, die erst bestätigt werden."
+            }
+            (Locale::De, Self::ProjectLocal) => {
+                "Halte projektspezifischen Kontext im Projekt; vermeide es, sensible Details ohne ausdrückliche Bitte in den Speicher zu übernehmen."
+            }
+            (Locale::Fr, Self::StandardCare) => {
+                "Protégez secrets, fichiers utilisateur, historique git, systèmes de production, coût, vie privée et temps."
+            }
+            (Locale::Fr, Self::StrictBoundaries) => {
+                "Traitez secrets, données personnelles, identifiants, état de production, argent et publications comme des limites exigeant confirmation."
+            }
+            (Locale::Fr, Self::ProjectLocal) => {
+                "Gardez le contexte propre au projet dans le projet ; évitez de l'écrire en mémoire sans demande explicite."
+            }
+            (Locale::Id, Self::StandardCare) => {
+                "Lindungi rahasia, file pengguna, riwayat git, sistem produksi, biaya, privasi, dan waktu."
+            }
+            (Locale::Id, Self::StrictBoundaries) => {
+                "Perlakukan rahasia, data pribadi, kredensial, status produksi, uang, dan tindakan publikasi sebagai batas yang harus dikonfirmasi dulu."
+            }
+            (Locale::Id, Self::ProjectLocal) => {
+                "Simpan konteks khusus proyek di dalam proyek; hindari membawanya ke memori kecuali diminta secara eksplisit."
+            }
+            (Locale::Hi, Self::StandardCare) => {
+                "रहस्यों, उपयोगकर्ता फ़ाइलों, git इतिहास, प्रोडक्शन सिस्टम, लागत, गोपनीयता और समय की रक्षा करें।"
+            }
+            (Locale::Hi, Self::StrictBoundaries) => {
+                "रहस्यों, व्यक्तिगत डेटा, क्रेडेंशियल, प्रोडक्शन स्थिति, धन और प्रकाशन क्रियाओं को पहले-पुष्टि सीमाओं की तरह मानें।"
+            }
+            (Locale::Hi, Self::ProjectLocal) => {
+                "प्रोजेक्ट-विशिष्ट संदर्भ प्रोजेक्ट के भीतर रखें; स्पष्ट अनुरोध के बिना संवेदनशील विवरण मेमोरी में न ले जाएँ।"
+            }
+            (Locale::Ru, Self::StandardCare) => {
+                "Защищайте секреты, файлы пользователя, историю git, production-системы, затраты, приватность и время."
+            }
+            (Locale::Ru, Self::StrictBoundaries) => {
+                "Считайте секреты, персональные данные, учётные данные, production-состояние, деньги и публикации границами, требующими подтверждения."
+            }
+            (Locale::Ru, Self::ProjectLocal) => {
+                "Держите контекст, специфичный для проекта, внутри проекта; не переносите чувствительные детали в память без явного запроса."
+            }
+            (Locale::Uk, Self::StandardCare) => {
+                "Захищайте секрети, файли користувача, історію git, production-системи, витрати, приватність і час."
+            }
+            (Locale::Uk, Self::StrictBoundaries) => {
+                "Вважайте секрети, персональні дані, облікові дані, production-стан, гроші та публікації межами, що потребують підтвердження."
+            }
+            (Locale::Uk, Self::ProjectLocal) => {
+                "Тримайте контекст, специфічний для проєкту, всередині проєкту; не переносьте чутливі деталі в пам'ять без явного запиту."
             }
             (_, Self::StandardCare) => {
                 "Protect secrets, user files, git history, production systems, cost, privacy, and time."
@@ -1282,6 +1539,69 @@ impl GuidedPrivacy {
             (Locale::Ko, Self::ProjectLocal) => {
                 "프로젝트 세부 정보를 메모리, 다른 워크스페이스, 오래된 인계 자료로 옮기기 전에 확인한다."
             }
+            (Locale::Ca, Self::StandardCare) => {
+                "Pregunta abans d'accions destructives, costoses, amb credencials, de publicació o amb risc legal o de seguretat."
+            }
+            (Locale::Ca, Self::StrictBoundaries) => {
+                "Atura't i pregunta abans de llegir o difondre dades sensibles, tocar sistemes de producció, gastar diners o publicar."
+            }
+            (Locale::Ca, Self::ProjectLocal) => {
+                "Confirma abans de portar detalls del projecte a la memòria, a altres espais de treball o a traspasos antics."
+            }
+            (Locale::De, Self::StandardCare) => {
+                "Frage vor destruktiven, kostspieligen, zugangsdatenbezogenen, veröffentlichenden, rechtlichen oder sicherheitskritischen Aktionen."
+            }
+            (Locale::De, Self::StrictBoundaries) => {
+                "Halte an und frage, bevor du sensible Daten liest oder verbreitest, Produktionssysteme anfasst, Geld ausgibst oder veröffentlichst."
+            }
+            (Locale::De, Self::ProjectLocal) => {
+                "Bestätige, bevor du Projektdetails in Speicher, Workspaces oder veraltete Übergaben überträgst."
+            }
+            (Locale::Fr, Self::StandardCare) => {
+                "Demandez avant toute action destructive, coûteuse, impliquant des identifiants, une publication, ou un risque juridique ou de sécurité."
+            }
+            (Locale::Fr, Self::StrictBoundaries) => {
+                "Arrêtez et demandez avant de lire ou diffuser des données sensibles, de toucher aux systèmes de production, de dépenser de l'argent ou de publier."
+            }
+            (Locale::Fr, Self::ProjectLocal) => {
+                "Confirmez avant de transporter des détails du projet vers la mémoire, d'autres espaces de travail ou d'anciens transferts."
+            }
+            (Locale::Id, Self::StandardCare) => {
+                "Tanya sebelum tindakan destruktif, mahal, terkait kredensial, publikasi, hukum, atau berisiko keamanan."
+            }
+            (Locale::Id, Self::StrictBoundaries) => {
+                "Berhenti dan tanya sebelum membaca atau menyebarkan data sensitif, menyentuh sistem produksi, membelanjakan uang, atau mempublikasikan."
+            }
+            (Locale::Id, Self::ProjectLocal) => {
+                "Konfirmasi sebelum membawa detail proyek ke memori, workspace lain, atau handoff lama."
+            }
+            (Locale::Hi, Self::StandardCare) => {
+                "विनाशकारी, उच्च-लागत, क्रेडेंशियल, प्रकाशन, कानूनी या सुरक्षा-जोखिम कार्यों से पहले पूछें।"
+            }
+            (Locale::Hi, Self::StrictBoundaries) => {
+                "संवेदनशील डेटा पढ़ने या फैलाने, प्रोडक्शन सिस्टम छूने, धन खर्च करने या प्रकाशित करने से पहले रुककर पूछें।"
+            }
+            (Locale::Hi, Self::ProjectLocal) => {
+                "प्रोजेक्ट विवरण मेमोरी, अन्य कार्यक्षेत्रों या पुराने हैंडऑफ़ में ले जाने से पहले पुष्टि करें।"
+            }
+            (Locale::Ru, Self::StandardCare) => {
+                "Спрашивайте перед деструктивными, дорогими, связанными с учётными данными, публикацией, юридическими или угрожающими безопасности действиями."
+            }
+            (Locale::Ru, Self::StrictBoundaries) => {
+                "Остановитесь и спросите, прежде чем читать или распространять чувствительные данные, трогать production-системы, тратить деньги или публиковать."
+            }
+            (Locale::Ru, Self::ProjectLocal) => {
+                "Подтвердите, прежде чем переносить детали проекта в память, другие рабочие области или устаревшие передаточные заметки."
+            }
+            (Locale::Uk, Self::StandardCare) => {
+                "Питайте перед руйнівними, дорогими, пов'язаними з обліковими даними, публікацією, юридичними чи небезпечними для безпеки діями."
+            }
+            (Locale::Uk, Self::StrictBoundaries) => {
+                "Зупиніться й запитайте, перш ніж читати чи поширювати чутливі дані, чіпати production-системи, витрачати гроші або публікувати."
+            }
+            (Locale::Uk, Self::ProjectLocal) => {
+                "Підтвердьте, перш ніж переносити деталі проєкту в пам'ять, інші робочі простори чи застарілі передаточні нотатки."
+            }
             (_, Self::StandardCare) => {
                 "Ask before destructive, high-cost, credential, publishing, legal, or security-risk actions."
             }
@@ -1334,6 +1654,27 @@ impl GuidedPrinciples {
             (Locale::Ko, Self::ScopedChanges) => "범위가 명확한 변경",
             (Locale::Ko, Self::UserVoice) => "사용자의 어조 유지",
             (Locale::Ko, Self::ReversibleOps) => "되돌릴 수 있는 단계",
+            (Locale::Ca, Self::ScopedChanges) => "canvis acotats",
+            (Locale::Ca, Self::UserVoice) => "veu de l'usuari",
+            (Locale::Ca, Self::ReversibleOps) => "passos reversibles",
+            (Locale::De, Self::ScopedChanges) => "begrenzte Änderungen",
+            (Locale::De, Self::UserVoice) => "Stimme des Nutzers",
+            (Locale::De, Self::ReversibleOps) => "reversible Schritte",
+            (Locale::Fr, Self::ScopedChanges) => "changements ciblés",
+            (Locale::Fr, Self::UserVoice) => "voix de l'utilisateur",
+            (Locale::Fr, Self::ReversibleOps) => "étapes réversibles",
+            (Locale::Id, Self::ScopedChanges) => "perubahan terbatas",
+            (Locale::Id, Self::UserVoice) => "suara pengguna",
+            (Locale::Id, Self::ReversibleOps) => "langkah reversibel",
+            (Locale::Hi, Self::ScopedChanges) => "सीमित बदलाव",
+            (Locale::Hi, Self::UserVoice) => "उपयोगकर्ता की आवाज़",
+            (Locale::Hi, Self::ReversibleOps) => "उत्क्रमणीय चरण",
+            (Locale::Ru, Self::ScopedChanges) => "ограниченные изменения",
+            (Locale::Ru, Self::UserVoice) => "голос пользователя",
+            (Locale::Ru, Self::ReversibleOps) => "обратимые шаги",
+            (Locale::Uk, Self::ScopedChanges) => "обмежені зміни",
+            (Locale::Uk, Self::UserVoice) => "голос користувача",
+            (Locale::Uk, Self::ReversibleOps) => "оборотні кроки",
             (_, Self::ScopedChanges) => "scoped changes",
             (_, Self::UserVoice) => "user voice",
             (_, Self::ReversibleOps) => "reversible steps",
@@ -1405,6 +1746,69 @@ impl GuidedPrinciples {
             (Locale::Ko, Self::ReversibleOps) => {
                 "자유 원칙: 영향이 큰 작업 전에 되돌릴 수 있는 단계, 체크포인트, 롤백 메모를 우선한다."
             }
+            (Locale::Ca, Self::ScopedChanges) => {
+                "Principi lliure: prefereix canvis petits i revisables i evita refactors no relacionats si no es demanen explícitament."
+            }
+            (Locale::Ca, Self::UserVoice) => {
+                "Principi lliure: preserva la veu, la marca i les restriccions de l'usuari sense tractar les preferències com una ampliació de permisos."
+            }
+            (Locale::Ca, Self::ReversibleOps) => {
+                "Principi lliure: priorita passos reversibles, punts de control i notes de marxa enrere abans d'operacions d'alt impacte."
+            }
+            (Locale::De, Self::ScopedChanges) => {
+                "Freitext-Prinzip: Bevorzuge kleine, überprüfbare Änderungen und vermeide unzusammenhängende Refactorings, sofern nicht ausdrücklich gewünscht."
+            }
+            (Locale::De, Self::UserVoice) => {
+                "Freitext-Prinzip: Bewahre Stimme, Marke und Vorgaben des Nutzers, ohne Präferenzen als Rechteausweitung zu behandeln."
+            }
+            (Locale::De, Self::ReversibleOps) => {
+                "Freitext-Prinzip: Bevorzuge reversible Schritte, Checkpoints und Rollback-Notizen vor einschneidenden Operationen."
+            }
+            (Locale::Fr, Self::ScopedChanges) => {
+                "Principe libre : préférez des changements petits et révisables et évitez les refactors sans rapport, sauf demande explicite."
+            }
+            (Locale::Fr, Self::UserVoice) => {
+                "Principe libre : préservez la voix, la marque et les contraintes de l'utilisateur sans traiter ses préférences comme une extension de permissions."
+            }
+            (Locale::Fr, Self::ReversibleOps) => {
+                "Principe libre : privilégiez étapes réversibles, points de contrôle et notes de rollback avant les opérations à fort impact."
+            }
+            (Locale::Id, Self::ScopedChanges) => {
+                "Prinsip bebas: utamakan perubahan kecil yang mudah ditinjau dan hindari refactor tak terkait kecuali diminta secara eksplisit."
+            }
+            (Locale::Id, Self::UserVoice) => {
+                "Prinsip bebas: jaga suara, merek, dan batasan pengguna tanpa memperlakukan preferensi sebagai perluasan izin."
+            }
+            (Locale::Id, Self::ReversibleOps) => {
+                "Prinsip bebas: utamakan langkah reversibel, checkpoint, dan catatan rollback sebelum operasi berdampak besar."
+            }
+            (Locale::Hi, Self::ScopedChanges) => {
+                "मुक्त-पाठ सिद्धांत: छोटे, समीक्षायोग्य बदलावों को प्राथमिकता दें और स्पष्ट अनुरोध के बिना असंबंधित रिफैक्टर से बचें।"
+            }
+            (Locale::Hi, Self::UserVoice) => {
+                "मुक्त-पाठ सिद्धांत: उपयोगकर्ता की आवाज़, ब्रांड और बाधाएँ सुरक्षित रखें; प्राथमिकताओं को अनुमति-विस्तार न मानें।"
+            }
+            (Locale::Hi, Self::ReversibleOps) => {
+                "मुक्त-पाठ सिद्धांत: उच्च-प्रभाव कार्यों से पहले उत्क्रमणीय चरणों, चेकपॉइंट और रोलबैक नोट्स को प्राथमिकता दें।"
+            }
+            (Locale::Ru, Self::ScopedChanges) => {
+                "Свободный принцип: предпочитайте небольшие, проверяемые изменения и избегайте несвязанных рефакторингов без явного запроса."
+            }
+            (Locale::Ru, Self::UserVoice) => {
+                "Свободный принцип: сохраняйте голос, бренд и ограничения пользователя, не трактуя предпочтения как расширение полномочий."
+            }
+            (Locale::Ru, Self::ReversibleOps) => {
+                "Свободный принцип: отдавайте предпочтение обратимым шагам, контрольным точкам и заметкам об откате перед высокорисковыми операциями."
+            }
+            (Locale::Uk, Self::ScopedChanges) => {
+                "Вільний принцип: надавайте перевагу невеликим, перевірюваним змінам і уникайте непов'язаних рефакторингів без явного запиту."
+            }
+            (Locale::Uk, Self::UserVoice) => {
+                "Вільний принцип: зберігайте голос, бренд і обмеження користувача, не трактуючи вподобання як розширення повноважень."
+            }
+            (Locale::Uk, Self::ReversibleOps) => {
+                "Вільний принцип: надавайте перевагу оборотним крокам, контрольним точкам і нотаткам про відкат перед високоризиковими операціями."
+            }
             (_, Self::ScopedChanges) => {
                 "Freeform principle: prefer small, reviewable changes and avoid unrelated refactors unless explicitly requested."
             }
@@ -1451,6 +1855,27 @@ fn autonomy_label(preference: AutonomyPreference, locale: Locale) -> &'static st
         (Locale::Ko, AutonomyPreference::Cautious) => "신중함",
         (Locale::Ko, AutonomyPreference::Balanced) => "균형",
         (Locale::Ko, AutonomyPreference::Autonomous) => "적극적",
+        (Locale::Ca, AutonomyPreference::Cautious) => "cautelós",
+        (Locale::Ca, AutonomyPreference::Balanced) => "equilibrat",
+        (Locale::Ca, AutonomyPreference::Autonomous) => "ambiciós",
+        (Locale::De, AutonomyPreference::Cautious) => "vorsichtig",
+        (Locale::De, AutonomyPreference::Balanced) => "ausgewogen",
+        (Locale::De, AutonomyPreference::Autonomous) => "ambitioniert",
+        (Locale::Fr, AutonomyPreference::Cautious) => "prudent",
+        (Locale::Fr, AutonomyPreference::Balanced) => "équilibré",
+        (Locale::Fr, AutonomyPreference::Autonomous) => "ambitieux",
+        (Locale::Id, AutonomyPreference::Cautious) => "hati-hati",
+        (Locale::Id, AutonomyPreference::Balanced) => "seimbang",
+        (Locale::Id, AutonomyPreference::Autonomous) => "ambisius",
+        (Locale::Hi, AutonomyPreference::Cautious) => "सावधान",
+        (Locale::Hi, AutonomyPreference::Balanced) => "संतुलित",
+        (Locale::Hi, AutonomyPreference::Autonomous) => "महत्वाकांक्षी",
+        (Locale::Ru, AutonomyPreference::Cautious) => "осторожный",
+        (Locale::Ru, AutonomyPreference::Balanced) => "сбалансированный",
+        (Locale::Ru, AutonomyPreference::Autonomous) => "самостоятельный",
+        (Locale::Uk, AutonomyPreference::Cautious) => "обережний",
+        (Locale::Uk, AutonomyPreference::Balanced) => "збалансований",
+        (Locale::Uk, AutonomyPreference::Autonomous) => "самостійний",
         (_, AutonomyPreference::Cautious) => "cautious",
         (_, AutonomyPreference::Balanced) => "balanced",
         (_, AutonomyPreference::Autonomous) => "ambitious",
@@ -1523,6 +1948,69 @@ fn autonomy_priority(preference: AutonomyPreference, locale: Locale) -> &'static
         (Locale::Ko, AutonomyPreference::Autonomous) => {
             "안전한 정형 작업은 모아서 진행하되, 파괴적이거나 자격 증명, 게시, 고비용, 법적, 보안 위험이 있는 작업에서는 멈추고 물어본다."
         }
+        (Locale::Ca, AutonomyPreference::Cautious) => {
+            "Atura't i pregunta abans d'editar fitxers, executar ordres o triar entre camins de producte ambigus."
+        }
+        (Locale::Ca, AutonomyPreference::Balanced) => {
+            "Actua directament en tasques clares i de baix risc; confirma abans d'accions arriscades, destructives o ambigües."
+        }
+        (Locale::Ca, AutonomyPreference::Autonomous) => {
+            "Agrupa la feina rutinària segura, però atura't davant accions destructives, amb credencials, de publicació, d'alt cost o amb risc legal o de seguretat."
+        }
+        (Locale::De, AutonomyPreference::Cautious) => {
+            "Halte an und frage, bevor du Dateien bearbeitest, Befehle ausführst oder zwischen mehrdeutigen Produktwegen wählst."
+        }
+        (Locale::De, AutonomyPreference::Balanced) => {
+            "Handle direkt bei klaren, risikoarmen Aufgaben; bestätige vor riskanten, destruktiven oder mehrdeutigen Aktionen."
+        }
+        (Locale::De, AutonomyPreference::Autonomous) => {
+            "Bündle sichere Routinearbeit, aber halte an bei destruktiven, zugangsdatenbezogenen, veröffentlichenden, kostspieligen, rechtlichen oder sicherheitskritischen Aktionen."
+        }
+        (Locale::Fr, AutonomyPreference::Cautious) => {
+            "Arrêtez et demandez avant de modifier des fichiers, d'exécuter des commandes ou de choisir entre des voies produit ambiguës."
+        }
+        (Locale::Fr, AutonomyPreference::Balanced) => {
+            "Agissez directement sur les tâches claires et à faible risque ; confirmez avant les actions risquées, destructives ou ambiguës."
+        }
+        (Locale::Fr, AutonomyPreference::Autonomous) => {
+            "Regroupez le travail de routine sûr, mais arrêtez devant les actions destructives, impliquant des identifiants, des publications, coûteuses, juridiques ou à risque de sécurité."
+        }
+        (Locale::Id, AutonomyPreference::Cautious) => {
+            "Berhenti dan tanya sebelum mengedit file, menjalankan perintah, atau memilih di antara jalur produk yang ambigu."
+        }
+        (Locale::Id, AutonomyPreference::Balanced) => {
+            "Bertindak langsung pada tugas yang jelas dan berisiko rendah; konfirmasi sebelum tindakan berisiko, destruktif, atau ambigu."
+        }
+        (Locale::Id, AutonomyPreference::Autonomous) => {
+            "Kelompokkan pekerjaan rutin yang aman, tetapi berhenti untuk tindakan destruktif, terkait kredensial, publikasi, mahal, hukum, atau berisiko keamanan."
+        }
+        (Locale::Hi, AutonomyPreference::Cautious) => {
+            "फ़ाइलें संपादित करने, कमांड चलाने या अस्पष्ट उत्पाद मार्गों में चुनने से पहले रुककर पूछें।"
+        }
+        (Locale::Hi, AutonomyPreference::Balanced) => {
+            "स्पष्ट, कम-जोखिम वाले कार्यों पर सीधे कार्य करें; जोखिमपूर्ण, विनाशकारी या अस्पष्ट कार्यों से पहले पुष्टि करें।"
+        }
+        (Locale::Hi, AutonomyPreference::Autonomous) => {
+            "सुरक्षित नियमित काम एक साथ करें, लेकिन विनाशकारी, क्रेडेंशियल, प्रकाशन, उच्च-लागत, कानूनी या सुरक्षा-जोखिम कार्यों पर रुककर पूछें।"
+        }
+        (Locale::Ru, AutonomyPreference::Cautious) => {
+            "Остановитесь и спросите перед редактированием файлов, запуском команд или выбором между неоднозначными продуктовыми путями."
+        }
+        (Locale::Ru, AutonomyPreference::Balanced) => {
+            "Действуйте напрямую в ясных низкорисковых задачах; подтверждайте перед рискованными, деструктивными или неоднозначными действиями."
+        }
+        (Locale::Ru, AutonomyPreference::Autonomous) => {
+            "Группируйте безопасную рутинную работу, но останавливайтесь перед деструктивными действиями, действиями с учётными данными, публикациями, дорогими, юридическими или угрожающими безопасности операциями."
+        }
+        (Locale::Uk, AutonomyPreference::Cautious) => {
+            "Зупиніться й запитайте перед редагуванням файлів, запуском команд або вибором між неоднозначними продуктовими шляхами."
+        }
+        (Locale::Uk, AutonomyPreference::Balanced) => {
+            "Дійте безпосередньо в чітких низькоризикових завданнях; підтверджуйте перед ризикованими, руйнівними чи неоднозначними діями."
+        }
+        (Locale::Uk, AutonomyPreference::Autonomous) => {
+            "Групуйте безпечну рутинну роботу, але зупиняйтеся перед руйнівними діями, діями з обліковими даними, публікаціями, дорогими, юридичними чи небезпечними для безпеки операціями."
+        }
         (_, AutonomyPreference::Cautious) => {
             "Stop and ask before editing files, running commands, or choosing between ambiguous product paths."
         }
@@ -1554,6 +2042,25 @@ fn authority_priority(locale: Locale) -> &'static str {
         }
         Locale::Ko => {
             "현재 사용자 요청과 실시간 도구 근거는 메모리, 오래된 인계 자료, 추측보다 우선한다."
+        }
+        Locale::Ca => {
+            "Les peticions actuals de l'usuari i l'evidència en directe de les eines prevalen sobre la memòria, els traspasos antics i les conjectures."
+        }
+        Locale::De => {
+            "Aktuelle Nutzeranfragen und Live-Werkzeugnachweise haben Vorrang vor Speicher, veralteten Übergaben und Vermutungen."
+        }
+        Locale::Fr => {
+            "Les demandes actuelles de l'utilisateur et les preuves directes des outils priment sur la mémoire, les anciens transferts et les suppositions."
+        }
+        Locale::Id => {
+            "Permintaan pengguna saat ini dan bukti langsung dari alat mengalahkan memori, handoff lama, dan tebakan."
+        }
+        Locale::Hi => "वर्तमान उपयोगकर्ता अनुरोध और लाइव टूल साक्ष्य मेमोरी, पुराने हैंडऑफ़ और अनुमानों से ऊपर हैं।",
+        Locale::Ru => {
+            "Текущие запросы пользователя и живые свидетельства инструментов важнее памяти, устаревших передаточных заметок и догадок."
+        }
+        Locale::Uk => {
+            "Поточні запити користувача та живі свідчення інструментів важливіші за пам'ять, застарілі передаточні нотатки й здогадки."
         }
         _ => {
             "Current user requests and live tool evidence outrank memory, stale handoffs, and guesses."
@@ -1641,6 +2148,62 @@ fn freeform_note_line(locale: Locale, note: &str, editing: bool) -> Line<'static
         (Locale::Ko, true, false) => format!("F 자유 원칙: 편집 중 - {preview}"),
         (Locale::Ko, false, true) => "F 자유 원칙: F를 눌러 제한된 원칙을 입력하거나 붙여넣기".to_string(),
         (Locale::Ko, false, false) => format!("F 자유 원칙: {preview}"),
+        (Locale::Ca, true, true) => {
+            "F Paraules pròpies: editant - escriu o enganxa un principi acotat, Enter per acabar".to_string()
+        }
+        (Locale::Ca, true, false) => format!("F Paraules pròpies: editant - {preview}"),
+        (Locale::Ca, false, true) => {
+            "F Paraules pròpies: prem F per escriure o enganxar un principi acotat".to_string()
+        }
+        (Locale::Ca, false, false) => format!("F Paraules pròpies: {preview}"),
+        (Locale::De, true, true) => {
+            "F Eigene Worte: Bearbeitung - tippe oder füge ein begrenztes Prinzip ein, Enter zum Abschluss".to_string()
+        }
+        (Locale::De, true, false) => format!("F Eigene Worte: Bearbeitung - {preview}"),
+        (Locale::De, false, true) => {
+            "F Eigene Worte: F drücken, um ein begrenztes Prinzip zu tippen oder einzufügen".to_string()
+        }
+        (Locale::De, false, false) => format!("F Eigene Worte: {preview}"),
+        (Locale::Fr, true, true) => {
+            "F Vos mots : édition - tapez ou collez un principe borné, Entrée pour terminer".to_string()
+        }
+        (Locale::Fr, true, false) => format!("F Vos mots : édition - {preview}"),
+        (Locale::Fr, false, true) => {
+            "F Vos mots : appuyez sur F pour taper ou coller un principe borné".to_string()
+        }
+        (Locale::Fr, false, false) => format!("F Vos mots : {preview}"),
+        (Locale::Id, true, true) => {
+            "F Kata sendiri: mengedit - ketik atau tempel prinsip terbatas, Enter untuk selesai".to_string()
+        }
+        (Locale::Id, true, false) => format!("F Kata sendiri: mengedit - {preview}"),
+        (Locale::Id, false, true) => {
+            "F Kata sendiri: tekan F untuk mengetik atau menempel prinsip terbatas".to_string()
+        }
+        (Locale::Id, false, false) => format!("F Kata sendiri: {preview}"),
+        (Locale::Hi, true, true) => {
+            "F अपने शब्द: संपादन जारी - सीमित सिद्धांत टाइप या पेस्ट करें, Enter से समाप्त करें".to_string()
+        }
+        (Locale::Hi, true, false) => format!("F अपने शब्द: संपादन जारी - {preview}"),
+        (Locale::Hi, false, true) => {
+            "F अपने शब्द: सीमित सिद्धांत टाइप या पेस्ट करने के लिए F दबाएँ".to_string()
+        }
+        (Locale::Hi, false, false) => format!("F अपने शब्द: {preview}"),
+        (Locale::Ru, true, true) => {
+            "F Свои слова: редактирование - введите или вставьте ограниченный принцип, Enter для завершения".to_string()
+        }
+        (Locale::Ru, true, false) => format!("F Свои слова: редактирование - {preview}"),
+        (Locale::Ru, false, true) => {
+            "F Свои слова: нажмите F, чтобы ввести или вставить ограниченный принцип".to_string()
+        }
+        (Locale::Ru, false, false) => format!("F Свои слова: {preview}"),
+        (Locale::Uk, true, true) => {
+            "F Свої слова: редагування - введіть або вставте обмежений принцип, Enter для завершення".to_string()
+        }
+        (Locale::Uk, true, false) => format!("F Свої слова: редагування - {preview}"),
+        (Locale::Uk, false, true) => {
+            "F Свої слова: натисніть F, щоб ввести або вставити обмежений принцип".to_string()
+        }
+        (Locale::Uk, false, false) => format!("F Свої слова: {preview}"),
         (_, true, true) => {
             "F Own words: editing - type or paste a bounded principle, Enter to finish".to_string()
         }
@@ -3339,6 +3902,13 @@ fn ratification_preview_title(locale: Locale) -> &'static str {
         Locale::Es419 => "Constitución del Usuario - Borrador para Ratificación",
         Locale::Vi => "Hiến pháp Người dùng - Bản nháp để phê chuẩn",
         Locale::Ko => "사용자 헌법 - 승인 전 초안",
+        Locale::Ca => "Constitució de l'Usuari - Esborrany per a Ratificació",
+        Locale::De => "Nutzerverfassung - Entwurf zur Ratifizierung",
+        Locale::Fr => "Constitution de l'Utilisateur - Brouillon pour Ratification",
+        Locale::Id => "Konstitusi Pengguna - Draf untuk Ratifikasi",
+        Locale::Hi => "उपयोगकर्ता संविधान - अंगीकार हेतु मसौदा",
+        Locale::Ru => "Конституция пользователя - Проект для ратификации",
+        Locale::Uk => "Конституція користувача - Проєкт для ратифікації",
         _ => "User Constitution — Draft for Ratification",
     }
 }
@@ -3364,6 +3934,13 @@ fn constitution_ratification_text(
             Locale::Es419 => "La constitución estructurada está vacía.".to_string(),
             Locale::Vi => "Hiến pháp có cấu trúc đang trống.".to_string(),
             Locale::Ko => "구조화된 헌법이 비어 있습니다.".to_string(),
+            Locale::Ca => "La constitució estructurada és buida.".to_string(),
+            Locale::De => "Die strukturierte Verfassung ist leer.".to_string(),
+            Locale::Fr => "La constitution structurée est vide.".to_string(),
+            Locale::Id => "Konstitusi terstruktur kosong.".to_string(),
+            Locale::Hi => "संरचित संविधान खाली है।".to_string(),
+            Locale::Ru => "Структурированная конституция пуста.".to_string(),
+            Locale::Uk => "Структурована конституція порожня.".to_string(),
             _ => "The structured constitution is empty.".to_string(),
         });
     let layer_order = tr(locale, MessageId::SetupCheckpointLayerOrder);
@@ -3636,6 +4213,284 @@ fn constitution_ratification_text(
                  승인\n{ratify_how}"
             )
         }
+        Locale::Ca => {
+            let drafted_by = match provenance {
+                DraftProvenance::Model(label) => format!(
+                    "Redactat per {label} a partir de les teves respostes guiades, després validat per esquema i acotat per Codewhale."
+                ),
+                DraftProvenance::Guided => {
+                    "Generat determinísticament a partir de les teves respostes guiades.".to_string()
+                }
+                DraftProvenance::Existing => {
+                    "La teva constitució existent, carregada de constitution.json, es mostra sense canvis."
+                        .to_string()
+                }
+            };
+            let ratify_how = match provenance {
+                DraftProvenance::Existing => {
+                    "Aquesta ja és la teva llei vigent. Tanca la previsualització i prem K per conservar-la i completar el punt de control; \
+                     el fitxer no es modifica. Esmena-la en qualsevol moment amb /constitution o /setup."
+                }
+                _ => {
+                    "Res no esdevé llei fins que ho confirmis. Tanca la previsualització i prem G per ratificar i desar. \
+                     Esmena-la en qualsevol moment amb /constitution o /setup."
+                }
+            };
+            format!(
+                "CODEWHALE · CONSTITUCIÓ DE L'USUARI\n{RULE}\n\n{drafted_by}\n\n\
+                 Aquesta és la llei permanent de com Codewhale treballa amb tu. Com les bones constitucions, \
+                 és prou curta per usar-se, feta de principis duradors en lloc de regles exhaustives, \
+                 i esmenable a mesura que canvies. Defineix poders i límits en lloc de decidir cada cas, \
+                 i dona continuïtat a la col·laboració entre sessions — però no és memòria: porta principis, no història.\n\n\
+                 {rendered}\n\n\
+                 JERARQUIA D'AUTORITAT\n{layer_order}\nLes teves peticions directes sempre prevalen sobre aquest document.\n\n\
+                 EL QUE AIXÒ NO POT FER\n\
+                 Orienta el comportament. No pot concedir ni canviar la política d'aprovació, sandbox, shell, xarxa, \
+                 confiança, permisos MCP, mode per defecte, publicació o autoritat de despesa; això queda sota el teu control en temps d'execució.\n\n\
+                 NUCLI REDUÏT I MÒDULS OPT-IN\n\
+                 El nucli inclòs continua actiu. Aquest esborrany només desa les teves preferències permanents globals d'usuari. \
+                 La doctrina pesada d'execució o orquestració pertany als prompts de mode o a futurs mòduls opt-in; aquesta previsualització no activa mòduls ni canvia la seva configuració.\n\n\
+                 RATIFICACIÓ\n{ratify_how}"
+            )
+        }
+        Locale::De => {
+            let drafted_by = match provenance {
+                DraftProvenance::Model(label) => format!(
+                    "Entworfen von {label} aus deinen geführten Antworten, dann schema-geprüft und begrenzt durch Codewhale."
+                ),
+                DraftProvenance::Guided => {
+                    "Deterministisch aus deinen geführten Antworten erzeugt.".to_string()
+                }
+                DraftProvenance::Existing => {
+                    "Deine bestehende Verfassung, geladen aus constitution.json — unverändert gezeigt."
+                        .to_string()
+                }
+            };
+            let ratify_how = match provenance {
+                DraftProvenance::Existing => {
+                    "Dies ist bereits dein geltendes Recht. Schließe die Vorschau und drücke K, um sie zu behalten und den Checkpoint abzuschließen — \
+                     die Datei wird nicht verändert. Jederzeit mit /constitution oder /setup änderbar."
+                }
+                _ => {
+                    "Nichts wird Recht, bevor du bestätigst. Schließe die Vorschau und drücke G, um zu ratifizieren und zu speichern. \
+                     Jederzeit mit /constitution oder /setup änderbar."
+                }
+            };
+            format!(
+                "CODEWHALE · NUTZERVERFASSUNG\n{RULE}\n\n{drafted_by}\n\n\
+                 Dies ist das geltende Gesetz dafür, wie Codewhale mit dir arbeitet. Wie die besten Verfassungen \
+                 ist sie kurz genug, um genutzt zu werden, besteht aus dauerhaften Prinzipien statt erschöpfender Regeln \
+                 und lässt sich ändern, wenn du dich änderst. Sie rahmt Befugnisse und Grenzen, statt jeden Einzelfall zu entscheiden, \
+                 und gibt deiner Zusammenarbeit Kontinuität über Sitzungen hinweg — aber sie ist kein Gedächtnis: Sie trägt Prinzipien, nicht Geschichte.\n\n\
+                 {rendered}\n\n\
+                 HIERARCHIE DER AUTORITÄT\n{layer_order}\nDeine direkten Anweisungen stehen immer über diesem Dokument.\n\n\
+                 WAS DIES NICHT KANN\n\
+                 Sie leitet Verhalten. Sie kann keine Freigaberichtlinie, Sandbox, Shell, Netzwerk, \
+                 Vertrauen, MCP-Berechtigungen, Standardmodus, Veröffentlichung oder Ausgabenbefugnis gewähren oder ändern — die bleiben zur Laufzeit in deiner Hand.\n\n\
+                 REDUZIERTER KERN UND OPT-IN-MODULE\n\
+                 Der mitgelieferte Kern bleibt aktiv. Dieser Entwurf speichert nur deine benutzer-globalen Dauerpräferenzen. \
+                 Schwere Ausführungs- oder Orchestrierungsdoktrin gehört in Modus-Prompts oder künftige Opt-in-Module; diese Vorschau aktiviert keine Module und ändert nicht ihre Konfiguration.\n\n\
+                 RATIFIZIERUNG\n{ratify_how}"
+            )
+        }
+        Locale::Fr => {
+            let drafted_by = match provenance {
+                DraftProvenance::Model(label) => format!(
+                    "Rédigé par {label} à partir de vos réponses guidées, puis validé par schéma et borné par Codewhale."
+                ),
+                DraftProvenance::Guided => {
+                    "Généré de façon déterministe à partir de vos réponses guidées.".to_string()
+                }
+                DraftProvenance::Existing => {
+                    "Votre constitution existante, chargée depuis constitution.json — affichée sans modification."
+                        .to_string()
+                }
+            };
+            let ratify_how = match provenance {
+                DraftProvenance::Existing => {
+                    "C'est déjà votre loi permanente. Fermez cet aperçu, puis appuyez sur K pour la conserver et terminer le point de contrôle — \
+                     le fichier n'est pas modifié. Amendez-la à tout moment avec /constitution ou /setup."
+                }
+                _ => {
+                    "Rien ne devient loi avant votre confirmation. Fermez cet aperçu, puis appuyez sur G pour ratifier et enregistrer. \
+                     Amendez-la à tout moment avec /constitution ou /setup."
+                }
+            };
+            format!(
+                "CODEWHALE · CONSTITUTION DE L'UTILISATEUR\n{RULE}\n\n{drafted_by}\n\n\
+                 Voici la loi permanente qui régit la façon dont Codewhale travaille avec vous. Comme les meilleures constitutions, \
+                 elle est assez courte pour être utilisée, faite de principes durables plutôt que de règles exhaustives, \
+                 et amendable à mesure que vous changez. Elle encadre les pouvoirs et les limites plutôt que de trancher chaque cas, \
+                 et donne à votre collaboration une continuité entre les sessions — mais elle n'est pas une mémoire : elle porte des principes, pas un historique.\n\n\
+                 {rendered}\n\n\
+                 HIÉRARCHIE D'AUTORITÉ\n{layer_order}\nVos demandes directes priment toujours sur ce document.\n\n\
+                 CE QU'ELLE NE PEUT PAS FAIRE\n\
+                 Elle guide le comportement. Elle ne peut ni accorder ni modifier la politique d'approbation, le sandbox, le shell, le réseau, \
+                 la confiance, les permissions MCP, le mode par défaut, la publication ou le pouvoir de dépense — ceux-ci restent entre vos mains à l'exécution.\n\n\
+                 NOYAU RÉDUIT ET MODULES OPT-IN\n\
+                 Le noyau intégré reste actif. Ce brouillon n'enregistre que vos préférences permanentes globales. \
+                 La doctrine lourde d'exécution ou d'orchestration appartient aux prompts de mode ou à de futurs modules opt-in ; cet aperçu n'active pas de modules et ne change pas leur configuration.\n\n\
+                 RATIFICATION\n{ratify_how}"
+            )
+        }
+        Locale::Id => {
+            let drafted_by = match provenance {
+                DraftProvenance::Model(label) => format!(
+                    "Disusun oleh {label} dari jawaban terpandu Anda, lalu diperiksa skemanya dan dibatasi oleh Codewhale."
+                ),
+                DraftProvenance::Guided => {
+                    "Dihasilkan secara deterministik dari jawaban terpandu Anda.".to_string()
+                }
+                DraftProvenance::Existing => {
+                    "Konstitusi Anda yang ada, dimuat dari constitution.json — ditampilkan tanpa perubahan."
+                        .to_string()
+                }
+            };
+            let ratify_how = match provenance {
+                DraftProvenance::Existing => {
+                    "Ini sudah menjadi hukum tetap Anda. Tutup pratinjau ini, lalu tekan K untuk mempertahankannya dan menyelesaikan checkpoint — \
+                     file tidak diubah. Amendemen kapan saja dengan /constitution atau /setup."
+                }
+                _ => {
+                    "Tidak ada yang menjadi hukum sampai Anda mengonfirmasi. Tutup pratinjau ini, lalu tekan G untuk meratifikasi dan menyimpan. \
+                     Amendemen kapan saja dengan /constitution atau /setup."
+                }
+            };
+            format!(
+                "CODEWHALE · KONSTITUSI PENGGUNA\n{RULE}\n\n{drafted_by}\n\n\
+                 Ini adalah hukum tetap tentang cara Codewhale bekerja dengan Anda. Seperti konstitusi terbaik, \
+                 ia cukup singkat untuk dipakai, tersusun dari prinsip yang awet alih-alih aturan yang menyeluruh, \
+                 dan dapat diamendemen seiring Anda berubah. Ia membingkai wewenang dan batasan alih-alih memutuskan setiap kasus, \
+                 dan memberi kolaborasi Anda kesinambungan lintas sesi — tetapi ia bukan memori: ia membawa prinsip, bukan riwayat.\n\n\
+                 {rendered}\n\n\
+                 HIERARKI OTORITAS\n{layer_order}\nPermintaan langsung Anda selalu mengungguli dokumen ini.\n\n\
+                 APA YANG TIDAK BISA DILAKUKANNYA\n\
+                 Ia memandu perilaku. Ia tidak dapat memberi atau mengubah kebijakan persetujuan, sandbox, shell, jaringan, \
+                 kepercayaan, izin MCP, mode default, publikasi, atau wewenang belanja — semua itu tetap di tangan Anda saat runtime.\n\n\
+                 INTI RINGKAS DAN MODUL OPT-IN\n\
+                 Inti bawaan tetap aktif. Draf ini hanya menyimpan preferensi tetap global pengguna Anda. \
+                 Doktrin eksekusi atau orkestrasi yang berat termasuk dalam prompt mode atau modul opt-in mendatang; pratinjau ini tidak mengaktifkan modul atau mengubah konfigurasinya.\n\n\
+                 RATIFIKASI\n{ratify_how}"
+            )
+        }
+        Locale::Hi => {
+            let drafted_by = match provenance {
+                DraftProvenance::Model(label) => format!(
+                    "{label} द्वारा आपके गाइडेड उत्तरों से तैयार, फिर Codewhale द्वारा स्कीमा-जाँचा और सीमित किया गया।"
+                ),
+                DraftProvenance::Guided => "आपके गाइडेड उत्तरों से नियत रूप से तैयार किया गया।".to_string(),
+                DraftProvenance::Existing => {
+                    "आपका मौजूदा संविधान, constitution.json से लोड किया गया — अपरिवर्तित दिखाया गया।"
+                        .to_string()
+                }
+            };
+            let ratify_how = match provenance {
+                DraftProvenance::Existing => {
+                    "यह पहले से ही आपका स्थायी कानून है। यह पूर्वावलोकन बंद करें, फिर इसे बनाए रखने और चेकपॉइंट पूरा करने के लिए K दबाएँ — \
+                     फ़ाइल संशोधित नहीं होती। /constitution या /setup से कभी भी संशोधित करें।"
+                }
+                _ => {
+                    "जब तक आप पुष्टि नहीं करते, कुछ भी कानून नहीं बनता। यह पूर्वावलोकन बंद करें, फिर अंगीकार और सहेजने के लिए G दबाएँ। \
+                     /constitution या /setup से कभी भी संशोधित करें।"
+                }
+            };
+            format!(
+                "CODEWHALE · उपयोगकर्ता संविधान\n{RULE}\n\n{drafted_by}\n\n\
+                 यह Codewhale आपके साथ कैसे काम करे, इसका स्थायी कानून है। सर्वोत्तम संविधानों की तरह, \
+                 यह उपयोग के लिए पर्याप्त छोटा है, संपूर्ण नियमों के बजाय टिकाऊ सिद्धांतों से बना है, \
+                 और आपके बदलने के साथ संशोधनीय है। यह हर मामले का फ़ैसला करने के बजाय शक्तियों और सीमाओं का ढाँचा देता है, \
+                 और आपके सहयोग को सत्रों के पार निरंतरता देता है — लेकिन यह मेमोरी नहीं है: यह इतिहास नहीं, सिद्धांत रखता है।\n\n\
+                 {rendered}\n\n\
+                 अधिकार पदानुक्रम\n{layer_order}\nआपके प्रत्यक्ष अनुरोध हमेशा इस दस्तावेज़ से ऊपर हैं।\n\n\
+                 यह क्या नहीं कर सकता\n\
+                 यह व्यवहार का मार्गदर्शन करता है। यह अनुमति नीति, सैंडबॉक्स, शेल, नेटवर्क, \
+                 ट्रस्ट, MCP अनुमतियाँ, डिफ़ॉल्ट मोड, प्रकाशन या खर्च का अधिकार प्रदान या परिवर्तित नहीं कर सकता — वे रनटाइम पर आपके हाथ में रहते हैं।\n\n\
+                 संक्षिप्त कोर और ऑप्ट-इन मॉड्यूल\n\
+                 Bundled कोर सक्रिय रहता है। यह मसौदा केवल आपकी उपयोगकर्ता-वैश्विक स्थायी प्राथमिकताएँ सहेजता है। \
+                 भारी निष्पादन या ऑर्केस्ट्रेशन सिद्धांत मोड प्रॉम्प्ट या भविष्य के ऑप्ट-इन मॉड्यूल में रहते हैं; यह पूर्वावलोकन मॉड्यूल सक्षम नहीं करता और न ही उनकी कॉन्फ़िगरेशन बदलता है।\n\n\
+                 अंगीकार\n{ratify_how}"
+            )
+        }
+        Locale::Ru => {
+            let drafted_by = match provenance {
+                DraftProvenance::Model(label) => format!(
+                    "Подготовлено {label} на основе ваших ответов на наводящие вопросы, затем проверено по схеме и ограничено Codewhale."
+                ),
+                DraftProvenance::Guided => {
+                    "Детерминированно построено из ваших ответов на наводящие вопросы.".to_string()
+                }
+                DraftProvenance::Existing => {
+                    "Ваша существующая конституция, загруженная из constitution.json, — показана без изменений."
+                        .to_string()
+                }
+            };
+            let ratify_how = match provenance {
+                DraftProvenance::Existing => {
+                    "Это уже ваш действующий закон. Закройте это превью, затем нажмите K, чтобы сохранить её и завершить контрольную точку — \
+                     файл не изменяется. Изменить можно в любое время через /constitution или /setup."
+                }
+                _ => {
+                    "Ничто не становится законом, пока вы не подтвердите. Закройте это превью, затем нажмите G, чтобы ратифицировать и сохранить. \
+                     Изменить можно в любое время через /constitution или /setup."
+                }
+            };
+            format!(
+                "CODEWHALE · КОНСТИТУЦИЯ ПОЛЬЗОВАТЕЛЯ\n{RULE}\n\n{drafted_by}\n\n\
+                 Это постоянный закон о том, как Codewhale работает с вами. Как лучшие конституции, \
+                 она достаточно коротка, чтобы ей пользоваться, состоит из долговечных принципов, а не исчерпывающих правил, \
+                 и может изменяться вместе с вами. Она очерчивает полномочия и границы, а не решает каждый случай, \
+                 и придаёт вашему сотрудничеству непрерывность между сессиями — но она не память: она хранит принципы, а не историю.\n\n\
+                 {rendered}\n\n\
+                 ИЕРАРХИЯ ПОЛНОМОЧИЙ\n{layer_order}\nВаши прямые указания всегда важнее этого документа.\n\n\
+                 ЧЕГО ОНА НЕ МОЖЕТ\n\
+                 Она направляет поведение. Она не может предоставить или изменить политику одобрения, sandbox, shell, сеть, \
+                 доверие, разрешения MCP, режим по умолчанию, публикацию или право тратить — они остаются в ваших руках во время выполнения.\n\n\
+                 СОКРАЩЁННОЕ ЯДРО И ОПЦИОНАЛЬНЫЕ МОДУЛИ\n\
+                 Встроенное ядро остаётся активным. Этот проект сохраняет только ваши глобальные постоянные предпочтения. \
+                 Тяжёлая доктрина исполнения или оркестрации принадлежит промптам режимов или будущим опциональным модулям; это превью не включает модули и не меняет их конфигурацию.\n\n\
+                 РАТИФИКАЦИЯ\n{ratify_how}"
+            )
+        }
+        Locale::Uk => {
+            let drafted_by = match provenance {
+                DraftProvenance::Model(label) => format!(
+                    "Підготовлено {label} на основі ваших відповідей на навідні запитання, потім перевірено за схемою та обмежено Codewhale."
+                ),
+                DraftProvenance::Guided => {
+                    "Детерміновано побудовано з ваших відповідей на навідні запитання.".to_string()
+                }
+                DraftProvenance::Existing => {
+                    "Ваша чинна конституція, завантажена з constitution.json, — показана без змін."
+                        .to_string()
+                }
+            };
+            let ratify_how = match provenance {
+                DraftProvenance::Existing => {
+                    "Це вже ваш чинний закон. Закрийте це прев'ю, потім натисніть K, щоб зберегти її та завершити контрольну точку — \
+                     файл не змінюється. Змінити можна будь-коли через /constitution або /setup."
+                }
+                _ => {
+                    "Ніщо не стає законом, доки ви не підтвердите. Закрийте це прев'ю, потім натисніть G, щоб ратифікувати та зберегти. \
+                     Змінити можна будь-коли через /constitution або /setup."
+                }
+            };
+            format!(
+                "CODEWHALE · КОНСТИТУЦІЯ КОРИСТУВАЧА\n{RULE}\n\n{drafted_by}\n\n\
+                 Це постійний закон про те, як Codewhale працює з вами. Як найкращі конституції, \
+                 вона достатньо коротка, щоб нею користуватися, складається з довговічних принципів, а не вичерпних правил, \
+                 і може змінюватися разом із вами. Вона окреслює повноваження та межі, а не вирішує кожен випадок, \
+                 і надає вашій співпраці неперервність між сесіями — але вона не пам'ять: вона зберігає принципи, а не історію.\n\n\
+                 {rendered}\n\n\
+                 ІЄРАРХІЯ ПОВНОВАЖЕНЬ\n{layer_order}\nВаші прямі вказівки завжди важливіші за цей документ.\n\n\
+                 ЧОГО ВОНА НЕ МОЖЕ\n\
+                 Вона спрямовує поведінку. Вона не може надати або змінити політику схвалення, sandbox, shell, мережу, \
+                 довіру, дозволи MCP, режим за замовчуванням, публікацію чи право витрачати — вони залишаються у ваших руках під час виконання.\n\n\
+                 СКОРОЧЕНЕ ЯДРО Й ОПЦІЙНІ МОДУЛІ\n\
+                 Вбудоване ядро залишається активним. Цей проєкт зберігає лише ваші глобальні постійні вподобання. \
+                 Важка доктрина виконання чи оркестрації належить промптам режимів або майбутнім опційним модулям; це прев'ю не вмикає модулі й не змінює їхню конфігурацію.\n\n\
+                 РАТИФІКАЦІЯ\n{ratify_how}"
+            )
+        }
         _ => {
             let drafted_by = match provenance {
                 DraftProvenance::Model(label) => format!(
@@ -3711,6 +4566,39 @@ fn model_draft_invitation_line(locale: Locale, model_label: &str) -> String {
                 "A {model_label}이(가) 초안을 작성할 수 있습니다. 승인은 당신이 합니다. 당신 없이는 아무것도 저장되지 않습니다."
             )
         }
+        Locale::Ca => {
+            format!("A {model_label} la pot redactar. Tu la ratifiques. Res no es desa sense tu.")
+        }
+        Locale::De => {
+            format!(
+                "A {model_label} kann sie entwerfen. Du ratifizierst sie. Ohne dich wird nichts gespeichert."
+            )
+        }
+        Locale::Fr => {
+            format!(
+                "A {model_label} peut la rédiger. Vous la ratifiez. Rien ne s'enregistre sans vous."
+            )
+        }
+        Locale::Id => {
+            format!(
+                "A {model_label} dapat menyusunnya. Anda yang meratifikasi. Tidak ada yang tersimpan tanpa Anda."
+            )
+        }
+        Locale::Hi => {
+            format!(
+                "A {model_label} इसका मसौदा बना सकता है। अंगीकार आप करते हैं। आपके बिना कुछ भी सहेजा नहीं जाता।"
+            )
+        }
+        Locale::Ru => {
+            format!(
+                "A {model_label} может подготовить проект. Ратифицируете вы. Без вас ничего не сохраняется."
+            )
+        }
+        Locale::Uk => {
+            format!(
+                "A {model_label} може підготувати проєкт. Ратифікуєте ви. Без вас нічого не зберігається."
+            )
+        }
         _ => format!("A {model_label} can draft it. You ratify it. Nothing saves without you."),
     }
 }
@@ -3727,6 +4615,21 @@ fn keep_existing_invitation_line(locale: Locale) -> &'static str {
         }
         Locale::Vi => "K Giữ hiến pháp hiện có - xem lại, giữ nguyên, tệp không đổi.",
         Locale::Ko => "K 기존 헌법 유지 - 검토 후 유지, 파일은 변경되지 않음.",
+        Locale::Ca => {
+            "K Mantén la constitució existent - revisa-la, conserva-la, fitxer sense canvis."
+        }
+        Locale::De => "K Bestehende Verfassung behalten - prüfen, behalten, Datei unverändert.",
+        Locale::Fr => {
+            "K Garder votre constitution existante - révisez-la, gardez-la, fichier inchangé."
+        }
+        Locale::Id => {
+            "K Pertahankan konstitusi Anda yang ada - tinjau, pertahankan, file tidak berubah."
+        }
+        Locale::Hi => "K अपना मौजूदा संविधान रखें - समीक्षा करें, बनाए रखें, फ़ाइल अपरिवर्तित।",
+        Locale::Ru => {
+            "K Сохранить существующую конституцию - просмотрите, сохраните, файл не изменяется."
+        }
+        Locale::Uk => "K Зберегти чинну конституцію - перегляньте, збережіть, файл без змін.",
         _ => "K Keep your existing constitution — review it, keep it, file unchanged.",
     }
 }
@@ -3765,6 +4668,41 @@ fn model_draft_ready_line(locale: Locale, model_label: &str) -> String {
                 "{model_label}의 초안이 승인을 기다리고 있습니다 - G로 확인하고 승인, 1-6은 초안을 버립니다."
             )
         }
+        Locale::Ca => {
+            format!(
+                "L'esborrany de {model_label} espera ratificació - G per revisar i ratificar; 1-6 el descarta."
+            )
+        }
+        Locale::De => {
+            format!(
+                "Entwurf von {model_label} wartet auf Ratifizierung - G zum Prüfen und Ratifizieren; 1-6 verwirft ihn."
+            )
+        }
+        Locale::Fr => {
+            format!(
+                "Le brouillon de {model_label} attend ratification - G pour réviser et ratifier ; 1-6 l'écarte."
+            )
+        }
+        Locale::Id => {
+            format!(
+                "Draf oleh {model_label} menunggu ratifikasi - G untuk meninjau dan meratifikasi; 1-6 membuangnya."
+            )
+        }
+        Locale::Hi => {
+            format!(
+                "{model_label} का मसौदा अंगीकार की प्रतीक्षा में है - समीक्षा और अंगीकार के लिए G; 1-6 उसे खारिज करता है।"
+            )
+        }
+        Locale::Ru => {
+            format!(
+                "Проект от {model_label} ожидает ратификации - G для просмотра и ратификации; 1-6 отклоняет его."
+            )
+        }
+        Locale::Uk => {
+            format!(
+                "Проєкт від {model_label} очікує ратифікації - G для перегляду та ратифікації; 1-6 відхиляє його."
+            )
+        }
         _ => format!(
             "Draft by {model_label} awaits ratification — G to review and ratify; 1-6 discards it."
         ),
@@ -3792,6 +4730,27 @@ pub(crate) fn model_draft_ready_message(locale: Locale, model_label: &str) -> St
         ),
         Locale::Ko => format!(
             "{model_label}이(가) 당신의 헌법 초안을 작성했습니다. 미리보기를 확인한 뒤 G를 눌러 승인하세요."
+        ),
+        Locale::Ca => format!(
+            "{model_label} ha redactat la teva constitució. Revisa la previsualització i prem G per ratificar."
+        ),
+        Locale::De => format!(
+            "{model_label} hat deine Verfassung entworfen. Prüfe die Vorschau und drücke G zum Ratifizieren."
+        ),
+        Locale::Fr => format!(
+            "{model_label} a rédigé votre constitution. Révisez l'aperçu, puis appuyez sur G pour ratifier."
+        ),
+        Locale::Id => format!(
+            "{model_label} menyusun konstitusi Anda. Tinjau pratinjaunya, lalu tekan G untuk meratifikasi."
+        ),
+        Locale::Hi => format!(
+            "{model_label} ने आपके संविधान का मसौदा तैयार किया। पूर्वावलोकन देखें, फिर अंगीकार के लिए G दबाएँ।"
+        ),
+        Locale::Ru => format!(
+            "{model_label} подготовил проект вашей конституции. Просмотрите превью, затем нажмите G для ратификации."
+        ),
+        Locale::Uk => format!(
+            "{model_label} підготував проєкт вашої конституції. Перегляньте прев'ю, потім натисніть G для ратифікації."
         ),
         _ => format!(
             "{model_label} drafted your constitution. Review the preview, then press G to ratify."
@@ -3836,6 +4795,41 @@ pub(crate) fn model_draft_failed_message(
         Locale::Ko => {
             format!(
                 "{model_label}이(가) 당신의 헌법 초안을 작성하지 못했습니다 ({reason}). 가이드 초안은 여전히 유효합니다. G를 눌러 미리보고 승인하세요."
+            )
+        }
+        Locale::Ca => {
+            format!(
+                "{model_label} no ha pogut redactar la teva constitució ({reason}). L'esborrany guiat continua vigent; prem G per previsualitzar i ratificar."
+            )
+        }
+        Locale::De => {
+            format!(
+                "{model_label} konnte deine Verfassung nicht entwerfen ({reason}). Dein geführter Entwurf bleibt gültig; drücke G für Vorschau und Ratifizierung."
+            )
+        }
+        Locale::Fr => {
+            format!(
+                "{model_label} n'a pas pu rédiger votre constitution ({reason}). Votre brouillon guidé reste valide ; appuyez sur G pour l'aperçu et la ratification."
+            )
+        }
+        Locale::Id => {
+            format!(
+                "{model_label} tidak dapat menyusun konstitusi Anda ({reason}). Draf terpandu Anda tetap berlaku; tekan G untuk pratinjau dan ratifikasi."
+            )
+        }
+        Locale::Hi => {
+            format!(
+                "{model_label} आपके संविधान का मसौदा नहीं बना सका ({reason})। आपका गाइडेड मसौदा अब भी मान्य है; पूर्वावलोकन और अंगीकार के लिए G दबाएँ।"
+            )
+        }
+        Locale::Ru => {
+            format!(
+                "{model_label} не смог подготовить вашу конституцию ({reason}). Ваш управляемый проект остаётся в силе — нажмите G для просмотра и ратификации."
+            )
+        }
+        Locale::Uk => {
+            format!(
+                "{model_label} не зміг підготувати вашу конституцію ({reason}). Ваш керований проєкт залишається чинним — натисніть G для перегляду та ратифікації."
             )
         }
         _ => format!(
@@ -4381,6 +5375,55 @@ mod tests {
                         "활성화하지 않으며",
                         "승인 정책, 샌드박스, 셸, 네트워크, 신뢰, MCP 권한, 기본 모드, 게시, 지출 권한을 부여하거나 바꿀 수 없습니다",
                         "MCP 권한",
+                    ),
+                    Locale::Ca => (
+                        "NUCLI REDUÏT",
+                        "mòduls",
+                        "no activa",
+                        "No pot concedir ni canviar la política d'aprovació, sandbox, shell, xarxa",
+                        "permisos MCP",
+                    ),
+                    Locale::De => (
+                        "REDUZIERTER KERN",
+                        "Module",
+                        "aktiviert keine",
+                        "Sie kann keine Freigaberichtlinie, Sandbox, Shell, Netzwerk",
+                        "MCP-Berechtigungen",
+                    ),
+                    Locale::Fr => (
+                        "NOYAU RÉDUIT",
+                        "modules",
+                        "n'active pas",
+                        "Elle ne peut ni accorder ni modifier la politique d'approbation, le sandbox, le shell, le réseau",
+                        "permissions MCP",
+                    ),
+                    Locale::Id => (
+                        "INTI RINGKAS",
+                        "modul",
+                        "tidak mengaktifkan",
+                        "tidak dapat memberi atau mengubah kebijakan persetujuan, sandbox, shell, jaringan",
+                        "izin MCP",
+                    ),
+                    Locale::Hi => (
+                        "संक्षिप्त कोर",
+                        "मॉड्यूल",
+                        "सक्षम नहीं करता",
+                        "यह अनुमति नीति, सैंडबॉक्स, शेल, नेटवर्क",
+                        "MCP अनुमतियाँ",
+                    ),
+                    Locale::Ru => (
+                        "СОКРАЩЁННОЕ ЯДРО",
+                        "модули",
+                        "не включает модули",
+                        "Она не может предоставить или изменить политику одобрения, sandbox, shell, сеть",
+                        "разрешения MCP",
+                    ),
+                    Locale::Uk => (
+                        "СКОРОЧЕНЕ ЯДРО",
+                        "модулі",
+                        "не вмикає модулі",
+                        "Вона не може надати або змінити політику схвалення, sandbox, shell, мережу",
+                        "дозволи MCP",
                     ),
                     Locale::En => (
                         "REDUCED CORE",

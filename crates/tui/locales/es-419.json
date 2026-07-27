@@ -435,7 +435,7 @@
     "HomeGoalModeTip": "Seguimiento de Goal - Usa /goal <objetivo> para seguir un objetivo persistente",
     "OnboardLanguageTitle": "Elige el idioma",
     "OnboardLanguageBlurb": "Elige el idioma de la interfaz. Puedes cambiarlo en cualquier momento con `/settings set locale <etiqueta>`.",
-    "OnboardLanguageFooter": "Presiona 1-9 para elegir, o Enter para mantener la configuración actual",
+    "OnboardLanguageFooter": "Presiona la tecla junto al idioma, o Enter para mantener la configuración actual",
     "OnboardProviderTitle": "Elige tu proveedor de modelos",
     "OnboardProviderBlurb": "Elige dónde se ejecutará tu modelo. Los proveedores alojados necesitan una clave; los runtimes locales pueden continuar sin ella.",
     "OnboardProviderFooter": "Enter abre la lista de proveedores · Esc vuelve · Ctrl+C sale.",

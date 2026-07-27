@@ -150,8 +150,26 @@ fn translation_target_language_for_tag(locale_tag: &str) -> &'static str {
         "Simplified Chinese (简体中文)"
     } else if normalized.starts_with("pt") {
         "Brazilian Portuguese (Português do Brasil)"
+    } else if normalized.starts_with("es") {
+        "Latin American Spanish (Español latinoamericano)"
     } else if normalized.starts_with("vi") {
         "Vietnamese (Tiếng Việt)"
+    } else if normalized.starts_with("ko") {
+        "Korean (한국어)"
+    } else if normalized.starts_with("ca") {
+        "Catalan (Català)"
+    } else if normalized.starts_with("de") {
+        "German (Deutsch)"
+    } else if normalized.starts_with("fr") {
+        "French (Français)"
+    } else if normalized.starts_with("id") {
+        "Indonesian (Bahasa Indonesia)"
+    } else if normalized.starts_with("hi") {
+        "Hindi (हिन्दी)"
+    } else if normalized.starts_with("ru") {
+        "Russian (Русский)"
+    } else if normalized.starts_with("uk") {
+        "Ukrainian (Українська)"
     } else {
         "English"
     }
@@ -806,10 +824,12 @@ fn effective_authority_recap() -> &'static str {
 /// context, the symptom reported in #1118 and visible in the WeChat
 /// screenshot that prompted this change.
 ///
-/// The list is intentionally short (only locales the TUI ships UI
-/// strings for: `zh-Hans`, `ja`, `pt-BR`). Other locales fall through
-/// to `None` and get the English-only directive, which is the same
-/// behavior as before this change.
+/// The list is intentionally short (`zh-Hans`, `ja`, `pt-BR`, `vi`) even
+/// though the TUI ships UI packs for many more locales. Other locales fall
+/// through to `None` and get the English-only directive, which is the same
+/// behavior as before this change; the test
+/// `v092_locales_add_no_prompt_bookends_so_prompt_bytes_stay_stable` locks
+/// that set so adding a UI pack never silently changes prompt bytes.
 ///
 /// ## Design philosophy: why a bookend, not a full translation
 ///
@@ -2315,6 +2335,59 @@ start it",
         let pt = locale_reinforcement_closer("pt-BR").expect("pt-BR closer");
         assert!(pt.contains("português do Brasil"));
         assert!(pt.contains("reasoning_content"));
+    }
+
+    #[test]
+    fn v092_locales_add_no_prompt_bookends_so_prompt_bytes_stay_stable() {
+        // Cache-stability contract: adding the v0.9.2 UI locales
+        // (ca, de, fr, id, hi, ru, uk) — and the already-shipped UI packs
+        // that never had bookends (ko, es-419, zh-Hant) — must not change
+        // the model-visible system prompt for an identical route/session
+        // when translation is not explicitly enabled. The bookend list
+        // stays intentionally short (zh-Hans, ja, pt-BR, vi); every other
+        // shipped locale resolves to None and therefore renders the exact
+        // same prompt bytes as English.
+        for tag in [
+            "zh-Hant", "ko", "es-419", "ca", "de", "fr", "id", "hi", "ru", "uk",
+        ] {
+            assert!(
+                locale_reinforcement_preamble(tag).is_none(),
+                "{tag} must not gain a locale preamble"
+            );
+            assert!(
+                locale_reinforcement_closer(tag).is_none(),
+                "{tag} must not gain a locale closer"
+            );
+        }
+        // The bookend set is exactly the original four locales — growing it
+        // is a deliberate, reviewable prompt change, not a side effect of
+        // adding a UI pack.
+        for tag in ["zh-Hans", "ja", "pt-BR", "vi"] {
+            assert!(
+                locale_reinforcement_preamble(tag).is_some(),
+                "{tag} lost its locale preamble"
+            );
+            assert!(
+                locale_reinforcement_closer(tag).is_some(),
+                "{tag} lost its locale closer"
+            );
+        }
+    }
+
+    #[test]
+    fn translation_seam_names_every_shipped_locale_canonically() {
+        // The translation output instruction is the declared model-facing
+        // seam: it only enters the prompt when `translation_enabled` is
+        // true. When it does, every shipped locale must be named
+        // canonically (English name + endonym) — never silently "English".
+        for locale in crate::localization::Locale::shipped() {
+            assert_eq!(
+                translation_target_language_for_tag(locale.tag()),
+                locale.translation_target_name(),
+                "{} translation seam drifted from the canonical locale name",
+                locale.tag()
+            );
+        }
     }
 
     #[test]

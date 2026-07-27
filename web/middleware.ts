@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { locales, defaultLocale } from "@/lib/i18n/config";
+import { locales } from "@/lib/i18n/config";
+import { detectLocaleFromHeaders } from "@/lib/i18n/detect";
 
 const COOKIE = "NEXT_LOCALE";
 
@@ -14,23 +15,6 @@ const SECURITY_HEADERS: Record<string, string> = {
 function applySecurityHeaders(res: NextResponse): NextResponse {
   for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.headers.set(k, v);
   return res;
-}
-
-function detectLocale(req: NextRequest): string {
-  // 1. Cookie
-  const cookie = req.cookies.get(COOKIE)?.value;
-  if (cookie && (locales as readonly string[]).includes(cookie)) return cookie;
-
-  // 2. Accept-Language header — match against all shipped locales
-  const accept = req.headers.get("accept-language") ?? "";
-  if (accept) {
-    const preferred = accept.split(",").map((s) => s.split(";")[0].trim().split("-")[0].toLowerCase());
-    for (const lang of preferred) {
-      if ((locales as readonly string[]).includes(lang)) return lang;
-    }
-  }
-
-  return defaultLocale;
 }
 
 export function middleware(req: NextRequest) {
@@ -55,8 +39,12 @@ export function middleware(req: NextRequest) {
     return applySecurityHeaders(res);
   }
 
-  // Redirect bare paths to detected locale
-  const locale = detectLocale(req);
+  // Redirect bare paths to the detected locale (deterministic: cookie, then
+  // Accept-Language full-tag/primary-subtag matching, then the default).
+  const locale = detectLocaleFromHeaders(
+    req.cookies.get(COOKIE)?.value,
+    req.headers.get("accept-language"),
+  );
   const url = req.nextUrl.clone();
   url.pathname = `/${locale}${pathname}`;
   const res = NextResponse.redirect(url);

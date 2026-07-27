@@ -450,7 +450,15 @@ fn expand_workspace_path(path: &str) -> Result<PathBuf, String> {
 fn public_site_locale_segment(locale: Locale) -> &'static str {
     match locale {
         Locale::ZhHans | Locale::ZhHant => "zh",
-        Locale::En | Locale::Ja | Locale::PtBr | Locale::Es419 | Locale::Vi | Locale::Ko => "en",
+        Locale::Ja => "ja",
+        Locale::Vi => "vi",
+        Locale::Ko => "ko",
+        Locale::Es419 => "es",
+        Locale::PtBr => "pt-BR",
+        Locale::Ru => "ru",
+        Locale::Uk => "uk",
+        // Not shipped on the website yet — English pages are the fallback.
+        Locale::En | Locale::Ca | Locale::De | Locale::Fr | Locale::Id | Locale::Hi => "en",
     }
 }
 

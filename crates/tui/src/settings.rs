@@ -340,7 +340,8 @@ pub struct Settings {
     /// This affects inline presentation only; exact evidence remains available
     /// through the tool-details route in every mode.
     pub inline_diffs: String,
-    /// UI locale: auto, en, ja, zh-Hans, zh-Hant, pt-BR, es-419, vi, ko.
+    /// UI locale: auto, en, ja, zh-Hans, zh-Hant, pt-BR, es-419, vi, ko,
+    /// ca, de, fr, id, hi, ru, uk.
     /// zh-Hant is a partial pack; missing strings fall back to English.
     pub locale: String,
     /// Named UI theme. Accepts `"system"` (follow terminal background),
@@ -1525,7 +1526,7 @@ impl Settings {
             ),
             (
                 "locale",
-                "UI locale and default model language: auto, en, ja, zh-Hans, zh-Hant, pt-BR, es-419, vi, ko; zh-Hant is partial and missing strings fall back to English",
+                "UI locale and default model language: auto, en, ja, zh-Hans, zh-Hant, pt-BR, es-419, vi, ko, ca, de, fr, id, hi, ru, uk; zh-Hant is partial and missing strings fall back to English",
             ),
             (
                 "theme",
@@ -3067,6 +3068,13 @@ mod tests {
             ("es-MX", "es-419"),
             ("vi_VN.UTF-8", "vi"),
             ("ko-KR", "ko"),
+            ("ca-ES", "ca"),
+            ("de_DE.UTF-8", "de"),
+            ("fr-FR", "fr"),
+            ("id-ID", "id"),
+            ("hi_IN.UTF-8", "hi"),
+            ("ru-RU", "ru"),
+            ("uk_UA.UTF-8", "uk"),
         ] {
             settings
                 .set("locale", input)

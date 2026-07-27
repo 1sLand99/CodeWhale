@@ -1,9 +1,15 @@
 import Link from "next/link";
 import { GITEE_ENABLED, type Locale } from "@/lib/i18n/config";
+import { getChrome } from "@/lib/i18n/dictionaries";
 import { Whale } from "./whale";
 
 export function Footer({ locale = "en" }: { locale?: Locale }) {
   const isZh = locale === "zh";
+  // en/zh stay inline (copy-contract tests read them from this file); every
+  // other routed locale resolves its chrome from the dictionary layer with
+  // English as the fallback.
+  const chrome = getChrome(locale);
+  const homeHref = `/${locale}`;
 
   const product = isZh
     ? [
@@ -12,12 +18,19 @@ export function Footer({ locale = "en" }: { locale?: Locale }) {
         { label: "模型", href: "/zh/models" },
         { label: "运行时", href: "/zh/runtime" },
       ]
-    : [
-        { label: "Docs", href: "/en/docs" },
-        { label: "Install", href: "/en/install" },
-        { label: "Models", href: "/en/models" },
-        { label: "Runtime", href: "/en/runtime" },
-      ];
+    : locale === "en"
+      ? [
+          { label: "Docs", href: "/en/docs" },
+          { label: "Install", href: "/en/install" },
+          { label: "Models", href: "/en/models" },
+          { label: "Runtime", href: "/en/runtime" },
+        ]
+      : [
+          { label: chrome.footerDocs, href: `/${locale}/docs` },
+          { label: chrome.footerInstall, href: `/${locale}/install` },
+          { label: chrome.footerModels, href: `/${locale}/models` },
+          { label: chrome.footerRuntime, href: `/${locale}/runtime` },
+        ];
 
   const project = isZh
     ? [
@@ -26,35 +39,46 @@ export function Footer({ locale = "en" }: { locale?: Locale }) {
         { label: "参与贡献", href: "/zh/contribute" },
         { label: "MIT 许可证", href: "https://github.com/Hmbown/CodeWhale/blob/main/LICENSE" },
       ]
-    : [
-        { label: "GitHub", href: "https://github.com/Hmbown/CodeWhale" },
-        { label: "Issues", href: "https://github.com/Hmbown/CodeWhale/issues" },
-        { label: "Contribute", href: "/en/contribute" },
-        { label: "MIT license", href: "https://github.com/Hmbown/CodeWhale/blob/main/LICENSE" },
-      ];
+    : locale === "en"
+      ? [
+          { label: "GitHub", href: "https://github.com/Hmbown/CodeWhale" },
+          { label: "Issues", href: "https://github.com/Hmbown/CodeWhale/issues" },
+          { label: "Contribute", href: "/en/contribute" },
+          { label: "MIT license", href: "https://github.com/Hmbown/CodeWhale/blob/main/LICENSE" },
+        ]
+      : [
+          { label: "GitHub", href: "https://github.com/Hmbown/CodeWhale" },
+          { label: chrome.footerIssues, href: "https://github.com/Hmbown/CodeWhale/issues" },
+          { label: chrome.footerContribute, href: `/${locale}/contribute` },
+          { label: chrome.footerLicense, href: "https://github.com/Hmbown/CodeWhale/blob/main/LICENSE" },
+        ];
+
+  const tagline = isZh
+    ? "Codewhale 开源运行时的文档、源码与社区入口。"
+    : chrome.footerTagline;
+  const productHeading = isZh ? "产品" : chrome.footerProduct;
+  const projectHeading = isZh ? "项目" : chrome.footerProject;
+  const canonicalSource = isZh ? "官方源码：" : chrome.footerCanonicalSource;
+  const releases = isZh ? " · 发布：" : chrome.footerReleases;
 
   return (
     <footer className="site-footer">
       <div className="site-footer-main">
         <div className="site-footer-brand">
-          <Link href={isZh ? "/zh" : "/en"} className="site-wordmark site-wordmark-footer">
+          <Link href={homeHref} className="site-wordmark site-wordmark-footer">
             <Whale size={31} className="text-current" />
             <span>Codewhale</span>
           </Link>
-          <p>
-            {isZh
-              ? "Codewhale 开源运行时的文档、源码与社区入口。"
-              : "Documentation, source, and community for the open-source Codewhale runtime."}
-          </p>
+          <p>{tagline}</p>
         </div>
 
         <div className="site-footer-links">
           <div>
-            <span>{isZh ? "产品" : "Product"}</span>
+            <span>{productHeading}</span>
             {product.map((item) => <Link key={item.href} href={item.href}>{item.label}</Link>)}
           </div>
           <div>
-            <span>{isZh ? "项目" : "Project"}</span>
+            <span>{projectHeading}</span>
             {project.map((item) => <Link key={item.href} href={item.href}>{item.label}</Link>)}
           </div>
         </div>
@@ -62,9 +86,9 @@ export function Footer({ locale = "en" }: { locale?: Locale }) {
 
       <div className="site-footer-meta">
         <p>
-          {isZh ? "官方源码：" : "Canonical source: "}
+          {canonicalSource}
           <a href="https://github.com/Hmbown/CodeWhale">github.com/Hmbown/CodeWhale</a>
-          {isZh ? " · 发布：" : " · Releases: "}
+          {releases}
           <a href="https://github.com/Hmbown/CodeWhale/releases">GitHub Releases</a>
         </p>
         <div>

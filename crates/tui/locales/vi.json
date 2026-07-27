@@ -435,7 +435,7 @@
     "HomeGoalModeTip": "Theo dõi mục tiêu - Dùng /goal <mục_tiêu> để đặt mục tiêu làm việc",
     "OnboardLanguageTitle": "Chọn ngôn ngữ của bạn",
     "OnboardLanguageBlurb": "Chọn ngôn ngữ hiển thị. Bạn có thể thay đổi bất kỳ lúc nào bằng lệnh `/settings set locale <tag>`.",
-    "OnboardLanguageFooter": "Nhấn phím từ 1-9 để chọn, hoặc Enter để giữ cài đặt hiện tại",
+    "OnboardLanguageFooter": "Nhấn phím bên cạnh ngôn ngữ để chọn, hoặc Enter để giữ cài đặt hiện tại",
     "OnboardProviderTitle": "Chọn nhà cung cấp mô hình",
     "OnboardProviderBlurb": "Chọn nơi mô hình chạy. Nhà cung cấp được lưu trữ cần khóa; runtime cục bộ có thể tiếp tục mà không cần khóa.",
     "OnboardProviderFooter": "Enter mở danh sách nhà cung cấp · Esc quay lại · Ctrl+C thoát.",

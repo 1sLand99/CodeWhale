@@ -11,6 +11,7 @@
     "test": "vitest run",
     "check:facts": "node scripts/check-facts.mjs",
     "check:docs": "node scripts/check-docs.mjs",
+    "check:locales": "node scripts/check-locales.mjs",
     "check:deploy-env": "node scripts/check-cloudflare-deploy-env.mjs",
     "compare:deployed-facts": "node scripts/compare-deployed-facts.mjs",
     "check:deployed-facts": "node scripts/compare-deployed-facts.mjs --require-current",

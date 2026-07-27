@@ -546,6 +546,111 @@ const WHALE_NICKNAMES_KO: &[&str] = &[
     "범고래",
 ];
 
+const WHALE_NICKNAMES_CA: &[&str] = &[
+    "Balena blava",
+    "Balena geperuda",
+    "Catxalot",
+    "Rorcual comú",
+    "Rorcual boreal",
+    "Balena minke",
+    "Balena franca",
+    "Balena de Groenlàndia",
+    "Beluga",
+    "Narval",
+    "Orca",
+    "Calderó",
+];
+
+const WHALE_NICKNAMES_DE: &[&str] = &[
+    "Blauwal",
+    "Buckelwal",
+    "Pottwal",
+    "Finnwal",
+    "Seiwal",
+    "Zwergwal",
+    "Glattwal",
+    "Grönlandwal",
+    "Beluga",
+    "Narwal",
+    "Orca",
+    "Pilotwal",
+];
+
+const WHALE_NICKNAMES_FR: &[&str] = &[
+    "Baleine bleue",
+    "Baleine à bosse",
+    "Cachalot",
+    "Rorqual commun",
+    "Rorqual boréal",
+    "Petit rorqual",
+    "Baleine franche",
+    "Baleine boréale",
+    "Béluga",
+    "Narval",
+    "Orque",
+    "Globicéphale",
+];
+
+const WHALE_NICKNAMES_ID: &[&str] = &[
+    "Paus biru",
+    "Paus bungkuk",
+    "Paus sperma",
+    "Paus sirip",
+    "Paus sei",
+    "Paus minke",
+    "Paus sikat",
+    "Paus bowhead",
+    "Beluga",
+    "Narwal",
+    "Orca",
+    "Paus pilot",
+];
+
+const WHALE_NICKNAMES_HI: &[&str] = &[
+    "नीली व्हेल",
+    "कूबड़ व्हेल",
+    "स्पर्म व्हेल",
+    "फिन व्हेल",
+    "सेई व्हेल",
+    "मिंक व्हेल",
+    "राइट व्हेल",
+    "बोहेड व्हेल",
+    "बेलुगा",
+    "नार्व्हल",
+    "ओर्का",
+    "पायलट व्हेल",
+];
+
+const WHALE_NICKNAMES_RU: &[&str] = &[
+    "Синий кит",
+    "Горбатый кит",
+    "Кашалот",
+    "Финвал",
+    "Сейвал",
+    "Малый полосатик",
+    "Гладкий кит",
+    "Гренландский кит",
+    "Белуха",
+    "Нарвал",
+    "Косатка",
+    "Гринда",
+];
+
+const WHALE_NICKNAMES_UK: &[&str] = &[
+    "Синій кит",
+    "Горбатий кит",
+    "Кашалот",
+    "Фінвал",
+    "Сейвал",
+    "Малий смугач",
+    "Гладкий кит",
+    "Гренландський кит",
+    "Белуга",
+    "Нарвал",
+    "Косатка",
+    "Гринда",
+];
+
 /// Return a deterministic whale name in the active UI locale.
 #[must_use]
 pub fn whale_name_for_id_in_locale(id: &str, locale_tag: &str) -> String {
@@ -562,6 +667,13 @@ pub fn whale_name_for_id_in_locale(id: &str, locale_tag: &str) -> String {
         "es-419" => Some(WHALE_NICKNAMES_ES_419),
         "vi" => Some(WHALE_NICKNAMES_VI),
         "ko" => Some(WHALE_NICKNAMES_KO),
+        "ca" => Some(WHALE_NICKNAMES_CA),
+        "de" => Some(WHALE_NICKNAMES_DE),
+        "fr" => Some(WHALE_NICKNAMES_FR),
+        "id" => Some(WHALE_NICKNAMES_ID),
+        "hi" => Some(WHALE_NICKNAMES_HI),
+        "ru" => Some(WHALE_NICKNAMES_RU),
+        "uk" => Some(WHALE_NICKNAMES_UK),
         _ => None,
     };
     if let Some(pool) = localized_pool {
