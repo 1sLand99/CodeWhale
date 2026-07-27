@@ -253,19 +253,29 @@ impl App {
             (id.name().to_string(), id, theme)
         });
         let provider_models = settings.provider_models.clone().unwrap_or_default();
-        let model = provider_models
-            .get(&provider_identity)
-            .cloned()
-            .or_else(|| {
-                // default_model is a DeepSeek-centric setting; other providers
-                // get their model from config.toml / env (e.g. OPENAI_MODEL).
-                if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
-                    settings.default_model.clone()
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(model);
+        // `provider_models` remembers the last `/model` pick per provider. It
+        // is a convenience default, not an override: when this launch named a
+        // model explicitly (`--model`, forwarded as `CODEWHALE_MODEL`), that
+        // request wins. Before this fix the memory won unconditionally, so
+        // `codewhale --provider moonshot --model kimi-k3` silently kept running
+        // the remembered `kimi-k2.7-code` while `doctor` reported `kimi-k3`.
+        let model = if crate::config::explicit_launch_model_override().is_some() {
+            model
+        } else {
+            provider_models
+                .get(&provider_identity)
+                .cloned()
+                .or_else(|| {
+                    // default_model is a DeepSeek-centric setting; other providers
+                    // get their model from config.toml / env (e.g. OPENAI_MODEL).
+                    if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
+                        settings.default_model.clone()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(model)
+        };
         let auto_model = model.trim().eq_ignore_ascii_case("auto");
         let mut enabled_provider_models = settings.enabled_models.clone().unwrap_or_default();
         for (saved_provider, saved_model) in &provider_models {

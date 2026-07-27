@@ -5222,10 +5222,27 @@ fn model_completion_names_for_openrouter_include_recent_large_models() {
 
 #[test]
 fn model_completion_names_for_moonshot_uses_latest_platform_model() {
-    assert_eq!(
-        model_completion_names_for_provider(ApiProvider::Moonshot),
-        vec![DEFAULT_MOONSHOT_MODEL]
-    );
+    let models = model_completion_names_for_provider(ApiProvider::Moonshot);
+
+    assert_eq!(models.first().copied(), Some(DEFAULT_MOONSHOT_MODEL));
+    // `kimi-k3` is served by this provider's default (direct platform) route
+    // and must be offerable — a dogfood user on v0.9.1 could not find it.
+    assert!(models.contains(&MOONSHOT_KIMI_K3_MODEL), "{models:?}");
+    // The Kimi Code coding-plan ids belong to api.kimi.com/coding/v1, which
+    // this base-URL-less list cannot express. Offering them here would
+    // advertise a pairing `validate_kimi_code_api_model_id` rejects.
+    assert!(!models.contains(&KIMI_CODE_K3_MODEL), "{models:?}");
+    assert!(!models.contains(&DEFAULT_KIMI_CODE_MODEL), "{models:?}");
+    for model in &models {
+        let config = Config {
+            provider: Some(ApiProvider::Moonshot.as_str().to_string()),
+            default_text_model: Some((*model).to_string()),
+            ..Default::default()
+        };
+        config
+            .validate()
+            .expect("every advertised Moonshot model must be valid on its default route");
+    }
 }
 
 #[test]
@@ -10215,4 +10232,144 @@ fn native_memory_backend_owns_explicit_path_and_disables_legacy_fallback() {
         config.memory_path(),
         tmp.path().join("memory/global/MEMORY.md")
     );
+}
+
+/// v0.9.1 kimi-k3 dogfood report: a dogfood user ran `codewhale --provider moonshot --model kimi-k3`
+/// and the session kept reporting `kimi-k2.7-code`. The `--model` flag reaches
+/// this binary as `CODEWHALE_MODEL`, so the route it produces is asserted here
+/// end to end: the effective model, the endpoint, and the id that goes on the
+/// wire must all be the one the user named.
+#[test]
+fn cli_model_flag_selects_kimi_k3_on_the_moonshot_platform_route() -> Result<()> {
+    let _lock = lock_test_env();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_root = env::temp_dir().join(format!(
+        "codewhale-tui-kimi-k3-cli-{}-{nanos}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&temp_root)?;
+    let _guard = EnvGuard::new(&temp_root);
+
+    // `EnvGuard` points DEEPSEEK_CONFIG_PATH at `<home>/.deepseek/config.toml`.
+    let config_path = temp_root.join(".deepseek").join("config.toml");
+    ensure_parent_dir(&config_path)?;
+    fs::write(
+        &config_path,
+        "provider = \"moonshot\"\n\n[providers.moonshot]\napi_key = \"k\"\n",
+    )?;
+    // Safety: test-only env mutation guarded by lock_test_env().
+    unsafe {
+        env::set_var("CODEWHALE_PROVIDER", "moonshot");
+        env::set_var("CODEWHALE_MODEL", MOONSHOT_KIMI_K3_MODEL);
+    }
+
+    let config = Config::load(None, None)?;
+
+    assert_eq!(config.api_provider(), ApiProvider::Moonshot);
+    assert_eq!(config.default_model(), MOONSHOT_KIMI_K3_MODEL);
+    assert_eq!(config.deepseek_base_url(), DEFAULT_MOONSHOT_BASE_URL);
+    assert_eq!(
+        wire_model_for_provider_route(
+            ApiProvider::Moonshot,
+            &config.deepseek_base_url(),
+            &config.default_model(),
+        ),
+        MOONSHOT_KIMI_K3_MODEL,
+        "the id the user named must be the id on the wire"
+    );
+    assert_eq!(
+        explicit_launch_model_override().as_deref(),
+        Some(MOONSHOT_KIMI_K3_MODEL),
+        "an explicit --model must remain recognizable as an explicit request"
+    );
+    assert_eq!(
+        moonshot_k3_route_display_name(&config.deepseek_base_url(), &config.default_model()),
+        Some("Moonshot direct / kimi-k3")
+    );
+    Ok(())
+}
+
+/// The bare `k3` id belongs to the Kimi Code coding-plan endpoint. A config
+/// that selects it there must resolve, and must be labelled as the membership
+/// product rather than the direct platform one (v0.9.1 kimi-k3 dogfood report).
+#[test]
+fn config_selects_bare_k3_on_the_kimi_code_route() {
+    let config = Config {
+        provider: Some("moonshot".to_string()),
+        providers: Some(ProvidersConfig {
+            moonshot: ProviderConfig {
+                api_key: Some("k".to_string()),
+                base_url: Some(DEFAULT_KIMI_CODE_BASE_URL.to_string()),
+                model: Some(KIMI_CODE_K3_MODEL.to_string()),
+                ..ProviderConfig::default()
+            },
+            ..ProvidersConfig::default()
+        }),
+        ..Config::default()
+    };
+
+    assert_eq!(config.default_model(), KIMI_CODE_K3_MODEL);
+    assert_eq!(
+        wire_model_for_provider_route(
+            ApiProvider::Moonshot,
+            &config.deepseek_base_url(),
+            &config.default_model(),
+        ),
+        KIMI_CODE_K3_MODEL
+    );
+    assert_eq!(
+        moonshot_k3_route_display_name(&config.deepseek_base_url(), &config.default_model()),
+        Some("Kimi Code membership / k3")
+    );
+}
+
+/// Neither K3 id may be silently served by the other product's endpoint. The
+/// two are different plans with different context windows, so an unservable
+/// pairing has to fail loudly and name both routes (v0.9.1 kimi-k3 dogfood report).
+#[test]
+fn k3_and_kimi_k3_never_cross_products_and_fail_visibly() {
+    let crossed = validate_kimi_code_api_model_id(
+        ApiProvider::Moonshot,
+        DEFAULT_KIMI_CODE_BASE_URL,
+        MOONSHOT_KIMI_K3_MODEL,
+    )
+    .expect_err("kimi-k3 is not a Kimi Code model id");
+    assert!(crossed.contains("api.kimi.com/coding/v1"), "{crossed}");
+    assert!(crossed.contains("api.moonshot.ai/v1"), "{crossed}");
+    assert!(crossed.contains(KIMI_CODE_K3_MODEL), "{crossed}");
+
+    let reversed = validate_kimi_code_api_model_id(
+        ApiProvider::Moonshot,
+        DEFAULT_MOONSHOT_BASE_URL,
+        KIMI_CODE_K3_MODEL,
+    )
+    .expect_err("bare k3 is not a direct-platform model id");
+    assert!(reversed.contains("api.moonshot.ai/v1"), "{reversed}");
+    assert!(reversed.contains("api.kimi.com/coding/v1"), "{reversed}");
+    assert!(reversed.contains(MOONSHOT_KIMI_K3_MODEL), "{reversed}");
+
+    // The exact-route predicates stay disjoint.
+    assert!(is_exact_direct_moonshot_k3_route(
+        ApiProvider::Moonshot,
+        DEFAULT_MOONSHOT_BASE_URL,
+        MOONSHOT_KIMI_K3_MODEL
+    ));
+    assert!(!is_exact_kimi_code_k3_route(
+        ApiProvider::Moonshot,
+        DEFAULT_MOONSHOT_BASE_URL,
+        MOONSHOT_KIMI_K3_MODEL
+    ));
+    assert!(is_exact_kimi_code_k3_route(
+        ApiProvider::Moonshot,
+        DEFAULT_KIMI_CODE_BASE_URL,
+        KIMI_CODE_K3_MODEL
+    ));
+    assert!(!is_exact_direct_moonshot_k3_route(
+        ApiProvider::Moonshot,
+        DEFAULT_KIMI_CODE_BASE_URL,
+        KIMI_CODE_K3_MODEL
+    ));
 }

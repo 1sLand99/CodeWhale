@@ -629,6 +629,29 @@ impl Default for ModelRegistry {
                 supports_tools: true,
                 supports_reasoning: true,
             },
+            // Moonshot ships K3 as two distinct products under one provider
+            // id, separated by endpoint (v0.9.1 kimi-k3 dogfood report):
+            //   * `kimi-k3` on the direct platform API (api.moonshot.ai/v1)
+            //   * `k3` on the Kimi Code coding-plan API (api.kimi.com/coding/v1)
+            // Both must be resolvable here or `--model kimi-k3` silently
+            // reports the provider default instead. The endpoint pairing is
+            // enforced separately by `validate_kimi_code_api_model_id`; keep
+            // the two ids in separate entries so neither one's alias set can
+            // launder a request onto the other product's route.
+            ModelInfo {
+                id: "kimi-k3".to_string(),
+                provider: ProviderKind::Moonshot,
+                aliases: vec!["moonshot-kimi-k3".to_string()],
+                supports_tools: true,
+                supports_reasoning: true,
+            },
+            ModelInfo {
+                id: "k3".to_string(),
+                provider: ProviderKind::Moonshot,
+                aliases: vec!["kimi-code-k3".to_string()],
+                supports_tools: true,
+                supports_reasoning: true,
+            },
             ModelInfo {
                 id: "deepseek-ai/DeepSeek-V4-Pro".to_string(),
                 provider: ProviderKind::Sglang,
@@ -1238,8 +1261,16 @@ impl ModelRegistry {
                     fallback_chain,
                 };
             }
+            // The global alias map is a *provider-less* convenience lookup. It
+            // must never answer a provider-scoped question with another
+            // vendor's model: before this fix, `--provider moonshot` asking for
+            // `kimi-k3` was answered with OpenCode Go's `kimi-k3` because the
+            // hinted provider had no such id. A hinted request that the hinted
+            // provider cannot serve falls through to that provider's default
+            // with `used_fallback: true`, which callers already surface.
             if provider_hint != Some(ProviderKind::OpencodeGo)
                 && let Some(idx) = self.alias_map.get(&normalize(name))
+                && provider_hint.is_none_or(|hint| self.models[*idx].provider == hint)
             {
                 return ModelResolution {
                     requested: Some(name.to_string()),
@@ -1570,6 +1601,71 @@ mod tests {
         assert_eq!(resolved.resolved.provider, ProviderKind::Moonshot);
         assert_eq!(resolved.resolved.id, "kimi-k2.6");
         assert!(resolved.resolved.supports_reasoning);
+    }
+
+    /// v0.9.1 dogfood report: a user ran `--provider moonshot --model kimi-k3` and was told
+    /// the model was `kimi-k2.7-code`. The registry knew neither Moonshot K3
+    /// product, so the explicit request fell through to the provider default.
+    #[test]
+    fn moonshot_resolves_both_k3_products_without_crossing_them() {
+        let registry = ModelRegistry::default();
+
+        for (requested, expected) in [("kimi-k3", "kimi-k3"), ("k3", "k3")] {
+            let resolved = registry.resolve(Some(requested), Some(ProviderKind::Moonshot));
+
+            assert_eq!(resolved.resolved.provider, ProviderKind::Moonshot);
+            assert_eq!(resolved.resolved.id, expected, "{resolved:?}");
+            assert!(
+                !resolved.used_fallback,
+                "an explicit Moonshot K3 request is not a fallback: {resolved:?}"
+            );
+        }
+    }
+
+    /// The bare `k3` id belongs to the Kimi Code coding-plan endpoint and
+    /// `kimi-k3` to the direct platform endpoint. Neither may be laundered
+    /// into the other's id by alias expansion.
+    #[test]
+    fn moonshot_k3_ids_are_never_rewritten_into_each_other() {
+        let registry = ModelRegistry::default();
+
+        assert_eq!(
+            registry
+                .resolve(Some("kimi-k3"), Some(ProviderKind::Moonshot))
+                .resolved
+                .id,
+            "kimi-k3"
+        );
+        assert_eq!(
+            registry
+                .resolve(Some("k3"), Some(ProviderKind::Moonshot))
+                .resolved
+                .id,
+            "k3"
+        );
+    }
+
+    /// A provider-scoped question must never be answered with another
+    /// vendor's model. `kimi-k3` also exists in the OpenCode Go catalog;
+    /// before this fix that entry answered `--provider moonshot` requests.
+    #[test]
+    fn a_provider_hint_never_resolves_to_another_providers_model() {
+        let registry = ModelRegistry::default();
+
+        let resolved = registry.resolve(Some("glm-5.2"), Some(ProviderKind::Moonshot));
+        assert_eq!(
+            resolved.resolved.provider,
+            ProviderKind::Moonshot,
+            "a Moonshot request must not be answered by Z.ai: {resolved:?}"
+        );
+        assert!(
+            resolved.used_fallback,
+            "an unservable id must be reported as a fallback, not as the request: {resolved:?}"
+        );
+
+        let go = registry.resolve(Some("kimi-k3"), Some(ProviderKind::OpencodeGo));
+        assert_eq!(go.resolved.provider, ProviderKind::OpencodeGo);
+        assert_eq!(go.resolved.id, "kimi-k3");
     }
 
     #[test]

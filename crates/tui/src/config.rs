@@ -1274,7 +1274,22 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
             vec![DEFAULT_SILICONFLOW_MODEL, DEFAULT_SILICONFLOW_FLASH_MODEL]
         }
         ApiProvider::Arcee => vec![DEFAULT_ARCEE_MODEL, ARCEE_TRINITY_LARGE_PREVIEW_MODEL],
-        ApiProvider::Moonshot => vec![DEFAULT_MOONSHOT_MODEL],
+        // Moonshot's direct platform API (the provider's default route) serves
+        // `kimi-k3`; advertising only `kimi-k2.7-code` is half of why a
+        // dogfood user reported "I can't find k3" on v0.9.1.
+        //
+        // The bare `k3` id and `kimi-for-coding` deliberately stay out: they
+        // belong to the Kimi Code coding-plan endpoint
+        // (api.kimi.com/coding/v1), which `validate_kimi_code_api_model_id`
+        // enforces. A completion list is a per-provider fallback with no
+        // base-URL context, so offering an id this route would reject would
+        // just move the surprise later. Kimi Code routes surface their own
+        // ids through the configured model and the route-aware picker rows.
+        ApiProvider::Moonshot => vec![
+            DEFAULT_MOONSHOT_MODEL,
+            MOONSHOT_KIMI_K3_MODEL,
+            MOONSHOT_KIMI_K2_6_MODEL,
+        ],
         ApiProvider::Huggingface => {
             vec![DEFAULT_HUGGINGFACE_MODEL, DEFAULT_HUGGINGFACE_FLASH_MODEL]
         }
@@ -9591,6 +9606,22 @@ fn provider_secret_store_api_key_with_mode(
         .ok()
         .flatten()
         .filter(|value| !value.trim().is_empty())
+}
+
+/// The model this launch was explicitly asked for, if any.
+///
+/// The `codewhale` dispatcher forwards `--model` to this binary as
+/// `CODEWHALE_MODEL` (with the legacy `DEEPSEEK_MODEL` alias), so an explicit
+/// flag and an explicit shell export are the same signal here: *the user named
+/// a model for this run*. That has to outrank the remembered per-provider
+/// selection in `settings.toml`, which is a convenience memory of the last
+/// `/model` pick — never a reason to run something the user did not ask for
+/// (v0.9.1 kimi-k3 dogfood report).
+pub(crate) fn explicit_launch_model_override() -> Option<String> {
+    codewhale_env_var("CODEWHALE_MODEL", "DEEPSEEK_MODEL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 pub(crate) fn explicit_cli_api_key_override() -> Option<String> {
