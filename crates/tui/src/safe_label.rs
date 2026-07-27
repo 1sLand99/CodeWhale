@@ -510,7 +510,7 @@ mod tests {
             "GET https://gw.example.com/v1/deployments/prod-key-8f2a?api_key=sk-1234567890abcdef failed".to_string(),
             "server \"my secret server\" refused: password=hunter2".to_string(),
             "model /Users/someone/models/private.gguf is unavailable".to_string(),
-            "authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9".to_string(),
+            "authorization: Bearer eyJhbGciFAKEFIXTUREnotasecret".to_string(),
             "endpoint http://10.0.0.5:8443/internal/deploy-9f8e7d6c5b4a3928 timed out".to_string(),
             format!("crash{}oops", '\u{7}'),
         ];

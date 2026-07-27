@@ -2019,7 +2019,7 @@ mod tests {
                 text: format!(
                     "escaped \\\"api_key\\\": \\\"sk-escapedsecret99\\\"\n\
                      bearer: Bearer abcdef1234567890\n\
-                     jwt eyJhbGciOiJIUzI1NiIs.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJVadQssw5c\n\
+                     jwt eyJhbGciOiJIUzI1NiIsFAKE.eyJGQUtFIjoiZml4dHVyZSJ9.FAKEFIXTURESIGNATUREnotasecret000\n\
                      url https://bob:s3cret@example.com/deep?session_token=xyz&ok=1#section\n\
                      path {workspace}/src/main.rs"
                 ),
