@@ -282,14 +282,14 @@ pub fn bundled_skill_tier(name: &str) -> Option<BundledSkillTier> {
 /// without updating the fixture fails the build rather than silently changing
 /// what every user gets installed.
 #[must_use]
-#[allow(dead_code)] // consumed by the catalog matrix contract tests
+#[cfg(test)]
 pub fn bundled_skill_names() -> Vec<&'static str> {
     BUNDLED_SKILLS.iter().map(|skill| skill.name).collect()
 }
 
 /// The shipped generation marker written to `.system-installed-version`.
 #[must_use]
-#[allow(dead_code)] // consumed by the catalog matrix contract tests
+#[cfg(test)]
 pub fn bundled_skill_generation() -> &'static str {
     BUNDLED_SKILL_VERSION
 }
