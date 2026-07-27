@@ -323,6 +323,14 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
         "show_thinking" | "thinking" => {
             Some(if app.show_thinking { "true" } else { "false" }.to_string())
         }
+        "thinking_default_expanded" | "thinking_expanded" => Some(
+            if app.thinking_default_expanded {
+                "true"
+            } else {
+                "false"
+            }
+            .to_string(),
+        ),
         "thinking_highlight" | "reasoning_highlight" => Some(
             if app.thinking_highlight {
                 "true"
@@ -1973,6 +1981,10 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
         }
         "show_thinking" | "thinking" => {
             app.show_thinking = settings.show_thinking;
+            app.mark_history_updated();
+        }
+        "thinking_default_expanded" | "thinking_expanded" => {
+            app.thinking_default_expanded = settings.thinking_default_expanded;
             app.mark_history_updated();
         }
         "thinking_highlight" | "reasoning_highlight" => {

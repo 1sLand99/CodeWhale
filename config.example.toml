@@ -85,6 +85,12 @@ default_text_model = "deepseek-v4-pro"
 # current tier as a ⚡ chip.
 reasoning_effort = "max"
 
+# Transcript reasoning presentation. `show_thinking` controls visibility;
+# `thinking_default_expanded` changes only the initial fold state. Space still
+# toggles an individual thinking block either way.
+show_thinking = true
+thinking_default_expanded = false
+
 # ─────────────────────────────────────────────────────────────────────────────────
 # Cost Display
 # ─────────────────────────────────────────────────────────────────────────────────

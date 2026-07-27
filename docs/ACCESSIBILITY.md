@@ -17,6 +17,7 @@ visual motion and density for screen-reader and low-motion users.
 | `status_indicator` setting | `cw` | Static typographic header mark. Set to `whale` or `dots` for the legacy animations, or `off` to hide it. |
 | `calm_mode` setting | `true` | Collapses tool-output details by default and trims status messages. Useful for screen readers that announce every redraw. |
 | `show_thinking` setting | `true` | Set to `false` to hide model `reasoning_content` blocks from the TUI presentation. Canonical session/replay receipts remain unchanged. |
+| `thinking_default_expanded` setting | `false` | Set to `true` to expand visible thinking blocks initially. Space still collapses or expands the selected block. |
 | `show_tool_details` setting | `false` | Set to `true` to expand tool calls inline; details remain available on demand either way. |
 | `inline_diffs` setting | `full` | Use `summary` or `off` to reduce inline File-change density. Exact applied evidence remains available with Alt/Option+V in every mode. |
 
