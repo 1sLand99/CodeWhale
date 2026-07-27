@@ -422,13 +422,13 @@ where
     Ok(())
 }
 
+/// Mirror the id type back as received. The ACP protocol requires
+/// echo-format matching: if the client sent a numeric id the response
+/// must also be numeric. avante.nvim's Lua client uses strict table keys
+/// (callbacks[1] ≠ callbacks["1"]) so converting types breaks the callback
+/// lookup.
 fn jsonrpc_response_id(id: Value) -> Value {
-    match id {
-        Value::Null => Value::Null,
-        Value::String(_) => id,
-        Value::Number(number) => Value::String(number.to_string()),
-        other => Value::String(other.to_string()),
-    }
+    id
 }
 
 #[cfg(test)]
@@ -492,7 +492,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn jsonrpc_result_stringifies_numeric_ids_for_zed_acp() {
+    async fn jsonrpc_result_preserves_numeric_ids_for_avante_acp() {
         let mut out = Vec::new();
 
         write_jsonrpc_result(&mut out, json!(1), json!({"ok": true}))
@@ -501,7 +501,13 @@ mod tests {
 
         let line = String::from_utf8(out).expect("utf8");
         let value: Value = serde_json::from_str(line.trim()).expect("json");
-        assert_eq!(value["id"], "1");
+        // Numeric ID must stay numeric — avante.nvim's Lua client uses
+        // strict table keys (callbacks[1] ≠ callbacks["1"]).
+        assert!(
+            value["id"].is_number(),
+            "numeric id must stay numeric, got {:?}",
+            value["id"]
+        );
         assert_eq!(value["result"], json!({"ok": true}));
     }
 
