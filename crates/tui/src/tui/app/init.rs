@@ -43,6 +43,9 @@ impl App {
             yolo,
             resume_session_id,
             initial_input,
+            // Consumed by `run_app` after the App exists, so it can be shown
+            // alongside (or instead of) the resume receipt.
+            startup_notice: _,
         } = options;
 
         // Start from disk-only preferences so one-time migrations can never
@@ -670,6 +673,8 @@ impl App {
             sidebar_width_dirty: false,
             sidebar_focus_dirty: false,
             context_panel: settings.context_panel,
+            sessions_rail: settings.sessions_rail,
+            sessions_rail_cache: None,
             tool_collapse_threshold: 3,
             expanded_tool_runs: HashSet::new(),
             tool_collapse_mode: ToolCollapseMode::from_setting(&settings.tool_collapse_mode),

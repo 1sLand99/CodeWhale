@@ -108,8 +108,16 @@ mod sandbox;
 mod scorecard;
 #[allow(dead_code)]
 mod session_diagnostics;
+// Acceptance matrix for #2934 / #4397. Test-only: the table documents the
+// contract for reviewers and is enforced by the tests beside it, so it does
+// not need to exist in a shipped binary.
+#[cfg(test)]
+mod session_control_acceptance;
 #[allow(dead_code)]
 mod session_manager;
+mod session_peek;
+mod session_projection;
+mod session_resume;
 mod settings;
 mod shell_dispatcher;
 mod skill_state;
@@ -1800,6 +1808,7 @@ async fn run_async_main(
 
     // Handle session resume. Plain `codewhale` starts fresh: interrupted
     // snapshots are preserved for explicit resume, but never auto-attached.
+    let mut startup_notice = None;
     let resume_session_id = if cli.continue_session {
         let workspace = resolve_workspace(&cli);
         recover_interrupted_checkpoint_for_resume(&workspace)
@@ -1809,14 +1818,54 @@ async fn run_async_main(
     } else if !cli.fresh {
         let workspace = resolve_workspace(&cli);
         preserve_interrupted_checkpoint_for_explicit_resume(&workspace);
-        None
+        // Opt-in auto-resume (#2934). Off by default, so the historical
+        // "plain `codewhale` starts fresh" behaviour is unchanged unless the
+        // user asked for something else. The decision never resumes an
+        // archived, unreadable, or foreign-workspace session; every fallback
+        // carries a receipt rather than silently starting blank.
+        let (session_id, notice) = resolve_auto_resume(&workspace);
+        startup_notice = notice;
+        session_id
     } else {
         None
     };
 
     // Default: Interactive TUI
     // --yolo starts in YOLO mode (auto-approve; shell enabled)
-    run_interactive(&cli, &config, resume_session_id, None, plugin_registry).await
+    run_interactive_with_notice(
+        &cli,
+        &config,
+        resume_session_id,
+        None,
+        startup_notice,
+        plugin_registry,
+    )
+    .await
+}
+
+/// Resolve the opt-in auto-resume setting into a session id plus a receipt.
+///
+/// Deliberately scoped to the plain interactive launch. `codewhale "do X"`
+/// (top-level prompt) and `codewhale exec` are not covered: silently prefixing
+/// a one-shot task with a prior conversation would change what is sent to the
+/// model, which is not a layout preference the user opted into.
+fn resolve_auto_resume(workspace: &Path) -> (Option<String>, Option<String>) {
+    use crate::session_resume::{ResumeRequest, decide_auto_resume};
+
+    let enabled = crate::settings::Settings::load_persisted()
+        .map(|settings| settings.session_auto_resume)
+        .unwrap_or(false);
+    if !enabled {
+        return (None, None);
+    }
+    let Ok(manager) = SessionManager::default_location() else {
+        return (None, None);
+    };
+    let decision = decide_auto_resume(true, &ResumeRequest::default(), workspace, &manager);
+    (
+        decision.session_id().map(str::to_string),
+        decision.status_message(),
+    )
 }
 
 fn prepare_cli_startup(
@@ -8982,6 +9031,28 @@ async fn run_interactive(
     initial_input: Option<tui::InitialInput>,
     plugin_registry: std::sync::Arc<crate::plugins::PluginRegistry>,
 ) -> Result<()> {
+    run_interactive_with_notice(
+        cli,
+        config,
+        resume_session_id,
+        initial_input,
+        None,
+        plugin_registry,
+    )
+    .await
+}
+
+/// As [`run_interactive`], but carrying a one-line startup receipt to show in
+/// the transcript — used by auto-resume to explain why it did or did not
+/// reattach to a previous session (#2934).
+async fn run_interactive_with_notice(
+    cli: &Cli,
+    config: &Config,
+    resume_session_id: Option<String>,
+    initial_input: Option<tui::InitialInput>,
+    startup_notice: Option<String>,
+    plugin_registry: std::sync::Arc<crate::plugins::PluginRegistry>,
+) -> Result<()> {
     let workspace = cli
         .workspace
         .clone()
@@ -9123,6 +9194,7 @@ async fn run_interactive(
             yolo, // YOLO mode auto-approves all tool executions
             resume_session_id,
             initial_input,
+            startup_notice,
             max_subagents,
         },
         plugin_registry,

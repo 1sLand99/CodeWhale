@@ -143,6 +143,8 @@
     "ConfigLabelSidebarWidth": "侧栏宽度",
     "ConfigLabelSidebarFocus": "侧栏焦点",
     "ConfigLabelContextPanel": "上下文面板",
+    "ConfigLabelSessionsRail": "会话栏",
+    "ConfigLabelSessionAutoResume": "自动恢复上次会话",
     "ConfigLabelAutoCompact": "自动压缩",
     "ConfigLabelAutoCompactThreshold": "压缩阈值",
     "ConfigLabelMaxHistory": "输入历史",
@@ -1175,5 +1177,18 @@
     "StartupDefaultSubjectMode": "启动模式",
     "StartupDefaultSubjectThinking": "思考级别",
     "StartupDefaultSubjectModel": "模型",
-    "StartupDefaultSubjectAll": "启动默认值"
+    "StartupDefaultSubjectAll": "启动默认值",
+    "SessionsRailTitle": "会话",
+    "SessionsRailEmpty": "此工作区尚无会话",
+    "SessionsRailBrowseAll": "浏览所有会话",
+    "SessionsRailShowingCount": "{total} 个中的 {shown} 个 — 浏览全部",
+    "SessionsRailUnavailable": "无法读取会话：{error}",
+    "SessionsActionArchive": "归档",
+    "SessionsActionShowArchived": "已归档",
+    "SessionsArchived": "已归档会话 {id}",
+    "SessionsRestored": "已恢复会话 {id}",
+    "SessionsArchiveFailed": "归档失败：{error}",
+    "SessionsShowingArchived": "正在显示已归档会话",
+    "SessionsHidingArchived": "已隐藏归档会话",
+    "SessionsArchivedCompact": "已归档"
 }

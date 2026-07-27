@@ -143,6 +143,8 @@
     "ConfigLabelSidebarWidth": "Sidebar width",
     "ConfigLabelSidebarFocus": "Sidebar focus",
     "ConfigLabelContextPanel": "Context panel",
+    "ConfigLabelSessionsRail": "Sessions rail",
+    "ConfigLabelSessionAutoResume": "Auto-resume last session",
     "ConfigLabelAutoCompact": "Auto compact",
     "ConfigLabelAutoCompactThreshold": "Compact threshold",
     "ConfigLabelMaxHistory": "Input history",
@@ -1175,5 +1177,18 @@
     "StartupDefaultSubjectMode": "startup mode",
     "StartupDefaultSubjectThinking": "thinking level",
     "StartupDefaultSubjectModel": "model",
-    "StartupDefaultSubjectAll": "startup defaults"
+    "StartupDefaultSubjectAll": "startup defaults",
+    "SessionsRailTitle": "Sessions",
+    "SessionsRailEmpty": "No sessions in this workspace yet",
+    "SessionsRailBrowseAll": "Browse all sessions",
+    "SessionsRailShowingCount": "{shown} of {total} — browse all",
+    "SessionsRailUnavailable": "Sessions unavailable: {error}",
+    "SessionsActionArchive": "archive",
+    "SessionsActionShowArchived": "archived",
+    "SessionsArchived": "Archived session {id}",
+    "SessionsRestored": "Restored session {id}",
+    "SessionsArchiveFailed": "Archive failed: {error}",
+    "SessionsShowingArchived": "Showing archived sessions",
+    "SessionsHidingArchived": "Hiding archived sessions",
+    "SessionsArchivedCompact": "archived"
 }

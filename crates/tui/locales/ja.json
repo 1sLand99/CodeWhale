@@ -143,6 +143,8 @@
     "ConfigLabelSidebarWidth": "サイドバー幅",
     "ConfigLabelSidebarFocus": "サイドバーフォーカス",
     "ConfigLabelContextPanel": "コンテキストパネル",
+    "ConfigLabelSessionsRail": "セッションレール",
+    "ConfigLabelSessionAutoResume": "前回のセッションを自動再開",
     "ConfigLabelAutoCompact": "自動コンパクト",
     "ConfigLabelAutoCompactThreshold": "コンパクトしきい値",
     "ConfigLabelMaxHistory": "入力履歴",
@@ -1175,5 +1177,18 @@
     "StartupDefaultSubjectMode": "起動時のモード",
     "StartupDefaultSubjectThinking": "思考レベル",
     "StartupDefaultSubjectModel": "モデル",
-    "StartupDefaultSubjectAll": "起動時の既定値"
+    "StartupDefaultSubjectAll": "起動時の既定値",
+    "SessionsRailTitle": "セッション",
+    "SessionsRailEmpty": "このワークスペースにはまだセッションがありません",
+    "SessionsRailBrowseAll": "すべてのセッションを表示",
+    "SessionsRailShowingCount": "{total} 件中 {shown} 件 — すべて表示",
+    "SessionsRailUnavailable": "セッションを読み込めません: {error}",
+    "SessionsActionArchive": "アーカイブ",
+    "SessionsActionShowArchived": "アーカイブ済み",
+    "SessionsArchived": "セッション {id} をアーカイブしました",
+    "SessionsRestored": "セッション {id} を復元しました",
+    "SessionsArchiveFailed": "アーカイブに失敗しました: {error}",
+    "SessionsShowingArchived": "アーカイブ済みセッションを表示中",
+    "SessionsHidingArchived": "アーカイブ済みセッションを非表示",
+    "SessionsArchivedCompact": "アーカイブ済み"
 }

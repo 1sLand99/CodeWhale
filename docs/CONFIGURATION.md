@@ -1295,6 +1295,22 @@ Common settings keys:
   `hidden` disables the right sidebar entirely so raw terminal selection cannot
   cross from the transcript into sidebar borders. Legacy `plan` and `todos`
   values, plus the old `work` name, are accepted and normalized to `pinned`.
+- `sessions_rail` (`on`/`off`; default `off`): show the persistent Sessions
+  rail in the sidebar panel stack. Rows list this workspace's recent
+  non-archived sessions, newest first, with the active one marked; activating a
+  row opens the session picker preselected on it (`/sessions open <id>`), so
+  resume keeps its single implementation. Rows are projected from cached
+  session metadata — the rail never reads a transcript per frame, and never
+  contacts a provider.
+- `session_auto_resume` (`on`/`off`; default `off`): reattach to this
+  workspace's most recent session when Codewhale starts. Off by default so
+  plain `codewhale` keeps starting fresh. `--resume`, `--continue`, and
+  `--fresh` always take precedence. When it is on, startup still refuses to
+  resume a session that is archived, fails to load, or is recorded against a
+  different workspace; each of those falls back to a fresh transcript and says
+  which session was skipped and why. It applies to the interactive launch only
+  — `codewhale "<prompt>"` and `codewhale exec` are never silently prefixed
+  with a prior conversation.
 - `max_history` (number of submitted input history entries; cleared drafts are
   also kept locally for composer history search)
 - `default_model` (model name override)

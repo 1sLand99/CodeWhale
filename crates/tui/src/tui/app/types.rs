@@ -607,6 +607,13 @@ pub struct TuiOptions {
     /// session with the PR context already typed — the user can edit
     /// before sending or hit Enter to fire as-is.
     pub initial_input: Option<InitialInput>,
+    /// One-line receipt to show once at startup.
+    ///
+    /// Auto-resume uses this to say what it did — reattached, or fell back to
+    /// a fresh transcript because the candidate was missing, unreadable, or
+    /// recorded against a different workspace (#2934). Silence is the correct
+    /// value when nothing happened worth reporting.
+    pub startup_notice: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

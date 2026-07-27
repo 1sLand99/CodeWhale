@@ -582,6 +582,7 @@ pub(crate) fn test_tui_options(workspace: impl AsRef<Path>) -> crate::tui::app::
         yolo: false,
         resume_session_id: None,
         initial_input: None,
+        startup_notice: None,
     }
 }
 

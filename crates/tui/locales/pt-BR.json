@@ -143,6 +143,8 @@
     "ConfigLabelSidebarWidth": "Largura da barra lateral",
     "ConfigLabelSidebarFocus": "Foco da barra lateral",
     "ConfigLabelContextPanel": "Painel de contexto",
+    "ConfigLabelSessionsRail": "Trilho de sessões",
+    "ConfigLabelSessionAutoResume": "Retomar a última sessão automaticamente",
     "ConfigLabelAutoCompact": "Compactação automática",
     "ConfigLabelAutoCompactThreshold": "Limite de compactação",
     "ConfigLabelMaxHistory": "Histórico de entrada",
@@ -1175,5 +1177,18 @@
     "StartupDefaultSubjectMode": "o modo de inicialização",
     "StartupDefaultSubjectThinking": "o nível de raciocínio",
     "StartupDefaultSubjectModel": "o modelo",
-    "StartupDefaultSubjectAll": "os padrões de inicialização"
+    "StartupDefaultSubjectAll": "os padrões de inicialização",
+    "SessionsRailTitle": "Sessões",
+    "SessionsRailEmpty": "Ainda não há sessões neste workspace",
+    "SessionsRailBrowseAll": "Ver todas as sessões",
+    "SessionsRailShowingCount": "{shown} de {total} — ver todas",
+    "SessionsRailUnavailable": "Sessões indisponíveis: {error}",
+    "SessionsActionArchive": "arquivar",
+    "SessionsActionShowArchived": "arquivadas",
+    "SessionsArchived": "Sessão {id} arquivada",
+    "SessionsRestored": "Sessão {id} restaurada",
+    "SessionsArchiveFailed": "Falha ao arquivar: {error}",
+    "SessionsShowingArchived": "Mostrando sessões arquivadas",
+    "SessionsHidingArchived": "Ocultando sessões arquivadas",
+    "SessionsArchivedCompact": "arquivada"
 }
