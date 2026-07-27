@@ -10,6 +10,7 @@ mod load;
 mod new;
 mod purge;
 mod relay;
+mod remote_control;
 mod rename;
 #[cfg(test)]
 pub(crate) use rename::rename_with_manager;
@@ -65,6 +66,10 @@ impl CommandGroup for SessionCommands {
             Box::new(FunctionCommand::new(
                 relay::RelayCmd::info(),
                 relay::RelayCmd::execute,
+            )),
+            Box::new(FunctionCommand::new(
+                remote_control::RemoteControlCmd::info(),
+                remote_control::RemoteControlCmd::execute,
             )),
             Box::new(FunctionCommand::new(
                 export::ExportCmd::info(),

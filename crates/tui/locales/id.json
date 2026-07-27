@@ -260,6 +260,7 @@
     "CmdQueueIndexPositive": "Indeks harus berupa angka positif",
     "CmdQueueIndexMin": "Indeks harus >= 1",
     "CmdRelayDescription": "Buat relay sesi (接力) untuk thread baru",
+    "CmdRemoteControlDescription": "Lanjutkan sesi persis ini dari akun web Codewhale Anda",
     "CmdRenameDescription": "Ubah nama sesi saat ini",
     "CmdRestoreDescription": "Kembalikan workspace ke snapshot pra/pasca-giliran sebelumnya. Tanpa argumen, menampilkan snapshot terbaru.",
     "CmdRetryDescription": "Coba lagi permintaan terakhir",

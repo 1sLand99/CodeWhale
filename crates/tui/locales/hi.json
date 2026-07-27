@@ -260,6 +260,7 @@
     "CmdQueueIndexPositive": "इंडेक्स धनात्मक संख्या होनी चाहिए",
     "CmdQueueIndexMin": "इंडेक्स >= 1 होनी चाहिए",
     "CmdRelayDescription": "नए थ्रेड के लिए सत्र रिले (接力) बनाएँ",
+    "CmdRemoteControlDescription": "अपने Codewhale वेब खाते से यही सत्र जारी रखें",
     "CmdRenameDescription": "वर्तमान सत्र का नाम बदलें",
     "CmdRestoreDescription": "वर्कस्पेस को पूर्व pre/post-turn स्नैपशॉट पर वापस लाएँ। बिना आर्ग के हालिया स्नैपशॉट सूचीबद्ध करता है।",
     "CmdRetryDescription": "अंतिम अनुरोध पुनः प्रयास करें",
