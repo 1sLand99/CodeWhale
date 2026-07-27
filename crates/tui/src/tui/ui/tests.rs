@@ -7269,6 +7269,29 @@ fn auto_model_still_uses_auto_model_router() {
     );
 }
 
+#[tokio::test]
+async fn auto_preview_stops_before_the_provider_backed_route_planner() {
+    let mut app = create_test_app();
+    app.auto_model = true;
+    app.model = "auto".to_string();
+    let config = Config::default();
+    let (_engine, handle) = crate::core::engine::Engine::new(EngineConfig::default(), &config);
+
+    let inputs = build_preview_request_inputs(
+        &app,
+        &config,
+        &handle,
+        Some("classify this hypothetical turn".to_string()),
+    )
+    .await;
+
+    assert!(inputs.next_turn.is_none());
+    assert!(matches!(
+        inputs.unresolved,
+        crate::core::engine::preview::PreviewUnresolved::AutoRouteClassificationNotExecuted
+    ));
+}
+
 fn init_git_repo() -> TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
 

@@ -38,11 +38,35 @@ impl Engine {
         todo_list: SharedTodoList,
         plan_state: SharedPlanState,
     ) -> ToolRegistryBuilder {
-        let shell_policy = shell_policy_for_mode(mode, self.session.allow_shell);
+        self.build_turn_tool_registry_builder_for_route(
+            mode,
+            self.session.allow_shell,
+            self.deepseek_client.clone(),
+            &self.session.model,
+            todo_list,
+            plan_state,
+        )
+    }
+
+    /// Build the registry from the route and authority already resolved for
+    /// this turn. Preview calls this before either is installed on the engine,
+    /// so reading `self.session` here would describe the previous turn's shell
+    /// posture, client, and model.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn build_turn_tool_registry_builder_for_route(
+        &self,
+        mode: AppMode,
+        allow_shell: bool,
+        client: Option<DeepSeekClient>,
+        model: &str,
+        todo_list: SharedTodoList,
+        plan_state: SharedPlanState,
+    ) -> ToolRegistryBuilder {
+        let shell_policy = shell_policy_for_mode(mode, allow_shell);
         if mode != AppMode::Plan {
             let mut builder = ToolRegistryBuilder::new().with_agent_runtime_surface(
-                self.deepseek_client.clone(),
-                self.session.model.clone(),
+                client.clone(),
+                model.to_string(),
                 self.agent_tool_surface_options(shell_policy),
                 todo_list,
                 plan_state,
@@ -80,7 +104,7 @@ impl Engine {
         };
 
         builder = builder
-            .with_review_tool(self.deepseek_client.clone(), self.session.model.clone())
+            .with_review_tool(client, model.to_string())
             .with_user_input_tool()
             .with_parallel_tool();
 

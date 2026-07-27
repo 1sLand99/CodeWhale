@@ -28,6 +28,16 @@ notes, and relevant issue/PR comments.
 ## Contributors by time
 
 <details open>
+<summary><strong>v0.9.2 — request inspectability</strong></summary>
+
+- **[GTC2080](https://github.com/GTC2080)** (TaoMu) — the `dryrun` concept
+  behind `/preview-request`: preview the next outbound request from the real
+  request-building seam rather than a hand-rolled summary (PR #1099,
+  harvested)
+
+</details>
+
+<details open>
 <summary><strong>v0.9.1 — provider and runtime hardening</strong></summary>
 
 - **[h3c-hexin](https://github.com/h3c-hexin)** — calendar-anchored hourly

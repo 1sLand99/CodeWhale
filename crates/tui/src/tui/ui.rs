@@ -105,6 +105,7 @@ use crate::tui::onboarding;
 use crate::tui::pager::PagerView;
 use crate::tui::persistence_actor::{self, PersistRequest};
 use crate::tui::scrolling::TranscriptScroll;
+use crate::turn_route_plan::{PlannedTurnRoute, TurnRoutePlanRequest, plan_turn_route};
 use crate::work_graph::task_owner_snapshot;
 // SelectionAutoscroll unused
 use crate::tui::motion::{FrameRequester, MotionMode};
@@ -1838,6 +1839,183 @@ fn spawn_tui_engine(config: EngineConfig, api_config: &Config) -> EngineHandle {
     // so workspace switches and provider recovery cannot retain stale Work.
     let _ = handle.try_send(Op::ListSubAgents);
     handle
+}
+
+/// Snapshot the posture a real `Op::SendMessage` would carry, and — when the
+/// user supplied a hypothetical prompt — resolve the next turn's route with
+/// the **same shared planner** dispatch uses (#1004).
+///
+/// The hypothetical prompt is taken through the deterministic part of the real
+/// submit path, in the real order: the **active skill** it would be wrapped
+/// with, file and git mention resolution with the same error propagation, and
+/// the paused-command note a real submit appends. That is what makes the body
+/// the engine hashes the body a real turn would build. It is never added to
+/// the conversation, no state is consumed, and the previewed request itself is
+/// never sent.
+///
+/// Two things a real submit does that an inspection must not, and what happens
+/// instead:
+///
+/// - **`message_submit` hooks.** They run first, before mentions, skill
+///   wrapping, route planning, and the tool policy, and they may replace the
+///   text or block the turn outright. Running them would give a *preview* the
+///   side effects of a submit. So when any are configured, nothing downstream
+///   of the text can be claimed exact and the whole manifest reports
+///   [`PreviewUnresolved::MessageSubmitHooksConfigured`] — including under a
+///   fixed model, because the tool policy is derived from the content too.
+/// - **Consuming the active skill.** A real submit *takes* `app.active_skill`.
+///   The preview clones it: the skill is still pending after an inspection,
+///   and the previewed body is the one it would have produced. Dropping it
+///   instead — which the first pass did — previewed an unwrapped prompt and
+///   quietly under-reported the request by the whole skill instruction.
+///
+/// Without a prompt there is no next-turn route to resolve under auto model
+/// routing and no next-turn body under any routing, so this reports a typed
+/// unresolved state instead of recycling the installed route.
+async fn build_preview_request_inputs(
+    app: &App,
+    config: &Config,
+    engine_handle: &EngineHandle,
+    hypothetical_prompt: Option<String>,
+) -> crate::core::engine::preview::PreviewRequestInputs {
+    use crate::core::engine::preview::{PreviewNextTurn, PreviewRequestInputs, PreviewUnresolved};
+
+    let requested_model = if app.auto_model {
+        "auto".to_string()
+    } else {
+        app.model.clone()
+    };
+    let prompt_supplied = hypothetical_prompt.is_some();
+    let posture = |next_turn, unresolved| PreviewRequestInputs {
+        mode: app.mode,
+        allow_shell: app.allow_shell,
+        trust_mode: app.trust_mode,
+        auto_approve: app_auto_approve_enabled(app),
+        approval_mode: app.approval_mode,
+        allowed_tools: app.active_allowed_tools.clone(),
+        dynamic_tools: Vec::new(),
+        provenance: crate::core::ops::UserInputProvenance::ExternalUser,
+        requested_model: requested_model.clone(),
+        requested_reasoning: app.reasoning_effort.as_setting().to_string(),
+        auto_model: app.auto_model,
+        hypothetical_prompt_supplied: prompt_supplied,
+        next_turn,
+        unresolved,
+    };
+
+    let Some(prompt) = hypothetical_prompt else {
+        // Never clear the unresolved flag just because a session has a route:
+        // under auto routing the next prompt is what decides it.
+        return posture(
+            None,
+            if app.auto_model {
+                PreviewUnresolved::AutoRouteNeedsPrompt
+            } else {
+                PreviewUnresolved::NoPrompt
+            },
+        );
+    };
+
+    // Auto routing runs a model classifier. `/preview-request` is an offline
+    // inspection command, so it stops before prompt resolution or the shared
+    // planner can reach that call. Production remains responsible for Auto.
+    if auto_router::should_resolve_auto_model_selection(app) {
+        return posture(None, PreviewUnresolved::AutoRouteClassificationNotExecuted);
+    }
+
+    if app
+        .hooks
+        .has_hooks_for_event(crate::hooks::HookEvent::MessageSubmit)
+    {
+        return posture(None, PreviewUnresolved::MessageSubmitHooksConfigured);
+    }
+
+    // Clone, never `take`: an inspection may not consume the pending skill.
+    let message = QueuedMessage {
+        display: prompt.clone(),
+        skill_instruction: app.active_skill.clone(),
+        skill_provenance: app.active_skill_provenance.clone(),
+    };
+    let mut git_cache = crate::tui::git_mention::GitMentionCache::default();
+    // Same failure surface as a real submit: a plugin-skill authority mismatch
+    // aborts the turn there and must not be papered over with the raw prompt
+    // here — that would describe a request the user could not send.
+    let mut content = match queued_message_content_for_app(
+        app,
+        &message,
+        std::env::current_dir().ok(),
+        &mut git_cache,
+    ) {
+        Ok(content) => content,
+        Err(error) => {
+            return posture(
+                None,
+                PreviewUnresolved::PromptResolutionFailed(error.to_string()),
+            );
+        }
+    };
+    // A real submit appends the paused-command note before planning the route.
+    // `plan_paused_command_message` is pure — it decides, it does not resume or
+    // discard anything — so the preview can use the same value.
+    let paused_dispatch = plan_paused_command_message(app, &prompt);
+    if let Some(note) = paused_dispatch.note() {
+        content.push_str(note);
+    }
+
+    let (app_route_identity, route_config) = app_scoped_runtime_config(app, config);
+    let planned = plan_turn_route(TurnRoutePlanRequest {
+        route_config: &route_config,
+        app_route_identity: &app_route_identity,
+        api_provider: app.api_provider,
+        app_model: &app.model,
+        auto_model: app.auto_model,
+        reasoning_effort: app.reasoning_effort,
+        mode: app.mode,
+        content: &content,
+        display_text: &prompt,
+        auto_router_context: &auto_router::recent_auto_router_context(&app.api_messages),
+        should_auto_resolve: false,
+        allow_auto_router_response_cache: false,
+        preflight_required: engine_handle.client_preflight_required(),
+        auto_compact_user_configured: app.auto_compact_user_configured,
+        auto_compact: app.auto_compact,
+        auto_compact_threshold_percent: app.auto_compact_threshold_percent,
+    })
+    .await;
+
+    match planned {
+        Ok(planned) => {
+            let prompt_context = crate::core::engine::NextTurnPromptContext::for_planned_turn(
+                planned.route.identity.provider,
+                planned.route.model.clone(),
+                crate::route_budget::known_route_limits(planned.route.candidate.limits()),
+                app.mode,
+                paused_dispatch.goal_objective(app),
+                app.hunt.verdict.goal_status(),
+                app.hunt.token_budget,
+                app.translation_enabled,
+                app.show_thinking,
+                app.verbosity.clone(),
+            );
+            posture(
+                Some(Box::new(PreviewNextTurn {
+                    content,
+                    route: Box::new(planned.route),
+                    prompt_context,
+                    reasoning_effort: planned.effective_reasoning_effort,
+                    reasoning_effort_auto: planned.auto_controls_reasoning,
+                    auto_route_source: planned
+                        .auto_selection
+                        .as_ref()
+                        .map(|selection| selection.source.label().to_string()),
+                    routing_source: planned.routing_source,
+                    compaction: planned.compaction,
+                })),
+                PreviewUnresolved::NoPrompt,
+            )
+        }
+        Err(error) => posture(None, PreviewUnresolved::PlanFailed(error)),
+    }
 }
 
 fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
@@ -3610,6 +3788,12 @@ async fn run_event_loop(
                     }
                     EngineEvent::Status { message } => {
                         app.status_message = Some(message);
+                    }
+                    EngineEvent::RequestManifestReady { rendered } => {
+                        // Typed manifest text, or the explicitly requested
+                        // base-prompt-only disclosure. Rendered as a system cell.
+                        app.add_message(HistoryCell::System { content: rendered });
+                        transcript_batch_updated = true;
                     }
                     EngineEvent::GoalUpdated { snapshot } => {
                         if apply_goal_snapshot_to_app(app, &snapshot) {
@@ -9094,142 +9278,45 @@ async fn spawned_dispatch_inner(
     recovery: DispatchRecovery,
     engine_handle: EngineHandle,
 ) -> crate::tui::app::DispatchApplyFn {
-    let auto_selection = if prepare.should_auto_resolve {
-        match crate::model_routing::resolve_auto_route_with_inventory_for_session(
-            &prepare.route_config,
-            &prepare.content,
-            &prepare.auto_router_context,
-            prepare.mode.as_setting(),
-            if prepare.auto_model { "auto" } else { "fixed" },
-            prepare
-                .reasoning_effort
-                .as_setting_for_provider(prepare.api_provider),
-        )
-        .await
-        {
-            Ok(selection) => Some(selection),
-            Err(err) => {
-                return build_dispatch_error_closure(prepare, recovery, err.to_string());
-            }
-        }
-    } else {
-        None
+    // Bound in its own statement: the planner borrows `prepare`, and the error
+    // arm moves it into the failure closure.
+    let plan_result = plan_turn_route(TurnRoutePlanRequest {
+        route_config: &prepare.route_config,
+        app_route_identity: &prepare.app_route_identity,
+        api_provider: prepare.api_provider,
+        app_model: &prepare.app_model,
+        auto_model: prepare.auto_model,
+        reasoning_effort: prepare.reasoning_effort,
+        mode: prepare.mode,
+        content: &prepare.content,
+        display_text: &prepare.message.display,
+        auto_router_context: &prepare.auto_router_context,
+        should_auto_resolve: prepare.should_auto_resolve,
+        allow_auto_router_response_cache: true,
+        preflight_required: engine_handle.client_preflight_required(),
+        auto_compact_user_configured: prepare.auto_compact_user_configured,
+        auto_compact: prepare.auto_compact,
+        auto_compact_threshold_percent: prepare.auto_compact_threshold_percent,
+    })
+    .await;
+    let planned = match plan_result {
+        Ok(planned) => planned,
+        Err(err) => return build_dispatch_error_closure(prepare, recovery, err),
     };
 
-    let effective_provider = auto_selection
-        .as_ref()
-        .map(|selection| selection.provider)
-        .unwrap_or(prepare.api_provider);
-
-    let effective_model = if prepare.auto_model {
-        auto_selection
-            .as_ref()
-            .map(|selection| selection.model.clone())
-            .unwrap_or_else(|| {
-                crate::model_routing::auto_model_heuristic(
-                    &prepare.message.display,
-                    &prepare.app_model,
-                )
-            })
-    } else {
-        prepare.app_model.clone()
-    };
-
-    let turn_route = if effective_provider == prepare.app_route_identity.provider {
-        resolve_runtime_route_for_identity(
-            &prepare.route_config,
-            &prepare.app_route_identity,
-            Some(&effective_model),
-        )
-    } else {
-        resolve_runtime_route(
-            &prepare.route_config,
-            effective_provider,
-            Some(&effective_model),
-        )
-    };
-
-    let turn_route = match turn_route {
-        Ok(route) => route,
-        Err(err) => {
-            return build_dispatch_error_closure(prepare, recovery, err.to_string());
-        }
-    };
-
-    let turn_route = if engine_handle.client_preflight_required() {
-        match turn_route.preflight() {
-            Ok(route) => route,
-            Err(err) => {
-                return build_dispatch_error_closure(prepare, recovery, err);
-            }
-        }
-    } else {
-        turn_route
-    };
-
-    let turn_route_limits = crate::route_budget::known_route_limits(turn_route.candidate.limits());
-    let effective_provider_identity = turn_route.identity.key.clone();
-    let effective_provider_label = if effective_provider == ApiProvider::Custom {
-        effective_provider_identity.clone()
-    } else {
-        effective_provider.display_name().to_string()
-    };
-
-    let turn_compaction = CompactionConfig {
-        enabled: if prepare.auto_compact_user_configured {
-            prepare.auto_compact
-        } else {
-            crate::route_budget::auto_compact_default_for_route(
-                turn_route.identity.provider,
-                &turn_route.model,
-                turn_route_limits,
-            )
-        },
-        token_threshold: crate::route_budget::compaction_threshold_for_route_at_percent(
-            turn_route.identity.provider,
-            &turn_route.model,
-            turn_route_limits,
-            prepare.auto_compact_threshold_percent,
-        ),
-        model: turn_route.model.clone(),
-        effective_context_window: Some(crate::route_budget::route_context_window_tokens(
-            turn_route.identity.provider,
-            &turn_route.model,
-            turn_route_limits,
-        )),
-        ..Default::default()
-    };
-
-    let auto_controls_reasoning =
-        prepare.auto_model || prepare.reasoning_effort == ReasoningEffort::Auto;
-    let selected_reasoning_effort = if auto_controls_reasoning {
-        let effort = auto_selection
-            .as_ref()
-            .and_then(|selection| selection.reasoning_effort)
-            .unwrap_or_else(|| crate::auto_reasoning::select(false, &prepare.message.display));
-        Some(effort)
-    } else {
-        None
-    };
-
-    let effective_reasoning_effort = if let Some(effort) = selected_reasoning_effort {
-        effort
-            .api_value_for_route(
-                effective_provider,
-                &turn_route.candidate.endpoint().base_url,
-                &turn_route.model,
-            )
-            .map(str::to_string)
-    } else {
-        prepare
-            .reasoning_effort
-            .api_value_for_route(
-                effective_provider,
-                &turn_route.candidate.endpoint().base_url,
-                &turn_route.model,
-            )
-            .map(str::to_string)
-    };
+    let PlannedTurnRoute {
+        route: turn_route,
+        compaction: turn_compaction,
+        effective_provider,
+        effective_model,
+        effective_provider_identity,
+        effective_provider_label,
+        selected_reasoning_effort,
+        effective_reasoning_effort,
+        auto_controls_reasoning,
+        auto_selection,
+        routing_source: _,
+    } = planned;
 
     if let Err(err) = engine_handle
         .send(Op::SendMessage {
@@ -10808,6 +10895,30 @@ async fn apply_command_result(
             AppAction::ListSubAgents => {
                 // #3802: non-blocking send — refresh op, safe to drop.
                 let _ = engine_handle.try_send(Op::ListSubAgents);
+            }
+            AppAction::PreviewOutboundRequest {
+                json,
+                base_prompt_only,
+                hypothetical_prompt,
+            } => {
+                // Split of authority: the host resolves the next turn's route
+                // with the same planner it would use to send one, and the
+                // engine — the only place that can rebuild the tool catalog,
+                // MCP state, gates, system prompt, and prepared body — turns
+                // that plan into a manifest.
+                let inputs =
+                    build_preview_request_inputs(app, config, engine_handle, hypothetical_prompt)
+                        .await;
+                if let Err(err) = engine_handle
+                    .send(Op::PreviewOutboundRequest {
+                        inputs: Box::new(inputs),
+                        json,
+                        base_prompt_only,
+                    })
+                    .await
+                {
+                    app.status_message = Some(format!("Cannot preview request: {err}"));
+                }
             }
             AppAction::CancelSubAgent { agent_id } => {
                 app.status_message = Some(format!("Cancelling {agent_id}..."));

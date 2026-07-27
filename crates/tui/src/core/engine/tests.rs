@@ -8271,6 +8271,58 @@ fn build_tool_context_uses_typed_shell_policy_per_mode() {
 }
 
 #[test]
+fn turn_tool_context_uses_planned_authority_and_route_not_installed_session() {
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    engine.session.allow_shell = false;
+    engine.session.trust_mode = false;
+    engine.session.model = "installed-old-model".to_string();
+
+    let authority = crate::core::authority::TurnAuthority::from_effective_fields(
+        AppMode::Yolo,
+        true,
+        true,
+        true,
+        crate::tui::approval::ApprovalMode::Bypass,
+    );
+    let route = TurnRouteContext {
+        provider: ApiProvider::Deepseek,
+        model: "planned-next-model".to_string(),
+        capabilities: codewhale_config::route::RouteCapabilities::default(),
+        limits: Some(codewhale_config::route::RouteLimits {
+            context_tokens: Some(123_456),
+            input_tokens: None,
+            output_tokens: Some(4_096),
+        }),
+        client: None,
+        api_config: Box::new(Config::default()),
+        locale_tag: engine.config.locale_tag.clone(),
+        role_models: engine.subagent_role_models(),
+        fleet_roster: engine.config.fleet_roster.clone(),
+        auto_model: false,
+        reasoning_effort: None,
+        reasoning_effort_auto: false,
+    };
+
+    let context = engine.build_tool_context_for_turn(&authority, &route);
+    assert_eq!(
+        context.shell_policy,
+        crate::worker_profile::ShellPolicy::Full
+    );
+    assert!(context.trust_mode);
+    assert!(context.auto_approve);
+    assert_eq!(context.route_context_window, Some(123_456));
+    assert_eq!(context.route_capabilities, route.capabilities);
+    assert_eq!(
+        context
+            .session_objects
+            .as_ref()
+            .expect("session object snapshot")
+            .model,
+        "planned-next-model"
+    );
+}
+
+#[test]
 fn agent_and_yolo_modes_elevate_shell_sandbox_to_allow_network() {
     // Regression for #273: the seatbelt-default policy denies all outbound
     // network (including DNS), which broke `curl`, `yt-dlp`, package managers,
@@ -11051,7 +11103,11 @@ async fn slop_gate_survives_mid_turn_compaction_without_reinjection() {
         "fixture must prove the gate would otherwise be summarized away: {unpinned_plan:?}"
     );
 
-    let pins = engine.compaction_pins_for_active_turn(Some(&active_gate_message));
+    let pins = engine.compaction_pins_for_messages(
+        &engine.session.messages,
+        &engine.session.working_set,
+        Some(&active_gate_message),
+    );
     assert!(pins.contains(&0));
 
     let compaction = CompactionConfig {

@@ -1971,6 +1971,31 @@ impl Engine {
                             }
                         }
                     }
+                    Op::PreviewOutboundRequest {
+                        inputs,
+                        json,
+                        base_prompt_only,
+                    } => {
+                        // Pure inspection: no turn is started, no message is
+                        // added, no engine state is written, and no provider
+                        // request is sent. Facts that are not exactly knowable
+                        // come back as typed unavailable sections rather than
+                        // as an error or a guess.
+                        let rendered = if base_prompt_only {
+                            crate::request_manifest::exact_base_prompt_only()
+                        } else {
+                            let manifest = self.build_request_manifest(*inputs).await;
+                            if json {
+                                manifest.to_json()
+                            } else {
+                                manifest.render()
+                            }
+                        };
+                        let _ = self
+                            .tx_event
+                            .send(Event::RequestManifestReady { rendered })
+                            .await;
+                    }
                     Op::ListSubAgents => {
                         // #3803: the sidebar refresh is a read-only snapshot.
                         // Render from a read lock; only take the write lock to
@@ -2404,7 +2429,11 @@ impl Engine {
         }
     }
 
-    fn active_input_tokens_with_current_text(&self, current_text: &str) -> usize {
+    fn active_input_tokens_with_current_text(
+        &self,
+        current_text: &str,
+        system_prompt: Option<&SystemPrompt>,
+    ) -> usize {
         let mut messages: Vec<Message> = self.session.messages.clone().into();
         if !current_text.trim().is_empty() {
             messages.push(Message {
@@ -2415,20 +2444,21 @@ impl Engine {
                 }],
             });
         }
-        estimate_input_tokens_conservative(&messages, self.session.system_prompt.as_ref())
+        estimate_input_tokens_conservative(&messages, system_prompt)
     }
 
     fn append_resource_metadata_lines(
         &self,
         lines: &mut Vec<String>,
-        routed_model: &str,
         current_text: &str,
+        prompt_context: &NextTurnPromptContext,
+        system_prompt: Option<&SystemPrompt>,
     ) {
-        let input_tokens = self.active_input_tokens_with_current_text(current_text);
+        let input_tokens = self.active_input_tokens_with_current_text(current_text, system_prompt);
         if let Some(budget) = route_context_budget_for_route(
-            self.api_provider,
-            routed_model,
-            self.active_route_limits,
+            prompt_context.provider,
+            &prompt_context.model,
+            prompt_context.route_limits,
             input_tokens,
         ) {
             let usage_percent = budget.usage_percent();
@@ -2455,7 +2485,7 @@ impl Engine {
         if let Some(line) = self.session_token_usage_line() {
             lines.push(line);
         }
-        if let Some(line) = self.active_goal_resource_line() {
+        if let Some(line) = self.active_goal_resource_line(prompt_context) {
             lines.push(line);
         }
     }
@@ -2480,24 +2510,32 @@ impl Engine {
         Some(line)
     }
 
-    fn active_goal_resource_line(&self) -> Option<String> {
+    fn active_goal_resource_line(&self, prompt_context: &NextTurnPromptContext) -> Option<String> {
+        let objective = prompt_context.goal_objective.as_deref()?;
         let snapshot = self.config.goal_state.lock().ok()?.snapshot();
-        if !snapshot.is_active() {
-            return None;
-        }
+        let same_goal =
+            normalized_goal_objective(snapshot.objective.as_deref()).as_deref() == Some(objective);
+        let (tokens_used, time_used_seconds, continuation_count) = if same_goal {
+            (
+                snapshot.tokens_used,
+                snapshot.time_used_seconds,
+                snapshot.continuation_count,
+            )
+        } else {
+            (0, 0, 0)
+        };
 
-        let mut telemetry =
-            ResourceTelemetry::new(snapshot.tokens_used, snapshot.time_used_seconds);
-        if let Some(token_budget) = snapshot.token_budget {
+        let mut telemetry = ResourceTelemetry::new(tokens_used, time_used_seconds);
+        if let Some(token_budget) = prompt_context.goal_token_budget {
             telemetry = telemetry.with_token_budget(u64::from(token_budget));
         }
 
         let mut line = format!("Active goal resource usage: {}", telemetry.human_summary());
-        if snapshot.tokens_used > 0 && snapshot.time_used_seconds > 0 {
-            let rate = snapshot.tokens_used as f64 / snapshot.time_used_seconds as f64;
+        if tokens_used > 0 && time_used_seconds > 0 {
+            let rate = tokens_used as f64 / time_used_seconds as f64;
             line.push_str(&format!("; {rate:.1} tok/s"));
         }
-        line.push_str(&format!("; {} continuations", snapshot.continuation_count));
+        line.push_str(&format!("; {continuation_count} continuations"));
         Some(line)
     }
 
@@ -2517,10 +2555,53 @@ impl Engine {
         current_text: &str,
         policy_narrowing: Option<&PolicyNarrowingEvent>,
     ) -> ContentBlock {
+        let prompt_context = self.installed_next_turn_prompt_context();
+        self.turn_metadata_block_from_snapshot(
+            routed_model,
+            auto_model,
+            reasoning_effort,
+            reasoning_effort_auto,
+            provenance,
+            current_text,
+            TurnMetadataSnapshot {
+                prompt_context: &prompt_context,
+                system_prompt: self.session.system_prompt.as_ref(),
+                approval_mode: self.session.approval_mode,
+                working_set: &self.session.working_set,
+                policy_narrowing,
+            },
+        )
+    }
+
+    /// Build `<turn_meta>` from an explicit snapshot of the session state a
+    /// turn installs *before* it writes the block.
+    ///
+    /// Production installs mode, approval posture, policy narrowing, and the
+    /// observed working set on `self`, then reads them back here.
+    /// `/preview-request` cannot install any of that — it describes a turn
+    /// that has not started — so it passes the values it would have installed,
+    /// including a *clone* of the working set with the hypothetical message
+    /// already observed. That is what makes the previewed block byte-identical
+    /// to the real one without a single write.
+    fn turn_metadata_block_from_snapshot(
+        &self,
+        _routed_model: &str,
+        auto_model: bool,
+        reasoning_effort: Option<&str>,
+        reasoning_effort_auto: bool,
+        provenance: UserInputProvenance,
+        current_text: &str,
+        snapshot: TurnMetadataSnapshot<'_>,
+    ) -> ContentBlock {
+        let TurnMetadataSnapshot {
+            prompt_context,
+            system_prompt,
+            approval_mode,
+            working_set,
+            policy_narrowing,
+        } = snapshot;
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let working_set_summary = self
-            .session
-            .working_set
+        let working_set_summary = working_set
             .summary_block(&self.config.workspace)
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
@@ -2535,11 +2616,11 @@ impl Engine {
             // the static system prefix stays byte-stable across sessions (see
             // `render_environment_block` for the prefix-cache rationale).
             format!("Current workspace: {}", self.config.workspace.display()),
-            format!("Current model: {routed_model}"),
-            format!("Current mode: {}", self.current_mode.as_setting()),
+            format!("Current model: {}", prompt_context.model),
+            format!("Current mode: {}", prompt_context.mode.as_setting()),
             format!(
                 "Current permission posture: {}",
-                self.session.approval_mode.permission_chip_label()
+                approval_mode.permission_chip_label()
             ),
             format!("Input provenance: {}", provenance.as_str()),
             format!(
@@ -2552,7 +2633,7 @@ impl Engine {
             ),
         ];
         if auto_model {
-            lines.push(format!("Auto model route: {routed_model}"));
+            lines.push(format!("Auto model route: {}", prompt_context.model));
         }
         if reasoning_effort_auto && let Some(reasoning_effort) = reasoning_effort {
             lines.push(format!("Auto reasoning effort: {reasoning_effort}"));
@@ -2566,7 +2647,12 @@ impl Engine {
             lines.push(format!("Authority transition: {}", event.transition()));
             lines.push(format!("Authority narrowing status: {}", event.message()));
         }
-        self.append_resource_metadata_lines(&mut lines, routed_model, current_text);
+        self.append_resource_metadata_lines(
+            &mut lines,
+            current_text,
+            prompt_context,
+            system_prompt,
+        );
         if let Some(working_set_summary) = working_set_summary {
             lines.push(working_set_summary);
         }
@@ -2578,6 +2664,43 @@ impl Engine {
         ContentBlock::Text {
             text: format!("<turn_meta>\n{summary}\n</turn_meta>"),
             cache_control: None,
+        }
+    }
+
+    /// The user message a turn would build, from an explicit state snapshot.
+    ///
+    /// Same block order and same constructor as
+    /// [`Self::user_text_message_with_turn_metadata_for_route_and_provenance`];
+    /// only the source of the turn-metadata inputs differs. See
+    /// [`Self::turn_metadata_block_from_snapshot`].
+    pub(super) fn user_text_message_from_snapshot(
+        &self,
+        text: String,
+        routed_model: &str,
+        auto_model: bool,
+        reasoning_effort: Option<&str>,
+        reasoning_effort_auto: bool,
+        provenance: UserInputProvenance,
+        snapshot: TurnMetadataSnapshot<'_>,
+    ) -> Message {
+        let turn_metadata = self.turn_metadata_block_from_snapshot(
+            routed_model,
+            auto_model,
+            reasoning_effort,
+            reasoning_effort_auto,
+            provenance,
+            &text,
+            snapshot,
+        );
+        Message {
+            role: "user".to_string(),
+            content: vec![
+                ContentBlock::Text {
+                    text,
+                    cache_control: None,
+                },
+                turn_metadata,
+            ],
         }
     }
 
@@ -3085,6 +3208,324 @@ impl Engine {
             .await;
     }
 
+    /// Build the turn's tool registry and the model-facing tool catalog.
+    ///
+    /// This is the single authority for "what tools would the next request
+    /// carry". `handle_send_message` calls it with [`SubAgentWiring::Live`]
+    /// and [`McpAccess::Connect`]; `/preview-request` calls it with
+    /// [`SubAgentWiring::Inert`] and [`McpAccess::PassiveSnapshot`], which
+    /// together remove every side effect of the build — no fork snapshot, no
+    /// spawned mailbox drainer, no pool creation, no `connect_all`, no status
+    /// events — while producing a byte-identical catalog for the state that
+    /// is already live.
+    ///
+    /// The session's `last_tool_catalog` is never an acceptable substitute:
+    /// it is one turn stale and stores the pre-activation catalog rather than
+    /// the active subset the provider would actually receive.
+    ///
+    /// `allowed_tools` is the command-scoped allow-list gate the catalog is
+    /// filtered under. It is an explicit **parameter**, not a read of
+    /// `self.config.allowed_tools`, because the preview's gate belongs to a
+    /// turn that has not been installed: writing it onto the engine and
+    /// restoring it afterwards would leave the wrong gate installed across
+    /// every `.await` in this function, and would leave it installed
+    /// permanently if the task were cancelled or panicked between the two
+    /// writes.
+    async fn build_turn_tool_registry_and_catalog(
+        &mut self,
+        input_policy: &TurnAuthority,
+        dynamic_tools: &[DynamicToolSpec],
+        allowed_tools: Option<Vec<String>>,
+        wiring: SubAgentWiring,
+        mcp_access: McpAccess,
+        route: TurnRouteContext,
+    ) -> TurnToolBuild {
+        // Build tool registry and tool list for the current mode
+        let todo_list = self.config.todos.clone();
+        let plan_state = self.config.plan_state.clone();
+
+        let tool_context = self.build_tool_context_for_turn(input_policy, &route);
+        // Ensure MCP pool is initialized before building the tool registry,
+        // so start_mcp_server can be registered when Feature::Mcp is enabled.
+        // A passive snapshot must not create the pool: allocating it is engine
+        // state a preview has no business writing.
+        if self.config.features.enabled(Feature::Mcp) && mcp_access.may_connect() {
+            let _ = self.ensure_mcp_pool().await;
+        }
+        let builder = self
+            .build_turn_tool_registry_builder_for_route(
+                input_policy.mode,
+                input_policy.allow_shell,
+                route.client.clone(),
+                &route.model,
+                todo_list,
+                plan_state,
+            )
+            .with_dynamic_tools(dynamic_tools);
+
+        let subagents_available =
+            self.config.subagents_enabled && self.config.features.enabled(Feature::Subagents);
+
+        let fork_context_for_runtime = if subagents_available && wiring.is_live() {
+            let state = StructuredState::capture(
+                input_policy.mode.label(),
+                self.config.workspace.clone(),
+                std::env::current_dir().ok(),
+                &self.session.working_set,
+                Some(&self.subagent_manager),
+            )
+            .await;
+            Some(SubAgentForkContext {
+                messages: self.messages_with_turn_metadata(),
+                structured_state_block: state.to_system_block(),
+                // Resolve at spawn time so a work update earlier in this turn
+                // reaches the child rather than freezing turn-start state.
+                work_source: Some(self.work_state_source()),
+            })
+        } else {
+            None
+        };
+
+        // Mailbox for structured sub-agent envelopes (#128/#130). One per
+        // turn: the receiver is drained by a short-lived task that converts
+        // envelopes into `Event::SubAgentMailbox` so the UI can route them
+        // to the matching in-transcript card. The drainer exits naturally
+        // when every cloned sender is dropped at turn-end.
+        let mailbox_for_runtime = if subagents_available && wiring.is_live() {
+            let cancel_token = self.cancel_token.child_token();
+            let (mailbox, mut receiver) = Mailbox::new(cancel_token.clone());
+            let tx_event_clone = self.tx_event.clone();
+            spawn_supervised(
+                "subagent-mailbox-drainer",
+                std::panic::Location::caller(),
+                async move {
+                    let mut best_effort_sent_at: HashMap<String, Instant> = HashMap::new();
+                    while let Some(envelope) = receiver.recv().await {
+                        let event = Event::SubAgentMailbox {
+                            seq: envelope.seq,
+                            message: envelope.message,
+                        };
+                        if let Event::SubAgentMailbox { message, .. } = &event
+                            && subagent_mailbox_message_is_best_effort(message)
+                        {
+                            if !subagent_mailbox_best_effort_send_permitted(
+                                &mut best_effort_sent_at,
+                                message,
+                                Instant::now(),
+                            ) {
+                                continue;
+                            }
+                            match tx_event_clone.try_send(event) {
+                                Ok(()) => continue,
+                                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => continue,
+                                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
+                            }
+                        }
+                        if tx_event_clone.send(event).await.is_err() {
+                            break;
+                        }
+                    }
+                },
+            );
+            Some((mailbox, cancel_token))
+        } else {
+            None
+        };
+
+        let mcp_pool = if self.config.features.enabled(Feature::Mcp) {
+            if mcp_access.may_connect() {
+                self.ensure_mcp_pool().await.ok()
+            } else {
+                self.mcp_pool.clone()
+            }
+        } else {
+            None
+        };
+
+        let mut subagent_runtime_model = None;
+        let mut tool_registry = if subagents_available {
+            let runtime = if let Some(client) = route.client.clone() {
+                let runtime_allow_shell =
+                    input_policy.allow_shell && !matches!(input_policy.mode, AppMode::Plan);
+                let runtime_shell_policy =
+                    shell_policy_for_mode(input_policy.mode, runtime_allow_shell);
+                subagent_runtime_model = Some(route.model.clone());
+                let mut rt = SubAgentRuntime::new(
+                    client,
+                    route.model.clone(),
+                    tool_context.clone(),
+                    runtime_allow_shell,
+                    Some(self.tx_event.clone()),
+                    Arc::clone(&self.subagent_manager),
+                )
+                .with_locale_tag(route.locale_tag.clone())
+                .with_role_models(route.role_models.clone())
+                .with_api_config((*route.api_config).clone())
+                .with_fleet_roster(route.fleet_roster.clone())
+                .with_auto_model(route.auto_model)
+                .with_reasoning_effort(route.reasoning_effort.clone(), route.reasoning_effort_auto)
+                .with_agent_tool_surface_options(
+                    self.agent_tool_surface_options(runtime_shell_policy),
+                )
+                .with_max_spawn_depth(self.config.max_spawn_depth)
+                .with_step_api_timeout(self.config.subagent_api_timeout)
+                .with_speech_output_dir(self.config.speech_output_dir.clone())
+                .with_mcp_pool(mcp_pool.clone())
+                .with_todos(self.config.todos.clone())
+                .with_parent_completion_tx(self.tx_subagent_completion.clone())
+                .with_parent_mode(input_policy.mode);
+                if matches!(input_policy.mode, AppMode::Plan) {
+                    rt.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Planner);
+                }
+                // #4042: stamp the session's --disallowed-tools onto the parent
+                // runtime so every model-spawned sub-agent inherits the deny-list
+                // (plan-mode role override above is intentionally before this).
+                rt.worker_profile.denied_tools =
+                    self.config.disallowed_tools.clone().unwrap_or_default();
+                if let Some(context) = fork_context_for_runtime.clone() {
+                    rt = rt.with_fork_context(context);
+                }
+                if let Some((mailbox, cancel_token)) = mailbox_for_runtime.as_ref() {
+                    rt = rt
+                        .with_mailbox(mailbox.clone())
+                        .with_cancel_token(cancel_token.clone());
+                }
+                Some(rt)
+            } else {
+                None
+            };
+            if let Some(subagent_runtime) = runtime {
+                Some(
+                    builder
+                        .with_subagent_tools(self.subagent_manager.clone(), subagent_runtime)
+                        .build(tool_context),
+                )
+            } else {
+                tracing::warn!(
+                    "Sub-agents enabled but no API client available, falling back to basic tool set"
+                );
+                Some(builder.build(tool_context))
+            }
+        } else {
+            Some(builder.build(tool_context))
+        };
+
+        // Load plugin tools from the user's tools directory and apply any
+        // config.toml overrides. Explicit overrides win over auto-discovered
+        // scripts with the same tool name.
+        let mut plugin_tool_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        if let Some(ref mut tool_registry) = tool_registry {
+            plugin_tool_names = configure_plugin_tools(tool_registry, self.config.tools.as_ref());
+        }
+
+        let mcp_state = if self.config.features.enabled(Feature::Mcp) {
+            if mcp_access.may_connect() {
+                let tools = self.mcp_tools().await;
+                let server_count = match self.mcp_pool.as_ref() {
+                    Some(pool) => pool.lock().await.connected_servers().len(),
+                    None => 0,
+                };
+                McpToolState::Live {
+                    tools,
+                    server_count,
+                }
+            } else {
+                self.passive_mcp_snapshot().await
+            }
+        } else {
+            McpToolState::Disabled
+        };
+        // Captured before the catalog closure consumes the tool list, so a
+        // caller can attribute MCP contributions without a second connect.
+        let mcp_tools = mcp_state.tools().to_vec();
+        let mcp_tool_names: Vec<String> = mcp_tools.iter().map(|tool| tool.name.clone()).collect();
+        let tools = tool_registry.as_ref().map(|registry| {
+            // The surface budget belongs to the route the request would go
+            // to, which is not necessarily the installed one: with auto model
+            // routing the host has already planned a different route for the
+            // next turn.
+            let capability = route.capability_profile();
+            let mut always_load = self.config.tools_always_load.clone();
+            if self.config.features.enabled(Feature::Mcp) {
+                always_load.insert("start_mcp_server".to_string());
+            }
+            let bypass = input_policy.auto_approve
+                || input_policy.approval_mode == crate::tui::approval::ApprovalMode::Bypass;
+            let mut catalog = build_model_tool_catalog_with_surface(
+                registry.to_api_tools_with_cache(true),
+                mcp_tools,
+                if bypass {
+                    AppMode::Yolo
+                } else {
+                    input_policy.mode
+                },
+                &always_load,
+                capability.tool_surface_budget,
+            );
+            for tool in &mut catalog {
+                if plugin_tool_names.contains(&tool.name) {
+                    tool.defer_loading = Some(false);
+                }
+            }
+            filter_tool_catalog_for_gates(
+                &mut catalog,
+                allowed_tools.as_deref(),
+                self.config.disallowed_tools.as_deref(),
+            );
+            filter_tool_catalog_for_permission_posture(
+                &mut catalog,
+                input_policy.approval_mode_for_session(),
+            );
+            catalog
+        });
+        TurnToolBuild {
+            registry: tool_registry,
+            catalog: tools,
+            mcp_tool_names,
+            mcp: mcp_state,
+            subagent_runtime_model,
+        }
+    }
+
+    /// Read-only MCP snapshot for `/preview-request` (#1004).
+    ///
+    /// Never creates the pool, never calls `connect_all`, never reloads a
+    /// config source, never starts a server, and never emits a status event.
+    /// It answers exactly one question: *is the tool set the next turn would
+    /// send already known?* It is known only when the pool exists, every
+    /// enabled server is connected, and no config source has changed since
+    /// the pool last read them. Otherwise the honest answer is "unavailable",
+    /// because a real turn would connect and discover more tools.
+    async fn passive_mcp_snapshot(&self) -> McpToolState {
+        let Some(pool) = self.mcp_pool.as_ref() else {
+            return McpToolState::Unavailable {
+                reason: McpUnavailable::PoolNotStarted,
+            };
+        };
+        let pool = pool.lock().await;
+        if !pool.config_sources_unchanged() {
+            return McpToolState::Unavailable {
+                reason: McpUnavailable::ConfigChangedSinceConnect,
+            };
+        }
+        let connected: Vec<&str> = pool.connected_servers();
+        let pending = pool
+            .enabled_server_names()
+            .into_iter()
+            .filter(|name| !connected.iter().any(|connected| *connected == name))
+            .count();
+        if pending > 0 {
+            return McpToolState::Unavailable {
+                reason: McpUnavailable::ServersNotConnected { pending },
+            };
+        }
+        McpToolState::Live {
+            tools: pool.to_api_tools(),
+            server_count: connected.len(),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn handle_send_message(
         &mut self,
@@ -3114,6 +3555,8 @@ impl Engine {
         let provider_identity = route.identity.key.clone();
         let model = route.model.clone();
         let route_limits = crate::route_budget::known_route_limits(route.candidate.limits());
+        let route_capabilities = route.candidate.capabilities();
+        let route_api_config = route.config.clone();
         if let Err(err) = self.install_resolved_runtime_route(route) {
             let _ = self
                 .tx_event
@@ -3155,6 +3598,18 @@ impl Engine {
             trust_mode,
             mode == AppMode::Yolo || auto_approve,
             approval_mode,
+        );
+        let prompt_context = NextTurnPromptContext::for_planned_turn(
+            effective_provider,
+            model.clone(),
+            route_limits,
+            input_policy.mode,
+            goal_objective.clone(),
+            goal_status,
+            goal_token_budget,
+            translation_enabled,
+            show_thinking,
+            verbosity.clone(),
         );
         // #3947: an effective-mode change is never silent. The structured
         // event is recorded first (so doctor and this turn's metadata can read
@@ -3279,30 +3734,11 @@ impl Engine {
             return outcome;
         }
 
-        self.session
-            .working_set
-            .observe_user_message(&content, &self.session.workspace);
-
-        // Add user message to session
-        let user_msg = self.user_text_message_with_turn_metadata_for_route_and_provenance(
-            content,
-            &model,
-            auto_model,
-            reasoning_effort.as_deref(),
-            reasoning_effort_auto,
-            provenance,
-        );
-        let base_content_blocks = user_msg.content.len();
-        let user_msg = self.with_slop_ledger_gate_for_initial_user_turn(user_msg, provenance);
-        turn.active_slop_gate_message =
-            (user_msg.content.len() > base_content_blocks).then(|| user_msg.clone());
-        self.session.add_message(user_msg);
-
         let previous_goal_objective = self.config.goal_objective.clone();
         let previous_goal_token_budget = self.config.goal_token_budget;
         let previous_goal_status = self.config.goal_status;
 
-        self.session.model = model;
+        self.session.model = model.clone();
         self.config.model.clone_from(&self.session.model);
         self.config.goal_objective = goal_objective.clone();
         self.config.goal_token_budget = goal_token_budget;
@@ -3328,222 +3764,69 @@ impl Engine {
         self.config.show_thinking = show_thinking;
         self.config.verbosity = verbosity;
 
-        // Refresh stable prompt context.
-        self.refresh_system_prompt();
+        // Compose from the immutable values accepted for this turn. Preview
+        // receives the same context before anything is installed, so prompt
+        // bytes cannot depend on stale session state or mutation order.
+        self.refresh_system_prompt_from_context(&prompt_context);
+
+        self.session
+            .working_set
+            .observe_user_message(&content, &self.session.workspace);
+
+        // Add the user message through the same explicit snapshot constructor
+        // preview uses. Route limits and mode in resource metadata therefore
+        // belong to this turn even when the previous route was different.
+        let user_msg = self.user_text_message_from_snapshot(
+            content,
+            &model,
+            auto_model,
+            self.session.reasoning_effort.as_deref(),
+            self.session.reasoning_effort_auto,
+            provenance,
+            TurnMetadataSnapshot {
+                prompt_context: &prompt_context,
+                system_prompt: self.session.system_prompt.as_ref(),
+                approval_mode: self.session.approval_mode,
+                working_set: &self.session.working_set,
+                policy_narrowing: self.last_policy_narrowing.as_ref(),
+            },
+        );
+        let base_content_blocks = user_msg.content.len();
+        let user_msg = self.with_slop_ledger_gate_for_initial_user_turn(user_msg, provenance);
+        turn.active_slop_gate_message =
+            (user_msg.content.len() > base_content_blocks).then(|| user_msg.clone());
+        self.session.add_message(user_msg);
+
         self.emit_session_updated().await;
 
         // Build tool registry and tool list for the current mode
-        let todo_list = self.config.todos.clone();
-        let plan_state = self.config.plan_state.clone();
-
-        let tool_context = self.build_tool_context(input_policy.mode, input_policy.auto_approve);
-        // Ensure MCP pool is initialized before building the tool registry,
-        // so start_mcp_server can be registered when Feature::Mcp is enabled.
-        if self.config.features.enabled(Feature::Mcp) {
-            let _ = self.ensure_mcp_pool().await;
-        }
-        let builder = self
-            .build_turn_tool_registry_builder(input_policy.mode, todo_list, plan_state)
-            .with_dynamic_tools(&dynamic_tools);
-
-        let subagents_available =
-            self.config.subagents_enabled && self.config.features.enabled(Feature::Subagents);
-
-        let fork_context_for_runtime = if subagents_available {
-            let state = StructuredState::capture(
-                input_policy.mode.label(),
-                self.config.workspace.clone(),
-                std::env::current_dir().ok(),
-                &self.session.working_set,
-                Some(&self.subagent_manager),
+        let TurnToolBuild {
+            registry: tool_registry,
+            catalog: tools,
+            ..
+        } = self
+            .build_turn_tool_registry_and_catalog(
+                &input_policy,
+                &dynamic_tools,
+                self.config.allowed_tools.clone(),
+                SubAgentWiring::Live,
+                McpAccess::Connect,
+                TurnRouteContext {
+                    provider: self.api_config.api_provider(),
+                    model: self.config.model.clone(),
+                    capabilities: route_capabilities,
+                    limits: self.active_route_limits,
+                    client: self.deepseek_client.clone(),
+                    api_config: route_api_config,
+                    locale_tag: self.config.locale_tag.clone(),
+                    role_models: self.subagent_role_models(),
+                    fleet_roster: self.config.fleet_roster.clone(),
+                    auto_model,
+                    reasoning_effort: self.session.reasoning_effort.clone(),
+                    reasoning_effort_auto: self.session.reasoning_effort_auto,
+                },
             )
             .await;
-            Some(SubAgentForkContext {
-                messages: self.messages_with_turn_metadata(),
-                structured_state_block: state.to_system_block(),
-                // Resolved at spawn time, not now: a `work_update` earlier in
-                // this same turn must reach the child (#3983).
-                work_source: Some(self.work_state_source()),
-            })
-        } else {
-            None
-        };
-
-        // Mailbox for structured sub-agent envelopes (#128/#130). One per
-        // turn: the receiver is drained by a short-lived task that converts
-        // envelopes into `Event::SubAgentMailbox` so the UI can route them
-        // to the matching in-transcript card. The drainer exits naturally
-        // when every cloned sender is dropped at turn-end.
-        let mailbox_for_runtime = if subagents_available {
-            let cancel_token = self.cancel_token.child_token();
-            let (mailbox, mut receiver) = Mailbox::new(cancel_token.clone());
-            let tx_event_clone = self.tx_event.clone();
-            spawn_supervised(
-                "subagent-mailbox-drainer",
-                std::panic::Location::caller(),
-                async move {
-                    let mut best_effort_sent_at: HashMap<String, Instant> = HashMap::new();
-                    while let Some(envelope) = receiver.recv().await {
-                        let event = Event::SubAgentMailbox {
-                            seq: envelope.seq,
-                            message: envelope.message,
-                        };
-                        if let Event::SubAgentMailbox { message, .. } = &event
-                            && subagent_mailbox_message_is_best_effort(message)
-                        {
-                            if !subagent_mailbox_best_effort_send_permitted(
-                                &mut best_effort_sent_at,
-                                message,
-                                Instant::now(),
-                            ) {
-                                continue;
-                            }
-                            match tx_event_clone.try_send(event) {
-                                Ok(()) => continue,
-                                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => continue,
-                                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
-                            }
-                        }
-                        if tx_event_clone.send(event).await.is_err() {
-                            break;
-                        }
-                    }
-                },
-            );
-            Some((mailbox, cancel_token))
-        } else {
-            None
-        };
-
-        let mcp_pool = if self.config.features.enabled(Feature::Mcp) {
-            self.ensure_mcp_pool().await.ok()
-        } else {
-            None
-        };
-
-        let mut tool_registry = if subagents_available {
-            let runtime = if let Some(client) = self.deepseek_client.clone() {
-                let runtime_allow_shell =
-                    self.session.allow_shell && !matches!(input_policy.mode, AppMode::Plan);
-                let runtime_shell_policy =
-                    shell_policy_for_mode(input_policy.mode, runtime_allow_shell);
-                let mut rt = SubAgentRuntime::new(
-                    client,
-                    self.session.model.clone(),
-                    tool_context.clone(),
-                    runtime_allow_shell,
-                    Some(self.tx_event.clone()),
-                    Arc::clone(&self.subagent_manager),
-                )
-                .with_locale_tag(self.config.locale_tag.clone())
-                .with_role_models(self.subagent_role_models())
-                .with_api_config(self.api_config.clone())
-                .with_fleet_roster(self.config.fleet_roster.clone())
-                .with_auto_model(self.session.auto_model)
-                .with_reasoning_effort(
-                    self.session.reasoning_effort.clone(),
-                    self.session.reasoning_effort_auto,
-                )
-                .with_agent_tool_surface_options(
-                    self.agent_tool_surface_options(runtime_shell_policy),
-                )
-                .with_max_spawn_depth(self.config.max_spawn_depth)
-                .with_step_api_timeout(self.config.subagent_api_timeout)
-                .with_speech_output_dir(self.config.speech_output_dir.clone())
-                .with_mcp_pool(mcp_pool.clone())
-                .with_todos(self.config.todos.clone())
-                .with_parent_completion_tx(self.tx_subagent_completion.clone())
-                .with_parent_mode(input_policy.mode);
-                if matches!(input_policy.mode, AppMode::Plan) {
-                    rt.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Planner);
-                }
-                // #4042: stamp the session's --disallowed-tools onto the parent
-                // runtime so every model-spawned sub-agent inherits the deny-list
-                // (plan-mode role override above is intentionally before this).
-                rt.worker_profile.denied_tools =
-                    self.config.disallowed_tools.clone().unwrap_or_default();
-                if let Some(context) = fork_context_for_runtime.clone() {
-                    rt = rt.with_fork_context(context);
-                }
-                if let Some((mailbox, cancel_token)) = mailbox_for_runtime.as_ref() {
-                    rt = rt
-                        .with_mailbox(mailbox.clone())
-                        .with_cancel_token(cancel_token.clone());
-                }
-                Some(rt)
-            } else {
-                None
-            };
-            if let Some(subagent_runtime) = runtime {
-                Some(
-                    builder
-                        .with_subagent_tools(self.subagent_manager.clone(), subagent_runtime)
-                        .build(tool_context),
-                )
-            } else {
-                tracing::warn!(
-                    "Sub-agents enabled but no API client available, falling back to basic tool set"
-                );
-                Some(builder.build(tool_context))
-            }
-        } else {
-            Some(builder.build(tool_context))
-        };
-
-        // Load plugin tools from the user's tools directory and apply any
-        // config.toml overrides. Explicit overrides win over auto-discovered
-        // scripts with the same tool name.
-        let mut plugin_tool_names: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        if let Some(ref mut tool_registry) = tool_registry {
-            plugin_tool_names = configure_plugin_tools(tool_registry, self.config.tools.as_ref());
-        }
-
-        let mcp_tools = if self.config.features.enabled(Feature::Mcp) {
-            self.mcp_tools().await
-        } else {
-            Vec::new()
-        };
-        let tools = tool_registry.as_ref().map(|registry| {
-            let capability = crate::model_profile::resolved_capability_profile_for_route(
-                self.api_config.api_provider(),
-                &self.config.model,
-                self.active_route_capabilities,
-                self.active_route_limits.unwrap_or_default(),
-            );
-            let mut always_load = self.config.tools_always_load.clone();
-            if self.config.features.enabled(Feature::Mcp) {
-                always_load.insert("start_mcp_server".to_string());
-            }
-            let bypass = input_policy.auto_approve
-                || input_policy.approval_mode == crate::tui::approval::ApprovalMode::Bypass;
-            let mut catalog = build_model_tool_catalog_with_surface(
-                registry.to_api_tools_with_cache(true),
-                mcp_tools,
-                if bypass {
-                    AppMode::Yolo
-                } else {
-                    input_policy.mode
-                },
-                &always_load,
-                capability.tool_surface_budget,
-            );
-            for tool in &mut catalog {
-                if plugin_tool_names.contains(&tool.name) {
-                    tool.defer_loading = Some(false);
-                }
-            }
-            filter_tool_catalog_for_gates(
-                &mut catalog,
-                self.config.allowed_tools.as_deref(),
-                self.config.disallowed_tools.as_deref(),
-            );
-            filter_tool_catalog_for_permission_posture(
-                &mut catalog,
-                input_policy.approval_mode_for_session(),
-            );
-            catalog
-        });
         let tool_catalog_for_event = tools.clone();
         let base_url_for_event = if self.model_client_injected {
             None
@@ -3923,19 +4206,16 @@ impl Engine {
     /// current top-level user turn. The exact message identity matters: an
     /// unchanged ledger can produce identical gate text on older turns, and
     /// pinning every historical copy would defeat compaction.
-    fn compaction_pins_for_active_turn(
+    fn compaction_pins_for_messages(
         &self,
+        messages: &[Message],
+        working_set: &crate::working_set::WorkingSet,
         active_slop_gate_message: Option<&Message>,
     ) -> Vec<usize> {
-        let mut pins = self
-            .session
-            .working_set
-            .pinned_message_indices(&self.session.messages, &self.session.workspace);
+        let mut pins = working_set.pinned_message_indices(messages, &self.session.workspace);
 
         if let Some(active_message) = active_slop_gate_message
-            && let Some(index) = self
-                .session
-                .messages
+            && let Some(index) = messages
                 .iter()
                 .rposition(|message| message == active_message)
         {
@@ -3989,7 +4269,11 @@ impl Engine {
         // Previously this passed None/None, so a compaction routed here (which,
         // on large windows, is the path that actually fires) could summarize
         // away pinned errors, patches, and the files the user is editing.
-        let compaction_pins = self.compaction_pins_for_active_turn(active_slop_gate_message);
+        let compaction_pins = self.compaction_pins_for_messages(
+            &self.session.messages,
+            &self.session.working_set,
+            active_slop_gate_message,
+        );
         let compaction_paths = self.session.working_set.top_paths(24);
 
         match compact_messages_safe(
@@ -4083,6 +4367,33 @@ impl Engine {
             mode == AppMode::Yolo || auto_approve,
             self.session.approval_mode,
         );
+        let route = TurnRouteContext {
+            provider: self.api_provider,
+            model: self.session.model.clone(),
+            capabilities: self.active_route_capabilities,
+            limits: self.active_route_limits,
+            client: self.deepseek_client.clone(),
+            api_config: Box::new(self.api_config.clone()),
+            locale_tag: self.config.locale_tag.clone(),
+            role_models: self.subagent_role_models(),
+            fleet_roster: self.config.fleet_roster.clone(),
+            auto_model: self.session.auto_model,
+            reasoning_effort: self.session.reasoning_effort.clone(),
+            reasoning_effort_auto: self.session.reasoning_effort_auto,
+        };
+        self.build_tool_context_for_turn(&authority, &route)
+    }
+
+    /// Build one tool context from the already-resolved turn authority and
+    /// route. A preview owns values that are deliberately not installed on the
+    /// session; rebuilding either from `self.session` would give it the prior
+    /// turn's shell posture, context window, model, route capabilities, and
+    /// provider-native search client.
+    fn build_tool_context_for_turn(
+        &self,
+        authority: &TurnAuthority,
+        route: &TurnRouteContext,
+    ) -> ToolContext {
         // Load the per-workspace trusted-paths list (#29) on every tool-context
         // build. Cheap (a small JSON file) and always reflects the latest
         // `/trust add` / `/trust remove` mutations without an explicit cache
@@ -4106,9 +4417,9 @@ impl Engine {
         )
         .with_state_namespace(self.session.id.clone())
         .with_route_context_window(crate::route_budget::route_context_window_tokens(
-            self.api_provider,
-            &self.session.model,
-            self.config.active_route_limits,
+            route.provider,
+            &route.model,
+            route.limits,
         ))
         .with_features(self.config.features.clone())
         .with_shell_manager(self.shell_manager.clone())
@@ -4121,7 +4432,7 @@ impl Engine {
         .with_plugin_registry(Arc::clone(&self.plugin_registry))
         .with_session_objects(crate::rlm::session::SessionObjectSnapshot::new(
             self.session.id.clone(),
-            self.session.model.clone(),
+            route.model.clone(),
             self.session.workspace.clone(),
             self.session.system_prompt.clone(),
             self.session.messages.clone().into(),
@@ -4162,14 +4473,10 @@ impl Engine {
         ctx.search_provider = self.config.search_provider;
         ctx.search_api_key = self.config.search_api_key.clone();
         ctx.search_base_url = self.config.search_base_url.clone();
-        ctx.route_capabilities = self.active_route_capabilities;
-        if self
-            .active_route_capabilities
-            .server_side_web_search
-            .is_supported()
-        {
-            ctx.provider_native_search = self
-                .deepseek_client
+        ctx.route_capabilities = route.capabilities;
+        if route.capabilities.server_side_web_search.is_supported() {
+            ctx.provider_native_search = route
+                .client
                 .as_ref()
                 .cloned()
                 .and_then(crate::client::ProviderNativeSearchClient::new);
@@ -4177,7 +4484,7 @@ impl Engine {
 
         let policy = authority.sandbox_policy(&self.session.workspace);
         let mut ctx = ctx.with_elevated_sandbox_policy(policy);
-        if matches!(mode, AppMode::Plan) {
+        if matches!(authority.mode, AppMode::Plan) {
             ctx = ctx.with_shell_network_denied_hint(
                 "Shell command blocked: Plan mode runs shell commands in a read-only sandbox — no writes, no network. Use Act mode (`/mode act`) for any command that creates or modifies files, or that needs network access.",
             );
@@ -4362,6 +4669,35 @@ impl Engine {
     #[allow(clippy::too_many_lines)]
     /// Refresh the stable system prompt based on current non-mode context.
     fn refresh_system_prompt(&mut self) {
+        let context = self.installed_next_turn_prompt_context();
+        self.refresh_system_prompt_from_context(&context);
+    }
+
+    fn refresh_system_prompt_from_context(&mut self, context: &NextTurnPromptContext) {
+        let stable_prompt = self.compose_stable_system_prompt(context);
+
+        let stable_hash = system_prompt_hash(stable_prompt.as_ref());
+        if self.session.system_prompt_override {
+            return;
+        }
+        if self.session.last_system_prompt_hash != Some(stable_hash) {
+            self.session.system_prompt = stable_prompt;
+            self.session.last_system_prompt_hash = Some(stable_hash);
+        }
+    }
+
+    /// Compose the stable system prompt for an explicit route, without
+    /// touching session state.
+    ///
+    /// [`Self::refresh_system_prompt`] calls it for the installed route;
+    /// `/preview-request` calls it for the route the *next* turn would use,
+    /// which may be a different model with a different context window when
+    /// auto routing is on. Extracting it is what lets a preview describe the
+    /// next prompt exactly without mutating the session to find out.
+    pub(super) fn compose_stable_system_prompt(
+        &self,
+        context: &NextTurnPromptContext,
+    ) -> Option<SystemPrompt> {
         let user_memory_block = if let Some(store) =
             crate::native_memory::NativeMemoryStore::from_global_path(&self.config.memory_path)
         {
@@ -4375,10 +4711,6 @@ impl Engine {
                 &self.config.memory_path,
             )
         };
-        let prompt_goal_objective = goal_objective_for_prompt(
-            self.config.goal_objective.as_deref(),
-            &self.config.goal_state,
-        );
         let base = prompts::system_prompt_for_mode_with_context_skills_session_and_approval(
             &self.config.workspace,
             None,
@@ -4386,41 +4718,46 @@ impl Engine {
             Some(&self.config.instructions),
             prompts::PromptSessionContext {
                 user_memory_block: user_memory_block.as_deref(),
-                goal_objective: prompt_goal_objective.as_deref(),
+                goal_objective: context.goal_objective.as_deref(),
                 project_context_pack_enabled: self.config.project_context_pack_enabled,
                 locale_tag: &self.config.locale_tag,
-                translation_enabled: self.config.translation_enabled,
-                model_id: &self.config.model,
+                translation_enabled: context.translation_enabled,
+                model_id: &context.model,
                 context_window_override: Some(crate::route_budget::route_context_window_tokens(
-                    self.api_provider,
-                    &self.config.model,
-                    self.active_route_limits,
+                    context.provider,
+                    &context.model,
+                    context.route_limits,
                 )),
-                show_thinking: self.config.show_thinking,
-                verbosity: self.config.verbosity.as_deref(),
+                show_thinking: context.show_thinking,
+                verbosity: context.verbosity.as_deref(),
                 skills_scan_codewhale_only: self.config.skills_scan_codewhale_only,
                 plugin_registry: Some(self.plugin_registry.as_ref()),
-                mode: self.current_mode,
+                mode: context.mode,
             },
         );
-        let stable_prompt =
-            merge_system_prompts(Some(&base), self.session.compaction_summary_prompt.clone());
+        merge_system_prompts(Some(&base), self.session.compaction_summary_prompt.clone())
+    }
 
-        let stable_hash = system_prompt_hash(stable_prompt.as_ref());
-        if self.session.system_prompt_override {
-            return;
-        }
-        if self.session.last_system_prompt_hash != Some(stable_hash) {
-            self.session.system_prompt = stable_prompt;
-            self.session.last_system_prompt_hash = Some(stable_hash);
-        }
+    fn installed_next_turn_prompt_context(&self) -> NextTurnPromptContext {
+        NextTurnPromptContext::for_planned_turn(
+            self.api_provider,
+            self.config.model.clone(),
+            self.active_route_limits,
+            self.current_mode,
+            goal_objective_for_prompt(
+                self.config.goal_objective.as_deref(),
+                &self.config.goal_state,
+            ),
+            self.config.goal_status,
+            self.config.goal_token_budget,
+            self.config.translation_enabled,
+            self.config.show_thinking,
+            self.config.verbosity.clone(),
+        )
     }
 
     fn slop_ledger_gate_block(&mut self) -> Option<String> {
-        let modified = crate::slop_ledger::SlopLedger::default_path()
-            .ok()
-            .and_then(|path| std::fs::metadata(path).ok())
-            .and_then(|metadata| metadata.modified().ok());
+        let modified = slop_ledger_gate_mtime();
 
         if let Some((cached_modified, cached_block)) = &self.slop_ledger_gate_cache
             && *cached_modified == modified
@@ -4428,17 +4765,26 @@ impl Engine {
             return cached_block.clone();
         }
 
-        let loaded = crate::slop_ledger::SlopLedger::load()
-            .ok()
-            .and_then(|ledger| {
-                if ledger.has_open_entries() {
-                    ledger.completion_gate_summary()
-                } else {
-                    None
-                }
-            });
+        let loaded = load_slop_ledger_gate_block();
         self.slop_ledger_gate_cache = Some((modified, loaded.clone()));
         loaded
+    }
+
+    /// The same gate block, evaluated without writing the memoization cache.
+    ///
+    /// `/preview-request` must describe the block a real turn would attach
+    /// while leaving the engine byte-identical. Writing `slop_ledger_gate_cache`
+    /// is engine state — small, but it is state, and an inspection that
+    /// changes it is no longer an inspection. Reading the ledger file is a
+    /// pure read, so the answer is identical; only the memo is skipped.
+    fn slop_ledger_gate_block_readonly(&self) -> Option<String> {
+        let modified = slop_ledger_gate_mtime();
+        if let Some((cached_modified, cached_block)) = &self.slop_ledger_gate_cache
+            && *cached_modified == modified
+        {
+            return cached_block.clone();
+        }
+        load_slop_ledger_gate_block()
     }
 
     /// Merge a compaction summary into the system prompt.
@@ -4971,9 +5317,248 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
     }
 }
 
+/// The session state a turn installs before it writes `<turn_meta>`.
+///
+/// Production reads it back off `self` after installing it; `/preview-request`
+/// supplies the values it *would* install, so an inspection can reproduce the
+/// block exactly without writing any of them.
+pub(crate) struct TurnMetadataSnapshot<'a> {
+    pub(crate) prompt_context: &'a NextTurnPromptContext,
+    pub(crate) system_prompt: Option<&'a SystemPrompt>,
+    pub(crate) approval_mode: crate::tui::approval::ApprovalMode,
+    pub(crate) working_set: &'a crate::working_set::WorkingSet,
+    pub(crate) policy_narrowing: Option<&'a PolicyNarrowingEvent>,
+}
+
+/// Immutable prompt facts for the next accepted turn.
+///
+/// Both production and `/preview-request` compose through this value. It owns
+/// every per-turn field resolved by submit or route planning that can change
+/// the stable system prompt, so a hypothetical route cannot accidentally
+/// inherit the installed turn's goal, translation, thinking, verbosity, mode,
+/// model, or context window. Workspace-scoped prompt inputs remain engine
+/// configuration and are documented separately as snapshot dependencies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NextTurnPromptContext {
+    pub(crate) provider: ApiProvider,
+    pub(crate) model: String,
+    pub(crate) route_limits: Option<codewhale_config::route::RouteLimits>,
+    pub(crate) mode: AppMode,
+    pub(crate) goal_objective: Option<String>,
+    pub(crate) goal_token_budget: Option<u32>,
+    pub(crate) translation_enabled: bool,
+    pub(crate) show_thinking: bool,
+    pub(crate) verbosity: Option<String>,
+}
+
+impl NextTurnPromptContext {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn for_planned_turn(
+        provider: ApiProvider,
+        model: String,
+        route_limits: Option<codewhale_config::route::RouteLimits>,
+        mode: AppMode,
+        goal_objective: Option<String>,
+        goal_status: GoalStatus,
+        goal_token_budget: Option<u32>,
+        translation_enabled: bool,
+        show_thinking: bool,
+        verbosity: Option<String>,
+    ) -> Self {
+        Self {
+            provider,
+            model,
+            route_limits,
+            mode,
+            goal_objective: (goal_status == GoalStatus::Active)
+                .then(|| normalized_goal_objective(goal_objective.as_deref()))
+                .flatten(),
+            goal_token_budget,
+            translation_enabled,
+            show_thinking,
+            verbosity,
+        }
+    }
+}
+
+/// Last-modified time of the slop ledger, or `None` when there is no ledger.
+fn slop_ledger_gate_mtime() -> Option<SystemTime> {
+    crate::slop_ledger::SlopLedger::default_path()
+        .ok()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .and_then(|metadata| metadata.modified().ok())
+}
+
+/// Load the completion-gate block from disk. A pure read.
+fn load_slop_ledger_gate_block() -> Option<String> {
+    crate::slop_ledger::SlopLedger::load()
+        .ok()
+        .and_then(|ledger| {
+            if ledger.has_open_entries() {
+                ledger.completion_gate_summary()
+            } else {
+                None
+            }
+        })
+}
+
+/// Result of one turn tool-catalog build.
+pub(crate) struct TurnToolBuild {
+    /// Runtime registry that will execute the tools.
+    pub(crate) registry: Option<crate::tools::ToolRegistry>,
+    /// Full model-facing catalog, including deferred entries.
+    pub(crate) catalog: Option<Vec<Tool>>,
+    /// Names of the MCP-contributed tools in this build.
+    pub(crate) mcp_tool_names: Vec<String>,
+    /// What is known about the MCP contribution to this catalog.
+    pub(crate) mcp: McpToolState,
+    /// Route model installed into the child runtime, when sub-agent tools were
+    /// available. This is an internal receipt, not a manifest field.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) subagent_runtime_model: Option<String>,
+}
+
+/// The route a tool catalog is being shaped for.
+///
+/// A real turn installs its route before building the catalog, so this is
+/// simply the installed route. `/preview-request` has a *planned* route that
+/// is deliberately not installed, so it passes that one instead — otherwise
+/// an auto-routed preview would report the previous route's tool budget.
+#[derive(Clone)]
+pub(crate) struct TurnRouteContext {
+    pub(crate) provider: ApiProvider,
+    pub(crate) model: String,
+    pub(crate) capabilities: codewhale_config::route::RouteCapabilities,
+    pub(crate) limits: Option<codewhale_config::route::RouteLimits>,
+    /// Client for this exact route. Tool contexts use it only for
+    /// provider-native helper capabilities; previews pass their throw-away
+    /// planned client instead of inheriting the installed session client.
+    pub(crate) client: Option<DeepSeekClient>,
+    /// Route-scoped runtime config, captured by the planner. A preview must
+    /// never construct child agents from the previously installed config.
+    pub(crate) api_config: Box<crate::config::Config>,
+    pub(crate) locale_tag: String,
+    pub(crate) role_models: HashMap<String, String>,
+    pub(crate) fleet_roster: Arc<crate::fleet::roster::FleetRoster>,
+    pub(crate) auto_model: bool,
+    pub(crate) reasoning_effort: Option<String>,
+    pub(crate) reasoning_effort_auto: bool,
+}
+
+impl TurnRouteContext {
+    pub(crate) fn capability_profile(&self) -> crate::model_profile::CapabilityProfile {
+        crate::model_profile::resolved_capability_profile_for_route(
+            self.provider,
+            &self.model,
+            self.capabilities,
+            self.limits.unwrap_or_default(),
+        )
+    }
+}
+
+/// Whether a tool-catalog build may start or connect MCP servers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum McpAccess {
+    /// A real turn: create the pool if needed and connect every enabled
+    /// server, exactly as before.
+    Connect,
+    /// An inspection: use only what is already connected, and report the
+    /// tool surface as unavailable when that is not the whole picture.
+    PassiveSnapshot,
+}
+
+impl McpAccess {
+    fn may_connect(self) -> bool {
+        matches!(self, Self::Connect)
+    }
+}
+
+/// The MCP contribution to one tool-catalog build.
+#[derive(Debug, Clone)]
+pub(crate) enum McpToolState {
+    /// MCP is off for this session; a turn would send no MCP tools.
+    Disabled,
+    /// The exact MCP tool set the next request would carry.
+    Live {
+        tools: Vec<Tool>,
+        server_count: usize,
+    },
+    /// The exact set is not knowable without connecting, which an inspection
+    /// must not do.
+    Unavailable { reason: McpUnavailable },
+}
+
+impl McpToolState {
+    pub(crate) fn tools(&self) -> &[Tool] {
+        match self {
+            Self::Live { tools, .. } => tools,
+            Self::Disabled | Self::Unavailable { .. } => &[],
+        }
+    }
+
+    /// Connected server count, or `None` when the state is unavailable.
+    pub(crate) fn server_count(&self) -> Option<usize> {
+        match self {
+            Self::Disabled => Some(0),
+            Self::Live { server_count, .. } => Some(*server_count),
+            Self::Unavailable { .. } => None,
+        }
+    }
+}
+
+/// Why a passive MCP snapshot could not describe the next turn exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum McpUnavailable {
+    /// No pool exists yet: the first turn of the session would create and
+    /// connect one.
+    PoolNotStarted,
+    /// An MCP config source changed since the pool last read it, so the next
+    /// turn would reload before connecting.
+    ConfigChangedSinceConnect,
+    /// Some enabled servers are configured but not connected.
+    ServersNotConnected { pending: usize },
+}
+
+impl McpUnavailable {
+    /// Short, path-free explanation for the manifest.
+    pub(crate) fn label(self) -> String {
+        match self {
+            Self::PoolNotStarted => {
+                "MCP is enabled but no server has been connected in this session yet".to_string()
+            }
+            Self::ConfigChangedSinceConnect => {
+                "an MCP configuration source changed since the last connect".to_string()
+            }
+            Self::ServersNotConnected { pending } => {
+                format!("{pending} enabled MCP server(s) are not connected yet")
+            }
+        }
+    }
+}
+
+/// Whether a tool-catalog build may establish sub-agent runtime side effects.
+///
+/// Both variants register exactly the same tools; only the runtime plumbing
+/// differs (the structured fork snapshot and the spawned mailbox drainer),
+/// which is what makes an offline inspection safe to run at any time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubAgentWiring {
+    /// A real turn: wire the fork snapshot and the mailbox drainer.
+    Live,
+    /// An inspection: build the catalog, spawn nothing.
+    Inert,
+}
+
+impl SubAgentWiring {
+    fn is_live(self) -> bool {
+        matches!(self, Self::Live)
+    }
+}
+
 mod approval;
 mod context;
 mod handle;
+pub mod preview;
 #[cfg(test)]
 pub(crate) use context::compact_tool_result_for_context;
 pub(crate) use context::compact_tool_result_for_route;
@@ -5059,14 +5644,15 @@ use self::streaming::{
 };
 use self::tool_catalog::{
     CODE_EXECUTION_TOOL_NAME, JS_EXECUTION_TOOL_NAME, MULTI_TOOL_PARALLEL_NAME,
-    REQUEST_USER_INPUT_NAME, active_tools_for_step, build_model_tool_catalog_with_surface,
-    ensure_advanced_tooling, execute_code_execution_tool, execute_tool_search,
-    initial_active_tools, is_tool_search_tool, maybe_hydrate_requested_deferred_tool,
-    missing_tool_error_message, tool_catalog_consistency_issues,
+    REQUEST_USER_INPUT_NAME, active_tools_for_request, build_model_tool_catalog_with_surface,
+    execute_code_execution_tool, execute_tool_search, is_tool_search_tool,
+    maybe_hydrate_requested_deferred_tool, missing_tool_error_message, plan_turn_tools,
+    tool_catalog_consistency_issues,
 };
 #[cfg(test)]
 use self::tool_catalog::{
-    TOOL_SEARCH_NAME, build_model_tool_catalog, maybe_activate_requested_deferred_tool,
+    TOOL_SEARCH_NAME, active_tools_for_step, build_model_tool_catalog, ensure_advanced_tooling,
+    initial_active_tools, maybe_activate_requested_deferred_tool,
     preflight_requested_deferred_tool, should_default_defer_tool,
 };
 use self::tool_execution::emit_tool_audit;

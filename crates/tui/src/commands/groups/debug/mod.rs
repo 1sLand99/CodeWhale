@@ -4,6 +4,7 @@
 mod balance;
 mod cache;
 mod change;
+mod preview_request;
 mod tokens;
 mod undo;
 
@@ -24,6 +25,10 @@ impl CommandGroup for DebugCommands {
             Box::new(FunctionCommand::new(&COST_INFO, run_cost)),
             Box::new(FunctionCommand::new(&BALANCE_INFO, run_balance)),
             Box::new(FunctionCommand::new(&CACHE_INFO, run_cache)),
+            Box::new(FunctionCommand::new(
+                &PREVIEW_REQUEST_INFO,
+                run_preview_request
+            )),
             Box::new(FunctionCommand::new(&CHANGE_INFO, run_change)),
             Box::new(FunctionCommand::new(&SYSTEM_INFO, run_system)),
             Box::new(FunctionCommand::new(&CONTEXT_INFO, run_context)),
@@ -58,6 +63,14 @@ static CACHE_INFO: CommandInfo = CommandInfo {
     aliases: &[],
     usage: "/cache [count|inspect|stats|zones|warmup]",
     description_id: MessageId::CmdCacheDescription,
+};
+static PREVIEW_REQUEST_INFO: CommandInfo = CommandInfo {
+    name: "preview-request",
+    // `dryrun` is the name PR #1099 used; `preview_request` covers the
+    // underscore spelling. Both stay wired so muscle memory keeps working.
+    aliases: &["dryrun", "preview_request"],
+    usage: "/preview-request [json] [--prompt <text>]",
+    description_id: MessageId::CmdPreviewRequestDescription,
 };
 static CHANGE_INFO: CommandInfo = CommandInfo {
     name: "change",
@@ -118,6 +131,9 @@ fn run_balance(app: &mut App, arg: Option<&str>) -> CommandResult {
 fn run_cache(app: &mut App, arg: Option<&str>) -> CommandResult {
     run_registered(app, "cache", arg)
 }
+fn run_preview_request(app: &mut App, arg: Option<&str>) -> CommandResult {
+    run_registered(app, "preview-request", arg)
+}
 fn run_change(app: &mut App, arg: Option<&str>) -> CommandResult {
     run_registered(app, "change", arg)
 }
@@ -150,6 +166,9 @@ pub(in crate::commands) fn dispatch(
         "cost" => tokens::cost(app),
         "balance" => balance::balance(app),
         "cache" => cache::cache(app, arg),
+        "preview-request" | "preview_request" | "dryrun" => {
+            preview_request::preview_request(app, arg)
+        }
         "change" => change::change(app, arg),
         "system" | "xitong" => tokens::system_prompt(app),
         "context" | "ctx" => tokens::context(app, arg),

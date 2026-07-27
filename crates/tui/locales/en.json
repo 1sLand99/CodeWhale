@@ -180,6 +180,7 @@
     "CmdAnchorDescription": "Pin a fact that survives compaction (auto-injected into context)",
     "CmdAttachDescription": "Attach image/video media; use @path for text files or directories",
     "CmdCacheDescription": "Show prefix-cache hit/miss stats for the last N turns",
+    "CmdPreviewRequestDescription": "Preview the next request as a redacted manifest without sending it",
     "CmdChangeDescription": "Show the latest changelog entry",
     "CmdChangeHeader": "Latest Changelog",
     "CmdChangeTranslationQueued": "English release notes are shown below. A translated version will be requested next; if the provider is unavailable, this English text is the fallback.",

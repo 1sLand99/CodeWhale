@@ -169,12 +169,11 @@ impl DeepSeekClient {
         body
     }
 
-    async fn send_anthropic_request(&self, body: &Value) -> Result<reqwest::Response> {
-        let url = anthropic_messages_url(&self.base_url);
+    async fn send_anthropic_request(&self, url: &str, body: &Value) -> Result<reqwest::Response> {
         self.wait_for_rate_limit().await;
         let response = self
             .http_client
-            .post(&url)
+            .post(url)
             .header("Accept", "text/event-stream")
             .json(body)
             .send()
@@ -206,14 +205,17 @@ impl DeepSeekClient {
     /// most one HTTP/1.1 fallback retry on a classified H2 header stall.
     /// Wire-specific request construction (headers, endpoint, body) stays
     /// here at the adapter edge.
-    async fn open_anthropic_stream_response(&self, body: &Value) -> Result<reqwest::Response> {
-        let url = anthropic_messages_url(&self.base_url);
+    async fn open_anthropic_stream_response(
+        &self,
+        url: &str,
+        body: &Value,
+    ) -> Result<reqwest::Response> {
         let open_req = super::stream_entry::StreamOpenRequest::new(
             super::stream_entry::stream_open_timeout(),
             self.stream_idle_timeout,
         );
         let opened = super::stream_entry::open_sse_response(&open_req, |policy| {
-            let url = url.clone();
+            let url = url.to_string();
             async move {
                 self.wait_for_rate_limit().await;
                 let client = super::stream_entry::client_for_policy(
@@ -245,10 +247,14 @@ impl DeepSeekClient {
     /// Handle a streaming Messages API request.
     pub(super) async fn handle_anthropic_stream(
         &self,
-        request: MessageRequest,
+        prepared: &super::PreparedOutboundRequest,
     ) -> Result<StreamEventBox> {
-        let body = self.build_anthropic_body(&request, true);
-        let response = self.open_anthropic_stream_response(&body).await?;
+        // Body and endpoint come from the shared prepared-request seam
+        // (`prepare_outbound_request`), never from a second builder.
+        let body = &prepared.body;
+        let response = self
+            .open_anthropic_stream_response(&prepared.endpoint.url, body)
+            .await?;
 
         let stream_idle_timeout = self.stream_idle_timeout;
         let byte_stream = response.bytes_stream();
@@ -327,10 +333,11 @@ impl DeepSeekClient {
     /// Handle a non-streaming Messages API request.
     pub(super) async fn handle_anthropic_message(
         &self,
-        request: MessageRequest,
+        prepared: &super::PreparedOutboundRequest,
     ) -> Result<MessageResponse> {
-        let body = self.build_anthropic_body(&request, false);
-        let response = self.send_anthropic_request(&body).await?;
+        let response = self
+            .send_anthropic_request(&prepared.endpoint.url, &prepared.body)
+            .await?;
         let mut value: Value = response
             .json()
             .await
@@ -344,7 +351,7 @@ impl DeepSeekClient {
 
 /// Build the `/v1/messages` endpoint URL, tolerating base URLs that already
 /// carry a `/v1` suffix.
-fn anthropic_messages_url(base_url: &str) -> String {
+pub(super) fn anthropic_messages_url(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
     if trimmed.ends_with("/v1") {
         format!("{trimmed}/messages")
@@ -1288,7 +1295,11 @@ mod tests {
 
         let client = deepseek_test_client(&server.uri());
         let mut stream = client
-            .handle_anthropic_stream(request_with("deepseek-v4", None, None, None))
+            .handle_anthropic_stream(
+                &client
+                    .prepare_outbound_request(request_with("deepseek-v4", None, None, None), true)
+                    .expect("anthropic request prepares"),
+            )
             .await
             .expect("stream opens through the shared seam");
 
@@ -1324,7 +1335,11 @@ mod tests {
 
         let client = deepseek_test_client(&server.uri());
         let err = match client
-            .handle_anthropic_stream(request_with("deepseek-v4", None, None, None))
+            .handle_anthropic_stream(
+                &client
+                    .prepare_outbound_request(request_with("deepseek-v4", None, None, None), true)
+                    .expect("anthropic request prepares"),
+            )
             .await
         {
             Ok(_) => panic!("auth errors must fail fast"),

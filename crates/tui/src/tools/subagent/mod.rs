@@ -4788,6 +4788,33 @@ impl SubAgentManager {
         agent_id
     }
 
+    /// Test helper: seed a current-session direct child whose future terminal
+    /// result is eligible for automatic parent delivery.
+    #[cfg(test)]
+    pub fn insert_test_running_direct_child(&mut self, name: &str, workspace: &Path) -> String {
+        let agent_id = self.insert_test_running_agent(name, workspace);
+        if let Some(record) = self.worker_records.get_mut(&agent_id) {
+            record.parent_run_id = None;
+            record.spec.parent_run_id = None;
+        }
+        agent_id
+    }
+
+    /// Test helper: seed a settled direct child whose result has not yet been
+    /// delivered to the parent.
+    #[cfg(test)]
+    pub fn insert_test_terminal_direct_child(&mut self, name: &str, workspace: &Path) -> String {
+        let agent_id = self.insert_test_running_direct_child(name, workspace);
+        if let Some(agent) = self.agents.get_mut(&agent_id) {
+            agent.status = SubAgentStatus::Completed;
+            agent.result = Some("test terminal result".to_string());
+        }
+        if let Some(record) = self.worker_records.get_mut(&agent_id) {
+            record.status = AgentWorkerStatus::Completed;
+        }
+        agent_id
+    }
+
     /// Test helper: seed an interrupted_continuable child with a checkpoint.
     #[cfg(test)]
     pub fn insert_test_interrupted_continuable_agent(
@@ -5287,6 +5314,29 @@ impl SubAgentManager {
             .collect::<Vec<_>>();
         results.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
         results
+    }
+
+    /// Whether a direct child can still inject a completion into the parent
+    /// before its next provider request.
+    ///
+    /// This is deliberately read-only and conservative: a current-session
+    /// direct child is eligible while it is still running, and remains
+    /// eligible after settling until its terminal result has been delivered.
+    /// Preview uses this predicate instead of draining either completion
+    /// channel, so inspecting the request cannot consume or claim the state it
+    /// is reporting.
+    pub fn may_transform_next_parent_request(
+        &self,
+        delivered_ids: &std::collections::HashSet<String>,
+    ) -> bool {
+        self.agents.values().any(|agent| {
+            agent.session_boot_id == self.current_session_boot_id
+                && self
+                    .worker_records
+                    .get(&agent.id)
+                    .is_none_or(|record| record.spec.parent_run_id.is_none())
+                && !delivered_ids.contains(&agent.id)
+        })
     }
 
     /// Resolve either a durable agent id or a model-facing session name.

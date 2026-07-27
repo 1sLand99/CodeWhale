@@ -709,6 +709,49 @@ fn effective_base_prompt() -> &'static str {
     effective_prompt_override(&BASE_PROMPT_OVERRIDE, BASE_PROMPT)
 }
 
+/// Where the base-prompt bytes used by this process actually came from.
+///
+/// #3928: diagnostics used to cite `crates/tui/src/prompts/text.rs`, which is
+/// a source-tree path that does not exist on an installed binary and says
+/// nothing about whether an override replaced the constant at startup. This
+/// reports the runtime truth instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BasePromptOrigin {
+    /// The `BASE_PROMPT` constant compiled into this binary.
+    Bundled,
+    /// An opted-in `prompts/constitution.md` override installed at startup.
+    ConfigOverride,
+}
+
+impl BasePromptOrigin {
+    /// Short, user-facing provenance label. Contains no filesystem paths.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Bundled => "bundled in this codewhale-tui build (BASE_PROMPT, compiled in)",
+            Self::ConfigOverride => concat!(
+                "config-directory override installed at startup ",
+                "(prompts/constitution.md, opt-in enabled)"
+            ),
+        }
+    }
+}
+
+/// Runtime provenance of the base prompt for this process.
+pub(crate) fn base_prompt_origin() -> BasePromptOrigin {
+    if BASE_PROMPT_OVERRIDE.get().is_some() {
+        BasePromptOrigin::ConfigOverride
+    } else {
+        BasePromptOrigin::Bundled
+    }
+}
+
+/// The exact base-prompt bytes this process will compose into the system
+/// prompt — the override when one is installed, the bundled constant
+/// otherwise.
+pub(crate) fn effective_base_prompt_text() -> &'static str {
+    effective_base_prompt()
+}
+
 fn effective_static_prompt_composer() -> Option<&'static StaticPromptComposer> {
     STATIC_PROMPT_COMPOSER.get().map(Box::as_ref)
 }

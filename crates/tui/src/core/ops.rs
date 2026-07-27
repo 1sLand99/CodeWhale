@@ -179,6 +179,21 @@ pub enum Op {
     #[allow(dead_code)]
     SpawnSubAgent { prompt: String },
 
+    /// Describe the exact request the next turn would send, without
+    /// sending it (`/preview-request`, #1004).
+    ///
+    /// Handled by the engine because only the engine can rebuild the current
+    /// tool catalog, MCP state, mode, gates, permission posture, and resolved
+    /// route. Pure inspection: it adds no message, no turn, and no tool call.
+    PreviewOutboundRequest {
+        inputs: Box<crate::core::engine::preview::PreviewRequestInputs>,
+        /// Render the manifest as JSON instead of the human-readable table.
+        json: bool,
+        /// Explicit disclosure of the base prompt only; effective system text
+        /// remains protected behind hashes.
+        base_prompt_only: bool,
+    },
+
     /// List current sub-agents and their status
     ListSubAgents,
 

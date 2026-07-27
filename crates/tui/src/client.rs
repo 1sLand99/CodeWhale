@@ -183,6 +183,9 @@ pub struct DeepSeekClient {
     pub(super) codex_account_id: Option<String>,
     wire_format: WireFormat,
     retry: RetryPolicy,
+    /// Auxiliary inspection calls use the normal bounded retry schedule but
+    /// never publish retry/rate-limit state into process-global UI cells.
+    isolated_request_state: bool,
     default_model: String,
     connection_health: Arc<AsyncMutex<ConnectionHealth>>,
     rate_limiter: Arc<AsyncMutex<TokenBucket>>,
@@ -437,6 +440,7 @@ impl Clone for DeepSeekClient {
             codex_account_id: self.codex_account_id.clone(),
             wire_format: self.wire_format,
             retry: self.retry.clone(),
+            isolated_request_state: self.isolated_request_state,
             default_model: self.default_model.clone(),
             connection_health: self.connection_health.clone(),
             rate_limiter: self.rate_limiter.clone(),
@@ -1091,6 +1095,7 @@ impl DeepSeekClient {
             codex_account_id,
             wire_format,
             retry,
+            isolated_request_state: false,
             default_model,
             connection_health: Arc::new(AsyncMutex::new(ConnectionHealth::default())),
             rate_limiter: Arc::new(AsyncMutex::new(TokenBucket::from_env())),
@@ -1553,6 +1558,144 @@ impl DeepSeekClient {
         &self.base_url
     }
 
+    /// Prepare — but do not send — the exact outbound request for `request`.
+    ///
+    /// This is *the* outbound seam (#1004). Production dispatch
+    /// (`create_message`, `create_message_stream`) and `/preview-request` both
+    /// call it, so a preview cannot describe a request different from the one
+    /// a turn would send.
+    ///
+    /// It runs, in production order:
+    ///
+    /// 1. tool-history repair and model-bound secret redaction
+    ///    ([`Self::prepare_model_bound_request`]);
+    /// 2. protocol binding and route model re-resolution
+    ///    ([`Self::bind_request_to_protocol`]);
+    /// 3. the dialect's own body builder — Chat Completions, Anthropic
+    ///    Messages, or OpenAI Responses — including every provider-specific
+    ///    sanitizer and reasoning shaper;
+    /// 4. exact endpoint resolution for that dialect and route shape.
+    ///
+    /// It performs no I/O and mutates no client state.
+    pub(crate) fn prepare_outbound_request(
+        &self,
+        request: MessageRequest,
+        stream: bool,
+    ) -> Result<PreparedOutboundRequest> {
+        let request = self.bind_request_to_protocol(self.prepare_model_bound_request(request))?;
+        let requested_effort = request.reasoning_effort.clone();
+        let dialect = WireDialect::from_wire_format(self.wire_format);
+        // `stream` is the caller's entry point, not a wire fact: each dialect
+        // decides for itself what the body's `stream` field says.
+        let entrypoint = CallerStreamMode::from_stream_flag(stream);
+
+        match self.wire_format {
+            WireFormat::ChatCompletions => {
+                let wire = chat::build_chat_wire_body(
+                    &request,
+                    self.api_provider,
+                    &self.base_url,
+                    stream,
+                )?;
+                let url = chat_completions_url(
+                    self.chat_transport_base_url(),
+                    &self.base_url,
+                    self.api_provider,
+                    self.path_suffix.as_deref(),
+                    &wire.body,
+                );
+                let shape = prepared::chat_route_shape(
+                    self.api_provider,
+                    &self.base_url,
+                    &wire.model,
+                    &url,
+                );
+                Ok(PreparedOutboundRequest::new(
+                    dialect,
+                    self.endpoint_identity(url, shape),
+                    wire.model,
+                    wire.body,
+                    requested_effort,
+                    wire.replay_input_tokens,
+                    entrypoint,
+                ))
+            }
+            WireFormat::AnthropicMessages => {
+                let body = self.build_anthropic_body(&request, stream);
+                let url = anthropic::anthropic_messages_url(&self.base_url);
+                let shape = if self.api_provider == ApiProvider::OpencodeZen {
+                    RouteShape::OpencodeZen
+                } else if self.api_provider == ApiProvider::Custom {
+                    RouteShape::CustomCompatible
+                } else {
+                    RouteShape::Standard
+                };
+                let wire_model = body
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .unwrap_or(request.model.as_str())
+                    .to_string();
+                Ok(PreparedOutboundRequest::new(
+                    dialect,
+                    self.endpoint_identity(url, shape),
+                    wire_model,
+                    body,
+                    requested_effort,
+                    None,
+                    entrypoint,
+                ))
+            }
+            WireFormat::Responses => {
+                let body = responses::build_responses_body(&request);
+                let is_codex = self.api_provider == ApiProvider::OpenaiCodex;
+                let url = if is_codex {
+                    format!("{}{}", self.base_url, responses::CODEX_RESPONSES_PATH)
+                } else {
+                    api_url(&self.base_url, "responses")
+                };
+                let shape = if is_codex {
+                    RouteShape::CodexResponses
+                } else if self.api_provider == ApiProvider::OpencodeZen {
+                    RouteShape::OpencodeZen
+                } else if self.api_provider == ApiProvider::Custom {
+                    RouteShape::CustomCompatible
+                } else {
+                    RouteShape::Standard
+                };
+                let wire_model = body
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .unwrap_or(request.model.as_str())
+                    .to_string();
+                Ok(PreparedOutboundRequest::new(
+                    dialect,
+                    self.endpoint_identity(url, shape),
+                    wire_model,
+                    body,
+                    requested_effort,
+                    None,
+                    entrypoint,
+                ))
+            }
+        }
+    }
+
+    /// Typed identity of the endpoint this client would POST to.
+    ///
+    /// `route_id` is left empty here on purpose: the client knows the provider
+    /// and the URL, but only the caller's resolved turn plan knows whether the
+    /// user reached this route through a named custom-provider entry. The
+    /// engine attaches it with [`PreparedOutboundRequest::with_route_id`].
+    fn endpoint_identity(&self, url: String, shape: RouteShape) -> EndpointIdentity {
+        EndpointIdentity {
+            provider_id: self.api_provider.as_str().to_string(),
+            provider_display: self.api_provider.display_name().to_string(),
+            route_id: None,
+            url,
+            shape,
+        }
+    }
+
     /// Returns the active API provider for this client.
     pub fn api_provider(&self) -> ApiProvider {
         self.api_provider
@@ -1630,15 +1773,20 @@ impl DeepSeekClient {
     ) -> Result<String> {
         let model = wire_model_for_provider_route(self.api_provider, &self.base_url, model);
         if self.wire_format != WireFormat::ChatCompletions {
-            let request = self.bind_request_to_protocol(translation_message_request(
-                text,
-                model,
-                target_language,
-            ))?;
-            let response = match self.wire_format {
-                WireFormat::Responses => self.handle_responses_message(request).await?,
-                WireFormat::AnthropicMessages => self.handle_anthropic_message(request).await?,
-                WireFormat::ChatCompletions => unreachable!(),
+            // Non-Chat dialects reuse the prepared-request seam so translation
+            // cannot drift from production shaping. Translation is still an
+            // *auxiliary* call, not a primary agent turn: the Chat dialect
+            // below builds its own small fixed body, and `/preview-request`
+            // deliberately does not claim to describe either
+            // (see `docs/PREVIEW_REQUEST.md`).
+            let prepared = self.prepare_outbound_request(
+                translation_message_request(text, model, target_language),
+                false,
+            )?;
+            let response = match prepared.dialect {
+                WireDialect::OpenAiResponses => self.handle_responses_message(&prepared).await?,
+                WireDialect::AnthropicMessages => self.handle_anthropic_message(&prepared).await?,
+                WireDialect::ChatCompletions => unreachable!(),
             };
             return translation_text_from_response(&response);
         }
@@ -2052,6 +2200,9 @@ impl DeepSeekClient {
     where
         F: FnMut() -> reqwest::RequestBuilder,
     {
+        if self.isolated_request_state {
+            return self.send_with_isolated_retry(build).await;
+        }
         let retry_cfg: LlmRetryConfig = self.retry.clone().into();
         let request_result = with_retry(
             &retry_cfg,
@@ -2134,6 +2285,57 @@ impl DeepSeekClient {
         }
     }
 
+    /// The same bounded transport retry policy without process-global retry
+    /// banners, provider-wide pause cells, or shared connection-health writes.
+    /// Used only by the Auto classifier during read-only request inspection.
+    async fn send_with_isolated_retry<F>(&self, mut build: F) -> Result<reqwest::Response>
+    where
+        F: FnMut() -> reqwest::RequestBuilder,
+    {
+        let retry_cfg: LlmRetryConfig = self.retry.clone().into();
+        let request_result = with_retry(
+            &retry_cfg,
+            || {
+                let request = build();
+                async move {
+                    self.wait_for_rate_limit().await;
+                    let response = request
+                        .send()
+                        .await
+                        .map_err(|err| LlmError::from_reqwest(&err))?;
+                    let status = response.status();
+                    if status.is_success() {
+                        return Ok(response);
+                    }
+                    let retry_after = extract_retry_after(response.headers());
+                    let body = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
+                    let body = sanitize_http_error_body(
+                        Some(self.api_provider.display_name()),
+                        status.as_u16(),
+                        &body,
+                    );
+                    Err(LlmError::from_http_response_with_retry_after(
+                        status.as_u16(),
+                        &body,
+                        retry_after,
+                    ))
+                }
+            },
+            Some(Box::new(|err, attempt, delay| {
+                let (reason_label, _) = retry_reason_label_and_human(err);
+                logging::warn(format!(
+                    "Isolated HTTP retry reason={} attempt={} delay={:.2}s",
+                    reason_label,
+                    attempt + 1,
+                    delay.as_secs_f64(),
+                ));
+            })),
+        )
+        .await;
+
+        request_result.map_err(|err| anyhow::Error::new(err.last_error))
+    }
+
     pub(super) async fn send_json_with_retry(
         &self,
         url: &str,
@@ -2169,6 +2371,34 @@ fn retry_reason_label_and_human(err: &LlmError) -> (&'static str, String) {
         LlmError::NetworkError(_) => ("network_error", "network error".to_string()),
         LlmError::Timeout(_) => ("timeout", "timeout".to_string()),
         _ => ("other", "other".to_string()),
+    }
+}
+
+impl DeepSeekClient {
+    /// Execute a non-streaming request without consulting or updating the
+    /// process-global response cache.
+    ///
+    /// Request previews use this only for Auto's auxiliary router classifier:
+    /// the classifier may call its configured provider, but an inspection must
+    /// not perturb later production routing through shared cache state.
+    pub(crate) async fn create_message_without_response_cache(
+        &self,
+        request: MessageRequest,
+    ) -> Result<MessageResponse> {
+        let mut isolated = self.clone();
+        isolated.isolated_request_state = true;
+        // The ordinary clone shares its provider token bucket so concurrent
+        // production calls observe one rate budget. Request inspection is an
+        // auxiliary classifier call, however: it must neither consume nor
+        // inherit that mutable foreground state.
+        isolated.rate_limiter = Arc::new(AsyncMutex::new(TokenBucket::from_env()));
+        let _permit = isolated.acquire_provider_request_permit().await;
+        let prepared = isolated.prepare_outbound_request(request, false)?;
+        match prepared.dialect {
+            WireDialect::OpenAiResponses => isolated.handle_responses_message(&prepared).await,
+            WireDialect::AnthropicMessages => isolated.handle_anthropic_message(&prepared).await,
+            WireDialect::ChatCompletions => isolated.create_message_chat(&prepared, false).await,
+        }
     }
 }
 
@@ -2211,11 +2441,14 @@ impl LlmClient for DeepSeekClient {
 
     async fn create_message(&self, request: MessageRequest) -> Result<MessageResponse> {
         let _permit = self.acquire_provider_request_permit().await;
-        let request = self.bind_request_to_protocol(self.prepare_model_bound_request(request))?;
-        match self.wire_format {
-            WireFormat::Responses => self.handle_responses_message(request).await,
-            WireFormat::AnthropicMessages => self.handle_anthropic_message(request).await,
-            WireFormat::ChatCompletions => self.create_message_chat(&request).await,
+        // Cacheability is a property of the caller's request, not of the wire
+        // body, so it is read before the request is consumed by the seam.
+        let cacheable = crate::llm_response_cache::request_is_cacheable(&request);
+        let prepared = self.prepare_outbound_request(request, false)?;
+        match prepared.dialect {
+            WireDialect::OpenAiResponses => self.handle_responses_message(&prepared).await,
+            WireDialect::AnthropicMessages => self.handle_anthropic_message(&prepared).await,
+            WireDialect::ChatCompletions => self.create_message_chat(&prepared, cacheable).await,
         }
     }
 
@@ -2224,11 +2457,11 @@ impl LlmClient for DeepSeekClient {
         request: MessageRequest,
     ) -> Result<crate::llm_client::StreamEventBox> {
         let permit = self.acquire_provider_request_permit().await;
-        let request = self.bind_request_to_protocol(self.prepare_model_bound_request(request))?;
-        let stream = match self.wire_format {
-            WireFormat::Responses => self.handle_responses_stream(request).await?,
-            WireFormat::AnthropicMessages => self.handle_anthropic_stream(request).await?,
-            WireFormat::ChatCompletions => self.handle_chat_completion_stream(request).await?,
+        let prepared = self.prepare_outbound_request(request, true)?;
+        let stream = match prepared.dialect {
+            WireDialect::OpenAiResponses => self.handle_responses_stream(&prepared).await?,
+            WireDialect::AnthropicMessages => self.handle_anthropic_stream(&prepared).await?,
+            WireDialect::ChatCompletions => self.handle_chat_completion_stream(prepared).await?,
         };
         Ok(Self::hold_provider_request_permit_for_stream(
             stream, permit,
@@ -2985,6 +3218,7 @@ impl DeepSeekClient {
 
 mod anthropic;
 mod chat;
+mod prepared;
 mod provider_native_search;
 mod responses;
 mod stream_entry;
@@ -3010,6 +3244,10 @@ fn take_sse_line(buffer: &mut Vec<u8>) -> Option<String> {
 }
 
 pub(crate) use chat::{CacheWarmupKey, PromptInspection};
+pub(crate) use prepared::{
+    CallerStreamMode, EndpointIdentity, PreparedOutboundRequest, RouteShape, WireBodyView,
+    WireDialect, canonical_json,
+};
 pub(crate) use provider_native_search::{ProviderNativeSearchClient, ProviderNativeSearchRequest};
 
 pub(crate) fn inspect_prompt_for_request(request: &MessageRequest) -> PromptInspection {
@@ -3032,7 +3270,8 @@ mod tests {
     use crate::client::responses::build_responses_body;
     use crate::config::{DEFAULT_TELECOMJS_MODEL, ProviderConfig, ProvidersConfig};
     use crate::models::{
-        ContentBlock, ContentBlockStart, Delta, Message, MessageRequest, StreamEvent, Tool,
+        ContentBlock, ContentBlockStart, Delta, Message, MessageRequest, MessageResponse,
+        StreamEvent, Tool,
     };
     use crate::tools::apply_patch::ApplyPatchTool;
     use crate::tools::spec::ToolSpec;
@@ -3245,6 +3484,174 @@ mod tests {
         let path = requests[0].url.path().to_string();
         let body = serde_json::from_slice(&requests[0].body).expect("captured request JSON");
         (path, body)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cache_free_message_call_neither_reads_nor_writes_global_cache() {
+        let _retry_guard = crate::retry_status::test_guard();
+        crate::retry_status::clear();
+        crate::retry_status::clear_rate_limit();
+        crate::retry_status::start(7, Duration::from_secs(60), "foreground sentinel");
+        crate::retry_status::note_rate_limit(Duration::from_secs(60));
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "chatcmpl-cache-free-provider",
+                "object": "chat.completion",
+                "model": "deepseek-v4-pro",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "provider result"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = deepseek_request_boundary_client("https://api.deepseek.com/v1", server.uri());
+        let request = MessageRequest {
+            model: "deepseek-v4-pro".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "preview-router-cache-isolation-regression".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 128,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: Some("off".to_string()),
+            stream: Some(false),
+            temperature: Some(0.0),
+            top_p: None,
+        };
+        let prepared = client
+            .prepare_outbound_request(request.clone(), false)
+            .expect("request prepares");
+        let wire_body = serde_json::to_vec(&prepared.body).expect("wire body serializes");
+        let cache_key = crate::llm_response_cache::ResponseCache::make_key(
+            client.api_provider.as_str(),
+            &client.base_url,
+            client.path_suffix.as_deref(),
+            &client.api_key,
+            &wire_body,
+        );
+        crate::llm_response_cache::response_cache().put(
+            cache_key,
+            MessageResponse {
+                id: "cached-sentinel-must-survive".to_string(),
+                r#type: "message".to_string(),
+                role: "assistant".to_string(),
+                content: Vec::new(),
+                model: "deepseek-v4-pro".to_string(),
+                stop_reason: Some("end_turn".to_string()),
+                stop_sequence: None,
+                container: None,
+                usage: Default::default(),
+            },
+        );
+
+        let response = client
+            .create_message_without_response_cache(request)
+            .await
+            .expect("cache-free provider call succeeds");
+        assert_eq!(response.id, "chatcmpl-cache-free-provider");
+        assert_eq!(
+            crate::llm_response_cache::response_cache()
+                .get(&cache_key)
+                .expect("sentinel remains")
+                .id,
+            "cached-sentinel-must-survive"
+        );
+        match crate::retry_status::snapshot() {
+            crate::retry_status::RetryState::Active(banner) => {
+                assert_eq!(banner.attempt, 7);
+                assert_eq!(banner.reason, "foreground sentinel");
+            }
+            state => panic!("isolated success mutated retry state: {state:?}"),
+        }
+        assert!(
+            crate::retry_status::rate_limit_remaining().is_some(),
+            "isolated success must not clear the foreground provider pause"
+        );
+        crate::retry_status::clear();
+        crate::retry_status::clear_rate_limit();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cache_free_classifier_429_does_not_publish_global_retry_or_rate_limit_state() {
+        let _retry_guard = crate::retry_status::test_guard();
+        crate::retry_status::clear();
+        crate::retry_status::clear_rate_limit();
+        crate::retry_status::start(9, Duration::from_secs(60), "foreground sentinel 429");
+        crate::retry_status::note_rate_limit(Duration::from_secs(60));
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "120")
+                    .set_body_string("rate limited"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut client =
+            deepseek_request_boundary_client("https://api.deepseek.com/v1", server.uri());
+        client.retry.enabled = false;
+        client.retry.max_retries = 0;
+        let request = MessageRequest {
+            model: "deepseek-v4-pro".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "preview-router-429-isolation-regression".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 64,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: Some("off".to_string()),
+            stream: Some(false),
+            temperature: Some(0.0),
+            top_p: None,
+        };
+        let error = client
+            .create_message_without_response_cache(request)
+            .await
+            .expect_err("429 must fail when isolated retries are disabled");
+        assert!(
+            matches!(
+                error.downcast_ref::<LlmError>(),
+                Some(LlmError::RateLimited { .. })
+            ),
+            "{error:#}"
+        );
+        match crate::retry_status::snapshot() {
+            crate::retry_status::RetryState::Active(banner) => {
+                assert_eq!(banner.attempt, 9);
+                assert_eq!(banner.reason, "foreground sentinel 429");
+            }
+            state => panic!("isolated 429 mutated retry state: {state:?}"),
+        }
+        let remaining =
+            crate::retry_status::rate_limit_remaining().expect("foreground provider pause remains");
+        assert!(
+            remaining < Duration::from_secs(70),
+            "classifier Retry-After must not extend the global pause: {remaining:?}"
+        );
+        crate::retry_status::clear();
+        crate::retry_status::clear_rate_limit();
     }
 
     async fn assert_deepseek_strict_request_route_boundary(streaming: bool) {

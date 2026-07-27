@@ -107,6 +107,16 @@ pub fn get_command_info(name: &str) -> Option<&'static CommandInfo> {
 
 /// Execute a slash command
 pub fn execute(cmd: &str, app: &mut App) -> CommandResult {
+    // Keep the command's raw remainder available for commands whose payload is
+    // byte-sensitive. Most slash commands intentionally receive a normalized
+    // argument below; `/preview-request --prompt`, however, must describe the
+    // exact prompt the send path would receive, including trailing whitespace
+    // and newlines.
+    let dispatch_input = cmd.trim_start();
+    let command_token_end = dispatch_input
+        .find(char::is_whitespace)
+        .unwrap_or(dispatch_input.len());
+    let raw_remainder = &dispatch_input[command_token_end..];
     let trimmed = cmd.trim();
 
     // `$skillname` is a backward-compatible alias for `/skill skillname`.
@@ -168,7 +178,12 @@ pub fn execute(cmd: &str, app: &mut App) -> CommandResult {
     }
 
     if let Some(command_object) = registry().get(command.as_str()) {
-        return command_object.execute(app, arg);
+        let command_arg = if command_object.info().name == "preview-request" {
+            Some(raw_remainder)
+        } else {
+            arg
+        };
+        return command_object.execute(app, command_arg);
     }
 
     match command.as_str() {
@@ -361,6 +376,22 @@ mod tests {
         super::user_registry::reload(None);
         let registry = super::user_registry::current_registry();
         assert!(registry.is_valid());
+    }
+
+    #[test]
+    fn preview_request_dispatch_preserves_prompt_edge_bytes() {
+        let mut app = create_test_app();
+        let result = execute("/preview-request --prompt   lead\ntrail  ", &mut app);
+
+        assert!(!result.is_error, "{result:?}");
+        assert!(matches!(
+            result.action,
+            Some(AppAction::PreviewOutboundRequest {
+                json: false,
+                base_prompt_only: false,
+                hypothetical_prompt,
+            }) if hypothetical_prompt.as_deref() == Some("  lead\ntrail  ")
+        ));
     }
 
     #[test]

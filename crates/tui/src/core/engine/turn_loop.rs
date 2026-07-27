@@ -331,10 +331,17 @@ impl Engine {
         let mut read_repeat_guard = ReadRepeatGuard::default();
         let mut turn_error: Option<String> = None;
         let mut context_recovery_attempts = 0u8;
-        let mut tool_catalog = tools.unwrap_or_default();
-        if !tool_catalog.is_empty() {
-            ensure_advanced_tooling(&mut tool_catalog, mode, &self.config.tools_always_load);
-        }
+        // Seed the turn's tool state from the shared planner so
+        // `/preview-request` and dispatch cannot disagree about which tools
+        // the next request would carry.
+        let tool_plan = plan_turn_tools(
+            tools,
+            mode,
+            &self.config.tools_always_load,
+            &dynamic_active_tools,
+            self.config.strict_tool_mode,
+        );
+        let tool_catalog = tool_plan.catalog;
         if let Some(registry) = tool_registry {
             let issues = tool_catalog_consistency_issues(&tool_catalog, registry);
             if !issues.is_empty() {
@@ -345,12 +352,7 @@ impl Engine {
                 );
             }
         }
-        let mut active_tool_names = initial_active_tools(&tool_catalog);
-        active_tool_names.extend(
-            dynamic_active_tools
-                .into_iter()
-                .map(std::string::ToString::to_string),
-        );
+        let mut active_tool_names = tool_plan.active_names;
         let mut goal_continuations_this_turn = 0u32;
         // Outer stream-retry counter: when the chunked-transfer connection
         // dies mid-stream and either nothing useful was streamed (#103
@@ -423,8 +425,11 @@ impl Engine {
                 break;
             }
 
-            let compaction_pins =
-                self.compaction_pins_for_active_turn(turn.active_slop_gate_message.as_ref());
+            let compaction_pins = self.compaction_pins_for_messages(
+                &self.session.messages,
+                &self.session.working_set,
+                turn.active_slop_gate_message.as_ref(),
+            );
             let compaction_paths = self.session.working_set.top_paths(24);
 
             if self.config.compaction.enabled
@@ -559,17 +564,15 @@ impl Engine {
             // model sees compile errors before its next reasoning step.
             self.flush_pending_lsp_diagnostics().await;
 
-            // Build the request
-            let mut active_tools = if tool_catalog.is_empty() {
-                None
-            } else {
-                Some(active_tools_for_step(&tool_catalog, &active_tool_names))
-            };
-            if self.config.strict_tool_mode
-                && let Some(tools) = active_tools.as_mut()
-            {
-                crate::tools::schema_sanitize::prepare_tools_for_strict_mode(tools);
-            }
+            // Build the request. Tool selection goes through the same
+            // helper that seeded this turn and that `/preview-request`
+            // reports, so a deferred tool activated mid-turn is reflected
+            // identically in both places.
+            let active_tools = active_tools_for_request(
+                &tool_catalog,
+                &active_tool_names,
+                self.config.strict_tool_mode,
+            );
 
             // Resolve `auto` reasoning_effort to a concrete tier (#663).
             let effective_reasoning_effort = resolve_auto_effort(
@@ -3247,14 +3250,27 @@ impl Engine {
         work_tail: Option<&Message>,
     ) -> usize {
         let base = self.estimated_input_tokens();
-        let Some(tail) = work_tail else {
-            return base;
-        };
-        base.saturating_add(super::context::estimate_input_tokens_conservative(
-            std::slice::from_ref(tail),
-            None,
-        ))
+        production_input_estimate_with_work_tail(base, work_tail)
     }
+}
+
+/// Add the separately framed transient Work tail to a production base-message
+/// estimate.
+///
+/// Production intentionally estimates these as two lists, so the tail pays
+/// its own fixed framing overhead. Preview must call this same seam instead of
+/// estimating one combined list, which can differ at the context ceiling.
+pub(super) fn production_input_estimate_with_work_tail(
+    base_message_estimate: usize,
+    work_tail: Option<&Message>,
+) -> usize {
+    let Some(tail) = work_tail else {
+        return base_message_estimate;
+    };
+    base_message_estimate.saturating_add(super::context::estimate_input_tokens_conservative(
+        std::slice::from_ref(tail),
+        None,
+    ))
 }
 
 pub(super) fn shell_completion_status_text(
@@ -3682,14 +3698,14 @@ fn should_emit_thinking_only_status(
 
 /// Sentinel reasoning-effort value meaning "let the auto-reasoning system
 /// decide" (#4158).
-const REASONING_EFFORT_AUTO: &str = "auto";
+pub(super) const REASONING_EFFORT_AUTO: &str = "auto";
 
 /// Resolve an `"auto"` reasoning-effort tier to a concrete value.
 ///
 /// When the configured effort is `"auto"`, inspects the last user message
 /// and calls [`crate::auto_reasoning::select`] to pick the actual tier.
 /// Non-`"auto"` values pass through unchanged.
-fn resolve_auto_effort(
+pub(super) fn resolve_auto_effort(
     reasoning_effort: Option<&str>,
     messages: &[Message],
     provider: crate::config::ApiProvider,

@@ -191,19 +191,36 @@ impl WorkStateSource {
     /// view with a warning rather than dropping Work state from the request,
     /// because a silently missing ledger reads to the model as "no work".
     pub async fn snapshot(&self) -> TodoListSnapshot {
-        if let Some(work) = self.work.as_ref().filter(|_| self.is_graph_backed()) {
-            match work.current_todos().await {
-                Ok(snapshot) => return snapshot,
-                Err(err) => {
-                    tracing::warn!(
-                        target: "work_grounding",
-                        error = %err,
-                        "work graph projection unavailable; falling back to the legacy To-do view"
-                    );
-                }
+        match self.authoritative_snapshot().await {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                tracing::warn!(
+                    target: "work_grounding",
+                    error = %err,
+                    "work graph projection unavailable; falling back to the legacy To-do view"
+                );
+                self.todos.lock().await.snapshot()
             }
         }
-        self.todos.lock().await.snapshot()
+    }
+
+    /// Current authoritative snapshot without the production fallback.
+    ///
+    /// Inspection callers need a stronger contract than the live request
+    /// loop: if a graph-backed projection cannot be read, falling back to the
+    /// asynchronously published legacy list could describe a stale request as
+    /// exact. Production remains available through [`Self::snapshot`]; a
+    /// preview instead fails closed through this method.
+    pub async fn exact_snapshot(&self) -> Result<TodoListSnapshot, String> {
+        self.authoritative_snapshot().await
+    }
+
+    /// One shared successful-read seam for production and exact inspection.
+    async fn authoritative_snapshot(&self) -> Result<TodoListSnapshot, String> {
+        if let Some(work) = self.work.as_ref().filter(|_| self.is_graph_backed()) {
+            return work.current_todos().await;
+        }
+        Ok(self.todos.lock().await.snapshot())
     }
 
     /// Canonical body for the current authoritative snapshot.
@@ -217,6 +234,14 @@ impl WorkStateSource {
     /// must not store it in history — see [`work_state_message`].
     pub async fn tail_message(&self) -> Option<Message> {
         work_state_message(&self.snapshot().await)
+    }
+
+    /// Exact transient request tail for read-only inspection.
+    ///
+    /// Unlike [`Self::tail_message`], this never substitutes the legacy view
+    /// when a graph-backed authority cannot be read.
+    pub async fn exact_tail_message(&self) -> Result<Option<Message>, String> {
+        Ok(work_state_message(&self.exact_snapshot().await?))
     }
 }
 

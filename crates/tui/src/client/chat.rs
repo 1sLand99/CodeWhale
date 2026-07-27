@@ -47,8 +47,8 @@ use crate::models::{
 use super::{
     DeepSeekClient, ERROR_BODY_MAX_BYTES, SSE_BACKPRESSURE_HIGH_WATERMARK,
     SSE_BACKPRESSURE_SLEEP_MS, SSE_MAX_LINES_PER_CHUNK, acquire_stream_buffer,
-    apply_reasoning_effort, bounded_error_text, chat_completions_url, from_api_tool_name,
-    parse_usage, release_stream_buffer, system_to_instructions, to_api_tool_name,
+    apply_reasoning_effort, bounded_error_text, from_api_tool_name, parse_usage,
+    release_stream_buffer, system_to_instructions, to_api_tool_name,
 };
 
 fn apply_provider_token_limit(
@@ -323,97 +323,157 @@ fn sanitize_moonshot_chat_tools(chat_tools: &mut [Value]) -> Result<()> {
     Ok(())
 }
 
-impl DeepSeekClient {
-    pub(super) async fn create_message_chat(
-        &self,
-        request: &MessageRequest,
-    ) -> Result<MessageResponse> {
-        let cacheable = crate::llm_response_cache::request_is_cacheable(request);
-        let messages = build_chat_messages_for_request_and_provider_and_route(
-            request,
-            self.api_provider,
-            &self.base_url,
-        );
-        let model =
-            wire_model_for_provider_route(self.api_provider, &self.base_url, &request.model);
-        let mut body = json!({
+/// The final Chat Completions wire payload for one request.
+///
+/// Produced by [`build_chat_wire_body`], the single place where a
+/// `MessageRequest` becomes Chat-shaped JSON. It is reached only through
+/// [`super::DeepSeekClient::prepare_outbound_request`], the shared outbound
+/// seam that the blocking transport, the streaming transport, and
+/// `/preview-request` all consume — so a preview cannot drift from what would
+/// be sent, and no other dialect is projected through this builder.
+///
+/// Seam concept harvested from PR #1099 (`build_sanitized_chat_completion_body`)
+/// by TaoMu (GTC2080); re-implemented against the current client shape.
+pub(crate) struct ChatWireBody {
+    /// Provider-shaped JSON body, post-sanitizers.
+    pub(crate) body: Value,
+    /// The model id actually placed on the wire (may differ from the
+    /// configured/display model for routed providers).
+    pub(crate) model: String,
+    /// Tokens re-sent because thinking-mode replay substituted
+    /// `reasoning_content`. Only computed on the streaming path, which is the
+    /// only path that runs the replay sanitizer today.
+    pub(crate) replay_input_tokens: Option<u32>,
+}
+
+/// Build the Chat Completions wire body for `request`.
+///
+/// `stream` selects the streaming shape (`stream` + `stream_options`) and, to
+/// preserve historical behavior exactly, also gates the thinking-mode replay
+/// sanitizer — the blocking path has never run it.
+pub(crate) fn build_chat_wire_body(
+    request: &MessageRequest,
+    provider: ApiProvider,
+    base_url: &str,
+    stream: bool,
+) -> Result<ChatWireBody> {
+    let messages =
+        build_chat_messages_for_request_and_provider_and_route(request, provider, base_url);
+    let model = wire_model_for_provider_route(provider, base_url, &request.model);
+    let mut body = if stream {
+        json!({
             "model": model.clone(),
             "messages": messages,
             "max_tokens": request.max_tokens,
-        });
-        apply_provider_token_limit(
-            &mut body,
-            self.api_provider,
-            &self.base_url,
-            &model,
-            request.max_tokens,
-        );
+            "stream": true,
+            "stream_options": {
+                "include_usage": true
+            },
+        })
+    } else {
+        json!({
+            "model": model.clone(),
+            "messages": messages,
+            "max_tokens": request.max_tokens,
+        })
+    };
+    apply_provider_token_limit(&mut body, provider, base_url, &model, request.max_tokens);
 
-        if let Some(temperature) = request.temperature {
-            body["temperature"] = json!(temperature);
+    if let Some(temperature) = request.temperature {
+        body["temperature"] = json!(temperature);
+    }
+    if let Some(top_p) = request.top_p {
+        body["top_p"] = json!(top_p);
+    }
+    if let Some(tools) = request.tools.as_ref() {
+        let mut chat_tools: Vec<_> = tools
+            .iter()
+            .map(|tool| tool_to_chat_for_base_url(tool, base_url))
+            .collect();
+        // Moonshot function parameters must end at a plain object root.
+        // Flatten root composition, preserve valid nested anyOf, and fail
+        // closed before transport when an internal root ref is unsafe.
+        if matches!(provider, crate::config::ApiProvider::Moonshot) {
+            sanitize_moonshot_chat_tools(&mut chat_tools)?;
         }
-        if let Some(top_p) = request.top_p {
-            body["top_p"] = json!(top_p);
-        }
-        if let Some(tools) = request.tools.as_ref() {
-            let mut chat_tools: Vec<_> = tools
-                .iter()
-                .map(|tool| tool_to_chat_for_base_url(tool, &self.base_url))
-                .collect();
-            // Moonshot function parameters must end at a plain object root.
-            // Flatten root composition, preserve valid nested anyOf, and fail
-            // closed before transport when an internal root ref is unsafe.
-            if matches!(self.api_provider, crate::config::ApiProvider::Moonshot) {
-                sanitize_moonshot_chat_tools(&mut chat_tools)?;
-            }
-            // xAI rejects a parameters root that is not a plain object schema
-            // (e.g. apply_patch's root `oneOf` required-groups) with a 400.
-            if matches!(self.api_provider, crate::config::ApiProvider::Xai) {
-                for t in &mut chat_tools {
-                    let Some(function) = t
-                        .as_object_mut()
-                        .and_then(|t| t.get_mut("function"))
-                        .and_then(|f| f.as_object_mut())
-                    else {
-                        continue;
-                    };
-                    let note = function.get_mut("parameters").and_then(|parameters| {
-                        crate::tools::schema_sanitize::sanitize_for_xai_parameters(parameters)
-                    });
-                    if let Some(note) = note
-                        && let Some(description) = function
-                            .get_mut("description")
-                            .and_then(|d| d.as_str().map(str::to_string))
-                    {
-                        function.insert(
-                            "description".to_string(),
-                            json!(format!("{description} {note}")),
-                        );
-                    }
+        // xAI rejects a parameters root that is not a plain object schema
+        // (e.g. apply_patch's root `oneOf` required-groups) with a 400.
+        if matches!(provider, crate::config::ApiProvider::Xai) {
+            for t in &mut chat_tools {
+                let Some(function) = t
+                    .as_object_mut()
+                    .and_then(|t| t.get_mut("function"))
+                    .and_then(|f| f.as_object_mut())
+                else {
+                    continue;
+                };
+                let note = function.get_mut("parameters").and_then(|parameters| {
+                    crate::tools::schema_sanitize::sanitize_for_xai_parameters(parameters)
+                });
+                if let Some(note) = note
+                    && let Some(description) = function
+                        .get_mut("description")
+                        .and_then(|d| d.as_str().map(str::to_string))
+                {
+                    function.insert(
+                        "description".to_string(),
+                        json!(format!("{description} {note}")),
+                    );
                 }
             }
-            body["tools"] = json!(chat_tools);
         }
-        if should_send_tool_choice_for_chat(self.api_provider, request.reasoning_effort.as_deref())
-            && let Some(choice) = request.tool_choice.as_ref()
-            && let Some(mapped) = map_tool_choice_for_chat(choice)
-        {
-            body["tool_choice"] = mapped;
-        }
-        apply_route_reasoning_controls(
+        body["tools"] = json!(chat_tools);
+    }
+    if should_send_tool_choice_for_chat(provider, request.reasoning_effort.as_deref())
+        && let Some(choice) = request.tool_choice.as_ref()
+        && let Some(mapped) = map_tool_choice_for_chat(choice)
+    {
+        body["tool_choice"] = mapped;
+    }
+    apply_route_reasoning_controls(
+        &mut body,
+        provider,
+        base_url,
+        &model,
+        request.reasoning_effort.as_deref(),
+    );
+    apply_direct_moonshot_k3_fixed_sampling(&mut body, provider, base_url, &model);
+
+    // Bulletproof final sanitizer: walk the wire payload and force
+    // `reasoning_content` onto any assistant message that has tool_calls
+    // but no reasoning_content. DeepSeek's thinking-mode API rejects
+    // such messages with a 400. This is the last line of defense after
+    // engine-side and build-side substitution; if either upstream path
+    // misses a case (e.g. a session restored from disk, a sub-agent
+    // adding messages directly, or a cached prefix mismatch), this pass
+    // still produces a valid request.
+    let replay_input_tokens = if stream {
+        sanitize_thinking_mode_messages_for_route(
             &mut body,
-            self.api_provider,
-            &self.base_url,
             &model,
             request.reasoning_effort.as_deref(),
-        );
-        apply_direct_moonshot_k3_fixed_sampling(
-            &mut body,
-            self.api_provider,
-            &self.base_url,
-            &model,
-        );
-        mirror_minimax_reasoning_details_for_body(&mut body, self.api_provider);
+            provider,
+            base_url,
+        )
+    } else {
+        None
+    };
+    mirror_minimax_reasoning_details_for_body(&mut body, provider);
+
+    Ok(ChatWireBody {
+        body,
+        model,
+        replay_input_tokens,
+    })
+}
+
+impl DeepSeekClient {
+    pub(super) async fn create_message_chat(
+        &self,
+        prepared: &super::PreparedOutboundRequest,
+        cacheable: bool,
+    ) -> Result<MessageResponse> {
+        let body = &prepared.body;
 
         let response_cache_key = if cacheable {
             let wire_body =
@@ -433,14 +493,11 @@ impl DeepSeekClient {
             None
         };
 
-        let url = chat_completions_url(
-            self.chat_transport_base_url(),
-            &self.base_url,
-            self.api_provider,
-            self.path_suffix.as_deref(),
-            &body,
-        );
-        let response = self.send_json_with_retry(&url, &body).await?;
+        // The endpoint was resolved by the shared seam alongside the body, so
+        // a route-shape decision (e.g. DeepSeek's strict-tools `/beta` path)
+        // cannot be made twice with two different answers.
+        let url = prepared.endpoint.url.as_str();
+        let response = self.send_json_with_retry(url, body).await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -507,121 +564,21 @@ impl DeepSeekClient {
 
     pub(super) async fn handle_chat_completion_stream(
         &self,
-        request: MessageRequest,
+        prepared: super::PreparedOutboundRequest,
     ) -> Result<StreamEventBox> {
-        // Try true SSE streaming via chat completions (widely supported)
-        let messages = build_chat_messages_for_request_and_provider_and_route(
-            &request,
-            self.api_provider,
-            &self.base_url,
-        );
-        let model =
-            wire_model_for_provider_route(self.api_provider, &self.base_url, &request.model);
-        let mut body = json!({
-            "model": model.clone(),
-            "messages": messages,
-            "max_tokens": request.max_tokens,
-            "stream": true,
-            "stream_options": {
-                "include_usage": true
-            },
-        });
-        apply_provider_token_limit(
-            &mut body,
-            self.api_provider,
-            &self.base_url,
-            &model,
-            request.max_tokens,
-        );
+        // Try true SSE streaming via chat completions (widely supported).
+        // Body and endpoint both come from the shared prepared-request seam,
+        // so a preview or a non-stream call can never diverge from the
+        // streamed request.
+        let super::PreparedOutboundRequest {
+            body,
+            wire_model: model,
+            replay_input_tokens,
+            endpoint,
+            ..
+        } = prepared;
+        let url = endpoint.url;
 
-        if let Some(temperature) = request.temperature {
-            body["temperature"] = json!(temperature);
-        }
-        if let Some(top_p) = request.top_p {
-            body["top_p"] = json!(top_p);
-        }
-        if let Some(tools) = request.tools.as_ref() {
-            let mut chat_tools: Vec<_> = tools
-                .iter()
-                .map(|tool| tool_to_chat_for_base_url(tool, &self.base_url))
-                .collect();
-            // Keep streaming and non-streaming Moonshot tool contracts
-            // identical; invalid refs fail before any request is sent.
-            if matches!(self.api_provider, crate::config::ApiProvider::Moonshot) {
-                sanitize_moonshot_chat_tools(&mut chat_tools)?;
-            }
-            // xAI rejects a parameters root that is not a plain object schema
-            // (e.g. apply_patch's root `oneOf` required-groups) with a 400.
-            if matches!(self.api_provider, crate::config::ApiProvider::Xai) {
-                for t in &mut chat_tools {
-                    let Some(function) = t
-                        .as_object_mut()
-                        .and_then(|t| t.get_mut("function"))
-                        .and_then(|f| f.as_object_mut())
-                    else {
-                        continue;
-                    };
-                    let note = function.get_mut("parameters").and_then(|parameters| {
-                        crate::tools::schema_sanitize::sanitize_for_xai_parameters(parameters)
-                    });
-                    if let Some(note) = note
-                        && let Some(description) = function
-                            .get_mut("description")
-                            .and_then(|d| d.as_str().map(str::to_string))
-                    {
-                        function.insert(
-                            "description".to_string(),
-                            json!(format!("{description} {note}")),
-                        );
-                    }
-                }
-            }
-            body["tools"] = json!(chat_tools);
-        }
-        if should_send_tool_choice_for_chat(self.api_provider, request.reasoning_effort.as_deref())
-            && let Some(choice) = request.tool_choice.as_ref()
-            && let Some(mapped) = map_tool_choice_for_chat(choice)
-        {
-            body["tool_choice"] = mapped;
-        }
-        apply_route_reasoning_controls(
-            &mut body,
-            self.api_provider,
-            &self.base_url,
-            &model,
-            request.reasoning_effort.as_deref(),
-        );
-        apply_direct_moonshot_k3_fixed_sampling(
-            &mut body,
-            self.api_provider,
-            &self.base_url,
-            &model,
-        );
-
-        // Bulletproof final sanitizer: walk the wire payload and force
-        // `reasoning_content` onto any assistant message that has tool_calls
-        // but no reasoning_content. DeepSeek's thinking-mode API rejects
-        // such messages with a 400. This is the last line of defense after
-        // engine-side and build-side substitution; if either upstream path
-        // misses a case (e.g. a session restored from disk, a sub-agent
-        // adding messages directly, or a cached prefix mismatch), this pass
-        // still produces a valid request.
-        let replay_input_tokens = sanitize_thinking_mode_messages_for_route(
-            &mut body,
-            &model,
-            request.reasoning_effort.as_deref(),
-            self.api_provider,
-            &self.base_url,
-        );
-        mirror_minimax_reasoning_details_for_body(&mut body, self.api_provider);
-
-        let url = chat_completions_url(
-            self.chat_transport_base_url(),
-            &self.base_url,
-            self.api_provider,
-            self.path_suffix.as_deref(),
-            &body,
-        );
         let (response, stream_idle_timeout) = self.open_chat_stream_response(&url, &body).await?;
 
         let status = response.status();

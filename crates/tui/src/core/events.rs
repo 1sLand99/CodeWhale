@@ -287,6 +287,17 @@ pub enum Event {
     /// Status message for UI display
     Status { message: String },
 
+    /// Rendered `/preview-request` manifest (#1004).
+    ///
+    /// The engine is the only authority that can rebuild the exact next-turn
+    /// request, so the manifest is rendered there and delivered as text. The
+    /// payload is normally a redacted, typed manifest — never a request body.
+    /// The explicit `base-prompt` mode may instead carry only the exact base
+    /// prompt; it never carries runtime/system additions. There is no error
+    /// variant: a manifest that cannot describe something says so in a typed
+    /// unavailable section instead.
+    RequestManifestReady { rendered: String },
+
     /// Pause terminal input events (for interactive subprocesses).
     PauseEvents {
         /// Optional one-shot notification fired after the UI has actually

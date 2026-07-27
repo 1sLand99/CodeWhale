@@ -19,12 +19,12 @@ use crate::models::{
 use crate::tools::schema_sanitize;
 
 use super::{
-    DeepSeekClient, ERROR_BODY_MAX_BYTES, api_url, bounded_error_text, from_api_tool_name,
+    DeepSeekClient, ERROR_BODY_MAX_BYTES, bounded_error_text, from_api_tool_name,
     system_to_instructions, to_api_tool_name,
 };
 
 /// Base URL path for the Codex Responses endpoint.
-const CODEX_RESPONSES_PATH: &str = "/codex/responses";
+pub(super) const CODEX_RESPONSES_PATH: &str = "/codex/responses";
 
 /// Build the Responses API request body from a `MessageRequest`.
 pub(super) fn build_responses_body(request: &MessageRequest) -> Value {
@@ -80,15 +80,19 @@ impl DeepSeekClient {
     /// Handle a streaming Responses API request for the OpenAI Codex provider.
     pub(super) async fn handle_responses_stream(
         &self,
-        request: MessageRequest,
+        prepared: &super::PreparedOutboundRequest,
     ) -> Result<StreamEventBox> {
-        let body = build_responses_body(&request);
-        let is_codex = self.api_provider == crate::config::ApiProvider::OpenaiCodex;
-        let url = if is_codex {
-            format!("{}{}", self.base_url, CODEX_RESPONSES_PATH)
-        } else {
-            api_url(&self.base_url, "responses")
-        };
+        // Body, endpoint, and route shape all come from the shared
+        // prepared-request seam (`prepare_outbound_request`).
+        let body = &prepared.body;
+        let is_codex = prepared.endpoint.shape == super::RouteShape::CodexResponses;
+        let url = prepared.endpoint.url.clone();
+        // The synthetic MessageStart below is emitted from inside the stream
+        // closure, which outlives `prepared`. Clone the wire model — the id
+        // actually placed on the body by the shared seam, after route
+        // remapping — rather than borrowing the request that no longer exists
+        // at this layer.
+        let wire_model = prepared.wire_model.clone();
 
         // The bearer Authorization header is already installed as a default
         // header on both the dual and the HTTP/1.1 twin client (resolved from
@@ -158,7 +162,7 @@ impl DeepSeekClient {
                     r#type: "message".to_string(),
                     role: "assistant".to_string(),
                     content: vec![],
-                    model: request.model.clone(),
+                    model: wire_model.clone(),
                     stop_reason: None,
                     stop_sequence: None,
                     container: None,
@@ -431,12 +435,12 @@ impl DeepSeekClient {
     /// shape.
     pub(super) async fn handle_responses_message(
         &self,
-        request: MessageRequest,
+        prepared: &super::PreparedOutboundRequest,
     ) -> Result<MessageResponse> {
         use futures_util::StreamExt;
 
-        let model = request.model.clone();
-        let mut stream = self.handle_responses_stream(request).await?;
+        let model = prepared.wire_model.clone();
+        let mut stream = self.handle_responses_stream(prepared).await?;
 
         let mut response = MessageResponse {
             id: String::new(),
@@ -898,7 +902,11 @@ mod tests {
             DeepSeekClient::new(&test_codex_config(&server)).unwrap()
         };
         let mut stream = client
-            .handle_responses_stream(minimal_responses_request())
+            .handle_responses_stream(
+                &client
+                    .prepare_outbound_request(minimal_responses_request(), true)
+                    .expect("responses request prepares"),
+            )
             .await
             .unwrap();
 
@@ -936,7 +944,11 @@ mod tests {
             DeepSeekClient::new(&test_codex_config(&server)).unwrap()
         };
         let mut stream = client
-            .handle_responses_stream(minimal_responses_request())
+            .handle_responses_stream(
+                &client
+                    .prepare_outbound_request(minimal_responses_request(), true)
+                    .expect("responses request prepares"),
+            )
             .await
             .unwrap();
 
@@ -975,7 +987,11 @@ mod tests {
         };
 
         let err = match client
-            .handle_responses_stream(minimal_responses_request())
+            .handle_responses_stream(
+                &client
+                    .prepare_outbound_request(minimal_responses_request(), true)
+                    .expect("responses request prepares"),
+            )
             .await
         {
             Ok(_) => panic!("non-retryable Responses errors should fail fast"),
@@ -1062,7 +1078,11 @@ mod tests {
             DeepSeekClient::new(&test_codex_config(&server)).unwrap()
         };
         let mut stream = client
-            .handle_responses_stream(minimal_responses_request())
+            .handle_responses_stream(
+                &client
+                    .prepare_outbound_request(minimal_responses_request(), true)
+                    .expect("responses request prepares"),
+            )
             .await
             .expect("stream opens with preserved headers");
 
@@ -1106,7 +1126,11 @@ mod tests {
             DeepSeekClient::new(&test_codex_config(&server)).unwrap()
         };
         let mut stream = client
-            .handle_responses_stream(minimal_responses_request())
+            .handle_responses_stream(
+                &client
+                    .prepare_outbound_request(minimal_responses_request(), true)
+                    .expect("responses request prepares"),
+            )
             .await
             .unwrap();
 

@@ -230,6 +230,26 @@ fn apply_tool_surface_budget(
     }
 }
 
+/// Whether two tool-surface budgets currently produce the same catalog.
+///
+/// Runs [`apply_tool_surface_budget`] over `catalog` under both budgets and
+/// compares the results. `/preview-request` publishes the Standard-vs-Full
+/// answer as a derived field so the truthful "these are currently collapsed"
+/// disclosure cannot drift from the code: the day the shaper narrows Standard
+/// differently from Full, this starts returning `false` on its own.
+pub(super) fn surface_budgets_produce_same_catalog(
+    catalog: &[Tool],
+    always_load: &HashSet<String>,
+    left_budget: ToolSurfaceBudget,
+    right_budget: ToolSurfaceBudget,
+) -> bool {
+    let mut left = catalog.to_vec();
+    let mut right = catalog.to_vec();
+    apply_tool_surface_budget(&mut left, left_budget, always_load);
+    apply_tool_surface_budget(&mut right, right_budget, always_load);
+    serde_json::to_string(&left).ok() == serde_json::to_string(&right).ok()
+}
+
 pub(super) fn ensure_advanced_tooling(
     catalog: &mut Vec<Tool>,
     mode: AppMode,
@@ -357,6 +377,71 @@ fn active_tool_list_from_catalog(catalog: &[Tool], active: &HashSet<String>) -> 
 
 pub(super) fn active_tools_for_step(catalog: &[Tool], active: &HashSet<String>) -> Vec<Tool> {
     active_tool_list_from_catalog(catalog, active)
+}
+
+/// The exact tool state the next model request would carry.
+///
+/// This is the single answer to "what tools would the next turn send?".
+/// [`super::turn_loop`] seeds its mutable per-step state from it, and
+/// `/preview-request` reports [`Self::active`] verbatim. Nothing else may
+/// re-derive tool selection — in particular, the session's *last* catalog is
+/// both stale and pre-activation, so it is never a substitute for this.
+#[derive(Debug, Clone)]
+pub(super) struct TurnToolPlan {
+    /// Full catalog after mode/always-load repair, including deferred tools.
+    pub(super) catalog: Vec<Tool>,
+    /// Names active at the start of the turn.
+    pub(super) active_names: HashSet<String>,
+    /// The catalog subset that would actually be serialized into the request.
+    /// `None` when the turn would send no `tools` field at all.
+    pub(super) active: Option<Vec<Tool>>,
+}
+
+/// The `tools` field of one outbound request, from a catalog and the set of
+/// currently-active tool names.
+///
+/// Shared by [`plan_turn_tools`] (turn seed and `/preview-request`) and by the
+/// per-step rebuild inside the turn loop, so activating a deferred tool
+/// mid-turn goes through exactly one code path.
+pub(super) fn active_tools_for_request(
+    catalog: &[Tool],
+    active: &HashSet<String>,
+    strict_tool_mode: bool,
+) -> Option<Vec<Tool>> {
+    if catalog.is_empty() {
+        return None;
+    }
+    let mut tools = active_tools_for_step(catalog, active);
+    if strict_tool_mode {
+        crate::tools::schema_sanitize::prepare_tools_for_strict_mode(&mut tools);
+    }
+    Some(tools)
+}
+
+/// Compute [`TurnToolPlan`] from a freshly built catalog.
+///
+/// `tools` is the catalog produced by `build_model_tool_catalog_with_surface`
+/// plus the gate and permission-posture filters — i.e. exactly the value the
+/// engine hands to `handle_deepseek_turn`.
+pub(super) fn plan_turn_tools(
+    tools: Option<Vec<Tool>>,
+    mode: AppMode,
+    always_load: &HashSet<String>,
+    dynamic_active_tools: &[&'static str],
+    strict_tool_mode: bool,
+) -> TurnToolPlan {
+    let mut catalog = tools.unwrap_or_default();
+    if !catalog.is_empty() {
+        ensure_advanced_tooling(&mut catalog, mode, always_load);
+    }
+    let mut active_names = initial_active_tools(&catalog);
+    active_names.extend(dynamic_active_tools.iter().map(|name| (*name).to_string()));
+    let active = active_tools_for_request(&catalog, &active_names, strict_tool_mode);
+    TurnToolPlan {
+        catalog,
+        active_names,
+        active,
+    }
 }
 
 fn tool_search_haystack(tool: &Tool) -> String {

@@ -180,6 +180,7 @@
     "CmdAnchorDescription": "Fijar un dato que sobrevive a la compactación (inyectado automáticamente en el contexto)",
     "CmdAttachDescription": "Adjuntar imagen o video; usa @ruta para archivos de texto o directorios",
     "CmdCacheDescription": "Mostrar estadísticas de aciertos/fallos del caché de prefijo en las últimas N rondas",
+    "CmdPreviewRequestDescription": "Previsualiza la próxima solicitud como un manifiesto redactado, sin enviarla",
     "CmdChangeDescription": "Mostrar la entrada más reciente del changelog",
     "CmdChangeHeader": "Changelog más reciente",
     "CmdChangeTranslationQueued": "Las notas de la versión en inglés se muestran abajo. Se solicitará una versión traducida a continuación; si el proveedor no está disponible, este texto en inglés será el fallback.",

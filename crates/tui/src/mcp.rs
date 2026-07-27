@@ -3638,6 +3638,49 @@ impl McpPool {
             .collect()
     }
 
+    /// Names of every *enabled* server this pool would connect on the next
+    /// turn (static config + dynamic runtime entries).
+    ///
+    /// Read-only: unlike [`Self::connect_all`], it neither reloads the config
+    /// sources nor starts a process. `/preview-request` uses it, together
+    /// with [`Self::connected_servers`] and
+    /// [`Self::config_sources_unchanged`], to decide whether the currently
+    /// connected tool set is *exactly* what the next turn would send — and to
+    /// report the tool surface as unavailable when it is not (#1004).
+    pub fn enabled_server_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .config
+            .servers
+            .iter()
+            .filter(|(_, server)| server.is_enabled())
+            .map(|(name, _)| name.clone())
+            .collect();
+        let dynamic = self.dynamic_servers.read();
+        for (name, server) in dynamic.iter() {
+            if server.is_enabled() && !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+        names
+    }
+
+    /// Whether every configured MCP source still has the mtime this pool last
+    /// read, i.e. whether `connect_all` would find anything new.
+    ///
+    /// Stats files; never reads, parses, reloads, or drops a connection. A
+    /// pool with no configured source is trivially unchanged.
+    pub fn config_sources_unchanged(&self) -> bool {
+        if self.config_sources.is_empty() {
+            return true;
+        }
+        let current: Vec<_> = self
+            .config_sources
+            .iter()
+            .map(|path| mcp_config_mtime(path))
+            .collect();
+        current == self.last_mtimes
+    }
+
     /// Disconnect all connections
     #[allow(dead_code)] // Public API for MCP lifecycle management
     pub fn disconnect_all(&mut self) {

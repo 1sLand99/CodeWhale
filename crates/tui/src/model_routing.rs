@@ -593,6 +593,27 @@ pub(crate) async fn resolve_auto_route_with_inventory_for_session(
     selected_model_mode: &str,
     selected_thinking_mode: &str,
 ) -> Result<AutoRouteSelection> {
+    resolve_auto_route_with_inventory_for_session_and_cache_policy(
+        config,
+        latest_request,
+        recent_context,
+        session_mode,
+        selected_model_mode,
+        selected_thinking_mode,
+        true,
+    )
+    .await
+}
+
+pub(crate) async fn resolve_auto_route_with_inventory_for_session_and_cache_policy(
+    config: &Config,
+    latest_request: &str,
+    recent_context: &str,
+    session_mode: &str,
+    selected_model_mode: &str,
+    selected_thinking_mode: &str,
+    allow_response_cache: bool,
+) -> Result<AutoRouteSelection> {
     let inventory = ModelInventory::from_config(config);
     if !inventory.router_available {
         // Fall back to heuristic-only auto routing when the flash router
@@ -616,6 +637,7 @@ pub(crate) async fn resolve_auto_route_with_inventory_for_session(
         session_mode,
         selected_model_mode,
         selected_thinking_mode,
+        allow_response_cache,
     )
     .await
     {
@@ -911,6 +933,7 @@ async fn auto_route_inventory_recommendation(
     session_mode: &str,
     selected_model_mode: &str,
     selected_thinking_mode: &str,
+    allow_response_cache: bool,
 ) -> Result<Option<InventoryAutoRouteRecommendation>> {
     let mut router_config = config.clone();
     // The classifier runs on the inventory's router route: the explicit
@@ -954,8 +977,15 @@ async fn auto_route_inventory_recommendation(
         top_p: None,
     };
 
-    let response =
-        tokio::time::timeout(Duration::from_secs(4), client.create_message(request)).await??;
+    let response = if allow_response_cache {
+        tokio::time::timeout(Duration::from_secs(4), client.create_message(request)).await??
+    } else {
+        tokio::time::timeout(
+            Duration::from_secs(4),
+            client.create_message_without_response_cache(request),
+        )
+        .await??
+    };
     Ok(parse_inventory_auto_route_recommendation(
         &message_response_text(&response),
         inventory,

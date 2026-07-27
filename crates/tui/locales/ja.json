@@ -180,6 +180,7 @@
     "CmdAnchorDescription": "コンパクション後も保持される重要な事実をピン留め（コンテキストに自動注入）",
     "CmdAttachDescription": "画像・動画メディアを添付（テキストファイルやディレクトリは @path）",
     "CmdCacheDescription": "直近 N ターンのプレフィックスキャッシュのヒット/ミス統計を表示",
+    "CmdPreviewRequestDescription": "次のリクエストを送信せずに、秘匿化されたマニフェストとしてプレビューします",
     "CmdChangeDescription": "最新の更新履歴を表示",
     "CmdChangeHeader": "最新の更新履歴",
     "CmdChangeTranslationQueued": "英語のリリースノートを以下に表示します。次に翻訳を依頼します。プロバイダーを利用できない場合は、この英語版がフォールバックです。",

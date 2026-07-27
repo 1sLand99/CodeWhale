@@ -387,7 +387,7 @@ fn base_source_entries(model: &str, workspace: &Path, skills_dir: Option<&Path>)
     builder.push(SourceEntry::text(
         SourceKind::Constitution,
         "Bundled constitution, language policy, and output policy",
-        Some("crates/tui/src/prompts/text.rs (BASE_PROMPT)".to_string()),
+        Some(crate::prompts::base_prompt_origin().label().to_string()),
         ActivationReason::AlwaysOn,
         &constitution,
         CountingConfidence::High,
@@ -535,7 +535,7 @@ fn base_source_entries(model: &str, workspace: &Path, skills_dir: Option<&Path>)
     builder.push(SourceEntry::text(
         SourceKind::CompactionRelayTemplate,
         "Compaction relay template",
-        Some("crates/tui/src/prompts/text.rs (COMPACT_TEMPLATE)".to_string()),
+        Some("bundled in this codewhale-tui build (COMPACT_TEMPLATE, compiled in)".to_string()),
         ActivationReason::AlwaysOn,
         COMPACT_TEMPLATE,
         CountingConfidence::High,

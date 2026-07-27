@@ -809,6 +809,18 @@ pub enum AppAction {
         clear: bool,
     },
     ListSubAgents,
+    /// Ask the engine to describe the exact next outbound request
+    /// (`/preview-request`, #1004). The engine is the authority: only it can
+    /// rebuild the current tool catalog, MCP state, gates, and resolved route.
+    PreviewOutboundRequest {
+        /// Render the manifest as JSON instead of the human-readable table.
+        json: bool,
+        /// Render the exact base prompt only. Never includes runtime/system layers.
+        base_prompt_only: bool,
+        /// Optional text used only to resolve `auto` reasoning/routing. Never
+        /// added to the conversation and never sent to a provider.
+        hypothetical_prompt: Option<String>,
+    },
     FetchModels,
     /// Force a Models.dev live-catalog refresh into ProviderLake (#4187).
     RefreshModelsDevCatalog,
