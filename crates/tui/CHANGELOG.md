@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — behavior
+
+- **Legacy `model = auto` no longer elects a network classifier on its own.**
+  Holding a DeepSeek API key used to silently select `deepseek-v4-flash` as the
+  classifier for every Auto turn — a per-turn cost on a route nobody asked for,
+  and one provider privileged over the rest. Auto now stays local and free
+  unless an explicit `[auto.router]` block names a provider and model.
+
+  **If you relied on the implicit default**, restore it explicitly:
+
+  ```toml
+  [auto.router]
+  provider = "deepseek"
+  model = "deepseek-v4-flash"
+  ```
+
+  `[auto.router]` remains legacy `model = auto` configuration. It is unrelated
+  to a Fleet's Adaptive Reasoning Router, which is a saved service referenced by
+  name from a Fleet file and decides only how hard an already-frozen route
+  thinks.
+
 Landed since v0.9.1, not yet released. A cluster of defects found by a
 read-through audit of the policy engine, the MCP proxy, the session index,
 and the app-server bridge — several of them cases where the wrong outcome
@@ -39,6 +60,28 @@ already claimed to.
   exhausted active goal token budget also produces a typed unavailable result
   before any outbound request is built.
   (#1004, #3928; dry-run concept harvested from PR #1099 by @GTC2080 / TaoMu.)
+
+- Slash commands, hotbar actions, and CLI entrypoints for the same Lane/Fleet
+  lifecycle operation now share one typed control-plane contract
+  (`codewhale-lane::control`): a stable `<domain>.<verb>` id, read-vs-write
+  authority, persistence scope, exact-identity target selection, retryability,
+  lifecycle outcome, and one bounded, sanitized receipt. `docs/COMMAND_CONTROL_PLANE.md`
+  documents it (#1888).
+
+- `/lane [list|status|interrupt|restart|resume]` — durable Lane control from the
+  composer, backed by the same executor `codewhale lane …` calls. `codewhale
+  lane interrupt|restart|resume` are the matching CLI verbs; `lane stop` stays as
+  a compatibility spelling of `lane interrupt`. Appending `@<lifecycle-seq>` to a
+  lane id fences a write to the exact durable generation you observed, so a
+  concurrent transition is rejected as a conflict rather than acted on (#1888).
+
+- `codewhale fleet list` and `/fleet [list|status|interrupt|resume]` — durable
+  Fleet run inspection and control from either surface, through shared DTOs that
+  carry the exact provider, provider-table id, model, effective reasoning tier,
+  and route source when the ledger records them, and a typed `not_recorded` /
+  `not_applicable` / `redacted` reason when it does not. Requested-vs-effective
+  reasoning is never back-filled: the ledger persists the effective tier only, so
+  the requested tier reports `not_recorded` (#4022).
 
 - The bundled skill pack now ships a `help` skill (catalog generation 7). It is
   `invocation: explicit-only`, so it never enters the model's ambient catalogue
@@ -98,6 +141,60 @@ already claimed to.
   (#4520, PR #4610 by @XhesicaFrost; harvested with co-authorship).
 
 ### Fixed
+
+- `/fleet status` read the current TUI session's sub-agents while `codewhale
+  fleet status` read the durable `.codewhale/fleet.jsonl` ledger — two different
+  things wearing one name, so a run started by `codewhale fleet run` never
+  appeared in the TUI. `/fleet status` now reads the durable ledger through the
+  same code path as the CLI; the session view keeps its own name as
+  `/fleet workers` (`/subagents` and `n` still work). When a workspace has no
+  ledger, both surfaces report a typed `no_fleet_ledger` reason instead of an
+  empty-looking "all clear", and neither creates the ledger as a side effect of
+  reading it (#4022).
+
+- `codewhale fleet status` (and `list`/`interrupt`/`resume`) created
+  `.codewhale/fleet.jsonl` as a side effect of opening the manager, then
+  reported `no_fleet_ledger` for the file it had just made — so the second
+  invocation showed an empty Fleet where none existed. The CLI now refuses
+  those verbs before the manager is constructed, matching `/fleet` (#4022).
+
+- `fleet resume <run-id>` accepted any string. An id absent from the ledger
+  reconciled nothing but still wrote a run-status record keyed by whatever was
+  typed, and reported `no_change`. Unknown ids are now refused as `not_found`
+  before any durable write (#4022).
+
+- `lane interrupt` reported `transitioned` even when it changed nothing —
+  another process's stop looked like our own. The Runtime backend now reports
+  whether *this* call performed the transition, and a no-op is `no_change`.
+  The `@<lifecycle-seq>` fence is also evaluated inside the registry's per-Lane
+  lock rather than before it, so a stale fence refuses without running Runtime
+  teardown instead of racing between the check and the stop (#1888).
+
+- `/lane` no longer runs Runtime teardown on the TUI composer thread. Reads on
+  the slash surface skip reconciliation (which probes tmux and takes a lock)
+  and say so on the receipt instead of implying freshness; `lane interrupt` is
+  CLI-only until that work runs off-thread, and reports
+  `surface_not_supported` naming `codewhale lane interrupt` (#4022).
+
+- The hotbar is no longer modelled as a third control surface. A slot binds a
+  slash command and fires it with no argument, so it runs *as* the slash
+  surface; the contract now declares which verb a bare press actually reaches
+  (`hotbar_bare_dispatch`, true only for `lane.list`) instead of advertising
+  target-taking verbs as hotbar-reachable (#1888).
+
+- `codewhale lane list --json` and `lane status --json` keep emitting the
+  `LaneRecord` shape they always have — the receipt did not replace it. The
+  human `lane status` output also regained `branch`, `session`, `socket`,
+  `attach`, and `log`, which the first cut of the shared DTO had dropped
+  (#1888).
+
+- No surface advertises a backend it does not have. `lane restart` and
+  `lane resume` have no implementation — a Lane is re-created by
+  `codewhale lane start`, and a stopped Lane's Runtime session is gone — so all
+  three surfaces refuse them with `backend_not_implemented` and say why.
+  `fleet restart` drives the manager loop to completion, which only the CLI
+  runs, so `/fleet restart` reports `surface_not_supported` and names the CLI
+  command rather than quietly doing a smaller thing (#1888).
 
 - Deny rules in `permissions.toml` no longer miss a command because of an
   intervening flag: deny matching is token-based with flag-skipping and
