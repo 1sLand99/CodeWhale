@@ -16,8 +16,8 @@ use tokio::time::timeout as tokio_timeout;
 
 use crate::config::{
     TOGETHER_INKLING_MODEL, is_exact_direct_moonshot_k3_route, is_exact_kimi_code_k3_route,
-    is_exact_zai_glm_5_2_route, minimax_m3_route_uses_max_completion_tokens,
-    wire_model_for_provider_route,
+    is_exact_zai_chat_route, is_exact_zai_glm_5_2_route,
+    minimax_m3_route_uses_max_completion_tokens, wire_model_for_provider_route,
 };
 
 // The bounded response-header wait (`stream_open_timeout`) and its env
@@ -201,23 +201,35 @@ fn apply_direct_moonshot_k3_reasoning_effort(
     body["reasoning_effort"] = json!(wire_effort);
 }
 
-/// Add GLM-5.2's documented top-level effort only on its exact first-party
-/// route. The generic Z.ai layer owns the enabled/disabled thinking object;
-/// GLM-5-Turbo and compatible gateways intentionally receive no invented
-/// effort granularity.
-fn apply_zai_glm_5_2_reasoning_effort(
+/// Keep Z.ai controls on exact first-party routes only. GLM-5.2 receives its
+/// documented top-level effort, GLM-5-Turbo keeps only the generic thinking
+/// toggle, and compatible gateways receive neither field because their
+/// request dialect is not known from provider/model selection alone.
+fn apply_zai_route_reasoning_controls(
     body: &mut Value,
     provider: ApiProvider,
     base_url: &str,
     model: &str,
     effort: Option<&str>,
 ) {
-    if !is_exact_zai_glm_5_2_route(provider, base_url, model) {
+    if provider != ApiProvider::Zai {
         return;
     }
 
     if let Some(object) = body.as_object_mut() {
         object.remove("reasoning_effort");
+        if !is_exact_zai_chat_route(provider, base_url) {
+            // A compatible gateway owns its own request dialect. Provider/model
+            // selection alone is not evidence that Z.ai's `thinking` object is
+            // supported there, so fail closed instead of leaking it.
+            object.remove("thinking");
+            return;
+        }
+    }
+    if !is_exact_zai_glm_5_2_route(provider, base_url, model) {
+        // Exact first-party GLM-5-Turbo and older Z.ai models keep only the
+        // generic enabled/disabled thinking control.
+        return;
     }
     match effort
         .map(|value| value.trim().to_ascii_lowercase())
@@ -248,7 +260,7 @@ fn apply_route_reasoning_controls(
     apply_openai_reasoning_effort(body, provider, model, effort);
     apply_direct_moonshot_k3_reasoning_effort(body, provider, base_url, model, effort);
     apply_kimi_code_k3_reasoning_effort(body, provider, base_url, model, effort);
-    apply_zai_glm_5_2_reasoning_effort(body, provider, base_url, model, effort);
+    apply_zai_route_reasoning_controls(body, provider, base_url, model, effort);
 }
 
 /// The direct K3 Chat Completions schema exposes fixed sampling behavior and

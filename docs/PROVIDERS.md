@@ -660,7 +660,8 @@ Providers marked "omitted" receive no reasoning fields at all for that tier.
 | `xiaomi-mimo` | `thinking: {type: disabled}` | `thinking: {type: enabled}` | `thinking: {type: enabled}` |
 | `minimax` | `reasoning_split: true` + `thinking: {type: disabled}` | `reasoning_split: true` + `thinking: {type: adaptive}` | `reasoning_split: true` + `thinking: {type: adaptive}` |
 | First-party Z.ai `GLM-5.2` | `thinking: {type: disabled}`; no `reasoning_effort` | enabled thinking; only effective `high` adds `reasoning_effort: "high"` | enabled thinking + `reasoning_effort: "max"` |
-| First-party Z.ai `GLM-5-Turbo` and compatible gateways | `thinking: {type: disabled}` | enabled thinking; effort granularity unavailable | enabled thinking; effort granularity unavailable |
+| First-party Z.ai `GLM-5-Turbo` | `thinking: {type: disabled}` | enabled thinking; effort granularity unavailable | enabled thinking; effort granularity unavailable |
+| Compatible gateways configured as `zai` | omitted; effective unavailable | omitted; effective unavailable | omitted; effective unavailable |
 | `nvidia-nim` | `chat_template_kwargs.thinking: false` | `chat_template_kwargs`: `thinking: true` + `reasoning_effort: "high"` | `chat_template_kwargs`: `thinking: true` + `reasoning_effort: "max"` |
 | `vllm` | `chat_template_kwargs.enable_thinking: false` | `chat_template_kwargs.enable_thinking: true` + `reasoning_effort` low/medium/high | `chat_template_kwargs.enable_thinking: true` + `reasoning_effort: "high"` (vLLM has no max tier) |
 | `arcee`, `huggingface` | omitted | `reasoning_effort` pass-through | `reasoning_effort: "high"` |

@@ -3981,10 +3981,20 @@ mod tests {
         )
         .await;
         assert!(gateway.get("reasoning_effort").is_none(), "{gateway}");
-        assert_eq!(
-            gateway["thinking"],
-            json!({"type": "enabled", "clear_thinking": false})
+        assert!(gateway.get("thinking").is_none(), "{gateway}");
+
+        let (_, gateway_turbo) = capture_zai_chat_request(
+            "https://gateway.example/v1",
+            crate::config::ZAI_GLM_5_TURBO_MODEL,
+            Some("max"),
+            streaming,
+        )
+        .await;
+        assert!(
+            gateway_turbo.get("reasoning_effort").is_none(),
+            "{gateway_turbo}"
         );
+        assert!(gateway_turbo.get("thinking").is_none(), "{gateway_turbo}");
     }
 
     async fn assert_minimax_request_truth(streaming: bool) {

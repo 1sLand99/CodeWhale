@@ -86,6 +86,7 @@ pub enum ReasoningEffort {
 pub(crate) enum EffectiveReasoningEffort {
     Tier(ReasoningEffort),
     ThinkingEnabledGranularityUnavailable,
+    Unavailable,
 }
 
 impl From<EffectiveReasoningEffort> for crate::work_graph::ReasoningEffortTier {
@@ -95,6 +96,7 @@ impl From<EffectiveReasoningEffort> for crate::work_graph::ReasoningEffortTier {
             EffectiveReasoningEffort::ThinkingEnabledGranularityUnavailable => {
                 Self::ThinkingEnabledGranularityUnavailable
             }
+            EffectiveReasoningEffort::Unavailable => Self::Unavailable,
         }
     }
 }

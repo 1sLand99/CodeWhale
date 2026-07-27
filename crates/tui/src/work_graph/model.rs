@@ -52,6 +52,9 @@ pub enum ReasoningEffortTier {
     /// Thinking is enabled, but the provider route exposes no supported
     /// effort tiers. This is an effective receipt, never a requested setting.
     ThinkingEnabledGranularityUnavailable,
+    /// The configured route exposes no verified reasoning-control contract.
+    /// This is an effective receipt, never a requested setting.
+    Unavailable,
 }
 
 /// Bounded, receipt-only activity attached to the session graph.

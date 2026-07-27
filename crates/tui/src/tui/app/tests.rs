@@ -414,6 +414,73 @@ fn glm_5_turbo_records_enabled_with_granularity_unavailable() {
 }
 
 #[test]
+fn compatible_zai_gateway_records_effective_unavailable() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Zai;
+    app.auto_model = false;
+    app.active_route_base_url = "https://gateway.example/v1".to_string();
+    app.model = crate::config::ZAI_GLM_5_2_MODEL.to_string();
+    app.reasoning_effort = ReasoningEffort::High;
+
+    app.cycle_effort();
+
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Max);
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Reasoning effort: max→effective unavailable")
+    );
+    assert_eq!(
+        app.reasoning_effort_display_label(),
+        "max→effective unavailable"
+    );
+    let work = app
+        .work_state_snapshot()
+        .expect("Work snapshot")
+        .expect("effort activity creates graph state");
+    let activity = work
+        .graph
+        .expect("Work Graph")
+        .activities
+        .last()
+        .cloned()
+        .expect("effort activity");
+    let crate::work_graph::WorkActivityEvent::ReasoningEffortChanged {
+        requested,
+        effective,
+        provider,
+        ..
+    } = &activity;
+    assert_eq!(*requested, crate::work_graph::ReasoningEffortTier::Max);
+    assert_eq!(
+        *effective,
+        crate::work_graph::ReasoningEffortTier::Unavailable
+    );
+    assert_eq!(provider, "zai");
+    assert_eq!(
+        serde_json::to_value(activity).expect("serialize activity")["effective"],
+        "unavailable"
+    );
+}
+
+#[test]
+fn pending_zai_route_without_endpoint_receipt_is_effective_unavailable() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Deepseek;
+    app.auto_model = false;
+    app.reasoning_effort = ReasoningEffort::Max;
+    app.pending_turn_route = Some((
+        ApiProvider::Zai,
+        crate::config::ZAI_GLM_5_2_MODEL.to_string(),
+        true,
+    ));
+
+    assert_eq!(
+        app.reasoning_effort_display_label(),
+        "max→effective unavailable"
+    );
+}
+
+#[test]
 fn reasoning_effort_display_receipts_route_normalization() {
     let mut app = App::new(test_options(false), &Config::default());
     app.api_provider = ApiProvider::Moonshot;

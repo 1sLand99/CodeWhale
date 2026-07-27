@@ -586,6 +586,7 @@ impl<'a> HeaderWidget<'a> {
             "max" | "maximum" | "xhigh" => "x",
             "auto" => "a",
             "thinking enabled; granularity unavailable" => "on?",
+            "effective unavailable" => "?",
             _ => "·",
         }
     }
@@ -1006,6 +1007,26 @@ mod tests {
 
         assert!(rendered.contains("on?"), "{rendered:?}");
         assert!(rendered.width() <= 20, "{rendered:?}");
+    }
+
+    #[test]
+    fn compact_header_keeps_unavailable_effective_reasoning_visible() {
+        let rendered = render_left(
+            HeaderData::new(
+                AppMode::Agent,
+                "GLM-5.2",
+                "codewhale-tui",
+                false,
+                palette::WHALE_BG,
+            )
+            .with_provider(Some("zai"))
+            .with_reasoning_effort(Some("max→effective unavailable"))
+            .with_status_indicator(Some("cw")),
+            18,
+        );
+
+        assert!(rendered.contains('?'), "{rendered:?}");
+        assert!(rendered.width() <= 18, "{rendered:?}");
     }
 
     #[test]

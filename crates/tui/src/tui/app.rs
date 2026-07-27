@@ -4337,32 +4337,52 @@ impl App {
         // Prefer the immutable installed-client receipt while a turn is live.
         // If it is unavailable, only use the configured route when no pending
         // or active foreign route could make that identity stale.
-        let exact_turbo = if let Some(route) = self
+        let route_truth = if let Some(route) = self
             .active_turn
             .as_ref()
             .and_then(|turn| turn.route.as_ref())
         {
-            route.receipt.as_ref().is_some_and(|receipt| {
-                crate::config::is_exact_zai_glm_5_turbo_route(
+            route.receipt.as_ref().map(|receipt| {
+                (
                     receipt.provider(),
                     receipt.endpoint_identity(),
                     receipt.wire_model(),
                 )
             })
         } else if self.pending_turn_route.is_none() {
-            crate::config::is_exact_zai_glm_5_turbo_route(
+            Some((
                 self.api_provider,
-                &self.active_route_base_url,
-                &self.model,
-            )
+                self.active_route_base_url.as_str(),
+                self.model.as_str(),
+            ))
         } else {
-            false
+            None
         };
-        if exact_turbo && !matches!(effective, ReasoningEffort::Off | ReasoningEffort::Auto) {
-            EffectiveReasoningEffort::ThinkingEnabledGranularityUnavailable
-        } else {
-            EffectiveReasoningEffort::Tier(effective)
+        if let Some((provider, base_url, model)) = route_truth {
+            if provider == ApiProvider::Zai
+                && !crate::config::is_exact_zai_chat_route(provider, base_url)
+            {
+                return EffectiveReasoningEffort::Unavailable;
+            }
+            if crate::config::is_exact_zai_glm_5_turbo_route(provider, base_url, model)
+                && !matches!(effective, ReasoningEffort::Off | ReasoningEffort::Auto)
+            {
+                return EffectiveReasoningEffort::ThinkingEnabledGranularityUnavailable;
+            }
+        } else if self.active_turn.as_ref().is_some_and(|turn| {
+            turn.route
+                .as_ref()
+                .is_some_and(|route| route.provider == ApiProvider::Zai && route.receipt.is_none())
+        }) || self
+            .pending_turn_route
+            .as_ref()
+            .is_some_and(|(provider, _, _)| *provider == ApiProvider::Zai)
+        {
+            // A route without its immutable endpoint receipt cannot prove
+            // first-party semantics from provider/model identity alone.
+            return EffectiveReasoningEffort::Unavailable;
         }
+        EffectiveReasoningEffort::Tier(effective)
     }
 
     fn reasoning_effort_resolution_label(
@@ -4386,6 +4406,9 @@ impl App {
                 "{}→thinking enabled; granularity unavailable",
                 requested.short_label()
             ),
+            EffectiveReasoningEffort::Unavailable => {
+                format!("{}→effective unavailable", requested.short_label())
+            }
         }
     }
 

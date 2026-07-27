@@ -7593,6 +7593,16 @@ pub(crate) fn is_exact_kimi_code_k3_route(
         && model.trim().eq_ignore_ascii_case(KIMI_CODE_K3_MODEL)
 }
 
+/// Whether a route is one of Z.ai's exact first-party Chat endpoints.
+#[must_use]
+pub(crate) fn is_exact_zai_chat_route(provider: ApiProvider, base_url: &str) -> bool {
+    provider == ApiProvider::Zai
+        && codewhale_config::provider::is_exact_zai_chat_route(
+            codewhale_config::ProviderKind::Zai,
+            base_url,
+        )
+}
+
 /// Whether a route is exactly first-party Z.ai GLM-5.2.
 #[must_use]
 pub(crate) fn is_exact_zai_glm_5_2_route(
@@ -7600,11 +7610,7 @@ pub(crate) fn is_exact_zai_glm_5_2_route(
     base_url: &str,
     model: &str,
 ) -> bool {
-    provider == ApiProvider::Zai
-        && codewhale_config::provider::is_exact_zai_chat_route(
-            codewhale_config::ProviderKind::Zai,
-            base_url,
-        )
+    is_exact_zai_chat_route(provider, base_url)
         && model.trim().eq_ignore_ascii_case(ZAI_GLM_5_2_MODEL)
 }
 
@@ -7615,11 +7621,7 @@ pub(crate) fn is_exact_zai_glm_5_turbo_route(
     base_url: &str,
     model: &str,
 ) -> bool {
-    provider == ApiProvider::Zai
-        && codewhale_config::provider::is_exact_zai_chat_route(
-            codewhale_config::ProviderKind::Zai,
-            base_url,
-        )
+    is_exact_zai_chat_route(provider, base_url)
         && model.trim().eq_ignore_ascii_case(ZAI_GLM_5_TURBO_MODEL)
 }
 

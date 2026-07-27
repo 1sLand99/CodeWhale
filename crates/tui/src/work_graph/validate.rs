@@ -261,6 +261,7 @@ fn check_structural(snapshot: &WorkGraphSnapshot, out: &mut Vec<Violation>) {
         if matches!(
             requested,
             super::ReasoningEffortTier::ThinkingEnabledGranularityUnavailable
+                | super::ReasoningEffortTier::Unavailable
         ) {
             out.push(Violation {
                 code: ValidationCode::Structural,

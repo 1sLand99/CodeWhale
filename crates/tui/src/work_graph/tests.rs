@@ -734,6 +734,31 @@ fn activity_receipts_reject_bad_provider_identity_and_oversized_snapshots() {
 }
 
 #[test]
+fn effective_only_reasoning_states_cannot_be_requested() {
+    for requested in [
+        ReasoningEffortTier::ThinkingEnabledGranularityUnavailable,
+        ReasoningEffortTier::Unavailable,
+    ] {
+        let mut graph = seeded();
+        let before = graph.snapshot().clone();
+        let result = graph.apply(
+            WorkGraphChange::RecordActivity {
+                event: WorkActivityEvent::ReasoningEffortChanged {
+                    requested,
+                    effective: requested,
+                    provider: "zai".to_string(),
+                    ts: 10,
+                    operation: None,
+                },
+            },
+            ctx(10),
+        );
+        expect_code(result, ValidationCode::Structural);
+        assert_eq!(graph.snapshot(), &before, "rejection must be atomic");
+    }
+}
+
+#[test]
 fn activity_operation_links_require_live_operations_at_write_time() {
     let mut graph = seeded();
     for operation in [nid("missing"), nid("root")] {
