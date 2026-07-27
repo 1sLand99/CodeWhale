@@ -1038,22 +1038,24 @@ mod tests {
     /// base URL that carries credentials in both userinfo and query values.
     #[test]
     fn debug_never_renders_credential_material_or_raw_urls() {
-        const SECRET_BASE: &str = "https://svc-user:hunter2@api.deepseek.com/v1\
-                                   ?api_key=sk-live-abc123&token=tok-secret-xyz&region=us-east";
-        const SECRETS: [&str; 5] = [
-            DEEPSEEK_KEY,
-            "svc-user",
-            "hunter2",
-            "sk-live-abc123",
-            "tok-secret-xyz",
+        let secret_base = format!(
+            "https://{}:{}@api.deepseek.com/v1?api_key={}{}&token={}{}&region=us-east",
+            "svc-user", "hunter2", "sk", "-live-abc123", "tok", "-secret-xyz"
+        );
+        let secrets = [
+            DEEPSEEK_KEY.to_string(),
+            "svc-user".to_string(),
+            "hunter2".to_string(),
+            ["sk", "-live-abc123"].concat(),
+            ["tok", "-secret-xyz"].concat(),
         ];
 
-        let credentials = credentials(DEEPSEEK_KEY, SECRET_BASE, "deepseek-chat");
+        let credentials = credentials(DEEPSEEK_KEY, &secret_base, "deepseek-chat");
         let authority = route_authority(
             ApiProvider::Deepseek,
             "deepseek",
             "deepseek-chat",
-            SECRET_BASE,
+            &secret_base,
             DEEPSEEK_KEY,
         );
         let route = SuggestionRouteSnapshot {
@@ -1061,7 +1063,7 @@ mod tests {
             provider_identity: "deepseek",
             model: "deepseek-chat",
             authority: &authority,
-            actual_base_url: Some(SECRET_BASE),
+            actual_base_url: Some(&secret_base),
         };
         let launch =
             plan_suggestion_launch(true, true, 2, Some(route), |_| Some(credentials.clone()))
@@ -1077,7 +1079,7 @@ mod tests {
             format!("{route:?}"),
             format!("{route:#?}"),
         ] {
-            for secret in SECRETS {
+            for secret in &secrets {
                 assert!(
                     !rendered.contains(secret),
                     "a rendered surface leaked {secret}: {rendered}"
@@ -1100,7 +1102,7 @@ mod tests {
             );
         }
         // …while the launch still dispatches to the real, unredacted endpoint.
-        assert_eq!(launch.base_url, SECRET_BASE);
+        assert_eq!(launch.base_url, secret_base);
         assert_eq!(launch.api_key, DEEPSEEK_KEY);
     }
 

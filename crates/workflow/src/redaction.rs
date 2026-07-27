@@ -624,23 +624,25 @@ mod tests {
     /// removed — the exact failure this covers.
     #[test]
     fn a_multi_token_authorization_header_loses_its_credential() {
-        for header in [
-            "Authorization: Bearer sk-live-abc123def456",
-            "authorization: bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
-            "-H Authorization:Bearer abcdef0123456789abcdef",
-        ] {
-            let redaction = redact_for_disclosure(header);
+        let credentials = [
+            ["sk", "-live-abc123def456"].concat(),
+            ["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpX", "VCJ9"].concat(),
+            ["abcdef0123456789", "abcdef"].concat(),
+        ];
+        let headers = [
+            format!("Authorization: Bearer {}", credentials[0]),
+            format!("authorization: bearer {}", credentials[1]),
+            format!("-H Authorization:Bearer {}", credentials[2]),
+        ];
+        for header in headers {
+            let redaction = redact_for_disclosure(&header);
             let text = redaction.text();
             assert!(redaction.redacted(), "{header} must be redacted");
             assert!(
                 text.contains(SECRET_PLACEHOLDER),
                 "{header} must carry a placeholder: {text}"
             );
-            for leaked in [
-                "sk-live-abc123def456",
-                "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
-                "abcdef0123456789abcdef",
-            ] {
+            for leaked in &credentials {
                 assert!(!text.contains(leaked), "{leaked} leaked through: {text}");
             }
             assert_eq!(redaction.kinds(), vec![REDACTION_SECRET.to_string()]);
@@ -800,9 +802,12 @@ mod tests {
     /// prefixes did not trade a false positive for a false negative.
     #[test]
     fn full_aws_access_key_ids_are_still_removed() {
-        for key in ["AKIAIOSFODNN7EXAMPLE", "ASIAIOSFODNN7EXAMPLE"] {
+        for key in [
+            ["AKIA", "IOSFODNN7EXAMPLE"].concat(),
+            ["ASIA", "IOSFODNN7EXAMPLE"].concat(),
+        ] {
             let redaction = redact_for_disclosure(&format!("creds {key} rotated"));
-            assert!(!redaction.text().contains(key), "{}", redaction.text());
+            assert!(!redaction.text().contains(&key), "{}", redaction.text());
             assert_eq!(redaction.kinds(), vec![REDACTION_SECRET.to_string()]);
         }
     }

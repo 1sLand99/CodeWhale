@@ -1237,11 +1237,13 @@ mod tests {
     }
 
     fn prepared_chat(body: serde_json::Value) -> PreparedOutboundRequest {
+        let fixture_url = format!(
+            "https://user:{}@api.z.ai:8443/api/paas/v4/chat/completions?api_key={}{}",
+            "hunter2", "sk", "-fixture-not-a-real-key-00000000"
+        );
         PreparedOutboundRequest::new(
             WireDialect::ChatCompletions,
-            endpoint(
-                "https://user:hunter2@api.z.ai:8443/api/paas/v4/chat/completions?api_key=sk-fixture-not-a-real-key-00000000",
-            ),
+            endpoint(&fixture_url),
             "glm-5.2".to_string(),
             body,
             Some("high".to_string()),

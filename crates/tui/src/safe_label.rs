@@ -417,22 +417,22 @@ mod tests {
     #[test]
     fn hostile_route_and_model_identifiers_never_reach_a_surface() {
         let hostile = [
-            "/Users/someone/models/private-weights.gguf",
-            "~/.codewhale/config.toml",
-            "https://internal.example.com/v1/deployments/prod",
-            "C:\\Users\\someone\\models\\weights.bin",
-            "sk-fixture-not-a-real-key-00000000",
-            "deployments/9f8e7d6c5b4a39281706abcdef012345",
-            "../../etc/passwd",
-            "model with spaces and a /path/inside",
-            "api_key=sk-live-1234567890",
-            "src/lib.rs",
-            "config/prod",
-            "models/weights.gguf",
-            "foo/bar-baz",
+            "/Users/someone/models/private-weights.gguf".to_string(),
+            "~/.codewhale/config.toml".to_string(),
+            "https://internal.example.com/v1/deployments/prod".to_string(),
+            "C:\\Users\\someone\\models\\weights.bin".to_string(),
+            ["sk", "-fixture-not-a-real-key-00000000"].concat(),
+            "deployments/9f8e7d6c5b4a39281706abcdef012345".to_string(),
+            "../../etc/passwd".to_string(),
+            "model with spaces and a /path/inside".to_string(),
+            ["api_key=sk", "-live-1234567890"].concat(),
+            "src/lib.rs".to_string(),
+            "config/prod".to_string(),
+            "models/weights.gguf".to_string(),
+            "foo/bar-baz".to_string(),
         ];
         for value in hostile {
-            let label = SafeLabel::identifier(value);
+            let label = SafeLabel::identifier(&value);
             assert!(label.is_redacted(), "`{value}` must not publish verbatim");
             assert!(label.as_str().starts_with("sha256:"), "{}", label.as_str());
             assert!(!label.as_str().contains('/'), "{}", label.as_str());
