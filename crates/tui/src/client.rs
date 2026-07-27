@@ -3389,6 +3389,56 @@ mod tests {
         client
     }
 
+    fn zai_request_boundary_client(
+        route_base_url: &str,
+        model: &str,
+        transport_base_url: String,
+    ) -> DeepSeekClient {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let mut client = DeepSeekClient::new(&Config {
+            provider: Some("zai".to_string()),
+            providers: Some(ProvidersConfig {
+                zai: ProviderConfig {
+                    api_key: Some("zai-request-boundary-key".to_string()),
+                    base_url: Some(route_base_url.to_string()),
+                    model: Some(model.to_string()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        })
+        .expect("Z.ai request-boundary client");
+        assert_eq!(client.base_url, route_base_url);
+        client.test_chat_transport_base_url = Some(transport_base_url);
+        client
+    }
+
+    fn minimax_request_boundary_client(
+        route_base_url: &str,
+        model: &str,
+        transport_base_url: String,
+    ) -> DeepSeekClient {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let mut client = DeepSeekClient::new(&Config {
+            provider: Some("minimax".to_string()),
+            providers: Some(ProvidersConfig {
+                minimax: ProviderConfig {
+                    api_key: Some("minimax-request-boundary-key".to_string()),
+                    base_url: Some(route_base_url.to_string()),
+                    model: Some(model.to_string()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        })
+        .expect("MiniMax request-boundary client");
+        assert_eq!(client.base_url, route_base_url);
+        client.test_chat_transport_base_url = Some(transport_base_url);
+        client
+    }
+
     fn deepseek_request_boundary_client(
         route_base_url: &str,
         transport_base_url: String,
@@ -3777,6 +3827,201 @@ mod tests {
         serde_json::from_slice(&requests[0].body).expect("captured request JSON")
     }
 
+    async fn capture_route_chat_request_body(
+        model: &str,
+        request: MessageRequest,
+        client_for_transport: impl FnOnce(String) -> DeepSeekClient,
+    ) -> (String, Value) {
+        let streaming = request.stream == Some(true);
+        let server = MockServer::start().await;
+        let response = if streaming {
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string("data: [DONE]\n\n")
+        } else {
+            ResponseTemplate::new(200).set_body_json(json!({
+                "id": "chatcmpl-provider-request-boundary",
+                "object": "chat.completion",
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2
+                }
+            }))
+        };
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(response)
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = client_for_transport(server.uri());
+        if streaming {
+            let mut stream = client
+                .create_message_stream(request)
+                .await
+                .expect("streaming request succeeds");
+            while let Some(event) = stream.next().await {
+                event.expect("captured SSE response remains valid");
+            }
+        } else {
+            client
+                .create_message(request)
+                .await
+                .expect("non-streaming request succeeds");
+        }
+
+        let requests = server.received_requests().await.expect("recorded request");
+        assert_eq!(requests.len(), 1);
+        (
+            requests[0].url.path().to_string(),
+            serde_json::from_slice(&requests[0].body).expect("captured request JSON"),
+        )
+    }
+
+    async fn capture_zai_chat_request(
+        route_base_url: &str,
+        model: &str,
+        effort: Option<&str>,
+        streaming: bool,
+    ) -> (String, Value) {
+        capture_route_chat_request_body(
+            model,
+            k3_request_fixture(model, effort, streaming),
+            |uri| zai_request_boundary_client(route_base_url, model, uri),
+        )
+        .await
+    }
+
+    async fn capture_minimax_chat_request(
+        route_base_url: &str,
+        model: &str,
+        effort: Option<&str>,
+        streaming: bool,
+    ) -> (String, Value) {
+        capture_route_chat_request_body(
+            model,
+            k3_request_fixture(model, effort, streaming),
+            |uri| minimax_request_boundary_client(route_base_url, model, uri),
+        )
+        .await
+    }
+
+    async fn assert_zai_request_truth(streaming: bool) {
+        for base_url in [
+            crate::config::DEFAULT_ZAI_BASE_URL,
+            "https://api.z.ai/api/paas/v4",
+        ] {
+            let (high_path, high) = capture_zai_chat_request(
+                base_url,
+                crate::config::ZAI_GLM_5_2_MODEL,
+                Some("high"),
+                streaming,
+            )
+            .await;
+            let (max_path, max) = capture_zai_chat_request(
+                base_url,
+                crate::config::ZAI_GLM_5_2_MODEL,
+                Some("max"),
+                streaming,
+            )
+            .await;
+            assert_eq!(high_path, "/v1/chat/completions");
+            assert_eq!(max_path, "/v1/chat/completions");
+            assert_eq!(high["reasoning_effort"], "high", "{base_url}: {high}");
+            assert_eq!(max["reasoning_effort"], "max", "{base_url}: {max}");
+            for body in [&high, &max] {
+                assert_eq!(
+                    body["thinking"],
+                    json!({"type": "enabled", "clear_thinking": false}),
+                    "{base_url}: {body}"
+                );
+                assert_eq!(body["model"], crate::config::ZAI_GLM_5_2_MODEL);
+            }
+            let mut high_without_effort = high.clone();
+            let mut max_without_effort = max.clone();
+            high_without_effort
+                .as_object_mut()
+                .expect("object")
+                .remove("reasoning_effort");
+            max_without_effort
+                .as_object_mut()
+                .expect("object")
+                .remove("reasoning_effort");
+            assert_eq!(high_without_effort, max_without_effort);
+
+            for requested in ["high", "max"] {
+                let (_, turbo) = capture_zai_chat_request(
+                    base_url,
+                    crate::config::ZAI_GLM_5_TURBO_MODEL,
+                    Some(requested),
+                    streaming,
+                )
+                .await;
+                assert!(turbo.get("reasoning_effort").is_none(), "{turbo}");
+                assert_eq!(
+                    turbo["thinking"],
+                    json!({"type": "enabled", "clear_thinking": false})
+                );
+            }
+        }
+
+        let (_, gateway) = capture_zai_chat_request(
+            "https://gateway.example/v1",
+            crate::config::ZAI_GLM_5_2_MODEL,
+            Some("max"),
+            streaming,
+        )
+        .await;
+        assert!(gateway.get("reasoning_effort").is_none(), "{gateway}");
+        assert_eq!(
+            gateway["thinking"],
+            json!({"type": "enabled", "clear_thinking": false})
+        );
+    }
+
+    async fn assert_minimax_request_truth(streaming: bool) {
+        for base_url in [
+            crate::config::DEFAULT_MINIMAX_BASE_URL,
+            "https://api.minimaxi.com/v1",
+        ] {
+            let (_, body) = capture_minimax_chat_request(
+                base_url,
+                crate::config::DEFAULT_MINIMAX_MODEL,
+                Some("high"),
+                streaming,
+            )
+            .await;
+            assert_eq!(body["max_completion_tokens"], 64, "{base_url}: {body}");
+            assert!(body.get("max_tokens").is_none(), "{base_url}: {body}");
+            assert_eq!(body["reasoning_split"], true);
+            assert_eq!(body["thinking"], json!({"type": "adaptive"}));
+        }
+
+        for (base_url, model) in [
+            (crate::config::DEFAULT_MINIMAX_BASE_URL, "MiniMax-M2"),
+            (
+                "https://gateway.example/v1",
+                crate::config::DEFAULT_MINIMAX_MODEL,
+            ),
+        ] {
+            let (_, body) =
+                capture_minimax_chat_request(base_url, model, Some("high"), streaming).await;
+            assert_eq!(body["max_tokens"], 64, "{base_url}: {body}");
+            assert!(
+                body.get("max_completion_tokens").is_none(),
+                "{base_url}: {body}"
+            );
+        }
+    }
+
     async fn assert_k3_request_json_route_boundaries(streaming: bool) {
         for (requested, expected) in [("off", "low"), ("high", "high"), ("max", "max")] {
             let body = capture_moonshot_chat_request(
@@ -4152,6 +4397,26 @@ mod tests {
     #[tokio::test]
     async fn create_message_stream_request_json_honors_exact_k3_route_boundaries() {
         assert_k3_request_json_route_boundaries(true).await;
+    }
+
+    #[tokio::test]
+    async fn create_message_request_json_keeps_zai_effort_route_exact() {
+        assert_zai_request_truth(false).await;
+    }
+
+    #[tokio::test]
+    async fn create_message_stream_request_json_keeps_zai_effort_route_exact() {
+        assert_zai_request_truth(true).await;
+    }
+
+    #[tokio::test]
+    async fn create_message_request_json_keeps_minimax_token_dialect_exact() {
+        assert_minimax_request_truth(false).await;
+    }
+
+    #[tokio::test]
+    async fn create_message_stream_request_json_keeps_minimax_token_dialect_exact() {
+        assert_minimax_request_truth(true).await;
     }
 
     #[tokio::test]

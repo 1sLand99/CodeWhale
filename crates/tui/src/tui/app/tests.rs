@@ -365,6 +365,55 @@ fn cycle_effort_updates_effort_status_and_compaction() {
 }
 
 #[test]
+fn glm_5_turbo_records_enabled_with_granularity_unavailable() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Zai;
+    app.auto_model = false;
+    app.active_route_base_url = crate::config::DEFAULT_ZAI_BASE_URL.to_string();
+    app.model = crate::config::ZAI_GLM_5_TURBO_MODEL.to_string();
+    app.reasoning_effort = ReasoningEffort::High;
+
+    app.cycle_effort();
+
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Max);
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Reasoning effort: max→thinking enabled; granularity unavailable")
+    );
+    assert_eq!(
+        app.reasoning_effort_display_label(),
+        "max→thinking enabled; granularity unavailable"
+    );
+    let work = app
+        .work_state_snapshot()
+        .expect("Work snapshot")
+        .expect("effort activity creates graph state");
+    let activity = work
+        .graph
+        .expect("Work Graph")
+        .activities
+        .last()
+        .cloned()
+        .expect("effort activity");
+    let crate::work_graph::WorkActivityEvent::ReasoningEffortChanged {
+        requested,
+        effective,
+        provider,
+        ..
+    } = &activity;
+    assert_eq!(*requested, crate::work_graph::ReasoningEffortTier::Max);
+    assert_eq!(
+        *effective,
+        crate::work_graph::ReasoningEffortTier::ThinkingEnabledGranularityUnavailable
+    );
+    assert_eq!(provider, "zai");
+    assert_eq!(
+        serde_json::to_value(activity).expect("serialize activity")["effective"],
+        "thinking_enabled_granularity_unavailable"
+    );
+}
+
+#[test]
 fn reasoning_effort_display_receipts_route_normalization() {
     let mut app = App::new(test_options(false), &Config::default());
     app.api_provider = ApiProvider::Moonshot;
@@ -378,6 +427,9 @@ fn reasoning_effort_display_receipts_route_normalization() {
     app.active_route_base_url = crate::config::DEFAULT_KIMI_CODE_BASE_URL.to_string();
     app.model = "k3".to_string();
     assert_eq!(app.reasoning_effort_display_label(), "low");
+
+    app.reasoning_effort = ReasoningEffort::Off;
+    assert_eq!(app.reasoning_effort_display_label(), "off→low");
 }
 
 #[test]

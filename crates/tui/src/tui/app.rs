@@ -67,6 +67,7 @@ pub(crate) use composer::{
     MAX_SUBMITTED_INPUT_CHARS, next_grapheme_boundary, prev_grapheme_boundary,
 };
 pub use status::{StatusToast, StatusToastLevel};
+pub(crate) use types::EffectiveReasoningEffort;
 pub use types::{
     ApiKeyError, AppAction, AppMode, ComposerDensity, InitialInput, McpUiAction, QueuedMessage,
     ReasoningEffort, SettingSelection, ShellJobAction, SubmitDisposition, TaskPanelEntry,
@@ -4321,28 +4322,70 @@ impl App {
     fn effective_reasoning_effort_for_active_route(
         &self,
         requested: ReasoningEffort,
-    ) -> ReasoningEffort {
-        if self.auto_model || requested == ReasoningEffort::Auto {
-            return self
-                .last_effective_reasoning_effort
-                .unwrap_or(ReasoningEffort::Auto);
+    ) -> EffectiveReasoningEffort {
+        let effective = if self.auto_model || requested == ReasoningEffort::Auto {
+            self.last_effective_reasoning_effort
+                .unwrap_or(ReasoningEffort::Auto)
+        } else {
+            requested.normalize_for_route(
+                self.api_provider,
+                &self.active_route_base_url,
+                &self.model,
+            )
+        };
+
+        // Prefer the immutable installed-client receipt while a turn is live.
+        // If it is unavailable, only use the configured route when no pending
+        // or active foreign route could make that identity stale.
+        let exact_turbo = if let Some(route) = self
+            .active_turn
+            .as_ref()
+            .and_then(|turn| turn.route.as_ref())
+        {
+            route.receipt.as_ref().is_some_and(|receipt| {
+                crate::config::is_exact_zai_glm_5_turbo_route(
+                    receipt.provider(),
+                    receipt.endpoint_identity(),
+                    receipt.wire_model(),
+                )
+            })
+        } else if self.pending_turn_route.is_none() {
+            crate::config::is_exact_zai_glm_5_turbo_route(
+                self.api_provider,
+                &self.active_route_base_url,
+                &self.model,
+            )
+        } else {
+            false
+        };
+        if exact_turbo && !matches!(effective, ReasoningEffort::Off | ReasoningEffort::Auto) {
+            EffectiveReasoningEffort::ThinkingEnabledGranularityUnavailable
+        } else {
+            EffectiveReasoningEffort::Tier(effective)
         }
-        requested.normalize_for_route(self.api_provider, &self.active_route_base_url, &self.model)
     }
 
     fn reasoning_effort_resolution_label(
         requested: ReasoningEffort,
-        effective: ReasoningEffort,
+        effective: EffectiveReasoningEffort,
         provider: ApiProvider,
     ) -> String {
-        if requested == effective {
-            return effective.display_label_for_provider(provider).to_string();
-        }
-        let effective = effective.display_label_for_provider(provider);
-        if requested == ReasoningEffort::Auto {
-            format!("auto: {effective}")
-        } else {
-            format!("{}→{effective}", requested.short_label())
+        match effective {
+            EffectiveReasoningEffort::Tier(effective) => {
+                if requested == effective {
+                    return effective.display_label_for_provider(provider).to_string();
+                }
+                let effective = effective.display_label_for_provider(provider);
+                if requested == ReasoningEffort::Auto {
+                    format!("auto: {effective}")
+                } else {
+                    format!("{}→{effective}", requested.short_label())
+                }
+            }
+            EffectiveReasoningEffort::ThinkingEnabledGranularityUnavailable => format!(
+                "{}→thinking enabled; granularity unavailable",
+                requested.short_label()
+            ),
         }
     }
 

@@ -446,6 +446,31 @@ pub fn is_exact_moonshot_platform_route(kind: ProviderKind, base_url: &str) -> b
     kind == ProviderKind::Moonshot && is_exact_https_route(base_url, "api.moonshot.ai", "v1")
 }
 
+/// Whether a configured route is one of Z.ai's exact first-party Chat
+/// Completions endpoints.
+///
+/// Z.ai-only request fields must not leak to compatible gateways merely
+/// because they expose the same model id. Both the Coding Plan and general
+/// platform endpoints are first-party; neighboring paths remain distinct.
+#[must_use]
+pub fn is_exact_zai_chat_route(kind: ProviderKind, base_url: &str) -> bool {
+    kind == ProviderKind::Zai
+        && (is_exact_https_route(base_url, "api.z.ai", "api/coding/paas/v4")
+            || is_exact_https_route(base_url, "api.z.ai", "api/paas/v4"))
+}
+
+/// Whether a configured route is one of MiniMax's exact first-party OpenAI
+/// Chat Completions endpoints.
+///
+/// This deliberately excludes the `/anthropic` routes: those use the native
+/// Messages adapter and do not share Chat Completions token-limit fields.
+#[must_use]
+pub fn is_exact_minimax_chat_route(kind: ProviderKind, base_url: &str) -> bool {
+    kind == ProviderKind::Minimax
+        && (is_exact_https_route(base_url, "api.minimax.io", "v1")
+            || is_exact_https_route(base_url, "api.minimaxi.com", "v1"))
+}
+
 /// Return credential help for one concrete provider route.
 ///
 /// This protects non-UI callers such as diagnostics and command surfaces from
@@ -1463,6 +1488,71 @@ mod tests {
         assert!(!is_exact_moonshot_platform_route(
             ProviderKind::Openai,
             DEFAULT_MOONSHOT_BASE_URL
+        ));
+    }
+
+    #[test]
+    fn zai_chat_route_matching_is_exact() {
+        for route in [
+            "https://api.z.ai/api/coding/paas/v4",
+            "https://api.z.ai/api/paas/v4/",
+            "HTTPS://API.Z.AI/api/paas/v4",
+        ] {
+            assert!(is_exact_zai_chat_route(ProviderKind::Zai, route), "{route}");
+        }
+        for neighboring_route in [
+            "http://api.z.ai/api/paas/v4",
+            "https://api.z.ai:443/api/paas/v4",
+            "https://api.z.ai/API/paas/v4",
+            "https://api.z.ai/api/paas/v4?preview=1",
+            "https://api.z.ai/api/paas/v4#fragment",
+            "https://api.z.ai/api/paas/v4//",
+            "https://api.z.ai/api/paas/v4/chat/completions",
+            "https://gateway.example/v1",
+        ] {
+            assert!(
+                !is_exact_zai_chat_route(ProviderKind::Zai, neighboring_route),
+                "{neighboring_route} must not inherit Z.ai-only request fields"
+            );
+        }
+        assert!(!is_exact_zai_chat_route(
+            ProviderKind::Openai,
+            DEFAULT_ZAI_BASE_URL
+        ));
+    }
+
+    #[test]
+    fn minimax_chat_route_matching_is_exact_and_excludes_messages() {
+        for route in [
+            "https://api.minimax.io/v1",
+            "https://api.minimaxi.com/v1/",
+            "HTTPS://API.MINIMAX.IO/v1",
+        ] {
+            assert!(
+                is_exact_minimax_chat_route(ProviderKind::Minimax, route),
+                "{route}"
+            );
+        }
+        for neighboring_route in [
+            "http://api.minimax.io/v1",
+            "https://api.minimax.io:443/v1",
+            "https://api.minimax.io/V1",
+            "https://api.minimax.io/v1?preview=1",
+            "https://api.minimax.io/v1#fragment",
+            "https://api.minimax.io/v1//",
+            "https://api.minimax.io/v1/chat/completions",
+            "https://api.minimax.io/anthropic",
+            "https://api.minimaxi.com/anthropic",
+            "https://gateway.example/v1",
+        ] {
+            assert!(
+                !is_exact_minimax_chat_route(ProviderKind::Minimax, neighboring_route),
+                "{neighboring_route} must not inherit MiniMax Chat request fields"
+            );
+        }
+        assert!(!is_exact_minimax_chat_route(
+            ProviderKind::MinimaxAnthropic,
+            DEFAULT_MINIMAX_BASE_URL
         ));
     }
 

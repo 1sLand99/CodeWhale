@@ -49,6 +49,9 @@ pub enum ReasoningEffortTier {
     High,
     Auto,
     Max,
+    /// Thinking is enabled, but the provider route exposes no supported
+    /// effort tiers. This is an effective receipt, never a requested setting.
+    ThinkingEnabledGranularityUnavailable,
 }
 
 /// Bounded, receipt-only activity attached to the session graph.

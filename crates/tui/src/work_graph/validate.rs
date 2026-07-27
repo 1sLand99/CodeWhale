@@ -250,13 +250,24 @@ fn check_structural(snapshot: &WorkGraphSnapshot, out: &mut Vec<Violation>) {
         });
     }
     for activity in snapshot.activities.iter() {
-        let (provider, operation) = match activity {
+        let (requested, provider, operation) = match activity {
             WorkActivityEvent::ReasoningEffortChanged {
+                requested,
                 provider,
                 operation,
                 ..
-            } => (provider, operation),
+            } => (requested, provider, operation),
         };
+        if matches!(
+            requested,
+            super::ReasoningEffortTier::ThinkingEnabledGranularityUnavailable
+        ) {
+            out.push(Violation {
+                code: ValidationCode::Structural,
+                message: "requested reasoning effort is not an operator-selectable tier"
+                    .to_string(),
+            });
+        }
         if provider.is_empty()
             || provider.chars().count() > 128
             || provider

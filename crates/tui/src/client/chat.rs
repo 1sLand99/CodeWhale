@@ -16,6 +16,7 @@ use tokio::time::timeout as tokio_timeout;
 
 use crate::config::{
     TOGETHER_INKLING_MODEL, is_exact_direct_moonshot_k3_route, is_exact_kimi_code_k3_route,
+    is_exact_zai_glm_5_2_route, minimax_m3_route_uses_max_completion_tokens,
     wire_model_for_provider_route,
 };
 
@@ -60,6 +61,7 @@ fn apply_provider_token_limit(
 ) {
     let use_max_completion_tokens = provider == ApiProvider::XiaomiMimo
         || (provider == ApiProvider::Openai && model_is_openai_reasoning_family(model))
+        || minimax_m3_route_uses_max_completion_tokens(provider, base_url, model)
         || is_exact_direct_moonshot_k3_route(provider, base_url, model);
     if !use_max_completion_tokens {
         return;
@@ -199,6 +201,38 @@ fn apply_direct_moonshot_k3_reasoning_effort(
     body["reasoning_effort"] = json!(wire_effort);
 }
 
+/// Add GLM-5.2's documented top-level effort only on its exact first-party
+/// route. The generic Z.ai layer owns the enabled/disabled thinking object;
+/// GLM-5-Turbo and compatible gateways intentionally receive no invented
+/// effort granularity.
+fn apply_zai_glm_5_2_reasoning_effort(
+    body: &mut Value,
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+    effort: Option<&str>,
+) {
+    if !is_exact_zai_glm_5_2_route(provider, base_url, model) {
+        return;
+    }
+
+    if let Some(object) = body.as_object_mut() {
+        object.remove("reasoning_effort");
+    }
+    match effort
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("high") => body["reasoning_effort"] = json!("high"),
+        Some("xhigh") | Some("max") | Some("highest") | Some("ultracode") => {
+            body["reasoning_effort"] = json!("max");
+        }
+        // Off, lower tiers, omitted effort, and unknown legacy values retain
+        // only the generic Z.ai thinking control.
+        _ => {}
+    }
+}
+
 /// Final reasoning-control pass shared by streaming and non-streaming Chat
 /// Completions requests. Route-specific shapers run after the generic provider
 /// layer so they can remove fields that are invalid for their exact endpoint.
@@ -214,6 +248,7 @@ fn apply_route_reasoning_controls(
     apply_openai_reasoning_effort(body, provider, model, effort);
     apply_direct_moonshot_k3_reasoning_effort(body, provider, base_url, model, effort);
     apply_kimi_code_k3_reasoning_effort(body, provider, base_url, model, effort);
+    apply_zai_glm_5_2_reasoning_effort(body, provider, base_url, model, effort);
 }
 
 /// The direct K3 Chat Completions schema exposes fixed sampling behavior and

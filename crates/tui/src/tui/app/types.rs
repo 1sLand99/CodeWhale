@@ -76,6 +76,29 @@ pub enum ReasoningEffort {
     Max,
 }
 
+/// Provider-effective reasoning state used by durable receipts and visible
+/// requested-to-effective labels.
+///
+/// Some routes, notably first-party GLM-5-Turbo, support a thinking toggle but
+/// publish no effort tiers. Keeping that state distinct prevents a requested
+/// `max` from being displayed or persisted as an effective `max` claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EffectiveReasoningEffort {
+    Tier(ReasoningEffort),
+    ThinkingEnabledGranularityUnavailable,
+}
+
+impl From<EffectiveReasoningEffort> for crate::work_graph::ReasoningEffortTier {
+    fn from(value: EffectiveReasoningEffort) -> Self {
+        match value {
+            EffectiveReasoningEffort::Tier(tier) => tier.into(),
+            EffectiveReasoningEffort::ThinkingEnabledGranularityUnavailable => {
+                Self::ThinkingEnabledGranularityUnavailable
+            }
+        }
+    }
+}
+
 impl From<ReasoningEffort> for crate::work_graph::ReasoningEffortTier {
     fn from(value: ReasoningEffort) -> Self {
         match value {
