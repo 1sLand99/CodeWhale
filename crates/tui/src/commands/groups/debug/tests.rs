@@ -100,16 +100,37 @@ fn tokens_report_uses_codex_oauth_route_context() {
 #[test]
 fn test_cost_shows_spending_info() {
     let mut app = create_test_app();
+    // A total is only reportable with the coverage that qualifies it. Setting
+    // the accumulator alone is the legacy shape, checked separately below.
+    app.session.cost_priced_turns = 1;
     app.session.session_cost = 0.1234;
     let result = cost(&mut app);
     assert!(result.message.is_some());
     let msg = result.message.unwrap();
-    assert!(msg.contains("Session Cost"));
-    assert!(msg.contains("Estimated total:"));
-    assert!(msg.contains("approximate"));
-    assert!(msg.contains("$0.1234"));
-    assert!(msg.contains("Provider API Pricing"));
-    assert!(!msg.contains("DeepSeek API Pricing"));
+    assert!(msg.contains("Session Cost"), "{msg}");
+    assert!(msg.contains("Estimated total:"), "{msg}");
+    assert!(msg.contains("$0.1234"), "{msg}");
+    // The old copy hedged with "approximate" and then printed a static
+    // "Provider API Pricing" rate card that was not what the number was
+    // computed from. Both are gone: the report now names its own basis and
+    // its coverage instead of gesturing at a price list (#4318).
+    assert!(msg.contains("estimate, not a bill"), "{msg}");
+    assert!(msg.contains("Covered: 1 of 1"), "{msg}");
+    assert!(!msg.contains("Provider API Pricing"), "{msg}");
+    assert!(!msg.contains("DeepSeek API Pricing"), "{msg}");
+}
+
+/// The same accumulator with no coverage behind it is not a total. It is the
+/// exact state a pre-coverage session restores into, and reporting it as
+/// "Estimated total: $0.1234" would claim the figure is complete.
+#[test]
+fn cost_report_will_not_promote_an_unqualified_accumulator_to_a_total() {
+    let mut app = create_test_app();
+    app.session.session_cost = 0.1234;
+
+    let msg = cost(&mut app).message.expect("cost report");
+    assert!(msg.contains("Estimated total: unknown"), "{msg}");
+    assert!(!msg.contains("$0.1234"), "{msg}");
 }
 
 #[test]

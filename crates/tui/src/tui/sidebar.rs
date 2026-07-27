@@ -3419,6 +3419,15 @@ mod tests {
         assert_eq!(context_panel_cost_line(&app), "cost: unknown");
     }
 
+    /// A route priced only in USD, displayed in CNY mode, must show the USD
+    /// figure. The alternative — rendering the CNY accumulator, which is a
+    /// structural zero for a USD-only route — would report ¥0.00 as if the
+    /// turn were free.
+    ///
+    /// The USD amount and the coverage that qualifies it are recorded through
+    /// the same audit production uses. Bumping the raw accumulator instead
+    /// would leave the session with money and no evidence of what it covers,
+    /// which is a different (and separately tested) state.
     #[test]
     fn context_panel_cost_line_uses_usd_for_usd_only_model_in_cny_mode() {
         let mut app = create_test_app();
@@ -3430,6 +3439,7 @@ mod tests {
         app.api_provider = crate::config::ApiProvider::Moonshot;
         app.billing_presentation = crate::route_billing::BillingPresentation::Metered;
         app.cost_currency = crate::pricing::CostCurrency::Cny;
+        app.record_turn_cost_audit(&usd_only_priced_audit(0.42));
         app.accrue_session_cost_estimate(crate::pricing::CostEstimate::usd_only(0.42));
 
         let line = context_panel_cost_line(&app);
@@ -3439,6 +3449,112 @@ mod tests {
             !line.contains('¥'),
             "must not render CNY zero, got {line:?}"
         );
+    }
+
+    /// The same session, before any turn has been priced, must not present the
+    /// USD accumulator as a CNY figure or as a total. With no coverage at all
+    /// there is nothing to report.
+    #[test]
+    fn context_panel_cost_line_reports_unknown_before_any_turn_is_priced() {
+        let mut app = create_test_app();
+        app.model = "kimi-k2.6".to_string();
+        app.api_provider = crate::config::ApiProvider::Moonshot;
+        app.billing_presentation = crate::route_billing::BillingPresentation::Metered;
+        app.cost_currency = crate::pricing::CostCurrency::Cny;
+
+        // Money with no audit behind it: the accumulator moved, coverage did
+        // not. This is exactly the shape a legacy/unaudited path produces.
+        app.accrue_session_cost_estimate(crate::pricing::CostEstimate::usd_only(0.42));
+
+        let line = context_panel_cost_line(&app);
+        assert!(
+            !line.contains("0.42"),
+            "an unqualified accumulator is not a reportable total: {line:?}"
+        );
+        assert!(!line.contains('¥'), "must not render CNY zero: {line:?}");
+    }
+
+    /// A route priced in CNY reports CNY in CNY mode — the fallback to USD is
+    /// for USD-only coverage, not a blanket preference for dollars.
+    #[test]
+    fn context_panel_cost_line_keeps_cny_when_the_route_is_priced_in_cny() {
+        let mut app = create_test_app();
+        app.model = "deepseek-v4-flash".to_string();
+        app.api_provider = crate::config::ApiProvider::Deepseek;
+        app.billing_presentation = crate::route_billing::BillingPresentation::Metered;
+        app.cost_currency = crate::pricing::CostCurrency::Cny;
+        app.record_turn_cost_audit(&dual_currency_priced_audit(0.42, 3.0));
+        app.accrue_session_cost_estimate(crate::pricing::CostEstimate {
+            usd: 0.42,
+            cny: 3.0,
+        });
+
+        let line = context_panel_cost_line(&app);
+        assert!(line.contains('¥'), "expected a CNY amount, got {line:?}");
+        assert!(!line.contains('$'), "must not fall back to USD: {line:?}");
+    }
+
+    /// An authoritatively priced turn that cost nothing is a *known* zero, and
+    /// is reported separately from a route whose spend could not be
+    /// established. Both currencies are checked so neither can be the one that
+    /// quietly reports a fabricated zero.
+    #[test]
+    fn context_panel_cost_line_separates_a_priced_zero_from_unknown_spend() {
+        let mut priced_zero = create_test_app();
+        priced_zero.api_provider = crate::config::ApiProvider::Deepseek;
+        priced_zero.model = "deepseek-v4-flash".to_string();
+        priced_zero.billing_presentation = crate::route_billing::BillingPresentation::Metered;
+        priced_zero.record_turn_cost_audit(&dual_currency_priced_audit(0.0, 0.0));
+        let priced_zero_line = context_panel_cost_line(&priced_zero);
+
+        let mut unknown = create_test_app();
+        unknown.api_provider = crate::config::ApiProvider::Deepseek;
+        unknown.model = "deepseek-v4-flash".to_string();
+        unknown.billing_presentation = crate::route_billing::BillingPresentation::Metered;
+        unknown.record_turn_cost_audit(&unpriced_audit());
+        let unknown_line = context_panel_cost_line(&unknown);
+
+        assert_eq!(unknown_line, "cost: unknown");
+        assert_ne!(
+            priced_zero_line, unknown_line,
+            "a provider-reported zero must not render as missing data"
+        );
+    }
+
+    fn usd_only_priced_audit(usd: f64) -> crate::pricing::TurnCostAudit {
+        crate::pricing::TurnCostAudit {
+            estimate: Some(crate::pricing::CostEstimate::usd_only(usd)),
+            provenance: Some(codewhale_config::pricing::PricingProvenance::ModelsDevBundled),
+            unpriced_classes: Vec::new(),
+            unpriced_reason: None,
+            live_pricing_defect: None,
+            usd_priced: true,
+            cny_priced: false,
+        }
+    }
+
+    fn dual_currency_priced_audit(usd: f64, cny: f64) -> crate::pricing::TurnCostAudit {
+        crate::pricing::TurnCostAudit {
+            estimate: Some(crate::pricing::CostEstimate { usd, cny }),
+            provenance: Some(codewhale_config::pricing::PricingProvenance::ModelsDevBundled),
+            unpriced_classes: Vec::new(),
+            unpriced_reason: None,
+            live_pricing_defect: None,
+            usd_priced: true,
+            cny_priced: true,
+        }
+    }
+
+    fn unpriced_audit() -> crate::pricing::TurnCostAudit {
+        crate::pricing::TurnCostAudit {
+            estimate: None,
+            provenance: None,
+            unpriced_classes: Vec::new(),
+            unpriced_reason: Some(crate::pricing::UnpricedReason::NoPricingRow),
+            live_pricing_defect: None,
+            usd_priced: false,
+            cny_priced: false,
+        }
     }
 
     #[test]
