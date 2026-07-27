@@ -446,30 +446,31 @@ pub(super) fn subagent_message_refreshes_workspace_context(message: &MailboxMess
 
 /// Route a `MailboxMessage` envelope to the matching in-transcript card,
 /// allocating a `DelegateCard` or `FanoutCard` on first sight (issue #128).
-pub(super) fn handle_subagent_mailbox(app: &mut App, seq: u64, message: &MailboxMessage) -> bool {
+pub(super) fn handle_subagent_mailbox_for_turn(
+    app: &mut App,
+    turn_id: &str,
+    seq: u64,
+    message: &MailboxMessage,
+) -> bool {
     // Accumulate sub-agent token costs for the real-time footer counter (#166).
-    if let MailboxMessage::TokenUsage {
-        provider,
-        model,
-        usage,
-        ..
-    } = message
-    {
+    if let MailboxMessage::TokenUsage { route, usage, .. } = message {
         // Preserve the effective child route for Agent Details. This is the
         // only provider source used by that projection: configured/default
         // parent routes are not evidence that the child actually used them.
         record_agent_current_activity(app, message);
-        let billing = crate::route_billing::for_child_route(
-            app.api_provider,
-            app.billing_presentation,
-            *provider,
-        );
-        if app.session.subagent_cost_event_seqs.insert(seq)
-            && let Some(cost) = crate::pricing::calculate_turn_cost_estimate_for_route(
-                *provider, model, usage, billing,
-            )
+        // Sub-agent spend joins the parent total, so it also joins the
+        // completeness counters `/cost` reports against that total.
+        if app
+            .session
+            .subagent_cost_event_seqs
+            .insert((turn_id.to_string(), seq))
         {
-            app.accrue_subagent_cost_estimate(cost);
+            let audit = route.audit(usage);
+            app.record_turn_cost_audit(&audit);
+            app.record_turn_cost_route_receipt(route.receipt(&audit));
+            if let Some(cost) = audit.estimate {
+                app.accrue_subagent_cost_estimate(cost);
+            }
         }
         return false; // No card visual change needed; the footer handles display.
     }
@@ -568,6 +569,11 @@ pub(super) fn handle_subagent_mailbox(app: &mut App, seq: u64, message: &Mailbox
     }
 }
 
+#[cfg(test)]
+pub(super) fn handle_subagent_mailbox(app: &mut App, seq: u64, message: &MailboxMessage) -> bool {
+    handle_subagent_mailbox_for_turn(app, "test-turn", seq, message)
+}
+
 fn bounded_mailbox_message(message: &MailboxMessage) -> MailboxMessage {
     match message {
         MailboxMessage::Progress { agent_id, status } => MailboxMessage::Progress {
@@ -631,13 +637,12 @@ fn bounded_mailbox_message(message: &MailboxMessage) -> MailboxMessage {
 fn record_agent_current_activity(app: &mut App, message: &MailboxMessage) {
     let agent_id = message.agent_id().to_string();
     let meta = app.agent_progress_meta.entry(agent_id).or_default();
-    if let MailboxMessage::TokenUsage {
-        provider, model, ..
-    } = message
-    {
-        meta.resolved_provider = Some(provider.as_str().to_string());
-        meta.resolved_model =
-            Some(bound_agent_activity_text(model)).filter(|model| !model.trim().is_empty());
+    if let MailboxMessage::TokenUsage { route, .. } = message {
+        meta.resolved_provider = Some(route.provider.as_str().to_string());
+        meta.resolved_model = Some(bound_agent_activity_text(
+            &crate::cost_status::sanitize_persisted_route_label(&route.model),
+        ))
+        .filter(|model| !model.trim().is_empty());
         return;
     }
     if matches!(message, MailboxMessage::WorkState { .. }) {
@@ -990,6 +995,20 @@ mod tests {
         }
     }
 
+    fn test_route(
+        provider: crate::config::ApiProvider,
+        model: &str,
+    ) -> crate::cost_status::EffectiveRouteEnvelope {
+        crate::cost_status::EffectiveRouteEnvelope::capture(
+            None,
+            provider,
+            provider.as_str(),
+            model,
+            Some(provider.default_base_url()),
+            Utc::now(),
+        )
+    }
+
     fn task_summary(id: &str, status: TaskStatus, duration_ms: Option<u64>) -> TaskSummary {
         TaskSummary {
             id: id.to_string(),
@@ -1217,8 +1236,8 @@ mod tests {
             91,
             &MailboxMessage::TokenUsage {
                 agent_id: "agent_route".to_string(),
-                provider: crate::config::ApiProvider::Openrouter,
-                model: "vendor/model-real".to_string(),
+                source_id: "response-route".to_string(),
+                route: test_route(crate::config::ApiProvider::Openrouter, "vendor/model-real"),
                 usage: crate::models::Usage::default(),
             },
         );

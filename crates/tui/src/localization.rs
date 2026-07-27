@@ -440,6 +440,19 @@ pub enum MessageId {
     CmdCacheNoData,
     CmdCacheTotals,
     CmdCostReport,
+    CmdCostReportSubtotal,
+    CmdCostReportUnknown,
+    CmdCostUnknownValue,
+    CmdCostEstimateOnly,
+    CmdCostCoverage,
+    CmdCostCoverageUnknownLegacy,
+    CmdCostUnpricedTurns,
+    CmdCostUnpricedClasses,
+    CmdCostPricingProvenance,
+    CmdCostLivePricingDowngraded,
+    CmdCostLivePricingUnavailable,
+    CmdCostRoutesHeader,
+    CmdTokensCacheWriteTotal,
     CmdTokensCacheBoth,
     CmdTokensCacheHitOnly,
     CmdTokensCacheMissOnly,
@@ -1676,6 +1689,19 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::CmdChangeTranslationUnavailable,
     MessageId::CmdChangePreviousVersion,
     MessageId::CmdCostReport,
+    MessageId::CmdCostReportSubtotal,
+    MessageId::CmdCostReportUnknown,
+    MessageId::CmdCostUnknownValue,
+    MessageId::CmdCostEstimateOnly,
+    MessageId::CmdCostCoverage,
+    MessageId::CmdCostCoverageUnknownLegacy,
+    MessageId::CmdCostUnpricedTurns,
+    MessageId::CmdCostUnpricedClasses,
+    MessageId::CmdCostPricingProvenance,
+    MessageId::CmdCostLivePricingDowngraded,
+    MessageId::CmdCostLivePricingUnavailable,
+    MessageId::CmdCostRoutesHeader,
+    MessageId::CmdTokensCacheWriteTotal,
     MessageId::CmdTokensCacheBoth,
     MessageId::CmdTokensCacheHitOnly,
     MessageId::CmdTokensCacheMissOnly,
@@ -2996,6 +3022,143 @@ mod tests {
                     locale.tag()
                 );
             }
+        }
+    }
+
+    /// The `/cost` and `/tokens` honesty block is assembled by `{placeholder}`
+    /// substitution, so a translation that drops or renames one silently ships a
+    /// line with a literal `{priced}` in it — or worse, omits the count that
+    /// makes the sentence true. Cost copy is exactly where a mistranslation
+    /// becomes a false claim about money, so it gets the same hard parity gate
+    /// the coordination pack has (#4318).
+    #[test]
+    fn cost_copy_has_raw_key_and_placeholder_parity_across_complete_packs() {
+        let english = raw_locale_messages(Locale::En);
+        let cost_keys = english
+            .keys()
+            .filter(|key| key.starts_with("CmdCost") || key.starts_with("CmdTokensCache"))
+            .cloned()
+            .collect::<Vec<_>>();
+        // Guard against the filter silently matching nothing after a rename.
+        assert!(
+            cost_keys.len() >= 12,
+            "expected the full CmdCost*/CmdTokensCache* set, found {cost_keys:?}"
+        );
+        // The keys this pass added must be in the set the gate covers.
+        for required in [
+            "CmdCostEstimateOnly",
+            "CmdCostCoverage",
+            "CmdCostCoverageUnknownLegacy",
+            "CmdCostUnpricedTurns",
+            "CmdCostUnpricedClasses",
+            "CmdCostPricingProvenance",
+            "CmdCostLivePricingDowngraded",
+            "CmdCostLivePricingUnavailable",
+            "CmdCostRoutesHeader",
+            "CmdTokensCacheWriteTotal",
+        ] {
+            assert!(
+                cost_keys.iter().any(|key| key == required),
+                "{required} is missing from en.json"
+            );
+        }
+
+        for locale in Locale::shipped_complete() {
+            let pack = raw_locale_messages(*locale);
+            for key in &cost_keys {
+                let english_value = english
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_else(|| panic!("English {key} must be a string"));
+                let translated = pack
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_else(|| panic!("{} is missing raw key {key}", locale.tag()));
+                assert_eq!(
+                    message_placeholders(translated),
+                    message_placeholders(english_value),
+                    "{} changed placeholders for {key}",
+                    locale.tag()
+                );
+            }
+        }
+    }
+
+    /// Key parity proves a pack *has* the subtotal and audited-route lines; it
+    /// does not prove anyone translated them. A pack that copies the English
+    /// string passes every structural gate and still ships English text to a
+    /// Japanese user — and these two lines are the ones that say a money figure
+    /// is incomplete and name the routes it was built from, which is exactly
+    /// the copy a reader must be able to understand (#4318).
+    #[test]
+    fn every_complete_pack_localizes_the_subtotal_and_audited_route_copy() {
+        for locale in Locale::shipped_complete()
+            .iter()
+            .filter(|locale| **locale != Locale::En)
+        {
+            for id in [
+                MessageId::CmdCostReportSubtotal,
+                MessageId::CmdCostReportUnknown,
+                MessageId::CmdCostRoutesHeader,
+                MessageId::CmdCostUnknownValue,
+                MessageId::CmdCostCoverageUnknownLegacy,
+            ] {
+                let localized = tr(*locale, id);
+                let english = tr(Locale::En, id);
+                assert!(
+                    !localized.trim().is_empty(),
+                    "{} has empty copy for {id:?}",
+                    locale.tag()
+                );
+                assert_ne!(
+                    localized,
+                    english,
+                    "{} still ships the English string for {id:?}",
+                    locale.tag()
+                );
+            }
+            // The subtotal headline must still carry its amount, and must not
+            // reuse the complete-total wording — those two states are the whole
+            // point of having separate keys.
+            let subtotal = tr(*locale, MessageId::CmdCostReportSubtotal);
+            assert!(
+                subtotal.contains("{cost}"),
+                "{} subtotal headline lost its amount",
+                locale.tag()
+            );
+            assert_ne!(
+                subtotal,
+                tr(*locale, MessageId::CmdCostReport),
+                "{} cannot distinguish a subtotal from a complete total",
+                locale.tag()
+            );
+            // The unknown headline names no amount at all.
+            let unknown = tr(*locale, MessageId::CmdCostReportUnknown);
+            assert!(
+                !unknown.contains("{cost}"),
+                "{} unknown headline must not interpolate an amount",
+                locale.tag()
+            );
+        }
+    }
+
+    /// Both money surfaces must say "estimate". `/tokens` quotes the same total
+    /// as `/cost`, so it cannot present it as settled while `/cost` hedges.
+    #[test]
+    fn every_complete_pack_marks_the_cost_total_as_an_estimate() {
+        for locale in Locale::shipped_complete() {
+            let disclaimer = tr(*locale, MessageId::CmdCostEstimateOnly);
+            assert!(
+                !disclaimer.trim().is_empty(),
+                "{} has no cost estimate disclaimer",
+                locale.tag()
+            );
+            let coverage = tr(*locale, MessageId::CmdCostCoverage);
+            assert!(
+                coverage.contains("{priced}") && coverage.contains("{turns}"),
+                "{} coverage line lost its counts",
+                locale.tag()
+            );
         }
     }
 

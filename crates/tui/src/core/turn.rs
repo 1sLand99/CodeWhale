@@ -13,6 +13,7 @@
 //! `/restore N` and the `revert_turn` tool both consume these
 //! snapshots.
 
+use crate::core::events::TurnRoute;
 use crate::models::{Message, Usage};
 use crate::snapshot::SnapshotRepo;
 use std::path::Path;
@@ -43,6 +44,10 @@ pub struct TurnContext {
     /// Usage for this turn
     pub usage: Usage,
 
+    /// Route facts resolved for this turn but not timestamped until the first
+    /// provider request is actually dispatched.
+    pub(crate) pending_route: Option<TurnRoute>,
+
     /// Exact initial user message carrying the mutable SlopLedger gate, when
     /// one was attached. Compaction uses this turn-scoped identity as an
     /// authoritative pin without retaining matching gates from older turns.
@@ -63,6 +68,7 @@ impl TurnContext {
                 output_tokens: 0,
                 ..Usage::default()
             },
+            pending_route: None,
             active_slop_gate_message: None,
         }
     }
@@ -92,8 +98,8 @@ impl TurnContext {
 
     /// Add usage from an API response
     pub fn add_usage(&mut self, usage: &Usage) {
-        self.usage.input_tokens += usage.input_tokens;
-        self.usage.output_tokens += usage.output_tokens;
+        self.usage.input_tokens = self.usage.input_tokens.saturating_add(usage.input_tokens);
+        self.usage.output_tokens = self.usage.output_tokens.saturating_add(usage.output_tokens);
         self.usage.prompt_cache_hit_tokens = add_optional_usage(
             self.usage.prompt_cache_hit_tokens,
             usage.prompt_cache_hit_tokens,
@@ -108,6 +114,17 @@ impl TurnContext {
         );
         self.usage.reasoning_tokens =
             add_optional_usage(self.usage.reasoning_tokens, usage.reasoning_tokens);
+        self.usage.reasoning_replay_tokens = add_optional_usage(
+            self.usage.reasoning_replay_tokens,
+            usage.reasoning_replay_tokens,
+        );
+        if let Some(delta) = usage.server_tool_use.as_ref() {
+            let total = self.usage.server_tool_use.get_or_insert_default();
+            total.code_execution_requests =
+                add_optional_usage(total.code_execution_requests, delta.code_execution_requests);
+            total.tool_search_requests =
+                add_optional_usage(total.tool_search_requests, delta.tool_search_requests);
+        }
     }
 }
 
@@ -117,6 +134,38 @@ fn add_optional_usage(total: Option<u32>, delta: Option<u32>) -> Option<u32> {
         (None, Some(delta)) => Some(delta),
         (Some(total), None) => Some(total),
         (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+    use crate::models::ServerToolUsage;
+
+    #[test]
+    fn add_usage_preserves_replay_and_saturates_server_tool_counters() {
+        let mut turn = TurnContext::new(2);
+        turn.add_usage(&Usage {
+            reasoning_replay_tokens: Some(u32::MAX - 1),
+            server_tool_use: Some(ServerToolUsage {
+                code_execution_requests: Some(u32::MAX),
+                tool_search_requests: Some(2),
+            }),
+            ..Usage::default()
+        });
+        turn.add_usage(&Usage {
+            reasoning_replay_tokens: Some(9),
+            server_tool_use: Some(ServerToolUsage {
+                code_execution_requests: Some(1),
+                tool_search_requests: Some(3),
+            }),
+            ..Usage::default()
+        });
+
+        assert_eq!(turn.usage.reasoning_replay_tokens, Some(u32::MAX));
+        let server = turn.usage.server_tool_use.expect("server tool usage");
+        assert_eq!(server.code_execution_requests, Some(u32::MAX));
+        assert_eq!(server.tool_search_requests, Some(5));
     }
 }
 

@@ -26,7 +26,7 @@ pub enum TurnOutcomeStatus {
 
 /// Provider/model route resolved for a model-backed turn.
 ///
-/// Carried with `TurnStarted` so hosts can retain provenance until the matching
+/// Emitted at `RouteDispatched` so hosts retain provenance until the matching
 /// `TurnComplete` without relying on mutable global selection state. Non-model
 /// turns such as composer `!` shell commands use no route.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +48,45 @@ pub struct TurnRoute {
     /// `None` when no concrete client was installed (injected-client engines,
     /// or a client that failed to construct).
     pub receipt: Option<crate::route_receipt::TurnRouteReceipt>,
+    /// Billing evidence for the request that was actually put on the wire.
+    ///
+    /// `None` at `TurnStarted`: a lifecycle start is not a dispatch, and a
+    /// route that has not been sent has no billing time, no metering surface,
+    /// and no endpoint to attest. Populated exactly once, at the wire
+    /// boundary, and delivered on `RouteDispatched`. Consumers that price a
+    /// turn must treat `None` as *unknown*, never as a zero-cost turn.
+    pub billing: Option<RouteBillingEnvelope>,
+}
+
+/// Dispatch-time billing evidence. Separate from [`TurnRoute`] so the type
+/// system — not a convention — enforces that no caller can read a billing
+/// surface, endpoint fingerprint, or dispatch instant off a route that was
+/// only *planned*.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteBillingEnvelope {
+    pub billing_surface: Option<String>,
+    pub endpoint_fingerprint: Option<String>,
+    pub billing_mode: crate::cost_status::RouteBillingMode,
+    pub dispatched_at: DateTime<Utc>,
+}
+
+impl TurnRoute {
+    /// Priceable envelope for this route, or `None` when the route was never
+    /// dispatched. Deliberately not a `Default`-filled envelope: an undispatched
+    /// route has no cost, and "no cost" is not "zero cost".
+    #[must_use]
+    pub fn cost_envelope(&self) -> Option<crate::cost_status::EffectiveRouteEnvelope> {
+        let billing = self.billing.as_ref()?;
+        Some(crate::cost_status::EffectiveRouteEnvelope {
+            provider: self.provider,
+            provider_identity: self.provider_identity.clone(),
+            model: self.model.clone(),
+            billing_surface: billing.billing_surface.clone(),
+            endpoint_fingerprint: billing.endpoint_fingerprint.clone(),
+            billing_mode: billing.billing_mode,
+            dispatched_at: billing.dispatched_at,
+        })
+    }
 }
 
 /// Structured lifecycle metadata paired with a human-readable
@@ -156,6 +195,8 @@ pub enum Event {
     TurnStarted {
         turn_id: String,
         created_at: DateTime<Utc>,
+        /// Legacy/non-model hosts may still attach a route at start. Model
+        /// turns emit it separately at the real provider dispatch boundary.
         route: Option<TurnRoute>,
     },
 
@@ -164,6 +205,10 @@ pub enum Event {
     ToolRequestSnapshot {
         snapshot: crate::tool_inspection::ToolInspectionSnapshot,
     },
+
+    /// Immutable billing route captured immediately before the first provider
+    /// request, after snapshots and other potentially slow pre-dispatch work.
+    RouteDispatched { turn_id: String, route: TurnRoute },
 
     /// The turn is complete (no more tool calls)
     TurnComplete {
@@ -268,6 +313,10 @@ pub enum Event {
     /// monotonic seq + the typed `MailboxMessage` so the UI can route each
     /// envelope to the correct in-transcript card.
     SubAgentMailbox {
+        /// Engine turn identity. Sequence numbers restart for every mailbox,
+        /// so consumers must deduplicate on `(turn_id, seq)`, never `seq`
+        /// alone.
+        turn_id: String,
         seq: u64,
         message: crate::tools::subagent::MailboxMessage,
     },

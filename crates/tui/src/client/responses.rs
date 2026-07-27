@@ -751,26 +751,31 @@ fn parse_responses_usage(val: &Value) -> Usage {
     let input = val
         .get("input_tokens")
         .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+        .map_or(0, super::saturating_u32);
     let output = val
         .get("output_tokens")
         .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+        .map_or(0, super::saturating_u32);
     let cached = val
         .get("input_tokens_details")
         .and_then(|d| d.get("cached_tokens"))
         .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+        .map_or(0, super::saturating_u32);
     // Mirror the Chat-Completions parser: derive cache-miss as input minus the
     // cached hit when the payload reports cached input tokens. Responses nests
     // reasoning under `output_tokens_details` (not `completion_tokens_details`).
     let prompt_cache_hit_tokens = if cached > 0 { Some(cached) } else { None };
     let prompt_cache_miss_tokens = prompt_cache_hit_tokens.map(|hit| input.saturating_sub(hit));
+    // `output_tokens` is already the total billable completion count, with
+    // reasoning a subset of it. A payload reporting more reasoning than output
+    // violates that, so the value is rejected as invalid telemetry rather than
+    // being trusted or turned into extra billable output (#4318).
     let reasoning_tokens = val
         .get("output_tokens_details")
         .and_then(|d| d.get("reasoning_tokens"))
         .and_then(|v| v.as_u64())
-        .map(|v| v as u32);
+        .map(super::saturating_u32)
+        .filter(|reasoning| *reasoning <= output);
     Usage {
         input_tokens: input,
         output_tokens: output,
@@ -1268,6 +1273,63 @@ mod tests {
         assert_eq!(parsed_bare.prompt_cache_hit_tokens, None);
         assert_eq!(parsed_bare.prompt_cache_miss_tokens, None);
         assert_eq!(parsed_bare.reasoning_tokens, None);
+    }
+
+    #[test]
+    fn parse_responses_usage_saturates_u64_fields() {
+        let parsed = parse_responses_usage(&json!({
+            "input_tokens": u64::MAX,
+            "output_tokens": u64::MAX,
+            "input_tokens_details": { "cached_tokens": u64::MAX },
+            "output_tokens_details": { "reasoning_tokens": u64::MAX }
+        }));
+        assert_eq!(parsed.input_tokens, u32::MAX);
+        assert_eq!(parsed.output_tokens, u32::MAX);
+        assert_eq!(parsed.prompt_cache_hit_tokens, Some(u32::MAX));
+        assert_eq!(parsed.prompt_cache_miss_tokens, Some(0));
+        assert_eq!(parsed.reasoning_tokens, Some(u32::MAX));
+    }
+
+    /// Regression fixture for the reasoning double-billing bug: a real
+    /// Responses usage payload has to survive the whole way into the pricing
+    /// conversion without reasoning tokens being charged twice. OpenAI's
+    /// `output_tokens` is already the *total* billable completion count, with
+    /// `output_tokens_details.reasoning_tokens` a subset of it.
+    #[test]
+    fn responses_usage_reaches_pricing_conversion_without_double_billing_reasoning() {
+        use crate::config::ApiProvider;
+        use crate::pricing::{calculate_turn_cost_estimate_for_provider, token_usage_for_pricing};
+
+        let usage = parse_responses_usage(&json!({
+            "input_tokens": 10_000,
+            "output_tokens": 4_000,
+            "total_tokens": 14_000,
+            "input_tokens_details": { "cached_tokens": 6_000 },
+            "output_tokens_details": { "reasoning_tokens": 3_500 }
+        }));
+
+        let classes = token_usage_for_pricing(&usage);
+        assert_eq!(classes.output, 4_000, "reasoning must not inflate output");
+        assert_eq!(classes.input, 4_000);
+        assert_eq!(classes.cache_read, 6_000);
+        assert_eq!(classes.cache_write, 0);
+
+        // gpt-5.5: 0.50 cache-read / 5.00 input / 30.00 output per million.
+        let cost =
+            calculate_turn_cost_estimate_for_provider(ApiProvider::Openai, "gpt-5.5", &usage)
+                .expect("direct OpenAI route is priced");
+        let expected = 0.006 * 0.50 + 0.004 * 5.00 + 0.004 * 30.00;
+        assert!(
+            (cost.usd - expected).abs() < 1e-12,
+            "expected {expected}, got {}",
+            cost.usd
+        );
+
+        // The bug charged the 3_500 reasoning tokens a second time at the
+        // output rate; assert the difference explicitly so a reintroduction is
+        // unambiguous rather than a silent number change.
+        let double_billed = expected + 0.0035 * 30.00;
+        assert!((cost.usd - double_billed).abs() > 1e-6);
     }
 
     #[test]

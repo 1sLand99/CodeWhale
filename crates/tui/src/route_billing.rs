@@ -33,6 +33,13 @@ pub enum BillingPresentation {
 pub enum UsageChip {
     /// Positive accrued spend on a metered route with real pricing.
     Money(String),
+    /// Authoritatively priced portion of a mixed/legacy session whose complete
+    /// spend is unknown. The amount remains visible without being called a
+    /// total.
+    PricedSubtotal {
+        amount: String,
+        legacy: bool,
+    },
     /// Subscription / OAuth allowance. `used_pct` is only set when the
     /// provider supplied a real percentage.
     Allowance {
@@ -83,6 +90,7 @@ pub fn for_route(config: &Config, provider: ApiProvider) -> BillingPresentation 
     let provider_config = config.provider_config_for(provider);
     match provider {
         ApiProvider::Stepfun => stepfun_billing(provider_config),
+        ApiProvider::Minimax | ApiProvider::MinimaxAnthropic => minimax_billing(provider_config),
         // Z.ai's dedicated Coding endpoint is the GLM Coding Plan route. Its
         // quota is subscription-backed, so a public API price estimate is not
         // truthful spend and must not appear as dollars in the UI.
@@ -108,6 +116,105 @@ pub fn for_route(config: &Config, provider: ApiProvider) -> BillingPresentation 
     }
 }
 
+/// Billing presentation for callers that hold a provider and the concrete base
+/// URL but **not** the app [`Config`] — background helpers (compaction,
+/// purge) that run off a bare client.
+///
+/// Everything decidable from provider identity plus a classified endpoint is
+/// decided; everything that depends on credentials or an auth mode CodeWhale
+/// cannot see from here stays [`BillingPresentation::Unknown`]. In particular a
+/// local, custom, or plan endpoint is never allowed to fall through to metered
+/// per-token dollars on the strength of a provider name (#4318).
+#[must_use]
+pub fn for_endpoint_without_config(
+    provider: ApiProvider,
+    base_url: Option<&str>,
+) -> BillingPresentation {
+    use crate::pricing::EndpointMetering;
+
+    if matches!(
+        provider,
+        ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm
+    ) {
+        return BillingPresentation::Local;
+    }
+    if provider == ApiProvider::OpenaiCodex {
+        return BillingPresentation::Subscription("Codex OAuth quota");
+    }
+    if provider == ApiProvider::OpencodeGo {
+        return BillingPresentation::Subscription("OpenCode Go quota");
+    }
+    // A named custom endpoint's pay mode lives in config, which this caller
+    // does not have.
+    if provider == ApiProvider::Custom {
+        return BillingPresentation::Unknown;
+    }
+
+    let surface = crate::pricing::billing_surface_for_route(provider, base_url);
+    match crate::pricing::endpoint_metering_for_billing_surface(surface) {
+        EndpointMetering::ExactSubscription => BillingPresentation::Subscription("provider plan"),
+        EndpointMetering::LocalNoBill => BillingPresentation::Local,
+        EndpointMetering::Money => {
+            // The endpoint is a per-token surface, but for providers whose
+            // billing is decided by auth mode rather than by URL (OAuth on the
+            // same host as the paid API) the endpoint alone cannot prove it.
+            if matches!(
+                provider,
+                ApiProvider::Anthropic
+                    | ApiProvider::Xai
+                    | ApiProvider::XiaomiMimo
+                    | ApiProvider::Minimax
+                    | ApiProvider::MinimaxAnthropic
+            ) {
+                BillingPresentation::Unknown
+            } else {
+                BillingPresentation::Metered
+            }
+        }
+        EndpointMetering::Unknown => BillingPresentation::Unknown,
+    }
+}
+
+/// Immutable billing surface captured when a foreground/child request is
+/// dispatched. Endpoint classification owns ordinary providers; MiniMax and
+/// OAuth-on-the-same-host providers require the saved route mode as additional
+/// evidence and otherwise fail closed.
+#[must_use]
+pub fn billing_surface_for_dispatch(
+    config: Option<&Config>,
+    provider: ApiProvider,
+    base_url: Option<&str>,
+) -> Option<&'static str> {
+    if let Some(config) = config {
+        match for_route(config, provider) {
+            BillingPresentation::Subscription(_) => {
+                return Some(match provider {
+                    ApiProvider::Minimax | ApiProvider::MinimaxAnthropic => {
+                        crate::pricing::MINIMAX_TOKEN_PLAN_BILLING_SURFACE
+                    }
+                    ApiProvider::OpenaiCodex
+                    | ApiProvider::OpencodeGo
+                    | ApiProvider::Anthropic
+                    | ApiProvider::Xai => crate::pricing::OAUTH_SUBSCRIPTION_BILLING_SURFACE,
+                    _ => crate::pricing::billing_surface_for_route(provider, base_url)
+                        .unwrap_or(crate::pricing::UNCLASSIFIED_BILLING_SURFACE),
+                });
+            }
+            BillingPresentation::Metered
+                if matches!(
+                    provider,
+                    ApiProvider::Minimax | ApiProvider::MinimaxAnthropic
+                ) =>
+            {
+                return Some(crate::pricing::MINIMAX_PAYG_BILLING_SURFACE);
+            }
+            BillingPresentation::Local => return Some(crate::pricing::LOCAL_BILLING_SURFACE),
+            BillingPresentation::Unknown | BillingPresentation::Metered => {}
+        }
+    }
+    crate::pricing::billing_surface_for_route(provider, base_url)
+}
+
 fn stepfun_billing(config: Option<&ProviderConfig>) -> BillingPresentation {
     let base_url = config
         .and_then(|config| config.base_url.as_deref())
@@ -118,6 +225,28 @@ fn stepfun_billing(config: Option<&ProviderConfig>) -> BillingPresentation {
             BillingPresentation::Subscription("StepFun Step Plan quota")
         }
         _ => BillingPresentation::Unknown,
+    }
+}
+
+fn minimax_billing(config: Option<&ProviderConfig>) -> BillingPresentation {
+    let Some(mode) = config
+        .and_then(|config| config.mode.as_deref())
+        .map(normalized)
+    else {
+        return BillingPresentation::Unknown;
+    };
+    if matches!(
+        mode.as_str(),
+        "payg" | "paygo" | "pay_as_you_go" | "metered" | "standard" | "api"
+    ) {
+        BillingPresentation::Metered
+    } else if matches!(
+        mode.as_str(),
+        "subscription" | "subscription_plan" | "plan" | "token_plan"
+    ) {
+        BillingPresentation::Subscription("MiniMax subscription plan")
+    } else {
+        BillingPresentation::Unknown
     }
 }
 
@@ -138,7 +267,21 @@ fn uses_zai_coding_plan(config: Option<&ProviderConfig>) -> bool {
 /// the completion envelope. Never invent metered dollars for providers that
 /// support subscription/OAuth routes; the parent route remains authoritative
 /// only when the provider is the same.
+///
+/// Ambiguity fails closed to [`BillingPresentation::Unknown`], **not** to a
+/// subscription label (#4318). A provider that *can* be subscription-billed is
+/// not evidence that this child turn *was*: `Zai`, `Moonshot`, `Anthropic`,
+/// `XiaomiMimo`, and `Xai` all also serve ordinary per-token API routes, so
+/// labelling them "provider quota" invented an exact subscription fact from a
+/// guess — and, because non-metered routes are excused from money coverage, that
+/// guess quietly removed real spend from the coverage denominator instead of
+/// reporting it as missing.
+///
+/// Only providers whose *every* route is genuinely non-metered keep an exact
+/// label here: local runtimes have no bill at all, and `OpenaiCodex` /
+/// `OpencodeGo` exist solely as OAuth/subscription brokers.
 #[must_use]
+#[cfg(test)]
 pub fn for_child_route(
     parent_provider: ApiProvider,
     parent_billing: BillingPresentation,
@@ -148,15 +291,24 @@ pub fn for_child_route(
         return parent_billing;
     }
     match child_provider {
+        // No provider bill exists for a local runtime under any configuration.
         ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm => BillingPresentation::Local,
+        // These providers have no per-token API route at all, so the
+        // subscription label is exact rather than assumed.
         ApiProvider::OpencodeGo => BillingPresentation::Subscription("OpenCode Go quota"),
-        ApiProvider::OpenaiCodex
-        | ApiProvider::Xai
+        ApiProvider::OpenaiCodex => BillingPresentation::Subscription("Codex OAuth quota"),
+        // Dual-mode providers: without the child's dispatch config there is no
+        // exact evidence either way, so stay unknown and let the cost audit
+        // count the turn as possibly-missing spend.
+        ApiProvider::Xai
         | ApiProvider::Moonshot
         | ApiProvider::Anthropic
         | ApiProvider::XiaomiMimo
-        | ApiProvider::Zai => BillingPresentation::Subscription("provider quota"),
-        ApiProvider::Stepfun | ApiProvider::Custom => BillingPresentation::Unknown,
+        | ApiProvider::Zai
+        | ApiProvider::Minimax
+        | ApiProvider::MinimaxAnthropic
+        | ApiProvider::Stepfun
+        | ApiProvider::Custom => BillingPresentation::Unknown,
         _ => BillingPresentation::Metered,
     }
 }
@@ -222,6 +374,11 @@ pub fn usage_chip(
 pub fn format_usage_chip(chip: &UsageChip) -> Option<String> {
     match chip {
         UsageChip::Money(amount) => Some(amount.clone()),
+        UsageChip::PricedSubtotal { amount, legacy } => Some(if *legacy {
+            format!("saved subtotal {amount} + unknown")
+        } else {
+            format!("subtotal {amount} + unknown")
+        }),
         UsageChip::Allowance { label, used_pct } => Some(match used_pct {
             Some(pct) => format!("usage: {label} · {pct:.0}%"),
             None => format!("usage: {label}"),
@@ -237,6 +394,13 @@ pub fn format_usage_chip(chip: &UsageChip) -> Option<String> {
 pub fn format_usage_line(chip: &UsageChip) -> String {
     match chip {
         UsageChip::Money(amount) => format!("cost: {amount}"),
+        UsageChip::PricedSubtotal { amount, legacy } => {
+            if *legacy {
+                format!("cost: saved subtotal {amount} + unknown")
+            } else {
+                format!("cost: subtotal {amount} + unknown")
+            }
+        }
         UsageChip::Allowance { label, used_pct } => match used_pct {
             Some(pct) => format!("usage: {label} · {pct:.0}% used"),
             None => format!("usage: {label}"),
@@ -548,16 +712,119 @@ mod tests {
         );
     }
 
+    /// A dual-mode child provider with no dispatch config is *unknown*, not a
+    /// subscription. It still never shows dollars, but the distinction is what
+    /// keeps its spend inside `/cost`'s coverage denominator instead of being
+    /// excused as quota-billed (#4318).
     #[test]
     fn routed_zai_child_never_claims_api_dollars_without_full_route_config() {
-        assert_eq!(
-            for_child_route(
+        let billing = for_child_route(
+            ApiProvider::Deepseek,
+            BillingPresentation::Metered,
+            ApiProvider::Zai,
+        );
+        assert_eq!(billing, BillingPresentation::Unknown);
+        assert!(!billing.shows_money());
+        assert_eq!(billing.label(), Some("unknown"));
+    }
+
+    /// Child-route billing for each shape a child can take. The invariant under
+    /// test is that only *exact* non-metered evidence produces a subscription or
+    /// local presentation; every ambiguous provider fails closed to Unknown, and
+    /// only Unknown-vs-Subscription decides whether the turn is money-metered
+    /// for coverage purposes.
+    #[test]
+    fn child_route_billing_fails_closed_for_every_ambiguous_provider() {
+        use crate::pricing::UnpricedReason;
+
+        let usage = crate::models::Usage {
+            input_tokens: 10_000,
+            output_tokens: 1_000,
+            ..Default::default()
+        };
+        let now = chrono::Utc::now();
+
+        // PAYG-only aggregators and first-party API providers stay metered.
+        for provider in [
+            ApiProvider::Openrouter,
+            ApiProvider::Deepseek,
+            ApiProvider::Openai,
+        ] {
+            let billing = for_child_route(ApiProvider::Zai, BillingPresentation::Metered, provider);
+            assert_eq!(billing, BillingPresentation::Metered, "{provider:?}");
+        }
+
+        // Dual-mode providers fail closed to Unknown, and the cost audit counts
+        // them toward money coverage rather than excusing them.
+        for provider in [
+            ApiProvider::Zai,
+            ApiProvider::Moonshot,
+            ApiProvider::Anthropic,
+            ApiProvider::XiaomiMimo,
+            ApiProvider::Xai,
+            ApiProvider::Minimax,
+            ApiProvider::Stepfun,
+            ApiProvider::Custom,
+        ] {
+            let billing = for_child_route(
                 ApiProvider::Deepseek,
                 BillingPresentation::Metered,
-                ApiProvider::Zai,
+                provider,
+            );
+            assert_eq!(billing, BillingPresentation::Unknown, "{provider:?}");
+            let audit = crate::pricing::audit_turn_cost_for_route(
+                provider,
+                "some-model",
+                None,
+                &usage,
+                now,
+                billing,
+            );
+            assert_eq!(
+                audit.unpriced_reason,
+                Some(UnpricedReason::UnknownBillingBasis),
+                "{provider:?}"
+            );
+            assert!(
+                audit.counts_toward_money_coverage(),
+                "{provider:?} must stay in the coverage denominator"
+            );
+        }
+
+        // Local and OAuth-only children are exactly non-metered, so they are
+        // excluded from money coverage.
+        for (provider, expected) in [
+            (ApiProvider::Ollama, BillingPresentation::Local),
+            (
+                ApiProvider::OpenaiCodex,
+                BillingPresentation::Subscription("Codex OAuth quota"),
             ),
-            BillingPresentation::Subscription("provider quota")
-        );
+            (
+                ApiProvider::OpencodeGo,
+                BillingPresentation::Subscription("OpenCode Go quota"),
+            ),
+        ] {
+            let billing = for_child_route(
+                ApiProvider::Deepseek,
+                BillingPresentation::Metered,
+                provider,
+            );
+            assert_eq!(billing, expected, "{provider:?}");
+            let audit = crate::pricing::audit_turn_cost_for_route(
+                provider,
+                "some-model",
+                None,
+                &usage,
+                now,
+                billing,
+            );
+            assert_eq!(
+                audit.unpriced_reason,
+                Some(UnpricedReason::NotMoneyMetered),
+                "{provider:?}"
+            );
+            assert!(!audit.counts_toward_money_coverage(), "{provider:?}");
+        }
     }
 
     #[test]
@@ -757,15 +1024,66 @@ mod tests {
     }
 
     #[test]
+    fn minimax_requires_an_explicit_saved_billing_mode() {
+        for provider in [ApiProvider::Minimax, ApiProvider::MinimaxAnthropic] {
+            assert_eq!(
+                for_route(&Config::default(), provider),
+                BillingPresentation::Unknown
+            );
+            assert_eq!(
+                for_endpoint_without_config(provider, Some(provider.default_base_url())),
+                BillingPresentation::Unknown
+            );
+
+            let payg = config_with(
+                provider,
+                ProviderConfig {
+                    mode: Some("pay-as-you-go".to_string()),
+                    ..ProviderConfig::default()
+                },
+            );
+            assert_eq!(for_route(&payg, provider), BillingPresentation::Metered);
+            assert_eq!(
+                billing_surface_for_dispatch(
+                    Some(&payg),
+                    provider,
+                    Some(provider.default_base_url())
+                ),
+                Some(crate::pricing::MINIMAX_PAYG_BILLING_SURFACE)
+            );
+
+            let plan = config_with(
+                provider,
+                ProviderConfig {
+                    mode: Some("subscription-plan".to_string()),
+                    ..ProviderConfig::default()
+                },
+            );
+            assert_eq!(
+                for_route(&plan, provider),
+                BillingPresentation::Subscription("MiniMax subscription plan")
+            );
+            assert_eq!(
+                billing_surface_for_dispatch(
+                    Some(&plan),
+                    provider,
+                    Some(provider.default_base_url())
+                ),
+                Some(crate::pricing::MINIMAX_TOKEN_PLAN_BILLING_SURFACE)
+            );
+        }
+    }
+
+    #[test]
     fn unknown_cross_provider_oauth_capable_child_never_invents_dollars() {
-        assert!(
-            !for_child_route(
-                ApiProvider::Deepseek,
-                BillingPresentation::Metered,
-                ApiProvider::Xai,
-            )
-            .shows_money()
+        let xai = for_child_route(
+            ApiProvider::Deepseek,
+            BillingPresentation::Metered,
+            ApiProvider::Xai,
         );
+        assert!(!xai.shows_money());
+        // Unknown, not an invented "provider quota" subscription.
+        assert_eq!(xai, BillingPresentation::Unknown);
         assert!(
             for_child_route(
                 ApiProvider::Deepseek,

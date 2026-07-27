@@ -115,14 +115,14 @@ use crate::tui::shell_job_routing::{
 };
 use crate::tui::streaming::StreamDisplayClock;
 use crate::tui::streaming_thinking;
-#[cfg(test)]
-use crate::tui::subagent_routing::reconcile_subagent_activity_state_at;
 use crate::tui::subagent_routing::{
-    apply_subagent_terminal_projection, format_task_list, handle_subagent_mailbox, open_task_pager,
-    parent_stop_status, reconcile_subagent_activity_state, running_agent_count,
+    apply_subagent_terminal_projection, format_task_list, handle_subagent_mailbox_for_turn,
+    open_task_pager, parent_stop_status, reconcile_subagent_activity_state, running_agent_count,
     sort_subagents_in_place, subagent_message_refreshes_workspace_context, task_mode_label,
     task_summary_to_panel_entry,
 };
+#[cfg(test)]
+use crate::tui::subagent_routing::{handle_subagent_mailbox, reconcile_subagent_activity_state_at};
 #[cfg(test)]
 use crate::tui::tool_routing::exploring_label;
 use crate::tui::tool_routing::{
@@ -3353,6 +3353,7 @@ async fn run_event_loop(
                     EngineEvent::ToolRequestSnapshot { snapshot } => {
                         app.session.last_tool_request_snapshot = Some(snapshot);
                     }
+                    EngineEvent::RouteDispatched { .. } => {}
                     EngineEvent::TurnComplete {
                         usage,
                         status,
@@ -3361,15 +3362,6 @@ async fn run_event_loop(
                         base_url,
                     } => {
                         let completed_turn = app.active_turn.take();
-                        let billing_surface = completed_turn
-                            .as_ref()
-                            .and_then(|turn| turn.route.as_ref())
-                            .and_then(|route| {
-                                crate::pricing::billing_surface_for_route(
-                                    route.provider,
-                                    base_url.as_deref(),
-                                )
-                            });
                         app.session.last_tool_catalog = tool_catalog;
                         // The endpoint this turn's client actually used. Kept
                         // separately from the mutable session/config surfaces
@@ -3464,7 +3456,7 @@ async fn run_event_loop(
                             crate::retry_status::clear();
                             crate::tui::notifications::stop_title_animation_quietly();
                         }
-                        let turn_tokens = usage.input_tokens + usage.output_tokens;
+                        let turn_tokens = usage.input_tokens.saturating_add(usage.output_tokens);
                         app.session.total_tokens =
                             app.session.total_tokens.saturating_add(turn_tokens);
                         app.session.total_conversation_tokens = app
@@ -3479,19 +3471,31 @@ async fn run_event_loop(
                             .session
                             .total_output_tokens
                             .saturating_add(usage.output_tokens);
-                        // Only accumulate cache telemetry when reported.
-                        if let Some(hit_tokens) = usage.prompt_cache_hit_tokens {
+                        // Only accumulate cache telemetry when the provider
+                        // reported at least one cache class. Use pricing's
+                        // canonical mutually-exclusive hit/miss/write split so
+                        // cache writes are never counted again as misses.
+                        if usage.prompt_cache_hit_tokens.is_some()
+                            || usage.prompt_cache_miss_tokens.is_some()
+                            || usage.prompt_cache_write_tokens.is_some()
+                        {
+                            let classes = crate::pricing::token_usage_for_pricing(&usage);
+                            let hit_tokens = u32::try_from(classes.cache_read).unwrap_or(u32::MAX);
+                            let miss_tokens = u32::try_from(classes.input).unwrap_or(u32::MAX);
+                            let write_tokens =
+                                u32::try_from(classes.cache_write).unwrap_or(u32::MAX);
                             app.session.total_cache_hit_tokens = app
                                 .session
                                 .total_cache_hit_tokens
                                 .saturating_add(hit_tokens);
-                            let cache_miss = usage
-                                .prompt_cache_miss_tokens
-                                .unwrap_or_else(|| usage.input_tokens.saturating_sub(hit_tokens));
                             app.session.total_cache_miss_tokens = app
                                 .session
                                 .total_cache_miss_tokens
-                                .saturating_add(cache_miss);
+                                .saturating_add(miss_tokens);
+                            app.session.total_cache_write_tokens = app
+                                .session
+                                .total_cache_write_tokens
+                                .saturating_add(write_tokens);
                         }
                         app.session.last_prompt_tokens = Some(usage.input_tokens);
                         app.session.last_completion_tokens = Some(usage.output_tokens);
@@ -3546,6 +3550,15 @@ async fn run_event_loop(
                         if auto_model {
                             app.last_effective_model = Some(effective_turn_model.clone());
                         }
+                        // Price the turn exactly once. The same audit feeds the
+                        // session total, the `/cache` row, and the `/cost`
+                        // completeness counters, so those three surfaces can
+                        // never disagree about what was counted (#4318).
+                        let cost_audit = completed_turn
+                            .as_ref()
+                            .and_then(|turn| turn.route.as_ref())
+                            .and_then(crate::core::events::TurnRoute::cost_envelope)
+                            .map(|route| route.audit(&usage));
                         app.push_turn_cache_record(crate::tui::app::TurnCacheRecord {
                             provider,
                             provider_identity,
@@ -3556,6 +3569,9 @@ async fn run_event_loop(
                             cache_hit_tokens: usage.prompt_cache_hit_tokens,
                             cache_miss_tokens: usage.prompt_cache_miss_tokens,
                             reasoning_replay_tokens: usage.reasoning_replay_tokens,
+                            cache_write_tokens: usage.prompt_cache_write_tokens,
+                            reasoning_tokens: usage.reasoning_tokens,
+                            cost_audit: cost_audit.clone(),
                             recorded_at: Instant::now(),
                         });
                         if let Some(error) = error.as_deref() {
@@ -3569,26 +3585,21 @@ async fn run_event_loop(
                             }
                         }
 
-                        // Update session cost
-                        let turn_cost = completed_turn
-                            .as_ref()
-                            .and_then(|turn| {
-                                turn.route.as_ref().map(|route| (turn.created_at, route))
-                            })
-                            .and_then(|(created_at, route)| {
-                                let billing =
-                                    crate::route_billing::for_route(config, route.provider);
-                                if !billing.shows_money() {
-                                    return None;
-                                }
-                                crate::pricing::calculate_turn_cost_estimate_for_route_at(
-                                    route.provider,
-                                    &route.model,
-                                    billing_surface,
-                                    &usage,
-                                    created_at,
-                                )
-                            });
+                        // Update session cost, and record what the total does
+                        // *not* cover so `/cost` can stay honest about it.
+                        let turn_cost = cost_audit.as_ref().and_then(|audit| audit.estimate);
+                        if let Some(audit) = cost_audit.as_ref() {
+                            app.record_turn_cost_audit(audit);
+                            // Redacted receipt for the route this money came
+                            // from: provider identity, wire model, billing
+                            // surface, and the endpoint *fingerprint* — never the
+                            // URL or any credential.
+                            if let Some(receipt) =
+                                completed_turn_cost_route_receipt(completed_turn.as_ref(), audit)
+                            {
+                                app.record_turn_cost_route_receipt(receipt);
+                            }
+                        }
                         if let Some(cost) = turn_cost {
                             app.accrue_session_cost_estimate(cost);
                         }
@@ -3816,7 +3827,11 @@ async fn run_event_loop(
                             app,
                             completed_turn.as_ref(),
                             &usage,
-                            billing_surface,
+                            completed_turn
+                                .as_ref()
+                                .and_then(|turn| turn.route.as_ref())
+                                .and_then(|route| route.billing.as_ref())
+                                .and_then(|billing| billing.billing_surface.as_deref()),
                             turn_elapsed,
                             error.as_deref(),
                         ) {
@@ -4213,10 +4228,15 @@ async fn run_event_loop(
                         // Individual spawn/complete events already log to history;
                         // full list available via /agents command.
                     }
-                    EngineEvent::SubAgentMailbox { seq, message } => {
+                    EngineEvent::SubAgentMailbox {
+                        turn_id,
+                        seq,
+                        message,
+                    } => {
                         let should_refresh_subagents =
                             subagent_message_refreshes_workspace_context(&message);
-                        let updated_transcript = handle_subagent_mailbox(app, seq, &message);
+                        let updated_transcript =
+                            handle_subagent_mailbox_for_turn(app, &turn_id, seq, &message);
                         if let Some((agent_id, status, result)) =
                             subagent_terminal_projection_from_mailbox(&message)
                         {
@@ -4745,10 +4765,16 @@ async fn run_event_loop(
         // Background callers populate `cost_status::report`; we sweep
         // the pool once per loop iteration so the footer chip matches
         // the DeepSeek website's billing.
-        let pending_bg_cost = crate::cost_status::drain();
-        if pending_bg_cost.is_positive() {
-            app.accrue_subagent_cost_estimate(pending_bg_cost);
-            app.needs_redraw = true;
+        // Money and its completeness are drained as one value, so the footer
+        // total and the `/cost` coverage line can never come from different
+        // observations of the pool (#4318).
+        let pending_bg = crate::cost_status::drain();
+        if !pending_bg.is_empty() {
+            if pending_bg.estimate.is_positive() {
+                app.accrue_subagent_cost_estimate(pending_bg.estimate);
+                app.needs_redraw = true;
+            }
+            app.absorb_background_cost_coverage(&pending_bg);
         }
         // Drain completed file-tree walks (initial build / expands) so the
         // spliced children repaint without waiting for an input event (#3900).
@@ -8102,35 +8128,62 @@ fn recover_engine_event_disconnect(app: &mut App) -> bool {
 }
 
 fn capture_turn_started_metadata(app: &mut App, event: &EngineEvent) {
-    if let EngineEvent::TurnStarted {
-        turn_id,
-        created_at,
-        route,
-    } = event
-    {
-        app.ocean_completion_started_at = None;
-        let auto_route_receipt = if route.as_ref().is_some_and(|route| route.auto_model) {
-            app.pending_auto_route_receipt.take()
-        } else {
-            app.pending_auto_route_receipt = None;
-            None
-        };
-        // Bind the prompt-suggestion authority to the receipt the engine minted
-        // from the client it installed for this turn. Deliberately not read
-        // from `config`: web config events are drained ahead of engine events,
-        // so config here may already describe a different key or endpoint than
-        // the one this turn is actually running on.
-        let suggestion_authority = route
-            .as_ref()
-            .and_then(crate::tui::prompt_suggestion::capture_route_authority);
-        app.active_turn = Some(ActiveTurnMetadata {
-            turn_id: turn_id.clone(),
-            created_at: *created_at,
-            route: route.clone(),
-            auto_route_receipt,
-            suggestion_authority,
-        });
-        app.pending_turn_route = None;
+    match event {
+        EngineEvent::TurnStarted {
+            turn_id,
+            created_at,
+            route,
+        } => {
+            app.ocean_completion_started_at = None;
+            let auto_route_receipt = if route.as_ref().is_some_and(|route| route.auto_model) {
+                app.pending_auto_route_receipt.take()
+            } else if route.is_some() {
+                app.pending_auto_route_receipt = None;
+                None
+            } else {
+                None
+            };
+            // Bind the prompt-suggestion authority to the receipt the engine minted
+            // from the client it installed for this turn. Deliberately not read
+            // from `config`: web config events are drained ahead of engine events,
+            // so config here may already describe a different key or endpoint than
+            // the one this turn is actually running on.
+            let suggestion_authority = route
+                .as_ref()
+                .and_then(crate::tui::prompt_suggestion::capture_route_authority);
+            app.active_turn = Some(ActiveTurnMetadata {
+                turn_id: turn_id.clone(),
+                created_at: *created_at,
+                route: route.clone(),
+                auto_route_receipt,
+                suggestion_authority,
+            });
+            app.pending_turn_route = None;
+        }
+        // The dispatch boundary is the billing truth: refresh the active turn's
+        // route with the envelope that was actually put on the wire. Receipts
+        // already taken at `TurnStarted` are preserved — this event narrows the
+        // route, it never re-opens an authority decision.
+        EngineEvent::RouteDispatched { turn_id, route } => {
+            if let Some(active) = app
+                .active_turn
+                .as_mut()
+                .filter(|active| active.turn_id == *turn_id)
+            {
+                if route.auto_model && active.auto_route_receipt.is_none() {
+                    active.auto_route_receipt = app.pending_auto_route_receipt.take();
+                } else if !route.auto_model {
+                    app.pending_auto_route_receipt = None;
+                    active.auto_route_receipt = None;
+                }
+                if active.suggestion_authority.is_none() {
+                    active.suggestion_authority =
+                        crate::tui::prompt_suggestion::capture_route_authority(route);
+                }
+                active.route = Some(route.clone());
+            }
+        }
+        _ => {}
     }
 }
 
@@ -10091,6 +10144,7 @@ mod config_update_tests {
             cache_summary: true,
             focus: None,
             live_state: None,
+            runtime_cost_owner: None,
         };
 
         assert!(try_apply_model_and_compaction_update(
@@ -14030,7 +14084,7 @@ async fn handle_view_events(
                 let session_id = metadata.id.clone();
                 let title = metadata.title.clone();
                 let mut work_snapshot_warning = None;
-                if apply_picker_session_rename_to_active_app(app, metadata)
+                if apply_picker_session_rename_to_active_app(app, *metadata)
                     && let Ok(manager) = SessionManager::default_location()
                 {
                     match build_session_snapshot(app, &manager) {
@@ -15904,6 +15958,10 @@ fn apply_loaded_session(
         &session.metadata.workspace,
         session.work_state.as_ref(),
     )?;
+    // All fallible preflight is complete. Retire the old session's background
+    // accounting atomically before mutating live state; any late old-scope
+    // provider response is rejected by `cost_status::report`.
+    let _settled_old_cost_scope = crate::cost_status::close_current_scope();
     *config = *restored_route.config;
     let projected_messages =
         crate::runtime_handoff::project_messages_for_restore(&session.messages);
@@ -15974,11 +16032,43 @@ fn apply_loaded_session(
     }
     app.session.total_tokens = u32::try_from(session.metadata.total_tokens).unwrap_or(u32::MAX);
     app.session.total_conversation_tokens = app.session.total_tokens;
-    app.session.session_cost = session.metadata.cost.session_cost_usd;
-    app.session.session_cost_cny = session.metadata.cost.session_cost_cny;
-    app.session.subagent_cost = session.metadata.cost.subagent_cost_usd;
-    app.session.subagent_cost_cny = session.metadata.cost.subagent_cost_cny;
+    let restored_parent = crate::pricing::CostEstimate {
+        usd: session.metadata.cost.session_cost_usd,
+        cny: session.metadata.cost.session_cost_cny,
+    }
+    .sanitized();
+    let restored_background = crate::pricing::CostEstimate {
+        usd: session.metadata.cost.subagent_cost_usd,
+        cny: session.metadata.cost.subagent_cost_cny,
+    }
+    .sanitized();
+    app.session.session_cost = restored_parent.usd;
+    app.session.session_cost_cny = restored_parent.cny;
+    app.session.subagent_cost = restored_background.usd;
+    app.session.subagent_cost_cny = restored_background.cny;
     app.session.subagent_cost_event_seqs.clear();
+    // Coverage is restored *with* the money, and the live counters are cleared
+    // first: whatever the previous session in this process priced is not inside
+    // the total being loaded, so carrying those counters over would describe the
+    // wrong total (#4318).
+    app.reset_cost_coverage();
+    app.session.cost_priced_turns = session.metadata.cost.priced_turns;
+    app.session.cost_unpriced_turns = session.metadata.cost.unpriced_turns;
+    app.session.cost_cny_priced_turns = session.metadata.cost.cny_priced_turns;
+    app.session.cost_cny_unpriced_turns = session.metadata.cost.cny_unpriced_turns;
+    app.session.cost_unpriced_reasons = session.metadata.cost.unpriced_reasons.clone();
+    app.session.cost_cny_unpriced_reasons = session.metadata.cost.cny_unpriced_reasons.clone();
+    app.session.cost_unpriced_classes = session.metadata.cost.unpriced_classes.clone();
+    app.session.cost_pricing_provenances = session.metadata.cost.pricing_provenances.clone();
+    app.session.cost_live_pricing_defects = session.metadata.cost.live_pricing_defects.clone();
+    app.session.cost_live_pricing_unusable_defects =
+        session.metadata.cost.live_pricing_unusable_defects.clone();
+    app.session.cost_route_receipts = session.metadata.cost.route_receipts.clone();
+    // A pre-coverage session deserializes its new fields from serde defaults,
+    // which are indistinguishable from "complete total, zero turns". Flag it so
+    // `/cost` says the coverage is unknown rather than claiming completeness,
+    // including for an all-zero record.
+    app.session.cost_coverage_unknown_legacy = session.metadata.cost.coverage_is_legacy_unknown();
     // Restore the high-water marks from persisted metadata so the
     // monotonic cost guarantee (#244) survives session restarts.
     // Take the max with the current totals — old sessions without
@@ -15986,16 +16076,13 @@ fn apply_loaded_session(
     // the restored total with no regression.
     let total_restored_usd = session.metadata.cost.total_usd();
     let total_restored_cny = session.metadata.cost.total_cny();
-    app.session.displayed_cost_high_water = session
-        .metadata
-        .cost
-        .displayed_cost_high_water_usd
-        .max(total_restored_usd);
-    app.session.displayed_cost_high_water_cny = session
-        .metadata
-        .cost
-        .displayed_cost_high_water_cny
-        .max(total_restored_cny);
+    let restored_high_water = crate::pricing::CostEstimate {
+        usd: session.metadata.cost.displayed_cost_high_water_usd,
+        cny: session.metadata.cost.displayed_cost_high_water_cny,
+    }
+    .sanitized();
+    app.session.displayed_cost_high_water = restored_high_water.usd.max(total_restored_usd);
+    app.session.displayed_cost_high_water_cny = restored_high_water.cny.max(total_restored_cny);
     app.session.last_prompt_tokens = None;
     app.session.last_completion_tokens = None;
     app.session.last_output_throughput = None;
@@ -17945,6 +18032,17 @@ model = "model-b"
         assert!(saved.contains("api_key = \"saved-b-key\""));
         assert!(saved.contains("model = \"model-b-updated\""));
     }
+}
+
+/// Build the foreground receipt only from the immutable route captured when
+/// this turn started. The app's selected route may already have changed by the
+/// time `TurnComplete` is handled, so it is not accepted as an input here.
+fn completed_turn_cost_route_receipt(
+    completed_turn: Option<&crate::tui::app::ActiveTurnMetadata>,
+    audit: &crate::pricing::TurnCostAudit,
+) -> Option<String> {
+    let route = completed_turn?.route.as_ref()?;
+    Some(route.cost_envelope()?.receipt(audit))
 }
 
 #[cfg(test)]

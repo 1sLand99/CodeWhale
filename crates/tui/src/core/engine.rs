@@ -724,6 +724,38 @@ fn subagent_mailbox_best_effort_send_permitted(
     true
 }
 
+/// Forward one turn-scoped mailbox envelope. Returns `false` when the engine
+/// event channel is closed and the drainer should stop.
+async fn forward_subagent_mailbox_message(
+    tx: &mpsc::Sender<Event>,
+    turn_id: &str,
+    seq: u64,
+    message: MailboxMessage,
+    best_effort_sent_at: &mut HashMap<String, Instant>,
+) -> bool {
+    let event = Event::SubAgentMailbox {
+        turn_id: turn_id.to_string(),
+        seq,
+        message,
+    };
+    if let Event::SubAgentMailbox { message, .. } = &event
+        && subagent_mailbox_message_is_best_effort(message)
+    {
+        if !subagent_mailbox_best_effort_send_permitted(
+            best_effort_sent_at,
+            message,
+            Instant::now(),
+        ) {
+            return true;
+        }
+        return match tx.try_send(event) {
+            Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => true,
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+        };
+    }
+    tx.send(event).await.is_ok()
+}
+
 impl Engine {
     /// Per-posture question discipline. Lives with the approval overlays in the
     /// stable prefix / gate errors — not re-asserted every turn (#4780).
@@ -3240,6 +3272,7 @@ impl Engine {
         wiring: SubAgentWiring,
         mcp_access: McpAccess,
         route: TurnRouteContext,
+        turn_id: &str,
     ) -> TurnToolBuild {
         // Build tool registry and tool list for the current mode
         let todo_list = self.config.todos.clone();
@@ -3296,39 +3329,52 @@ impl Engine {
             let cancel_token = self.cancel_token.child_token();
             let (mailbox, mut receiver) = Mailbox::new(cancel_token.clone());
             let tx_event_clone = self.tx_event.clone();
-            spawn_supervised(
+            let mailbox_turn_id = turn_id.to_string();
+            let (flush_tx, mut flush_rx) = tokio::sync::oneshot::channel();
+            let drain_handle = spawn_supervised(
                 "subagent-mailbox-drainer",
                 std::panic::Location::caller(),
                 async move {
                     let mut best_effort_sent_at: HashMap<String, Instant> = HashMap::new();
-                    while let Some(envelope) = receiver.recv().await {
-                        let event = Event::SubAgentMailbox {
-                            seq: envelope.seq,
-                            message: envelope.message,
-                        };
-                        if let Event::SubAgentMailbox { message, .. } = &event
-                            && subagent_mailbox_message_is_best_effort(message)
-                        {
-                            if !subagent_mailbox_best_effort_send_permitted(
-                                &mut best_effort_sent_at,
-                                message,
-                                Instant::now(),
-                            ) {
-                                continue;
+                    'drain: loop {
+                        tokio::select! {
+                            biased;
+                            _ = &mut flush_rx => {
+                                for envelope in receiver.drain_available() {
+                                    if !forward_subagent_mailbox_message(
+                                        &tx_event_clone,
+                                        &mailbox_turn_id,
+                                        envelope.seq,
+                                        envelope.message,
+                                        &mut best_effort_sent_at,
+                                    ).await {
+                                        break 'drain;
+                                    }
+                                }
+                                break;
                             }
-                            match tx_event_clone.try_send(event) {
-                                Ok(()) => continue,
-                                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => continue,
-                                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
+                            envelope = receiver.recv() => {
+                                let Some(envelope) = envelope else { break };
+                                if !forward_subagent_mailbox_message(
+                                    &tx_event_clone,
+                                    &mailbox_turn_id,
+                                    envelope.seq,
+                                    envelope.message,
+                                    &mut best_effort_sent_at,
+                                ).await {
+                                    break;
+                                }
                             }
-                        }
-                        if tx_event_clone.send(event).await.is_err() {
-                            break;
                         }
                     }
                 },
             );
-            Some((mailbox, cancel_token))
+            Some(TurnMailboxBarrier {
+                mailbox,
+                cancel_token,
+                flush_tx,
+                drain_handle,
+            })
         } else {
             None
         };
@@ -3374,6 +3420,7 @@ impl Engine {
                 .with_mcp_pool(mcp_pool.clone())
                 .with_todos(self.config.todos.clone())
                 .with_parent_completion_tx(self.tx_subagent_completion.clone())
+                .with_runtime_cost_owner(self.config.compaction.runtime_cost_owner.as_deref())
                 .with_parent_mode(input_policy.mode);
                 if matches!(input_policy.mode, AppMode::Plan) {
                     rt.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Planner);
@@ -3386,10 +3433,10 @@ impl Engine {
                 if let Some(context) = fork_context_for_runtime.clone() {
                     rt = rt.with_fork_context(context);
                 }
-                if let Some((mailbox, cancel_token)) = mailbox_for_runtime.as_ref() {
+                if let Some(barrier) = mailbox_for_runtime.as_ref() {
                     rt = rt
-                        .with_mailbox(mailbox.clone())
-                        .with_cancel_token(cancel_token.clone());
+                        .with_mailbox(barrier.mailbox.clone())
+                        .with_cancel_token(barrier.cancel_token.clone());
                 }
                 Some(rt)
             } else {
@@ -3486,6 +3533,7 @@ impl Engine {
             mcp_tool_names,
             mcp: mcp_state,
             subagent_runtime_model,
+            mailbox: mailbox_for_runtime,
         }
     }
 
@@ -3633,6 +3681,7 @@ impl Engine {
         // Create turn context first so start event includes a stable turn id.
         let mut turn = TurnContext::new(self.config.max_steps);
         self.turn_counter = self.turn_counter.saturating_add(1);
+        let turn_started_at = chrono::Utc::now();
         // Mint the route receipt from the client that `install_resolved_runtime_route`
         // actually installed above — the same client `Event::TurnComplete`
         // reports `base_url` from. Hosts must not re-derive this from config
@@ -3648,13 +3697,44 @@ impl Engine {
                 .as_ref()
                 .map(|client| client.turn_route_receipt(&provider_identity))
         };
+        let route_base_url = self
+            .deepseek_client
+            .as_ref()
+            .map(|client| client.base_url());
         let turn_route = TurnRoute {
             provider: effective_provider,
             provider_identity,
             model: model.clone(),
             auto_model,
             receipt: route_receipt,
+            // A start is not a dispatch. The billing envelope is attached
+            // below, on the route held for the wire boundary only.
+            billing: None,
         };
+        // Billing provenance follows the *route* that was installed for this
+        // turn, which is authoritative even when a test or embedder injected the
+        // transport: `deepseek_client`'s base URL is the resolved route's
+        // endpoint either way. This is a weaker claim than `receipt`, which
+        // digests the credential an injected client did not use and is therefore
+        // withheld above.
+        let dispatch_billing = crate::core::events::RouteBillingEnvelope {
+            billing_surface: crate::route_billing::billing_surface_for_dispatch(
+                Some(&self.api_config),
+                effective_provider,
+                route_base_url,
+            )
+            .map(str::to_string),
+            endpoint_fingerprint: route_base_url.and_then(crate::cost_status::endpoint_fingerprint),
+            billing_mode: crate::route_billing::for_route(&self.api_config, effective_provider)
+                .into(),
+            // Provisional. Replaced with the true wire-boundary instant
+            // when `handle_deepseek_turn` emits `Event::RouteDispatched`.
+            dispatched_at: turn_started_at,
+        };
+        turn.pending_route = Some(TurnRoute {
+            billing: Some(dispatch_billing),
+            ..turn_route.clone()
+        });
 
         // Emit turn started event IMMEDIATELY so the UI knows the turn is
         // active. The snapshot below can take 30+ seconds on slow filesystems
@@ -3663,7 +3743,7 @@ impl Engine {
             .tx_event
             .send(Event::TurnStarted {
                 turn_id: turn.id.clone(),
-                created_at: chrono::Utc::now(),
+                created_at: turn_started_at,
                 route: Some(turn_route),
             })
             .await;
@@ -3801,9 +3881,11 @@ impl Engine {
         self.emit_session_updated().await;
 
         // Build tool registry and tool list for the current mode
+        let turn_id_for_mailbox = turn.id.clone();
         let TurnToolBuild {
             registry: tool_registry,
             catalog: tools,
+            mailbox: mut mailbox_for_runtime,
             ..
         } = self
             .build_turn_tool_registry_and_catalog(
@@ -3826,6 +3908,7 @@ impl Engine {
                     reasoning_effort: self.session.reasoning_effort.clone(),
                     reasoning_effort_auto: self.session.reasoning_effort_auto,
                 },
+                &turn_id_for_mailbox,
             )
             .await;
         let tool_catalog_for_event = tools.clone();
@@ -3870,6 +3953,17 @@ impl Engine {
         // Update session usage
         self.session.total_usage.add(&turn.usage);
         self.record_goal_usage_for_turn(&turn.usage, turn.elapsed());
+
+        // Seal and fully forward every accepted mailbox envelope before the
+        // terminal event. This is the durability barrier for child usage: an
+        // event can no longer arrive after `TurnComplete` and be mistaken for
+        // the following turn (or lost by a runtime monitor that already
+        // settled the record).
+        if let Some(barrier) = mailbox_for_runtime.take() {
+            barrier.mailbox.seal();
+            let _ = barrier.flush_tx.send(());
+            let _ = barrier.drain_handle.await;
+        }
 
         // Emit turn complete event — after all post-turn bookkeeping so
         // the terminal is immediately responsive when the UI receives it.
@@ -5404,6 +5498,16 @@ fn load_slop_ledger_gate_block() -> Option<String> {
 }
 
 /// Result of one turn tool-catalog build.
+/// Turn-scoped mailbox handle plus the machinery needed to close it exactly
+/// once. Held by the engine (never by the child runtime) so the flush barrier
+/// is owned by the same code that emits the terminal turn event.
+pub(crate) struct TurnMailboxBarrier {
+    pub(crate) mailbox: Mailbox,
+    pub(crate) cancel_token: tokio_util::sync::CancellationToken,
+    pub(crate) flush_tx: tokio::sync::oneshot::Sender<()>,
+    pub(crate) drain_handle: tokio::task::JoinHandle<()>,
+}
+
 pub(crate) struct TurnToolBuild {
     /// Runtime registry that will execute the tools.
     pub(crate) registry: Option<crate::tools::ToolRegistry>,
@@ -5417,6 +5521,11 @@ pub(crate) struct TurnToolBuild {
     /// available. This is an internal receipt, not a manifest field.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) subagent_runtime_model: Option<String>,
+    /// Turn-scoped sub-agent mailbox and its flush barrier, when sub-agent
+    /// wiring was live. The engine must seal, flush, and await this before it
+    /// emits `TurnComplete`: that is what makes detached-child usage accounting
+    /// exactly-once rather than "whatever arrived in time".
+    pub(crate) mailbox: Option<TurnMailboxBarrier>,
 }
 
 /// The route a tool catalog is being shaped for.

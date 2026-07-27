@@ -384,52 +384,23 @@ fn accrue_child_token_cost_if_any(app: &mut App, result: &Result<ToolResult, Too
     let Some(metadata) = tool_result.metadata.as_ref() else {
         return;
     };
-    let Some(model) = metadata
-        .get("child_model")
-        .and_then(serde_json::Value::as_str)
-    else {
+    let Some(route) = crate::cost_status::child_route_envelope_from_metadata(metadata) else {
         return;
     };
-    let input_tokens = metadata
-        .get("child_input_tokens")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-    let output_tokens = metadata
-        .get("child_output_tokens")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-    if input_tokens == 0 && output_tokens == 0 {
+    // Use the same parser as the runtime host. It deliberately returns a
+    // zero-valued usage record when the producer emitted the canonical child
+    // fields: a model-backed call is still an auditable/priced-zero call, and
+    // replay/server-tool telemetry must not disappear in the TUI projection.
+    let Some(usage) = crate::cost_status::child_usage_from_metadata(metadata) else {
         return;
-    }
-    let prompt_cache_hit_tokens = metadata
-        .get("child_prompt_cache_hit_tokens")
-        .and_then(serde_json::Value::as_u64)
-        .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
-    let prompt_cache_miss_tokens = metadata
-        .get("child_prompt_cache_miss_tokens")
-        .and_then(serde_json::Value::as_u64)
-        .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
-    let usage = crate::models::Usage {
-        input_tokens: u32::try_from(input_tokens).unwrap_or(u32::MAX),
-        output_tokens: u32::try_from(output_tokens).unwrap_or(u32::MAX),
-        prompt_cache_hit_tokens,
-        prompt_cache_miss_tokens,
-        prompt_cache_write_tokens: None,
-        reasoning_tokens: None,
-        reasoning_replay_tokens: None,
-        server_tool_use: None,
     };
-    let provider = metadata
-        .get("child_provider")
-        .or_else(|| metadata.get("resolved_provider"))
-        .and_then(serde_json::Value::as_str)
-        .and_then(crate::config::ApiProvider::parse)
-        .unwrap_or(app.api_provider);
-    let billing =
-        crate::route_billing::for_child_route(app.api_provider, app.billing_presentation, provider);
-    if let Some(cost) =
-        crate::pricing::calculate_turn_cost_estimate_for_route(provider, model, &usage, billing)
-    {
+    // Sub-agent spend lands in the same displayed total as parent turns, so it
+    // has to feed the same completeness counters — otherwise `/cost` would call
+    // a total complete while an unpriced child turn is missing from it.
+    let audit = route.audit(&usage);
+    app.record_turn_cost_audit(&audit);
+    app.record_turn_cost_route_receipt(route.receipt(&audit));
+    if let Some(cost) = audit.estimate {
         app.accrue_subagent_cost_estimate(cost);
     }
 }

@@ -42,6 +42,10 @@ pub struct CompactionConfig {
     /// the request tail instead of being frozen into the stable prefix.
     /// Host-owned snapshot; pure format lives in [`format_live_state_reminder`].
     pub live_state: Option<CompactionLiveState>,
+    /// Runtime turn that owns provider calls made by this compaction pass.
+    /// `None` for the foreground TUI. This is accounting provenance only and
+    /// is never included in a provider request.
+    pub runtime_cost_owner: Option<String>,
 }
 
 /// Host-captured live state injected after compaction so the successor agent
@@ -94,6 +98,7 @@ impl Default for CompactionConfig {
             cache_summary: true,
             focus: None,
             live_state: None,
+            runtime_cost_owner: None,
         }
     }
 }
@@ -1282,6 +1287,7 @@ pub async fn compact_messages(
         &config.model,
         config.effective_context_window,
         config.focus.as_deref(),
+        config.runtime_cost_owner.as_deref(),
     )
     .await?;
 
@@ -1355,6 +1361,7 @@ async fn create_summary_with_ladder(
     model: &str,
     effective_context_window: Option<u32>,
     focus: Option<&str>,
+    runtime_cost_owner: Option<&str>,
 ) -> Result<String> {
     let rungs = [
         SummaryInputRung::Full,
@@ -1370,6 +1377,7 @@ async fn create_summary_with_ladder(
             model,
             effective_context_window,
             focus,
+            runtime_cost_owner,
             *rung,
         )
         .await
@@ -1396,6 +1404,7 @@ async fn create_summary_with_ladder(
                     model,
                     effective_context_window,
                     focus,
+                    runtime_cost_owner,
                     SummaryInputRung::Extreme,
                 )
                 .await
@@ -1462,6 +1471,7 @@ async fn create_summary(
     model: &str,
     effective_context_window: Option<u32>,
     focus: Option<&str>,
+    runtime_cost_owner: Option<&str>,
     rung: SummaryInputRung,
 ) -> Result<String> {
     let mut limits = summary_input_limits_for_model(model, effective_context_window);
@@ -1492,6 +1502,8 @@ async fn create_summary(
         build_formatted_summary_request(model, messages, limits, focus)
     };
 
+    let cost_scope = crate::cost_status::scope_token();
+    let mut cost_route = client.effective_route_envelope(model, chrono::Utc::now());
     let mut telemetry_cache_aligned = used_cache_aligned;
     let response = match client.create_message(request).await {
         Ok(response) => response,
@@ -1508,6 +1520,7 @@ async fn create_summary(
             ));
             telemetry_cache_aligned = false;
             let fallback_request = build_formatted_summary_request(model, messages, limits, focus);
+            cost_route = client.effective_route_envelope(model, chrono::Utc::now());
             client.create_message(fallback_request).await?
         }
         Err(err) => return Err(err),
@@ -1515,9 +1528,20 @@ async fn create_summary(
     // Compaction summary calls are billed by DeepSeek; route the
     // tokens through the side-channel so the dashboard total
     // matches the website (#526).
-    let api_provider = crate::config::ApiProvider::parse(client.provider_name())
-        .unwrap_or(crate::config::ApiProvider::Custom);
-    crate::cost_status::report(api_provider, &response.model, &response.usage);
+    crate::cost_status::report_effective_route_for_runtime(
+        cost_scope,
+        runtime_cost_owner,
+        &format!(
+            "compaction:dispatch:{}:response:{}",
+            cost_route
+                .dispatched_at
+                .timestamp_nanos_opt()
+                .unwrap_or_default(),
+            response.id
+        ),
+        &cost_route,
+        &response.usage,
+    );
 
     // #584: emit one debug-level event per summary call so the
     // cache-aligned win is observable post-deploy without

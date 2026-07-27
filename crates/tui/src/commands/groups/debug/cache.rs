@@ -561,6 +561,40 @@ fn changed_static_layers(previous: &PromptInspection, current: &PromptInspection
         .collect()
 }
 
+/// Column header for the per-turn cache/cost table. The widths here must match
+/// the row format strings below.
+const TURN_CACHE_ROW_HEADER: &str = "turn  route                        in    out    hit   miss  write  replay    ratio        cost   age";
+
+/// Rule width for the table. Sized to the header above.
+const TURN_CACHE_TABLE_WIDTH: usize = 106;
+
+/// Render one turn's cost cell, collecting the reason when it has none.
+///
+/// A turn with no route provenance (legacy or synthetic record) and a turn on a
+/// route that is not money-metered both render as `—` — neither is a real
+/// zero-dollar charge.
+fn turn_cost_cell(
+    rec: &TurnCacheRecord,
+    currency: crate::pricing::CostCurrency,
+    unpriced_notes: &mut std::collections::BTreeSet<&'static str>,
+) -> String {
+    let Some(audit) = rec.cost_audit.as_ref() else {
+        return "—".to_string();
+    };
+    if audit.is_priced_in(currency)
+        && let Some(estimate) = audit.estimate
+    {
+        return crate::pricing::format_cost_amount_precise(estimate.amount(currency), currency);
+    }
+    if let Some(reason) = audit.unpriced_reason {
+        unpriced_notes.insert(reason.label());
+    }
+    for class in &audit.unpriced_classes {
+        unpriced_notes.insert(class.label());
+    }
+    "—".to_string()
+}
+
 fn format_cache_history(app: &App, count: usize, locale: Locale) -> String {
     let total = app.session.turn_cache_history.len();
     let start = total.saturating_sub(count);
@@ -569,16 +603,22 @@ fn format_cache_history(app: &App, count: usize, locale: Locale) -> String {
     let mut totals_input: u64 = 0;
     let mut totals_hit: u64 = 0;
     let mut totals_miss: u64 = 0;
+    let mut totals_write: u64 = 0;
+    let mut totals_reasoning: u64 = 0;
+    let currency = app.cost_display_currency(app.cost_currency);
+    // Non-secret audit trail for turns whose spend is missing from the session
+    // total, so a `—` in the cost column is always explainable.
+    let mut unpriced_notes: std::collections::BTreeSet<&'static str> =
+        std::collections::BTreeSet::new();
     let mut header = tr(locale, MessageId::CmdCacheHeader)
         .replace("{count}", &rows.len().to_string())
         .replace("{total}", &total.to_string())
         .replace("{model}", &app.model);
-    header.push_str(&"─".repeat(96));
+    header.push_str(&"─".repeat(TURN_CACHE_TABLE_WIDTH));
     header.push('\n');
-    header.push_str(
-        "turn  route                       in    out    hit   miss  replay   ratio   age\n",
-    );
-    header.push_str(&"─".repeat(96));
+    header.push_str(TURN_CACHE_ROW_HEADER);
+    header.push('\n');
+    header.push_str(&"─".repeat(TURN_CACHE_TABLE_WIDTH));
     header.push('\n');
 
     let now = Instant::now();
@@ -591,6 +631,23 @@ fn format_cache_history(app: &App, count: usize, locale: Locale) -> String {
         let replay_cell = rec
             .reasoning_replay_tokens
             .map_or_else(|| "—".to_string(), |t| t.to_string());
+        let classes = crate::pricing::token_usage_for_pricing(&crate::models::Usage {
+            input_tokens: rec.input_tokens,
+            output_tokens: rec.output_tokens,
+            prompt_cache_hit_tokens: rec.cache_hit_tokens,
+            prompt_cache_miss_tokens: rec.cache_miss_tokens,
+            prompt_cache_write_tokens: rec.cache_write_tokens,
+            reasoning_tokens: rec.reasoning_tokens,
+            reasoning_replay_tokens: rec.reasoning_replay_tokens,
+            server_tool_use: None,
+        });
+        let write = u32::try_from(classes.cache_write).unwrap_or(u32::MAX);
+        let write_cell = rec
+            .cache_write_tokens
+            .map_or_else(|| "—".to_string(), |_| write.to_string());
+        totals_write += classes.cache_write;
+        totals_reasoning += u64::from(rec.reasoning_tokens.unwrap_or(0));
+        let cost_cell = turn_cost_cell(rec, currency, &mut unpriced_notes);
         let route_cell = format_turn_cache_route(rec);
         let age = humanize_age(now.saturating_duration_since(rec.recorded_at));
 
@@ -598,25 +655,34 @@ fn format_cache_history(app: &App, count: usize, locale: Locale) -> String {
         // with inferred zeros. Some providers (and some routes inside DeepSeek)
         // skip the cache fields; including a synthesized 0/N for those turns
         // would make every aggregate ratio look broken.
-        let Some(hit) = rec.cache_hit_tokens else {
+        if rec.cache_hit_tokens.is_none()
+            && rec.cache_miss_tokens.is_none()
+            && rec.cache_write_tokens.is_none()
+        {
             body.push_str(&format!(
-                "{turn:>4}  {route:<24}  {input:>5}  {output:>5}  {hit:>5}  {miss:>5}  {replay:>6}   {ratio:>6}   {age}\n",
+                "{turn:>4}  {route:<24}  {input:>5}  {output:>5}  {hit:>5}  {miss:>5}  {write:>5}  {replay:>6}   {ratio:>6}   {cost:>9}   {age}\n",
                 turn = turn_index,
                 route = route_cell,
                 input = rec.input_tokens,
                 output = rec.output_tokens,
                 hit = "—",
                 miss = "—",
+                write = write_cell,
                 replay = replay_cell,
                 ratio = "—",
+                cost = cost_cell,
                 age = age,
             ));
             continue;
-        };
+        }
 
         let miss_reported = rec.cache_miss_tokens;
-        let miss = miss_reported.unwrap_or_else(|| rec.input_tokens.saturating_sub(hit));
-        let accounted = u64::from(hit) + u64::from(miss);
+        let hit = u32::try_from(classes.cache_read).unwrap_or(u32::MAX);
+        let miss = u32::try_from(classes.input).unwrap_or(u32::MAX);
+        // Use the same mutually-exclusive hit/miss/write partition as pricing.
+        // Inferring `input - hit` here and then adding write counted creation
+        // tokens twice in exactly the turns with a write premium.
+        let accounted = u64::from(hit) + u64::from(miss) + u64::from(write);
         let ratio = if accounted == 0 {
             "    —".to_string()
         } else {
@@ -631,20 +697,23 @@ fn format_cache_history(app: &App, count: usize, locale: Locale) -> String {
         };
 
         body.push_str(&format!(
-            "{turn:>4}  {route:<24}  {input:>5}  {output:>5}  {hit:>5}  {miss:>5}  {replay:>6}   {ratio}   {age}\n",
+            "{turn:>4}  {route:<24}  {input:>5}  {output:>5}  {hit:>5}  {miss:>5}  {write:>5}  {replay:>6}   {ratio}   {cost:>9}   {age}\n",
             turn = turn_index,
             route = route_cell,
             input = rec.input_tokens,
             output = rec.output_tokens,
             hit = hit,
             miss = miss_cell,
+            write = write_cell,
             replay = replay_cell,
             ratio = ratio,
+            cost = cost_cell,
             age = age,
         ));
     }
 
-    let totals_accounted = totals_hit + totals_miss;
+    // Anthropic-normalized aggregate: hit / (hit + miss + write).
+    let totals_accounted = totals_hit + totals_miss + totals_write;
     let avg_ratio = if totals_accounted == 0 {
         "—".to_string()
     } else {
@@ -655,8 +724,14 @@ fn format_cache_history(app: &App, count: usize, locale: Locale) -> String {
     };
 
     let mut footer = String::new();
-    footer.push_str(&"─".repeat(96));
+    footer.push_str(&"─".repeat(TURN_CACHE_TABLE_WIDTH));
     footer.push('\n');
+    // Reasoning is reported separately from `sum_out` on purpose: providers
+    // count it *inside* the completion tokens they bill, so adding the two
+    // would double-count it.
+    footer.push_str(&format!(
+        "sum_write: {totals_write}  sum_reasoning: {totals_reasoning} (already inside out)\n"
+    ));
     footer.push_str(
         &tr(locale, MessageId::CmdCacheTotals)
             .replace("{sum_in}", &totals_input.to_string())
@@ -665,6 +740,12 @@ fn format_cache_history(app: &App, count: usize, locale: Locale) -> String {
             .replace("{avg}", &avg_ratio),
     );
     footer.push_str(&tr(locale, MessageId::CmdCacheFootnote));
+    if !unpriced_notes.is_empty() {
+        footer.push_str(&format!(
+            "cost — = no authoritative price for that turn; it is missing from the session estimate ({}).\n",
+            unpriced_notes.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
     footer.push_str(&tr(locale, MessageId::CmdCacheAdvice));
 
     format!("{header}{body}{footer}")
@@ -720,6 +801,9 @@ mod route_tests {
             cache_hit_tokens: None,
             cache_miss_tokens: None,
             reasoning_replay_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            cost_audit: None,
             recorded_at: Instant::now(),
         };
 

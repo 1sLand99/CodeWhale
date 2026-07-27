@@ -2371,6 +2371,10 @@ pub struct SubAgentRuntime {
     /// whole spawn tree publishes into one ordered, fan-out-able mailbox.
     /// `None` only when no consumer is wired (legacy entry points / tests).
     pub mailbox: Option<Mailbox>,
+    /// Lease on the durable runtime-turn accounting sink. Detached child
+    /// runtimes clone this guard, keeping the sink alive after the parent UI
+    /// mailbox closes until the final child response has been persisted.
+    pub(crate) runtime_usage_lease: Option<crate::cost_status::RuntimeUsageLease>,
     /// Wakeup channel for this runtime's immediate parent (issue #756). For
     /// the engine's direct children this points at the engine turn loop. While
     /// a sub-agent is running, its tool registry swaps this for a local inbox
@@ -2454,6 +2458,7 @@ impl SubAgentRuntime {
             max_spawn_depth: DEFAULT_MAX_SPAWN_DEPTH,
             cancel_token: CancellationToken::new(),
             mailbox: None,
+            runtime_usage_lease: None,
             parent_completion_tx: None,
             fork_context: None,
             mcp_pool: None,
@@ -2553,6 +2558,15 @@ impl SubAgentRuntime {
     #[allow(dead_code)] // wired by #128 (in-transcript cards) when it lands.
     pub fn with_mailbox(mut self, mailbox: Mailbox) -> Self {
         self.mailbox = Some(mailbox);
+        self
+    }
+
+    /// Bind descendants to the durable accounting owner created by a runtime
+    /// host. Interactive TUI turns have no owner and continue using mailbox
+    /// delivery only.
+    #[must_use]
+    pub(crate) fn with_runtime_cost_owner(mut self, owner: Option<&str>) -> Self {
+        self.runtime_usage_lease = owner.and_then(crate::cost_status::acquire_runtime_usage_lease);
         self
     }
 
@@ -2714,6 +2728,7 @@ impl SubAgentRuntime {
             max_spawn_depth: self.max_spawn_depth,
             cancel_token: self.cancel_token.child_token(),
             mailbox: self.mailbox.clone(),
+            runtime_usage_lease: self.runtime_usage_lease.clone(),
             parent_completion_tx: self.parent_completion_tx.clone(),
             fork_context: self.fork_context.clone(),
             mcp_pool: self.mcp_pool.clone(),
@@ -8656,17 +8671,25 @@ async fn request_subagent_model_response_with_retries(
     steps: u32,
     max_steps: u32,
     request: MessageRequest,
-) -> std::result::Result<MessageResponse, SubAgentApiRequestFailure> {
+) -> std::result::Result<
+    (MessageResponse, crate::cost_status::EffectiveRouteEnvelope),
+    SubAgentApiRequestFailure,
+> {
     let mut transient_failures = 0u32;
 
     loop {
+        // Billing time is the immutable wire-dispatch boundary, not worker
+        // start/checkpoint time. A retry gets its own current route envelope.
+        let usage_route = runtime
+            .client
+            .effective_route_envelope(&runtime.model, chrono::Utc::now());
         match tokio::time::timeout(
             runtime.step_api_timeout,
             runtime.client.create_message(request.clone()),
         )
         .await
         {
-            Ok(Ok(response)) => return Ok(response),
+            Ok(Ok(response)) => return Ok((response, usage_route)),
             Ok(Err(err)) => {
                 let retry_number = transient_failures.saturating_add(1);
                 let Some(retryable) = retryable_subagent_provider_failure(&err, retry_number)
@@ -9096,7 +9119,7 @@ async fn run_subagent(
         // Race the API call against the cancellation token so a parent
         // cancel during a long thinking turn doesn't have to wait for the
         // step timeout.
-        let response = tokio::select! {
+        let (response, usage_route) = tokio::select! {
             biased;
             () = runtime.cancel_token.cancelled() => {
                 record_agent_progress(
@@ -9239,12 +9262,26 @@ async fn run_subagent(
 
         let mut tool_uses = Vec::new();
 
-        // Report token usage so the parent's cost counter updates live.
+        let usage_source_id = format!("subagent:{agent_id}:step:{steps}:response:{}", response.id);
+        // Runtime-owned children persist directly before best-effort UI
+        // delivery. The owner lease outlives the parent mailbox when a top-
+        // level child remains active after the parent turn terminates.
+        if let Some(lease) = runtime.runtime_usage_lease.as_ref() {
+            crate::cost_status::report_effective_route_for_runtime(
+                crate::cost_status::scope_token(),
+                Some(lease.owner()),
+                &usage_source_id,
+                &usage_route,
+                &response.usage,
+            );
+        }
+        // Interactive turns have no runtime owner; their mailbox is the sole
+        // delivery path into the TUI cost projection.
         if let Some(mb) = runtime.mailbox.as_ref() {
             let _ = mb.send(MailboxMessage::token_usage(
                 &agent_id,
-                runtime.client.api_provider(),
-                response.model.clone(),
+                &usage_source_id,
+                usage_route,
                 response.usage.clone(),
             ));
         }

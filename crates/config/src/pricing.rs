@@ -55,6 +55,83 @@ pub enum PricingProvenance {
     Unknown,
 }
 
+impl PricingProvenance {
+    /// Stable, non-localized identifier for logs, JSON, and scorecards.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::ModelsDevBundled => "models_dev_bundled",
+            Self::ProviderLive => "provider_live",
+            Self::ProviderDocs => "provider_docs",
+            Self::UserOverride => "user_override",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Whether this provenance may be presented as an authoritative published
+    /// price without further freshness checks.
+    ///
+    /// [`Self::ProviderLive`] is deliberately excluded: a live row is only
+    /// authoritative while it is fresh *and* was fetched from the endpoint the
+    /// turn was actually served on. Callers must clear it through
+    /// [`OfferingPricing::live_pricing_defect`] first.
+    #[must_use]
+    pub fn is_authoritative_without_freshness_check(&self) -> bool {
+        matches!(
+            self,
+            Self::ModelsDevBundled | Self::ProviderDocs | Self::UserOverride
+        )
+    }
+}
+
+/// Default freshness window for a `ProviderLive` pricing row, in seconds.
+///
+/// A provider `/models` refresh is a snapshot of a mutable price list. Past
+/// this age CodeWhale stops calling the row authoritative rather than billing
+/// against a rate the provider may have already changed.
+pub const LIVE_PRICING_MAX_AGE_SECS: u64 = 24 * 60 * 60;
+
+/// Why a `ProviderLive` pricing row cannot be treated as authoritative.
+///
+/// Each variant is a non-secret receipt: fingerprints are FNV digests of a
+/// normalized base URL (see [`crate::catalog::base_url_fingerprint`]), never the
+/// URL itself, so these can be logged and serialized freely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "defect", rename_all = "snake_case")]
+pub enum LivePricingDefect {
+    /// The row is older than the caller's freshness window.
+    Stale { age_secs: u64, max_age_secs: u64 },
+    /// The row was fetched from a different endpoint than the turn was served
+    /// on, so it prices a different billing surface.
+    EndpointMismatch {
+        row_fingerprint: String,
+        route_fingerprint: String,
+    },
+    /// The row claims live provenance but carries no endpoint fingerprint, so
+    /// it cannot be matched to the route that is being priced.
+    MissingEndpointFingerprint,
+    /// The row claims live provenance but carries no fetch timestamp, so its
+    /// age cannot be established.
+    MissingTimestamp,
+    /// The caller could not establish which endpoint the turn was served on, so
+    /// a live row cannot be confirmed to price that route.
+    UnknownRouteEndpoint,
+}
+
+impl LivePricingDefect {
+    /// Stable, non-localized identifier for logs, JSON, and scorecards.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Stale { .. } => "live_pricing_stale",
+            Self::EndpointMismatch { .. } => "live_pricing_endpoint_mismatch",
+            Self::MissingEndpointFingerprint => "live_pricing_missing_endpoint_fingerprint",
+            Self::MissingTimestamp => "live_pricing_missing_timestamp",
+            Self::UnknownRouteEndpoint => "live_pricing_unknown_route_endpoint",
+        }
+    }
+}
+
 /// Normalized token usage for a single turn, in canonical billable classes.
 ///
 /// Producing this from provider-specific usage payloads (Chat Completions,
@@ -63,12 +140,58 @@ pub enum PricingProvenance {
 pub struct TokenUsage {
     /// Non-cached input (prompt) tokens.
     pub input: u64,
-    /// Output (completion) tokens, including reasoning output.
+    /// Total billable output (completion) tokens.
+    ///
+    /// Providers report reasoning tokens as a *subset* of the completion token
+    /// count (OpenAI `output_tokens_details.reasoning_tokens` ⊆ `output_tokens`,
+    /// Chat Completions `completion_tokens_details.reasoning_tokens` ⊆
+    /// `completion_tokens`), so a normalizer must never add reasoning tokens on
+    /// top of this field — that double-bills every reasoning turn.
     pub output: u64,
     /// Cache-read (cache-hit) input tokens, billed at the cache-read rate.
     pub cache_read: u64,
     /// Cache-write (cache-creation) tokens, billed at the cache-write rate.
     pub cache_write: u64,
+}
+
+/// A canonical billable token class.
+///
+/// Used to report *which* class of a turn's usage lacked a published price, so
+/// an unpriced turn can be audited instead of silently dropping out of a total.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenClass {
+    Input,
+    Output,
+    CacheRead,
+    CacheWrite,
+}
+
+impl TokenClass {
+    /// Every class, in reporting order.
+    pub const ALL: [Self; 4] = [Self::Input, Self::Output, Self::CacheRead, Self::CacheWrite];
+
+    /// Stable, non-localized identifier for logs, JSON, and scorecards.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Output => "output",
+            Self::CacheRead => "cache_read",
+            Self::CacheWrite => "cache_write",
+        }
+    }
+
+    /// This class's token count within `usage`.
+    #[must_use]
+    pub fn tokens(self, usage: &TokenUsage) -> u64 {
+        match self {
+            Self::Input => usage.input,
+            Self::Output => usage.output,
+            Self::CacheRead => usage.cache_read,
+            Self::CacheWrite => usage.cache_write,
+        }
+    }
 }
 
 /// A provider/offering-scoped pricing row.
@@ -104,6 +227,16 @@ pub struct OfferingPricing {
     /// Unix seconds the price was fetched / became effective, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_at: Option<u64>,
+    /// Fingerprint of the base URL this price was fetched from, for
+    /// [`PricingProvenance::ProviderLive`] rows.
+    ///
+    /// This is the same non-secret FNV digest the catalog cache scopes on (see
+    /// [`crate::catalog::base_url_fingerprint`]) — never the URL itself. It
+    /// exists so a live row can be proven to price the endpoint a turn was
+    /// actually served on; a row whose fingerprint does not match the route is
+    /// a different billing surface, not a fresher price for this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_fingerprint: Option<String>,
 }
 
 impl OfferingPricing {
@@ -119,6 +252,13 @@ impl OfferingPricing {
     #[must_use]
     pub fn from_catalog_offering(offering: &CatalogOffering) -> Option<Self> {
         let cost = offering.cost.as_ref()?;
+        // A provider/catalog price is untrusted numeric input.  Reject the
+        // entire row when any published class is NaN, infinite, or negative;
+        // accepting only the apparently valid fields would turn a malformed
+        // row into a silently incomplete (or negative) bill.
+        if !catalog_cost_is_valid(cost) {
+            return None;
+        }
         if cost.input.is_none()
             && cost.output.is_none()
             && cost.cache_read.is_none()
@@ -137,6 +277,7 @@ impl OfferingPricing {
             cache_write_per_million: cost.cache_write,
             provenance: provenance_from_source(&offering.source),
             effective_at: effective_at_from_source(&offering.source),
+            endpoint_fingerprint: endpoint_fingerprint_from_source(&offering.source),
         })
     }
 
@@ -161,6 +302,83 @@ impl OfferingPricing {
         }
     }
 
+    /// Why this row cannot be trusted as an authoritative live price, if so.
+    ///
+    /// Returns `None` for rows that are not [`PricingProvenance::ProviderLive`]
+    /// (a bundled snapshot, a documented hand price, or a user override carries
+    /// no fetch clock to go stale against) and for live rows that are both
+    /// fresh and fingerprint-matched to `route_endpoint_fingerprint`.
+    ///
+    /// A live row with any defect must not be labelled `provider_live` nor used
+    /// as complete pricing: it is either older than `max_age_secs` or priced for
+    /// a different endpoint. Callers fail closed and receipt the returned
+    /// defect. `route_endpoint_fingerprint` of `None` means the caller could not
+    /// determine the endpoint at all, which is itself a defect — a live row can
+    /// never be *confirmed* to price an unknown route.
+    #[must_use]
+    pub fn live_pricing_defect(
+        &self,
+        route_endpoint_fingerprint: Option<&str>,
+        now_unix: Option<u64>,
+        max_age_secs: u64,
+    ) -> Option<LivePricingDefect> {
+        if self.provenance != PricingProvenance::ProviderLive {
+            return None;
+        }
+        let Some(row_fingerprint) = self.endpoint_fingerprint.as_deref() else {
+            return Some(LivePricingDefect::MissingEndpointFingerprint);
+        };
+        let Some(route_fingerprint) = route_endpoint_fingerprint else {
+            return Some(LivePricingDefect::UnknownRouteEndpoint);
+        };
+        if row_fingerprint != route_fingerprint {
+            return Some(LivePricingDefect::EndpointMismatch {
+                row_fingerprint: row_fingerprint.to_string(),
+                route_fingerprint: route_fingerprint.to_string(),
+            });
+        }
+        let Some(effective_at) = self.effective_at else {
+            return Some(LivePricingDefect::MissingTimestamp);
+        };
+        // Without a clock the age is unknowable, so the row stays unproven
+        // rather than being assumed fresh.
+        let Some(now_unix) = now_unix else {
+            return Some(LivePricingDefect::MissingTimestamp);
+        };
+        let age_secs = now_unix.saturating_sub(effective_at);
+        if age_secs >= max_age_secs {
+            return Some(LivePricingDefect::Stale {
+                age_secs,
+                max_age_secs,
+            });
+        }
+        None
+    }
+
+    /// Per-million price for one canonical class, when published.
+    #[must_use]
+    pub fn price_per_million(&self, class: TokenClass) -> Option<f64> {
+        match class {
+            TokenClass::Input => self.input_per_million,
+            TokenClass::Output => self.output_per_million,
+            TokenClass::CacheRead => self.cache_read_per_million,
+            TokenClass::CacheWrite => self.cache_write_per_million,
+        }
+    }
+
+    /// Classes this turn actually used that carry no published price.
+    ///
+    /// Non-empty means [`Self::estimate_cost`] fails closed for this usage; the
+    /// returned classes are exactly the reason why, so callers can report the
+    /// gap instead of presenting a silently under-counted total.
+    #[must_use]
+    pub fn unpriced_used_classes(&self, usage: &TokenUsage) -> Vec<TokenClass> {
+        TokenClass::ALL
+            .into_iter()
+            .filter(|class| class.tokens(usage) > 0 && self.price_per_million(*class).is_none())
+            .collect()
+    }
+
     /// Estimate the cost of `usage` in this row's [`Currency`].
     ///
     /// Returns `None` if any usage class with a non-zero token count has an
@@ -169,17 +387,20 @@ impl OfferingPricing {
     #[must_use]
     pub fn estimate_cost(&self, usage: &TokenUsage) -> Option<f64> {
         let mut total = 0.0_f64;
-        for (tokens, price) in [
-            (usage.input, self.input_per_million),
-            (usage.output, self.output_per_million),
-            (usage.cache_read, self.cache_read_per_million),
-            (usage.cache_write, self.cache_write_per_million),
-        ] {
+        for class in TokenClass::ALL {
+            let tokens = class.tokens(usage);
             if tokens > 0 {
-                let price = price?;
+                let price = self.price_per_million(class)?;
                 // Per-turn token counts are far below 2^53, so this cast is
                 // exact; revisit if TokenUsage ever aggregates across sessions.
-                total += (tokens as f64 / 1_000_000.0) * price;
+                let component = (tokens as f64 / 1_000_000.0) * price;
+                if !component.is_finite() || component < 0.0 {
+                    return None;
+                }
+                total += component;
+                if !total.is_finite() || total < 0.0 {
+                    return None;
+                }
             }
         }
         Some(total)
@@ -231,6 +452,9 @@ pub(crate) fn route_pricing_sku_from_cost(cost: Option<&ModelsDevCost>) -> Prici
     let Some(cost) = cost else {
         return PricingSku::UnknownOrStale;
     };
+    if !catalog_cost_is_valid(cost) {
+        return PricingSku::UnknownOrStale;
+    }
     if cost.input.is_none() && cost.output.is_none() {
         // No input/output rate: a cache-only or empty cost would render as a
         // rate-less `Token` at the route layer, so it stays honestly unknown.
@@ -240,6 +464,36 @@ pub(crate) fn route_pricing_sku_from_cost(cost: Option<&ModelsDevCost>) -> Prici
         input_per_mtok: cost.input,
         output_per_mtok: cost.output,
     }
+}
+
+/// Upper bound, per million tokens, on a price CodeWhale will treat as real.
+///
+/// Published frontier rates are in the single-to-triple digits per million.
+/// A value four orders of magnitude above that is not an expensive model, it is
+/// a unit error — a per-token price parsed as per-million, or a minor-unit
+/// integer (cents, fen) read as a major unit. Both mistakes bill the user
+/// 10^6 or 10^2 times over, so the row is rejected rather than believed.
+///
+/// The bound is deliberately generous: it exists to catch impossible
+/// magnitudes, not to second-guess a provider's pricing.
+pub const MAX_PLAUSIBLE_PRICE_PER_MILLION: f64 = 100_000.0;
+
+/// Whether every numeric field in a catalog price is finite, non-negative, and
+/// of a plausible magnitude.
+///
+/// Kept at the catalog boundary so every projection (routing SKU and runtime
+/// cost audit) applies the same validation rule. Catalog prices are untrusted
+/// numeric input: they arrive from a bundled snapshot, a live provider
+/// `/models` response, or a user override file, and any of the three can carry
+/// a malformed value. The whole row is rejected on a single bad field —
+/// accepting the fields that happen to parse would turn a malformed row into a
+/// silently under-counted bill, which is worse than no price at all.
+#[must_use]
+pub fn catalog_cost_is_valid(cost: &ModelsDevCost) -> bool {
+    [cost.input, cost.output, cost.cache_read, cost.cache_write]
+        .into_iter()
+        .flatten()
+        .all(|price| price.is_finite() && (0.0..=MAX_PLAUSIBLE_PRICE_PER_MILLION).contains(&price))
 }
 
 fn provenance_from_source(source: &CatalogSource) -> PricingProvenance {
@@ -253,6 +507,16 @@ fn provenance_from_source(source: &CatalogSource) -> PricingProvenance {
 fn effective_at_from_source(source: &CatalogSource) -> Option<u64> {
     match source {
         CatalogSource::Live { fetched_at, .. } => Some(*fetched_at),
+        CatalogSource::Bundled | CatalogSource::UserOverride => None,
+    }
+}
+
+fn endpoint_fingerprint_from_source(source: &CatalogSource) -> Option<String> {
+    match source {
+        CatalogSource::Live {
+            base_url_fingerprint,
+            ..
+        } => Some(base_url_fingerprint.clone()),
         CatalogSource::Bundled | CatalogSource::UserOverride => None,
     }
 }

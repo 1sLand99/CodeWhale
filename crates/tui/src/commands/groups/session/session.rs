@@ -1063,7 +1063,9 @@ mod tests {
         app.session.session_cost_cny = 9.13;
         app.session.subagent_cost = 0.75;
         app.session.subagent_cost_cny = 5.48;
-        app.session.subagent_cost_event_seqs.insert(42);
+        app.session
+            .subagent_cost_event_seqs
+            .insert(("turn-test".to_string(), 42));
         app.session.displayed_cost_high_water = 2.0;
         app.session.displayed_cost_high_water_cny = 14.61;
         app.session.last_prompt_tokens = Some(120);
@@ -1081,6 +1083,9 @@ mod tests {
             cache_hit_tokens: Some(80),
             cache_miss_tokens: Some(40),
             reasoning_replay_tokens: Some(12),
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            cost_audit: None,
             recorded_at: Instant::now(),
         });
 

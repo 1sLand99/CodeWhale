@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
 use crate::config::ApiProvider;
 use crate::models::Usage;
 use crate::tools::todo::TodoListSnapshot;
@@ -79,11 +80,12 @@ pub enum MailboxMessage {
     /// Published after each turn so the parent's cost counter updates live.
     TokenUsage {
         agent_id: String,
-        /// Effective provider that produced this usage. Pricing and billing
-        /// policy are route-scoped, so model identity alone is insufficient.
-        provider: ApiProvider,
-        /// Model that produced this usage, used for pricing.
-        model: String,
+        /// Stable identity of the provider response. Runtime accounting uses
+        /// this across direct durability, mailbox replay, and restart dedupe.
+        source_id: String,
+        /// Immutable provider/model/billing evidence captured before the
+        /// child request was sent.
+        route: crate::cost_status::EffectiveRouteEnvelope,
         /// Provider usage payload, including cache-hit/cache-miss fields.
         usage: Usage,
     },
@@ -132,14 +134,14 @@ impl MailboxMessage {
 
     pub(crate) fn token_usage(
         agent_id: impl Into<String>,
-        provider: ApiProvider,
-        model: impl Into<String>,
+        source_id: impl Into<String>,
+        route: crate::cost_status::EffectiveRouteEnvelope,
         usage: Usage,
     ) -> Self {
         Self::TokenUsage {
             agent_id: agent_id.into(),
-            provider,
-            model: model.into(),
+            source_id: source_id.into(),
+            route,
             usage,
         }
     }
@@ -170,6 +172,10 @@ struct MailboxInner {
     next_seq: AtomicU64,
     seq_tx: watch::Sender<u64>,
     closed: AtomicBool,
+    /// Linearizes publication against turn-end sealing. Without this gate a
+    /// producer could observe `closed = false`, lose the race to the turn
+    /// completion barrier, and enqueue usage after `TurnComplete`.
+    send_gate: std::sync::Mutex<()>,
     #[cfg(test)]
     cancel_token: CancellationToken,
 }
@@ -198,6 +204,7 @@ impl Mailbox {
             next_seq: AtomicU64::new(0),
             seq_tx,
             closed: AtomicBool::new(false),
+            send_gate: std::sync::Mutex::new(()),
             #[cfg(test)]
             cancel_token,
         };
@@ -226,6 +233,11 @@ impl Mailbox {
     /// mailbox is already closed (callers should treat this as "the
     /// receiver is gone, stop publishing").
     pub fn send(&self, message: MailboxMessage) -> Option<u64> {
+        let _send_gate = self
+            .inner
+            .send_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         if self.inner.closed.load(Ordering::Acquire) {
             return None;
         }
@@ -236,6 +248,21 @@ impl Mailbox {
         }
         let _ = self.inner.seq_tx.send_replace(seq);
         Some(seq)
+    }
+
+    /// Stop publication for this turn without cancelling detached workers.
+    ///
+    /// The engine seals, drains, and awaits the mailbox before it emits
+    /// `TurnComplete`. The send gate makes this a hard ordering boundary:
+    /// once this returns, every accepted envelope is already in the receiver
+    /// and no later worker message can attach itself to the completed turn.
+    pub(crate) fn seal(&self) {
+        let _send_gate = self
+            .inner
+            .send_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.inner.closed.store(true, Ordering::Release);
     }
 
     /// Whether the mailbox has been closed.
@@ -254,7 +281,9 @@ impl Mailbox {
     /// own explicit cancellation.
     #[cfg(test)]
     pub fn close(&self) {
-        if !self.inner.closed.swap(true, Ordering::AcqRel) {
+        let was_closed = self.inner.closed.load(Ordering::Acquire);
+        self.seal();
+        if !was_closed {
             self.inner.cancel_token.cancel();
         }
     }
@@ -291,6 +320,14 @@ impl MailboxReceiver {
         self.rx.recv().await
     }
 
+    /// Drain all envelopes accepted before a mailbox was sealed.
+    pub(crate) fn drain_available(&mut self) -> Vec<MailboxEnvelope> {
+        while let Ok(envelope) = self.rx.try_recv() {
+            self.pending.push_back(envelope);
+        }
+        self.pending.drain(..).collect()
+    }
+
     /// Awaits the next envelope with a timeout. Useful in tests.
     #[cfg(test)]
     pub async fn recv_timeout(&mut self, timeout: Duration) -> Option<MailboxEnvelope> {
@@ -310,6 +347,20 @@ mod tests {
         let token = CancellationToken::new();
         let (mb, rx) = Mailbox::new(token.clone());
         (mb, rx, token)
+    }
+
+    fn test_route(
+        provider: ApiProvider,
+        model: &str,
+    ) -> crate::cost_status::EffectiveRouteEnvelope {
+        crate::cost_status::EffectiveRouteEnvelope::capture(
+            None,
+            provider,
+            provider.as_str(),
+            model,
+            Some(provider.default_base_url()),
+            chrono::Utc::now(),
+        )
     }
 
     #[tokio::test]
@@ -390,6 +441,25 @@ mod tests {
             mb.send(MailboxMessage::progress("a", "after close"))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn turn_end_seal_forms_a_flush_barrier_without_cancelling_worker() {
+        let (mb, mut rx, token) = open();
+        assert_eq!(
+            mb.send(MailboxMessage::progress("a", "accepted before barrier")),
+            Some(1)
+        );
+        mb.seal();
+
+        assert!(!token.is_cancelled(), "detached worker is not cancelled");
+        assert!(
+            mb.send(MailboxMessage::progress("a", "too late")).is_none(),
+            "no event may be accepted after the completion barrier"
+        );
+        let drained = rx.drain_available();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].seq, 1);
     }
 
     #[tokio::test]
@@ -547,8 +617,8 @@ mod tests {
             (
                 MailboxMessage::TokenUsage {
                     agent_id: "a9".into(),
-                    provider: ApiProvider::Deepseek,
-                    model: "deepseek-v4-flash".into(),
+                    source_id: "response-a9".into(),
+                    route: test_route(ApiProvider::Deepseek, "deepseek-v4-flash"),
                     usage: Usage {
                         input_tokens: 100,
                         output_tokens: 50,
@@ -561,5 +631,25 @@ mod tests {
         for (msg, expected) in cases {
             assert_eq!(msg.agent_id(), expected, "extract failed for {msg:?}");
         }
+    }
+
+    #[test]
+    fn token_usage_serde_round_trip_preserves_immutable_route_evidence() {
+        let route = crate::cost_status::EffectiveRouteEnvelope {
+            provider: ApiProvider::Moonshot,
+            provider_identity: "kimi-membership".to_string(),
+            model: "k3".to_string(),
+            billing_surface: Some(crate::pricing::MOONSHOT_KIMI_CODE_BILLING_SURFACE.to_string()),
+            endpoint_fingerprint: Some("a".repeat(64)),
+            billing_mode: crate::cost_status::RouteBillingMode::Subscription,
+            dispatched_at: chrono::DateTime::<chrono::Utc>::from_timestamp(1_234, 0)
+                .expect("timestamp"),
+        };
+        let message =
+            MailboxMessage::token_usage("agent-k3", "response-k3", route, Usage::default());
+        let json = serde_json::to_string(&message).expect("serialize token usage");
+        let restored: MailboxMessage =
+            serde_json::from_str(&json).expect("deserialize token usage");
+        assert_eq!(restored, message);
     }
 }

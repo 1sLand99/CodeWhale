@@ -669,13 +669,49 @@ impl CatalogCompiler {
 /// Normalization folds case in the scheme/host, trims trailing slashes, and
 /// drops a default-port suffix, so cosmetically different spellings of the same
 /// endpoint share a cache scope while genuinely different endpoints do not. The
-/// fingerprint is a dependency-free FNV-1a hex digest; it is deterministic
-/// within and across runs but is not a cryptographic hash (it identifies a
-/// cache bucket, nothing security-sensitive).
+/// fingerprint is a SHA-256 digest. Secret-bearing URLs are mapped to one
+/// constant redacted input before hashing, so userinfo, query credentials, and
+/// fragments never enter the digest function at all.
 #[must_use]
 pub fn base_url_fingerprint(base_url: &str) -> String {
-    let normalized = normalize_base_url(base_url);
-    fnv1a_hex(normalized.as_bytes())
+    use sha2::Digest as _;
+
+    let normalized = secret_free_fingerprint_input(base_url);
+    let digest = sha2::Sha256::digest(normalized.as_bytes());
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
+}
+
+fn secret_free_fingerprint_input(base_url: &str) -> String {
+    const REDACTED: &str = "invalid-or-secret-bearing-url";
+    let trimmed = base_url.trim();
+    if let Some((scheme, rest)) = trimmed.split_once("://") {
+        let scheme = scheme.to_ascii_lowercase();
+        if !matches!(scheme.as_str(), "http" | "https") {
+            return REDACTED.to_string();
+        }
+        let authority_end = rest.find('/').unwrap_or(rest.len());
+        let authority_with_userinfo = &rest[..authority_end];
+        if authority_with_userinfo.contains(['?', '#']) {
+            return REDACTED.to_string();
+        }
+        let authority = authority_with_userinfo
+            .rsplit_once('@')
+            .map_or(authority_with_userinfo, |(_, host)| host);
+        if authority.is_empty() {
+            return REDACTED.to_string();
+        }
+        let path = rest[authority_end..]
+            .split(['?', '#'])
+            .next()
+            .unwrap_or_default();
+        return normalize_base_url(&format!("{scheme}://{authority}{path}"));
+    }
+    normalize_base_url(trimmed.split(['?', '#']).next().unwrap_or(REDACTED))
 }
 
 fn normalize_base_url(base_url: &str) -> String {
@@ -704,17 +740,6 @@ fn normalize_base_url(base_url: &str) -> String {
     } else {
         trimmed.to_ascii_lowercase()
     }
-}
-
-fn fnv1a_hex(bytes: &[u8]) -> String {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut hash = OFFSET;
-    for &b in bytes {
-        hash ^= u64::from(b);
-        hash = hash.wrapping_mul(PRIME);
-    }
-    format!("{hash:016x}")
 }
 
 /// Current unix time in seconds, for callers assembling deltas / cache entries.

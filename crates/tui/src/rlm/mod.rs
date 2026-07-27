@@ -46,6 +46,20 @@ fn add_usage_with_prompt_cache(total: &mut Usage, delta: &Usage) {
         total.prompt_cache_write_tokens,
         delta.prompt_cache_write_tokens,
     );
+    total.reasoning_tokens = add_optional_usage(total.reasoning_tokens, delta.reasoning_tokens);
+    total.reasoning_replay_tokens =
+        add_optional_usage(total.reasoning_replay_tokens, delta.reasoning_replay_tokens);
+    if let Some(delta_server) = delta.server_tool_use.as_ref() {
+        let total_server = total.server_tool_use.get_or_insert_default();
+        total_server.code_execution_requests = add_optional_usage(
+            total_server.code_execution_requests,
+            delta_server.code_execution_requests,
+        );
+        total_server.tool_search_requests = add_optional_usage(
+            total_server.tool_search_requests,
+            delta_server.tool_search_requests,
+        );
+    }
 }
 
 fn add_optional_usage(total: Option<u32>, delta: Option<u32>) -> Option<u32> {
@@ -75,6 +89,12 @@ mod tests {
             output_tokens: 5,
             prompt_cache_hit_tokens: Some(30),
             prompt_cache_miss_tokens: Some(20),
+            reasoning_tokens: Some(4),
+            reasoning_replay_tokens: Some(3),
+            server_tool_use: Some(crate::models::ServerToolUsage {
+                code_execution_requests: Some(2),
+                tool_search_requests: Some(1),
+            }),
             ..Usage::default()
         };
 
@@ -84,5 +104,14 @@ mod tests {
         assert_eq!(total.output_tokens, 15);
         assert_eq!(total.prompt_cache_hit_tokens, Some(110));
         assert_eq!(total.prompt_cache_miss_tokens, Some(40));
+        assert_eq!(total.reasoning_tokens, Some(4));
+        assert_eq!(total.reasoning_replay_tokens, Some(3));
+        assert_eq!(
+            total.server_tool_use,
+            Some(crate::models::ServerToolUsage {
+                code_execution_requests: Some(2),
+                tool_search_requests: Some(1),
+            })
+        );
     }
 }

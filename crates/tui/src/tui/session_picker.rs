@@ -373,7 +373,7 @@ impl SessionPickerView {
         self.status =
             Some(tr(self.locale, MessageId::SessionsRenamed).replace("{title}", new_title));
         ViewAction::Emit(ViewEvent::SessionRenamed {
-            metadata: saved.metadata,
+            metadata: Box::new(saved.metadata),
         })
     }
 

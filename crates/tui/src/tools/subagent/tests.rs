@@ -8517,6 +8517,7 @@ fn stub_runtime() -> SubAgentRuntime {
         max_spawn_depth: DEFAULT_MAX_SPAWN_DEPTH,
         cancel_token: CancellationToken::new(),
         mailbox: None,
+        runtime_usage_lease: None,
         parent_agent_id: None,
         parent_completion_tx: None,
         fork_context: None,

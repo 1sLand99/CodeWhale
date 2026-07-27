@@ -6,7 +6,10 @@
 //! reliable balance endpoint exists.
 
 use chrono::{DateTime, TimeZone, Utc};
-use codewhale_config::pricing::{Currency, OfferingPricing, TokenUsage};
+use codewhale_config::pricing::{
+    Currency, LIVE_PRICING_MAX_AGE_SECS, LivePricingDefect, OfferingPricing, PricingProvenance,
+    TokenClass, TokenUsage,
+};
 
 use crate::config::{
     ApiProvider, DEEPSEEK_ALIAS_REPLACEMENT, DEEPSEEK_ALIAS_RETIREMENT_UTC,
@@ -52,7 +55,47 @@ impl CostEstimate {
     }
 
     pub fn is_positive(self) -> bool {
-        self.usd > 0.0 || self.cny > 0.0
+        self.is_finite_nonnegative() && (self.usd > 0.0 || self.cny > 0.0)
+    }
+
+    /// A cost is safe to persist/display only when both carried currencies are
+    /// finite and nonnegative.
+    #[must_use]
+    pub fn is_finite_nonnegative(self) -> bool {
+        self.usd.is_finite() && self.usd >= 0.0 && self.cny.is_finite() && self.cny >= 0.0
+    }
+
+    #[must_use]
+    pub fn sanitized(self) -> Self {
+        Self {
+            usd: if self.usd.is_finite() && self.usd >= 0.0 {
+                self.usd
+            } else {
+                0.0
+            },
+            cny: if self.cny.is_finite() && self.cny >= 0.0 {
+                self.cny
+            } else {
+                0.0
+            },
+        }
+    }
+
+    /// Add cost without ever producing NaN, infinity, or a negative total.
+    /// Individual pricing rows are validated earlier; the saturation protects
+    /// long-running accumulation from floating-point overflow.
+    #[must_use]
+    pub fn saturating_add(self, rhs: Self) -> Self {
+        fn component(left: f64, right: f64) -> f64 {
+            let sum = left + right;
+            if sum.is_finite() { sum } else { f64::MAX }
+        }
+        let left = self.sanitized();
+        let right = rhs.sanitized();
+        Self {
+            usd: component(left.usd, right.usd),
+            cny: component(left.cny, right.cny),
+        }
     }
 
     pub fn amount(self, currency: CostCurrency) -> f64 {
@@ -96,15 +139,55 @@ impl BalanceInfo {
     }
 }
 
+/// How a hand-sourced row bills cache-creation (cache-write) tokens.
+///
+/// The distinction matters because "no separate write rate published" and
+/// "documented to cost the same as ordinary input" are different facts that used
+/// to collapse onto the same `None`. Folding the unknown case into the input
+/// rate invents a price; this enum keeps the invention impossible (#4318).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CacheWritePolicy {
+    /// The provider publishes a distinct cache-creation rate (per million).
+    Rate(f64),
+    /// Provider documentation states that cache creation carries **no separate
+    /// charge** beyond the ordinary cache-miss input rate, so the miss rate is
+    /// the published write rate rather than a substitute for a missing one.
+    ///
+    /// The `&'static str` is the documentation receipt this claim rests on, so
+    /// the policy is auditable instead of asserted.
+    DocumentedAsInputRate(&'static str),
+    /// No published cache-write rate was found for this row. A turn that
+    /// actually wrote to cache fails closed rather than being billed at a rate
+    /// CodeWhale made up.
+    Unpublished,
+}
+
+/// DeepSeek's context-caching docs: tokens that miss the cache are billed once
+/// at the cache-miss rate and writing them into the cache costs nothing extra.
+/// <https://api-docs.deepseek.com/guides/kv_cache>
+const DEEPSEEK_CACHE_WRITE_IS_FREE: &str = "deepseek-kv-cache-no-write-charge";
+
+impl CacheWritePolicy {
+    /// The rate to bill cache-write tokens at, given the row's input rate.
+    ///
+    /// `None` means the row cannot price cache-write tokens at all.
+    fn rate(self, input_cache_miss_per_million: f64) -> Option<f64> {
+        match self {
+            Self::Rate(rate) => Some(rate),
+            Self::DocumentedAsInputRate(_) => Some(input_cache_miss_per_million),
+            Self::Unpublished => None,
+        }
+    }
+}
+
 /// Per-million-token pricing for a model.
 #[derive(Debug, Clone, Copy)]
 struct CurrencyPricing {
     input_cache_hit_per_million: f64,
     input_cache_miss_per_million: f64,
     output_per_million: f64,
-    /// Cache-write (creation) rate. `None` means write tokens are billed at
-    /// the cache-miss / input rate (providers without a separate write tier).
-    cache_write_per_million: Option<f64>,
+    /// How cache-creation tokens are billed on this row.
+    cache_write: CacheWritePolicy,
 }
 
 /// Per-million-token pricing for a model.
@@ -119,45 +202,290 @@ pub(crate) const STEPFUN_PLAN_BILLING_SURFACE: &str = "stepfun-plan";
 const STEPFUN_PLAN_BASE_URL: &str = "https://api.stepfun.ai/step_plan/v1";
 const LEGACY_STEPFUN_PLAN_BASE_URL: &str = "https://api.stepfun.com/step_plan/v1";
 
-/// Reduce a concrete request endpoint to non-secret billing provenance.
-/// Unknown/custom endpoints stay unclassified so offline reports fail closed.
-pub(crate) fn billing_surface_for_route(
-    provider: ApiProvider,
-    base_url: Option<&str>,
-) -> Option<&'static str> {
-    if provider != ApiProvider::Stepfun {
-        return None;
+/// Z.ai's dedicated Coding endpoint — the GLM Coding Plan subscription route.
+pub(crate) const ZAI_CODING_PLAN_BILLING_SURFACE: &str = "zai-coding-plan";
+/// Z.ai's ordinary public per-token API.
+pub(crate) const ZAI_PAYG_BILLING_SURFACE: &str = "zai-payg";
+/// Moonshot's Kimi Code subscription endpoint.
+pub(crate) const MOONSHOT_KIMI_CODE_BILLING_SURFACE: &str = "moonshot-kimi-code";
+/// Moonshot's ordinary public per-token API.
+pub(crate) const MOONSHOT_PAYG_BILLING_SURFACE: &str = "moonshot-payg";
+/// MiniMax's prepaid Token Plan endpoint.
+pub(crate) const MINIMAX_TOKEN_PLAN_BILLING_SURFACE: &str = "minimax-token-plan";
+/// MiniMax's ordinary public per-token API.
+pub(crate) const MINIMAX_PAYG_BILLING_SURFACE: &str = "minimax-payg";
+/// Xiaomi MiMo's prepaid token-plan endpoint.
+pub(crate) const XIAOMI_TOKEN_PLAN_BILLING_SURFACE: &str = "xiaomi-mimo-token-plan";
+/// Xiaomi MiMo's ordinary public per-token API.
+pub(crate) const XIAOMI_PAYG_BILLING_SURFACE: &str = "xiaomi-mimo-payg";
+/// An OAuth/subscription-brokered endpoint (Codex, Claude OAuth, Grok OAuth,
+/// OpenCode Go). Never per-token metered from CodeWhale's side.
+pub(crate) const OAUTH_SUBSCRIPTION_BILLING_SURFACE: &str = "oauth-subscription";
+/// A loopback / self-hosted endpoint with no provider bill at all.
+pub(crate) const LOCAL_BILLING_SURFACE: &str = "local-no-bill";
+/// A provider's own first-party public per-token API, on its documented host.
+pub(crate) const FIRST_PARTY_PAYG_BILLING_SURFACE: &str = "first-party-payg";
+/// An aggregator/reseller endpoint: metered, but priced by the aggregator's own
+/// catalog rather than by the upstream model owner's published rates.
+pub(crate) const AGGREGATOR_BILLING_SURFACE: &str = "aggregator-payg";
+/// A reachable endpoint CodeWhale could not match to any known billing surface.
+/// Distinct from "not classified yet": this is a positive statement that the
+/// surface is unknown, and it fails closed everywhere it is consumed.
+pub(crate) const UNCLASSIFIED_BILLING_SURFACE: &str = "unclassified";
+
+/// How a classified billing surface meters money.
+///
+/// This is the fact every cost surface actually needs: whether a dollar figure
+/// is even the right unit for the route. `Unknown` is a real answer and is
+/// treated as *possibly* metered — it is counted as missing spend rather than
+/// excused as a subscription (#4318).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointMetering {
+    /// Per-token money, priced against published rates.
+    Money,
+    /// An exactly-identified subscription or prepaid-quota endpoint. Money is
+    /// the wrong unit here, so these turns are excluded from money coverage.
+    ExactSubscription,
+    /// Local/self-hosted: there is no provider bill.
+    LocalNoBill,
+    /// Could not be established. Fails closed as possibly-money.
+    Unknown,
+}
+
+/// Classify a billing-surface id into its metering shape.
+///
+/// Unrecognized ids — including ones written by a newer build — resolve to
+/// [`EndpointMetering::Unknown`] rather than being guessed into a bucket.
+#[must_use]
+pub fn endpoint_metering_for_billing_surface(billing_surface: Option<&str>) -> EndpointMetering {
+    let Some(surface) = billing_surface.map(str::trim).filter(|s| !s.is_empty()) else {
+        return EndpointMetering::Unknown;
+    };
+    // Exact, case-insensitive matches only. A prefix/substring rule here would
+    // let an unrecognized future surface impersonate a known one.
+    for (known, metering) in [
+        (STEPFUN_PAYG_BILLING_SURFACE, EndpointMetering::Money),
+        (ZAI_PAYG_BILLING_SURFACE, EndpointMetering::Money),
+        (MOONSHOT_PAYG_BILLING_SURFACE, EndpointMetering::Money),
+        (MINIMAX_PAYG_BILLING_SURFACE, EndpointMetering::Money),
+        (XIAOMI_PAYG_BILLING_SURFACE, EndpointMetering::Money),
+        (FIRST_PARTY_PAYG_BILLING_SURFACE, EndpointMetering::Money),
+        (AGGREGATOR_BILLING_SURFACE, EndpointMetering::Money),
+        (
+            STEPFUN_PLAN_BILLING_SURFACE,
+            EndpointMetering::ExactSubscription,
+        ),
+        (
+            ZAI_CODING_PLAN_BILLING_SURFACE,
+            EndpointMetering::ExactSubscription,
+        ),
+        (
+            MOONSHOT_KIMI_CODE_BILLING_SURFACE,
+            EndpointMetering::ExactSubscription,
+        ),
+        (
+            MINIMAX_TOKEN_PLAN_BILLING_SURFACE,
+            EndpointMetering::ExactSubscription,
+        ),
+        (
+            XIAOMI_TOKEN_PLAN_BILLING_SURFACE,
+            EndpointMetering::ExactSubscription,
+        ),
+        (
+            OAUTH_SUBSCRIPTION_BILLING_SURFACE,
+            EndpointMetering::ExactSubscription,
+        ),
+        (LOCAL_BILLING_SURFACE, EndpointMetering::LocalNoBill),
+        (UNCLASSIFIED_BILLING_SURFACE, EndpointMetering::Unknown),
+    ] {
+        if surface.eq_ignore_ascii_case(known) {
+            return metering;
+        }
     }
-    let parsed = reqwest::Url::parse(base_url?.trim()).ok()?;
+    EndpointMetering::Unknown
+}
+
+/// A base URL reduced to the non-secret parts a billing classification may
+/// depend on: scheme, host, normalized path. `None` when the URL carries
+/// embedded credentials, a query, a fragment, a non-default port, or is not
+/// HTTPS — any of which means CodeWhale cannot vouch for which surface it is.
+struct EndpointShape {
+    host: String,
+    path: String,
+}
+
+fn endpoint_shape(base_url: &str) -> Option<EndpointShape> {
+    let parsed = reqwest::Url::parse(base_url.trim()).ok()?;
     if parsed.scheme() != "https"
         || !parsed.username().is_empty()
         || parsed.password().is_some()
         || parsed.query().is_some()
         || parsed.fragment().is_some()
+        || parsed.port_or_known_default() != Some(443)
     {
         return None;
     }
-    let default = reqwest::Url::parse(DEFAULT_STEPFUN_BASE_URL).ok()?;
-    let official_host = default.host_str()?;
-    let host = parsed.host_str()?;
-    let path = parsed.path().trim_end_matches('/');
-    if parsed.port_or_known_default() != Some(443) {
-        return None;
+    Some(EndpointShape {
+        host: parsed.host_str()?.to_ascii_lowercase(),
+        path: parsed.path().trim_end_matches('/').to_string(),
+    })
+}
+
+fn host_of(url: &str) -> Option<String> {
+    reqwest::Url::parse(url)
+        .ok()?
+        .host_str()
+        .map(str::to_ascii_lowercase)
+}
+
+/// Reduce a concrete request endpoint to non-secret billing provenance.
+///
+/// Every reachable endpoint now gets a positive classification, including
+/// [`UNCLASSIFIED_BILLING_SURFACE`] for one CodeWhale cannot place. `None` is
+/// reserved for "no endpoint was supplied", which is a different failure and is
+/// also treated as unknown downstream. Nothing here consults credentials or
+/// echoes a URL, so the result is safe to persist and log.
+pub(crate) fn billing_surface_for_route(
+    provider: ApiProvider,
+    base_url: Option<&str>,
+) -> Option<&'static str> {
+    // Routes whose billing shape is a property of the provider itself, not of
+    // the endpoint spelling.
+    match provider {
+        ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm => {
+            return Some(LOCAL_BILLING_SURFACE);
+        }
+        ApiProvider::OpenaiCodex | ApiProvider::OpencodeGo => {
+            return Some(OAUTH_SUBSCRIPTION_BILLING_SURFACE);
+        }
+        // A named custom endpoint is never assumed to be metered; the billing
+        // presentation layer decides that from explicit config.
+        ApiProvider::Custom => return Some(UNCLASSIFIED_BILLING_SURFACE),
+        _ => {}
     }
-    if host.eq_ignore_ascii_case(official_host) && matches!(path, "" | "/v1") {
-        Some(STEPFUN_PAYG_BILLING_SURFACE)
-    } else if [STEPFUN_PLAN_BASE_URL, LEGACY_STEPFUN_PLAN_BASE_URL]
+
+    let base_url = base_url.map(str::trim).filter(|url| !url.is_empty())?;
+    let Some(shape) = endpoint_shape(base_url) else {
+        return Some(UNCLASSIFIED_BILLING_SURFACE);
+    };
+
+    let surface = match provider {
+        ApiProvider::Stepfun => stepfun_surface(&shape),
+        ApiProvider::Zai => zai_surface(&shape),
+        ApiProvider::Moonshot => moonshot_surface(&shape),
+        ApiProvider::Minimax | ApiProvider::MinimaxAnthropic => minimax_surface(&shape),
+        ApiProvider::XiaomiMimo => xiaomi_surface(&shape),
+        ApiProvider::Openrouter | ApiProvider::NvidiaNim | ApiProvider::OpencodeZen => {
+            is_official_default_endpoint(provider, &shape).then_some(AGGREGATOR_BILLING_SURFACE)
+        }
+        _ => is_official_default_endpoint(provider, &shape)
+            .then_some(FIRST_PARTY_PAYG_BILLING_SURFACE),
+    };
+    Some(surface.unwrap_or(UNCLASSIFIED_BILLING_SURFACE))
+}
+
+fn stepfun_surface(shape: &EndpointShape) -> Option<&'static str> {
+    if host_of(DEFAULT_STEPFUN_BASE_URL).is_some_and(|official| shape.host == official)
+        && matches!(shape.path.as_str(), "" | "/v1")
+    {
+        return Some(STEPFUN_PAYG_BILLING_SURFACE);
+    }
+    let plan_host = [STEPFUN_PLAN_BASE_URL, LEGACY_STEPFUN_PLAN_BASE_URL]
         .iter()
-        .filter_map(|url| reqwest::Url::parse(url).ok())
-        .any(|plan| {
-            plan.host_str()
-                .is_some_and(|plan_host| host.eq_ignore_ascii_case(plan_host))
-                && matches!(path, "/step_plan" | "/step_plan/v1")
-        })
+        .filter_map(|url| host_of(url))
+        .any(|plan| plan == shape.host);
+    if plan_host && matches!(shape.path.as_str(), "/step_plan" | "/step_plan/v1") {
+        return Some(STEPFUN_PLAN_BILLING_SURFACE);
+    }
+    None
+}
+
+fn zai_surface(shape: &EndpointShape) -> Option<&'static str> {
+    // The Coding Plan contract is the exact shipped Z.ai endpoint. Do not let
+    // arbitrary future `/api/coding/*` paths, or the separate BigModel host,
+    // inherit a subscription classification.
+    if shape.host == "api.z.ai" && shape.path == "/api/coding/paas/v4" {
+        Some(ZAI_CODING_PLAN_BILLING_SURFACE)
+    } else if matches!(shape.host.as_str(), "api.z.ai" | "open.bigmodel.cn")
+        && matches!(
+            shape.path.as_str(),
+            "/api/paas/v4" | "/api/anthropic" | "/v1" | ""
+        )
     {
-        Some(STEPFUN_PLAN_BILLING_SURFACE)
+        Some(ZAI_PAYG_BILLING_SURFACE)
     } else {
         None
+    }
+}
+
+fn moonshot_surface(shape: &EndpointShape) -> Option<&'static str> {
+    // Kimi Code is a distinct membership product on api.kimi.com.  Accept the
+    // exact shipped endpoint as well as its slash-normalized parent; do not
+    // infer a plan from a model id or from an arbitrary host carrying a
+    // `/coding` path.
+    if shape.host == "api.kimi.com" && matches!(shape.path.as_str(), "/coding" | "/coding/v1") {
+        Some(MOONSHOT_KIMI_CODE_BILLING_SURFACE)
+    } else if matches!(shape.host.as_str(), "api.moonshot.ai" | "api.moonshot.cn")
+        && matches!(shape.path.as_str(), "" | "/v1" | "/anthropic")
+    {
+        Some(MOONSHOT_PAYG_BILLING_SURFACE)
+    } else {
+        None
+    }
+}
+
+fn minimax_surface(shape: &EndpointShape) -> Option<&'static str> {
+    // MiniMax API keys and subscription-plan keys use the same normal
+    // endpoints. The URL therefore proves neither PAYG nor plan billing; only
+    // an explicit saved mode may produce a concrete MiniMax surface.
+    let _is_supported_endpoint = matches!(
+        shape.host.as_str(),
+        "api.minimax.io" | "api.minimaxi.com" | "api.minimax.chat"
+    ) && matches!(shape.path.as_str(), "" | "/v1" | "/anthropic");
+    None
+}
+
+fn xiaomi_surface(shape: &EndpointShape) -> Option<&'static str> {
+    if matches!(
+        shape.host.as_str(),
+        "token-plan-cn.xiaomimimo.com"
+            | "token-plan-sgp.xiaomimimo.com"
+            | "token-plan-ams.xiaomimimo.com"
+    ) && shape.path == "/v1"
+    {
+        return Some(XIAOMI_TOKEN_PLAN_BILLING_SURFACE);
+    }
+    if shape.host == "api.xiaomimimo.com" && shape.path == "/v1" {
+        return Some(XIAOMI_PAYG_BILLING_SURFACE);
+    }
+    None
+}
+
+/// Exact default endpoint match for built-in providers whose billing surface
+/// has no provider-specific split above.
+///
+/// A provider enum is not proof that a configured URL is that provider's own
+/// billing surface.  This allowlist keeps `https://proxy.example/v1` from
+/// inheriting OpenAI/Anthropic/DeepSeek/OpenRouter prices merely because the
+/// selected protocol/provider name is familiar.
+fn is_official_default_endpoint(provider: ApiProvider, shape: &EndpointShape) -> bool {
+    let Some(default) = endpoint_shape(provider.default_base_url()) else {
+        return false;
+    };
+    if shape.host != default.host {
+        return false;
+    }
+    if shape.path == default.path {
+        return true;
+    }
+    match provider {
+        ApiProvider::Deepseek | ApiProvider::DeepseekCN => {
+            matches!(shape.path.as_str(), "" | "/v1" | "/beta")
+        }
+        ApiProvider::DeepseekAnthropic => shape.path == "/anthropic",
+        ApiProvider::Openai => matches!(shape.path.as_str(), "" | "/v1"),
+        ApiProvider::Anthropic => matches!(shape.path.as_str(), "" | "/v1"),
+        _ => false,
     }
 }
 
@@ -330,6 +658,9 @@ fn known_pricing_for_model(model_lower: &str) -> Option<ModelPricing> {
     }
 }
 
+/// A USD row whose provider publishes input/cache-read/output rates but **no**
+/// cache-creation rate. Cache-write tokens on such a row are unpriced, not free
+/// and not silently charged at the input rate (#4318).
 fn usd_only_pricing(
     input_cache_hit_per_million: f64,
     input_cache_miss_per_million: f64,
@@ -339,7 +670,7 @@ fn usd_only_pricing(
         input_cache_hit_per_million,
         input_cache_miss_per_million,
         output_per_million,
-        None,
+        CacheWritePolicy::Unpublished,
     )
 }
 
@@ -353,7 +684,7 @@ fn usd_pricing_with_write(
         input_cache_hit_per_million,
         input_cache_miss_per_million,
         output_per_million,
-        Some(cache_write_per_million),
+        CacheWritePolicy::Rate(cache_write_per_million),
     )
 }
 
@@ -361,14 +692,14 @@ fn usd_pricing(
     input_cache_hit_per_million: f64,
     input_cache_miss_per_million: f64,
     output_per_million: f64,
-    cache_write_per_million: Option<f64>,
+    cache_write: CacheWritePolicy,
 ) -> ModelPricing {
     ModelPricing {
         usd: CurrencyPricing {
             input_cache_hit_per_million,
             input_cache_miss_per_million,
             output_per_million,
-            cache_write_per_million,
+            cache_write,
         },
         cny: None,
     }
@@ -446,19 +777,23 @@ fn claude_sonnet_5_pricing(now: DateTime<Utc>) -> ModelPricing {
     }
 }
 
+/// DeepSeek publishes only cache-hit and cache-miss input rates *because* its
+/// context cache charges nothing extra to write: a token that misses the cache
+/// is billed once at the miss rate and is cached as a side effect. That makes
+/// the miss rate the documented write rate, not a stand-in for a missing one.
 fn deepseek_v4_pro_pricing() -> ModelPricing {
     ModelPricing {
         usd: CurrencyPricing {
             input_cache_hit_per_million: 0.003625,
             input_cache_miss_per_million: 0.435,
             output_per_million: 0.87,
-            cache_write_per_million: None,
+            cache_write: CacheWritePolicy::DocumentedAsInputRate(DEEPSEEK_CACHE_WRITE_IS_FREE),
         },
         cny: Some(CurrencyPricing {
             input_cache_hit_per_million: 0.025,
             input_cache_miss_per_million: 3.0,
             output_per_million: 6.0,
-            cache_write_per_million: None,
+            cache_write: CacheWritePolicy::DocumentedAsInputRate(DEEPSEEK_CACHE_WRITE_IS_FREE),
         }),
     }
 }
@@ -469,13 +804,13 @@ fn deepseek_v4_flash_pricing() -> ModelPricing {
             input_cache_hit_per_million: 0.0028,
             input_cache_miss_per_million: 0.14,
             output_per_million: 0.28,
-            cache_write_per_million: None,
+            cache_write: CacheWritePolicy::DocumentedAsInputRate(DEEPSEEK_CACHE_WRITE_IS_FREE),
         },
         cny: Some(CurrencyPricing {
             input_cache_hit_per_million: 0.02,
             input_cache_miss_per_million: 1.0,
             output_per_million: 2.0,
-            cache_write_per_million: None,
+            cache_write: CacheWritePolicy::DocumentedAsInputRate(DEEPSEEK_CACHE_WRITE_IS_FREE),
         }),
     }
 }
@@ -495,6 +830,42 @@ pub fn calculate_turn_cost_estimate_from_usage(model: &str, usage: &Usage) -> Op
     Some(cost_estimate_with_pricing(pricing, usage))
 }
 
+/// Cost from a hand-sourced row, or `None` when the row cannot price a class
+/// this turn actually used.
+///
+/// Only cache-write can fail here: input, cache-read, and output rates are
+/// mandatory on every hand row, while a cache-creation rate exists only where a
+/// provider publishes one or documents that writes cost nothing extra.
+fn cost_estimate_with_pricing_checked(
+    pricing: ModelPricing,
+    usage: &Usage,
+) -> Result<CostEstimate, Vec<TokenClass>> {
+    let classes = token_usage_for_pricing(usage);
+    if classes.cache_write > 0
+        && pricing
+            .usd
+            .cache_write
+            .rate(pricing.usd.input_cache_miss_per_million)
+            .is_none()
+    {
+        return Err(vec![TokenClass::CacheWrite]);
+    }
+    Ok(CostEstimate {
+        usd: calculate_turn_cost_from_usage_with_pricing(pricing.usd, usage),
+        cny: pricing
+            .cny
+            .map(|pricing| calculate_turn_cost_from_usage_with_pricing(pricing, usage))
+            .unwrap_or(0.0),
+    })
+}
+
+/// Unchecked projection for the legacy model-only test helpers, which construct
+/// usage they have already established the row can price.
+///
+/// Production paths must use [`cost_estimate_with_pricing_checked`] so an
+/// unpublished cache-write rate fails closed instead of billing writes at the
+/// input rate.
+#[cfg(test)]
 fn cost_estimate_with_pricing(pricing: ModelPricing, usage: &Usage) -> CostEstimate {
     CostEstimate {
         usd: calculate_turn_cost_from_usage_with_pricing(pricing.usd, usage),
@@ -521,17 +892,18 @@ pub fn calculate_turn_cost_estimate_for_provider(
 /// Calculate cost only for routes that are actually money-metered. OAuth and
 /// token-plan routes deliberately return `None` even when the underlying model
 /// also exists behind a separately-priced public API.
+///
+/// Production callers use [`audit_turn_cost_for_route`] instead: a caller that
+/// adds to a total must also record why a turn was left out of it.
 #[must_use]
+#[cfg(test)]
 pub fn calculate_turn_cost_estimate_for_route(
     provider: ApiProvider,
     model: &str,
     usage: &Usage,
     billing: crate::route_billing::BillingPresentation,
 ) -> Option<CostEstimate> {
-    if !billing.shows_money() {
-        return None;
-    }
-    calculate_turn_cost_estimate_for_provider(provider, model, usage)
+    audit_turn_cost_for_route(provider, model, None, usage, Utc::now(), billing).estimate
 }
 
 /// Estimate a turn when endpoint-derived billing provenance is available.
@@ -556,8 +928,261 @@ pub(crate) fn calculate_turn_cost_estimate_for_provider_at(
     usage: &Usage,
     recorded_at: DateTime<Utc>,
 ) -> Option<CostEstimate> {
-    if provider == ApiProvider::OpenaiCodex || route_requires_billing_surface(provider, model) {
-        return None;
+    audit_turn_cost_for_provider_at(provider, model, usage, recorded_at).estimate
+}
+
+/// Why a route produced no cost estimate.
+///
+/// Every `None` from the estimator carries one of these so `/cost`, `/cache`,
+/// and the scorecard can say *why* a turn is missing from a total instead of
+/// letting the total read as complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnpricedReason {
+    /// The route is **exactly identified** as one where money is not the unit:
+    /// a named OAuth subscription, a named prepaid token plan, or a local
+    /// endpoint with no provider bill. Only this reason excuses a turn from
+    /// money coverage, and only exact evidence may produce it (#4318).
+    NotMoneyMetered,
+    /// The route may or may not meter money and CodeWhale could not establish
+    /// which. Distinct from [`Self::NotMoneyMetered`] on purpose: an unknown
+    /// basis is counted as *possibly missing spend*, never waved through as a
+    /// subscription. A cross-provider child route with no dispatch config is
+    /// the common case.
+    UnknownBillingBasis,
+    /// One provider/model pair spans several billing systems and the non-secret
+    /// endpoint provenance needed to pick one is missing.
+    AmbiguousBillingSurface,
+    /// No endpoint classification was supplied for the route at all.
+    ///
+    /// Distinct from [`Self::UnknownBillingBasis`], which means an endpoint was
+    /// classified and could not be placed. This means none was offered, so
+    /// there is no evidence the turn was served by the provider's own official
+    /// surface rather than a proxy, a gateway, or a self-hosted clone that
+    /// happens to speak the same protocol. A provider enum plus a familiar
+    /// model id is not that evidence (#4318).
+    UnestablishedEndpoint,
+    /// The turn's endpoint classified as a per-token surface, but the pricing
+    /// layer holds no rates for that specific surface (as opposed to no rates
+    /// for the model at all).
+    UnpricedBillingSurface,
+    /// The only pricing row found claims live provider provenance but is stale
+    /// or was fetched from a different endpoint, so it is not authoritative for
+    /// this turn. Never silently downgraded to "authoritative anyway".
+    UnverifiedLivePricing,
+    /// A compatibility alias whose published rate has been retired.
+    RetiredAlias,
+    /// The turn crossed a request-wide pricing tier the pricing layer cannot
+    /// represent yet (for example OpenAI's >272K long-context surcharge).
+    UnrepresentedTier,
+    /// No pricing row exists for this provider/model route.
+    NoPricingRow,
+    /// A row exists, but a token class this turn actually used has no published
+    /// price, so the estimate fails closed rather than under-reporting.
+    MissingClassPrice,
+    /// A catalog row contains a NaN, infinite, or negative rate. The whole row
+    /// is rejected at the trust boundary rather than partially billed.
+    InvalidPricingRow,
+    /// The row is denominated in a currency CodeWhale does not carry. No
+    /// conversion is invented.
+    UnsupportedCurrency,
+    /// Provider telemetry assigns more cache-hit/miss/write tokens than the
+    /// reported input total. Pricing that contradictory partition would
+    /// over-count input, so the call is retained but fails closed.
+    InconsistentUsage,
+}
+
+impl UnpricedReason {
+    /// Stable, non-localized identifier for logs, JSON, and scorecards.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NotMoneyMetered => "not_money_metered",
+            Self::UnknownBillingBasis => "unknown_billing_basis",
+            Self::AmbiguousBillingSurface => "ambiguous_billing_surface",
+            Self::UnestablishedEndpoint => "unestablished_endpoint",
+            Self::UnpricedBillingSurface => "unpriced_billing_surface",
+            Self::UnverifiedLivePricing => "unverified_live_pricing",
+            Self::RetiredAlias => "retired_alias",
+            Self::UnrepresentedTier => "unrepresented_pricing_tier",
+            Self::NoPricingRow => "no_pricing_row",
+            Self::MissingClassPrice => "missing_class_price",
+            Self::InvalidPricingRow => "invalid_pricing_row",
+            Self::UnsupportedCurrency => "unsupported_currency",
+            Self::InconsistentUsage => "inconsistent_usage",
+        }
+    }
+
+    /// Whether a turn with this reason belongs in the money-metered coverage
+    /// denominator `/cost` reports against its dollar total.
+    ///
+    /// Only [`Self::NotMoneyMetered`] — an *exactly* identified subscription,
+    /// token plan, or local route — is excluded. Everything else, including an
+    /// unknown billing basis, counts as spend the total is missing, because
+    /// treating "don't know" as "not billed" is what let unpriced turns
+    /// disappear from a total that then read as complete (#4318).
+    #[must_use]
+    pub fn counts_toward_money_coverage(self) -> bool {
+        self != Self::NotMoneyMetered
+    }
+}
+
+/// A turn cost plus the provenance and completeness needed to audit it.
+///
+/// `estimate.is_some()` and `unpriced_reason.is_none()` always agree: this type
+/// is produced by the same code path that computes the estimate, so an audit
+/// can never disagree with the number a total was built from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnCostAudit {
+    /// The cost, when the route is priced for every class this turn used.
+    pub estimate: Option<CostEstimate>,
+    /// Where the applied (or attempted) pricing row came from.
+    pub provenance: Option<PricingProvenance>,
+    /// Classes this turn used that carry no published price.
+    pub unpriced_classes: Vec<TokenClass>,
+    /// Why the estimate is absent, when it is.
+    pub unpriced_reason: Option<UnpricedReason>,
+    /// Set when a live catalog row could not be verified as authoritative for
+    /// this route. Present both when the row was *degraded* to the bundled
+    /// snapshot (the estimate is still priced, from the bundled row) and when
+    /// there was no fallback at all. It is the receipt for the downgrade, so a
+    /// `provider_live` label is never claimed for an unproven row.
+    pub live_pricing_defect: Option<LivePricingDefect>,
+    /// Whether the estimate is authoritative in each carried currency. A zero
+    /// amount is still priced when usage is zero; these flags therefore cannot
+    /// be inferred from `estimate > 0`.
+    pub usd_priced: bool,
+    pub cny_priced: bool,
+}
+
+impl TurnCostAudit {
+    fn priced(
+        estimate: CostEstimate,
+        provenance: PricingProvenance,
+        usd_priced: bool,
+        cny_priced: bool,
+    ) -> Self {
+        Self {
+            estimate: Some(estimate),
+            provenance: Some(provenance),
+            unpriced_classes: Vec::new(),
+            unpriced_reason: None,
+            live_pricing_defect: None,
+            usd_priced,
+            cny_priced,
+        }
+    }
+
+    pub(crate) fn unpriced(reason: UnpricedReason) -> Self {
+        Self {
+            estimate: None,
+            provenance: None,
+            unpriced_classes: Vec::new(),
+            unpriced_reason: Some(reason),
+            live_pricing_defect: None,
+            usd_priced: false,
+            cny_priced: false,
+        }
+    }
+
+    fn missing_classes(provenance: PricingProvenance, classes: Vec<TokenClass>) -> Self {
+        Self {
+            estimate: None,
+            provenance: Some(provenance),
+            unpriced_classes: classes,
+            unpriced_reason: Some(UnpricedReason::MissingClassPrice),
+            live_pricing_defect: None,
+            usd_priced: false,
+            cny_priced: false,
+        }
+    }
+
+    fn unverified_live(defect: LivePricingDefect) -> Self {
+        Self {
+            estimate: None,
+            // Deliberately not `ProviderLive`: an unverified row must never be
+            // labelled with authoritative live provenance.
+            provenance: Some(PricingProvenance::Unknown),
+            unpriced_classes: Vec::new(),
+            unpriced_reason: Some(UnpricedReason::UnverifiedLivePricing),
+            live_pricing_defect: Some(defect),
+            usd_priced: false,
+            cny_priced: false,
+        }
+    }
+
+    /// Attach a live-pricing downgrade receipt to an otherwise complete audit.
+    fn with_live_defect(mut self, defect: Option<LivePricingDefect>) -> Self {
+        if let Some(defect) = defect {
+            self.live_pricing_defect = Some(defect);
+        }
+        self
+    }
+
+    /// Whether this turn contributed an authoritative number to a total.
+    #[must_use]
+    #[cfg(test)]
+    pub fn is_priced(&self) -> bool {
+        self.estimate.is_some()
+    }
+
+    /// Whether the estimate is authoritative in the requested display
+    /// currency. Exact zero remains priced; the boolean provenance flags are
+    /// intentionally not inferred from the numeric amount.
+    #[must_use]
+    pub fn is_priced_in(&self, currency: CostCurrency) -> bool {
+        self.estimate.is_some()
+            && match currency {
+                CostCurrency::Usd => self.usd_priced,
+                CostCurrency::Cny => self.cny_priced,
+            }
+    }
+
+    /// Whether this turn belongs in the money-metered coverage denominator.
+    ///
+    /// Priced turns always do. Unpriced ones do unless the route was *exactly*
+    /// identified as non-metered.
+    #[must_use]
+    pub fn counts_toward_money_coverage(&self) -> bool {
+        self.unpriced_reason
+            .is_none_or(UnpricedReason::counts_toward_money_coverage)
+    }
+}
+
+/// Audit a turn on a provider/model route, without knowing which endpoint served
+/// it. A live catalog row cannot be *confirmed* for an unknown endpoint, so this
+/// path degrades to the bundled published snapshot; use
+/// [`audit_turn_cost_for_provider_on_endpoint_at`] when the base URL is known.
+#[must_use]
+pub(crate) fn audit_turn_cost_for_provider_at(
+    provider: ApiProvider,
+    model: &str,
+    usage: &Usage,
+    recorded_at: DateTime<Utc>,
+) -> TurnCostAudit {
+    audit_turn_cost_for_provider_on_endpoint_at(provider, model, None, usage, recorded_at)
+}
+
+/// Audit a turn's cost on a provider/model route at its recorded time.
+///
+/// This is the single implementation; `calculate_turn_cost_estimate_*` are thin
+/// projections of it, so no caller can build a total from one rule set while
+/// reporting completeness from another.
+#[must_use]
+pub(crate) fn audit_turn_cost_for_provider_on_endpoint_at(
+    provider: ApiProvider,
+    model: &str,
+    endpoint_fingerprint: Option<&str>,
+    usage: &Usage,
+    recorded_at: DateTime<Utc>,
+) -> TurnCostAudit {
+    if !usage_cache_partition_is_consistent(usage) {
+        return TurnCostAudit::unpriced(UnpricedReason::InconsistentUsage);
+    }
+    if provider == ApiProvider::OpenaiCodex {
+        return TurnCostAudit::unpriced(UnpricedReason::NotMoneyMetered);
+    }
+    if route_requires_billing_surface(provider, model) {
+        return TurnCostAudit::unpriced(UnpricedReason::AmbiguousBillingSurface);
     }
     let normalized_model = model.trim();
     let model_lower = normalized_model.to_ascii_lowercase();
@@ -565,15 +1190,17 @@ pub(crate) fn calculate_turn_cost_estimate_for_provider_at(
         provider,
         ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::DeepseekAnthropic
     );
-    let canonical_model = canonical_model_id_for_provider(provider, normalized_model)?;
+    let Some(canonical_model) = canonical_model_id_for_provider(provider, normalized_model) else {
+        return TurnCostAudit::unpriced(UnpricedReason::NoPricingRow);
+    };
     let catalog_model = if direct_deepseek
         && matches!(model_lower.as_str(), "deepseek-chat" | "deepseek-reasoner")
     {
-        let retirement = DateTime::parse_from_rfc3339(DEEPSEEK_ALIAS_RETIREMENT_UTC)
-            .ok()?
-            .with_timezone(&Utc);
-        if recorded_at >= retirement {
-            return None;
+        let Ok(retirement) = DateTime::parse_from_rfc3339(DEEPSEEK_ALIAS_RETIREMENT_UTC) else {
+            return TurnCostAudit::unpriced(UnpricedReason::NoPricingRow);
+        };
+        if recorded_at >= retirement.with_timezone(&Utc) {
+            return TurnCostAudit::unpriced(UnpricedReason::RetiredAlias);
         }
         DEEPSEEK_ALIAS_REPLACEMENT.to_string()
     } else {
@@ -581,7 +1208,7 @@ pub(crate) fn calculate_turn_cost_estimate_for_provider_at(
     };
 
     if direct_openai_long_context_tier_is_unpriced(provider, &catalog_model, usage.input_tokens) {
-        return None;
+        return TurnCostAudit::unpriced(UnpricedReason::UnrepresentedTier);
     }
 
     // MiniMax-M3 doubles its published rates above 512K total input. The
@@ -593,8 +1220,7 @@ pub(crate) fn calculate_turn_cost_estimate_for_provider_at(
         ApiProvider::Minimax | ApiProvider::MinimaxAnthropic
     ) && catalog_model.eq_ignore_ascii_case("minimax-m3")
     {
-        let pricing = pricing_for_model_and_usage(&catalog_model, usage)?;
-        return Some(cost_estimate_with_pricing(pricing, usage));
+        return hand_priced_audit(pricing_for_model_and_usage(&catalog_model, usage), usage);
     }
 
     // Direct DeepSeek pricing carries an authoritative CNY row, and Sonnet 5
@@ -605,36 +1231,179 @@ pub(crate) fn calculate_turn_cost_estimate_for_provider_at(
         || (provider == ApiProvider::Anthropic
             && catalog_model.eq_ignore_ascii_case("claude-sonnet-5"))
     {
-        let pricing = provider_owned_hand_pricing_at(provider, &catalog_model, recorded_at)?;
-        return Some(cost_estimate_with_pricing(pricing, usage));
+        return hand_priced_audit(
+            provider_owned_hand_pricing_at(provider, &catalog_model, recorded_at),
+            usage,
+        );
     }
 
-    if let Some(offering) =
-        crate::provider_lake::catalog_offering_for_model(provider, &catalog_model)
-        && OfferingPricing::from_catalog_offering(&offering).is_some()
+    let classes = token_usage_for_pricing(usage);
+    // A live catalog row is only authoritative when it is fresh *and* was
+    // fetched from the endpoint this turn was served on. When it is not, degrade
+    // to the bundled published snapshot and receipt the defect; only if there is
+    // no bundled row at all does the turn fail closed (#4318).
+    let mut live_defect = None;
+    let offering = match verified_catalog_offering(
+        provider,
+        &catalog_model,
+        endpoint_fingerprint,
+        recorded_at,
+    ) {
+        VerifiedOffering::Usable(offering) => Some(offering),
+        VerifiedOffering::DegradedToBundled { offering, defect } => {
+            live_defect = Some(defect);
+            Some(offering)
+        }
+        VerifiedOffering::Unusable(defect) => {
+            live_defect = Some(defect);
+            None
+        }
+        VerifiedOffering::Absent => None,
+    };
+
+    if let Some(audit) = offering.as_ref().and_then(invalid_catalog_pricing_audit) {
+        return audit.with_live_defect(live_defect);
+    }
+
+    if let Some(offering) = offering.as_ref()
+        && let Some(pricing) =
+            effective_offering_pricing(provider, &catalog_model, offering, &classes)
     {
         if let Some(estimate) =
-            catalog_cost_estimate_for_route(provider, &catalog_model, &offering, usage)
+            catalog_cost_estimate_for_route(provider, &catalog_model, offering, usage)
         {
-            return Some(estimate);
+            let (usd_priced, cny_priced) = match pricing.currency {
+                Currency::Usd => (true, false),
+                Currency::Cny => (false, true),
+                Currency::Other(_) => (false, false),
+            };
+            return TurnCostAudit::priced(
+                estimate,
+                pricing.provenance.clone(),
+                usd_priced,
+                cny_priced,
+            )
+            .with_live_defect(live_defect);
         }
-        if catalog_gap_uses_documented_hand_price(provider, &catalog_model, &offering, usage) {
-            let pricing = provider_owned_hand_pricing_at(provider, &catalog_model, recorded_at)?;
-            return Some(cost_estimate_with_pricing(pricing, usage));
+        let classes = pricing.unpriced_used_classes(&classes);
+        if classes.is_empty() {
+            // Every used class is priced, so the only way the estimate failed
+            // is a currency CodeWhale does not carry. Never convert.
+            return TurnCostAudit::unpriced(UnpricedReason::UnsupportedCurrency)
+                .with_live_defect(live_defect);
         }
-        return None;
+        return TurnCostAudit::missing_classes(pricing.provenance, classes)
+            .with_live_defect(live_defect);
     }
 
     // A few first-party rows predate or intentionally omit a Models.dev entry
     // (for example OpenAI API `gpt-5-codex` and MiniMax `minimax-m2.7`).
     // Preserve only an explicit provider-owned allowlist here;
     // a costless foreign/catalog route must remain unpriced.
-    let pricing = provider_owned_hand_pricing_at(provider, &catalog_model, recorded_at)?;
-    Some(cost_estimate_with_pricing(pricing, usage))
+    let hand_row = provider_owned_hand_pricing_at(provider, &catalog_model, recorded_at);
+
+    // An unverifiable live row with no bundled fallback and no hand row is a
+    // route CodeWhale cannot price truthfully. Say which, rather than reporting
+    // the unverified rate or a bare "no pricing row".
+    match (live_defect, hand_row) {
+        (Some(defect), None) => TurnCostAudit::unverified_live(defect),
+        (defect, hand_row) => hand_priced_audit(hand_row, usage).with_live_defect(defect),
+    }
+}
+
+/// Convert malformed catalog numerics into an explicit runtime audit reason.
+/// Keeping this distinct from the ordinary `None` projection prevents a bad
+/// published row from becoming indistinguishable from an absent price.
+fn invalid_catalog_pricing_audit(
+    offering: &codewhale_config::catalog::CatalogOffering,
+) -> Option<TurnCostAudit> {
+    offering
+        .cost
+        .as_ref()
+        .is_some_and(|cost| !codewhale_config::pricing::catalog_cost_is_valid(cost))
+        .then(|| TurnCostAudit::unpriced(UnpricedReason::InvalidPricingRow))
+}
+
+/// Outcome of checking a catalog row's pricing provenance against the route.
+enum VerifiedOffering {
+    /// The row is authoritative as-is (bundled, user override, or a live row
+    /// proven fresh and endpoint-matched).
+    Usable(codewhale_config::catalog::CatalogOffering),
+    /// The live row could not be verified, so the bundled published row is used
+    /// instead. The defect is retained as the receipt for why.
+    DegradedToBundled {
+        offering: codewhale_config::catalog::CatalogOffering,
+        defect: LivePricingDefect,
+    },
+    /// The live row could not be verified and no bundled row exists.
+    Unusable(LivePricingDefect),
+    /// No catalog row for this provider/model at all.
+    Absent,
+}
+
+/// Resolve the catalog row to price against, refusing to treat an unverifiable
+/// live row as authoritative.
+///
+/// `endpoint_fingerprint` is the non-secret SHA-256 digest of the base URL the turn
+/// was actually served on (see [`codewhale_config::catalog::base_url_fingerprint`]).
+/// Callers that do not know the endpoint pass `None`, which cannot *confirm* a
+/// live row — so those callers degrade to the bundled snapshot rather than
+/// billing against a rate whose endpoint scope is unproven.
+fn verified_catalog_offering(
+    provider: ApiProvider,
+    catalog_model: &str,
+    endpoint_fingerprint: Option<&str>,
+    recorded_at: DateTime<Utc>,
+) -> VerifiedOffering {
+    let Some(offering) = crate::provider_lake::catalog_offering_for_model(provider, catalog_model)
+    else {
+        return VerifiedOffering::Absent;
+    };
+    let Some(pricing) = OfferingPricing::from_catalog_offering(&offering) else {
+        // No priced row to verify; downstream treats this as unpriced.
+        return VerifiedOffering::Usable(offering);
+    };
+    // `recorded_at` is the turn's own clock, which is the right reference for
+    // "was this price current when the turn happened".
+    let now_unix = u64::try_from(recorded_at.timestamp()).ok();
+    let Some(defect) =
+        pricing.live_pricing_defect(endpoint_fingerprint, now_unix, LIVE_PRICING_MAX_AGE_SECS)
+    else {
+        return VerifiedOffering::Usable(offering);
+    };
+    match crate::provider_lake::bundled_catalog_offering_for_model(provider, catalog_model) {
+        Some(bundled) => VerifiedOffering::DegradedToBundled {
+            offering: bundled,
+            defect,
+        },
+        None => VerifiedOffering::Unusable(defect),
+    }
+}
+
+/// Project a hand-sourced provider row into an audit.
+///
+/// A hand row always publishes input, cache-read, and output rates. Cache-write
+/// is the one class that can be genuinely absent: only providers that publish a
+/// write premium, or document that cache creation carries no separate charge,
+/// can price it. A turn that wrote to cache on a row with neither fact fails
+/// closed and names the class, rather than being billed at the input rate on the
+/// strength of an assumption (#4318).
+fn hand_priced_audit(pricing: Option<ModelPricing>, usage: &Usage) -> TurnCostAudit {
+    let Some(pricing) = pricing else {
+        return TurnCostAudit::unpriced(UnpricedReason::NoPricingRow);
+    };
+    let has_cny = pricing.cny.is_some();
+    match cost_estimate_with_pricing_checked(pricing, usage) {
+        Ok(estimate) => {
+            TurnCostAudit::priced(estimate, PricingProvenance::ProviderDocs, true, has_cny)
+        }
+        Err(classes) => TurnCostAudit::missing_classes(PricingProvenance::ProviderDocs, classes),
+    }
 }
 
 /// Recorded-time variant with explicit billing-surface provenance.
 #[must_use]
+#[cfg(test)]
 pub(crate) fn calculate_turn_cost_estimate_for_route_at(
     provider: ApiProvider,
     model: &str,
@@ -642,14 +1411,180 @@ pub(crate) fn calculate_turn_cost_estimate_for_route_at(
     usage: &Usage,
     recorded_at: DateTime<Utc>,
 ) -> Option<CostEstimate> {
+    audit_turn_cost_for_route_at(provider, model, billing_surface, usage, recorded_at).estimate
+}
+
+/// Audit a turn's cost with endpoint-derived billing provenance.
+#[must_use]
+pub(crate) fn audit_turn_cost_for_route_at(
+    provider: ApiProvider,
+    model: &str,
+    billing_surface: Option<&str>,
+    usage: &Usage,
+    recorded_at: DateTime<Utc>,
+) -> TurnCostAudit {
+    audit_turn_cost_for_route_on_endpoint_at(
+        provider,
+        model,
+        billing_surface,
+        None,
+        usage,
+        recorded_at,
+    )
+}
+
+/// Audit a turn's cost with both endpoint-derived billing provenance and the
+/// endpoint fingerprint needed to verify live catalog pricing.
+#[must_use]
+pub(crate) fn audit_turn_cost_for_route_on_endpoint_at(
+    provider: ApiProvider,
+    model: &str,
+    billing_surface: Option<&str>,
+    endpoint_fingerprint: Option<&str>,
+    usage: &Usage,
+    recorded_at: DateTime<Utc>,
+) -> TurnCostAudit {
+    // An explicitly recorded surface is evidence.  Exact non-metered surfaces
+    // override provider guesses; an explicit unknown/unrecognized surface must
+    // fail closed and may never fall through to a familiar model's hand row.
+    match endpoint_metering_for_billing_surface(billing_surface) {
+        EndpointMetering::ExactSubscription | EndpointMetering::LocalNoBill => {
+            return TurnCostAudit::unpriced(UnpricedReason::NotMoneyMetered);
+        }
+        EndpointMetering::Unknown if billing_surface.is_some() => {
+            return TurnCostAudit::unpriced(UnpricedReason::UnknownBillingBasis);
+        }
+        EndpointMetering::Unknown | EndpointMetering::Money => {}
+    }
+    if !usage_cache_partition_is_consistent(usage) {
+        return TurnCostAudit::unpriced(UnpricedReason::InconsistentUsage);
+    }
     if provider == ApiProvider::Stepfun {
-        let pricing = pricing_for_billing_surface(provider, model, billing_surface)?;
-        return Some(cost_estimate_with_pricing(pricing, usage));
+        return match pricing_for_billing_surface(provider, model, billing_surface) {
+            // StepFun's hand row publishes no cache-write rate, so a turn that
+            // wrote to cache fails closed here as well.
+            Some(pricing) => match cost_estimate_with_pricing_checked(pricing, usage) {
+                Ok(estimate) => {
+                    TurnCostAudit::priced(estimate, PricingProvenance::ProviderDocs, true, false)
+                }
+                Err(classes) => {
+                    TurnCostAudit::missing_classes(PricingProvenance::ProviderDocs, classes)
+                }
+            },
+            // The surface classified as per-token but no rates exist for it, or
+            // no surface was established at all.
+            None => TurnCostAudit::unpriced(match billing_surface {
+                Some(_) => UnpricedReason::UnpricedBillingSurface,
+                None => UnpricedReason::AmbiguousBillingSurface,
+            }),
+        };
     }
     if model.trim().eq_ignore_ascii_case(DEFAULT_STEPFUN_MODEL) {
-        return None;
+        return TurnCostAudit::unpriced(UnpricedReason::AmbiguousBillingSurface);
     }
-    calculate_turn_cost_estimate_for_provider_at(provider, model, usage, recorded_at)
+    // This is the *route* audit: the caller is asserting it knows which
+    // endpoint served the turn. With no classification at all, nothing
+    // distinguishes the provider's own official surface from a proxy, a
+    // gateway, or a self-hosted clone speaking the same protocol — a provider
+    // enum plus a familiar model id is not evidence of an official endpoint.
+    // So the turn prices as unknown rather than at official rates.
+    //
+    // Callers that genuinely hold only a provider and a model use
+    // `audit_turn_cost_for_provider_*`, which says so in its name and carries
+    // its own weaker claim.
+    if billing_surface.is_none() {
+        return TurnCostAudit::unpriced(UnpricedReason::UnestablishedEndpoint);
+    }
+    audit_turn_cost_for_provider_on_endpoint_at(
+        provider,
+        model,
+        endpoint_fingerprint,
+        usage,
+        recorded_at,
+    )
+}
+
+/// Audit a turn against the route's billing presentation.
+///
+/// The three non-metered presentations are **not** interchangeable, and
+/// collapsing them was the bug (#4318):
+///
+/// - [`BillingPresentation::Subscription`] and [`BillingPresentation::Local`]
+///   are exact evidence that money is the wrong unit, so those turns are
+///   `NotMoneyMetered` and drop out of the coverage denominator.
+/// - [`BillingPresentation::Unknown`] is *not* such evidence. It means CodeWhale
+///   could not establish the basis, so the turn is `UnknownBillingBasis`: still
+///   unpriced, but counted as spend the total may be missing.
+///
+/// [`BillingPresentation::Subscription`]: crate::route_billing::BillingPresentation::Subscription
+/// [`BillingPresentation::Local`]: crate::route_billing::BillingPresentation::Local
+/// [`BillingPresentation::Unknown`]: crate::route_billing::BillingPresentation::Unknown
+#[must_use]
+#[cfg(test)]
+pub fn audit_turn_cost_for_route(
+    provider: ApiProvider,
+    model: &str,
+    billing_surface: Option<&str>,
+    usage: &Usage,
+    recorded_at: DateTime<Utc>,
+    billing: crate::route_billing::BillingPresentation,
+) -> TurnCostAudit {
+    audit_turn_cost_for_route_on_endpoint(
+        provider,
+        model,
+        billing_surface,
+        None,
+        usage,
+        recorded_at,
+        billing,
+    )
+}
+
+/// [`audit_turn_cost_for_route`] plus the endpoint fingerprint that lets live
+/// catalog pricing be verified for this exact route.
+#[must_use]
+#[cfg(test)]
+pub fn audit_turn_cost_for_route_on_endpoint(
+    provider: ApiProvider,
+    model: &str,
+    billing_surface: Option<&str>,
+    endpoint_fingerprint: Option<&str>,
+    usage: &Usage,
+    recorded_at: DateTime<Utc>,
+    billing: crate::route_billing::BillingPresentation,
+) -> TurnCostAudit {
+    use crate::route_billing::BillingPresentation;
+    match billing {
+        BillingPresentation::Subscription(_) | BillingPresentation::Local => {
+            return TurnCostAudit::unpriced(UnpricedReason::NotMoneyMetered);
+        }
+        BillingPresentation::Unknown => {
+            return TurnCostAudit::unpriced(UnpricedReason::UnknownBillingBasis);
+        }
+        BillingPresentation::Metered => {}
+    }
+    // A metered presentation still has to survive the endpoint classification:
+    // an endpoint that classifies as an exact subscription surface overrides a
+    // metered guess, and an unclassifiable one fails closed.
+    match endpoint_metering_for_billing_surface(billing_surface) {
+        EndpointMetering::ExactSubscription | EndpointMetering::LocalNoBill => {
+            return TurnCostAudit::unpriced(UnpricedReason::NotMoneyMetered);
+        }
+        // `Unknown` here is the common, benign case of a caller that has no
+        // endpoint to classify; the provider/model path below still decides.
+        EndpointMetering::Unknown if billing_surface.is_some() => {
+            return TurnCostAudit::unpriced(UnpricedReason::UnknownBillingBasis);
+        }
+        EndpointMetering::Unknown | EndpointMetering::Money => {}
+    }
+    audit_turn_cost_for_route_on_endpoint_at(
+        provider,
+        model,
+        billing_surface,
+        endpoint_fingerprint,
+        usage,
+        recorded_at,
+    )
 }
 
 fn provider_owned_hand_pricing_at(
@@ -700,28 +1635,32 @@ fn provider_owned_hand_pricing_at(
         .flatten()
 }
 
-/// Whether a failed catalog estimate is missing only a class whose billing is
-/// explicitly documented by the provider-owned row. Keep this narrow: a hand
-/// row must not fill unrelated catalog gaps (for example an unpublished cache
-/// read rate) merely because the model name is known locally.
-fn catalog_gap_uses_documented_hand_price(
+/// The offering's pricing row as it actually applies to this route.
+///
+/// Two documented first-party routes publish no separate cache rate *because*
+/// cache tokens are billed at the plain input rate; that substitution happens
+/// here so cost estimation and the unpriced-class audit read the same row.
+fn effective_offering_pricing(
     provider: ApiProvider,
     model: &str,
     offering: &codewhale_config::catalog::CatalogOffering,
-    usage: &Usage,
-) -> bool {
-    if provider != ApiProvider::Openai || !model.eq_ignore_ascii_case("gpt-5.5") {
-        return false;
+    classes: &TokenUsage,
+) -> Option<OfferingPricing> {
+    let mut pricing = OfferingPricing::from_catalog_offering(offering)?;
+    let model_lower = model.trim().to_ascii_lowercase();
+    let cache_uses_input_rate = matches!(
+        (provider, model_lower.as_str()),
+        (ApiProvider::Openai, "gpt-5.5-pro") | (ApiProvider::Arcee, "trinity-large-thinking")
+    );
+    if cache_uses_input_rate {
+        if classes.cache_read > 0 && pricing.cache_read_per_million.is_none() {
+            pricing.cache_read_per_million = pricing.input_per_million;
+        }
+        if classes.cache_write > 0 && pricing.cache_write_per_million.is_none() {
+            pricing.cache_write_per_million = pricing.input_per_million;
+        }
     }
-    let Some(pricing) = OfferingPricing::from_catalog_offering(offering) else {
-        return false;
-    };
-    let usage = token_usage_for_pricing(usage);
-    usage.cache_write > 0
-        && pricing.cache_write_per_million.is_none()
-        && (usage.input == 0 || pricing.input_per_million.is_some())
-        && (usage.output == 0 || pricing.output_per_million.is_some())
-        && (usage.cache_read == 0 || pricing.cache_read_per_million.is_some())
+    Some(pricing)
 }
 
 /// Estimate usage only from the exact provider offering. Missing prices for a
@@ -733,23 +1672,10 @@ fn catalog_cost_estimate_for_route(
     offering: &codewhale_config::catalog::CatalogOffering,
     usage: &Usage,
 ) -> Option<CostEstimate> {
-    let usage = token_usage_for_pricing(usage);
-    let mut pricing = OfferingPricing::from_catalog_offering(offering)?;
-    let model_lower = model.trim().to_ascii_lowercase();
-    let cache_uses_input_rate = matches!(
-        (provider, model_lower.as_str()),
-        (ApiProvider::Openai, "gpt-5.5-pro") | (ApiProvider::Arcee, "trinity-large-thinking")
-    );
-    if cache_uses_input_rate {
-        if usage.cache_read > 0 && pricing.cache_read_per_million.is_none() {
-            pricing.cache_read_per_million = pricing.input_per_million;
-        }
-        if usage.cache_write > 0 && pricing.cache_write_per_million.is_none() {
-            pricing.cache_write_per_million = pricing.input_per_million;
-        }
-    }
+    let classes = token_usage_for_pricing(usage);
+    let pricing = effective_offering_pricing(provider, model, offering, &classes)?;
 
-    let amount = pricing.estimate_cost(&usage)?;
+    let amount = pricing.estimate_cost(&classes)?;
     match pricing.currency {
         Currency::Usd => Some(CostEstimate::usd_only(amount)),
         Currency::Cny => Some(CostEstimate {
@@ -767,24 +1693,35 @@ fn catalog_cost_estimate_for_route(
 /// `Usage::prompt_cache_write_tokens` maps to `TokenUsage::cache_write` so
 /// providers that publish a write premium (Anthropic 1.25x–2x) are not
 /// undercounted.
+///
+/// `Usage::reasoning_tokens` is deliberately **not** added to the billable
+/// output. Every provider CodeWhale normalizes reports reasoning as a *subset*
+/// of the completion count it already bills — OpenAI Responses nests
+/// `reasoning_tokens` under `output_tokens_details` while `output_tokens` is
+/// the total, and Chat Completions nests it under `completion_tokens_details`
+/// while `completion_tokens` is the total. Adding it charged reasoning turns
+/// twice for the same tokens (up to 2x on reasoning-heavy turns). It stays on
+/// `Usage` as informational telemetry (`/usage`, hooks, sub-agent metadata).
 #[must_use]
 pub fn token_usage_for_pricing(usage: &Usage) -> TokenUsage {
-    let cache_read = usage.prompt_cache_hit_tokens.unwrap_or(0);
-    let cache_write = usage.prompt_cache_write_tokens.unwrap_or(0);
-    let non_cached_reported = usage.prompt_cache_miss_tokens.unwrap_or_else(|| {
-        usage
-            .input_tokens
-            .saturating_sub(cache_read)
-            .saturating_sub(cache_write)
-    });
-    let accounted_input = cache_read
-        .saturating_add(non_cached_reported)
-        .saturating_add(cache_write);
-    let uncategorized_input = usage.input_tokens.saturating_sub(accounted_input);
+    // `input_tokens` is the authoritative total. Even malformed provider
+    // telemetry must never produce token classes whose sum exceeds it. The
+    // audit path rejects contradictory partitions; this bounded projection
+    // keeps token-only displays truthful while retaining deterministic class
+    // priority (read, write, then miss/unclassified input).
+    let total_input = usage.input_tokens;
+    let cache_read = usage.prompt_cache_hit_tokens.unwrap_or(0).min(total_input);
+    let after_read = total_input.saturating_sub(cache_read);
+    let cache_write = usage.prompt_cache_write_tokens.unwrap_or(0).min(after_read);
+    let after_write = after_read.saturating_sub(cache_write);
+    let non_cached_reported = usage
+        .prompt_cache_miss_tokens
+        .unwrap_or(after_write)
+        .min(after_write);
+    let uncategorized_input = after_write.saturating_sub(non_cached_reported);
     let input = non_cached_reported.saturating_add(uncategorized_input);
-    let output = usage
-        .output_tokens
-        .saturating_add(usage.reasoning_tokens.unwrap_or(0));
+    // Reasoning tokens are already inside `output_tokens`; see the doc comment.
+    let output = usage.output_tokens;
 
     TokenUsage {
         input: u64::from(input),
@@ -794,13 +1731,24 @@ pub fn token_usage_for_pricing(usage: &Usage) -> TokenUsage {
     }
 }
 
+fn usage_cache_partition_is_consistent(usage: &Usage) -> bool {
+    let reported = u64::from(usage.prompt_cache_hit_tokens.unwrap_or(0))
+        + u64::from(usage.prompt_cache_miss_tokens.unwrap_or(0))
+        + u64::from(usage.prompt_cache_write_tokens.unwrap_or(0));
+    reported <= u64::from(usage.input_tokens)
+}
+
 fn calculate_turn_cost_from_usage_with_pricing(pricing: CurrencyPricing, usage: &Usage) -> f64 {
     let usage = token_usage_for_pricing(usage);
     let hit_cost = (usage.cache_read as f64 / 1_000_000.0) * pricing.input_cache_hit_per_million;
     let miss_cost = (usage.input as f64 / 1_000_000.0) * pricing.input_cache_miss_per_million;
+    // An unpublished write policy is only reachable here for usage with zero
+    // cache-write tokens; `cost_estimate_with_pricing_checked` rejects the rest
+    // before any money is computed.
     let write_rate = pricing
-        .cache_write_per_million
-        .unwrap_or(pricing.input_cache_miss_per_million);
+        .cache_write
+        .rate(pricing.input_cache_miss_per_million)
+        .unwrap_or(0.0);
     let write_cost = (usage.cache_write as f64 / 1_000_000.0) * write_rate;
     let output_cost = (usage.output as f64 / 1_000_000.0) * pricing.output_per_million;
     hit_cost + miss_cost + write_cost + output_cost
@@ -873,7 +1821,9 @@ pub fn calculate_cache_savings_for_provider(
 #[must_use]
 pub fn format_cost_amount(cost: f64, currency: CostCurrency) -> String {
     let symbol = currency.symbol();
-    if cost < 0.0001 {
+    if cost == 0.0 {
+        format!("{symbol}0.00")
+    } else if cost > 0.0 && cost < 0.0001 {
         format!("<{symbol}0.0001")
     } else if cost < 0.01 {
         format!("{symbol}{cost:.4}")
@@ -886,7 +1836,9 @@ pub fn format_cost_amount(cost: f64, currency: CostCurrency) -> String {
 #[must_use]
 pub fn format_cost_amount_precise(cost: f64, currency: CostCurrency) -> String {
     let symbol = currency.symbol();
-    if cost < 0.0001 {
+    if cost == 0.0 {
+        format!("{symbol}0.0000")
+    } else if cost > 0.0 && cost < 0.0001 {
         format!("<{symbol}0.0001")
     } else {
         format!("{symbol}{cost:.4}")
@@ -903,6 +1855,578 @@ pub fn format_cost_estimate(estimate: CostEstimate, currency: CostCurrency) -> S
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn malformed_catalog_row_has_an_explicit_runtime_reason() {
+        let offering = codewhale_config::catalog::CatalogOffering {
+            provider: "openrouter".to_string(),
+            wire_model_id: "openai/gpt-5.5".to_string(),
+            cost: Some(codewhale_config::models_dev::ModelsDevCost {
+                input: Some(f64::NAN),
+                output: Some(30.0),
+                cache_read: Some(0.05),
+                cache_write: None,
+            }),
+            ..Default::default()
+        };
+
+        let audit = invalid_catalog_pricing_audit(&offering)
+            .expect("malformed row must become an explicit failed-closed audit");
+        assert!(!audit.is_priced());
+        assert_eq!(
+            audit.unpriced_reason,
+            Some(UnpricedReason::InvalidPricingRow)
+        );
+        assert_eq!(
+            audit.unpriced_reason.unwrap().label(),
+            "invalid_pricing_row"
+        );
+    }
+
+    /// A hand-sourced row with **no published** cache-write rate must fail closed
+    /// for a turn that wrote to cache, while a row whose provider *documents*
+    /// that writes carry no separate charge prices it at the input rate.
+    ///
+    /// Both used to be `None` and both silently billed writes at the input rate,
+    /// which invented a price for the first case (#4318).
+    #[test]
+    fn unpublished_cache_write_fails_closed_but_documented_same_rate_prices() {
+        let write_heavy = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 0,
+            prompt_cache_hit_tokens: Some(0),
+            prompt_cache_miss_tokens: Some(900_000),
+            prompt_cache_write_tokens: Some(100_000),
+            ..Usage::default()
+        };
+        let now = Utc::now();
+
+        // DeepSeek documents that a cache miss is billed once and cached for
+        // free, so the miss rate *is* the published write rate. The policy
+        // carries the documentation receipt rather than being an assumption.
+        let deepseek = deepseek_v4_flash_pricing();
+        assert_eq!(
+            deepseek.usd.cache_write,
+            CacheWritePolicy::DocumentedAsInputRate(DEEPSEEK_CACHE_WRITE_IS_FREE)
+        );
+        let priced = audit_turn_cost_for_provider_at(
+            ApiProvider::Deepseek,
+            "deepseek-v4-flash",
+            &write_heavy,
+            now,
+        );
+        assert!(priced.is_priced(), "{priced:?}");
+        // 900k miss + 100k write, both at the 0.14/M miss rate.
+        let expected = (0.9 + 0.1) * 0.14;
+        assert!(
+            (priced.estimate.expect("priced").usd - expected).abs() < 1e-12,
+            "{priced:?}"
+        );
+
+        // StepFun's hand row publishes input/cache-read/output only. A write
+        // turn is unpriced and names the class instead of borrowing the input
+        // rate.
+        let stepfun = pricing_for_billing_surface(
+            ApiProvider::Stepfun,
+            DEFAULT_STEPFUN_MODEL,
+            Some(STEPFUN_PAYG_BILLING_SURFACE),
+        )
+        .expect("StepFun PAYG row");
+        assert_eq!(stepfun.usd.cache_write, CacheWritePolicy::Unpublished);
+        let failed = audit_turn_cost_for_route_at(
+            ApiProvider::Stepfun,
+            DEFAULT_STEPFUN_MODEL,
+            Some(STEPFUN_PAYG_BILLING_SURFACE),
+            &write_heavy,
+            now,
+        );
+        assert!(!failed.is_priced(), "{failed:?}");
+        assert_eq!(
+            failed.unpriced_reason,
+            Some(UnpricedReason::MissingClassPrice)
+        );
+        assert_eq!(failed.unpriced_classes, vec![TokenClass::CacheWrite]);
+
+        // The same route with no cache-write tokens prices normally, proving the
+        // gap is class-scoped rather than route-scoped.
+        let no_write = Usage {
+            prompt_cache_write_tokens: None,
+            ..write_heavy.clone()
+        };
+        assert!(
+            audit_turn_cost_for_route_at(
+                ApiProvider::Stepfun,
+                DEFAULT_STEPFUN_MODEL,
+                Some(STEPFUN_PAYG_BILLING_SURFACE),
+                &no_write,
+                now,
+            )
+            .is_priced()
+        );
+    }
+
+    /// Every exact billing surface a route can carry must be understood, and
+    /// anything unrecognized must fail closed as unknown rather than defaulting
+    /// into per-token dollars (#4318).
+    #[test]
+    fn endpoint_classification_covers_every_exact_billing_surface() {
+        for (provider, base_url, expected_surface, expected_metering) in [
+            (
+                ApiProvider::Zai,
+                "https://api.z.ai/api/coding/paas/v4",
+                ZAI_CODING_PLAN_BILLING_SURFACE,
+                EndpointMetering::ExactSubscription,
+            ),
+            (
+                ApiProvider::Zai,
+                "https://api.z.ai/api/paas/v4",
+                ZAI_PAYG_BILLING_SURFACE,
+                EndpointMetering::Money,
+            ),
+            (
+                ApiProvider::Moonshot,
+                crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+                MOONSHOT_KIMI_CODE_BILLING_SURFACE,
+                EndpointMetering::ExactSubscription,
+            ),
+            (
+                ApiProvider::Moonshot,
+                "https://api.moonshot.ai/v1",
+                MOONSHOT_PAYG_BILLING_SURFACE,
+                EndpointMetering::Money,
+            ),
+            (
+                ApiProvider::XiaomiMimo,
+                crate::config::XIAOMI_MIMO_PAY_AS_YOU_GO_BASE_URL,
+                XIAOMI_PAYG_BILLING_SURFACE,
+                EndpointMetering::Money,
+            ),
+            (
+                ApiProvider::XiaomiMimo,
+                crate::config::DEFAULT_XIAOMI_MIMO_BASE_URL,
+                XIAOMI_TOKEN_PLAN_BILLING_SURFACE,
+                EndpointMetering::ExactSubscription,
+            ),
+            (
+                ApiProvider::Stepfun,
+                "https://api.stepfun.ai/step_plan/v1",
+                STEPFUN_PLAN_BILLING_SURFACE,
+                EndpointMetering::ExactSubscription,
+            ),
+            (
+                ApiProvider::Stepfun,
+                "https://api.stepfun.ai/v1",
+                STEPFUN_PAYG_BILLING_SURFACE,
+                EndpointMetering::Money,
+            ),
+            (
+                ApiProvider::Anthropic,
+                "https://api.anthropic.com/v1",
+                FIRST_PARTY_PAYG_BILLING_SURFACE,
+                EndpointMetering::Money,
+            ),
+            (
+                ApiProvider::Openrouter,
+                "https://openrouter.ai/api/v1",
+                AGGREGATOR_BILLING_SURFACE,
+                EndpointMetering::Money,
+            ),
+        ] {
+            let surface = billing_surface_for_route(provider, Some(base_url));
+            assert_eq!(surface, Some(expected_surface), "{provider:?} {base_url}");
+            assert_eq!(
+                endpoint_metering_for_billing_surface(surface),
+                expected_metering,
+                "{provider:?} {base_url}"
+            );
+        }
+
+        // Provider-intrinsic surfaces need no URL at all.
+        for (provider, expected_surface, expected_metering) in [
+            (
+                ApiProvider::OpenaiCodex,
+                OAUTH_SUBSCRIPTION_BILLING_SURFACE,
+                EndpointMetering::ExactSubscription,
+            ),
+            (
+                ApiProvider::OpencodeGo,
+                OAUTH_SUBSCRIPTION_BILLING_SURFACE,
+                EndpointMetering::ExactSubscription,
+            ),
+            (
+                ApiProvider::Ollama,
+                LOCAL_BILLING_SURFACE,
+                EndpointMetering::LocalNoBill,
+            ),
+            (
+                ApiProvider::Vllm,
+                LOCAL_BILLING_SURFACE,
+                EndpointMetering::LocalNoBill,
+            ),
+            // A named custom endpoint's pay mode is config, not URL shape.
+            (
+                ApiProvider::Custom,
+                UNCLASSIFIED_BILLING_SURFACE,
+                EndpointMetering::Unknown,
+            ),
+        ] {
+            let surface = billing_surface_for_route(provider, None);
+            assert_eq!(surface, Some(expected_surface), "{provider:?}");
+            assert_eq!(
+                endpoint_metering_for_billing_surface(surface),
+                expected_metering,
+                "{provider:?}"
+            );
+        }
+
+        // An unrecognized surface id — including one a newer build might write —
+        // is never guessed into a known bucket.
+        for unknown in [
+            Some("some-future-surface"),
+            Some(""),
+            Some("   "),
+            Some(UNCLASSIFIED_BILLING_SURFACE),
+            None,
+        ] {
+            assert_eq!(
+                endpoint_metering_for_billing_surface(unknown),
+                EndpointMetering::Unknown,
+                "{unknown:?}"
+            );
+        }
+    }
+
+    /// An endpoint that was never established is not the official endpoint.
+    ///
+    /// The route audit used to fall through to the provider/model catalog when
+    /// no billing surface was supplied, which meant a persisted or recorded row
+    /// carrying nothing but `provider: "openai"` and a familiar model id got
+    /// billed at OpenAI's published first-party rates — even though the turn
+    /// could equally have been served by a proxy, a gateway, or a self-hosted
+    /// clone speaking the same protocol. Absence of endpoint evidence is not
+    /// evidence of the official endpoint.
+    #[test]
+    fn an_unestablished_endpoint_is_never_priced_as_the_official_one() {
+        let usage = Usage {
+            input_tokens: 10_000,
+            output_tokens: 1_000,
+            ..Usage::default()
+        };
+        let now = Utc::now();
+        for (provider, model) in [
+            (ApiProvider::Openai, "gpt-5.5"),
+            (ApiProvider::Anthropic, "claude-haiku-4-5"),
+            (ApiProvider::Deepseek, "deepseek-v4-flash"),
+            (ApiProvider::Openrouter, "openai/gpt-5.5"),
+            (ApiProvider::Moonshot, "kimi-k2.7-code"),
+        ] {
+            let audit = audit_turn_cost_for_route_at(provider, model, None, &usage, now);
+            assert_eq!(
+                audit.unpriced_reason,
+                Some(UnpricedReason::UnestablishedEndpoint),
+                "{provider:?}/{model}: {audit:?}"
+            );
+            assert!(!audit.is_priced(), "{provider:?}/{model}: {audit:?}");
+            assert_eq!(audit.estimate, None, "{provider:?}/{model}");
+            // An unknown route is still possibly-spent money, so it stays in
+            // the coverage denominator rather than being excused like an OAuth
+            // or local route.
+            assert!(
+                audit.counts_toward_money_coverage(),
+                "{provider:?}/{model}: an unknown route must not leave money coverage"
+            );
+
+            // The same route with its endpoint actually classified prices
+            // normally: this is a fail-closed rule, not a refusal to price.
+            // (OpenRouter is excluded here only because its aggregator surface
+            // carries no bundled rate at all, which is a different gap.)
+            if provider == ApiProvider::Openrouter {
+                continue;
+            }
+            let classified = audit_turn_cost_for_route_at(
+                provider,
+                model,
+                billing_surface_for_route(provider, Some(provider.default_base_url())),
+                &usage,
+                now,
+            );
+            assert!(
+                classified.is_priced(),
+                "{provider:?}/{model} must price on its own official endpoint: {classified:?}"
+            );
+        }
+
+        // The distinction is preserved end to end: "no endpoint offered" and
+        // "endpoint offered but unplaceable" are different findings, and
+        // neither is a price.
+        let unplaceable = audit_turn_cost_for_route_at(
+            ApiProvider::Openai,
+            "gpt-5.5",
+            billing_surface_for_route(ApiProvider::Openai, Some("https://proxy.example/v1")),
+            &usage,
+            now,
+        );
+        assert_eq!(
+            unplaceable.unpriced_reason,
+            Some(UnpricedReason::UnknownBillingBasis)
+        );
+    }
+
+    #[test]
+    fn builtin_provider_names_do_not_price_unofficial_proxy_endpoints() {
+        let usage = Usage {
+            input_tokens: 10_000,
+            output_tokens: 1_000,
+            ..Usage::default()
+        };
+        for (provider, model) in [
+            (ApiProvider::Deepseek, "deepseek-v4-flash"),
+            (ApiProvider::Openai, "gpt-5.5"),
+            (ApiProvider::Anthropic, "claude-haiku-4-5"),
+            (ApiProvider::Openrouter, "openai/gpt-5.5"),
+        ] {
+            let surface = billing_surface_for_route(provider, Some("https://proxy.example/v1"));
+            assert_eq!(surface, Some(UNCLASSIFIED_BILLING_SURFACE), "{provider:?}");
+            let audit = audit_turn_cost_for_route_at(provider, model, surface, &usage, Utc::now());
+            assert_eq!(
+                audit.unpriced_reason,
+                Some(UnpricedReason::UnknownBillingBasis),
+                "{provider:?}: {audit:?}"
+            );
+            assert!(!audit.is_priced(), "{provider:?}: {audit:?}");
+        }
+
+        assert_eq!(
+            billing_surface_for_route(
+                ApiProvider::Moonshot,
+                Some(crate::config::DEFAULT_KIMI_CODE_BASE_URL)
+            ),
+            Some(MOONSHOT_KIMI_CODE_BILLING_SURFACE)
+        );
+        for (provider, endpoint) in [
+            (ApiProvider::Minimax, "https://api.minimax.io/v1"),
+            (
+                ApiProvider::MinimaxAnthropic,
+                "https://api.minimax.io/anthropic",
+            ),
+            (ApiProvider::Minimax, "https://api.minimax.io/v1/token-plan"),
+            (
+                ApiProvider::XiaomiMimo,
+                "https://token-plan-proxy.example/v1",
+            ),
+            (
+                ApiProvider::Zai,
+                "https://api.z.ai/api/coding/something-else",
+            ),
+        ] {
+            assert_eq!(
+                billing_surface_for_route(provider, Some(endpoint)),
+                Some(UNCLASSIFIED_BILLING_SURFACE),
+                "{provider:?} {endpoint}"
+            );
+        }
+    }
+
+    /// A route classified as an exact subscription surface is not money-metered
+    /// even when the provider-level presentation guessed "metered", and it must
+    /// never reach a per-token rate.
+    #[test]
+    fn exact_plan_surface_overrides_a_metered_presentation() {
+        let usage = Usage {
+            input_tokens: 100_000,
+            output_tokens: 10_000,
+            ..Usage::default()
+        };
+        let audit = audit_turn_cost_for_route(
+            ApiProvider::Zai,
+            "glm-5.2",
+            Some(ZAI_CODING_PLAN_BILLING_SURFACE),
+            &usage,
+            Utc::now(),
+            crate::route_billing::BillingPresentation::Metered,
+        );
+        assert!(!audit.is_priced(), "{audit:?}");
+        assert_eq!(audit.unpriced_reason, Some(UnpricedReason::NotMoneyMetered));
+        assert!(!audit.counts_toward_money_coverage());
+
+        // The same model on the per-token surface is money-metered, so it stays
+        // in the coverage denominator whether or not a price is found.
+        let payg = audit_turn_cost_for_route(
+            ApiProvider::Zai,
+            "glm-5.2",
+            Some(ZAI_PAYG_BILLING_SURFACE),
+            &usage,
+            Utc::now(),
+            crate::route_billing::BillingPresentation::Metered,
+        );
+        assert!(payg.counts_toward_money_coverage(), "{payg:?}");
+    }
+
+    /// An unknown billing basis is *not* a subscription. It stays unpriced and
+    /// stays inside the money-coverage denominator, so its spend is reported as
+    /// missing rather than excused (#4318).
+    #[test]
+    fn unknown_billing_basis_is_not_excused_as_not_money_metered() {
+        let usage = Usage {
+            input_tokens: 10_000,
+            output_tokens: 1_000,
+            ..Usage::default()
+        };
+        let unknown = audit_turn_cost_for_route(
+            ApiProvider::Anthropic,
+            "claude-haiku-4-5",
+            None,
+            &usage,
+            Utc::now(),
+            crate::route_billing::BillingPresentation::Unknown,
+        );
+        assert!(!unknown.is_priced());
+        assert_eq!(
+            unknown.unpriced_reason,
+            Some(UnpricedReason::UnknownBillingBasis)
+        );
+        assert!(unknown.counts_toward_money_coverage());
+
+        // Local and subscription presentations are exact, so they *are* excused.
+        for billing in [
+            crate::route_billing::BillingPresentation::Local,
+            crate::route_billing::BillingPresentation::Subscription("plan"),
+        ] {
+            let audit = audit_turn_cost_for_route(
+                ApiProvider::Anthropic,
+                "claude-haiku-4-5",
+                None,
+                &usage,
+                Utc::now(),
+                billing,
+            );
+            assert_eq!(audit.unpriced_reason, Some(UnpricedReason::NotMoneyMetered));
+            assert!(!audit.counts_toward_money_coverage());
+        }
+    }
+
+    #[test]
+    fn audit_names_why_a_turn_is_missing_from_a_total() {
+        let write_heavy = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 100_000,
+            prompt_cache_hit_tokens: Some(200_000),
+            prompt_cache_write_tokens: Some(100_000),
+            ..Usage::default()
+        };
+
+        // Anthropic publishes a cache-write rate: fully priced, provenance kept.
+        let priced = audit_turn_cost_for_provider_at(
+            ApiProvider::Anthropic,
+            "claude-haiku-4-5",
+            &write_heavy,
+            Utc::now(),
+        );
+        assert!(priced.is_priced());
+        assert_eq!(priced.unpriced_reason, None);
+        assert!(priced.unpriced_classes.is_empty());
+        assert!(priced.provenance.is_some());
+
+        // Moonshot does not: the turn fails closed and names the class.
+        let missing = audit_turn_cost_for_provider_at(
+            ApiProvider::Moonshot,
+            "kimi-k2.7-code",
+            &write_heavy,
+            Utc::now(),
+        );
+        assert!(!missing.is_priced());
+        assert_eq!(
+            missing.unpriced_reason,
+            Some(UnpricedReason::MissingClassPrice)
+        );
+        assert_eq!(missing.unpriced_classes, vec![TokenClass::CacheWrite]);
+        // Dropping the write tokens makes the very same route priceable, which
+        // proves the gap is class-scoped rather than route-scoped.
+        let no_write = Usage {
+            prompt_cache_write_tokens: None,
+            ..write_heavy.clone()
+        };
+        assert!(
+            audit_turn_cost_for_provider_at(
+                ApiProvider::Moonshot,
+                "kimi-k2.7-code",
+                &no_write,
+                Utc::now(),
+            )
+            .is_priced()
+        );
+
+        // Subscription/OAuth and ambiguous-surface routes report their own
+        // reasons rather than an absent price.
+        assert_eq!(
+            audit_turn_cost_for_provider_at(
+                ApiProvider::OpenaiCodex,
+                "gpt-5.5",
+                &write_heavy,
+                Utc::now(),
+            )
+            .unpriced_reason,
+            Some(UnpricedReason::NotMoneyMetered)
+        );
+        assert_eq!(
+            audit_turn_cost_for_route_at(
+                ApiProvider::Stepfun,
+                DEFAULT_STEPFUN_MODEL,
+                None,
+                &write_heavy,
+                Utc::now(),
+            )
+            .unpriced_reason,
+            Some(UnpricedReason::AmbiguousBillingSurface)
+        );
+        assert_eq!(
+            audit_turn_cost_for_provider_at(
+                ApiProvider::Openai,
+                "gpt-5.5",
+                &Usage {
+                    input_tokens: OPENAI_LONG_CONTEXT_SURCHARGE_THRESHOLD + 1,
+                    ..Usage::default()
+                },
+                Utc::now(),
+            )
+            .unpriced_reason,
+            Some(UnpricedReason::UnrepresentedTier)
+        );
+    }
+
+    /// The audit and the estimator are the same computation, so every route
+    /// must agree on whether it produced a number.
+    #[test]
+    fn audit_and_estimate_never_disagree() {
+        let usage = Usage {
+            input_tokens: 10_000,
+            output_tokens: 1_000,
+            prompt_cache_hit_tokens: Some(2_000),
+            prompt_cache_write_tokens: Some(1_000),
+            ..Usage::default()
+        };
+        let now = Utc::now();
+        for (provider, model) in [
+            (ApiProvider::Anthropic, "claude-haiku-4-5"),
+            (ApiProvider::Anthropic, "claude-sonnet-5"),
+            (ApiProvider::Moonshot, "kimi-k2.7-code"),
+            (ApiProvider::Openai, "gpt-5.5"),
+            (ApiProvider::OpenaiCodex, "gpt-5.5"),
+            (ApiProvider::Deepseek, "deepseek-v4-pro"),
+            (ApiProvider::Ollama, "gpt-5.5"),
+            (ApiProvider::Stepfun, DEFAULT_STEPFUN_MODEL),
+        ] {
+            let audit = audit_turn_cost_for_route_at(provider, model, None, &usage, now);
+            let estimate =
+                calculate_turn_cost_estimate_for_route_at(provider, model, None, &usage, now);
+            assert_eq!(audit.estimate, estimate, "{provider:?}/{model}");
+            assert_eq!(
+                audit.is_priced(),
+                audit.unpriced_reason.is_none(),
+                "{provider:?}/{model}"
+            );
+        }
+    }
 
     #[test]
     fn nvidia_nim_deepseek_model_does_not_use_deepseek_platform_pricing() {
@@ -934,6 +2458,11 @@ mod tests {
                 "{base_url}"
             );
         }
+        // Endpoints CodeWhale cannot place now classify *positively* as
+        // unclassified rather than returning `None`. Both fail closed
+        // identically, but "we looked and could not place this" is a different
+        // fact from "no endpoint was supplied", and the audit reports it as
+        // such (#4318).
         for base_url in [
             "http://api.stepfun.ai/v1",
             "https://token@api.stepfun.ai/v1",
@@ -943,13 +2472,25 @@ mod tests {
         ] {
             assert_eq!(
                 billing_surface_for_route(ApiProvider::Stepfun, Some(base_url)),
-                None,
+                Some(UNCLASSIFIED_BILLING_SURFACE),
                 "{base_url}"
             );
+            assert_eq!(
+                endpoint_metering_for_billing_surface(Some(UNCLASSIFIED_BILLING_SURFACE)),
+                EndpointMetering::Unknown
+            );
         }
+        // A StepFun URL paired with the OpenRouter protocol is a foreign custom
+        // endpoint, not proof of either provider's billing surface.
         assert_eq!(
             billing_surface_for_route(ApiProvider::Openrouter, Some(DEFAULT_STEPFUN_BASE_URL)),
-            None
+            Some(UNCLASSIFIED_BILLING_SURFACE)
+        );
+        // No endpoint at all stays `None`.
+        assert_eq!(
+            billing_surface_for_route(ApiProvider::Stepfun, None),
+            None,
+            "an absent endpoint is not a classification"
         );
 
         let usage = Usage {
@@ -968,9 +2509,8 @@ mod tests {
         assert!((payg.usd - 0.735).abs() < 1e-12);
         assert_eq!(payg.cny, 0.0);
 
-        // Provider/model-only callers (background compaction, sub-agents, and
-        // legacy records) cannot distinguish PAYG from Step Plan and must not
-        // add either route to spend or savings totals.
+        // Provider/model-only legacy callers cannot distinguish PAYG from Step
+        // Plan and must not add either route to spend or savings totals.
         assert!(
             calculate_turn_cost_estimate_for_provider(
                 ApiProvider::Stepfun,
@@ -1338,7 +2878,7 @@ mod tests {
         assert_eq!(pricing.usd.input_cache_hit_per_million, 0.06);
         assert_eq!(pricing.usd.input_cache_miss_per_million, 0.30);
         assert_eq!(pricing.usd.output_per_million, 1.20);
-        assert_eq!(pricing.usd.cache_write_per_million, Some(0.375));
+        assert_eq!(pricing.usd.cache_write, CacheWritePolicy::Rate(0.375));
     }
 
     #[test]
@@ -1392,19 +2932,21 @@ mod tests {
             assert_eq!(estimate.cny, 0.0);
         }
 
-        // Anthropic / Qwen rows that publish a cache-write premium (#4318).
+        // Anthropic / Qwen rows that publish a cache-write premium, and one row
+        // (`gpt-5.5`) that publishes none — which is `Unpublished`, not a
+        // licence to bill writes at the input rate (#4318).
         for (model, write) in [
-            ("claude-opus-4-8", Some(6.25)),
-            ("claude-sonnet-4-6", Some(3.75)),
-            ("claude-haiku-4-5", Some(1.25)),
-            ("claude-fable-5", Some(12.50)),
-            ("qwen/qwen3.7-plus", Some(0.40)),
-            ("gpt-5.5", None),
+            ("claude-opus-4-8", CacheWritePolicy::Rate(6.25)),
+            ("claude-sonnet-4-6", CacheWritePolicy::Rate(3.75)),
+            ("claude-haiku-4-5", CacheWritePolicy::Rate(1.25)),
+            ("claude-fable-5", CacheWritePolicy::Rate(12.50)),
+            ("qwen/qwen3.7-plus", CacheWritePolicy::Rate(0.40)),
+            ("gpt-5.5", CacheWritePolicy::Unpublished),
         ] {
             let pricing = pricing_for_model_at(model, Utc::now()).expect(model);
             assert_eq!(
-                pricing.usd.cache_write_per_million, write,
-                "cache-write rate for {model}"
+                pricing.usd.cache_write, write,
+                "cache-write policy for {model}"
             );
         }
     }
@@ -1551,7 +3093,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_hand_price_fills_catalog_missing_used_class() {
+    fn provider_price_does_not_invent_catalog_missing_cache_write_class() {
         let offering =
             crate::provider_lake::catalog_offering_for_model(ApiProvider::Openai, "gpt-5.5")
                 .expect("bundled OpenAI route");
@@ -1566,16 +3108,15 @@ mod tests {
             ..Default::default()
         };
 
-        let estimate = calculate_turn_cost_estimate_for_provider_at(
-            ApiProvider::Openai,
-            "gpt-5.5",
-            &usage,
-            Utc::now(),
-        )
-        .expect("provider hand price supplies the missing cache-write class");
+        let audit =
+            audit_turn_cost_for_provider_at(ApiProvider::Openai, "gpt-5.5", &usage, Utc::now());
 
-        assert!((estimate.usd - 1.25).abs() < f64::EPSILON);
-        assert_eq!(estimate.cny, 0.0);
+        assert!(audit.estimate.is_none());
+        assert_eq!(
+            audit.unpriced_reason,
+            Some(UnpricedReason::MissingClassPrice)
+        );
+        assert_eq!(audit.unpriced_classes, vec![TokenClass::CacheWrite]);
     }
 
     #[test]
@@ -1657,13 +3198,15 @@ mod tests {
     }
 
     #[test]
-    fn token_usage_for_pricing_maps_cache_and_reasoning_classes() {
+    fn token_usage_for_pricing_maps_cache_classes_without_double_billing_reasoning() {
         let usage = Usage {
             input_tokens: 1_000,
             output_tokens: 100,
             prompt_cache_hit_tokens: Some(250),
             prompt_cache_miss_tokens: Some(700),
             prompt_cache_write_tokens: Some(50),
+            // Reasoning is a subset of the 100 reported output tokens, not an
+            // extra 50 tokens of billable output.
             reasoning_tokens: Some(50),
             ..Default::default()
         };
@@ -1672,10 +3215,75 @@ mod tests {
             token_usage_for_pricing(&usage),
             TokenUsage {
                 input: 700,
-                output: 150,
+                output: 100,
                 cache_read: 250,
                 cache_write: 50,
             }
+        );
+
+        // Informational reasoning telemetry must not move the billed output at
+        // all: the same completion count costs the same with or without it.
+        let without_reasoning = Usage {
+            reasoning_tokens: None,
+            ..usage.clone()
+        };
+        assert_eq!(
+            token_usage_for_pricing(&usage).output,
+            token_usage_for_pricing(&without_reasoning).output
+        );
+        assert_eq!(
+            calculate_turn_cost_estimate_for_provider(
+                ApiProvider::Anthropic,
+                "claude-haiku-4-5",
+                &usage,
+            ),
+            calculate_turn_cost_estimate_for_provider(
+                ApiProvider::Anthropic,
+                "claude-haiku-4-5",
+                &without_reasoning,
+            )
+        );
+    }
+
+    #[test]
+    fn contradictory_cache_partition_is_bounded_and_fails_closed() {
+        let usage = Usage {
+            input_tokens: 100,
+            output_tokens: 10,
+            prompt_cache_hit_tokens: Some(80),
+            prompt_cache_miss_tokens: Some(40),
+            prompt_cache_write_tokens: Some(30),
+            ..Usage::default()
+        };
+
+        let classes = token_usage_for_pricing(&usage);
+        assert_eq!(
+            classes.input + classes.cache_read + classes.cache_write,
+            u64::from(usage.input_tokens),
+            "token projection may never exceed the provider's input total"
+        );
+        let audit = audit_turn_cost_for_provider_on_endpoint_at(
+            ApiProvider::Deepseek,
+            "deepseek-v4-flash",
+            None,
+            &usage,
+            Utc::now(),
+        );
+        assert!(audit.estimate.is_none());
+        assert_eq!(
+            audit.unpriced_reason,
+            Some(UnpricedReason::InconsistentUsage)
+        );
+
+        let overflow_shape = Usage {
+            input_tokens: u32::MAX,
+            prompt_cache_hit_tokens: Some(u32::MAX),
+            prompt_cache_miss_tokens: Some(1),
+            ..Usage::default()
+        };
+        assert!(
+            !usage_cache_partition_is_consistent(&overflow_shape),
+            "consistency validation must not hide overflow via saturation"
         );
     }
 
@@ -1713,11 +3321,11 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            calculate_turn_cost_estimate_for_route(
+            calculate_turn_cost_estimate_for_billing_surface(
                 ApiProvider::Anthropic,
                 "claude-sonnet-5",
+                Some(FIRST_PARTY_PAYG_BILLING_SURFACE),
                 &usage,
-                crate::route_billing::BillingPresentation::Metered,
             )
             .is_some()
         );
@@ -1798,7 +3406,7 @@ mod tests {
         assert_eq!(pricing.usd.input_cache_hit_per_million, 0.20);
         assert_eq!(pricing.usd.input_cache_miss_per_million, 2.00);
         assert_eq!(pricing.usd.output_per_million, 10.00);
-        assert_eq!(pricing.usd.cache_write_per_million, Some(2.50));
+        assert_eq!(pricing.usd.cache_write, CacheWritePolicy::Rate(2.50));
         assert!(pricing.cny.is_none());
     }
 
@@ -1810,7 +3418,7 @@ mod tests {
         assert_eq!(pricing.usd.input_cache_hit_per_million, 0.30);
         assert_eq!(pricing.usd.input_cache_miss_per_million, 3.00);
         assert_eq!(pricing.usd.output_per_million, 15.00);
-        assert_eq!(pricing.usd.cache_write_per_million, Some(3.75));
+        assert_eq!(pricing.usd.cache_write, CacheWritePolicy::Rate(3.75));
         assert!(pricing.cny.is_none());
         assert!(has_pricing_for_model("claude-sonnet-5"));
     }
@@ -1914,6 +3522,8 @@ mod tests {
     fn format_cost_amount_uses_selected_symbol() {
         assert_eq!(format_cost_amount(0.42, CostCurrency::Usd), "$0.42");
         assert_eq!(format_cost_amount(2.0, CostCurrency::Cny), "¥2.00");
+        assert_eq!(format_cost_amount(0.0, CostCurrency::Usd), "$0.00");
+        assert_eq!(format_cost_amount(0.00001, CostCurrency::Usd), "<$0.0001");
     }
 
     #[test]
@@ -1925,6 +3535,38 @@ mod tests {
         assert_eq!(
             format_cost_amount_precise(0.1234, CostCurrency::Cny),
             "¥0.1234"
+        );
+        assert_eq!(
+            format_cost_amount_precise(0.0, CostCurrency::Usd),
+            "$0.0000"
+        );
+        assert_eq!(
+            format_cost_amount_precise(0.00001, CostCurrency::Usd),
+            "<$0.0001"
+        );
+    }
+
+    #[test]
+    fn accumulated_cost_stays_finite_and_nonnegative() {
+        let saturated = CostEstimate {
+            usd: f64::MAX,
+            cny: 1.0,
+        }
+        .saturating_add(CostEstimate {
+            usd: f64::MAX,
+            cny: -1.0,
+        });
+        assert_eq!(saturated.usd, f64::MAX);
+        assert_eq!(saturated.cny, 1.0);
+        assert!(saturated.is_finite_nonnegative());
+
+        assert_eq!(
+            CostEstimate {
+                usd: f64::NAN,
+                cny: f64::INFINITY,
+            }
+            .sanitized(),
+            CostEstimate::default()
         );
     }
 

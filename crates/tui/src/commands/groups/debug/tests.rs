@@ -70,7 +70,11 @@ fn test_tokens_shows_usage_info() {
     assert!(msg.contains("Cache hit/miss:"));
     assert!(msg.contains("70 hit / 30 miss"));
     assert!(msg.contains("Cumulative tokens:"));
-    assert!(msg.contains("Approx session cost:"));
+    // Not "approx session cost": the figure is the priced subtotal, and a
+    // session with no priced turn reports `unknown` rather than the raw
+    // accumulator (#4318).
+    assert!(msg.contains("Priced amount:"));
+    assert!(msg.contains("Priced amount:         unknown"), "{msg}");
     assert!(msg.contains("API messages:"));
     assert!(msg.contains("Chat messages:"));
     assert!(msg.contains("Model:"));
@@ -96,16 +100,311 @@ fn tokens_report_uses_codex_oauth_route_context() {
 #[test]
 fn test_cost_shows_spending_info() {
     let mut app = create_test_app();
+    // A total is only reportable with the coverage that qualifies it. Setting
+    // the accumulator alone is the legacy shape, checked separately below.
+    app.session.cost_priced_turns = 1;
     app.session.session_cost = 0.1234;
     let result = cost(&mut app);
     assert!(result.message.is_some());
     let msg = result.message.unwrap();
-    assert!(msg.contains("Session Cost"));
-    assert!(msg.contains("Approx total spent:"));
-    assert!(msg.contains("approximate"));
-    assert!(msg.contains("$0.1234"));
-    assert!(msg.contains("Provider API Pricing"));
-    assert!(!msg.contains("DeepSeek API Pricing"));
+    assert!(msg.contains("Session Cost"), "{msg}");
+    assert!(msg.contains("Estimated total:"), "{msg}");
+    assert!(msg.contains("$0.1234"), "{msg}");
+    // The old copy hedged with "approximate" and then printed a static
+    // "Provider API Pricing" rate card that was not what the number was
+    // computed from. Both are gone: the report now names its own basis and
+    // its coverage instead of gesturing at a price list (#4318).
+    assert!(msg.contains("estimate, not a bill"), "{msg}");
+    assert!(msg.contains("Covered: 1 of 1"), "{msg}");
+    assert!(!msg.contains("Provider API Pricing"), "{msg}");
+    assert!(!msg.contains("DeepSeek API Pricing"), "{msg}");
+}
+
+/// The same accumulator with no coverage behind it is not a total. It is the
+/// exact state a pre-coverage session restores into, and reporting it as
+/// "Estimated total: $0.1234" would claim the figure is complete.
+#[test]
+fn cost_report_will_not_promote_an_unqualified_accumulator_to_a_total() {
+    let mut app = create_test_app();
+    app.session.session_cost = 0.1234;
+
+    let msg = cost(&mut app).message.expect("cost report");
+    assert!(msg.contains("Estimated total: unknown"), "{msg}");
+    assert!(!msg.contains("$0.1234"), "{msg}");
+}
+
+#[test]
+fn cost_report_states_its_coverage_and_names_what_it_excludes() {
+    use crate::pricing::audit_turn_cost_for_provider_at;
+
+    let mut app = create_test_app();
+    let write_heavy = crate::models::Usage {
+        input_tokens: 1_000_000,
+        output_tokens: 100_000,
+        prompt_cache_hit_tokens: Some(200_000),
+        prompt_cache_write_tokens: Some(100_000),
+        ..Default::default()
+    };
+    let now = chrono::Utc::now();
+
+    // One priced turn, one turn whose route publishes no cache-write rate, and
+    // one subscription turn that is not money-metered at all.
+    let priced = audit_turn_cost_for_provider_at(
+        crate::config::ApiProvider::Anthropic,
+        "claude-haiku-4-5",
+        &write_heavy,
+        now,
+    );
+    assert!(priced.is_priced(), "fixture must be priced");
+    app.record_turn_cost_audit(&priced);
+    app.accrue_session_cost_estimate(priced.estimate.expect("priced"));
+
+    let unpriced = audit_turn_cost_for_provider_at(
+        crate::config::ApiProvider::Moonshot,
+        "kimi-k2.7-code",
+        &write_heavy,
+        now,
+    );
+    assert!(!unpriced.is_priced(), "fixture must fail closed");
+    app.record_turn_cost_audit(&unpriced);
+
+    let oauth = audit_turn_cost_for_provider_at(
+        crate::config::ApiProvider::OpenaiCodex,
+        "gpt-5.5",
+        &write_heavy,
+        now,
+    );
+    app.record_turn_cost_audit(&oauth);
+    assert!(
+        !app.session
+            .cost_unpriced_reasons
+            .contains("not_money_metered")
+    );
+
+    let msg = cost(&mut app).message.expect("cost report");
+
+    // Non-metered routes are not counted as "incomplete dollars".
+    assert!(msg.contains("Covered: 1 of 2"), "{msg}");
+    assert!(msg.contains("estimate, not a bill"), "{msg}");
+    assert!(msg.contains("Excluded: 1"), "{msg}");
+    assert!(msg.contains("Priced subtotal:"), "{msg}");
+    assert!(msg.contains("missing_class_price"), "{msg}");
+    assert!(msg.contains("cache_write"), "{msg}");
+
+    // A run with no unpriced turns says so without an exclusion note.
+    let mut clean = create_test_app();
+    clean.record_turn_cost_audit(&priced);
+    let clean_msg = cost(&mut clean).message.expect("cost report");
+    assert!(clean_msg.contains("Covered: 1 of 1"), "{clean_msg}");
+    assert!(clean_msg.contains("Estimated total:"), "{clean_msg}");
+    assert!(!clean_msg.contains("Excluded:"), "{clean_msg}");
+    assert!(clean_msg.contains("estimate, not a bill"), "{clean_msg}");
+    // Provenance of the row the total was built from is part of explaining it.
+    assert!(clean_msg.contains("Pricing sources used:"), "{clean_msg}");
+}
+
+#[test]
+fn cost_coverage_is_currency_specific_for_mixed_deepseek_openai() {
+    let mut app = create_test_app();
+    let usage = crate::models::Usage {
+        input_tokens: 10_000,
+        output_tokens: 1_000,
+        ..Default::default()
+    };
+    let deepseek = crate::pricing::audit_turn_cost_for_provider_at(
+        crate::config::ApiProvider::Deepseek,
+        "deepseek-v4-flash",
+        &usage,
+        chrono::Utc::now(),
+    );
+    let openai = crate::pricing::audit_turn_cost_for_provider_at(
+        crate::config::ApiProvider::Openai,
+        "gpt-5.5",
+        &usage,
+        chrono::Utc::now(),
+    );
+    app.record_turn_cost_audit(&deepseek);
+    app.record_turn_cost_audit(&openai);
+    app.accrue_session_cost_estimate(deepseek.estimate.expect("DeepSeek priced"));
+    app.accrue_session_cost_estimate(openai.estimate.expect("OpenAI priced"));
+
+    app.cost_currency = crate::pricing::CostCurrency::Usd;
+    let usd = cost(&mut app).message.expect("USD report");
+    assert!(usd.contains("Covered: 2 of 2"), "{usd}");
+    assert!(usd.contains("Estimated total:"), "{usd}");
+
+    app.cost_currency = crate::pricing::CostCurrency::Cny;
+    let cny = cost(&mut app).message.expect("CNY report");
+    assert!(cny.contains("Covered: 1 of 2"), "{cny}");
+    assert!(cny.contains("Priced subtotal:"), "{cny}");
+}
+
+/// A session restored from a pre-coverage save has real money and no evidence of
+/// what it covers. `/cost` must say the coverage is unknown rather than render a
+/// fabricated "0 of 0 priced", which would assert the total is complete (#4318).
+#[test]
+fn cost_report_shows_unknown_coverage_for_a_legacy_session_instead_of_zero_of_zero() {
+    let mut app = create_test_app();
+    app.session.session_cost = 1.25;
+    app.session.cost_coverage_unknown_legacy = true;
+
+    let msg = cost(&mut app).message.expect("cost report");
+    assert!(msg.contains("Coverage: unknown"), "{msg}");
+    assert!(
+        !msg.contains("Covered: 0 of 0"),
+        "a legacy session must never claim a complete zero-turn total: {msg}"
+    );
+    assert!(msg.contains("estimate, not a bill"), "{msg}");
+}
+
+#[test]
+fn cost_report_distinguishes_unknown_from_authoritatively_priced_zero() {
+    let mut unknown = create_test_app();
+    let unknown_msg = cost(&mut unknown).message.expect("unknown report");
+    assert!(
+        unknown_msg.contains("Estimated total: unknown"),
+        "{unknown_msg}"
+    );
+    assert!(!unknown_msg.contains("$0.0000"), "{unknown_msg}");
+
+    let mut priced_zero = create_test_app();
+    priced_zero.session.cost_priced_turns = 1;
+    let zero_msg = cost(&mut priced_zero).message.expect("priced zero report");
+    assert!(zero_msg.contains("$0.0000"), "{zero_msg}");
+    assert!(!zero_msg.contains("<$0.0001"), "{zero_msg}");
+}
+
+#[test]
+fn cost_report_distinguishes_bundled_fallback_from_no_usable_fallback() {
+    let mut app = create_test_app();
+    app.session.cost_priced_turns = 1;
+    app.session
+        .cost_live_pricing_defects
+        .insert("live_pricing_stale".to_string());
+    app.session
+        .cost_live_pricing_unusable_defects
+        .insert("live_pricing_scope_mismatch".to_string());
+
+    let msg = cost(&mut app).message.expect("cost report");
+    assert!(msg.contains("bundled published rates were used"), "{msg}");
+    assert!(
+        msg.contains("no usable bundled rate was available"),
+        "{msg}"
+    );
+    assert!(msg.contains("this spend is unknown"), "{msg}");
+}
+
+#[test]
+fn all_zero_legacy_coverage_stays_unknown_when_rendered_and_resaved() {
+    let mut app = create_test_app();
+    let legacy: crate::session_manager::SessionCostSnapshot =
+        serde_json::from_value(serde_json::json!({
+            "session_cost_usd": 0.0,
+            "session_cost_cny": 0.0
+        }))
+        .expect("legacy zero snapshot");
+    assert!(legacy.coverage_is_legacy_unknown());
+    app.session.cost_coverage_unknown_legacy = true;
+
+    let msg = cost(&mut app).message.expect("cost report");
+    assert!(msg.contains("Coverage: unknown"), "{msg}");
+    assert!(!msg.contains("Covered: 0 of 0"), "{msg}");
+
+    let mut metadata = crate::session_manager::create_saved_session_with_id_and_mode(
+        "legacy-zero".to_string(),
+        &[],
+        "deepseek-v4-flash",
+        std::path::Path::new("/tmp"),
+        0,
+        None,
+        None,
+    )
+    .metadata;
+    app.sync_cost_to_metadata(&mut metadata);
+    assert!(!metadata.cost.coverage_recorded);
+    assert!(metadata.cost.coverage_is_legacy_unknown());
+}
+
+/// Loading a session must not leave the previous session's coverage counters
+/// attached to a total that no longer contains those turns.
+#[test]
+fn reset_cost_coverage_clears_every_counter() {
+    use crate::pricing::audit_turn_cost_for_provider_at;
+
+    let mut app = create_test_app();
+    let usage = crate::models::Usage {
+        input_tokens: 1_000_000,
+        output_tokens: 100_000,
+        prompt_cache_write_tokens: Some(100_000),
+        ..Default::default()
+    };
+    let now = chrono::Utc::now();
+    app.record_turn_cost_audit(&audit_turn_cost_for_provider_at(
+        crate::config::ApiProvider::Anthropic,
+        "claude-haiku-4-5",
+        &usage,
+        now,
+    ));
+    app.record_turn_cost_audit(&audit_turn_cost_for_provider_at(
+        crate::config::ApiProvider::Moonshot,
+        "kimi-k2.7-code",
+        &usage,
+        now,
+    ));
+    app.record_turn_cost_route_receipt("provider=anthropic model=x".to_string());
+    app.session.cost_coverage_unknown_legacy = true;
+    assert_ne!(app.session.cost_priced_turns, 0);
+    assert_ne!(app.session.cost_unpriced_turns, 0);
+    assert!(!app.session.cost_unpriced_reasons.is_empty());
+    assert!(!app.session.cost_unpriced_classes.is_empty());
+    assert!(!app.session.cost_pricing_provenances.is_empty());
+    assert!(!app.session.cost_route_receipts.is_empty());
+
+    app.reset_cost_coverage();
+
+    assert_eq!(app.session.cost_priced_turns, 0);
+    assert_eq!(app.session.cost_unpriced_turns, 0);
+    assert!(app.session.cost_unpriced_reasons.is_empty());
+    assert!(app.session.cost_cny_unpriced_reasons.is_empty());
+    assert!(app.session.cost_unpriced_classes.is_empty());
+    assert!(app.session.cost_pricing_provenances.is_empty());
+    assert!(app.session.cost_live_pricing_defects.is_empty());
+    assert!(app.session.cost_live_pricing_unusable_defects.is_empty());
+    assert!(app.session.cost_route_receipts.is_empty());
+    assert!(!app.session.cost_coverage_unknown_legacy);
+    // With nothing recorded, `/cost` reports an honest empty coverage rather
+    // than the legacy-unknown state.
+    let msg = cost(&mut app).message.expect("cost report");
+    assert!(msg.contains("Covered: 0 of 0"), "{msg}");
+    assert!(!msg.contains("Coverage: unknown"), "{msg}");
+}
+
+/// `/tokens` quotes the same total as `/cost`, so it carries the same estimate
+/// disclaimer and the same coverage state, and reports cache-write with a
+/// pointer to `/cache` for the per-turn detail.
+#[test]
+fn tokens_report_says_estimate_and_exposes_coverage_and_cache_write() {
+    let mut app = create_test_app();
+    app.session.total_cache_write_tokens = 250_000;
+    app.record_turn_cost_audit(&crate::pricing::audit_turn_cost_for_provider_at(
+        crate::config::ApiProvider::Moonshot,
+        "kimi-k2.7-code",
+        &crate::models::Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 100_000,
+            prompt_cache_write_tokens: Some(100_000),
+            ..Default::default()
+        },
+        chrono::Utc::now(),
+    ));
+
+    let msg = tokens(&mut app).message.expect("tokens report");
+    assert!(msg.contains("estimate, not a bill"), "{msg}");
+    assert!(msg.contains("Covered: 0 of 1"), "{msg}");
+    assert!(msg.contains("Excluded: 1"), "{msg}");
+    assert!(msg.contains("250000"), "{msg}");
+    // The cache-write line links to /cache rather than duplicating the table.
+    assert!(msg.contains("/cache"), "{msg}");
 }
 
 #[test]
@@ -496,6 +795,9 @@ fn cache_command_renders_recorded_turns_with_ratio() {
         cache_hit_tokens: Some(3_000),
         cache_miss_tokens: Some(1_000),
         reasoning_replay_tokens: None,
+        cache_write_tokens: None,
+        reasoning_tokens: None,
+        cost_audit: None,
         recorded_at: now,
     });
     app.push_turn_cache_record(TurnCacheRecord {
@@ -508,6 +810,9 @@ fn cache_command_renders_recorded_turns_with_ratio() {
         cache_hit_tokens: Some(3_000),
         cache_miss_tokens: Some(3_000),
         reasoning_replay_tokens: Some(150),
+        cache_write_tokens: None,
+        reasoning_tokens: None,
+        cost_audit: None,
         recorded_at: now,
     });
     // Turn 3: hit reported but provider didn't report miss separately —
@@ -522,6 +827,9 @@ fn cache_command_renders_recorded_turns_with_ratio() {
         cache_hit_tokens: Some(2_500),
         cache_miss_tokens: None,
         reasoning_replay_tokens: None,
+        cache_write_tokens: None,
+        reasoning_tokens: None,
+        cost_audit: None,
         recorded_at: now,
     });
     // Turn 4: no telemetry at all — must not pollute aggregate ratios.
@@ -535,6 +843,9 @@ fn cache_command_renders_recorded_turns_with_ratio() {
         cache_hit_tokens: None,
         cache_miss_tokens: None,
         reasoning_replay_tokens: None,
+        cache_write_tokens: None,
+        reasoning_tokens: None,
+        cost_audit: None,
         recorded_at: now,
     });
 
@@ -554,6 +865,72 @@ fn cache_command_renders_recorded_turns_with_ratio() {
     assert!(msg.contains("avg hit ratio: 56.7%"), "got: {msg}");
     // Footer guidance is present.
     assert!(msg.contains("70%"), "got: {msg}");
+}
+
+#[test]
+fn cache_history_shows_cache_write_tokens_and_explains_unpriced_turns() {
+    use crate::pricing::audit_turn_cost_for_provider_at;
+
+    let mut app = create_test_app();
+    let write_heavy = crate::models::Usage {
+        input_tokens: 1_000_000,
+        output_tokens: 100_000,
+        prompt_cache_hit_tokens: Some(200_000),
+        prompt_cache_write_tokens: Some(100_000),
+        ..Default::default()
+    };
+    let now = chrono::Utc::now();
+
+    app.push_turn_cache_record(TurnCacheRecord {
+        provider: Some(crate::config::ApiProvider::Anthropic),
+        provider_identity: None,
+        model: Some("claude-haiku-4-5".to_string()),
+        auto_model: false,
+        input_tokens: 1_000_000,
+        output_tokens: 100_000,
+        cache_hit_tokens: Some(200_000),
+        cache_miss_tokens: Some(700_000),
+        reasoning_replay_tokens: None,
+        cache_write_tokens: Some(100_000),
+        reasoning_tokens: Some(40_000),
+        cost_audit: Some(audit_turn_cost_for_provider_at(
+            crate::config::ApiProvider::Anthropic,
+            "claude-haiku-4-5",
+            &write_heavy,
+            now,
+        )),
+        recorded_at: Instant::now(),
+    });
+    app.push_turn_cache_record(TurnCacheRecord {
+        provider: Some(crate::config::ApiProvider::Moonshot),
+        provider_identity: None,
+        model: Some("kimi-k2.7-code".to_string()),
+        auto_model: false,
+        input_tokens: 1_000_000,
+        output_tokens: 100_000,
+        cache_hit_tokens: Some(200_000),
+        cache_miss_tokens: Some(700_000),
+        reasoning_replay_tokens: None,
+        cache_write_tokens: Some(100_000),
+        reasoning_tokens: Some(10_000),
+        cost_audit: Some(audit_turn_cost_for_provider_at(
+            crate::config::ApiProvider::Moonshot,
+            "kimi-k2.7-code",
+            &write_heavy,
+            now,
+        )),
+        recorded_at: Instant::now(),
+    });
+
+    let msg = cache(&mut app, None).message.expect("cache message");
+
+    assert!(msg.contains("write"), "{msg}");
+    assert!(msg.contains("sum_write: 200000"), "{msg}");
+    assert!(msg.contains("sum_reasoning: 50000"), "{msg}");
+    // The priced turn shows money; the unpriced one shows why it does not.
+    assert!(msg.contains("$1.3450"), "{msg}");
+    assert!(msg.contains("missing_class_price"), "{msg}");
+    assert!(msg.contains("cache_write"), "{msg}");
 }
 
 #[test]
@@ -579,6 +956,9 @@ fn cache_command_replays_reported_1177_low_hit_fixture() {
             cache_hit_tokens: Some(hit),
             cache_miss_tokens: Some(miss),
             reasoning_replay_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            cost_audit: None,
             recorded_at: now,
         });
     }
@@ -608,6 +988,9 @@ fn cache_command_count_argument_clamps_to_history() {
             cache_hit_tokens: Some(500),
             cache_miss_tokens: Some(500),
             reasoning_replay_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            cost_audit: None,
             recorded_at: Instant::now(),
         });
     }
@@ -631,6 +1014,9 @@ fn turn_cache_history_is_capped_at_50() {
             cache_hit_tokens: Some(i as u32),
             cache_miss_tokens: Some(0),
             reasoning_replay_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            cost_audit: None,
             recorded_at: Instant::now(),
         });
     }
@@ -1324,6 +1710,9 @@ fn cache_stats_shows_cache_hit_summary() {
         cache_hit_tokens: Some(8_000),
         cache_miss_tokens: Some(2_000),
         reasoning_replay_tokens: None,
+        cache_write_tokens: None,
+        reasoning_tokens: None,
+        cost_audit: None,
         recorded_at: Instant::now(),
     });
     app.push_turn_cache_record(TurnCacheRecord {
@@ -1336,6 +1725,9 @@ fn cache_stats_shows_cache_hit_summary() {
         cache_hit_tokens: Some(4_500),
         cache_miss_tokens: Some(500),
         reasoning_replay_tokens: None,
+        cache_write_tokens: None,
+        reasoning_tokens: None,
+        cost_audit: None,
         recorded_at: Instant::now(),
     });
 
@@ -1365,6 +1757,9 @@ fn cache_stats_low_hit_rate_shows_note() {
         cache_hit_tokens: Some(1_000),
         cache_miss_tokens: Some(9_000),
         reasoning_replay_tokens: None,
+        cache_write_tokens: None,
+        reasoning_tokens: None,
+        cost_audit: None,
         recorded_at: Instant::now(),
     });
 
@@ -1399,6 +1794,9 @@ fn cache_stats_flags_reported_1747_low_hit_fixture() {
         cache_hit_tokens: Some(21_356_928),
         cache_miss_tokens: Some(8_470_281),
         reasoning_replay_tokens: None,
+        cache_write_tokens: None,
+        reasoning_tokens: None,
+        cost_audit: None,
         recorded_at: Instant::now(),
     });
 

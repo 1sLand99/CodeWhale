@@ -177,12 +177,35 @@ fn failed_same_identity_route_preflight_leaves_old_client_untouched() {
 
 #[tokio::test]
 async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_builtin_route() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let custom_server = MockServer::start().await;
+    let custom_base_url = format!("{}/v1", custom_server.uri());
+    let done_sse = concat!(
+        "data: {\"id\":\"chatcmpl-exact-route\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"exact route\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-exact-route\",\"choices\":[{\"index\":0,",
+        "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(done_sse),
+        )
+        .expect(1)
+        .mount(&custom_server)
+        .await;
+
     let mut custom = HashMap::new();
     custom.insert(
         "custom-a".to_string(),
         crate::config::ProviderConfig {
             kind: Some("openai-compatible".to_string()),
-            base_url: Some("http://127.0.0.1:18181/v1".to_string()),
+            base_url: Some(custom_base_url.clone()),
             model: Some("local-model".to_string()),
             api_key: Some("local-test-key".to_string()),
             ..crate::config::ProviderConfig::default()
@@ -203,7 +226,7 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
         ..Config::default()
     };
     let engine_config = EngineConfig {
-        max_steps: 0,
+        max_steps: 1,
         snapshots_enabled: false,
         ..EngineConfig::default()
     };
@@ -258,34 +281,83 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
         .await
         .expect("send exact custom turn");
 
-    let mut saw_exact_start = false;
-    let mut saw_exact_endpoint = false;
-    for _ in 0..20 {
-        let event = tokio::time::timeout(Duration::from_secs(2), async {
-            handle.rx_event.write().await.recv().await
-        })
-        .await
-        .expect("engine event timeout")
-        .expect("engine event");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut lifecycle_stage = 0u8;
+    let mut diagnostics = Vec::new();
+    let mut rx = handle.rx_event.write().await;
+    loop {
+        let event = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .unwrap_or_else(|_| {
+                panic!("timed out waiting for semantic route sequence: {diagnostics:?}")
+            })
+            .expect("engine event channel closed before terminal route receipt");
+        diagnostics.push(match &event {
+            Event::TurnStarted { .. } => "turn_started",
+            Event::RouteDispatched { .. } => "route_dispatched",
+            Event::TurnComplete { .. } => "turn_complete",
+            Event::SessionUpdated { .. } => "session_updated",
+            Event::PrefixCacheChange { .. } => "prefix_cache",
+            Event::Status { .. } => "status",
+            _ => "other",
+        });
         match event {
-            Event::TurnStarted {
-                route: Some(route), ..
-            } => {
+            Event::TurnStarted { route, .. } => {
+                assert_eq!(
+                    lifecycle_stage, 0,
+                    "duplicate/reordered start: {diagnostics:?}"
+                );
+                // Lifecycle start still carries the installed-route receipt
+                // hosts authorize follow-up work against, but it must carry no
+                // billing envelope: nothing has been dispatched yet, and an
+                // undispatched route has no metering surface or billing time.
+                assert!(
+                    route.as_ref().is_none_or(|route| route.billing.is_none()),
+                    "billing route must not be stamped at lifecycle start"
+                );
+                lifecycle_stage = 1;
+            }
+            Event::RouteDispatched { route, .. } => {
+                assert_eq!(
+                    lifecycle_stage, 1,
+                    "dispatch missing, duplicated, or reordered: {diagnostics:?}"
+                );
                 assert_eq!(route.provider, ApiProvider::Custom);
                 assert_eq!(route.provider_identity, "custom-a");
                 assert_eq!(route.model, "local-model");
-                saw_exact_start = true;
+                assert_eq!(
+                    route
+                        .billing
+                        .as_ref()
+                        .and_then(|billing| billing.endpoint_fingerprint.clone()),
+                    crate::cost_status::endpoint_fingerprint(&custom_base_url),
+                    "dispatch receipt borrowed the later ambient route"
+                );
+                lifecycle_stage = 2;
             }
             Event::TurnComplete { base_url, .. } => {
-                assert_eq!(base_url.as_deref(), Some("http://127.0.0.1:18181/v1"));
-                saw_exact_endpoint = true;
+                assert_eq!(
+                    lifecycle_stage, 2,
+                    "terminal arrived without an ordered dispatch receipt: {diagnostics:?}"
+                );
+                assert_eq!(base_url.as_deref(), Some(custom_base_url.as_str()));
+                lifecycle_stage = 3;
                 break;
             }
             _ => {}
         }
     }
-    assert!(saw_exact_start);
-    assert!(saw_exact_endpoint);
+    drop(rx);
+    assert_eq!(lifecycle_stage, 3);
+    assert_eq!(
+        custom_server
+            .received_requests()
+            .await
+            .expect("recorded custom-route request")
+            .len(),
+        1,
+        "semantic dispatch sequence must bracket one real provider request"
+    );
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     run_task.await.expect("engine task");
 }
@@ -595,7 +667,8 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
     );
     let run_task = tokio::spawn(engine.run());
 
-    let mut starts = 0;
+    let mut lifecycle_starts = 0;
+    let mut dispatches = 0;
     let mut completes = 0;
     let mut awaiting_second_sync = false;
     let mut verified_synthetic_goal = false;
@@ -607,14 +680,32 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
         .expect("goal engine event timeout")
         .expect("goal engine event");
         match event {
-            Event::TurnStarted {
-                route: Some(route), ..
-            } => {
-                starts += 1;
-                assert_eq!(route.provider_identity, "custom-a");
-                if starts == 2 {
+            Event::TurnStarted { route, .. } => {
+                assert!(
+                    route.as_ref().is_none_or(|route| route.billing.is_none()),
+                    "lifecycle start must not carry billing time"
+                );
+                lifecycle_starts += 1;
+                if lifecycle_starts == 2 {
                     awaiting_second_sync = true;
                 }
+            }
+            Event::RouteDispatched { route, .. } => {
+                dispatches += 1;
+                assert_eq!(route.provider_identity, "custom-a");
+                let expected_base_url = if dispatches == 1 {
+                    first_base_url.as_str()
+                } else {
+                    second_base_url.as_str()
+                };
+                assert_eq!(
+                    route
+                        .billing
+                        .as_ref()
+                        .and_then(|billing| billing.endpoint_fingerprint.clone()),
+                    crate::cost_status::endpoint_fingerprint(expected_base_url),
+                    "goal continuation dispatch borrowed the wrong authoritative route"
+                );
             }
             Event::SessionUpdated {
                 messages,
@@ -689,7 +780,8 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
             _ => {}
         }
     }
-    assert_eq!(starts, 2);
+    assert_eq!(lifecycle_starts, 2);
+    assert_eq!(dispatches, 2);
     assert!(verified_synthetic_goal);
     let requests = model.captured_requests();
     assert_eq!(requests.len(), 2);
@@ -2773,8 +2865,15 @@ fn subagent_mailbox_keeps_lifecycle_events_reliable() {
     assert!(!subagent_mailbox_message_is_best_effort(
         &MailboxMessage::TokenUsage {
             agent_id: "agent_a".to_string(),
-            provider: ApiProvider::Deepseek,
-            model: "model".to_string(),
+            source_id: "response-a".to_string(),
+            route: crate::cost_status::EffectiveRouteEnvelope::capture(
+                None,
+                ApiProvider::Deepseek,
+                "deepseek",
+                "model",
+                Some(ApiProvider::Deepseek.default_base_url()),
+                chrono::Utc::now(),
+            ),
             usage: Usage::default(),
         }
     ));
@@ -2860,8 +2959,15 @@ fn subagent_mailbox_never_samples_lifecycle_or_usage_events() {
         &mut last_sent_at,
         &MailboxMessage::TokenUsage {
             agent_id: "agent_a".to_string(),
-            provider: ApiProvider::Deepseek,
-            model: "model".to_string(),
+            source_id: "response-a".to_string(),
+            route: crate::cost_status::EffectiveRouteEnvelope::capture(
+                None,
+                ApiProvider::Deepseek,
+                "deepseek",
+                "model",
+                Some(ApiProvider::Deepseek.default_base_url()),
+                chrono::Utc::now(),
+            ),
             usage: Usage::default(),
         },
         start,
@@ -3862,8 +3968,7 @@ async fn operate_conversation_reaches_provider_when_workers_are_disabled() {
         .expect("timed out waiting for Operate completion")
     {
         match event {
-            Event::TurnStarted { route, .. } => {
-                let route = route.expect("model turn route");
+            Event::RouteDispatched { route, .. } => {
                 assert_eq!(route.provider, ApiProvider::Deepseek);
                 assert_eq!(route.model, crate::config::DEFAULT_TEXT_MODEL);
                 assert!(!route.auto_model);
