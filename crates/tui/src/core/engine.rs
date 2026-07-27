@@ -3711,31 +3711,28 @@ impl Engine {
             // below, on the route held for the wire boundary only.
             billing: None,
         };
-        // An injected model client performs the I/O; `deepseek_client` is only
-        // an auxiliary route-shaping client and cannot attest the endpoint that
-        // was actually billed. Rather than fabricate a surface from config, the
-        // route is dispatched with no billing envelope and prices as unknown —
-        // the same rule that already governs `receipt` and `TurnComplete`'s
-        // `base_url`.
-        let dispatch_billing = (!self.model_client_injected).then(|| {
-            crate::core::events::RouteBillingEnvelope {
-                billing_surface: crate::route_billing::billing_surface_for_dispatch(
-                    Some(&self.api_config),
-                    effective_provider,
-                    route_base_url,
-                )
-                .map(str::to_string),
-                endpoint_fingerprint: route_base_url
-                    .and_then(crate::cost_status::endpoint_fingerprint),
-                billing_mode: crate::route_billing::for_route(&self.api_config, effective_provider)
-                    .into(),
-                // Provisional. Replaced with the true wire-boundary instant
-                // when `handle_deepseek_turn` emits `Event::RouteDispatched`.
-                dispatched_at: turn_started_at,
-            }
-        });
+        // Billing provenance follows the *route* that was installed for this
+        // turn, which is authoritative even when a test or embedder injected the
+        // transport: `deepseek_client`'s base URL is the resolved route's
+        // endpoint either way. This is a weaker claim than `receipt`, which
+        // digests the credential an injected client did not use and is therefore
+        // withheld above.
+        let dispatch_billing = crate::core::events::RouteBillingEnvelope {
+            billing_surface: crate::route_billing::billing_surface_for_dispatch(
+                Some(&self.api_config),
+                effective_provider,
+                route_base_url,
+            )
+            .map(str::to_string),
+            endpoint_fingerprint: route_base_url.and_then(crate::cost_status::endpoint_fingerprint),
+            billing_mode: crate::route_billing::for_route(&self.api_config, effective_provider)
+                .into(),
+            // Provisional. Replaced with the true wire-boundary instant
+            // when `handle_deepseek_turn` emits `Event::RouteDispatched`.
+            dispatched_at: turn_started_at,
+        };
         turn.pending_route = Some(TurnRoute {
-            billing: dispatch_billing,
+            billing: Some(dispatch_billing),
             ..turn_route.clone()
         });
 
