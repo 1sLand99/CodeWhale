@@ -53,8 +53,20 @@ export const DOC_TOPICS: DocTopic[] = [
       zh: "首次运行、会话、命令、快捷键和日常使用流程。",
     },
     repoSource: ["docs/GUIDE.md", "docs/KEYBINDINGS.md"],
-    hasPage: false,
+    hasPage: true,
     category: "getting-started",
+  },
+  {
+    id: "vocabulary",
+    slug: "vocabulary",
+    label: { en: "Vocabulary", zh: "产品名词" },
+    description: {
+      en: "The exact product nouns — Fleet, Workflow, Lane, Runtime; Plan / Act / Operate; Consultant; and explicit route provenance — plus measurement principles.",
+      zh: "确切的产品名词——Fleet、Workflow、Lane、Runtime；Plan / Act / Operate；Consultant；明确的路由来源——以及测量原则。",
+    },
+    repoSource: ["docs/FLEET.md", "docs/MODES.md", "docs/public-surface-facts.json"],
+    hasPage: true,
+    category: "core-concepts",
   },
   {
     id: "configuration",
