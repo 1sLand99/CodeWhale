@@ -10,7 +10,8 @@ use codewhale_config::pricing::{Currency, OfferingPricing, TokenUsage};
 
 use crate::config::{
     ApiProvider, DEEPSEEK_ALIAS_REPLACEMENT, DEEPSEEK_ALIAS_RETIREMENT_UTC,
-    DEFAULT_STEPFUN_BASE_URL, DEFAULT_STEPFUN_MODEL, canonical_model_id_for_provider,
+    DEFAULT_STEPFUN_BASE_URL, DEFAULT_STEPFUN_MODEL, DEFAULT_STEPFUN_PLAN_BASE_URL,
+    canonical_model_id_for_provider,
 };
 use crate::models::{Usage, has_date_snapshot_suffix};
 
@@ -116,7 +117,6 @@ struct ModelPricing {
 
 pub(crate) const STEPFUN_PAYG_BILLING_SURFACE: &str = "stepfun-payg";
 pub(crate) const STEPFUN_PLAN_BILLING_SURFACE: &str = "stepfun-plan";
-const STEPFUN_PLAN_BASE_URL: &str = "https://api.stepfun.ai/step_plan/v1";
 const LEGACY_STEPFUN_PLAN_BASE_URL: &str = "https://api.stepfun.com/step_plan/v1";
 
 /// Reduce a concrete request endpoint to non-secret billing provenance.
@@ -146,7 +146,7 @@ pub(crate) fn billing_surface_for_route(
     }
     if host.eq_ignore_ascii_case(official_host) && matches!(path, "" | "/v1") {
         Some(STEPFUN_PAYG_BILLING_SURFACE)
-    } else if [STEPFUN_PLAN_BASE_URL, LEGACY_STEPFUN_PLAN_BASE_URL]
+    } else if [DEFAULT_STEPFUN_PLAN_BASE_URL, LEGACY_STEPFUN_PLAN_BASE_URL]
         .iter()
         .filter_map(|url| reqwest::Url::parse(url).ok())
         .any(|plan| {
