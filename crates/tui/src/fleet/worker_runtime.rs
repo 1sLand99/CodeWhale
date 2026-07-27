@@ -19,7 +19,7 @@ use codewhale_protocol::fleet::{
     FleetWorkerSpec,
 };
 
-use super::profile::AgentProfile;
+use super::profile::{AgentProfile, canonical_public_role_name};
 use crate::config::{ApiProvider, Config};
 use crate::route_runtime::{resolve_route_candidate, resolve_runtime_route};
 use crate::tools::subagent::{AgentWorkerSpec, AgentWorkerToolProfile, FleetRole};
@@ -37,6 +37,18 @@ pub fn validate_task_agent_profiles(
         resolve_task_agent_profile(task, agent_profiles)?;
     }
     Ok(())
+}
+
+/// Rewrite compatibility-only advisory role names before a Fleet run is
+/// persisted. Replayed older ledgers are still canonicalized at projection
+/// boundaries, but every newly created durable task records `consultant`.
+pub(crate) fn canonicalize_fleet_task_roles(tasks: &mut [FleetTaskSpec]) {
+    for task in tasks {
+        let Some(role) = task.worker.as_mut().and_then(|worker| worker.role.as_mut()) else {
+            continue;
+        };
+        *role = canonical_public_role_name(role.trim());
+    }
 }
 
 /// Validate that every task's pinned model route actually resolves before any
@@ -590,17 +602,11 @@ fn fleet_task_prompt_with_profile(
     task_spec: &FleetTaskSpec,
     agent_profile: Option<&AgentProfile>,
 ) -> String {
-    let role = task_spec
-        .worker
-        .as_ref()
-        .and_then(|worker| worker.role.as_deref())
-        .or_else(|| agent_profile.map(|profile| profile.profile.role.name.as_str()))
-        .map(str::trim)
-        .filter(|role| !role.is_empty())
-        .unwrap_or("general");
+    let role = effective_fleet_role(task_spec.worker.as_ref(), agent_profile)
+        .unwrap_or_else(|| "general".to_string());
     let mut prompt = String::new();
     prompt.push_str("You have been summoned as a Codewhale Fleet member (");
-    prompt.push_str(role);
+    prompt.push_str(&role);
     prompt.push_str(") by the Fleet orchestrator.\n\n");
     prompt.push_str("Fleet operating contract:\n");
     prompt.push_str("- Work only the assigned slice; keep sibling or topology assumptions out of your answer.\n");
@@ -702,13 +708,13 @@ fn effective_fleet_role_with_source(
         .and_then(|worker| worker.role.as_deref())
         .map(str::trim)
         .filter(|role| !role.is_empty())
-        .map(str::to_string)
+        .map(canonical_public_role_name)
         .map(|role| (Some(role), Some("task.role")))
         .unwrap_or_else(|| {
             agent_profile
                 .map(|profile| {
                     (
-                        Some(profile.profile.role.name.clone()),
+                        Some(canonical_public_role_name(&profile.profile.role.name)),
                         Some("agent_profile.role"),
                     )
                 })
@@ -1658,6 +1664,50 @@ mod tests {
         assert_eq!(route.loadout_source, None);
         assert_eq!(route.model_route.as_deref(), Some("inherit"));
         assert_eq!(route.model_source.as_deref(), Some("resolver.default"));
+    }
+
+    #[test]
+    fn advisory_task_aliases_emit_consultant_in_prompts_and_route_receipts() {
+        for alias in ["oracle", "advisor"] {
+            let task = fleet_task(
+                &format!("legacy-{alias}"),
+                Some(worker_profile(
+                    None,
+                    Some(alias),
+                    None,
+                    None,
+                    None,
+                    vec!["read_file"],
+                )),
+            );
+
+            let prompt = fleet_task_prompt(&task);
+            assert!(
+                prompt.contains("Fleet member (consultant)"),
+                "prompt must canonicalize {alias}: {prompt}"
+            );
+            assert!(
+                !prompt.contains(&format!("Fleet member ({alias})")),
+                "prompt must not emit compatibility alias {alias}: {prompt}"
+            );
+
+            let resolved = resolve_fleet_route(&task, &[], None)
+                .expect("compatibility role should resolve a receipt route");
+            assert_eq!(resolved.role.as_deref(), Some("consultant"));
+            assert_eq!(resolved.role_source.as_deref(), Some("task.role"));
+
+            let reported = resolve_fleet_route_from_worker_report(
+                &task,
+                &[],
+                None,
+                "deepseek",
+                None,
+                "deepseek-v4-pro",
+            )
+            .expect("worker-reported route should retain canonical role metadata");
+            assert_eq!(reported.role.as_deref(), Some("consultant"));
+            assert_eq!(reported.role_source.as_deref(), Some("task.role"));
+        }
     }
 
     #[test]

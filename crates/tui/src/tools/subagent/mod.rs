@@ -10558,14 +10558,26 @@ pub(crate) fn configured_model_for_role_or_type(
     agent_type: &FleetRole,
 ) -> Result<Option<String>, ToolError> {
     let mut keys = Vec::new();
+    let mut push_key = |key: String| {
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    };
     if let Some(role) = role.map(str::trim).filter(|role| !role.is_empty()) {
-        keys.push(role.to_ascii_lowercase());
+        push_key(role.to_ascii_lowercase());
     }
-    keys.push(agent_type.as_str().to_string());
+    push_key(agent_type.as_str().to_string());
     if agent_type.legacy_type_name() != agent_type.as_str() {
-        keys.push(agent_type.legacy_type_name().to_string());
+        push_key(agent_type.legacy_type_name().to_string());
     }
-    keys.push("default".to_string());
+    // `[subagents.models].oracle` shipped before the public role was renamed.
+    // Keep both historical advisory keys readable, but never expose them in
+    // schemas, prompts, receipts, or newly serialized role values.
+    if *agent_type == FleetRole::Consultant {
+        push_key("oracle".to_string());
+        push_key("advisor".to_string());
+    }
+    push_key("default".to_string());
 
     for key in keys {
         if let Some(model) = runtime.role_models.get(&key) {

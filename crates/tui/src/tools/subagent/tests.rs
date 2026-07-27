@@ -10138,6 +10138,20 @@ fn role_model_validation_accepts_provider_native_ids() {
 }
 
 #[test]
+fn consultant_reads_released_advisory_role_model_override_keys() {
+    for legacy_key in ["oracle", "advisor"] {
+        let mut runtime = stub_runtime();
+        runtime
+            .role_models
+            .insert(legacy_key.to_string(), "deepseek-v4-flash".to_string());
+
+        let model = configured_model_for_role_or_type(&runtime, None, &FleetRole::Consultant)
+            .expect("released compatibility override should remain valid");
+        assert_eq!(model.as_deref(), Some("deepseek-v4-flash"), "{legacy_key}");
+    }
+}
+
+#[test]
 fn role_model_validation_stays_strict_on_official_deepseek() {
     let mut runtime = stub_runtime();
     runtime
