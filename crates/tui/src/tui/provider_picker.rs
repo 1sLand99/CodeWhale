@@ -119,7 +119,11 @@ impl StepfunBillingRoute {
 /// user choice, so the stage is skipped rather than silently rewriting it.
 fn stepfun_route_is_selectable(provider: ApiProvider, base_url: &str) -> bool {
     provider == ApiProvider::Stepfun
-        && crate::pricing::billing_surface_for_route(provider, Some(base_url)).is_some()
+        && matches!(
+            crate::pricing::billing_surface_for_route(provider, Some(base_url)),
+            Some(crate::pricing::STEPFUN_PAYG_BILLING_SURFACE)
+                | Some(crate::pricing::STEPFUN_PLAN_BILLING_SURFACE)
+        )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
