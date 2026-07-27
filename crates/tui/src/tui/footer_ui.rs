@@ -889,19 +889,15 @@ pub(crate) fn footer_context_percent_spans(app: &App) -> Vec<Span<'static>> {
 }
 
 pub(crate) fn footer_cost_spans(app: &App) -> Vec<Span<'static>> {
-    let displayed_cost = app.displayed_session_cost_for_currency(app.cost_currency);
-    let chip = crate::route_billing::usage_chip(
-        app.billing_presentation,
-        app.api_provider,
-        &app.model,
-        displayed_cost,
-        app.cost_display_currency(app.cost_currency),
-        None,
-    );
-    // Footer only owns positive metered spend. Allowance/local/unknown live
-    // on the context panel so the chrome stays calm and never invents $0.00.
-    let crate::route_billing::UsageChip::Money(amount) = chip else {
-        return Vec::new();
+    let chip = app.cumulative_usage_chip();
+    // Footer owns positive priced spend, including an explicitly labelled
+    // subtotal. Allowance/local/bare unknown remain in the context panel.
+    let amount = match &chip {
+        crate::route_billing::UsageChip::Money(amount) => amount.clone(),
+        crate::route_billing::UsageChip::PricedSubtotal { .. } => {
+            crate::route_billing::format_usage_chip(&chip).unwrap_or_default()
+        }
+        _ => return Vec::new(),
     };
     let mut spans = vec![Span::styled(
         amount,
@@ -911,7 +907,7 @@ pub(crate) fn footer_cost_spans(app: &App) -> Vec<Span<'static>> {
     // saved money (#2038).
     if let Some(saved) = app.last_turn_cache_savings()
         && saved > 0.0
-        && app.billing_presentation.shows_money()
+        && matches!(chip, crate::route_billing::UsageChip::Money(_))
     {
         spans.push(Span::styled(
             format!(" · saved {}", app.format_cost_amount(saved)),

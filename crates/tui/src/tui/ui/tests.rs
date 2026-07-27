@@ -37,6 +37,66 @@ use unicode_width::UnicodeWidthStr;
 use crate::tui::selection::{SelectionAutoscroll, TranscriptSelectionPoint};
 use tempfile::TempDir;
 
+fn test_mailbox_route(
+    provider: ApiProvider,
+    model: &str,
+) -> crate::cost_status::EffectiveRouteEnvelope {
+    crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        provider,
+        provider.as_str(),
+        model,
+        Some(provider.default_base_url()),
+        chrono::Utc::now(),
+    )
+}
+
+#[test]
+fn completed_turn_cost_receipt_uses_the_captured_effective_route() {
+    let usage = crate::models::Usage {
+        input_tokens: 1_000,
+        output_tokens: 100,
+        ..Default::default()
+    };
+    let audit = crate::pricing::audit_turn_cost_for_route_at(
+        ApiProvider::Deepseek,
+        "deepseek-v4-flash",
+        Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
+        &usage,
+        chrono::Utc::now(),
+    );
+    let completed = crate::tui::app::ActiveTurnMetadata {
+        turn_id: "completed-deepseek".to_string(),
+        created_at: chrono::Utc::now(),
+        route: Some(crate::core::events::TurnRoute {
+            provider: ApiProvider::Deepseek,
+            provider_identity: "deepseek-cn".to_string(),
+            model: "deepseek-v4-flash".to_string(),
+            auto_model: false,
+            receipt: None,
+            billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+            endpoint_fingerprint: Some("served-endpoint-fingerprint".to_string()),
+            billing_mode: crate::cost_status::RouteBillingMode::Metered,
+            dispatched_at: chrono::Utc::now(),
+        }),
+        auto_route_receipt: None,
+        suggestion_authority: None,
+    };
+
+    let receipt = completed_turn_cost_route_receipt(Some(&completed), &audit)
+        .expect("captured model-backed turn has a receipt");
+
+    assert!(receipt.contains("provider=deepseek"), "{receipt}");
+    assert!(receipt.contains("identity=deepseek-cn"), "{receipt}");
+    assert!(receipt.contains("model=deepseek-v4-flash"), "{receipt}");
+    assert!(
+        receipt.contains("endpoint_fp=served-endpoint-fingerprint"),
+        "{receipt}"
+    );
+    assert!(receipt.contains("billing_mode=metered"), "{receipt}");
+    assert!(receipt.contains("currency=usd+cny"), "{receipt}");
+}
+
 #[test]
 fn permission_cycle_shortcut_accepts_both_shift_tab_encodings() {
     assert!(is_permission_cycle_shortcut(&KeyEvent::new(
@@ -4269,7 +4329,9 @@ fn apply_loaded_session_resets_unpersisted_telemetry() {
     app.session.session_cost_cny = 9.13;
     app.session.subagent_cost = 0.75;
     app.session.subagent_cost_cny = 5.48;
-    app.session.subagent_cost_event_seqs.insert(42);
+    app.session
+        .subagent_cost_event_seqs
+        .insert(("turn-test".to_string(), 42));
     app.session.displayed_cost_high_water = 2.0;
     app.session.displayed_cost_high_water_cny = 14.61;
     app.session.last_prompt_tokens = Some(120);
@@ -4277,6 +4339,11 @@ fn apply_loaded_session_resets_unpersisted_telemetry() {
     app.session.last_prompt_cache_hit_tokens = Some(80);
     app.session.last_prompt_cache_miss_tokens = Some(40);
     app.session.last_reasoning_replay_tokens = Some(12);
+    app.session.total_input_tokens = 120;
+    app.session.total_output_tokens = 35;
+    app.session.total_cache_hit_tokens = 80;
+    app.session.total_cache_miss_tokens = 40;
+    app.session.total_cache_write_tokens = 17;
     app.push_turn_cache_record(crate::tui::app::TurnCacheRecord {
         provider: None,
         provider_identity: None,
@@ -4287,6 +4354,9 @@ fn apply_loaded_session_resets_unpersisted_telemetry() {
         cache_hit_tokens: Some(80),
         cache_miss_tokens: Some(40),
         reasoning_replay_tokens: Some(12),
+        cache_write_tokens: None,
+        reasoning_tokens: None,
+        cost_audit: None,
         recorded_at: Instant::now(),
     });
     let mut session = saved_session_with_messages(vec![text_message("assistant", "ready")]);
@@ -4310,6 +4380,11 @@ fn apply_loaded_session_resets_unpersisted_telemetry() {
     assert_eq!(app.session.last_prompt_cache_hit_tokens, None);
     assert_eq!(app.session.last_prompt_cache_miss_tokens, None);
     assert_eq!(app.session.last_reasoning_replay_tokens, None);
+    assert_eq!(app.session.total_input_tokens, 0);
+    assert_eq!(app.session.total_output_tokens, 0);
+    assert_eq!(app.session.total_cache_hit_tokens, 0);
+    assert_eq!(app.session.total_cache_miss_tokens, 0);
+    assert_eq!(app.session.total_cache_write_tokens, 0);
     assert!(app.session.turn_cache_history.is_empty());
 }
 
@@ -5085,6 +5160,9 @@ async fn provider_switch_clears_turn_cache_history() {
         cache_hit_tokens: Some(70),
         cache_miss_tokens: Some(30),
         reasoning_replay_tokens: Some(12),
+        cache_write_tokens: None,
+        reasoning_tokens: None,
+        cost_audit: None,
         recorded_at: Instant::now(),
     });
     let mut engine = mock_engine_handle();
@@ -7452,6 +7530,10 @@ fn turn_liveness_recovers_stalled_in_progress_turn() {
             model: "gpt-5.5".to_string(),
             auto_model: false,
             receipt: None,
+            billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+            endpoint_fingerprint: Some("openai-endpoint".to_string()),
+            billing_mode: crate::cost_status::RouteBillingMode::Metered,
+            dispatched_at: chrono::Utc::now(),
         }),
         auto_route_receipt: None,
         suggestion_authority: None,
@@ -7495,6 +7577,10 @@ fn engine_event_disconnect_recovers_live_turn_immediately() {
             model: "gpt-5.5".to_string(),
             auto_model: false,
             receipt: None,
+            billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+            endpoint_fingerprint: Some("openai-endpoint".to_string()),
+            billing_mode: crate::cost_status::RouteBillingMode::Metered,
+            dispatched_at: chrono::Utc::now(),
         }),
         auto_route_receipt: None,
         suggestion_authority: None,
@@ -7562,6 +7648,10 @@ fn engine_event_disconnect_cleans_cancelled_turn_metadata() {
             model: "gpt-5.5".to_string(),
             auto_model: false,
             receipt: None,
+            billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+            endpoint_fingerprint: Some("openai-endpoint".to_string()),
+            billing_mode: crate::cost_status::RouteBillingMode::Metered,
+            dispatched_at: chrono::Utc::now(),
         }),
         auto_route_receipt: None,
         suggestion_authority: None,
@@ -8785,8 +8875,8 @@ fn subagent_token_usage_updates_live_cost_counter_without_card_change() {
         1,
         &crate::tools::subagent::MailboxMessage::TokenUsage {
             agent_id: "agent-a".to_string(),
-            provider: ApiProvider::Deepseek,
-            model: "deepseek-v4-flash".to_string(),
+            source_id: "response-a".to_string(),
+            route: test_mailbox_route(ApiProvider::Deepseek, "deepseek-v4-flash"),
             usage: crate::models::Usage {
                 input_tokens: 10_000,
                 output_tokens: 1_000,
@@ -8812,8 +8902,8 @@ fn subagent_token_usage_prices_the_child_route_not_the_parent_route() {
         2,
         &crate::tools::subagent::MailboxMessage::TokenUsage {
             agent_id: "agent-codex".to_string(),
-            provider: ApiProvider::OpenaiCodex,
-            model: "gpt-5.5".to_string(),
+            source_id: "response-codex".to_string(),
+            route: test_mailbox_route(ApiProvider::OpenaiCodex, "gpt-5.5"),
             usage: crate::models::Usage {
                 input_tokens: 10_000,
                 output_tokens: 1_000,
@@ -8833,8 +8923,8 @@ fn subagent_token_usage_is_deduped_by_mailbox_sequence() {
     let mut app = create_test_app();
     let usage = crate::tools::subagent::MailboxMessage::TokenUsage {
         agent_id: "agent-a".to_string(),
-        provider: ApiProvider::Deepseek,
-        model: "deepseek-v4-flash".to_string(),
+        source_id: "response-a".to_string(),
+        route: test_mailbox_route(ApiProvider::Deepseek, "deepseek-v4-flash"),
         usage: crate::models::Usage {
             input_tokens: 10_000,
             output_tokens: 1_000,
@@ -8848,6 +8938,31 @@ fn subagent_token_usage_is_deduped_by_mailbox_sequence() {
     assert_eq!(app.session.subagent_cost, first);
     handle_subagent_mailbox(&mut app, 8, &usage);
     assert!(app.session.subagent_cost > first);
+}
+
+#[test]
+fn subagent_token_usage_sequence_is_scoped_to_engine_turn() {
+    let mut app = create_test_app();
+    let usage = crate::tools::subagent::MailboxMessage::TokenUsage {
+        agent_id: "agent-a".to_string(),
+        source_id: "response-a".to_string(),
+        route: test_mailbox_route(ApiProvider::Deepseek, "deepseek-v4-flash"),
+        usage: crate::models::Usage {
+            input_tokens: 10_000,
+            output_tokens: 1_000,
+            ..Default::default()
+        },
+    };
+
+    handle_subagent_mailbox_for_turn(&mut app, "engine-turn-a", 1, &usage);
+    let first = app.session.subagent_cost;
+    handle_subagent_mailbox_for_turn(&mut app, "engine-turn-a", 1, &usage);
+    assert_eq!(app.session.subagent_cost, first, "same envelope dedupes");
+    handle_subagent_mailbox_for_turn(&mut app, "engine-turn-b", 1, &usage);
+    assert!(
+        app.session.subagent_cost > first,
+        "a new turn's sequence one must accrue independently"
+    );
 }
 
 #[test]
@@ -9989,6 +10104,10 @@ fn turn_started_route_is_captured_before_cancel_suppression() {
             model: "gpt-5.5".to_string(),
             auto_model: true,
             receipt: None,
+            billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+            endpoint_fingerprint: Some("openai-endpoint".to_string()),
+            billing_mode: crate::cost_status::RouteBillingMode::Metered,
+            dispatched_at: created_at.clone(),
         }),
     };
 
@@ -10045,6 +10164,10 @@ fn turn_started_suggestion_authority_comes_from_the_route_receipt_not_config() {
             model: "deepseek-chat".to_string(),
             auto_model: false,
             receipt: Some(receipt),
+            billing_surface: None,
+            endpoint_fingerprint: None,
+            billing_mode: crate::cost_status::RouteBillingMode::Unknown,
+            dispatched_at: chrono::Utc::now(),
         }),
     };
 
@@ -10079,6 +10202,10 @@ fn turn_started_without_a_route_receipt_captures_no_suggestion_authority() {
             model: "deepseek-chat".to_string(),
             auto_model: false,
             receipt: None,
+            billing_surface: None,
+            endpoint_fingerprint: None,
+            billing_mode: crate::cost_status::RouteBillingMode::Unknown,
+            dispatched_at: chrono::Utc::now(),
         }),
     };
 
@@ -10107,6 +10234,10 @@ fn engine_error_health_accounting_uses_active_turn_route() {
             model: "gpt-5.5".to_string(),
             auto_model: true,
             receipt: None,
+            billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+            endpoint_fingerprint: Some("openai-endpoint".to_string()),
+            billing_mode: crate::cost_status::RouteBillingMode::Metered,
+            dispatched_at: chrono::Utc::now(),
         }),
     };
     capture_turn_started_metadata(&mut app, &event);
@@ -13048,7 +13179,7 @@ fn shell_wait_without_command_uses_task_id_until_command_metadata_arrives() {
 }
 
 #[test]
-fn tool_child_usage_metadata_updates_live_cost_counter() {
+fn legacy_child_usage_metadata_fails_closed_without_parent_route_fallback() {
     let mut app = create_test_app();
     let result = Ok(crate::tools::spec::ToolResult::success("ok").with_metadata(
         serde_json::json!({
@@ -13062,7 +13193,171 @@ fn tool_child_usage_metadata_updates_live_cost_counter() {
 
     handle_tool_call_complete(&mut app, "review-usage", "review", &result);
 
-    assert!(app.session.subagent_cost > 0.0);
+    assert_eq!(app.session.subagent_cost, 0.0);
+    assert_eq!(app.session.cost_unpriced_turns, 1);
+    assert!(
+        app.session
+            .cost_unpriced_reasons
+            .contains("unknown_billing_basis")
+    );
+}
+
+/// Child metadata has to carry every billable class end-to-end. The producer
+/// (`review`/`verify`/`rlm`) and the reconstruction in `tool_routing` are tested
+/// together here, because the bug was a mismatch between them: the reconstruction
+/// hardcoded `prompt_cache_write_tokens: None`, so a child's cache-creation
+/// tokens were billed at nothing *and* the turn still looked fully priced (#4318).
+#[test]
+fn child_usage_metadata_carries_cache_write_and_reasoning_end_to_end() {
+    let child_usage = crate::models::Usage {
+        input_tokens: 1_000_000,
+        output_tokens: 100_000,
+        prompt_cache_hit_tokens: Some(200_000),
+        prompt_cache_miss_tokens: Some(700_000),
+        prompt_cache_write_tokens: Some(100_000),
+        reasoning_tokens: Some(40_000),
+        reasoning_replay_tokens: Some(12_345),
+        server_tool_use: Some(crate::models::ServerToolUsage {
+            code_execution_requests: Some(2),
+            tool_search_requests: Some(1),
+        }),
+        ..Default::default()
+    };
+
+    // The shared producer emits every class.
+    let priced_route = crate::cost_status::EffectiveRouteEnvelope {
+        provider: crate::config::ApiProvider::Anthropic,
+        provider_identity: "anthropic-api".to_string(),
+        model: "claude-haiku-4-5".to_string(),
+        billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+        endpoint_fingerprint: Some("test-anthropic-endpoint".to_string()),
+        billing_mode: crate::cost_status::RouteBillingMode::Metered,
+        dispatched_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).expect("epoch"),
+    };
+    let fields = crate::cost_status::child_usage_metadata_fields(&priced_route, &child_usage);
+    assert_eq!(fields["child_prompt_cache_write_tokens"], 100_000);
+    assert_eq!(fields["child_reasoning_tokens"], 40_000);
+    assert_eq!(fields["child_reasoning_replay_tokens"], 12_345);
+    assert_eq!(
+        fields["child_server_tool_use"]["code_execution_requests"],
+        2
+    );
+    assert_eq!(fields["child_prompt_cache_hit_tokens"], 200_000);
+
+    // A priced child route with a published cache-write rate accrues money, and
+    // the reconstructed write class is what makes the amount correct.
+    //
+    // The parent deliberately stays DeepSeek: only the frozen child envelope
+    // may control this price.
+    let mut priced_app = create_test_app();
+    priced_app.api_provider = crate::config::ApiProvider::Deepseek;
+    priced_app.billing_presentation = crate::route_billing::BillingPresentation::Metered;
+    let mut metadata = serde_json::json!({});
+    crate::cost_status::attach_child_usage_metadata(&mut metadata, &priced_route, &child_usage);
+    assert_eq!(
+        crate::cost_status::child_route_envelope_from_metadata(&metadata),
+        Some(priced_route.clone()),
+        "typed child route metadata must round-trip exactly"
+    );
+    let priced = Ok(crate::tools::spec::ToolResult::success("ok").with_metadata(metadata));
+    handle_tool_call_complete(&mut priced_app, "verify-1", "verify", &priced);
+
+    // 0.7M input @1.00 + 0.1M output @5.00 + 0.2M read @0.10 + 0.1M write @1.25.
+    let expected = 0.7 * 1.0 + 0.1 * 5.0 + 0.2 * 0.1 + 0.1 * 1.25;
+    assert!(
+        (priced_app.session.subagent_cost - expected).abs() < 1e-9,
+        "got {}, want {expected}",
+        priced_app.session.subagent_cost
+    );
+    assert_eq!(priced_app.session.cost_priced_turns, 1);
+    assert_eq!(priced_app.session.cost_unpriced_turns, 0);
+
+    // The same usage on a route that publishes no cache-write rate must fail
+    // closed and name the class, rather than pricing "completely" at 0 for the
+    // write tokens.
+    let mut unpriced_app = create_test_app();
+    unpriced_app.api_provider = crate::config::ApiProvider::Deepseek;
+    unpriced_app.billing_presentation = crate::route_billing::BillingPresentation::Metered;
+    let unpriced_route = crate::cost_status::EffectiveRouteEnvelope {
+        provider: crate::config::ApiProvider::Moonshot,
+        provider_identity: "moonshot-api".to_string(),
+        model: "kimi-k2.7-code".to_string(),
+        billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+        endpoint_fingerprint: Some("test-moonshot-endpoint".to_string()),
+        billing_mode: crate::cost_status::RouteBillingMode::Metered,
+        dispatched_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).expect("epoch"),
+    };
+    let mut metadata = serde_json::json!({});
+    crate::cost_status::attach_child_usage_metadata(&mut metadata, &unpriced_route, &child_usage);
+    let unpriced = Ok(crate::tools::spec::ToolResult::success("ok").with_metadata(metadata));
+    handle_tool_call_complete(&mut unpriced_app, "rlm-1", "rlm", &unpriced);
+
+    assert_eq!(unpriced_app.session.subagent_cost, 0.0);
+    assert_eq!(unpriced_app.session.cost_priced_turns, 0);
+    assert_eq!(unpriced_app.session.cost_unpriced_turns, 1);
+    assert!(
+        unpriced_app
+            .session
+            .cost_unpriced_classes
+            .contains("cache_write"),
+        "{:?}",
+        unpriced_app.session.cost_unpriced_classes
+    );
+
+    // A child reporting more reasoning than output is contradicting the subset
+    // invariant; the figure is discarded rather than inflating billable output.
+    let mut pathological = create_test_app();
+    pathological.api_provider = crate::config::ApiProvider::Deepseek;
+    pathological.billing_presentation = crate::route_billing::BillingPresentation::Metered;
+    let mut metadata = serde_json::json!({});
+    crate::cost_status::attach_child_usage_metadata(
+        &mut metadata,
+        &test_mailbox_route(ApiProvider::Deepseek, "deepseek-v4-flash"),
+        &crate::models::Usage {
+            input_tokens: 1_000,
+            output_tokens: 100,
+            reasoning_tokens: Some(9_000),
+            ..Default::default()
+        },
+    );
+    let result = Ok(crate::tools::spec::ToolResult::success("ok").with_metadata(metadata));
+    handle_tool_call_complete(&mut pathological, "rlm-2", "rlm", &result);
+    // Cost is that of 1000 input / 100 output, with no reasoning surcharge.
+    let sane = crate::pricing::calculate_turn_cost_estimate_for_provider(
+        crate::config::ApiProvider::Deepseek,
+        "deepseek-v4-flash",
+        &crate::models::Usage {
+            input_tokens: 1_000,
+            output_tokens: 100,
+            ..Default::default()
+        },
+    )
+    .expect("DeepSeek flash is priced");
+    assert!(
+        (pathological.session.subagent_cost - sane.usd).abs() < 1e-12,
+        "impossible reasoning telemetry changed the price: {}",
+        pathological.session.subagent_cost
+    );
+}
+
+#[test]
+fn zero_usage_model_child_still_records_priced_receipt() {
+    let mut app = create_test_app();
+    let route = test_mailbox_route(ApiProvider::Deepseek, "deepseek-v4-flash");
+    let mut metadata = serde_json::json!({});
+    crate::cost_status::attach_child_usage_metadata(
+        &mut metadata,
+        &route,
+        &crate::models::Usage::default(),
+    );
+    let result = Ok(crate::tools::spec::ToolResult::error("kernel closed").with_metadata(metadata));
+
+    handle_tool_call_complete(&mut app, "rlm-zero", "rlm", &result);
+
+    assert_eq!(app.session.subagent_cost, 0.0);
+    assert_eq!(app.session.cost_priced_turns, 1);
+    assert_eq!(app.session.cost_unpriced_turns, 0);
+    assert_eq!(app.session.cost_route_receipts.len(), 1);
 }
 
 #[test]
@@ -17368,8 +17663,8 @@ fn duplicate_mailbox_token_usage_does_not_regress_displayed_cost() {
     let mut app = create_test_app();
     let usage = crate::tools::subagent::MailboxMessage::TokenUsage {
         agent_id: "agent-x".to_string(),
-        provider: ApiProvider::Deepseek,
-        model: "deepseek-v4-flash".to_string(),
+        source_id: "response-x".to_string(),
+        route: test_mailbox_route(ApiProvider::Deepseek, "deepseek-v4-flash"),
         usage: crate::models::Usage {
             input_tokens: 10_000,
             output_tokens: 1_000,

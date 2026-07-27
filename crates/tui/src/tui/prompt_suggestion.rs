@@ -1182,6 +1182,10 @@ mod tests {
             model,
             auto_model: false,
             receipt: Some(validated.client.turn_route_receipt("deepseek")),
+            billing_surface: None,
+            endpoint_fingerprint: None,
+            billing_mode: crate::cost_status::RouteBillingMode::Unknown,
+            dispatched_at: chrono::Utc::now(),
         }
     }
 
@@ -1522,6 +1526,10 @@ mod tests {
                     DEEPSEEK_BASE,
                     DEEPSEEK_KEY,
                 )),
+                billing_surface: None,
+                endpoint_fingerprint: None,
+                billing_mode: crate::cost_status::RouteBillingMode::Unknown,
+                dispatched_at: chrono::Utc::now(),
             };
             assert!(
                 capture_route_authority(&route).is_none(),

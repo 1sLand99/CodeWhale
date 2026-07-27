@@ -724,6 +724,16 @@ impl Engine {
                     snapshot: tool_request_snapshot,
                 })
                 .await;
+            if let Some(mut route) = turn.pending_route.take() {
+                route.dispatched_at = chrono::Utc::now();
+                let _ = self
+                    .tx_event
+                    .send(Event::RouteDispatched {
+                        turn_id: turn.id.clone(),
+                        route,
+                    })
+                    .await;
+            }
             let stream_result = tokio::select! {
                 biased;
                 () = self.cancel_token.cancelled() => {

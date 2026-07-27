@@ -533,7 +533,7 @@ pub fn build_purge_tool() -> Tool {
 /// and for replacing the session message list with `PurgeResult.messages`.
 pub async fn run_purge(
     client: &impl LlmClient,
-    provider: ApiProvider,
+    _provider: ApiProvider,
     messages: &[Message],
     model: &str,
     reasoning_effort: Option<String>,
@@ -569,13 +569,18 @@ pub async fn run_purge(
         top_p: None,
     };
 
-    // 4. Send to the model.
+    // 4. Send to the model. Capture the session scope before awaiting so a
+    // late response cannot accrue into a subsequently loaded/new session.
+    let cost_scope = crate::cost_status::scope_token();
+    let cost_route = client.effective_route_envelope(model, chrono::Utc::now());
     let response = client
         .create_message(request)
         .await
         .map_err(|e| format!("Purge API error: {e}"))?;
 
-    crate::cost_status::report(provider, &response.model, &response.usage);
+    // Report the route, not just the provider name: the endpoint decides
+    // whether this is a metered public API, a plan quota, or a local runtime.
+    crate::cost_status::report_effective_route(cost_scope, &cost_route, &response.usage);
 
     // 5. Find the `purge_context` tool call in the response.
     let tool_input = response.content.iter().find_map(|block| {
@@ -840,6 +845,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_purge_removes_message() {
+        let _cost_guard = crate::cost_status::test_scope();
         let mock = MockLlmClient::new(vec![]);
         mock.push_message_response(msg_response_with_tool_call(json!([
             {"op": "remove", "msg": 2}
@@ -878,6 +884,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_purge_replace_condenses_text() {
+        let _cost_guard = crate::cost_status::test_scope();
         let mock = MockLlmClient::new(vec![]);
         mock.push_message_response(msg_response_with_tool_call(json!([
             {"op": "replace", "msg": 1, "block": 0, "pattern": "very long and verbose", "with": "short"}
@@ -903,6 +910,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_purge_errors_when_no_tool_call() {
+        let _cost_guard = crate::cost_status::test_scope();
         let mock = MockLlmClient::new(vec![]);
         mock.push_message_response(msg_response_without_tool_call("nothing to clean up"));
 
@@ -915,6 +923,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_purge_errors_on_api_failure() {
+        let _cost_guard = crate::cost_status::test_scope();
         // No canned response — MockLlmClient returns an error.
         let mock = MockLlmClient::new(vec![]);
         let messages = vec![msg_text("user", "hi")];

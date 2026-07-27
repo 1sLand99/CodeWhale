@@ -3121,14 +3121,7 @@ fn render_context_panel(f: &mut Frame, area: Rect, app: &mut App) {
 
 fn context_panel_cost_line(app: &App) -> String {
     let displayed_total = app.displayed_session_cost_for_currency(app.cost_currency);
-    let chip = crate::route_billing::usage_chip(
-        app.billing_presentation,
-        app.api_provider,
-        &app.model,
-        displayed_total,
-        app.cost_display_currency(app.cost_currency),
-        None,
-    );
+    let chip = app.cumulative_usage_chip();
     match &chip {
         crate::route_billing::UsageChip::Money(_)
             if crate::route_billing::has_priced_metered_basis(

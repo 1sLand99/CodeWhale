@@ -178,6 +178,13 @@ pub struct DeepSeekClient {
     model_bound_secret_values: Arc<Vec<String>>,
     pub(super) base_url: String,
     pub(super) api_provider: ApiProvider,
+    /// Exact configured provider identity and billing mode frozen when this
+    /// client is built. Child/tool calls only carry the client at dispatch, so
+    /// these route facts must travel with it instead of being reconstructed
+    /// from the mutable parent session at completion time.
+    provider_identity: String,
+    billing_surface: Option<String>,
+    billing_mode: crate::cost_status::RouteBillingMode,
     /// ChatGPT account id captured through the same consent-gated credential
     /// resolution as the Codex bearer token.
     pub(super) codex_account_id: Option<String>,
@@ -442,6 +449,9 @@ impl Clone for DeepSeekClient {
             model_bound_secret_values: Arc::clone(&self.model_bound_secret_values),
             base_url: self.base_url.clone(),
             api_provider: self.api_provider,
+            provider_identity: self.provider_identity.clone(),
+            billing_surface: self.billing_surface.clone(),
+            billing_mode: self.billing_mode,
             codex_account_id: self.codex_account_id.clone(),
             wire_format: self.wire_format,
             retry: self.retry.clone(),
@@ -1009,6 +1019,14 @@ impl DeepSeekClient {
         config: &Config,
     ) -> Result<Self> {
         let api_provider = config.api_provider();
+        let provider_identity = config.provider_identity_for(api_provider);
+        let billing_surface = crate::route_billing::billing_surface_for_dispatch(
+            Some(config),
+            api_provider,
+            Some(&base_url),
+        )
+        .map(str::to_string);
+        let billing_mode = crate::route_billing::for_route(config, api_provider).into();
         if api_provider == ApiProvider::OpencodeGo {
             validate_route(api_provider, &default_model).map_err(anyhow::Error::msg)?;
         }
@@ -1099,6 +1117,9 @@ impl DeepSeekClient {
             model_bound_secret_values,
             base_url,
             api_provider,
+            provider_identity,
+            billing_surface,
+            billing_mode,
             codex_account_id,
             wire_format,
             retry,
@@ -1740,6 +1761,29 @@ impl DeepSeekClient {
             &self.base_url,
             &self.api_key,
         )
+    }
+
+    /// Capture the immutable, redacted route envelope for a request immediately
+    /// before it is dispatched. The wire model is normalized exactly as the
+    /// transport will normalize it; a provider-returned alias must never replace
+    /// this billing identity later.
+    #[must_use]
+    pub fn effective_route_envelope(
+        &self,
+        requested_model: &str,
+        dispatched_at: chrono::DateTime<chrono::Utc>,
+    ) -> crate::cost_status::EffectiveRouteEnvelope {
+        let model =
+            wire_model_for_provider_route(self.api_provider, &self.base_url, requested_model);
+        crate::cost_status::EffectiveRouteEnvelope {
+            provider: self.api_provider,
+            provider_identity: self.provider_identity.clone(),
+            model,
+            billing_surface: self.billing_surface.clone(),
+            endpoint_fingerprint: crate::cost_status::endpoint_fingerprint(&self.base_url),
+            billing_mode: self.billing_mode,
+            dispatched_at,
+        }
     }
 
     /// Resolved in-flight provider request cap, if one is active.
@@ -2437,6 +2481,18 @@ impl LlmClient for DeepSeekClient {
         &self.default_model
     }
 
+    fn billing_base_url(&self) -> Option<&str> {
+        Some(&self.base_url)
+    }
+
+    fn effective_route_envelope(
+        &self,
+        requested_model: &str,
+        dispatched_at: chrono::DateTime<chrono::Utc>,
+    ) -> crate::cost_status::EffectiveRouteEnvelope {
+        DeepSeekClient::effective_route_envelope(self, requested_model, dispatched_at)
+    }
+
     async fn health_check(&self) -> Result<bool> {
         if api_provider_skips_models_probe(self.api_provider) {
             self.mark_request_success().await;
@@ -2549,6 +2605,11 @@ struct OpenRouterPricing {
     completion: Option<String>,
     #[serde(default)]
     input_cache_read: Option<String>,
+    /// Per-token cache-write (cache-creation) price. OpenRouter publishes this
+    /// for the upstreams that charge a write premium (Anthropic, Qwen, …);
+    /// dropping it undercounted every cache-creation turn on those routes.
+    #[serde(default)]
+    input_cache_write: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2749,6 +2810,7 @@ fn openrouter_to_catalog_offering(
     };
 
     let cost = item.pricing.as_ref().map(|p| {
+        // OpenRouter quotes per-token USD strings; ModelsDevCost is per million.
         let parse_price = |s: &Option<String>| -> Option<f64> {
             s.as_ref()
                 .and_then(|v| v.parse::<f64>().ok())
@@ -2758,7 +2820,7 @@ fn openrouter_to_catalog_offering(
             input: parse_price(&p.prompt),
             output: parse_price(&p.completion),
             cache_read: parse_price(&p.input_cache_read),
-            cache_write: None,
+            cache_write: parse_price(&p.input_cache_write),
         }
     });
 
@@ -3107,6 +3169,10 @@ pub(super) fn apply_reasoning_effort(
     }
 }
 
+pub(super) fn saturating_u32(value: u64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
 pub(super) fn parse_usage(usage: Option<&Value>) -> Usage {
     let input_tokens = usage
         .and_then(|u| u.get("input_tokens").or_else(|| u.get("prompt_tokens")))
@@ -3143,23 +3209,30 @@ pub(super) fn parse_usage(usage: Option<&Value>) -> Usage {
         .and_then(|u| u.get("prompt_cache_hit_tokens"))
         .and_then(Value::as_u64)
         .or(cached_tokens)
-        .map(|v| v as u32);
+        .map(saturating_u32);
     let prompt_cache_miss_tokens = usage
         .and_then(|u| u.get("prompt_cache_miss_tokens"))
         .and_then(Value::as_u64)
         .or_else(|| prompt_cache_hit_tokens.map(|hit| input_tokens.saturating_sub(u64::from(hit))))
-        .map(|v| v as u32);
-    let reasoning_tokens = reasoning_tokens_raw.map(|v| v as u32);
+        .map(saturating_u32);
+    // Reasoning tokens are a *subset* of the completion count every provider
+    // bills, so they are never added to output. A payload claiming more
+    // reasoning than output contradicts that invariant, which makes the figure
+    // invalid telemetry rather than extra billable output: drop it instead of
+    // letting a bad number reach the cost surfaces (#4318).
+    let reasoning_tokens = reasoning_tokens_raw
+        .filter(|reasoning| *reasoning <= output_tokens)
+        .map(saturating_u32);
 
     let server_tool_use = usage.and_then(|u| u.get("server_tool_use")).map(|server| {
         let code_execution_requests = server
             .get("code_execution_requests")
             .and_then(Value::as_u64)
-            .map(|v| v as u32);
+            .map(saturating_u32);
         let tool_search_requests = server
             .get("tool_search_requests")
             .and_then(Value::as_u64)
-            .map(|v| v as u32);
+            .map(saturating_u32);
         ServerToolUsage {
             code_execution_requests,
             tool_search_requests,
@@ -3167,8 +3240,8 @@ pub(super) fn parse_usage(usage: Option<&Value>) -> Usage {
     });
 
     Usage {
-        input_tokens: input_tokens.min(u64::from(u32::MAX)) as u32,
-        output_tokens: output_tokens.min(u64::from(u32::MAX)) as u32,
+        input_tokens: saturating_u32(input_tokens),
+        output_tokens: saturating_u32(output_tokens),
         prompt_cache_hit_tokens,
         prompt_cache_miss_tokens,
         prompt_cache_write_tokens: None,
@@ -3293,6 +3366,57 @@ mod tests {
     use serde_json::json;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn openrouter_pricing_maps_cache_write_per_token_to_per_million() {
+        let payload = r#"{"data":[{
+            "id":"anthropic/claude-sonnet-4-6",
+            "pricing":{
+                "prompt":"0.000003",
+                "completion":"0.000015",
+                "input_cache_read":"0.0000003",
+                "input_cache_write":"0.00000375"
+            }
+        },{
+            "id":"some/no-write-row",
+            "pricing":{"prompt":"0.000001","completion":"0.000002"}
+        }]}"#;
+
+        let items = parse_openrouter_models_response(payload).expect("parses");
+        let priced = openrouter_to_catalog_offering(&items[0], "openrouter", "fp", 42);
+        let cost = priced.cost.as_ref().expect("pricing row");
+        assert_eq!(cost.input, Some(3.0));
+        assert_eq!(cost.output, Some(15.0));
+        assert_eq!(cost.cache_read, Some(0.3));
+        assert_eq!(cost.cache_write, Some(3.75));
+
+        // A cache-write premium must actually reach the estimator: the same
+        // tokens cost more when they are cache-creation rather than cache-read.
+        let pricing = codewhale_config::pricing::OfferingPricing::from_catalog_offering(&priced)
+            .expect("priced offering");
+        let write = codewhale_config::pricing::TokenUsage {
+            cache_write: 1_000_000,
+            ..Default::default()
+        };
+        assert_eq!(pricing.estimate_cost(&write), Some(3.75));
+        assert!(pricing.unpriced_used_classes(&write).is_empty());
+
+        // A row without a published write rate stays unknown, not zero, and
+        // fails closed for cache-creation turns.
+        let unwritten = openrouter_to_catalog_offering(&items[1], "openrouter", "fp", 42);
+        assert_eq!(
+            unwritten.cost.as_ref().and_then(|cost| cost.cache_write),
+            None
+        );
+        let unwritten =
+            codewhale_config::pricing::OfferingPricing::from_catalog_offering(&unwritten)
+                .expect("priced offering");
+        assert_eq!(unwritten.estimate_cost(&write), None);
+        assert_eq!(
+            unwritten.unpriced_used_classes(&write),
+            vec![codewhale_config::pricing::TokenClass::CacheWrite]
+        );
+    }
 
     fn test_tool(name: &str) -> Tool {
         Tool {
@@ -8115,6 +8239,177 @@ mod tests {
         assert_eq!(usage.prompt_cache_hit_tokens, Some(70));
         assert_eq!(usage.prompt_cache_miss_tokens, Some(30));
         assert_eq!(usage.reasoning_tokens, Some(12));
+    }
+
+    #[test]
+    fn parse_usage_saturates_every_u64_token_field() {
+        let usage = parse_usage(Some(&json!({
+            "input_tokens": u64::MAX,
+            "output_tokens": u64::MAX,
+            "prompt_cache_hit_tokens": u64::MAX,
+            "prompt_cache_miss_tokens": u64::MAX,
+            "completion_tokens_details": { "reasoning_tokens": u64::MAX },
+            "server_tool_use": {
+                "code_execution_requests": u64::MAX,
+                "tool_search_requests": u64::MAX
+            }
+        })));
+        assert_eq!(usage.input_tokens, u32::MAX);
+        assert_eq!(usage.output_tokens, u32::MAX);
+        assert_eq!(usage.prompt_cache_hit_tokens, Some(u32::MAX));
+        assert_eq!(usage.prompt_cache_miss_tokens, Some(u32::MAX));
+        assert_eq!(usage.reasoning_tokens, Some(u32::MAX));
+        let server = usage.server_tool_use.expect("server usage");
+        assert_eq!(server.code_execution_requests, Some(u32::MAX));
+        assert_eq!(server.tool_search_requests, Some(u32::MAX));
+    }
+
+    #[test]
+    fn client_route_envelope_freezes_saved_minimax_billing_mode_and_wire_model() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let config = Config {
+            provider: Some("minimax".to_string()),
+            providers: Some(ProvidersConfig {
+                minimax: ProviderConfig {
+                    api_key: Some("test-key".to_string()),
+                    mode: Some("pay-as-you-go".to_string()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        };
+        let client = DeepSeekClient::new(&config).expect("MiniMax client");
+        let dispatched_at =
+            chrono::DateTime::<chrono::Utc>::from_timestamp(1_234, 0).expect("timestamp");
+        let route = client.effective_route_envelope("MiniMax-M3", dispatched_at);
+
+        assert_eq!(route.provider, ApiProvider::Minimax);
+        assert_eq!(route.provider_identity, "minimax");
+        assert_eq!(route.model, "MiniMax-M3");
+        assert_eq!(
+            route.billing_surface.as_deref(),
+            Some(crate::pricing::MINIMAX_PAYG_BILLING_SURFACE)
+        );
+        assert_eq!(
+            route.billing_mode,
+            crate::cost_status::RouteBillingMode::Metered
+        );
+        assert_eq!(route.dispatched_at.timestamp(), 1_234);
+    }
+
+    /// Real-shaped Chat-Completions usage payloads from the three providers most
+    /// likely to report reasoning tokens, carried end-to-end into pricing.
+    ///
+    /// Two invariants hold for every fixture: `reasoning_tokens <= output_tokens`,
+    /// and pricing never adds reasoning on top of output — dropping the reasoning
+    /// field entirely must not change the cost by a single cent.
+    #[test]
+    fn reasoning_parser_fixtures_never_exceed_or_add_to_billable_output() {
+        use crate::config::ApiProvider;
+        use crate::pricing::{calculate_turn_cost_estimate_for_provider, token_usage_for_pricing};
+
+        // (label, provider, model, payload)
+        let fixtures: [(&str, ApiProvider, &str, serde_json::Value); 3] = [
+            (
+                "moonshot",
+                ApiProvider::Moonshot,
+                "kimi-k2.7-code",
+                json!({
+                    "prompt_tokens": 30_000,
+                    "completion_tokens": 2_400,
+                    "total_tokens": 32_400,
+                    "prompt_tokens_details": { "cached_tokens": 24_000 },
+                    "completion_tokens_details": { "reasoning_tokens": 1_900 }
+                }),
+            ),
+            (
+                "minimax",
+                ApiProvider::Minimax,
+                "minimax-m3",
+                json!({
+                    "prompt_tokens": 12_000,
+                    "completion_tokens": 3_000,
+                    "total_tokens": 15_000,
+                    "prompt_tokens_details": { "cached_tokens": 4_000 },
+                    "completion_tokens_details": { "reasoning_tokens": 2_950 }
+                }),
+            ),
+            (
+                "openrouter",
+                ApiProvider::Openrouter,
+                "qwen/qwen3.7-plus",
+                json!({
+                    "prompt_tokens": 8_000,
+                    "completion_tokens": 1_500,
+                    "total_tokens": 9_500,
+                    "prompt_tokens_details": { "cached_tokens": 2_000 },
+                    "completion_tokens_details": { "reasoning_tokens": 1_500 }
+                }),
+            ),
+        ];
+
+        for (label, provider, model, payload) in fixtures {
+            let usage = parse_usage(Some(&payload));
+            let reasoning = usage.reasoning_tokens.expect("fixture reports reasoning");
+
+            // Invariant 1: reasoning is a subset of the billed completion count.
+            assert!(
+                reasoning <= usage.output_tokens,
+                "{label}: reasoning {reasoning} exceeds output {}",
+                usage.output_tokens
+            );
+            // Billable output is exactly the reported completion count.
+            let classes = token_usage_for_pricing(&usage);
+            assert_eq!(
+                classes.output,
+                u64::from(usage.output_tokens),
+                "{label}: reasoning leaked into billable output"
+            );
+
+            // Invariant 2: pricing does not add reasoning a second time. The same
+            // usage with the reasoning field removed must cost the same.
+            let without = crate::models::Usage {
+                reasoning_tokens: None,
+                ..usage.clone()
+            };
+            assert_eq!(
+                calculate_turn_cost_estimate_for_provider(provider, model, &usage),
+                calculate_turn_cost_estimate_for_provider(provider, model, &without),
+                "{label}: reasoning changed the price"
+            );
+        }
+    }
+
+    /// A payload claiming more reasoning than output contradicts the subset
+    /// invariant. That is broken telemetry, so the field is discarded — and it
+    /// must never become extra billable output.
+    #[test]
+    fn pathological_reasoning_above_output_is_rejected_not_billed() {
+        let usage = parse_usage(Some(&json!({
+            "prompt_tokens": 1_000,
+            "completion_tokens": 100,
+            "completion_tokens_details": { "reasoning_tokens": 5_000 }
+        })));
+
+        assert_eq!(usage.output_tokens, 100, "output stays as reported");
+        assert_eq!(
+            usage.reasoning_tokens, None,
+            "impossible reasoning telemetry is dropped rather than trusted"
+        );
+        let classes = crate::pricing::token_usage_for_pricing(&usage);
+        assert_eq!(classes.output, 100);
+
+        // `completion_tokens: 0` with reasoning present is the *legitimate*
+        // shape this filter must not break: providers that report only reasoning
+        // set output from it, keeping reasoning == output.
+        let zero_output = parse_usage(Some(&json!({
+            "prompt_tokens": 1_000,
+            "completion_tokens": 0,
+            "completion_tokens_details": { "reasoning_tokens": 12 }
+        })));
+        assert_eq!(zero_output.output_tokens, 12);
+        assert_eq!(zero_output.reasoning_tokens, Some(12));
     }
 
     #[test]

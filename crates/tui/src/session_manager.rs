@@ -16,6 +16,7 @@ use crate::tui::file_mention::ContextReference;
 use crate::utils::write_atomic;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -162,7 +163,16 @@ impl SessionMetadata {
 }
 
 /// Cost and high-water-mark fields persisted with each session.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+///
+/// The coverage fields below are persisted **alongside** the money so a restored
+/// session can still say what its total covers. Without them a reload produced a
+/// dollar figure with no completeness information, which then rendered as "0 of 0
+/// turns priced" — a fabricated claim of a complete total. Sessions written
+/// before these fields existed deserialize them from `Default`, which is
+/// indistinguishable from that same false reading, so the load path detects the
+/// legacy shape explicitly (see [`Self::coverage_is_legacy_unknown`]) rather than
+/// trusting the defaults (#4318).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionCostSnapshot {
     /// Accumulated parent-turn session cost in USD.
     #[serde(default)]
@@ -183,17 +193,85 @@ pub struct SessionCostSnapshot {
     /// Max-ever displayed session+subagent cost in CNY.
     #[serde(default)]
     pub displayed_cost_high_water_cny: f64,
+    /// Turns whose route was money-metered and produced an authoritative price.
+    /// These are exactly the turns the persisted totals contain.
+    #[serde(default)]
+    pub priced_turns: u32,
+    /// Money-metered (or unknown-basis) turns that produced no authoritative
+    /// price, so their spend is missing from the persisted totals.
+    #[serde(default)]
+    pub unpriced_turns: u32,
+    /// CNY-specific coverage. USD-only routes are unpriced in CNY rather than
+    /// silently contributing a fabricated zero.
+    #[serde(default)]
+    pub cny_priced_turns: u32,
+    #[serde(default)]
+    pub cny_unpriced_turns: u32,
+    /// Stable reason labels for the unpriced turns.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub unpriced_reasons: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub cny_unpriced_reasons: BTreeSet<String>,
+    /// Token classes used on some route that carry no published price.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub unpriced_classes: BTreeSet<String>,
+    /// Provenance labels of the pricing rows the totals were built from.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub pricing_provenances: BTreeSet<String>,
+    /// Live-pricing downgrade receipts recorded while building the totals.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub live_pricing_defects: BTreeSet<String>,
+    /// Live rows that failed validation and had no usable bundled fallback.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub live_pricing_unusable_defects: BTreeSet<String>,
+    /// Redacted per-route receipts: provider, configured identity, wire model,
+    /// billing surface, endpoint fingerprint, billing mode, currency. Never a URL, a
+    /// credential, or a filesystem path.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub route_receipts: BTreeSet<String>,
+    /// Written by builds that track coverage, so a reader can tell "this session
+    /// genuinely had zero money-metered turns" apart from "this session predates
+    /// coverage tracking". Absent on legacy rows.
+    #[serde(default)]
+    pub coverage_recorded: bool,
 }
 
 impl SessionCostSnapshot {
     /// Session + subagent cost in USD.
     pub fn total_usd(&self) -> f64 {
-        self.session_cost_usd + self.subagent_cost_usd
+        crate::pricing::CostEstimate {
+            usd: self.session_cost_usd,
+            cny: 0.0,
+        }
+        .saturating_add(crate::pricing::CostEstimate {
+            usd: self.subagent_cost_usd,
+            cny: 0.0,
+        })
+        .usd
     }
 
     /// Session + subagent cost in CNY.
     pub fn total_cny(&self) -> f64 {
-        self.session_cost_cny + self.subagent_cost_cny
+        crate::pricing::CostEstimate {
+            usd: 0.0,
+            cny: self.session_cost_cny,
+        }
+        .saturating_add(crate::pricing::CostEstimate {
+            usd: 0.0,
+            cny: self.subagent_cost_cny,
+        })
+        .cny
+    }
+
+    /// Whether this snapshot's coverage state must be shown as unknown.
+    ///
+    /// True when the snapshot has no coverage evidence — the signature of a
+    /// session written before coverage was persisted. Reporting any such
+    /// session as "0 of 0 priced" would claim completeness without evidence,
+    /// including when the saved amount is zero.
+    #[must_use]
+    pub fn coverage_is_legacy_unknown(&self) -> bool {
+        !self.coverage_recorded
     }
 }
 
@@ -201,7 +279,7 @@ impl SessionMetadata {
     /// Copy cost fields from another metadata (used when forking a session).
     #[allow(dead_code)]
     pub fn copy_cost_from(&mut self, other: &SessionMetadata) {
-        self.cost = other.cost;
+        self.cost = other.cost.clone();
     }
 
     /// Record additive lineage metadata for a forked saved session.
@@ -1382,6 +1460,94 @@ mod tests {
                 text: text.to_string(),
                 cache_control: None,
             }],
+        }
+    }
+
+    /// Coverage state round-trips with the money it qualifies, and a session
+    /// written before coverage existed is detected as *unknown* rather than being
+    /// read as a complete total covering zero turns (#4318).
+    #[test]
+    fn cost_snapshot_round_trips_coverage_and_detects_legacy_unknown() {
+        // A pre-coverage row: real money, no coverage fields at all.
+        let legacy: SessionCostSnapshot = serde_json::from_value(serde_json::json!({
+            "session_cost_usd": 1.25,
+            "session_cost_cny": 0.0,
+            "subagent_cost_usd": 0.0,
+            "subagent_cost_cny": 0.0,
+            "displayed_cost_high_water_usd": 1.25,
+            "displayed_cost_high_water_cny": 0.0
+        }))
+        .expect("legacy cost snapshot stays readable");
+        assert_eq!(legacy.priced_turns, 0);
+        assert_eq!(legacy.unpriced_turns, 0);
+        assert!(!legacy.coverage_recorded);
+        assert!(
+            legacy.coverage_is_legacy_unknown(),
+            "a non-zero total with no coverage evidence must not read as complete"
+        );
+
+        // An all-zero pre-coverage session is still unknown: zero may mean no
+        // turns, all unpriced turns, or exact zero usage. Absence of evidence is
+        // never rewritten into a complete 0/0 claim.
+        let empty = SessionCostSnapshot::default();
+        assert!(empty.coverage_is_legacy_unknown());
+
+        // A coverage-aware writer that recorded zero money-metered turns is also
+        // not unknown — it positively knows the answer is zero.
+        let recorded_zero = SessionCostSnapshot {
+            session_cost_usd: 1.25,
+            coverage_recorded: true,
+            ..SessionCostSnapshot::default()
+        };
+        assert!(!recorded_zero.coverage_is_legacy_unknown());
+
+        // Full round-trip of every coverage field.
+        let full = SessionCostSnapshot {
+            session_cost_usd: 2.5,
+            session_cost_cny: 3.0,
+            subagent_cost_usd: 0.5,
+            subagent_cost_cny: 0.25,
+            displayed_cost_high_water_usd: 3.0,
+            displayed_cost_high_water_cny: 3.25,
+            priced_turns: 7,
+            unpriced_turns: 2,
+            cny_priced_turns: 1,
+            cny_unpriced_turns: 8,
+            unpriced_reasons: ["missing_class_price".to_string()].into(),
+            cny_unpriced_reasons: ["currency_not_published".to_string()].into(),
+            unpriced_classes: ["cache_write".to_string()].into(),
+            pricing_provenances: ["models_dev_bundled".to_string()].into(),
+            live_pricing_defects: ["live_pricing_stale".to_string()].into(),
+            live_pricing_unusable_defects: ["live_pricing_scope_mismatch".to_string()].into(),
+            route_receipts: ["provider=anthropic identity=- model=claude-haiku-4-5 \
+                 surface=first-party-payg endpoint_fp=abc123 currency=usd"
+                .to_string()]
+            .into(),
+            coverage_recorded: true,
+        };
+        let json = serde_json::to_string(&full).expect("serialize");
+        let back: SessionCostSnapshot = serde_json::from_str(&json).expect("round-trip");
+        assert_eq!(back.priced_turns, 7);
+        assert_eq!(back.unpriced_turns, 2);
+        assert_eq!(back.cny_priced_turns, 1);
+        assert_eq!(back.cny_unpriced_turns, 8);
+        assert_eq!(back.unpriced_reasons, full.unpriced_reasons);
+        assert_eq!(back.cny_unpriced_reasons, full.cny_unpriced_reasons);
+        assert_eq!(back.unpriced_classes, full.unpriced_classes);
+        assert_eq!(back.pricing_provenances, full.pricing_provenances);
+        assert_eq!(back.live_pricing_defects, full.live_pricing_defects);
+        assert_eq!(
+            back.live_pricing_unusable_defects,
+            full.live_pricing_unusable_defects
+        );
+        assert_eq!(back.route_receipts, full.route_receipts);
+        assert!(back.coverage_recorded);
+        assert!(!back.coverage_is_legacy_unknown());
+
+        // The persisted receipts carry no endpoint URL or credential.
+        let lower = json.to_lowercase();
+        for needle in ["http", "api_key", "authorization", "bearer", "sk-"] {
+            assert!(!lower.contains(needle), "{needle} leaked into {json}");
         }
     }
 

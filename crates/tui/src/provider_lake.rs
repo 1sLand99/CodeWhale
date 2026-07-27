@@ -371,6 +371,35 @@ pub fn catalog_offering_for_model(
         .cloned()
 }
 
+/// Look up the **bundled-snapshot** offering for `(provider, wire_model_id)`,
+/// ignoring any live rows merged over it.
+///
+/// Pricing uses this as an honest fallback when a live row cannot be verified as
+/// authoritative for the endpoint being priced (stale fetch, or a fetch from a
+/// different base URL). The bundled snapshot is a published Models.dev seed with
+/// no endpoint scoping, so it is authoritative for the model without needing a
+/// freshness proof — degrading to it is strictly more truthful than billing
+/// against an unverified live rate (#4318).
+#[must_use]
+pub fn bundled_catalog_offering_for_model(
+    provider: ApiProvider,
+    wire_model_id: &str,
+) -> Option<CatalogOffering> {
+    if provider == ApiProvider::OpenaiCodex {
+        return None;
+    }
+    let catalog_id = catalog_provider_id(provider);
+    let needle = wire_model_id.trim();
+    if needle.is_empty() {
+        return None;
+    }
+    bundled_snapshot()
+        .offerings_for_provider(catalog_id)
+        .into_iter()
+        .find(|row| row.wire_model_id.eq_ignore_ascii_case(needle))
+        .cloned()
+}
+
 /// Count of merged-catalog models for one provider (catalog view / dashboard).
 #[must_use]
 pub fn catalog_model_count_for_provider(provider: ApiProvider) -> usize {

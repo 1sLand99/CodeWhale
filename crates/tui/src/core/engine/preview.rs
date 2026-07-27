@@ -310,6 +310,7 @@ impl Engine {
                 SubAgentWiring::Inert,
                 McpAccess::PassiveSnapshot,
                 route_context.clone(),
+                "",
             )
             .await;
 
@@ -1189,6 +1190,7 @@ mod tests {
                     reasoning_effort: planned.effective_reasoning_effort,
                     reasoning_effort_auto: planned.auto_controls_reasoning,
                 },
+                "",
             )
             .await;
         assert!(
@@ -2037,6 +2039,7 @@ mod tests {
                     reasoning_effort: None,
                     reasoning_effort_auto: false,
                 },
+                "",
             )
             .await;
 

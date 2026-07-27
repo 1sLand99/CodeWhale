@@ -123,11 +123,36 @@ fn sample_turn(thread_id: &str, turn_id: &str, status: RuntimeTurnStatus) -> Tur
         effective_provider: None,
         effective_provider_id: None,
         effective_billing_surface: None,
+        effective_endpoint_fingerprint: None,
+        effective_billing_mode: None,
+        effective_dispatched_at: None,
         effective_model: None,
+        routed_usage: Vec::new(),
+        routed_usage_source_ids: Vec::new(),
+        routed_usage_dropped_records: 0,
         error: None,
         item_ids: Vec::new(),
         steer_count: 0,
     }
+}
+
+fn set_test_turn_route(
+    turn: &mut TurnRecord,
+    provider: ApiProvider,
+    provider_identity: &str,
+    model: &str,
+    billing_surface: Option<&str>,
+    billing_mode: crate::cost_status::RouteBillingMode,
+) {
+    turn.persist_effective_route(&crate::cost_status::EffectiveRouteEnvelope {
+        provider,
+        provider_identity: provider_identity.to_string(),
+        model: model.to_string(),
+        billing_surface: billing_surface.map(str::to_string),
+        endpoint_fingerprint: None,
+        billing_mode,
+        dispatched_at: turn.created_at,
+    });
 }
 
 #[test]
@@ -161,12 +186,19 @@ fn legacy_turn_record_has_no_invented_route_provenance() {
     object.remove("effective_provider");
     object.remove("effective_provider_id");
     object.remove("effective_billing_surface");
+    object.remove("effective_endpoint_fingerprint");
+    object.remove("effective_billing_mode");
+    object.remove("effective_dispatched_at");
     object.remove("effective_model");
+    object.remove("routed_usage");
 
     let restored: TurnRecord = serde_json::from_value(value).expect("deserialize legacy turn");
     assert_eq!(restored.effective_provider, None);
     assert_eq!(restored.effective_billing_surface, None);
+    assert_eq!(restored.effective_billing_mode, None);
+    assert_eq!(restored.effective_dispatched_at, None);
     assert_eq!(restored.effective_model, None);
+    assert!(restored.routed_usage.is_empty());
 }
 
 #[tokio::test]
@@ -938,10 +970,15 @@ async fn concurrent_turn_starts_leave_one_claim_and_one_consistent_durable_turn(
         manager.active_turn_flags(&thread.id, &turn.id).await,
         Some((false, false))
     );
-    assert!(matches!(
-        harness.rx_op.recv().await,
-        Some(Op::SendMessage { .. })
-    ));
+    match harness.rx_op.recv().await {
+        Some(Op::SendMessage { compaction, .. }) => {
+            assert_eq!(
+                compaction.runtime_cost_owner.as_deref(),
+                Some(turn.id.as_str())
+            );
+        }
+        other => panic!("expected SendMessage op, got {other:?}"),
+    }
     assert!(harness.rx_op.try_recv().is_err());
     Ok(())
 }
@@ -1484,17 +1521,76 @@ async fn simultaneous_named_custom_auto_threads_keep_exact_routes() -> Result<()
 #[test]
 fn turn_record_persists_billing_surface_without_raw_endpoint() {
     let mut turn = sample_turn("thr_surface", "turn_surface", RuntimeTurnStatus::Completed);
-    turn.effective_provider = Some(ApiProvider::Stepfun.as_str().to_string());
-    turn.effective_billing_surface = Some(crate::pricing::STEPFUN_PAYG_BILLING_SURFACE.to_string());
-    turn.effective_model = Some("step-3.7-flash".to_string());
+    let fingerprint = "a".repeat(64);
+    turn.persist_effective_route(&crate::cost_status::EffectiveRouteEnvelope {
+        provider: ApiProvider::Stepfun,
+        provider_identity: "stepfun-primary".to_string(),
+        model: "step-3.7-flash".to_string(),
+        billing_surface: Some(crate::pricing::STEPFUN_PAYG_BILLING_SURFACE.to_string()),
+        endpoint_fingerprint: Some(fingerprint.clone()),
+        billing_mode: crate::cost_status::RouteBillingMode::Metered,
+        dispatched_at: turn.created_at,
+    });
 
     let value = serde_json::to_value(turn).expect("serialize turn");
     assert_eq!(
         value["effective_billing_surface"],
         crate::pricing::STEPFUN_PAYG_BILLING_SURFACE
     );
+    assert_eq!(value["effective_billing_mode"], "metered");
+    assert_eq!(value["effective_endpoint_fingerprint"], fingerprint);
+    assert!(value["effective_dispatched_at"].is_string());
     assert!(value.get("base_url").is_none());
     assert!(value.get("effective_base_url").is_none());
+}
+
+#[test]
+fn serialized_turn_record_redacts_all_route_and_source_fields() {
+    let mut value = serde_json::to_value(sample_turn(
+        "thr_secret_route",
+        "turn_secret_route",
+        RuntimeTurnStatus::Completed,
+    ))
+    .expect("serialize clean fixture");
+    value["effective_provider"] = serde_json::json!("Authorization: Bearer provider-secret");
+    value["effective_provider_id"] = serde_json::json!("CUSTOM_API_KEY=sk-provider-secret");
+    value["effective_model"] = serde_json::json!("../.ssh/model-secret");
+    value["effective_billing_surface"] =
+        serde_json::json!("https://alice:password@example.test/v1?token=secret#fragment");
+    value["effective_endpoint_fingerprint"] = serde_json::json!("secret-endpoint");
+    value["routed_usage_source_ids"] = serde_json::json!(["raw-provider-response-secret"]);
+    value["routed_usage"] = serde_json::json!([{
+        "route": {
+            "provider": "custom",
+            "provider_identity": "TOKEN=ghp_child_secret",
+            "model": r"relative\secret\model",
+            "billing_surface": "https://host.test/v1?key=child-secret",
+            "endpoint_fingerprint": "child-endpoint-secret",
+            "billing_mode": "metered",
+            "dispatched_at": Utc::now(),
+        },
+        "usage": Usage::default(),
+    }]);
+    let turn: TurnRecord = serde_json::from_value(value).expect("deserialize hostile fixture");
+
+    let serialized = serde_json::to_string(&turn).expect("serialize turn record");
+    for secret in [
+        "provider-secret",
+        "sk-provider-secret",
+        ".ssh",
+        "alice",
+        "password",
+        "token=secret",
+        "raw-provider-response-secret",
+        "ghp_child_secret",
+        "child-secret",
+        "child-endpoint-secret",
+    ] {
+        assert!(
+            !serialized.contains(secret),
+            "serialized turn leaked {secret:?}: {serialized}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1511,14 +1607,26 @@ async fn aggregate_usage_keeps_codex_tokens_without_api_dollar_pricing() -> Resu
     };
     let mut deepseek = sample_turn(&thread.id, "turn_deepseek", RuntimeTurnStatus::Completed);
     deepseek.usage = Some(usage.clone());
-    deepseek.effective_provider = Some(ApiProvider::Deepseek.as_str().to_string());
-    deepseek.effective_model = Some("deepseek-v4-flash".to_string());
+    set_test_turn_route(
+        &mut deepseek,
+        ApiProvider::Deepseek,
+        ApiProvider::Deepseek.as_str(),
+        "deepseek-v4-flash",
+        None,
+        crate::cost_status::RouteBillingMode::Metered,
+    );
     manager.store.save_turn(&deepseek)?;
 
     let mut codex = sample_turn(&thread.id, "turn_codex", RuntimeTurnStatus::Completed);
     codex.usage = Some(usage);
-    codex.effective_provider = Some(ApiProvider::OpenaiCodex.as_str().to_string());
-    codex.effective_model = Some("gpt-5.5".to_string());
+    set_test_turn_route(
+        &mut codex,
+        ApiProvider::OpenaiCodex,
+        ApiProvider::OpenaiCodex.as_str(),
+        "gpt-5.5",
+        Some(crate::pricing::OAUTH_SUBSCRIPTION_BILLING_SURFACE),
+        crate::cost_status::RouteBillingMode::Subscription,
+    );
     manager.store.save_turn(&codex)?;
 
     let report = manager
@@ -1540,13 +1648,77 @@ async fn aggregate_usage_keeps_codex_tokens_without_api_dollar_pricing() -> Resu
         .expect("Codex bucket");
     assert!(deepseek_bucket.cost_usd > 0.0);
     assert_eq!(codex_bucket.cost_usd, 0.0);
+    assert_eq!(deepseek_bucket.priced_turns, 1);
+    assert_eq!(deepseek_bucket.unpriced_turns, 0);
+    assert_eq!(codex_bucket.priced_turns, 0);
+    assert_eq!(codex_bucket.nonmetered_turns, 1);
+    assert_eq!(codex_bucket.unpriced_turns, 0);
+    assert!(codex_bucket.unpriced_reasons.is_empty());
+    assert_eq!(report.totals.priced_turns, 1);
+    assert_eq!(report.totals.nonmetered_turns, 1);
+    assert_eq!(report.totals.unpriced_turns, 0);
+    assert!(report.totals.cost_complete);
     assert_eq!(codex_bucket.input_tokens, 10_000);
     assert_eq!(report.totals.cost_usd, deepseek_bucket.cost_usd);
     Ok(())
 }
 
 #[tokio::test]
-async fn aggregate_usage_prices_each_turn_at_its_recorded_time() -> Result<()> {
+async fn aggregate_usage_marks_unknown_cost_as_subtotal_and_keeps_cache_writes() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = sample_thread("thr_cost_coverage");
+    manager.store.save_thread(&thread)?;
+    let usage = Usage {
+        input_tokens: 10_000,
+        output_tokens: 1_000,
+        prompt_cache_write_tokens: Some(321),
+        ..Usage::default()
+    };
+
+    let mut priced = sample_turn(&thread.id, "turn_priced", RuntimeTurnStatus::Completed);
+    priced.usage = Some(usage.clone());
+    set_test_turn_route(
+        &mut priced,
+        ApiProvider::Deepseek,
+        ApiProvider::Deepseek.as_str(),
+        "deepseek-v4-flash",
+        None,
+        crate::cost_status::RouteBillingMode::Metered,
+    );
+    manager.store.save_turn(&priced)?;
+
+    let mut unknown = sample_turn(&thread.id, "turn_unknown", RuntimeTurnStatus::Completed);
+    unknown.usage = Some(usage);
+    set_test_turn_route(
+        &mut unknown,
+        ApiProvider::Openai,
+        ApiProvider::Openai.as_str(),
+        "gpt-5.5",
+        Some(crate::pricing::UNCLASSIFIED_BILLING_SURFACE),
+        crate::cost_status::RouteBillingMode::Unknown,
+    );
+    manager.store.save_turn(&unknown)?;
+
+    let report = manager
+        .aggregate_usage(None, None, UsageGroupBy::Thread)
+        .await?;
+    assert!(report.totals.cost_usd > 0.0, "priced subtotal is retained");
+    assert_eq!(report.totals.priced_turns, 1);
+    assert_eq!(report.totals.unpriced_turns, 1);
+    assert!(!report.totals.cost_complete);
+    assert_eq!(report.totals.nonmetered_turns, 0);
+    assert_eq!(report.totals.cache_write_tokens, 642);
+    assert!(
+        report
+            .totals
+            .unpriced_reasons
+            .contains("unknown_billing_basis")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn aggregate_usage_prices_slow_predispatch_turn_at_dispatch_boundary() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
     let mut thread = sample_thread("thr_historical_pricing");
     thread.model = "claude-sonnet-5".to_string();
@@ -1557,15 +1729,27 @@ async fn aggregate_usage_prices_each_turn_at_its_recorded_time() -> Result<()> {
         output_tokens: 0,
         ..Usage::default()
     };
-    for (turn_id, created_at) in [
-        ("turn_intro", "2026-08-31T23:59:59Z"),
-        ("turn_standard", "2026-09-01T00:00:00Z"),
+    for (turn_id, created_at, dispatched_at) in [
+        ("turn_intro", "2026-08-31T23:59:58Z", "2026-08-31T23:59:59Z"),
+        (
+            "turn_slow_snapshot",
+            "2026-08-31T23:59:59Z",
+            "2026-09-01T00:00:00Z",
+        ),
     ] {
         let mut turn = sample_turn(&thread.id, turn_id, RuntimeTurnStatus::Completed);
         turn.created_at = created_at.parse().expect("recorded turn time");
+        turn.started_at = Some(turn.created_at);
         turn.usage = Some(usage.clone());
-        turn.effective_provider = Some(ApiProvider::Anthropic.as_str().to_string());
-        turn.effective_model = Some("claude-sonnet-5".to_string());
+        set_test_turn_route(
+            &mut turn,
+            ApiProvider::Anthropic,
+            ApiProvider::Anthropic.as_str(),
+            "claude-sonnet-5",
+            None,
+            crate::cost_status::RouteBillingMode::Metered,
+        );
+        turn.effective_dispatched_at = Some(dispatched_at.parse().expect("dispatch time"));
         manager.store.save_turn(&turn)?;
     }
 
@@ -1605,9 +1789,18 @@ async fn aggregate_usage_prices_only_stepfun_payg_surface() -> Result<()> {
     ] {
         let mut turn = sample_turn(&thread.id, turn_id, RuntimeTurnStatus::Completed);
         turn.usage = Some(usage.clone());
-        turn.effective_provider = Some(ApiProvider::Stepfun.as_str().to_string());
-        turn.effective_billing_surface = Some(surface.to_string());
-        turn.effective_model = Some("step-3.7-flash".to_string());
+        set_test_turn_route(
+            &mut turn,
+            ApiProvider::Stepfun,
+            ApiProvider::Stepfun.as_str(),
+            "step-3.7-flash",
+            Some(surface),
+            if surface == crate::pricing::STEPFUN_PLAN_BILLING_SURFACE {
+                crate::cost_status::RouteBillingMode::Subscription
+            } else {
+                crate::cost_status::RouteBillingMode::Metered
+            },
+        );
         manager.store.save_turn(&turn)?;
     }
 
@@ -1617,6 +1810,379 @@ async fn aggregate_usage_prices_only_stepfun_payg_surface() -> Result<()> {
     assert_eq!(report.totals.turns, 2);
     assert!((report.totals.cost_usd - 0.735).abs() < 1e-12);
     Ok(())
+}
+
+#[tokio::test]
+async fn aggregate_usage_includes_exclusive_child_calls_and_zero_usage_receipts() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = sample_thread("thr_child_usage");
+    manager.store.save_thread(&thread)?;
+
+    let mut turn = sample_turn(&thread.id, "turn_parent", RuntimeTurnStatus::Completed);
+    turn.usage = Some(Usage {
+        input_tokens: 100,
+        output_tokens: 20,
+        prompt_cache_hit_tokens: Some(40),
+        prompt_cache_miss_tokens: Some(50),
+        prompt_cache_write_tokens: Some(10),
+        reasoning_tokens: Some(5),
+        ..Usage::default()
+    });
+    set_test_turn_route(
+        &mut turn,
+        ApiProvider::Deepseek,
+        "deepseek-parent",
+        "deepseek-v4-flash",
+        None,
+        crate::cost_status::RouteBillingMode::Metered,
+    );
+    turn.routed_usage
+        .push(crate::cost_status::EffectiveRouteUsage {
+            route: crate::cost_status::EffectiveRouteEnvelope {
+                provider: ApiProvider::Deepseek,
+                provider_identity: "deepseek-child".to_string(),
+                model: "deepseek-v4-flash".to_string(),
+                billing_surface: None,
+                endpoint_fingerprint: None,
+                billing_mode: crate::cost_status::RouteBillingMode::Metered,
+                dispatched_at: turn.created_at,
+            },
+            usage: Usage {
+                input_tokens: 30,
+                output_tokens: 7,
+                prompt_cache_hit_tokens: Some(10),
+                prompt_cache_miss_tokens: Some(20),
+                reasoning_tokens: Some(6),
+                ..Usage::default()
+            },
+        });
+    turn.routed_usage
+        .push(crate::cost_status::EffectiveRouteUsage {
+            route: crate::cost_status::EffectiveRouteEnvelope {
+                provider: ApiProvider::OpenaiCodex,
+                provider_identity: "codex-oauth".to_string(),
+                model: "gpt-5.5".to_string(),
+                billing_surface: Some(
+                    crate::pricing::OAUTH_SUBSCRIPTION_BILLING_SURFACE.to_string(),
+                ),
+                endpoint_fingerprint: None,
+                billing_mode: crate::cost_status::RouteBillingMode::Subscription,
+                dispatched_at: turn.created_at,
+            },
+            usage: Usage::default(),
+        });
+    manager.store.save_turn(&turn)?;
+
+    let report = manager
+        .aggregate_usage(None, None, UsageGroupBy::Thread)
+        .await?;
+    assert_eq!(report.totals.turns, 3, "parent plus two child calls");
+    assert_eq!(report.totals.input_tokens, 70);
+    assert_eq!(report.totals.cached_tokens, 50);
+    assert_eq!(report.totals.cache_write_tokens, 10);
+    assert_eq!(report.totals.output_tokens, 27);
+    assert_eq!(report.totals.reasoning_tokens, 11);
+    assert_eq!(report.totals.priced_turns, 2);
+    assert_eq!(report.totals.nonmetered_turns, 1);
+    assert_eq!(report.totals.unpriced_turns, 0);
+    assert!(report.totals.cost_complete);
+    assert_eq!(report.totals.route_receipts.len(), 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn aggregate_usage_filters_each_call_by_its_dispatch_timestamp() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = sample_thread("thr_dispatch_window");
+    manager.store.save_thread(&thread)?;
+    let window = Utc::now();
+    let mut turn = sample_turn(
+        &thread.id,
+        "turn_dispatch_window",
+        RuntimeTurnStatus::Completed,
+    );
+    turn.created_at = window - chrono::Duration::days(2);
+    turn.usage = Some(Usage {
+        input_tokens: 100,
+        ..Usage::default()
+    });
+    set_test_turn_route(
+        &mut turn,
+        ApiProvider::Deepseek,
+        "deepseek-parent",
+        "deepseek-v4-flash",
+        None,
+        crate::cost_status::RouteBillingMode::Metered,
+    );
+    turn.routed_usage
+        .push(crate::cost_status::EffectiveRouteUsage {
+            route: crate::cost_status::EffectiveRouteEnvelope {
+                provider: ApiProvider::Deepseek,
+                provider_identity: "deepseek-child".to_string(),
+                model: "deepseek-v4-flash".to_string(),
+                billing_surface: None,
+                endpoint_fingerprint: None,
+                billing_mode: crate::cost_status::RouteBillingMode::Metered,
+                dispatched_at: window,
+            },
+            usage: Usage {
+                input_tokens: 33,
+                ..Usage::default()
+            },
+        });
+    manager.store.save_turn(&turn)?;
+
+    let report = manager
+        .aggregate_usage(
+            Some(window - chrono::Duration::minutes(1)),
+            Some(window + chrono::Duration::minutes(1)),
+            UsageGroupBy::Thread,
+        )
+        .await?;
+    assert_eq!(report.totals.turns, 1);
+    assert_eq!(report.totals.input_tokens, 33);
+    Ok(())
+}
+
+#[tokio::test]
+async fn aggregate_usage_marks_bounded_journal_truncation_incomplete() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = sample_thread("thr_truncated_usage");
+    manager.store.save_thread(&thread)?;
+    let mut turn = sample_turn(
+        &thread.id,
+        "turn_truncated_usage",
+        RuntimeTurnStatus::Completed,
+    );
+    turn.routed_usage_dropped_records = 2;
+    manager.store.save_turn(&turn)?;
+
+    let report = manager
+        .aggregate_usage(None, None, UsageGroupBy::Thread)
+        .await?;
+    assert_eq!(report.totals.dropped_usage_records, 2);
+    assert_eq!(report.totals.unpriced_turns, 2);
+    assert_eq!(report.totals.turns, 2);
+    assert!(!report.totals.cost_complete);
+    assert!(
+        report
+            .totals
+            .unpriced_reasons
+            .contains("runtime_usage_journal_truncated")
+    );
+    Ok(())
+}
+
+#[test]
+fn runtime_usage_sink_survives_parent_terminal_and_restart_exactly_once() -> Result<()> {
+    let _cost_scope = crate::cost_status::test_scope();
+    let data_dir = test_runtime_dir();
+    let manager = test_manager(data_dir.clone())?;
+    let thread = sample_thread("thr_compaction_sink");
+    manager.store.save_thread(&thread)?;
+    let turn = sample_turn(
+        &thread.id,
+        "turn_compaction_sink",
+        RuntimeTurnStatus::InProgress,
+    );
+    manager.store.save_turn(&turn)?;
+    manager.register_runtime_usage_sink(&turn.id);
+    let lease = crate::cost_status::acquire_runtime_usage_lease(&turn.id)
+        .expect("active runtime owner lease");
+    crate::cost_status::finish_runtime_usage_owner(&turn.id);
+
+    let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Deepseek,
+        "deepseek-compaction",
+        "deepseek-v4-flash",
+        Some(ApiProvider::Deepseek.default_base_url()),
+        Utc::now(),
+    );
+    crate::cost_status::report_effective_route_for_runtime(
+        crate::cost_status::scope_token(),
+        Some(&turn.id),
+        "compaction:response:test",
+        &route,
+        &Usage {
+            input_tokens: 17,
+            output_tokens: 3,
+            ..Usage::default()
+        },
+    );
+    crate::cost_status::report_effective_route_for_runtime(
+        crate::cost_status::scope_token(),
+        Some(&turn.id),
+        "compaction:response:test",
+        &route,
+        &Usage {
+            input_tokens: 17,
+            output_tokens: 3,
+            ..Usage::default()
+        },
+    );
+    drop(lease);
+
+    let reopened = test_manager(data_dir.clone())?;
+    reopened.register_runtime_usage_sink(&turn.id);
+    crate::cost_status::report_effective_route_for_runtime(
+        crate::cost_status::scope_token(),
+        Some(&turn.id),
+        "compaction:response:test",
+        &route,
+        &Usage {
+            input_tokens: 17,
+            output_tokens: 3,
+            ..Usage::default()
+        },
+    );
+    crate::cost_status::finish_runtime_usage_owner(&turn.id);
+    let reopened = test_manager(data_dir)?;
+    let persisted = reopened.store.load_turn(&turn.id)?;
+    assert_eq!(persisted.routed_usage.len(), 1);
+    assert_eq!(persisted.routed_usage[0].usage.input_tokens, 17);
+    assert!(
+        crate::cost_status::take_runtime_usage(&turn.id)
+            .records
+            .is_empty(),
+        "successful synchronous persistence must not duplicate into fallback"
+    );
+    assert!(
+        crate::cost_status::drain().is_empty(),
+        "runtime-owned usage must not duplicate into the TUI pool"
+    );
+    Ok(())
+}
+
+#[test]
+fn routed_usage_append_is_bounded_and_idempotent_for_every_delivery_path() {
+    let mut turn = sample_turn(
+        "thr_all_paths",
+        "turn_all_paths",
+        RuntimeTurnStatus::InProgress,
+    );
+    let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        ApiProvider::Deepseek,
+        "deepseek-primary",
+        "deepseek-v4-flash",
+        Some(ApiProvider::Deepseek.default_base_url()),
+        Utc::now(),
+    );
+    for index in 0..90 {
+        let path = match index % 3 {
+            0 => "sink",
+            1 => "mailbox",
+            _ => "fallback",
+        };
+        assert!(append_routed_usage_record(
+            &mut turn,
+            &format!("{path}:response:{index}"),
+            crate::cost_status::EffectiveRouteUsage {
+                route: route.clone(),
+                usage: Usage {
+                    input_tokens: index,
+                    ..Usage::default()
+                },
+            },
+        ));
+    }
+
+    assert_eq!(turn.routed_usage.len(), MAX_ROUTED_USAGE_RECORDS_PER_TURN);
+    assert_eq!(turn.routed_usage_dropped_records, 26);
+    assert_eq!(turn.routed_usage_source_ids.len(), 90);
+    let before = turn.clone();
+    assert!(!append_routed_usage_record(
+        &mut turn,
+        "sink:response:0",
+        crate::cost_status::EffectiveRouteUsage {
+            route,
+            usage: Usage {
+                input_tokens: 999,
+                ..Usage::default()
+            },
+        },
+    ));
+    assert_eq!(turn.routed_usage, before.routed_usage);
+    assert_eq!(
+        turn.routed_usage_dropped_records,
+        before.routed_usage_dropped_records
+    );
+}
+
+#[tokio::test]
+async fn aggregate_usage_fails_closed_for_legacy_reconstructed_route() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = sample_thread("thr_legacy_cost");
+    manager.store.save_thread(&thread)?;
+    let mut turn = sample_turn(&thread.id, "turn_legacy_cost", RuntimeTurnStatus::Completed);
+    turn.usage = Some(Usage {
+        input_tokens: 1_000,
+        output_tokens: 10,
+        ..Usage::default()
+    });
+    // These mutable-era fields are intentionally insufficient: no exact
+    // identity, billing mode, or dispatch timestamp was persisted.
+    turn.effective_provider = Some(ApiProvider::Deepseek.as_str().to_string());
+    turn.effective_model = Some("deepseek-v4-flash".to_string());
+    manager.store.save_turn(&turn)?;
+
+    let report = manager
+        .aggregate_usage(None, None, UsageGroupBy::Thread)
+        .await?;
+    assert_eq!(report.totals.cost_usd, 0.0);
+    assert_eq!(report.totals.unpriced_turns, 1);
+    assert!(
+        report
+            .totals
+            .unpriced_reasons
+            .contains("unknown_provider_route")
+    );
+    assert!(report.totals.route_receipts.is_empty());
+    Ok(())
+}
+
+#[test]
+fn runtime_usage_accumulators_saturate_tokens_and_currency() {
+    let mut total = f64::MAX;
+    saturating_add_usd(&mut total, f64::MAX);
+    assert_eq!(total, f64::MAX);
+
+    let thread = sample_thread("thr_saturating");
+    let turn = sample_turn(&thread.id, "turn_saturating", RuntimeTurnStatus::Completed);
+    let mut totals = UsageTotals {
+        input_tokens: u64::MAX,
+        output_tokens: u64::MAX,
+        cached_tokens: u64::MAX,
+        reasoning_tokens: u64::MAX,
+        reasoning_replay_tokens: u64::MAX,
+        cache_write_tokens: u64::MAX,
+        ..UsageTotals::default()
+    };
+    let mut buckets = std::collections::BTreeMap::new();
+    accumulate_runtime_usage_record(
+        &mut totals,
+        &mut buckets,
+        UsageGroupBy::Thread,
+        None,
+        &Usage {
+            input_tokens: 1,
+            output_tokens: 1,
+            prompt_cache_hit_tokens: Some(1),
+            prompt_cache_write_tokens: Some(1),
+            reasoning_tokens: Some(1),
+            reasoning_replay_tokens: Some(1),
+            ..Usage::default()
+        },
+        &turn,
+        &thread,
+    );
+    assert_eq!(totals.input_tokens, u64::MAX);
+    assert_eq!(totals.output_tokens, u64::MAX);
+    assert_eq!(totals.cached_tokens, u64::MAX);
+    assert_eq!(totals.reasoning_tokens, u64::MAX);
+    assert_eq!(totals.reasoning_replay_tokens, u64::MAX);
+    assert_eq!(totals.cache_write_tokens, u64::MAX);
 }
 
 fn sample_item(turn_id: &str, item_id: &str, status: TurnItemLifecycleStatus) -> TurnItemRecord {
@@ -2543,6 +3109,204 @@ async fn thread_lifecycle_persists_across_restart() -> Result<()> {
 }
 
 #[tokio::test]
+async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest::default())
+        .await?;
+    let mut harness = install_mock_engine(&manager, &thread.id).await;
+    let turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "capture immutable route".to_string(),
+                ..StartTurnRequest::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage { .. })
+    ));
+
+    let started_at = Utc::now() - chrono::Duration::minutes(5);
+    let dispatched_at = Utc::now() - chrono::Duration::seconds(2);
+    let endpoint_fingerprint = "d".repeat(64);
+    harness
+        .tx_event
+        .send(EngineEvent::TurnStarted {
+            turn_id: "engine_route_receipt".to_string(),
+            created_at: started_at,
+            route: None,
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::RouteDispatched {
+            turn_id: "engine_route_receipt".to_string(),
+            route: crate::core::events::TurnRoute {
+                provider: ApiProvider::Stepfun,
+                provider_identity: "stepfun-payg-primary".to_string(),
+                model: "step-3.7-flash".to_string(),
+                auto_model: false,
+                receipt: None,
+                billing_surface: Some(crate::pricing::STEPFUN_PAYG_BILLING_SURFACE.to_string()),
+                endpoint_fingerprint: Some(endpoint_fingerprint.clone()),
+                billing_mode: crate::cost_status::RouteBillingMode::Metered,
+                dispatched_at,
+            },
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::SubAgentMailbox {
+            turn_id: "engine_route_receipt".to_string(),
+            seq: 77,
+            message: crate::tools::subagent::MailboxMessage::TokenUsage {
+                agent_id: "agent_child".to_string(),
+                source_id: "response-child".to_string(),
+                route: crate::cost_status::EffectiveRouteEnvelope {
+                    provider: ApiProvider::OpenaiCodex,
+                    provider_identity: "codex-child".to_string(),
+                    model: "gpt-5.5".to_string(),
+                    billing_surface: Some(
+                        crate::pricing::OAUTH_SUBSCRIPTION_BILLING_SURFACE.to_string(),
+                    ),
+                    endpoint_fingerprint: None,
+                    billing_mode: crate::cost_status::RouteBillingMode::Subscription,
+                    dispatched_at,
+                },
+                usage: Usage {
+                    input_tokens: 3,
+                    output_tokens: 2,
+                    reasoning_tokens: Some(2),
+                    ..Usage::default()
+                },
+            },
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 4,
+                reasoning_replay_tokens: Some(6),
+                server_tool_use: Some(crate::models::ServerToolUsage {
+                    code_execution_requests: Some(2),
+                    tool_search_requests: Some(3),
+                }),
+                ..Usage::default()
+            },
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            // Completion-time endpoint evidence must be ignored.
+            base_url: Some("https://api.stepfun.com/v1/coding".to_string()),
+        })
+        .await?;
+
+    let completed = wait_for_terminal_turn(&manager, &turn.id, Duration::from_secs(2)).await?;
+    assert_eq!(completed.effective_provider.as_deref(), Some("stepfun"));
+    assert_eq!(
+        completed.effective_provider_id.as_deref(),
+        Some("stepfun-payg-primary")
+    );
+    assert_eq!(
+        completed.effective_billing_surface.as_deref(),
+        Some(crate::pricing::STEPFUN_PAYG_BILLING_SURFACE)
+    );
+    assert_eq!(
+        completed.effective_endpoint_fingerprint.as_deref(),
+        Some(endpoint_fingerprint.as_str())
+    );
+    assert_eq!(
+        completed.effective_billing_mode,
+        Some(crate::cost_status::RouteBillingMode::Metered)
+    );
+    assert_eq!(completed.effective_dispatched_at, Some(dispatched_at));
+    assert_eq!(completed.started_at, Some(started_at));
+    assert_eq!(completed.routed_usage.len(), 1);
+    assert_eq!(completed.routed_usage[0].usage.reasoning_tokens, Some(2));
+    let persisted_usage = completed.usage.expect("parent usage");
+    assert_eq!(persisted_usage.reasoning_replay_tokens, Some(6));
+    assert_eq!(
+        persisted_usage.server_tool_use,
+        Some(crate::models::ServerToolUsage {
+            code_execution_requests: Some(2),
+            tool_search_requests: Some(3),
+        })
+    );
+
+    // A new engine mailbox starts at the same sequence number. Runtime
+    // dedupe is scoped by the engine turn identity, so the second receipt is
+    // persisted exactly once instead of colliding with the prior turn.
+    let second = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "capture second mailbox".to_string(),
+                ..StartTurnRequest::default()
+            },
+        )
+        .await?;
+    assert!(matches!(
+        harness.rx_op.recv().await,
+        Some(Op::SendMessage { .. })
+    ));
+    let second_engine_turn = "engine_route_receipt_second";
+    harness
+        .tx_event
+        .send(EngineEvent::TurnStarted {
+            turn_id: second_engine_turn.to_string(),
+            created_at: Utc::now(),
+            route: None,
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::SubAgentMailbox {
+            turn_id: second_engine_turn.to_string(),
+            seq: 77,
+            message: crate::tools::subagent::MailboxMessage::TokenUsage {
+                agent_id: "agent-child-second".to_string(),
+                source_id: "response-child-second".to_string(),
+                route: crate::cost_status::EffectiveRouteEnvelope {
+                    provider: ApiProvider::OpenaiCodex,
+                    provider_identity: "codex-child".to_string(),
+                    model: "gpt-5.5".to_string(),
+                    billing_surface: Some(
+                        crate::pricing::OAUTH_SUBSCRIPTION_BILLING_SURFACE.to_string(),
+                    ),
+                    endpoint_fingerprint: None,
+                    billing_mode: crate::cost_status::RouteBillingMode::Subscription,
+                    dispatched_at: Utc::now(),
+                },
+                usage: Usage {
+                    input_tokens: 5,
+                    output_tokens: 1,
+                    ..Usage::default()
+                },
+            },
+        })
+        .await?;
+    harness
+        .tx_event
+        .send(EngineEvent::TurnComplete {
+            usage: Usage::default(),
+            status: TurnOutcomeStatus::Completed,
+            error: None,
+            tool_catalog: None,
+            base_url: None,
+        })
+        .await?;
+    let second = wait_for_terminal_turn(&manager, &second.id, Duration::from_secs(2)).await?;
+    assert_eq!(second.routed_usage.len(), 1);
+    assert_eq!(second.routed_usage[0].usage.input_tokens, 5);
+    Ok(())
+}
+
+#[tokio::test]
 async fn completed_turn_without_engine_output_fails() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;
     let thread = manager
@@ -3047,10 +3811,15 @@ async fn compact_thread_preserves_thread_auto_approve_policy() -> Result<()> {
         .compact_thread(&thread.id, CompactThreadRequest::default())
         .await?;
 
-    assert!(matches!(
-        rx_op.recv().await,
-        Some(Op::CompactContext { .. })
-    ));
+    match rx_op.recv().await {
+        Some(Op::CompactContext { compaction, .. }) => {
+            assert_eq!(
+                compaction.runtime_cost_owner.as_deref(),
+                Some(turn.id.as_str())
+            );
+        }
+        other => panic!("expected CompactContext op, got {other:?}"),
+    }
     assert_eq!(
         manager.active_turn_flags(&thread.id, &turn.id).await,
         Some((false, false))
@@ -7242,7 +8011,13 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         effective_provider: None,
         effective_provider_id: None,
         effective_billing_surface: None,
+        effective_endpoint_fingerprint: None,
+        effective_billing_mode: None,
+        effective_dispatched_at: None,
         effective_model: None,
+        routed_usage: Vec::new(),
+        routed_usage_source_ids: Vec::new(),
+        routed_usage_dropped_records: 0,
         error: None,
         item_ids: vec![completed_item.id.clone(), in_progress_item.id.clone()],
         steer_count: 0,
@@ -7261,7 +8036,13 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         effective_provider: None,
         effective_provider_id: None,
         effective_billing_surface: None,
+        effective_endpoint_fingerprint: None,
+        effective_billing_mode: None,
+        effective_dispatched_at: None,
         effective_model: None,
+        routed_usage: Vec::new(),
+        routed_usage_source_ids: Vec::new(),
+        routed_usage_dropped_records: 0,
         error: None,
         item_ids: vec![queued_item.id.clone()],
         steer_count: 0,
@@ -7510,7 +8291,13 @@ fn seed_turns_with_user_messages(
             effective_provider: None,
             effective_provider_id: None,
             effective_billing_surface: None,
+            effective_endpoint_fingerprint: None,
+            effective_billing_mode: None,
+            effective_dispatched_at: None,
             effective_model: None,
+            routed_usage: Vec::new(),
+            routed_usage_source_ids: Vec::new(),
+            routed_usage_dropped_records: 0,
             error: None,
             item_ids: vec![user_item_id, asst_item_id],
             steer_count: 0,

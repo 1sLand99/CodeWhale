@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -245,6 +245,18 @@ pub struct TurnCacheRecord {
     ///   — in that case the `/cache` formatter infers the miss as
     ///   `input_tokens − cache_hit_tokens`.
     pub cache_miss_tokens: Option<u32>,
+    /// Cache-creation tokens (`cache_creation_input_tokens` on Anthropic-style
+    ///   payloads). Billed at a premium where the provider publishes one, so
+    ///   they are recorded as their own class rather than folded into misses.
+    pub cache_write_tokens: Option<u32>,
+    /// Reasoning tokens the provider reported. **Informational only**: every
+    ///   provider counts these inside `output_tokens`, so they are never added
+    ///   to billable output.
+    pub reasoning_tokens: Option<u32>,
+    /// The turn's cost with its provenance and per-class completeness, taken
+    ///   from the same call that fed the session total. `None` for records made
+    ///   without route provenance (legacy rows, synthetic test rows).
+    pub cost_audit: Option<crate::pricing::TurnCostAudit>,
     /// Approximate tokens spent re-sending prior `reasoning_content` on
     ///   V4-thinking tool-calling turns (chars/3 heuristic). Helps separate
     ///   cache misses caused by reasoning-replay churn from misses caused by
@@ -751,7 +763,9 @@ pub struct SessionState {
     pub session_cost_cny: f64,
     pub subagent_cost: f64,
     pub subagent_cost_cny: f64,
-    pub subagent_cost_event_seqs: HashSet<u64>,
+    /// Mailbox usage envelopes already accrued, keyed by engine turn and the
+    /// mailbox-local sequence. Sequences restart at one for every turn.
+    pub subagent_cost_event_seqs: HashSet<(String, u64)>,
     pub displayed_cost_high_water: f64,
     pub displayed_cost_high_water_cny: f64,
     pub last_prompt_tokens: Option<u32>,
@@ -766,7 +780,55 @@ pub struct SessionState {
     pub total_input_tokens: u32,
     pub total_cache_hit_tokens: u32,
     pub total_cache_miss_tokens: u32,
+    /// Cache-creation (cache-write) tokens across the session. Tracked as its
+    /// own class because providers that publish a write premium bill it above
+    /// the ordinary input rate, so folding it into misses understated spend.
+    pub total_cache_write_tokens: u32,
     pub total_output_tokens: u32,
+    /// Turns whose route was money-metered and produced an authoritative
+    /// price. These are exactly the turns inside `session_cost`.
+    pub cost_priced_turns: u32,
+    /// Turns whose route was money-metered — or of unknown billing basis — but
+    /// produced no authoritative price, so they are missing from `session_cost`
+    /// entirely. `/cost` reports this instead of presenting the subtotal as a
+    /// complete figure.
+    pub cost_unpriced_turns: u32,
+    /// CNY-specific coverage. Most providers publish USD only, so these cannot
+    /// share the USD counters without falsely calling a mixed-route CNY subtotal
+    /// complete.
+    pub cost_cny_priced_turns: u32,
+    pub cost_cny_unpriced_turns: u32,
+    /// Stable reason labels for the unpriced turns, in sorted order.
+    ///
+    /// `String` rather than `&'static str` because this state round-trips
+    /// through a saved session: a label read back from disk was written by some
+    /// build's vocabulary, not necessarily this one's.
+    pub cost_unpriced_reasons: BTreeSet<String>,
+    pub cost_cny_unpriced_reasons: BTreeSet<String>,
+    /// Token classes used on some route this session that carry no published
+    /// price. Their turns fail closed rather than under-report.
+    pub cost_unpriced_classes: BTreeSet<String>,
+    /// Provenance labels of the pricing rows behind the priced turns
+    /// (`models_dev_bundled`, `provider_live`, `provider_docs`, …).
+    pub cost_pricing_provenances: BTreeSet<String>,
+    /// Live-pricing downgrade receipts: a live catalog row that could not be
+    /// verified for the endpoint that served a turn, so the bundled snapshot was
+    /// used instead of claiming authoritative live provenance.
+    pub cost_live_pricing_defects: BTreeSet<String>,
+    /// Live-pricing defects for which no bundled row could produce a price.
+    pub cost_live_pricing_unusable_defects: BTreeSet<String>,
+    /// One redacted receipt per distinct audited route:
+    /// provider, configured identity, wire model, billing surface, endpoint
+    /// fingerprint, billing mode, currency. Never a URL, credential, or filesystem path.
+    pub cost_route_receipts: BTreeSet<String>,
+    /// True when the restored session has no coverage state at all.
+    ///
+    /// Sessions written before coverage was tracked deserialize their new fields
+    /// from serde defaults, which look exactly like "0 priced, 0 unpriced" — i.e.
+    /// a complete total covering nothing. That reading is false, so the load path
+    /// marks the session explicitly unknown and `/cost` says so rather than
+    /// presenting fabricated completeness, even for an all-zero record (#4318).
+    pub cost_coverage_unknown_legacy: bool,
     pub turn_cache_history: VecDeque<TurnCacheRecord>,
     pub last_cache_inspection: Option<PromptInspection>,
     pub last_warmup_key: Option<CacheWarmupKey>,
@@ -908,7 +970,20 @@ impl Default for SessionState {
             total_input_tokens: 0,
             total_cache_hit_tokens: 0,
             total_cache_miss_tokens: 0,
+            total_cache_write_tokens: 0,
             total_output_tokens: 0,
+            cost_priced_turns: 0,
+            cost_unpriced_turns: 0,
+            cost_cny_priced_turns: 0,
+            cost_cny_unpriced_turns: 0,
+            cost_unpriced_reasons: BTreeSet::new(),
+            cost_cny_unpriced_reasons: BTreeSet::new(),
+            cost_unpriced_classes: BTreeSet::new(),
+            cost_pricing_provenances: BTreeSet::new(),
+            cost_live_pricing_defects: BTreeSet::new(),
+            cost_live_pricing_unusable_defects: BTreeSet::new(),
+            cost_route_receipts: BTreeSet::new(),
+            cost_coverage_unknown_legacy: false,
             turn_cache_history: VecDeque::new(),
             last_cache_inspection: None,
             last_warmup_key: None,
@@ -925,6 +1000,7 @@ impl SessionState {
         self.total_input_tokens = 0;
         self.total_cache_hit_tokens = 0;
         self.total_cache_miss_tokens = 0;
+        self.total_cache_write_tokens = 0;
         self.total_output_tokens = 0;
         self.last_output_throughput = None;
     }
@@ -1826,6 +1902,62 @@ fn push_enabled_provider_model(
 }
 
 impl App {
+    /// One truthful chip for cumulative session cost surfaces.
+    ///
+    /// Session history wins over the *current* route: switching to an OAuth or
+    /// local route must not hide spend already accrued on a metered route, and
+    /// an unpriced turn turns a displayed amount into a subtotal rather than a
+    /// complete total.
+    #[must_use]
+    pub fn cumulative_usage_chip(&self) -> crate::route_billing::UsageChip {
+        let displayed = self.displayed_session_cost_for_currency(self.cost_currency);
+        let (priced, unpriced) = match self.cost_display_currency(self.cost_currency) {
+            CostCurrency::Usd => (
+                self.session.cost_priced_turns,
+                self.session.cost_unpriced_turns,
+            ),
+            CostCurrency::Cny => (
+                self.session.cost_cny_priced_turns,
+                self.session.cost_cny_unpriced_turns,
+            ),
+        };
+        if self.session.cost_coverage_unknown_legacy {
+            return if displayed.is_finite() && displayed > 0.0 {
+                crate::route_billing::UsageChip::PricedSubtotal {
+                    amount: self.format_cost_amount(displayed),
+                    legacy: true,
+                }
+            } else {
+                crate::route_billing::UsageChip::Unknown
+            };
+        }
+        if unpriced > 0 {
+            return if displayed.is_finite() && displayed > 0.0 {
+                crate::route_billing::UsageChip::PricedSubtotal {
+                    amount: self.format_cost_amount(displayed),
+                    legacy: false,
+                }
+            } else {
+                crate::route_billing::UsageChip::Unknown
+            };
+        }
+        if priced > 0 {
+            return if displayed.is_finite() && displayed > 0.0 {
+                crate::route_billing::UsageChip::Money(self.format_cost_amount(displayed))
+            } else {
+                crate::route_billing::UsageChip::Hidden
+            };
+        }
+        crate::route_billing::usage_chip(
+            self.billing_presentation,
+            self.api_provider,
+            &self.model,
+            displayed,
+            self.cost_display_currency(self.cost_currency),
+            None,
+        )
+    }
+
     pub fn enable_provider_model(&mut self, provider: &str, model: &str) {
         push_enabled_provider_model(&mut self.enabled_provider_models, provider, model);
     }
@@ -2700,10 +2832,176 @@ impl App {
         self.accrue_session_cost_estimate(CostEstimate::usd_only(delta));
     }
 
+    /// Record what a turn's pricing attempt actually produced.
+    ///
+    /// Called with the same audit that feeds [`Self::accrue_session_cost_estimate`],
+    /// so the completeness counters can never drift from the running total.
+    /// Routes that do not meter money at all (OAuth, token plans, local models)
+    /// are not counted in either bucket — there is no dollar figure to be
+    /// incomplete about.
+    pub fn record_turn_cost_audit(&mut self, audit: &crate::pricing::TurnCostAudit) {
+        // Provenance is recorded for every audited turn, priced or not: knowing
+        // *which* row a total was built from is part of explaining the total.
+        if let Some(provenance) = audit.provenance.as_ref() {
+            self.session
+                .cost_pricing_provenances
+                .insert(provenance.label().to_string());
+        }
+        if let Some(defect) = audit.live_pricing_defect.as_ref() {
+            if audit.estimate.is_some() {
+                self.session
+                    .cost_live_pricing_defects
+                    .insert(defect.label().to_string());
+            } else {
+                self.session
+                    .cost_live_pricing_unusable_defects
+                    .insert(defect.label().to_string());
+            }
+        }
+        // An exactly non-metered route has no dollar figure to be incomplete
+        // about, so it joins neither coverage bucket. Everything else does,
+        // including a route whose billing basis could not be established.
+        if !audit.counts_toward_money_coverage() {
+            return;
+        }
+        for class in &audit.unpriced_classes {
+            self.session
+                .cost_unpriced_classes
+                .insert(class.label().to_string());
+        }
+        if !audit.usd_priced
+            && let Some(reason) = audit.unpriced_reason
+        {
+            self.session
+                .cost_unpriced_reasons
+                .insert(reason.label().to_string());
+        }
+        if !audit.cny_priced {
+            self.session.cost_cny_unpriced_reasons.insert(
+                audit
+                    .unpriced_reason
+                    .map_or("currency_not_published", |reason| reason.label())
+                    .to_string(),
+            );
+        }
+        if audit.usd_priced {
+            self.session.cost_priced_turns = self.session.cost_priced_turns.saturating_add(1);
+        } else {
+            self.session.cost_unpriced_turns = self.session.cost_unpriced_turns.saturating_add(1);
+        }
+        if audit.cny_priced {
+            self.session.cost_cny_priced_turns =
+                self.session.cost_cny_priced_turns.saturating_add(1);
+        } else {
+            self.session.cost_cny_unpriced_turns =
+                self.session.cost_cny_unpriced_turns.saturating_add(1);
+        }
+    }
+
+    /// Record the route a turn's cost was resolved against, redacted.
+    pub fn record_turn_cost_route_receipt(&mut self, receipt: String) {
+        // Bound the set so a session that rotates routes cannot grow it without
+        // limit; the first 32 distinct routes are more than enough to explain a
+        // total, and the cap is reported rather than silently truncating.
+        const MAX_ROUTE_RECEIPTS: usize = 32;
+        if self.session.cost_route_receipts.len() < MAX_ROUTE_RECEIPTS {
+            self.session.cost_route_receipts.insert(receipt);
+        } else {
+            self.session
+                .cost_route_receipts
+                .insert("…additional routes not recorded (receipt cap reached)".to_string());
+        }
+    }
+
+    /// Fold a drained background-cost pool's coverage into the session's.
+    ///
+    /// The caller has already added `pool.estimate` to the running total; this
+    /// adds the counters and provenance that qualify it, from the same drained
+    /// value, so the two can never disagree.
+    pub fn absorb_background_cost_coverage(
+        &mut self,
+        pool: &crate::cost_status::PendingBackgroundCost,
+    ) {
+        self.session.cost_priced_turns = self
+            .session
+            .cost_priced_turns
+            .saturating_add(pool.priced_turns);
+        self.session.cost_unpriced_turns = self
+            .session
+            .cost_unpriced_turns
+            .saturating_add(pool.unpriced_turns);
+        self.session.cost_cny_priced_turns = self
+            .session
+            .cost_cny_priced_turns
+            .saturating_add(pool.cny_priced_turns);
+        self.session.cost_cny_unpriced_turns = self
+            .session
+            .cost_cny_unpriced_turns
+            .saturating_add(pool.cny_unpriced_turns);
+        for reason in &pool.unpriced_reasons {
+            self.session
+                .cost_unpriced_reasons
+                .insert((*reason).to_string());
+        }
+        for reason in &pool.cny_unpriced_reasons {
+            self.session
+                .cost_cny_unpriced_reasons
+                .insert((*reason).to_string());
+        }
+        for class in &pool.unpriced_classes {
+            self.session
+                .cost_unpriced_classes
+                .insert((*class).to_string());
+        }
+        for provenance in &pool.pricing_provenances {
+            self.session
+                .cost_pricing_provenances
+                .insert((*provenance).to_string());
+        }
+        for defect in &pool.live_pricing_defects {
+            self.session
+                .cost_live_pricing_defects
+                .insert((*defect).to_string());
+        }
+        for defect in &pool.live_pricing_unusable_defects {
+            self.session
+                .cost_live_pricing_unusable_defects
+                .insert((*defect).to_string());
+        }
+        for receipt in &pool.route_receipts {
+            self.record_turn_cost_route_receipt(receipt.clone());
+        }
+    }
+
+    /// Clear every live cost-coverage counter.
+    ///
+    /// Used by `/new` and by the session-load path: loading a session must not
+    /// leave the previous session's priced/unpriced turns attached to a total
+    /// that no longer contains them (#4318).
+    pub fn reset_cost_coverage(&mut self) {
+        self.session.cost_priced_turns = 0;
+        self.session.cost_unpriced_turns = 0;
+        self.session.cost_cny_priced_turns = 0;
+        self.session.cost_cny_unpriced_turns = 0;
+        self.session.cost_unpriced_reasons.clear();
+        self.session.cost_cny_unpriced_reasons.clear();
+        self.session.cost_unpriced_classes.clear();
+        self.session.cost_pricing_provenances.clear();
+        self.session.cost_live_pricing_defects.clear();
+        self.session.cost_live_pricing_unusable_defects.clear();
+        self.session.cost_route_receipts.clear();
+        self.session.cost_coverage_unknown_legacy = false;
+    }
+
     /// Add a dual-currency parent-turn cost estimate.
     pub fn accrue_session_cost_estimate(&mut self, estimate: CostEstimate) {
-        self.session.session_cost += estimate.usd;
-        self.session.session_cost_cny += estimate.cny;
+        let total = CostEstimate {
+            usd: self.session.session_cost,
+            cny: self.session.session_cost_cny,
+        }
+        .saturating_add(estimate);
+        self.session.session_cost = total.usd;
+        self.session.session_cost_cny = total.cny;
         self.refresh_displayed_cost_high_water();
     }
 
@@ -2716,8 +3014,13 @@ impl App {
 
     /// Add a dual-currency sub-agent/background cost estimate.
     pub fn accrue_subagent_cost_estimate(&mut self, estimate: CostEstimate) {
-        self.session.subagent_cost += estimate.usd;
-        self.session.subagent_cost_cny += estimate.cny;
+        let total = CostEstimate {
+            usd: self.session.subagent_cost,
+            cny: self.session.subagent_cost_cny,
+        }
+        .saturating_add(estimate);
+        self.session.subagent_cost = total.usd;
+        self.session.subagent_cost_cny = total.cny;
         self.refresh_displayed_cost_high_water();
     }
 
@@ -2730,6 +3033,26 @@ impl App {
         metadata.cost.subagent_cost_cny = self.session.subagent_cost_cny;
         metadata.cost.displayed_cost_high_water_usd = self.session.displayed_cost_high_water;
         metadata.cost.displayed_cost_high_water_cny = self.session.displayed_cost_high_water_cny;
+        // Coverage travels with the money it qualifies. A restored total without
+        // these fields cannot say what it covers, and its serde defaults read as
+        // a *complete* total covering zero turns — so they are persisted together
+        // and `coverage_recorded` marks that this writer actually knew (#4318).
+        metadata.cost.priced_turns = self.session.cost_priced_turns;
+        metadata.cost.unpriced_turns = self.session.cost_unpriced_turns;
+        metadata.cost.cny_priced_turns = self.session.cost_cny_priced_turns;
+        metadata.cost.cny_unpriced_turns = self.session.cost_cny_unpriced_turns;
+        metadata.cost.unpriced_reasons = self.session.cost_unpriced_reasons.clone();
+        metadata.cost.cny_unpriced_reasons = self.session.cost_cny_unpriced_reasons.clone();
+        metadata.cost.unpriced_classes = self.session.cost_unpriced_classes.clone();
+        metadata.cost.pricing_provenances = self.session.cost_pricing_provenances.clone();
+        metadata.cost.live_pricing_defects = self.session.cost_live_pricing_defects.clone();
+        metadata.cost.live_pricing_unusable_defects =
+            self.session.cost_live_pricing_unusable_defects.clone();
+        metadata.cost.route_receipts = self.session.cost_route_receipts.clone();
+        // A session restored as legacy-unknown stays unknown when re-saved:
+        // re-writing it as "recorded" would launder the missing evidence into an
+        // apparently complete zero.
+        metadata.cost.coverage_recorded = !self.session.cost_coverage_unknown_legacy;
         // Persist cumulative turn duration so the footer "worked" chip
         // survives session save/restore (#2038).
         metadata.cumulative_turn_secs = self.cumulative_turn_duration.as_secs();
@@ -2738,13 +3061,19 @@ impl App {
     /// Recompute the displayed cost high-water mark. Called any time a cost
     /// counter is mutated; never decreases.
     pub fn refresh_displayed_cost_high_water(&mut self) {
-        let current = self.session.session_cost + self.session.subagent_cost;
-        if current > self.session.displayed_cost_high_water {
-            self.session.displayed_cost_high_water = current;
+        let current = CostEstimate {
+            usd: self.session.session_cost,
+            cny: self.session.session_cost_cny,
         }
-        let current_cny = self.session.session_cost_cny + self.session.subagent_cost_cny;
-        if current_cny > self.session.displayed_cost_high_water_cny {
-            self.session.displayed_cost_high_water_cny = current_cny;
+        .saturating_add(CostEstimate {
+            usd: self.session.subagent_cost,
+            cny: self.session.subagent_cost_cny,
+        });
+        if current.usd > self.session.displayed_cost_high_water {
+            self.session.displayed_cost_high_water = current.usd;
+        }
+        if current.cny > self.session.displayed_cost_high_water_cny {
+            self.session.displayed_cost_high_water_cny = current.cny;
         }
     }
 
@@ -2760,11 +3089,27 @@ impl App {
     pub fn displayed_session_cost_for_currency(&self, currency: CostCurrency) -> f64 {
         match self.cost_display_currency(currency) {
             CostCurrency::Usd => {
-                let current = self.session.session_cost + self.session.subagent_cost;
+                let current = CostEstimate {
+                    usd: self.session.session_cost,
+                    cny: 0.0,
+                }
+                .saturating_add(CostEstimate {
+                    usd: self.session.subagent_cost,
+                    cny: 0.0,
+                })
+                .usd;
                 current.max(self.session.displayed_cost_high_water)
             }
             CostCurrency::Cny => {
-                let current = self.session.session_cost_cny + self.session.subagent_cost_cny;
+                let current = CostEstimate {
+                    usd: 0.0,
+                    cny: self.session.session_cost_cny,
+                }
+                .saturating_add(CostEstimate {
+                    usd: 0.0,
+                    cny: self.session.subagent_cost_cny,
+                })
+                .cny;
                 current.max(self.session.displayed_cost_high_water_cny)
             }
         }
@@ -2797,12 +3142,8 @@ impl App {
 
     pub(crate) fn cost_display_currency(&self, currency: CostCurrency) -> CostCurrency {
         if currency == CostCurrency::Cny
-            && self.session.session_cost_cny == 0.0
-            && self.session.subagent_cost_cny == 0.0
-            && self.session.displayed_cost_high_water_cny == 0.0
-            && (self.session.session_cost > 0.0
-                || self.session.subagent_cost > 0.0
-                || self.session.displayed_cost_high_water > 0.0)
+            && self.session.cost_cny_priced_turns == 0
+            && self.session.cost_priced_turns > 0
         {
             CostCurrency::Usd
         } else {

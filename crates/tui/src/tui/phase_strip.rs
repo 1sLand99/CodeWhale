@@ -196,17 +196,15 @@ pub fn render(area: Rect, buf: &mut Buffer, app: &mut App) {
         ));
     }
 
-    let cost = app.displayed_session_cost_for_currency(app.cost_currency);
-    let chip = crate::route_billing::usage_chip(
-        app.billing_presentation,
-        app.api_provider,
-        &app.model,
-        cost,
-        app.cost_currency,
-        None,
-    );
-    if let crate::route_billing::UsageChip::Money(amount) = chip
-        && tier != ShellTier::Compact
+    let chip = app.cumulative_usage_chip();
+    if tier != ShellTier::Compact
+        && let Some(amount) = match &chip {
+            crate::route_billing::UsageChip::Money(amount) => Some(amount.clone()),
+            crate::route_billing::UsageChip::PricedSubtotal { .. } => {
+                crate::route_billing::format_usage_chip(&chip)
+            }
+            _ => None,
+        }
     {
         left.push(Span::styled(
             " · ",

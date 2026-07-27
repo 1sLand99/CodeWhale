@@ -805,6 +805,10 @@ fn active_turn_zai_receipt_overrides_all_mutable_parallel_route_metadata() {
                 crate::config::DEFAULT_ZAI_BASE_URL,
                 "test-secret-never-persisted",
             )),
+            billing_surface: None,
+            endpoint_fingerprint: None,
+            billing_mode: crate::cost_status::RouteBillingMode::Unknown,
+            dispatched_at: chrono::Utc::now(),
         }),
         auto_route_receipt: None,
         suggestion_authority: None,
@@ -1295,6 +1299,7 @@ fn cny_display_falls_back_to_usd_for_usd_only_costs() {
     let mut app = App::new(test_options(false), &Config::default());
     app.cost_currency = CostCurrency::Cny;
     app.accrue_session_cost_estimate(CostEstimate::usd_only(0.42));
+    app.session.cost_priced_turns = 1;
 
     let displayed = app.displayed_session_cost_for_currency(CostCurrency::Cny);
 
@@ -1311,11 +1316,29 @@ fn cny_display_keeps_cny_when_costs_have_cny_rates() {
         usd: 0.42,
         cny: 2.5,
     });
+    app.session.cost_priced_turns = 1;
+    app.session.cost_cny_priced_turns = 1;
 
     let displayed = app.displayed_session_cost_for_currency(CostCurrency::Cny);
 
     assert_eq!(displayed, 2.5);
     assert_eq!(app.format_cost_amount(displayed), "¥2.50");
+}
+
+#[test]
+fn cny_display_does_not_fall_back_to_an_unproven_usd_total() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.cost_currency = CostCurrency::Cny;
+    app.accrue_session_cost_estimate(CostEstimate::usd_only(0.42));
+
+    assert_eq!(
+        app.cost_display_currency(CostCurrency::Cny),
+        CostCurrency::Cny
+    );
+    assert_eq!(
+        app.displayed_session_cost_for_currency(CostCurrency::Cny),
+        0.0
+    );
 }
 
 #[test]
@@ -1325,6 +1348,47 @@ fn subscription_route_hides_stale_session_dollars_in_footer() {
     app.billing_presentation =
         crate::route_billing::BillingPresentation::Subscription("Codex OAuth quota");
     assert!(crate::tui::footer_ui::footer_cost_spans(&app).is_empty());
+}
+
+#[test]
+fn provider_switch_keeps_audited_cumulative_spend_visible() {
+    let mut app = App::new(test_options(false), &Config::default());
+    let usage = crate::models::Usage {
+        input_tokens: 10_000,
+        output_tokens: 1_000,
+        ..Default::default()
+    };
+    let priced = crate::pricing::audit_turn_cost_for_provider_at(
+        ApiProvider::Deepseek,
+        "deepseek-v4-flash",
+        &usage,
+        chrono::Utc::now(),
+    );
+    app.record_turn_cost_audit(&priced);
+    app.accrue_session_cost_estimate(priced.estimate.expect("priced"));
+
+    app.api_provider = ApiProvider::OpenaiCodex;
+    app.model = "gpt-5.5".to_string();
+    app.billing_presentation =
+        crate::route_billing::BillingPresentation::Subscription("Codex OAuth quota");
+    assert!(matches!(
+        app.cumulative_usage_chip(),
+        crate::route_billing::UsageChip::Money(_)
+    ));
+    assert!(!crate::tui::footer_ui::footer_cost_spans(&app).is_empty());
+
+    let unknown = crate::pricing::audit_turn_cost_for_route_at(
+        ApiProvider::Openai,
+        "gpt-5.5",
+        Some(crate::pricing::UNCLASSIFIED_BILLING_SURFACE),
+        &usage,
+        chrono::Utc::now(),
+    );
+    app.record_turn_cost_audit(&unknown);
+    assert!(matches!(
+        app.cumulative_usage_chip(),
+        crate::route_billing::UsageChip::PricedSubtotal { legacy: false, .. }
+    ));
 }
 
 #[test]

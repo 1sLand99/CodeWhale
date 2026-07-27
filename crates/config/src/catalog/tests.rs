@@ -263,6 +263,7 @@ fn cache_scopes_by_provider_and_base_url_fingerprint() {
 #[test]
 fn fingerprint_folds_cosmetic_base_url_differences() {
     let canonical = base_url_fingerprint("https://API.Example.com/v1");
+    assert_eq!(canonical.len(), 64, "endpoint fingerprints use SHA-256");
     assert_eq!(
         canonical,
         base_url_fingerprint("https://api.example.com/v1/"),
@@ -291,6 +292,18 @@ fn fingerprint_folds_cosmetic_base_url_differences() {
         base_url_fingerprint("http://h.example.com/v1"),
         ":443 is not http's default port and must not fold"
     );
+}
+
+#[test]
+fn fingerprint_never_hashes_secret_bearing_url_text() {
+    let expected = base_url_fingerprint("https://api.example.com/v1");
+    for url in [
+        "https://user:secret@api.example.com/v1",
+        "https://api.example.com/v1?api_key=secret",
+        "https://api.example.com/v1#secret",
+    ] {
+        assert_eq!(base_url_fingerprint(url), expected, "{url}");
+    }
 }
 
 #[test]

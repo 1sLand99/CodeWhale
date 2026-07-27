@@ -177,6 +177,10 @@ pub(crate) fn reset_conversation_state(app: &mut App) -> bool {
     if !app.clear_todos() {
         return false;
     }
+    // Atomically retire background accounting before zeroing the session.
+    // Late reports retain the old scope token and are discarded instead of
+    // appearing in the new conversation.
+    let _settled_old_cost_scope = crate::cost_status::close_current_scope();
     app.clear_history();
     app.mark_history_updated();
     app.api_messages.clear();
@@ -194,6 +198,7 @@ pub(crate) fn reset_conversation_state(app: &mut App) -> bool {
     app.session.subagent_cost_event_seqs.clear();
     app.session.displayed_cost_high_water = 0.0;
     app.session.displayed_cost_high_water_cny = 0.0;
+    app.reset_cost_coverage();
     app.tool_log.clear();
     app.tool_cells.clear();
     app.tool_details_by_cell.clear();
@@ -956,12 +961,15 @@ mod tests {
         app.session.session_cost_cny = 3.05;
         app.session.subagent_cost = 0.11;
         app.session.subagent_cost_cny = 0.80;
-        app.session.subagent_cost_event_seqs.insert(7);
+        app.session
+            .subagent_cost_event_seqs
+            .insert(("turn-test".to_string(), 7));
         app.session.displayed_cost_high_water = 0.53;
         app.session.displayed_cost_high_water_cny = 3.85;
         app.session.last_prompt_cache_hit_tokens = Some(70);
         app.session.last_prompt_cache_miss_tokens = Some(30);
         app.session.last_reasoning_replay_tokens = Some(12);
+        app.session.total_cache_write_tokens = 99;
         app.session.last_warmup_key = None;
         app.session.last_tool_catalog = Some(Vec::new());
         app.session.last_base_url = Some("https://api.deepseek.com".to_string());
@@ -981,6 +989,9 @@ mod tests {
             cache_hit_tokens: Some(70),
             cache_miss_tokens: Some(30),
             reasoning_replay_tokens: Some(12),
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            cost_audit: None,
             recorded_at: Instant::now(),
         });
 
@@ -998,6 +1009,7 @@ mod tests {
         assert_eq!(app.session.last_prompt_cache_hit_tokens, None);
         assert_eq!(app.session.last_prompt_cache_miss_tokens, None);
         assert_eq!(app.session.last_reasoning_replay_tokens, None);
+        assert_eq!(app.session.total_cache_write_tokens, 0);
         assert!(app.session.turn_cache_history.is_empty());
         assert_eq!(app.session.last_cache_inspection, None);
         assert_eq!(app.session.last_warmup_key, None);
@@ -1289,6 +1301,9 @@ mod tests {
             cache_hit_tokens: Some(70),
             cache_miss_tokens: Some(30),
             reasoning_replay_tokens: Some(12),
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            cost_audit: None,
             recorded_at: Instant::now(),
         });
 
@@ -1314,6 +1329,9 @@ mod tests {
             cache_hit_tokens: Some(70),
             cache_miss_tokens: Some(30),
             reasoning_replay_tokens: Some(12),
+            cache_write_tokens: None,
+            reasoning_tokens: None,
+            cost_audit: None,
             recorded_at: Instant::now(),
         });
 

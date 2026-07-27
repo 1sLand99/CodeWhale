@@ -16,6 +16,7 @@ fd-lock = "4.0.4"
 libc = "0.2"
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 toml.workspace = true
 toml_edit.workspace = true

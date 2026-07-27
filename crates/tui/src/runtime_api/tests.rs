@@ -277,7 +277,13 @@ fn messages_from_thread_detail_batches_tool_results() {
         effective_provider: None,
         effective_provider_id: None,
         effective_billing_surface: None,
+        effective_endpoint_fingerprint: None,
+        effective_billing_mode: None,
+        effective_dispatched_at: None,
         effective_model: None,
+        routed_usage: Vec::new(),
+        routed_usage_source_ids: Vec::new(),
+        routed_usage_dropped_records: 0,
         error: None,
         item_ids: vec![
             "item_user".to_string(),

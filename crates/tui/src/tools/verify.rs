@@ -268,7 +268,6 @@ struct EvidenceBlock {
 /// Outcome of a single critic invocation, plus accounting for metadata.
 struct CritiqueRun {
     report: CritiqueReport,
-    response_model: String,
     usage: Usage,
 }
 
@@ -451,6 +450,7 @@ self-check of whether what you just did is actually correct and complete."
 
         // Run the critic under the re-entry marker so any (future) nested tool
         // call to `verify` is refused.
+        let route = client.effective_route_envelope(&self.model, chrono::Utc::now());
         let run = VERIFY_ACTIVE
             .scope(
                 (),
@@ -458,17 +458,17 @@ self-check of whether what you just did is actually correct and complete."
             )
             .await?;
 
-        let metadata = json!({
+        let mut metadata = json!({
             "tool": "verify",
             "verdict": run.report.verdict,
             "finding_count": run.report.findings.len(),
             "highest_severity": run.report.highest_severity(),
             "unresolved_risk": run.report.unresolved_risk,
             "critic_effort": self.critic_effort.as_setting(),
-            "child_model": run.response_model,
-            "child_input_tokens": run.usage.input_tokens,
-            "child_output_tokens": run.usage.output_tokens,
         });
+        // Previously this reported only input/output, so a verify child's cache
+        // reads *and* cache writes were invisible to the cost audit (#4318).
+        crate::cost_status::attach_child_usage_metadata(&mut metadata, &route, &run.usage);
 
         let result = ToolResult::json(&run.report)
             .map_err(|e| ToolError::execution_failed(e.to_string()))?;
@@ -493,7 +493,6 @@ async fn run_critique<C: LlmClient>(
     let text = extract_text(&response.content);
     Ok(CritiqueRun {
         report: CritiqueReport::from_model_text(&text),
-        response_model: response.model,
         usage: response.usage,
     })
 }
