@@ -164,6 +164,10 @@ pub const ZAI_GLM_5_TURBO_MODEL: &str = "GLM-5-Turbo";
 pub const DEFAULT_ZAI_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
 pub const DEFAULT_STEPFUN_MODEL: &str = "step-3.7-flash";
 pub const DEFAULT_STEPFUN_BASE_URL: &str = "https://api.stepfun.ai/v1";
+/// StepFun's Step Plan subscription endpoint. Billed against a plan allowance
+/// rather than per-token, so it is a separate route from pay-as-you-go and is
+/// never inferred — the user picks it during provider setup (#4526).
+pub const DEFAULT_STEPFUN_PLAN_BASE_URL: &str = "https://api.stepfun.ai/step_plan/v1";
 pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
 pub const ANTHROPIC_OPUS_MODEL: &str = "claude-opus-4-8";
 pub const ANTHROPIC_HAIKU_MODEL: &str = "claude-haiku-4-5";

@@ -9346,6 +9346,40 @@ pub(crate) fn save_provider_model_for_identity(
     Ok(config_path)
 }
 
+/// Persist a guided-setup endpoint choice into the provider's own
+/// `[providers.<name>] base_url` (#4526).
+///
+/// Deliberately narrow: it never touches the root `base_url`, another
+/// provider's table, or any other key, so a billing-route choice cannot
+/// repoint an unrelated route.
+pub(crate) fn save_provider_base_url_for_identity(
+    identity: &ProviderIdentity,
+    _route_config: &Config,
+    base_url: &str,
+) -> Result<PathBuf> {
+    let base_url = base_url.trim();
+    anyhow::ensure!(!base_url.is_empty(), "base URL cannot be empty");
+    let config_path = default_config_path()
+        .context("Failed to resolve config path: home directory not found.")?;
+    ensure_parent_dir(&config_path)?;
+    let key_inside = if identity.provider == ApiProvider::Custom {
+        let key = identity.key.trim();
+        anyhow::ensure!(!key.is_empty(), "custom provider id cannot be empty");
+        key
+    } else {
+        provider_config_key(identity.provider).context("provider base URL table")?
+    };
+    crate::config_persistence::mutate_config_document(&config_path, |doc| {
+        crate::config_persistence::set_document_value(
+            doc,
+            &["providers", key_inside, "base_url"],
+            base_url,
+        )
+    })
+    .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
+    Ok(config_path)
+}
+
 /// Persist a guided-setup context-window choice without replacing the user's
 /// surrounding TOML comments or formatting.
 pub(crate) fn save_provider_context_window_for_identity(

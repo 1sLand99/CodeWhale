@@ -415,6 +415,14 @@ base_url = "https://api.stepfun.ai/step_plan/v1"
 model = "step-3.7-flash"
 ```
 
+`/provider` setup asks which StepFun billing route the key belongs to —
+pay-as-you-go (`https://api.stepfun.ai/v1`) or a Step Plan subscription
+(`https://api.stepfun.ai/step_plan/v1`) — and validates the key against the
+endpoint you pick before saving it. The answer is written to
+`[providers.stepfun].base_url` and nowhere else. If that key already holds a
+base URL Codewhale does not recognize as one of those two routes, the question
+is skipped and your value is left untouched.
+
 Alibaba Bailian / Model Studio DashScope Qwen routes use the same OpenAI
 provider shape:
 
