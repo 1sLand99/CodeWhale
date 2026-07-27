@@ -2096,7 +2096,6 @@ mod tests {
         }
     }
 
-    #[test]
     /// An endpoint that was never established is not the official endpoint.
     ///
     /// The route audit used to fall through to the provider/model catalog when
