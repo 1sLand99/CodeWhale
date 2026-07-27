@@ -45,6 +45,10 @@ pub(crate) struct ModelInventory {
     pub(crate) router_model: String,
     /// Thinking tier for the classifier call (None = off) (#auto.router).
     pub(crate) router_thinking: Option<String>,
+    /// Whether an explicit legacy `[auto.router]` classifier route is
+    /// configured. Absent configuration means legacy Auto stays local/free —
+    /// holding a provider key never elects a network classifier by itself.
+    pub(crate) router_configured: bool,
     pub(crate) router_available: bool,
     pub(crate) candidates: Vec<ModelRouteCandidate>,
 }
@@ -148,10 +152,15 @@ impl ModelInventory {
             }
         }
 
-        // [auto.router]: an explicit classifier route wins over the legacy
-        // DeepSeek flash default. When unset, keep the historic behavior:
-        // deepseek-v4-flash when a DeepSeek key exists, else heuristic-only.
-        let (router_provider, router_model, router_thinking) = config
+        // `[auto.router]` is legacy `model = auto` configuration and stays that
+        // way — it is NOT a Fleet Router. Explicit configuration still works.
+        //
+        // What is gone is the implicit half: merely holding a DeepSeek key used
+        // to silently elect `deepseek-v4-flash` as a network classifier for
+        // every Auto turn, spending a user's tokens on a route they never asked
+        // for and privileging one provider. With no explicit `[auto.router]`,
+        // legacy Auto is now local/free (heuristic-only).
+        let explicit_router = config
             .auto
             .as_ref()
             .and_then(|auto| auto.router.as_ref())
@@ -172,13 +181,18 @@ impl ModelInventory {
                         .filter(|t| !t.is_empty())
                         .map(str::to_string),
                 ))
-            })
+            });
+        let router_configured = explicit_router.is_some();
+        let (router_provider, router_model, router_thinking) = explicit_router
+            // Kept only as an inert display/default label for the router fields;
+            // `router_available` below is what gates any classifier call.
             .unwrap_or_else(|| (ApiProvider::Deepseek, "deepseek-v4-flash".to_string(), None));
 
         Self {
             active_provider,
             router_provider,
-            router_available: has_api_key_for(config, router_provider),
+            router_configured,
+            router_available: router_configured && has_api_key_for(config, router_provider),
             router_model,
             router_thinking,
             candidates,
@@ -415,7 +429,10 @@ mod tests {
 
         let inventory = ModelInventory::from_config(&config);
 
-        assert!(inventory.router_available);
+        // A DeepSeek key alone no longer elects a network classifier: with no
+        // explicit `[auto.router]`, legacy Auto stays local/free.
+        assert!(!inventory.router_configured);
+        assert!(!inventory.router_available);
         assert!(
             inventory
                 .candidate(ApiProvider::Zai, crate::config::ZAI_GLM_5_2_MODEL)
@@ -605,17 +622,57 @@ mod tests {
         };
 
         let inventory = ModelInventory::from_config(&config);
+        assert!(inventory.router_configured);
         assert_eq!(inventory.router_provider, ApiProvider::Zai);
         assert_eq!(inventory.router_model, "glm-5-turbo");
         assert_eq!(inventory.router_thinking.as_deref(), Some("low"));
     }
 
+    /// A DeepSeek key must never, on its own, turn on a network classifier.
+    /// `[auto.router]` stays legacy `model = auto` configuration; absent it,
+    /// legacy Auto is local/free.
     #[test]
-    fn auto_router_config_defaults_to_deepseek_flash_when_unset() {
-        let inventory = ModelInventory::from_config(&Config::default());
-        assert_eq!(inventory.router_provider, ApiProvider::Deepseek);
-        assert_eq!(inventory.router_model, "deepseek-v4-flash");
-        assert_eq!(inventory.router_thinking, None);
+    fn a_deepseek_key_alone_never_elects_an_implicit_flash_classifier() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let _deepseek = crate::test_support::EnvVarGuard::set("DEEPSEEK_API_KEY", "ds-key");
+        let config = Config {
+            provider: Some("deepseek".to_string()),
+            ..Default::default()
+        };
+
+        let inventory = ModelInventory::from_config(&config);
+
+        assert!(
+            !inventory.router_configured,
+            "no [auto.router] means no configured classifier"
+        );
+        assert!(
+            !inventory.router_available,
+            "holding a DeepSeek key must not silently select deepseek-v4-flash as a classifier"
+        );
+    }
+
+    #[test]
+    fn an_explicit_legacy_auto_router_still_works_when_its_key_is_present() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let _zai = crate::test_support::EnvVarGuard::set("ZAI_API_KEY", "zai-key");
+        let config = Config {
+            auto: Some(crate::config::AutoConfig {
+                cost_saving: None,
+                router: Some(crate::config::AutoRouterConfig {
+                    provider: Some("zai".to_string()),
+                    model: Some("glm-5-turbo".to_string()),
+                    thinking: None,
+                }),
+            }),
+            ..Default::default()
+        };
+
+        let inventory = ModelInventory::from_config(&config);
+
+        assert!(inventory.router_configured);
+        assert!(inventory.router_available);
+        assert_eq!(inventory.router_model, "glm-5-turbo");
     }
 
     #[test]
@@ -675,6 +732,7 @@ mod tests {
             router_provider: ApiProvider::Deepseek,
             router_model: "deepseek-v4-flash".to_string(),
             router_thinking: None,
+            router_configured: false,
             router_available: false,
             candidates: vec![ModelRouteCandidate {
                 provider: ApiProvider::Openai,
