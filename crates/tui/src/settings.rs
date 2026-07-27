@@ -2017,7 +2017,7 @@ fn settings_transaction_mutex(path: &Path) -> &'static std::sync::Mutex<()> {
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mutex: &'static Mutex<()> = *locks
+    let mutex: &'static Mutex<()> = locks
         .entry(key)
         .or_insert_with(|| Box::leak(Box::new(Mutex::new(()))));
     drop(locks);
