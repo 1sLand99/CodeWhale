@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.2] - 2026-07-27
 
+This is the Codewhale v0.9.2 source candidate. It is not a published release
+until the matching tag, packages, checksums, and release assets exist.
+
 ### Changed — behavior
 
 - **Legacy `model = auto` no longer elects a network classifier on its own.**
@@ -285,6 +288,30 @@ already claimed to.
   cross_provider = true` opt-in (an explicit `[auto.router]` route remains its
   own opt-in for the classifier call). Same-provider strong/fast selection and
   `[auto] cost_saving` are unchanged.
+
+### Contributors
+
+Thank you to the contributors whose code, reports, and reviews shaped v0.9.2:
+
+- [@greyfreedom](https://github.com/greyfreedom) — exact repository-scoped
+  allow grants and cross-platform path semantics (PR #4761).
+- [@nightt5879](https://github.com/nightt5879) — off-event-loop clipboard
+  writes and complete locale exposure in settings.
+- [@XhesicaFrost](https://github.com/XhesicaFrost) — the configurable
+  session-token header (PR #4610) and context-menu hover alignment (PR #4897).
+- [@cyq1017](https://github.com/cyq1017) — the hooks configuration/executor
+  split from PR #4087.
+- [@snailoniu](https://github.com/snailoniu) — OpenCode Zen's model-aware
+  routes, authentication, documentation, and test isolation.
+- [@SparkofSpike](https://github.com/SparkofSpike) — the zh-Hans translation
+  quality review harvested from PR #4908.
+- [@GTC2080](https://github.com/GTC2080) — the request-preview concept from
+  PR #1099.
+- [@h3c-hexin](https://github.com/h3c-hexin) — non-UTF-8 `fetch_url`
+  decoding direction from PR #4909.
+- [@fleitz](https://github.com/fleitz) — required source-candidate credit for
+  the canonical `Bash` no-`cwd` workspace fix and regression in PR #4673
+  (issue #4674).
 
 ## [0.9.1] - 2026-07-24
 
@@ -4332,7 +4359,7 @@ overflow report and `/theme` picker edge-wrapping patch in #1814.
 
 Older releases (v0.8.39 and earlier) are archived in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).
 
-[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.1...HEAD
 [0.9.2]: https://github.com/Hmbown/CodeWhale/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/Hmbown/CodeWhale/compare/v0.9.0...v0.9.1
 [0.8.68]: https://github.com/Hmbown/CodeWhale/compare/v0.8.67...v0.8.68

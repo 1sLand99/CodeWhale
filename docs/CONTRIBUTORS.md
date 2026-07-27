@@ -28,12 +28,29 @@ notes, and relevant issue/PR comments.
 ## Contributors by time
 
 <details open>
-<summary><strong>v0.9.2 — request inspectability</strong></summary>
+<summary><strong>v0.9.2 — routing, workflow, localization, and inspectability</strong></summary>
 
+- **[greyfreedom](https://github.com/greyfreedom)** — exact repository-scoped
+  allow grants and the cross-platform path-semantics repairs from PR #4761
+- **[nightt5879](https://github.com/nightt5879)** — off-event-loop terminal
+  clipboard writes and complete locale exposure in settings
+- **[XhesicaFrost](https://github.com/XhesicaFrost)** — the configurable
+  session-token header from PR #4610 and context-menu hover alignment in PR #4897
+- **[cyq1017](https://github.com/cyq1017)** — the hooks configuration/executor
+  split from PR #4087
+- **[snailoniu](https://github.com/snailoniu)** — OpenCode Zen's model-aware
+  route, authentication, documentation, and test-isolation implementation
+- **[Sh1Zuku / SparkofSpike](https://github.com/SparkofSpike)** — the zh-Hans
+  translation quality review harvested from PR #4908
 - **[GTC2080](https://github.com/GTC2080)** (TaoMu) — the `dryrun` concept
   behind `/preview-request`: preview the next outbound request from the real
   request-building seam rather than a hand-rolled summary (PR #1099,
   harvested)
+- **[h3c-hexin](https://github.com/h3c-hexin)** — the non-UTF-8 `fetch_url`
+  report and implementation direction harvested from PR #4909
+- **[Fred Leitz / fleitz](https://github.com/fleitz)** — required
+  source-candidate credit for the canonical `Bash` no-`cwd` workspace fix and
+  regression in PR #4673 (issue #4674)
 
 </details>
 
