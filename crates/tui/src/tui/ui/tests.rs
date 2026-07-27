@@ -17848,6 +17848,7 @@ fn notification_settings_tui_always_keeps_configured_method_no_threshold() {
             sound_file: None,
             include_summary: true,
             subagent_completion: crate::config::SubagentCompletionNotification::default(),
+            event_sound: crate::config::EventSoundConfig::default(),
         }),
         ..Config::default()
     };
@@ -17882,6 +17883,7 @@ fn notification_settings_no_tui_override_uses_notifications_block() {
             sound_file: None,
             include_summary: false,
             subagent_completion: crate::config::SubagentCompletionNotification::default(),
+            event_sound: crate::config::EventSoundConfig::default(),
         }),
         ..Config::default()
     };

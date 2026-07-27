@@ -1567,6 +1567,53 @@ pub struct NotificationsConfig {
     /// Path to the WAV sound file used when `completion_sound = "file"`.
     #[serde(default)]
     pub sound_file: Option<PathBuf>,
+
+    /// Opt-in per-event sound policy (`[notifications.event_sound]`).
+    /// Disabled by default; see `tui::sound_policy` for the decision rules.
+    #[serde(default)]
+    pub event_sound: EventSoundConfig,
+}
+
+fn default_event_sound_events() -> Vec<String> {
+    vec!["turn-complete".to_string(), "approval-needed".to_string()]
+}
+
+fn default_event_sound_min_interval_ms() -> u64 {
+    2000
+}
+
+/// Opt-in, deterministic per-event sound policy (#4817). Terminal-bell
+/// level only: cues are BEL (`\x07`) bytes, a platform-safe no-op on
+/// terminals that ignore them. Off by default.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct EventSoundConfig {
+    /// Master switch. Default: `false` (nothing is emitted unless opted in).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Allow-list of event names, kebab-case (`"turn-complete"`,
+    /// `"subagent-terminal"`, `"approval-needed"`, `"input-needed"`,
+    /// `"elevation-needed"`, `"model-notify"`). Unknown names are ignored.
+    /// Default: `["turn-complete", "approval-needed"]`.
+    #[serde(default = "default_event_sound_events")]
+    pub events: Vec<String>,
+    /// Minimum milliseconds between two plays of the same event. Default: 2000.
+    #[serde(default = "default_event_sound_min_interval_ms")]
+    pub min_interval_ms: u64,
+    /// Quiet mode: suppress all event sounds without editing the allow-list.
+    /// Default: `false`.
+    #[serde(default)]
+    pub quiet: bool,
+}
+
+impl Default for EventSoundConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            events: default_event_sound_events(),
+            min_interval_ms: default_event_sound_min_interval_ms(),
+            quiet: false,
+        }
+    }
 }
 
 fn default_snapshots_enabled() -> bool {

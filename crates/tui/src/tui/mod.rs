@@ -84,6 +84,7 @@ mod shell_job_routing;
 pub mod shell_key_routing;
 pub mod sidebar;
 pub mod slash_menu;
+pub mod sound_policy;
 pub mod spinner;
 pub mod startup_defaults;
 pub mod streaming;

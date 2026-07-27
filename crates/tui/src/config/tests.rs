@@ -9457,6 +9457,51 @@ fn notifications_parse_custom_completion_sound_file() {
 }
 
 #[test]
+fn notifications_parse_event_sound_table() {
+    let config: Config = toml::from_str(
+        r#"
+        [notifications.event_sound]
+        enabled = true
+        events = ["turn-complete", "bogus-event", "approval-needed"]
+        min_interval_ms = 500
+        quiet = true
+        "#,
+    )
+    .expect("event sound config should parse");
+
+    let notifications = config.notifications_config();
+    assert_eq!(
+        notifications.event_sound,
+        EventSoundConfig {
+            enabled: true,
+            events: vec![
+                "turn-complete".to_string(),
+                "bogus-event".to_string(),
+                "approval-needed".to_string(),
+            ],
+            min_interval_ms: 500,
+            quiet: true,
+        }
+    );
+}
+
+#[test]
+fn notifications_event_sound_defaults_when_table_absent() {
+    let config: Config = toml::from_str("[notifications]\nmethod = \"off\"\n")
+        .expect("bare notifications table should parse");
+
+    let event_sound = config.notifications_config().event_sound;
+    assert_eq!(event_sound, EventSoundConfig::default());
+    assert!(!event_sound.enabled);
+    assert_eq!(
+        event_sound.events,
+        vec!["turn-complete".to_string(), "approval-needed".to_string()]
+    );
+    assert_eq!(event_sound.min_interval_ms, 2000);
+    assert!(!event_sound.quiet);
+}
+
+#[test]
 fn huggingface_short_custom_env_url_does_not_inherit_ambient_key() -> Result<()> {
     let _lock = lock_test_env();
     let nanos = SystemTime::now()
