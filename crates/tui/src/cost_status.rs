@@ -546,8 +546,65 @@ static TEST_RUNTIME_USAGE_JOURNAL: OnceLock<
     Mutex<std::collections::HashMap<std::thread::ThreadId, RuntimeUsageJournal>>,
 > = OnceLock::new();
 
+#[cfg(not(test))]
 static RUNTIME_USAGE_SINKS: OnceLock<Mutex<HashMap<String, RuntimeUsageSinkEntry>>> =
     OnceLock::new();
+
+/// Sinks are keyed by owner id, and owner ids in tests are short fixture
+/// strings that repeat across tests. Under the default parallel test harness a
+/// process-global map let one test's `register_runtime_usage_sink` replace
+/// another's live sink, and let one test's `finish_runtime_usage_owner` retire
+/// it — turning exactly-once child accounting into an order-dependent race.
+/// Scoping by thread matches the pending-cost pool and the runtime journal,
+/// which are already thread-scoped for the same reason.
+#[cfg(test)]
+#[allow(clippy::type_complexity)]
+static TEST_RUNTIME_USAGE_SINKS: OnceLock<
+    Mutex<HashMap<std::thread::ThreadId, HashMap<String, RuntimeUsageSinkEntry>>>,
+> = OnceLock::new();
+
+/// Run `f` against this scope's sink registry.
+fn with_runtime_usage_sinks<R>(
+    f: impl FnOnce(&mut HashMap<String, RuntimeUsageSinkEntry>) -> R,
+) -> R {
+    #[cfg(not(test))]
+    {
+        let mut sinks = RUNTIME_USAGE_SINKS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        f(&mut sinks)
+    }
+    #[cfg(test)]
+    {
+        let mut by_thread = TEST_RUNTIME_USAGE_SINKS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        f(by_thread.entry(std::thread::current().id()).or_default())
+    }
+}
+
+/// Like [`with_runtime_usage_sinks`], but does not create the registry when it
+/// has never been initialized. Used on drop paths, where allocating a registry
+/// to then find it empty would be pointless.
+fn with_existing_runtime_usage_sinks<R>(
+    f: impl FnOnce(&mut HashMap<String, RuntimeUsageSinkEntry>) -> R,
+) -> Option<R> {
+    #[cfg(not(test))]
+    {
+        let sinks = RUNTIME_USAGE_SINKS.get()?;
+        let mut sinks = sinks.lock().unwrap_or_else(|error| error.into_inner());
+        Some(f(&mut sinks))
+    }
+    #[cfg(test)]
+    {
+        let by_thread = TEST_RUNTIME_USAGE_SINKS.get()?;
+        let mut by_thread = by_thread.lock().unwrap_or_else(|error| error.into_inner());
+        let sinks = by_thread.get_mut(&std::thread::current().id())?;
+        Some(f(sinks))
+    }
+}
 
 fn with_runtime_usage_journal_mut<R>(f: impl FnOnce(&mut RuntimeUsageJournal) -> R) -> R {
     #[cfg(not(test))]
@@ -585,12 +642,8 @@ fn record_runtime_usage(
             usage: usage.clone(),
         },
     };
-    let sink = RUNTIME_USAGE_SINKS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .get(owner)
-        .map(|entry| Arc::clone(&entry.sink));
+    let sink =
+        with_runtime_usage_sinks(|sinks| sinks.get(owner).map(|entry| Arc::clone(&entry.sink)));
     if sink.is_some_and(|sink| sink(record.clone())) {
         return;
     }
@@ -612,11 +665,8 @@ pub(crate) fn register_runtime_usage_sink(owner: &str, sink: RuntimeUsageSink) {
     if owner.is_empty() {
         return;
     }
-    RUNTIME_USAGE_SINKS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .insert(
+    with_runtime_usage_sinks(|sinks| {
+        sinks.insert(
             owner.to_string(),
             RuntimeUsageSinkEntry {
                 sink,
@@ -624,6 +674,7 @@ pub(crate) fn register_runtime_usage_sink(owner: &str, sink: RuntimeUsageSink) {
                 terminal: false,
             },
         );
+    });
 }
 
 /// Acquire an owner lease for a root sub-agent runtime. Runtime clones inherit
@@ -634,15 +685,13 @@ pub(crate) fn acquire_runtime_usage_lease(owner: &str) -> Option<RuntimeUsageLea
     if owner.is_empty() {
         return None;
     }
-    let mut sinks = RUNTIME_USAGE_SINKS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let entry = sinks.get_mut(owner)?;
-    entry.leases = entry.leases.saturating_add(1);
-    Some(RuntimeUsageLease {
-        owner: owner.to_string(),
-        active: true,
+    with_runtime_usage_sinks(|sinks| {
+        let entry = sinks.get_mut(owner)?;
+        entry.leases = entry.leases.saturating_add(1);
+        Some(RuntimeUsageLease {
+            owner: owner.to_string(),
+            active: true,
+        })
     })
 }
 
@@ -656,12 +705,12 @@ impl RuntimeUsageLease {
 impl Clone for RuntimeUsageLease {
     fn clone(&self) -> Self {
         if self.active {
-            let mut sinks = RUNTIME_USAGE_SINKS
-                .get_or_init(|| Mutex::new(HashMap::new()))
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if let Some(entry) = sinks.get_mut(&self.owner) {
-                entry.leases = entry.leases.saturating_add(1);
+            let cloned = with_runtime_usage_sinks(|sinks| {
+                sinks.get_mut(&self.owner).map(|entry| {
+                    entry.leases = entry.leases.saturating_add(1);
+                })
+            });
+            if cloned.is_some() {
                 return Self {
                     owner: self.owner.clone(),
                     active: true,
@@ -680,25 +729,22 @@ impl Drop for RuntimeUsageLease {
         if !self.active {
             return;
         }
-        let Some(sinks) = RUNTIME_USAGE_SINKS.get() else {
-            return;
-        };
-        let mut sinks = sinks.lock().unwrap_or_else(|error| error.into_inner());
-        let should_remove = sinks.get_mut(&self.owner).is_some_and(|entry| {
-            entry.leases = entry.leases.saturating_sub(1);
-            entry.terminal && entry.leases == 0
+        with_existing_runtime_usage_sinks(|sinks| {
+            let should_remove = sinks.get_mut(&self.owner).is_some_and(|entry| {
+                entry.leases = entry.leases.saturating_sub(1);
+                entry.terminal && entry.leases == 0
+            });
+            if should_remove {
+                sinks.remove(&self.owner);
+            }
         });
-        if should_remove {
-            sinks.remove(&self.owner);
-        }
     }
 }
 
 /// Mark the parent turn terminal. An owner with detached children stays live
 /// until their cloned leases drop; owners without children retire now.
 pub(crate) fn finish_runtime_usage_owner(owner: &str) {
-    if let Some(sinks) = RUNTIME_USAGE_SINKS.get() {
-        let mut sinks = sinks.lock().unwrap_or_else(|error| error.into_inner());
+    with_existing_runtime_usage_sinks(|sinks| {
         let should_remove = sinks.get_mut(owner).is_some_and(|entry| {
             entry.terminal = true;
             entry.leases == 0
@@ -706,7 +752,7 @@ pub(crate) fn finish_runtime_usage_owner(owner: &str) {
         if should_remove {
             sinks.remove(owner);
         }
-    }
+    });
 }
 
 /// Take only the background usage assigned to one runtime turn.
@@ -1289,6 +1335,80 @@ mod tests {
 
         report_effective_route_for_runtime(scope_token(), None, "response-tui", &route, &usage);
         assert_eq!(drain().priced_turns, 1, "ownerless usage belongs to TUI");
+    }
+
+    /// Every piece of shared cost accounting is scoped to the test that owns
+    /// it, including the durability sink registry.
+    ///
+    /// Sinks are keyed by owner id, and owner ids in tests are short fixture
+    /// strings that repeat. A process-global registry let one test's
+    /// `register_runtime_usage_sink` overwrite another's live sink, and let one
+    /// test's `finish_runtime_usage_owner` retire it mid-flight — so a passing
+    /// exactly-once assertion depended on which tests happened to run
+    /// concurrently. This pins the isolation directly: a sink registered on
+    /// another thread must be invisible here, and usage reported here must not
+    /// reach it.
+    #[test]
+    fn runtime_usage_sinks_do_not_leak_across_test_threads() {
+        let _g = test_scope();
+        let owner = "shared-owner";
+        let other_thread_deliveries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        // A concurrent test, standing in for any other test in the binary that
+        // happens to use the same owner id.
+        let deliveries = Arc::clone(&other_thread_deliveries);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let other = std::thread::spawn(move || {
+            register_runtime_usage_sink(
+                owner,
+                Arc::new(move |_record| {
+                    deliveries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    true
+                }),
+            );
+            ready_tx.send(()).expect("signal registration");
+            // Hold the registration open across this thread's assertions.
+            done_rx.recv().expect("wait for the other test to finish");
+            // The other thread's own reports still reach its own sink.
+            report_effective_route_for_runtime(
+                scope_token(),
+                Some(owner),
+                "response-other",
+                &deepseek_envelope(),
+                &small_usage(),
+            );
+        });
+        ready_rx.recv().expect("other test registered its sink");
+
+        // This thread never registered a sink, so its usage must fall through
+        // to this thread's journal — not into the other test's sink.
+        report_effective_route_for_runtime(
+            scope_token(),
+            Some(owner),
+            "response-mine",
+            &deepseek_envelope(),
+            &small_usage(),
+        );
+        assert_eq!(
+            other_thread_deliveries.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "another test's sink received this test's usage"
+        );
+        let mine = take_runtime_usage(owner);
+        assert_eq!(mine.records.len(), 1);
+        assert_eq!(mine.records[0].source_id, "response-mine");
+        assert_eq!(mine.dropped_records, 0);
+
+        // Retiring the owner here must not retire the other test's sink.
+        finish_runtime_usage_owner(owner);
+        done_tx.send(()).expect("release the other test");
+        other.join().expect("other test thread");
+        assert_eq!(
+            other_thread_deliveries.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the other test's sink was retired by an unrelated test"
+        );
     }
 
     #[test]
