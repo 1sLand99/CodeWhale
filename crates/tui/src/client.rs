@@ -4460,6 +4460,54 @@ mod tests {
         assert_k3_request_json_route_boundaries(true).await;
     }
 
+    /// v0.9.1 kimi-k3 dogfood report: the id the user selects has to be the id on the wire. A
+    /// dogfood user selecting `kimi-k3` was served `kimi-k2.7-code`, so this
+    /// asserts the wire `model` field for each K3 product on its own endpoint,
+    /// and that neither one's request carries the other's id.
+    #[tokio::test]
+    async fn selected_moonshot_k3_model_is_the_model_on_the_wire() {
+        let platform = capture_moonshot_chat_request(
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            crate::config::MOONSHOT_KIMI_K3_MODEL,
+            Some("high"),
+            false,
+        )
+        .await;
+        assert_eq!(
+            platform["model"],
+            json!(crate::config::MOONSHOT_KIMI_K3_MODEL),
+            "the direct platform route must send the id the user named: {platform}"
+        );
+        assert_ne!(
+            platform["model"],
+            json!(crate::config::DEFAULT_MOONSHOT_MODEL),
+            "an explicit selection is never replaced by the provider default: {platform}"
+        );
+        assert_ne!(
+            platform["model"],
+            json!(crate::config::KIMI_CODE_K3_MODEL),
+            "the coding-plan id must not leak onto the platform route: {platform}"
+        );
+
+        let membership = capture_moonshot_chat_request(
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            crate::config::KIMI_CODE_K3_MODEL,
+            Some("high"),
+            false,
+        )
+        .await;
+        assert_eq!(
+            membership["model"],
+            json!(crate::config::KIMI_CODE_K3_MODEL),
+            "the Kimi Code membership route must send bare `k3`: {membership}"
+        );
+        assert_ne!(
+            membership["model"],
+            json!(crate::config::MOONSHOT_KIMI_K3_MODEL),
+            "the platform id must not leak onto the coding-plan route: {membership}"
+        );
+    }
+
     #[tokio::test]
     async fn create_message_request_json_keeps_zai_effort_route_exact() {
         assert_zai_request_truth(false).await;

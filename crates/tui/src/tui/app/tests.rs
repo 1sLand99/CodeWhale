@@ -6264,3 +6264,59 @@ fn hotbar_mode_row_for_the_live_mode_still_shows_the_saved_receipt() {
         "plan"
     );
 }
+
+/// v0.9.1 kimi-k3 dogfood report: `settings.toml`'s `[provider_models]` is a memory of the last
+/// `/model` pick, so it must not override a model the user named for *this*
+/// launch. A dogfood user ran `codewhale --provider moonshot --model kimi-k3`
+/// and the session header kept showing the remembered `kimi-k2.7-code` while
+/// `doctor` reported `kimi-k3`; header and route have to agree.
+#[test]
+fn an_explicit_launch_model_outranks_the_remembered_provider_model() {
+    let _lock = lock_test_env();
+    let temp = tempfile::tempdir().expect("sealed state root");
+    let config_path = temp.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        "provider = \"moonshot\"\n\n[providers.moonshot]\napi_key = \"k\"\nmodel = \"kimi-k3\"\n",
+    )
+    .expect("seed config");
+    std::fs::write(
+        temp.path().join("settings.toml"),
+        "[provider_models]\nmoonshot = \"kimi-k2.7-code\"\n",
+    )
+    .expect("seed settings");
+    let _config_path_guard = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_path);
+    let _codewhale_config_path = EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
+
+    let config = Config::load(Some(config_path.clone()), None).expect("load sealed config");
+
+    // Without an explicit request this launch, the remembered pick still wins:
+    // that stickiness is what `/model` exists for.
+    let _no_flag = EnvVarGuard::remove("CODEWHALE_MODEL");
+    let _no_legacy_flag = EnvVarGuard::remove("DEEPSEEK_MODEL");
+    let remembered = App::new(
+        TuiOptions {
+            model: config.default_model(),
+            ..test_options(false)
+        },
+        &config,
+    );
+    assert_eq!(
+        remembered.model, "kimi-k2.7-code",
+        "the remembered /model pick remains the default when nothing was named"
+    );
+
+    // `--model` reaches this binary as CODEWHALE_MODEL. It must win.
+    let _model_flag = EnvVarGuard::set("CODEWHALE_MODEL", "kimi-k3");
+    let requested = App::new(
+        TuiOptions {
+            model: config.default_model(),
+            ..test_options(false)
+        },
+        &config,
+    );
+    assert_eq!(
+        requested.model, "kimi-k3",
+        "an explicit --model must never be silently replaced by session memory"
+    );
+}
