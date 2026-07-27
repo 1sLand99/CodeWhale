@@ -2488,6 +2488,9 @@ mod tests {
         );
         assert!(!network.contains("test-router-key"), "{network}");
 
+        // A scope opt-in without an explicit `[auto.router]` widens which
+        // candidates Auto may pick but elects no network classifier — the
+        // implicit DeepSeek-flash default is gone, so the hint stays local.
         let opted_in = Config {
             auto: Some(crate::config::AutoConfig {
                 cost_saving: None,
@@ -2496,11 +2499,9 @@ mod tests {
             }),
             ..config.clone()
         };
-        let cross_provider = auto_picker_hint(&app, &opted_in);
-        assert!(
-            cross_provider.contains("runnable providers"),
-            "{cross_provider}"
-        );
+        let scope_only = auto_picker_hint(&app, &opted_in);
+        assert!(scope_only.contains("local heuristic"), "{scope_only}");
+        assert!(scope_only.contains("no router request"), "{scope_only}");
     }
 
     #[test]

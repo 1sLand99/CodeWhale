@@ -695,6 +695,7 @@ mod tests {
                     model: Some("glm-5-turbo".to_string()),
                     thinking: None,
                 }),
+                cross_provider: None,
             }),
             ..Default::default()
         };
@@ -898,6 +899,10 @@ mod tests {
         };
         assert!(!ModelInventory::from_config(&zai).router_available);
 
+        // `cross_provider = true` widens which candidates Auto may pick; it is
+        // NOT a classifier election. With the implicit DeepSeek-flash default
+        // removed, no network classifier runs without an explicit
+        // `[auto.router]` route — a scope opt-in alone stays local/free.
         let opted_in = Config {
             auto: Some(crate::config::AutoConfig {
                 cost_saving: None,
@@ -906,7 +911,9 @@ mod tests {
             }),
             ..zai.clone()
         };
-        assert!(ModelInventory::from_config(&opted_in).router_available);
+        let widened = ModelInventory::from_config(&opted_in);
+        assert!(!widened.router_available);
+        assert!(widened.auto_scope_allows(ApiProvider::Deepseek));
 
         // An explicitly configured `[auto.router]` is itself a persisted
         // opt-in for that classifier route.
@@ -924,11 +931,13 @@ mod tests {
         };
         assert!(ModelInventory::from_config(&explicit_router).router_available);
 
-        // DeepSeek sessions keep their own classifier.
+        // A DeepSeek session gets no free classifier either: with the
+        // implicit flash default removed, only an explicit `[auto.router]`
+        // elects a network classifier, active provider or not.
         let deepseek = Config {
             provider: Some("deepseek".to_string()),
             ..Default::default()
         };
-        assert!(ModelInventory::from_config(&deepseek).router_available);
+        assert!(!ModelInventory::from_config(&deepseek).router_available);
     }
 }
