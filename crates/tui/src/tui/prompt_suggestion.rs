@@ -1182,6 +1182,8 @@ mod tests {
             model,
             auto_model: false,
             receipt: Some(validated.client.turn_route_receipt("deepseek")),
+            base_url: crate::config::DEFAULT_DEEPSEEK_BASE_URL.to_string(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
         }
     }
 
@@ -1522,6 +1524,8 @@ mod tests {
                     DEEPSEEK_BASE,
                     DEEPSEEK_KEY,
                 )),
+                base_url: DEEPSEEK_BASE.to_string(),
+                billing_product: crate::route_billing::RouteProduct::Unproven,
             };
             assert!(
                 capture_route_authority(&route).is_none(),

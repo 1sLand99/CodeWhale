@@ -3540,11 +3540,26 @@ async fn run_event_loop(
                         let turn_cost = completed_turn
                             .as_ref()
                             .and_then(|turn| {
-                                turn.route.as_ref().map(|route| (turn.created_at, route))
+                                turn.route.as_ref().map(|route| {
+                                    (turn.created_at, route, turn.dispatched_receipt())
+                                })
                             })
-                            .and_then(|(created_at, route)| {
-                                let billing =
-                                    crate::route_billing::for_route(config, route.provider);
+                            .and_then(|(created_at, route, receipt)| {
+                                // Bill this turn's receipt and nothing else.
+                                // Every input was captured at dispatch, and
+                                // the classifier takes no `Config`, so a
+                                // provider or custom-table switch since then
+                                // cannot retro-bill this turn onto another
+                                // route. A missing receipt is not a licence to
+                                // guess: it fails closed to Unknown and
+                                // accrues nothing.
+                                //
+                                // The endpoint comes from the receipt, not the
+                                // event: most `TurnComplete` emitters send
+                                // `base_url: None`, and an empty endpoint used
+                                // to fall through `classify`'s metered
+                                // catch-all for endpoint-shaped providers.
+                                let billing = crate::route_billing::for_dispatched_receipt(receipt);
                                 if !billing.shows_money() {
                                     return None;
                                 }
@@ -8089,12 +8104,40 @@ fn capture_turn_started_metadata(app: &mut App, event: &EngineEvent) {
         let suggestion_authority = route
             .as_ref()
             .and_then(crate::tui::prompt_suggestion::capture_route_authority);
+        // Copy the receipt the producer froze at the client-freeze boundary.
+        // Deliberately no `config` read: this handler runs on the ambient
+        // config, which by TurnComplete an in-turn provider switch, an
+        // auto-router hop, or a `/provider` change can have moved onto another
+        // vendor entirely — and for a named custom route the ambient
+        // `config.provider` selects a different `[providers.<name>]` table, so
+        // re-deriving here would bill the wrong custom vendor. `None` route
+        // means nothing was captured, which stays Unproven and bills Unknown
+        // for credential-shaped providers.
+        let (billing_identity, billing_product, billing_base_url) = route.as_ref().map_or_else(
+            || {
+                (
+                    None,
+                    crate::route_billing::RouteProduct::default(),
+                    String::new(),
+                )
+            },
+            |route| {
+                (
+                    Some(route.provider_identity.clone()),
+                    route.billing_product,
+                    route.base_url.clone(),
+                )
+            },
+        );
         app.active_turn = Some(ActiveTurnMetadata {
             turn_id: turn_id.clone(),
             created_at: *created_at,
             route: route.clone(),
             auto_route_receipt,
             suggestion_authority,
+            billing_identity,
+            billing_product,
+            billing_base_url,
         });
         app.pending_turn_route = None;
     }

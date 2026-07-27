@@ -805,9 +805,14 @@ fn active_turn_zai_receipt_overrides_all_mutable_parallel_route_metadata() {
                 crate::config::DEFAULT_ZAI_BASE_URL,
                 "test-secret-never-persisted",
             )),
+            base_url: crate::config::DEFAULT_ZAI_BASE_URL.to_string(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
         auto_route_receipt: None,
         suggestion_authority: None,
+        billing_identity: None,
+        billing_product: crate::route_billing::RouteProduct::Unproven,
+        billing_base_url: String::new(),
     });
 
     assert_eq!(

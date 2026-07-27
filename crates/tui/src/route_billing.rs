@@ -64,9 +64,196 @@ impl BillingPresentation {
     }
 }
 
-/// Resolve how the active provider route should present usage.
+/// Immutable, non-secret receipt of the route a request was dispatched on.
+///
+/// This is what a child/non-active route must be billed from. Re-reading an
+/// ambient `Config` for a non-active provider is unsound: `apply_env_overrides`
+/// merges provider endpoint variables (`MOONSHOT_BASE_URL`, `KIMI_BASE_URL`,
+/// …) into the **active** provider's table only, so a cross-provider child's
+/// config entry does not describe the endpoint its client was built with.
+///
+/// Test-only: the production dispatch path captures a full
+/// [`DispatchedReceipt`] at the client-freeze boundary and classifies with
+/// [`for_dispatched_receipt`]. This pair exists so route-resolution tests can
+/// assert that the pre-dispatch and receipt answers cannot disagree.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+pub struct DispatchedRoute<'a> {
+    /// Provider the dispatched client is bound to.
+    pub provider: ApiProvider,
+    /// Base URL the dispatched client will call, verbatim.
+    pub base_url: &'a str,
+}
+
+/// A fully captured, `Config`-free billing receipt.
+///
+/// This is what [`for_dispatched_receipt`] consumes. Every field is captured
+/// at dispatch; nothing here can be re-derived later.
+#[derive(Debug, Clone, Copy)]
+pub struct DispatchedReceipt<'a> {
+    /// Provider the dispatched client was bound to.
+    pub provider: ApiProvider,
+    /// Non-secret identity key that selected this route's table — the
+    /// `[providers.<name>]` key for a named custom route, the provider's own
+    /// key otherwise.
+    ///
+    /// `None` means the identity was not captured. For a named custom route
+    /// that is fatal to any product claim: without it there is no way to say
+    /// *which* custom vendor ran, and the classifier fails closed rather than
+    /// reading whichever custom table happens to be selected now.
+    pub identity: Option<&'a str>,
+    /// Base URL the dispatched client called, verbatim.
+    pub base_url: &'a str,
+    /// Product truth captured when this client was built.
+    pub product: RouteProduct,
+}
+
+/// Immutable, non-secret product truth for one route, captured at the moment
+/// its client was built.
+///
+/// Several providers are *credential-shaped* rather than endpoint-shaped: the
+/// same host sells both a metered and a subscription product, and only the
+/// credential (or an operator-declared pay mode) separates them. That fact
+/// cannot be recovered later from an ambient `Config` — the session may have
+/// switched provider, custom table, or key since — so it has to travel with
+/// the receipt.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RouteProduct {
+    /// No product fact was captured. Credential-shaped providers must fail
+    /// closed on this: an uncaptured product is not a licence to guess.
+    #[default]
+    Unproven,
+    /// The route's credential/pay mode is subscription-backed, with this
+    /// user-facing quota label.
+    Subscription(&'static str),
+    /// The route bills per token.
+    Metered,
+}
+
+/// Resolve how a provider route should present usage, from the endpoint that
+/// route resolves to right now.
+///
+/// The endpoint is resolved exactly once, through the same identity-aware
+/// [`Config::base_url_for_route`] the client is built from, and is then judged
+/// by the same exact-product rules a dispatch receipt gets. There is no
+/// separate "ambient" reading of a provider's table: a config entry with no
+/// `base_url` still resolves to a real endpoint (an imported Kimi token
+/// resolves to the Kimi Code membership host), and classifying from the raw
+/// table field would call that route metered and invent dollars against a
+/// membership quota.
+///
+/// This is the pre-dispatch answer — for a turn that already ran, bill from
+/// its receipt with [`for_dispatched_route`] instead.
 #[must_use]
 pub fn for_route(config: &Config, provider: ApiProvider) -> BillingPresentation {
+    let base_url = config.base_url_for_route(provider);
+    let identity = config.provider_identity_for(provider);
+    classify(
+        provider,
+        Some(identity.as_str()),
+        &base_url,
+        capture_product(config, provider),
+    )
+}
+
+/// Capture the immutable product facts for `provider` from the config its
+/// client is being built from, **at dispatch time**.
+///
+/// Call this while the config still describes the route being dispatched. The
+/// result is what travels on [`DispatchedRoute::product`]; nothing downstream
+/// may re-derive it.
+#[must_use]
+pub fn capture_product(config: &Config, provider: ApiProvider) -> RouteProduct {
+    let provider_config = config.provider_config_for(provider);
+    match provider {
+        ApiProvider::XiaomiMimo => {
+            if xiaomi_is_explicit_pay_as_you_go(provider_config) {
+                RouteProduct::Metered
+            } else {
+                RouteProduct::Subscription("MiMo token plan")
+            }
+        }
+        ApiProvider::Xai => {
+            if provider_config.is_some_and(uses_xai_oauth)
+                && crate::xai_oauth::credentials_valid(config)
+            {
+                RouteProduct::Subscription("Grok OAuth quota")
+            } else {
+                RouteProduct::Metered
+            }
+        }
+        ApiProvider::Anthropic => {
+            if provider_config.is_some_and(uses_anthropic_oauth) {
+                RouteProduct::Subscription("Claude OAuth quota")
+            } else {
+                RouteProduct::Metered
+            }
+        }
+        ApiProvider::Custom => match provider_config {
+            Some(entry) if !custom_billing_unknown(entry) => RouteProduct::Metered,
+            // No table, or a table with no declared pay mode: a custom vendor
+            // that has not told us how it bills.
+            _ => RouteProduct::Unproven,
+        },
+        // Endpoint-shaped and flat-rate providers need no credential fact.
+        _ => RouteProduct::Unproven,
+    }
+}
+
+/// Resolve billing for a route from its dispatch-time receipt.
+///
+/// Deliberately takes no `Config`: after dispatch there is no sound ambient
+/// state to consult. The session can have switched provider, custom table, or
+/// credential since the request went out, so every fact this needs must
+/// already be on the receipt. A receipt that does not name a product fails
+/// closed to [`BillingPresentation::Unknown`] rather than inventing one.
+/// Classify a receipt with no `Config` in reach at all.
+///
+/// This is the entry point every post-dispatch caller must use. Because it
+/// takes no config, a provider switch, a `/provider` change, or a different
+/// custom table being selected after dispatch cannot retro-bill the turn onto
+/// another route.
+#[must_use]
+pub fn for_dispatched_receipt(receipt: DispatchedReceipt<'_>) -> BillingPresentation {
+    classify(
+        receipt.provider,
+        receipt.identity,
+        receipt.base_url,
+        receipt.product,
+    )
+}
+
+/// Convenience wrapper for callers that still hold the route's own
+/// **dispatch-time** config and have not captured a receipt yet.
+///
+/// Sound only while `config` still describes the dispatched route. Anything
+/// that runs after the turn has already completed must capture a
+/// [`DispatchedReceipt`] at dispatch and use [`for_dispatched_receipt`].
+#[cfg(test)]
+#[must_use]
+pub fn for_dispatched_route(config: &Config, route: DispatchedRoute<'_>) -> BillingPresentation {
+    let identity = config.provider_identity_for(route.provider);
+    for_dispatched_receipt(DispatchedReceipt {
+        provider: route.provider,
+        identity: Some(identity.as_str()),
+        base_url: route.base_url,
+        product: capture_product(config, route.provider),
+    })
+}
+
+/// The one classifier, pure in its inputs.
+///
+/// `base_url` is the single resolved endpoint for this route and `product` is
+/// the captured credential truth. There is no `Config` parameter on purpose:
+/// this cannot read a provider table, a custom entry, or an active selection,
+/// so a pre-dispatch answer and a receipt answer cannot drift apart and a
+/// post-dispatch provider switch cannot retro-bill a turn onto another route.
+fn classify(
+    provider: ApiProvider,
+    identity: Option<&str>,
+    base_url: &str,
+    product: RouteProduct,
+) -> BillingPresentation {
     if matches!(
         provider,
         ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm
@@ -80,39 +267,53 @@ pub fn for_route(config: &Config, provider: ApiProvider) -> BillingPresentation 
         return BillingPresentation::Subscription("OpenCode Go quota");
     }
 
-    let provider_config = config.provider_config_for(provider);
     match provider {
-        ApiProvider::Stepfun => stepfun_billing(provider_config),
+        // StepFun already reduces an endpoint to a non-secret billing surface
+        // and fails closed on anything it does not recognize.
+        ApiProvider::Stepfun => stepfun_billing_for_endpoint(Some(base_url)),
         // Z.ai's dedicated Coding endpoint is the GLM Coding Plan route. Its
         // quota is subscription-backed, so a public API price estimate is not
-        // truthful spend and must not appear as dollars in the UI.
-        ApiProvider::Zai if uses_zai_coding_plan(provider_config) => {
+        // truthful spend and must not appear as dollars in the UI. A
+        // credentials-only `[providers.zai]` entry still resolves to that
+        // endpoint, because it is also CodeWhale's Z.ai default.
+        ApiProvider::Zai if base_url.trim().is_empty() => BillingPresentation::Unknown,
+        ApiProvider::Zai if is_zai_coding_plan_endpoint(base_url) => {
             BillingPresentation::Subscription("Z.ai Coding Plan quota")
         }
-        ApiProvider::XiaomiMimo if !xiaomi_is_explicit_pay_as_you_go(provider_config) => {
-            BillingPresentation::Subscription("MiMo token plan")
-        }
-        ApiProvider::Xai
-            if provider_config.is_some_and(uses_xai_oauth)
-                && crate::xai_oauth::credentials_valid(config) =>
+        ApiProvider::Zai => BillingPresentation::Metered,
+        ApiProvider::XiaomiMimo => product_billing(product),
+
+        ApiProvider::Xai | ApiProvider::Anthropic => product_billing(product),
+        // A named custom route is billed from the identity and endpoint it
+        // dispatched on. Without an identity there is no vendor to name, and
+        // without an endpoint there is no route at all — either way the honest
+        // answer is Unknown rather than whatever the active custom table says.
+        ApiProvider::Custom
+            if identity.is_none_or(|key| key.trim().is_empty()) || base_url.trim().is_empty() =>
         {
-            BillingPresentation::Subscription("Grok OAuth quota")
-        }
-        ApiProvider::Anthropic if provider_config.is_some_and(uses_anthropic_oauth) => {
-            BillingPresentation::Subscription("Claude OAuth quota")
-        }
-        ApiProvider::Custom if provider_config.is_none_or(custom_billing_unknown) => {
             BillingPresentation::Unknown
         }
+        ApiProvider::Custom => product_billing(product),
         _ => BillingPresentation::Metered,
     }
 }
 
-fn stepfun_billing(config: Option<&ProviderConfig>) -> BillingPresentation {
-    let base_url = config
-        .and_then(|config| config.base_url.as_deref())
-        .unwrap_or(crate::config::DEFAULT_STEPFUN_BASE_URL);
-    match crate::pricing::billing_surface_for_route(ApiProvider::Stepfun, Some(base_url)) {
+/// Credential-shaped providers answer from the captured product and nothing
+/// else. An uncaptured product is Unknown: no invented dollars, no invented
+/// quota label.
+fn product_billing(product: RouteProduct) -> BillingPresentation {
+    match product {
+        RouteProduct::Subscription(label) => BillingPresentation::Subscription(label),
+        RouteProduct::Metered => BillingPresentation::Metered,
+        RouteProduct::Unproven => BillingPresentation::Unknown,
+    }
+}
+
+/// StepFun already reduces an endpoint to a non-secret billing surface and
+/// fails closed on anything it does not recognize, so the resolved endpoint
+/// and a dispatch receipt use the same reduction unchanged.
+fn stepfun_billing_for_endpoint(base_url: Option<&str>) -> BillingPresentation {
+    match crate::pricing::billing_surface_for_route(ApiProvider::Stepfun, base_url) {
         Some(crate::pricing::STEPFUN_PAYG_BILLING_SURFACE) => BillingPresentation::Metered,
         Some(crate::pricing::STEPFUN_PLAN_BILLING_SURFACE) => {
             BillingPresentation::Subscription("StepFun Step Plan quota")
@@ -121,15 +322,9 @@ fn stepfun_billing(config: Option<&ProviderConfig>) -> BillingPresentation {
     }
 }
 
-fn uses_zai_coding_plan(config: Option<&ProviderConfig>) -> bool {
-    // The configured URL is optional because the Coding Plan endpoint is also
-    // CodeWhale's Z.ai default. A credentials-only `[providers.zai]` entry
-    // must therefore remain plan-billed rather than falling through to fake
-    // per-token dollars.
-    let url = config
-        .and_then(|config| config.base_url.as_deref())
-        .unwrap_or(crate::config::DEFAULT_ZAI_BASE_URL);
-    url.trim()
+fn is_zai_coding_plan_endpoint(base_url: &str) -> bool {
+    base_url
+        .trim()
         .trim_end_matches('/')
         .ends_with("/api/coding/paas/v4")
 }
@@ -495,6 +690,12 @@ mod tests {
 
     #[test]
     fn zai_default_coding_endpoint_never_claims_api_dollars() {
+        // The route resolves its shipped default, so the ambient generic
+        // endpoint override has to be locked out for the assertion to be
+        // about the default at all.
+        let _lock = crate::test_support::lock_test_env();
+        let _generic = crate::test_support::EnvVarGuard::remove("CODEWHALE_BASE_URL");
+        let _legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_BASE_URL");
         let config = config_with(ApiProvider::Zai, ProviderConfig::default());
         assert_eq!(
             for_route(&config, ApiProvider::Zai),
@@ -807,6 +1008,86 @@ mod tests {
         assert_eq!(
             for_route(&metered_custom, ApiProvider::Custom),
             BillingPresentation::Metered
+        );
+    }
+
+    /// Cross-provider dispatch receipts for the other endpoint-shaped routes.
+    #[test]
+    fn dispatched_endpoint_shaped_routes_classify_from_the_receipt() {
+        let config = Config::default();
+        // StepFun: plan endpoint, PAYG endpoint, unrecognized host.
+        assert_eq!(
+            for_dispatched_route(
+                &config,
+                DispatchedRoute {
+                    provider: ApiProvider::Stepfun,
+                    base_url: "https://api.stepfun.ai/step_plan/v1",
+                },
+            ),
+            BillingPresentation::Subscription("StepFun Step Plan quota")
+        );
+        assert_eq!(
+            for_dispatched_route(
+                &config,
+                DispatchedRoute {
+                    provider: ApiProvider::Stepfun,
+                    base_url: crate::config::DEFAULT_STEPFUN_BASE_URL,
+                },
+            ),
+            BillingPresentation::Metered
+        );
+        assert_eq!(
+            for_dispatched_route(
+                &config,
+                DispatchedRoute {
+                    provider: ApiProvider::Stepfun,
+                    base_url: "https://gateway.internal.example/v1",
+                },
+            ),
+            BillingPresentation::Unknown
+        );
+        // Z.ai: the Coding Plan path is quota-billed; a blank receipt is not
+        // an excuse to fall back to the plan default.
+        assert_eq!(
+            for_dispatched_route(
+                &config,
+                DispatchedRoute {
+                    provider: ApiProvider::Zai,
+                    base_url: "https://api.z.ai/api/coding/paas/v4",
+                },
+            ),
+            BillingPresentation::Subscription("Z.ai Coding Plan quota")
+        );
+        assert_eq!(
+            for_dispatched_route(
+                &config,
+                DispatchedRoute {
+                    provider: ApiProvider::Zai,
+                    base_url: "",
+                },
+            ),
+            BillingPresentation::Unknown
+        );
+        // Identity-owned routes are unchanged by the receipt.
+        assert_eq!(
+            for_dispatched_route(
+                &config,
+                DispatchedRoute {
+                    provider: ApiProvider::Ollama,
+                    base_url: "http://localhost:11434/v1",
+                },
+            ),
+            BillingPresentation::Local
+        );
+        assert_eq!(
+            for_dispatched_route(
+                &config,
+                DispatchedRoute {
+                    provider: ApiProvider::OpenaiCodex,
+                    base_url: "https://chatgpt.com/backend-api/codex",
+                },
+            ),
+            BillingPresentation::Subscription("Codex OAuth quota")
         );
     }
 }

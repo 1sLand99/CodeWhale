@@ -10613,6 +10613,54 @@ default_text_model = "legacy-1"
 }
 
 #[test]
+fn dispatch_endpoint_and_billing_receipts_agree_for_every_resolved_route() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let _managed = no_managed_config(temp_root.path());
+    let config_path = temp_root.path().join("config.toml");
+    fs::write(&config_path, "provider = \"deepseek\"\n")?;
+    let _base = EnvVarGuard::set("CODEWHALE_BASE_URL", "https://env-gateway.example.test/v1");
+
+    let config = Config::load(Some(config_path), None)?;
+
+    // `for_route` reads the ambient config; `for_dispatched_route` reads the
+    // endpoint the client is actually built from. After the resolver became
+    // identity-aware these must not be able to disagree for the active route.
+    let provider = config.api_provider();
+    let resolved = config.deepseek_base_url();
+    assert_eq!(
+        crate::route_billing::for_route(&config, provider),
+        crate::route_billing::for_dispatched_route(
+            &config,
+            crate::route_billing::DispatchedRoute {
+                provider,
+                base_url: &resolved,
+            },
+        )
+    );
+
+    // A pinned cross-provider child bills from its own resolved endpoint,
+    // which is its canonical host — not the session's env-selected gateway.
+    for child in [ApiProvider::DeepseekCN, ApiProvider::Moonshot] {
+        let child_base = config.base_url_for_route(child);
+        assert_eq!(child_base, child.default_base_url(), "{child:?}");
+        assert_eq!(
+            crate::route_billing::for_dispatched_route(
+                &config,
+                crate::route_billing::DispatchedRoute {
+                    provider: child,
+                    base_url: &child_base,
+                },
+            ),
+            crate::route_billing::for_route(&config, child),
+            "{child:?} ambient and dispatch billing receipts must agree"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn readiness_and_inventory_classify_the_resolved_route_not_the_session_host() -> Result<()> {
     let _lock = lock_test_env();
     let temp_root = tempfile::tempdir()?;

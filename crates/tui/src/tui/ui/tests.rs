@@ -7452,9 +7452,14 @@ fn turn_liveness_recovers_stalled_in_progress_turn() {
             model: "gpt-5.5".to_string(),
             auto_model: false,
             receipt: None,
+            base_url: String::new(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
         auto_route_receipt: None,
         suggestion_authority: None,
+        billing_identity: None,
+        billing_product: crate::route_billing::RouteProduct::Unproven,
+        billing_base_url: String::new(),
     });
 
     let recovered = reconcile_turn_liveness(&mut app, now, false);
@@ -7495,9 +7500,14 @@ fn engine_event_disconnect_recovers_live_turn_immediately() {
             model: "gpt-5.5".to_string(),
             auto_model: false,
             receipt: None,
+            base_url: String::new(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
         auto_route_receipt: None,
         suggestion_authority: None,
+        billing_identity: None,
+        billing_product: crate::route_billing::RouteProduct::Unproven,
+        billing_base_url: String::new(),
     });
     let thinking_idx = crate::tui::streaming_thinking::ensure_active_entry(&mut app);
     crate::tui::streaming_thinking::append(&mut app, thinking_idx, "partial reasoning");
@@ -7562,9 +7572,14 @@ fn engine_event_disconnect_cleans_cancelled_turn_metadata() {
             model: "gpt-5.5".to_string(),
             auto_model: false,
             receipt: None,
+            base_url: String::new(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
         auto_route_receipt: None,
         suggestion_authority: None,
+        billing_identity: None,
+        billing_product: crate::route_billing::RouteProduct::Unproven,
+        billing_base_url: String::new(),
     });
 
     let recovered = recover_engine_event_disconnect(&mut app);
@@ -9989,6 +10004,8 @@ fn turn_started_route_is_captured_before_cancel_suppression() {
             model: "gpt-5.5".to_string(),
             auto_model: true,
             receipt: None,
+            base_url: String::new(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
     };
 
@@ -10045,6 +10062,8 @@ fn turn_started_suggestion_authority_comes_from_the_route_receipt_not_config() {
             model: "deepseek-chat".to_string(),
             auto_model: false,
             receipt: Some(receipt),
+            base_url: String::new(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
     };
 
@@ -10079,6 +10098,8 @@ fn turn_started_without_a_route_receipt_captures_no_suggestion_authority() {
             model: "deepseek-chat".to_string(),
             auto_model: false,
             receipt: None,
+            base_url: String::new(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
     };
 
@@ -10107,6 +10128,8 @@ fn engine_error_health_accounting_uses_active_turn_route() {
             model: "gpt-5.5".to_string(),
             auto_model: true,
             receipt: None,
+            base_url: String::new(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
     };
     capture_turn_started_metadata(&mut app, &event);

@@ -3558,6 +3558,17 @@ impl Engine {
         let route_limits = crate::route_budget::known_route_limits(route.candidate.limits());
         let route_capabilities = route.candidate.capabilities();
         let route_api_config = route.config.clone();
+        // Freeze the billing receipt here, while `route` is still the single
+        // authority for this turn: `route.config` is the identity-scoped
+        // Config the client is being built from, and `route.candidate` names
+        // the endpoint it will call. After `install_resolved_runtime_route`
+        // consumes `route`, the only sound source for these facts is this
+        // receipt — an ambient `Config` read at TurnStarted or TurnComplete
+        // would follow a later provider switch, auto-router hop, or custom
+        // table change onto the wrong vendor.
+        let dispatched_base_url = route.candidate.endpoint().base_url.clone();
+        let dispatched_product =
+            crate::route_billing::capture_product(&route.config, effective_provider);
         if let Err(err) = self.install_resolved_runtime_route(route) {
             let _ = self
                 .tx_event
@@ -3654,6 +3665,8 @@ impl Engine {
             model: model.clone(),
             auto_model,
             receipt: route_receipt,
+            base_url: dispatched_base_url,
+            billing_product: dispatched_product,
         };
 
         // Emit turn started event IMMEDIATELY so the UI knows the turn is

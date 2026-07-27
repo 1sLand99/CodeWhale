@@ -93,6 +93,38 @@ pub struct ActiveTurnMetadata {
     /// produce a follow-up prompt suggestion; see
     /// [`crate::tui::prompt_suggestion::capture_route_authority`].
     pub suggestion_authority: Option<crate::tui::prompt_suggestion::SuggestionRouteAuthority>,
+    /// Non-secret identity key of the route this turn dispatched on, captured
+    /// at `TurnStarted`. Needed to bill a named custom route after the session
+    /// may have selected a different custom table.
+    pub billing_identity: Option<String>,
+    /// Credential/product truth for this turn's route, captured at
+    /// `TurnStarted` while the config still described it. Credential-shaped
+    /// providers cannot be billed from a later ambient read.
+    pub billing_product: crate::route_billing::RouteProduct,
+    /// Endpoint this turn's client was frozen against, copied from the
+    /// producer's receipt. An empty string bills Unknown rather than falling
+    /// through to a metered default.
+    pub billing_base_url: String,
+}
+
+impl ActiveTurnMetadata {
+    /// The immutable dispatch receipt for this turn.
+    ///
+    /// Every post-dispatch billing decision must come from here. Takes no
+    /// `Config` by construction, so a later provider switch, auto-router hop,
+    /// or custom-table change cannot retro-bill the turn onto another route.
+    #[must_use]
+    pub fn dispatched_receipt(&self) -> crate::route_billing::DispatchedReceipt<'_> {
+        crate::route_billing::DispatchedReceipt {
+            provider: self
+                .route
+                .as_ref()
+                .map_or(crate::config::ApiProvider::Custom, |route| route.provider),
+            identity: self.billing_identity.as_deref(),
+            base_url: self.billing_base_url.as_str(),
+            product: self.billing_product,
+        }
+    }
 }
 
 /// Per-message context estimates used by the render-time context meter.

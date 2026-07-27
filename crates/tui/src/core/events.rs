@@ -48,6 +48,25 @@ pub struct TurnRoute {
     /// `None` when no concrete client was installed (injected-client engines,
     /// or a client that failed to construct).
     pub receipt: Option<crate::route_receipt::TurnRouteReceipt>,
+    /// Endpoint this turn's client was frozen against, verbatim.
+    ///
+    /// [`crate::route_receipt::TurnRouteReceipt`] deliberately keeps only a
+    /// redacted endpoint identity, which billing cannot classify from, so the
+    /// non-secret URL travels here. Captured from the resolved route candidate
+    /// at the client-freeze boundary, before any ambient selection state can
+    /// move. Empty only when no endpoint was captured, which bills Unknown
+    /// rather than guessing.
+    pub base_url: String,
+    /// Credential/pay-mode product truth captured from the route-scoped config
+    /// at the same instant.
+    ///
+    /// Together with `provider_identity` and `base_url` this is a complete
+    /// [`crate::route_billing::DispatchedReceipt`]: every fact billing needs,
+    /// frozen at dispatch. Consumers must classify from these fields and must
+    /// never re-read an ambient `Config` after the turn starts — by
+    /// `TurnComplete` a provider switch, an auto-router hop, or a `/provider`
+    /// change can have moved it elsewhere.
+    pub billing_product: crate::route_billing::RouteProduct,
 }
 
 /// Structured lifecycle metadata paired with a human-readable
