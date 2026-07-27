@@ -189,6 +189,73 @@ RLM child-query batching is a different, cheaper cost class. Its
 `sub_query_batch` helper accepts 1–16 one-shot children inside a live `rlm`
 session; it is not a substitute for tool-carrying `agent` workers.
 
+## Human inspection: `/tools` (`/tool-studio`)
+
+`/tools` renders a **read-only, bounded human projection** of the tool field of
+the request that was prepared for one `(turn, step)`. It is not a second
+registry and not an execution surface.
+
+**The seam.** The snapshot is built in `crates/tui/src/core/engine/turn_loop.rs`
+immediately after `MessageRequest` is constructed, from `request.tools` — the
+same value the model client is handed. The engine resolves the surrounding
+per-turn data once in `engine.rs` (`ToolSurfaceContext`: flattened registry
+facts, the MCP pool's own server attribution, the engine-injected catalog names,
+and the resolved model client's receipt) and passes it as plain data, so the
+per-step seam never re-locks the MCP pool or holds a tool object.
+
+**Turn and step identity.** The tool set can differ between steps of a turn, so
+each snapshot is stamped with turn id and step and each seam emits its own. The
+TUI keeps only the latest (`SessionState.last_tool_request_snapshot`). Before
+the first seam there is no snapshot and `/tools` says so rather than rebuilding
+a registry in the UI.
+
+Two kinds of fact are kept apart:
+
+- **Wire facts** come from the prepared request: name, description, schema,
+  `defer_loading` / `strict` / `allowed_callers` / `cache_control`, byte
+  accounting, and the catalog digest.
+- **Surface facts** come from the `ToolSurfaceContext`: provenance
+  (`builtin` / `plugin` / `mcp` / `synthetic` / `unknown`), MCP server identity,
+  declared capabilities, declared approval requirement, and model visibility.
+
+Contract:
+
+- **One digest.** `active_tool_catalog_sha256`
+  (`crates/tui/src/core/engine/preview.rs`) is the single definition of the
+  active-tool-catalog hash. The request manifest publishes it as
+  `ToolSurfaceFacts::active_tool_catalog_sha256` and `/tools` reports the same
+  value for the same prepared request; neither surface keeps a hash of its own.
+- **Nothing is guessed.** MCP server identity is shown only when the real pool
+  attributed that exact model tool name. `McpPool::mcp_model_tool_name` is the
+  single definition shared by the model catalog and the human attribution, and
+  an ambiguous name (two servers colliding on one model name) resolves to no
+  server. Synthetic provenance comes from
+  `default_synthetic_catalog_tool_names`, which is asserted against the engine's
+  own `is_synthetic_catalog_tool` predicate. A transmitted tool with no registry
+  entry reports `capabilities: unknown`, never "none".
+- **Provider availability follows the resolved client.** It comes from
+  `Engine::tool_surface_provider_receipt`, never from "a tool registry exists".
+  With no client the receipt is `unavailable` even when the registry is full.
+- **Unknown shrinks, it does not vanish.** `unavailable_for_this_request` always
+  contains `provider_wire_payload`: nothing on this path observes what the
+  provider adapter finally transmits. It additionally contains `provider` and
+  `model` without a resolved client, and `provenance` / `capabilities` /
+  `approval` when no surface context was captured.
+- **Absent stays distinct from empty.** A request with no tools field is not a
+  request with an empty tools array; an unresolved field is `unknown` with a
+  reason, not a default.
+- **Bounded.** Rendering is capped by tool count (32), name, description, schema
+  bytes, allowed-caller count, and a payload measurement bound, each with an
+  explicit truncation or omission receipt. Registered tools that this request
+  does *not* carry are reported as a bounded name list plus an exact count
+  rather than expanding the projection.
+- **Inert.** The snapshot lives beside the transcript, never in
+  `session.messages`, so it cannot enter a model request or perturb the
+  provider's prefix cache. It never executes a tool, never reads credentials,
+  never reorders the catalog, and is never registered as a model-callable tool.
+- **Delivery is never claimed.** The capture happens before connection setup, so
+  `delivery_status` stays `unknown`.
+
 ## Release verification
 
 Do not infer the public surface from handler function names. Verify the model
