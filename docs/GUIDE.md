@@ -289,6 +289,7 @@ Common commands for first-time users:
 | `/model` | Select a model or use `/model auto` |
 | `/provider` | Pick the active API provider |
 | `/fleet` | Configure Fleet roles or open worker status |
+| `/workflow` | Orchestrate the current work as a Workflow |
 | `/config` | Edit runtime and provider settings |
 | `/statusline` | Choose which footer status chips are visible |
 | `/compact` | Summarize long context to recover token budget |

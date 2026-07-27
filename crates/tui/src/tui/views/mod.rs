@@ -1241,6 +1241,14 @@ enum ConfigSection {
     History,
     Mcp,
     Fleet,
+    /// Workflow orchestration (`/workflow`). Kept out of Fleet: a Fleet is
+    /// *who*, a Workflow is *what order* the work follows over it.
+    Workflow,
+    /// Session-scoped drivers such as `/goal`.
+    Session,
+    /// Explicitly legacy compatibility settings that are not a live choice —
+    /// e.g. the DeepSeek-only `default_model` fallback (#4751).
+    Legacy,
     Experimental,
 }
 
@@ -1288,7 +1296,12 @@ impl ConfigTab {
             ConfigTab::Display => matches!(section, ConfigSection::Display),
             ConfigTab::Advanced => matches!(
                 section,
-                ConfigSection::Mcp | ConfigSection::Fleet | ConfigSection::Experimental
+                ConfigSection::Mcp
+                    | ConfigSection::Fleet
+                    | ConfigSection::Workflow
+                    | ConfigSection::Session
+                    | ConfigSection::Legacy
+                    | ConfigSection::Experimental
             ),
         }
     }
@@ -1336,6 +1349,9 @@ impl ConfigSection {
                 ConfigSection::History => MessageId::ConfigSectionHistory,
                 ConfigSection::Mcp => MessageId::ConfigSectionMcp,
                 ConfigSection::Fleet => MessageId::ConfigSectionFleet,
+                ConfigSection::Workflow => MessageId::ConfigSectionWorkflow,
+                ConfigSection::Session => MessageId::ConfigSectionSession,
+                ConfigSection::Legacy => MessageId::ConfigSectionLegacy,
                 ConfigSection::Experimental => MessageId::ConfigSectionExperimental,
             },
         )
@@ -1836,25 +1852,22 @@ impl ConfigView {
             ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::DeepseekAnthropic
         ) || settings.default_model.is_some();
         if show_deepseek_fallback {
-            let insert_at = rows
-                .iter()
-                .position(|row| row.key == "fast_model")
-                .map(|i| i + 1)
-                .unwrap_or(rows.len());
-            rows.insert(
-                insert_at,
-                ConfigRow {
-                    section: ConfigSection::Model,
-                    key: "default_model".to_string(),
-                    value: settings
-                        .default_model
-                        .as_deref()
-                        .unwrap_or(&*tr(app.ui_locale, MessageId::ConfigDefaultValue))
-                        .to_string(),
-                    editable: false,
-                    scope: ConfigScope::Saved,
-                },
-            );
+            // #4751: an inert DeepSeek-only compatibility field is not a model
+            // choice and never a Fleet choice — exact-Fleet users switch
+            // Fleets, not fallback models. Keep the persisted `default_model`
+            // key (the runtime still reads it) but present it in the explicitly
+            // Legacy section at the end, not among live Model settings.
+            rows.push(ConfigRow {
+                section: ConfigSection::Legacy,
+                key: "default_model".to_string(),
+                value: settings
+                    .default_model
+                    .as_deref()
+                    .unwrap_or(&*tr(app.ui_locale, MessageId::ConfigDefaultValue))
+                    .to_string(),
+                editable: false,
+                scope: ConfigScope::Saved,
+            });
         }
         let external_status_rows = [ApiProvider::OpenaiCodex, ApiProvider::Xai]
             .into_iter()
@@ -2630,7 +2643,7 @@ fn experimental_config_rows(config: &Config) -> Vec<ConfigRow> {
     }
 
     rows.push(ConfigRow {
-        section: ConfigSection::Fleet,
+        section: ConfigSection::Session,
         key: "goal_command".to_string(),
         value:
             "/goal sets session objectives with optional token budgets; state shows in Work context"
@@ -2639,7 +2652,8 @@ fn experimental_config_rows(config: &Config) -> Vec<ConfigRow> {
         scope: ConfigScope::Saved,
     });
     rows.push(ConfigRow {
-        section: ConfigSection::Fleet,
+        // Workflow orchestration is its own section, not a Fleet concern.
+        section: ConfigSection::Workflow,
         key: "workflow".to_string(),
         value:
             "/workflow runs scripted fan-out/fan-in operations with run cards and cancel support"
@@ -4876,7 +4890,11 @@ mod tests {
                 .filter(|row| {
                     !matches!(
                         row.section,
-                        super::ConfigSection::Experimental | super::ConfigSection::Fleet
+                        super::ConfigSection::Experimental
+                            | super::ConfigSection::Fleet
+                            | super::ConfigSection::Workflow
+                            | super::ConfigSection::Session
+                            | super::ConfigSection::Legacy
                     ) && !DIAGNOSTIC_ONLY.contains(&row.key.as_str())
                         && !row.key.starts_with("managed_")
                 })
@@ -4888,7 +4906,11 @@ mod tests {
                 .filter(|row| {
                     matches!(
                         row.section,
-                        super::ConfigSection::Experimental | super::ConfigSection::Fleet
+                        super::ConfigSection::Experimental
+                            | super::ConfigSection::Fleet
+                            | super::ConfigSection::Workflow
+                            | super::ConfigSection::Session
+                            | super::ConfigSection::Legacy
                     )
                 })
                 .all(|row| !row.editable)
@@ -5191,6 +5213,69 @@ api_key_env = "ACME_API_KEY"
             config_label_for_key(&row.key),
             "Legacy fallback model (DeepSeek routes only)"
         );
+        // #4751: never a Fleet (or live Model) choice.
+        assert_eq!(row.section, super::ConfigSection::Legacy);
+    }
+
+    /// #4751: Fleet settings hold Fleet/member concerns only. The
+    /// legacy DeepSeek fallback is Legacy, `/goal` is Session, and Workflow
+    /// orchestration is Workflow — every persisted key is unchanged.
+    #[test]
+    fn config_view_settings_rows_land_in_truthful_sections() {
+        let _guard = ConfigSettingsEnvGuard::new("default_model = \"deepseek-v4-pro\"\n");
+        let mut app = create_test_app();
+        app.api_provider = crate::config::ApiProvider::Zai;
+        let view = ConfigView::new_for_app(&app);
+
+        let section_of = |key: &str| {
+            view.rows
+                .iter()
+                .find(|row| row.key == key)
+                .unwrap_or_else(|| panic!("{key} row"))
+                .section
+        };
+        assert_eq!(section_of("default_model"), super::ConfigSection::Legacy);
+        assert_eq!(section_of("goal_command"), super::ConfigSection::Session);
+        assert_eq!(section_of("workflow"), super::ConfigSection::Workflow);
+
+        // Relabelling is presentation only: the persisted key, the persisted
+        // value, the Saved scope, and the read-only posture all round-trip
+        // unchanged, so existing config files keep loading identically.
+        let legacy = view
+            .rows
+            .iter()
+            .find(|row| row.section == super::ConfigSection::Legacy)
+            .expect("legacy row");
+        assert_eq!(legacy.key, "default_model");
+        assert_eq!(legacy.value, "deepseek-v4-pro");
+        assert_eq!(legacy.scope, ConfigScope::Saved);
+        assert!(!legacy.editable);
+
+        // Fleet keeps Fleet/member concerns only.
+        let fleet_keys: Vec<&str> = view
+            .rows
+            .iter()
+            .filter(|row| row.section == super::ConfigSection::Fleet)
+            .map(|row| row.key.as_str())
+            .collect();
+        assert!(
+            fleet_keys.iter().all(|key| key.starts_with("fleet.")),
+            "non-Fleet concerns leaked into Fleet settings: {fleet_keys:?}"
+        );
+        assert!(
+            !fleet_keys.contains(&"default_model"),
+            "the legacy fallback must not be presented as a Fleet choice"
+        );
+
+        // Workflow keeps its own name and its `/workflow` wording.
+        let workflow = view
+            .rows
+            .iter()
+            .find(|row| row.section == super::ConfigSection::Workflow)
+            .expect("workflow row");
+        assert_eq!(workflow.key, "workflow");
+        assert!(workflow.value.starts_with("/workflow "), "{workflow:?}");
+        assert_eq!(config_label_for_key("workflow"), "Workflow");
     }
 
     #[test]
@@ -5278,12 +5363,14 @@ max_spawn_depth = 2
 
         view.clear_filter();
         type_filter(&mut view, "goal");
-        assert_eq!(visible_section_labels(&view), vec!["Fleet"]);
+        assert_eq!(visible_section_labels(&view), vec!["Session"]);
         assert_eq!(visible_row_keys(&view), vec!["goal_command"]);
 
+        // The `workflow` row keeps its key and its name; #4751 only moved it
+        // out of Fleet into its own Workflow section.
         view.clear_filter();
         type_filter(&mut view, "workflow");
-        assert_eq!(visible_section_labels(&view), vec!["Fleet"]);
+        assert_eq!(visible_section_labels(&view), vec!["Workflow"]);
         assert_eq!(visible_row_keys(&view), vec!["workflow"]);
 
         view.clear_filter();

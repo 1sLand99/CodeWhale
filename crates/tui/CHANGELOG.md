@@ -100,6 +100,14 @@ already claimed to.
 
 - Prefix-cache tool catalog entries store only the SHA-256 digest, not the
   joined catalog string. Unused plan-transition validation helpers are removed.
+- Settings sections now hold only what they claim (#4751). Fleet keeps
+  Fleet/member concerns; `/goal` moved to a **Session** section and
+  Workflow orchestration to its own **Workflow** section. The inert
+  DeepSeek-only `default_model` fallback moved out of Model settings into an
+  explicit **Legacy** section — exact-Fleet users switch Fleets, not fallback
+  models; the config field is retained because the runtime still reads it.
+  This is presentation only: the persisted keys (`goal_command`, `workflow`,
+  `default_model`), their values, scopes, and runtime behavior are unchanged.
 ## [0.9.1] - 2026-07-24
 
 ### Dogfood follow-ups (2026-07-24)
