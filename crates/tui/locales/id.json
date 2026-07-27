@@ -1190,5 +1190,11 @@
     "CmdCostRoutesHeader": "Rute teraudit (disunting):",
     "CmdTokensCacheWriteTotal": "Token tulis-cache (cache-creation) sesi ini: {write}. Ditagih di atas tarif input bila penyedia memublikasikan premi tulis; lihat /cache untuk rincian per giliran.",
     "ModelPickerAutoNetworkActiveProviderHint": "per giliran · hanya penyedia aktif · permintaan + konteks terbaru → {provider} / {model}",
-    "CmdLaneDescription": "Kelola Lane aktif: interrupt, restart, resume"
+    "CmdLaneDescription": "Kelola Lane aktif: interrupt, restart, resume",
+    "StepfunBillingRouteTitle": "Rute penagihan StepFun",
+    "StepfunBillingRouteIntro": "StepFun menagih pay-as-you-go dan langganan Step Plan pada endpoint terpisah. Pilih yang sesuai dengan kunci Anda.",
+    "StepfunBillingRoutePaygOption": "Pay-as-you-go (harga per token)",
+    "StepfunBillingRoutePlanOption": "Langganan Step Plan (jatah paket)",
+    "StepfunPlanApiKeyHint": "Untuk langganan StepFun Step Plan, gunakan kunci yang diterbitkan untuk Step Plan Anda, bukan kunci pay-as-you-go.",
+    "StepfunPlanRouteHint": "Rute ini memakai {route} dan ditagih dari jatah Step Plan Anda."
 }

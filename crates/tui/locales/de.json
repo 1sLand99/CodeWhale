@@ -1190,5 +1190,11 @@
     "CmdCostRoutesHeader": "Geprüfte Routen (geschwärzt):",
     "CmdTokensCacheWriteTotal": "Cache-Schreib-Tokens (cache-creation) in dieser Sitzung: {write}. Über dem Eingaberatensatz abgerechnet, wenn der Anbieter einen Schreibaufschlag veröffentlicht; Details pro Zug unter /cache.",
     "ModelPickerAutoNetworkActiveProviderHint": "pro Zug · nur aktiver Anbieter · Anfrage + jüngster Kontext → {provider} / {model}",
-    "CmdLaneDescription": "Aktive Lanes verwalten: interrupt, restart, resume"
+    "CmdLaneDescription": "Aktive Lanes verwalten: interrupt, restart, resume",
+    "StepfunBillingRouteTitle": "StepFun-Abrechnungsroute",
+    "StepfunBillingRouteIntro": "StepFun rechnet Pay-as-you-go und Step-Plan-Abos über getrennte Endpunkte ab. Wählen Sie den, zu dem Ihr Schlüssel gehört.",
+    "StepfunBillingRoutePaygOption": "Pay-as-you-go (Token-Preis)",
+    "StepfunBillingRoutePlanOption": "Step-Plan-Abo (Plankontingent)",
+    "StepfunPlanApiKeyHint": "Verwenden Sie für StepFun-Step-Plan-Abos den für Ihren Step Plan ausgestellten Schlüssel, keinen Pay-as-you-go-Schlüssel.",
+    "StepfunPlanRouteHint": "Diese Route nutzt {route} und wird gegen Ihr Step-Plan-Kontingent abgerechnet."
 }

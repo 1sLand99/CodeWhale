@@ -1190,5 +1190,11 @@
     "CmdCostRoutesHeader": "Rutes auditades (redactades):",
     "CmdTokensCacheWriteTotal": "Tokens d'escriptura a la memòria cau (cache-creation) aquesta sessió: {write}. Es facturen per sobre de la tarifa d'entrada quan el proveïdor publica una prima d'escriptura; vegeu /cache per al desglossament per torn.",
     "ModelPickerAutoNetworkActiveProviderHint": "per torn · només el proveïdor actiu · petició + context recent → {provider} / {model}",
-    "CmdLaneDescription": "Gestiona les Lane actives: interrupt, restart, resume"
+    "CmdLaneDescription": "Gestiona les Lane actives: interrupt, restart, resume",
+    "StepfunBillingRouteTitle": "Ruta de facturació de StepFun",
+    "StepfunBillingRouteIntro": "StepFun factura el pay-as-you-go i les subscripcions Step Plan en endpoints separats. Trieu aquell al qual pertany la vostra clau.",
+    "StepfunBillingRoutePaygOption": "Pay-as-you-go (preu per token)",
+    "StepfunBillingRoutePlanOption": "Subscripció Step Plan (quota del pla)",
+    "StepfunPlanApiKeyHint": "Per a subscripcions StepFun Step Plan, useu la clau emesa per al vostre Step Plan, no una clau pay-as-you-go.",
+    "StepfunPlanRouteHint": "Aquesta ruta usa {route} i es factura contra la quota del vostre Step Plan."
 }

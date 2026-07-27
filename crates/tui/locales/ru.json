@@ -1190,5 +1190,11 @@
     "CmdCostRoutesHeader": "Проверенные маршруты (данные скрыты):",
     "CmdTokensCacheWriteTotal": "Токены записи в кэш (cache-creation) за сеанс: {write}. Тарифицируются выше входной ставки, если провайдер публикует надбавку за запись; по-ходовая разбивка — /cache.",
     "ModelPickerAutoNetworkActiveProviderHint": "за ход · только активный провайдер · запрос + недавний контекст → {provider} / {model}",
-    "CmdLaneDescription": "Управление активными Lane: interrupt, restart, resume"
+    "CmdLaneDescription": "Управление активными Lane: interrupt, restart, resume",
+    "StepfunBillingRouteTitle": "Тарифный маршрут StepFun",
+    "StepfunBillingRouteIntro": "StepFun выставляет счета за pay-as-you-go и подписки Step Plan на разных конечных точках. Выберите ту, к которой относится ваш ключ.",
+    "StepfunBillingRoutePaygOption": "Pay-as-you-go (потокенная оплата)",
+    "StepfunBillingRoutePlanOption": "Подписка Step Plan (лимит плана)",
+    "StepfunPlanApiKeyHint": "Для подписок StepFun Step Plan используйте ключ, выданный для вашего Step Plan, а не ключ pay-as-you-go.",
+    "StepfunPlanRouteHint": "Этот маршрут использует {route} и списывается из лимита вашего Step Plan."
 }

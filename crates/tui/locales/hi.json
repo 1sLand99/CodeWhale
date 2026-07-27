@@ -1190,5 +1190,11 @@
     "CmdCostRoutesHeader": "ऑडिट किए गए मार्ग (संपादित):",
     "CmdTokensCacheWriteTotal": "इस सत्र में कैश-लेखन (cache-creation) टोकन: {write}। जहाँ प्रदाता लेखन प्रीमियम प्रकाशित करता है वहाँ इनपुट दर से ऊपर बिल होते हैं; प्रति-टर्न विवरण के लिए /cache देखें।",
     "ModelPickerAutoNetworkActiveProviderHint": "प्रति टर्न · केवल सक्रिय प्रदाता · अनुरोध + हालिया संदर्भ → {provider} / {model}",
-    "CmdLaneDescription": "सक्रिय Lane प्रबंधित करें: interrupt, restart, resume"
+    "CmdLaneDescription": "सक्रिय Lane प्रबंधित करें: interrupt, restart, resume",
+    "StepfunBillingRouteTitle": "StepFun बिलिंग मार्ग",
+    "StepfunBillingRouteIntro": "StepFun pay-as-you-go और Step Plan सदस्यताओं का बिल अलग-अलग endpoints पर बनाता है। वही चुनें जिससे आपकी कुंजी संबंधित है।",
+    "StepfunBillingRoutePaygOption": "Pay-as-you-go (टोकन मूल्य)",
+    "StepfunBillingRoutePlanOption": "Step Plan सदस्यता (प्लान भत्ता)",
+    "StepfunPlanApiKeyHint": "StepFun Step Plan सदस्यताओं के लिए अपने Step Plan के लिए जारी कुंजी उपयोग करें, pay-as-you-go कुंजी नहीं।",
+    "StepfunPlanRouteHint": "यह मार्ग {route} उपयोग करता है और आपके Step Plan भत्ते से बिल होता है।"
 }

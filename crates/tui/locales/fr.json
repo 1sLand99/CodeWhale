@@ -1190,5 +1190,11 @@
     "CmdCostRoutesHeader": "Routes auditées (caviardées) :",
     "CmdTokensCacheWriteTotal": "Tokens d'écriture en cache (cache-creation) cette session : {write}. Facturés au-dessus du tarif d'entrée lorsque le fournisseur publie une prime d'écriture ; voir /cache pour le détail par tour.",
     "ModelPickerAutoNetworkActiveProviderHint": "par tour · fournisseur actif uniquement · requête + contexte récent → {provider} / {model}",
-    "CmdLaneDescription": "Gérer les Lanes actives : interrupt, restart, resume"
+    "CmdLaneDescription": "Gérer les Lanes actives : interrupt, restart, resume",
+    "StepfunBillingRouteTitle": "Route de facturation StepFun",
+    "StepfunBillingRouteIntro": "StepFun facture le pay-as-you-go et les abonnements Step Plan sur des endpoints distincts. Choisissez celui auquel appartient votre clé.",
+    "StepfunBillingRoutePaygOption": "Pay-as-you-go (tarif au token)",
+    "StepfunBillingRoutePlanOption": "Abonnement Step Plan (quota du plan)",
+    "StepfunPlanApiKeyHint": "Pour les abonnements StepFun Step Plan, utilisez la clé émise pour votre Step Plan, pas une clé pay-as-you-go.",
+    "StepfunPlanRouteHint": "Cette route utilise {route} et est facturée sur le quota de votre Step Plan."
 }
