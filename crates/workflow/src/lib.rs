@@ -5,6 +5,15 @@
 //! top only after their cancellation and evidence semantics are proven.
 
 mod elevation;
+/// Setup-time Fleet composition: a suggestion schema with no runtime authority.
+///
+/// Deliberately **not** re-exported from the crate root. Nothing consumes it
+/// yet — the UI lane that turns a proposal into a saved Fleet has not landed —
+/// and a crate-root export would advertise a public API that no call path
+/// reaches. Kept `pub mod` so the lane that wires it can address it by path
+/// (`codewhale_workflow::fleet_composition::…`) without a second review of the
+/// schema itself.
+pub mod fleet_composition;
 pub mod fleet_exact;
 pub mod fleet_preflight;
 pub mod fleet_reasoning;
