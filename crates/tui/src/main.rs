@@ -6235,10 +6235,12 @@ fn provider_capability_report(config: &Config) -> serde_json::Value {
         crate::route_runtime::ContextWindowSource::Fallback.label(),
         |route| route.context_window.source.label(),
     );
+    // `null` when neither the resolved route nor the compatibility matrix
+    // publishes an output ceiling — doctor must not invent one.
     let max_output = route_profile
         .as_ref()
         .and_then(|profile| profile.max_output)
-        .unwrap_or(cap.max_output);
+        .or(cap.max_output);
     let is_exact_kimi_code_k3 = route.as_ref().is_some_and(|route| {
         crate::config::is_exact_kimi_code_k3_route(
             provider,

@@ -538,6 +538,17 @@ differs from the static table, set `[providers.<name>] context_window = N`.
 The configured value becomes the route-effective context window for prompts,
 context-pressure checks, compaction, and output-cap budgeting.
 
+`max_output` is optional and truthful: it is `null` (and omitted from the
+capability struct on the wire) when the route publishes no output maximum we
+can stand behind — the Kimi Code membership `kimi-for-coding` family is the
+canonical example, since the membership catalog owns their limits. An unknown
+output ceiling is never backfilled with a placeholder, and it applies **no**
+compatibility clamp to a turn's requested `max_tokens`; only a concrete
+route/offering maximum narrows the request. A model the catalogue simply has no
+row for is a different fact — absence is not permission, so an uncatalogued id
+keeps a conservative ceiling. The "Max output metadata" column below reads
+`unknown` wherever no documented maximum exists.
+
 | Provider/model class | Context window | Max output metadata | Thinking support | Cache telemetry | FIM endpoint |
 | --- | --- | --- | --- | --- | --- |
 | DeepSeek V4 (`deepseek-v4-pro`, `deepseek-v4-flash`) | 1,000,000 | 384,000 | yes | yes | DeepSeek beta only |
@@ -554,22 +565,23 @@ context-pressure checks, compaction, and output-cap budgeting.
 | Meta Model API `muse-spark-1.1` | 1,000,000 | 32,000 | yes | no | not documented in code |
 | OpenAI Codex / ChatGPT route (`openai-codex`) | 400,000 effective | 128,000 | yes | no | route uses Responses payload at `/codex/responses` |
 | OpenModel default/custom model IDs | 200,000 fallback unless model metadata or config overrides it | 64,000 fallback | model-dependent | no | route uses Messages payload at `/v1/messages` |
-| Wanjie Ark `reasoner` / `r1` model IDs | 128,000 | 4,096 | yes | no | not documented in code |
+| Wanjie Ark `reasoner` / `r1` model IDs | 128,000 | unknown (no documented maximum) | yes | no | not documented in code |
 | Direct Arcee API `trinity-large-thinking` | 262,144 | 262,144 | yes | no | not documented in code |
-| Direct Arcee API `trinity-large-preview` | 262,144 | 4,096 | no in doctor capability metadata | no | not documented in code |
+| Direct Arcee API `trinity-large-preview` | 262,144 | unknown (no documented maximum) | no in doctor capability metadata | no | not documented in code |
 | Direct Moonshot `kimi-k3` | 1,048,576 | 1,048,576 documented maximum; 131,072 provider default | yes | no | exact route uses `max_completion_tokens` and omits fixed sampling fields ([K3 quickstart](https://platform.kimi.ai/docs/guide/kimi-k3-quickstart)) |
 | Kimi Code membership `k3` | 262,144 safe baseline; 1,048,576 with an explicit entitled-plan override | 131,072 conservative default ceiling; membership maximum is not published | yes | no | exact `https://api.kimi.com/coding/v1` route |
-| Moonshot/Kimi K2.7/K2.6 (`kimi-k2.7-code`, `kimi-k2.6`, Kimi Code `kimi-for-coding`) | 262,144 | 32,768 | yes | no | not documented in code |
+| Direct Moonshot/Kimi K2.7/K2.6 (`kimi-k2.7-code`, `kimi-k2.6`) | 262,144 | 32,768 | yes | no | provider-reported bundled catalog |
+| Kimi Code membership `kimi-for-coding`, `kimi-for-coding-highspeed` | 262,144 | unknown — the membership catalog owns these limits and no client-side ceiling is claimed | yes | no | exact `https://api.kimi.com/coding/v1` route |
 | Direct Z.AI `GLM-5.2` (default) | 1,000,000 | 131,072 | yes | no | not documented in code |
 | Direct Z.AI `GLM-5.1` | 202,752 | 131,072 | yes | no | not documented in code |
 | Direct Z.AI `GLM-5-Turbo` | 202,752 | 131,072 | yes | no | faster/explore sub-agent sibling |
 | Direct MiniMax `MiniMax-M3` | 1,000,000 | 524,288 | yes | no | not documented in code |
-| Direct MiniMax M2.x models | 204,800 | 4,096 fallback until MiniMax output metadata is promoted | yes | no | not documented in code |
+| Direct MiniMax M2.x models | 204,800 | unknown until MiniMax output metadata is promoted | yes | no | not documented in code |
 | MiniMax Messages route (`MiniMax-M3`, `MiniMax-M2.7`) | model-specific values above | model-specific values above | yes | no | route uses `/anthropic/v1/messages` |
-| Generic `openai` and AtlasCloud | 128,000 | 4,096 | no in doctor capability metadata | no | not documented in code |
-| Ollama | 8,192 | 4,096 | no | no | not documented in code |
-| Hugging Face Inference Providers V4 model IDs | 131,072 | 4,096 | yes | no | not documented in code |
-| Other recognized DeepSeek model IDs | 128,000 unless the model name carries an explicit `Nk` hint | 4,096 | no unless V4/reasoner logic matches | DeepSeek/NIM only | DeepSeek beta only |
+| Generic `openai` and AtlasCloud | 128,000 | unknown (no documented maximum) | no in doctor capability metadata | no | not documented in code |
+| Ollama | 8,192 | unknown (no documented maximum) | no | no | not documented in code |
+| Hugging Face Inference Providers V4 model IDs | 131,072 | unknown (no documented maximum) | yes | no | not documented in code |
+| Other recognized DeepSeek model IDs | 128,000 unless the model name carries an explicit `Nk` hint | unknown (no documented maximum) | no unless V4/reasoner logic matches | DeepSeek/NIM only | DeepSeek beta only |
 
 MiniMax M3 uses input-length and service tiers. Codewhale omits
 `service_tier`, so requests use the standard tier and cost estimates select the

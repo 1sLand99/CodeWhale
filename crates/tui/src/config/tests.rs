@@ -8827,7 +8827,7 @@ fn provider_capability_deepseek_v4_pro_has_1m_window_and_thinking() {
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     assert!(cap.cache_telemetry_supported);
     assert_eq!(
@@ -8846,7 +8846,7 @@ fn provider_capability_deepseek_anthropic_uses_messages_payload() {
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
     assert_eq!(
@@ -8866,7 +8866,7 @@ fn provider_capability_openmodel_uses_messages_payload() {
     );
     assert_eq!(
         cap.max_output,
-        crate::models::max_output_tokens_for_model(DEFAULT_OPENMODEL_MODEL).unwrap_or(64_000)
+        Some(crate::models::max_output_tokens_for_model(DEFAULT_OPENMODEL_MODEL).unwrap_or(64_000))
     );
     assert!(!cap.cache_telemetry_supported);
     assert_eq!(
@@ -8883,7 +8883,7 @@ fn provider_capability_deepseek_v4_flash_has_1m_window_and_thinking() {
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     assert!(cap.cache_telemetry_supported);
 }
@@ -8895,7 +8895,7 @@ fn provider_capability_deepseek_chat_alias_has_v4_flash_caps_and_metadata() {
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     assert!(cap.cache_telemetry_supported);
 
@@ -8916,7 +8916,7 @@ fn provider_capability_deepseek_reasoner_alias_has_v4_flash_caps_and_metadata() 
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     assert!(cap.cache_telemetry_supported);
 
@@ -8941,7 +8941,7 @@ fn provider_capability_nvidia_nim_v4_pro_maps_correctly() {
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     assert!(cap.cache_telemetry_supported);
     assert_eq!(
@@ -8957,7 +8957,7 @@ fn provider_capability_nvidia_nim_v4_flash_maps_correctly() {
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     assert!(cap.cache_telemetry_supported);
 }
@@ -8969,7 +8969,7 @@ fn provider_capability_openrouter_v4_pro_has_thinking_no_cache() {
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     // OpenRouter does not return DeepSeek prompt-cache telemetry.
     assert!(!cap.cache_telemetry_supported);
@@ -8988,7 +8988,7 @@ fn provider_capability_openai_codex_uses_responses_payload() {
         cap.context_window,
         OPENAI_CODEX_EFFECTIVE_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 4096);
+    assert_eq!(cap.max_output, Some(4096));
     assert!(cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
     assert_eq!(cap.request_payload_mode, RequestPayloadMode::Responses);
@@ -9033,7 +9033,7 @@ fn provider_capability_openrouter_recent_large_models_are_reasoning_aware() {
         let cap = provider_capability(ApiProvider::Openrouter, model);
 
         assert_eq!(cap.context_window, expected_window);
-        assert_eq!(cap.max_output, expected_output);
+        assert_eq!(cap.max_output, Some(expected_output));
         assert!(cap.thinking_supported);
         assert!(!cap.cache_telemetry_supported);
         assert_eq!(
@@ -9067,7 +9067,7 @@ fn openrouter_nemotron_ultra_aliases_resolve_to_live_id() {
 fn provider_capability_arcee_direct_models_use_api_docs_shape() {
     let thinking_cap = provider_capability(ApiProvider::Arcee, DEFAULT_ARCEE_MODEL);
     assert_eq!(thinking_cap.context_window, 262_144);
-    assert_eq!(thinking_cap.max_output, 262_144);
+    assert_eq!(thinking_cap.max_output, Some(262_144));
     assert!(thinking_cap.thinking_supported);
     assert!(!thinking_cap.cache_telemetry_supported);
     assert_eq!(
@@ -9077,14 +9077,14 @@ fn provider_capability_arcee_direct_models_use_api_docs_shape() {
 
     let preview = provider_capability(ApiProvider::Arcee, ARCEE_TRINITY_LARGE_PREVIEW_MODEL);
     assert_eq!(preview.context_window, 262_144);
-    assert_eq!(preview.max_output, 4096);
+    assert_eq!(preview.max_output, None);
     assert!(!preview.thinking_supported);
 
     let mini = provider_capability(ApiProvider::Arcee, ARCEE_TRINITY_MINI_MODEL);
     assert_eq!(mini.context_window, 128_000);
-    // ProviderCapability carries a mandatory request fallback; model metadata
-    // itself deliberately keeps Trinity Mini's upstream output limit unknown.
-    assert_eq!(mini.max_output, 4096);
+    // Trinity Mini's upstream output limit is unknown, and ProviderCapability
+    // now says so instead of fabricating a 4K request fallback.
+    assert_eq!(mini.max_output, None);
     assert_eq!(
         crate::models::max_output_tokens_for_model(ARCEE_TRINITY_MINI_MODEL),
         None
@@ -9115,7 +9115,7 @@ fn provider_capability_marks_exact_inkling_route_as_reasoning() {
 fn provider_capability_xiaomi_mimo_has_thinking_no_cache() {
     let cap = provider_capability(ApiProvider::XiaomiMimo, DEFAULT_XIAOMI_MIMO_MODEL);
     assert_eq!(cap.context_window, 1_000_000);
-    assert_eq!(cap.max_output, 131_072);
+    assert_eq!(cap.max_output, Some(131_072));
     assert!(cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
     assert_eq!(
@@ -9125,7 +9125,7 @@ fn provider_capability_xiaomi_mimo_has_thinking_no_cache() {
 
     let omni = provider_capability(ApiProvider::XiaomiMimo, XIAOMI_MIMO_V2_5_OMNI_MODEL);
     assert_eq!(omni.context_window, 1_000_000);
-    assert_eq!(omni.max_output, 131_072);
+    assert_eq!(omni.max_output, Some(131_072));
     assert!(omni.thinking_supported);
     assert!(!omni.cache_telemetry_supported);
 }
@@ -9137,7 +9137,7 @@ fn provider_capability_novita_v4_pro_has_thinking_no_cache() {
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
 }
@@ -9149,7 +9149,7 @@ fn provider_capability_fireworks_v4_pro_has_thinking_no_cache() {
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
 }
@@ -9161,7 +9161,7 @@ fn provider_capability_siliconflow_v4_pro_has_thinking_no_cache() {
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
     assert_eq!(
@@ -9177,7 +9177,7 @@ fn provider_capability_sglang_v4_pro_has_thinking_no_cache() {
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
 }
@@ -9189,7 +9189,7 @@ fn provider_capability_openai_custom_model_is_chat_completions_without_thinking(
         cap.context_window,
         crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 4096);
+    assert_eq!(cap.max_output, None);
     assert!(!cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
     assert_eq!(
@@ -9208,7 +9208,7 @@ fn provider_capability_atlascloud_v4_model_resolves_model_metadata() {
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
     assert_eq!(
@@ -9221,12 +9221,42 @@ fn provider_capability_atlascloud_v4_model_resolves_model_metadata() {
 fn provider_capability_moonshot_default_model_resolves_kimi_metadata() {
     let cap = provider_capability(ApiProvider::Moonshot, DEFAULT_MOONSHOT_MODEL);
     assert_eq!(cap.context_window, 262_144);
-    assert_eq!(cap.max_output, 32_768);
+    assert_eq!(cap.max_output, Some(32_768));
     assert!(cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
     assert_eq!(
         cap.request_payload_mode,
         RequestPayloadMode::ChatCompletions
+    );
+}
+
+#[test]
+fn provider_capability_kimi_membership_ids_report_unknown_output_ceiling() {
+    // The `kimi-for-coding` family is membership-only: the membership catalog
+    // owns its output limits, so the static matrix must say "unknown" rather
+    // than fabricating a ceiling. A placeholder here is not cosmetic — it
+    // becomes a hard request clamp in `route_budget`.
+    for model in ["kimi-for-coding", "kimi-for-coding-highspeed"] {
+        let cap = provider_capability(ApiProvider::Moonshot, model);
+        assert_eq!(cap.context_window, 262_144, "{model}");
+        assert_eq!(cap.max_output, None, "{model}");
+        assert!(cap.thinking_supported, "{model}");
+
+        // Unknown is *omitted* on the wire, never serialized as a number.
+        let json = serde_json::to_value(&cap).expect("capability serializes");
+        assert!(
+            json.get("max_output").is_none(),
+            "{model}: unknown output ceiling must not be serialized: {json}"
+        );
+        let round_tripped: ProviderCapability =
+            serde_json::from_value(json).expect("capability round-trips with an absent max_output");
+        assert_eq!(round_tripped, cap, "{model}");
+    }
+
+    // The direct-platform K2.7 Code route does publish 32K, and keeps it.
+    assert_eq!(
+        provider_capability(ApiProvider::Moonshot, "kimi-k2.7-code").max_output,
+        Some(32_768)
     );
 }
 
@@ -9237,7 +9267,7 @@ fn provider_capability_zai_defaults_to_5_2_and_tracks_5_1_and_turbo() {
     assert_eq!(default.resolved_model, DEFAULT_ZAI_MODEL);
     assert_eq!(default.resolved_model, ZAI_GLM_5_2_MODEL);
     assert_eq!(default.context_window, 1_000_000);
-    assert_eq!(default.max_output, 131_072);
+    assert_eq!(default.max_output, Some(131_072));
     assert!(default.thinking_supported);
     assert!(!default.cache_telemetry_supported);
 
@@ -9245,7 +9275,7 @@ fn provider_capability_zai_defaults_to_5_2_and_tracks_5_1_and_turbo() {
     let v51 = provider_capability(ApiProvider::Zai, ZAI_GLM_5_1_MODEL);
     assert_eq!(v51.resolved_model, ZAI_GLM_5_1_MODEL);
     assert_eq!(v51.context_window, 202_752);
-    assert_eq!(v51.max_output, 131_072);
+    assert_eq!(v51.max_output, Some(131_072));
     assert!(v51.thinking_supported);
 
     // GLM-5-Turbo is the faster sub-agent sibling.
@@ -9257,7 +9287,7 @@ fn provider_capability_zai_defaults_to_5_2_and_tracks_5_1_and_turbo() {
 fn provider_capability_minimax_direct_models_use_api_docs_shape() {
     let m3 = provider_capability(ApiProvider::Minimax, DEFAULT_MINIMAX_MODEL);
     assert_eq!(m3.context_window, 1_000_000);
-    assert_eq!(m3.max_output, 524_288);
+    assert_eq!(m3.max_output, Some(524_288));
     assert!(m3.thinking_supported);
     assert!(!m3.cache_telemetry_supported);
     assert_eq!(m3.request_payload_mode, RequestPayloadMode::ChatCompletions);
@@ -9302,7 +9332,7 @@ fn provider_capability_wanjie_ark_reasoner_has_thinking_no_cache() {
         cap.context_window,
         crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 4096);
+    assert_eq!(cap.max_output, None);
     assert!(cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
     assert_eq!(
@@ -9320,7 +9350,7 @@ fn provider_capability_ollama_deepseek_tag_uses_deepseek_heuristic() {
         cap.context_window,
         crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 4096);
+    assert_eq!(cap.max_output, None);
     assert!(!cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
     assert_eq!(
@@ -9333,7 +9363,7 @@ fn provider_capability_ollama_deepseek_tag_uses_deepseek_heuristic() {
 fn provider_capability_ollama_unknown_model_falls_back_to_8192() {
     let cap = provider_capability(ApiProvider::Ollama, "llama3.2:3b");
     assert_eq!(cap.context_window, 8192);
-    assert_eq!(cap.max_output, 4096);
+    assert_eq!(cap.max_output, None);
     assert!(!cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
     assert_eq!(
@@ -9349,7 +9379,7 @@ fn provider_capability_non_v4_model_has_smaller_window() {
         cap.context_window,
         crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 4096);
+    assert_eq!(cap.max_output, None);
     assert!(!cap.thinking_supported);
 }
 

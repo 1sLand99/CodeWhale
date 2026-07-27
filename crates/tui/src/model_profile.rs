@@ -221,7 +221,10 @@ pub fn resolved_capability_profile_with_overrides(
             .context_window
             .unwrap_or(provider_cap.context_window),
     );
-    let max_output = Some(overrides.max_output.unwrap_or(provider_cap.max_output));
+    // An explicit override wins; otherwise carry the compatibility cap through
+    // *including its unknown state*, so pickers and diagnostics render `?`
+    // rather than a fabricated ceiling.
+    let max_output = overrides.max_output.or(provider_cap.max_output);
     let reasoning = overrides
         .reasoning
         .unwrap_or_else(|| bool_state(provider_cap.thinking_supported));

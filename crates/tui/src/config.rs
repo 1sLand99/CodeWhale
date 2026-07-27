@@ -438,13 +438,22 @@ pub struct ProviderCapability {
     pub resolved_model: String,
     /// Context window in tokens (the maximum input the model can accept).
     pub context_window: u32,
-    /// Known output ceiling for this provider/model metadata path.
+    /// Known output ceiling for this provider/model metadata path, when one is
+    /// actually known.
     ///
-    /// This may be a documented exact-route maximum or a conservative/default
-    /// ceiling when the route does not publish a maximum. It is metadata for
-    /// diagnostics and CI policy; normal turns use a separate, more
-    /// conservative request cap in the engine.
-    pub max_output: u32,
+    /// `None` means "this route publishes no output maximum we can stand
+    /// behind" — for example the Kimi Code membership ids, whose limits live in
+    /// the membership catalog rather than the static model catalogue. Unknown
+    /// must stay unknown: callers may **not** substitute a placeholder ceiling,
+    /// and in particular [`crate::route_budget`] does not clamp a requested
+    /// `max_tokens` against an unknown compatibility cap.
+    ///
+    /// When `Some`, the value is a documented exact-route maximum or a
+    /// deliberately conservative provider ceiling (Anthropic's 64K floor, the
+    /// Codex OAuth route). It is metadata for diagnostics and CI policy; normal
+    /// turns use a separate, more conservative request cap in the engine.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output: Option<u32>,
     /// Whether the provider+model supports thinking/reasoning mode.
     pub thinking_supported: bool,
     /// Whether the provider returns prompt-cache telemetry fields.
@@ -499,8 +508,11 @@ pub fn provider_capability(provider: ApiProvider, resolved_model: &str) -> Provi
             // their 1M windows from models.rs rows (#3014).
             context_window: crate::models::context_window_for_model(resolved_model)
                 .unwrap_or(200_000),
-            max_output: crate::models::max_output_tokens_for_model(resolved_model)
-                .unwrap_or(64_000),
+            // 64K is the documented Anthropic Messages floor, so it stays a
+            // known cap rather than an unknown.
+            max_output: Some(
+                crate::models::max_output_tokens_for_model(resolved_model).unwrap_or(64_000),
+            ),
             thinking_supported: crate::models::model_supports_reasoning(resolved_model),
             cache_telemetry_supported: matches!(provider, ApiProvider::Anthropic),
             request_payload_mode: RequestPayloadMode::AnthropicMessages,
@@ -513,10 +525,11 @@ pub fn provider_capability(provider: ApiProvider, resolved_model: &str) -> Provi
             provider,
             resolved_model: resolved_model.to_string(),
             context_window: OPENAI_CODEX_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
-            // The OAuth cache does not publish an output ceiling. Keep the
-            // compatibility capability conservative instead of inheriting the
-            // public API model's output limit.
-            max_output: 4096,
+            // The OAuth cache does not publish an output ceiling. This 4K is a
+            // deliberate, long-standing product decision for the Codex route
+            // (not a fallback): keep the compatibility capability conservative
+            // instead of inheriting the public API model's output limit.
+            max_output: Some(4096),
             thinking_supported: true,
             cache_telemetry_supported: false,
             request_payload_mode: RequestPayloadMode::Responses,
@@ -535,7 +548,9 @@ pub fn provider_capability(provider: ApiProvider, resolved_model: &str) -> Provi
             resolved_model: resolved_model.to_string(),
             context_window: crate::models::context_window_for_model(resolved_model)
                 .unwrap_or(crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS),
-            max_output: crate::models::max_output_tokens_for_model(resolved_model).unwrap_or(4096),
+            // No documented output maximum for these routes: stay unknown so
+            // no compatibility clamp is applied downstream.
+            max_output: crate::models::max_output_tokens_for_model(resolved_model),
             thinking_supported: crate::models::model_supports_reasoning(resolved_model),
             cache_telemetry_supported: false,
             request_payload_mode: RequestPayloadMode::ChatCompletions,
@@ -549,7 +564,9 @@ pub fn provider_capability(provider: ApiProvider, resolved_model: &str) -> Provi
             resolved_model: resolved_model.to_string(),
             context_window: crate::models::context_window_for_model(resolved_model)
                 .unwrap_or(crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS),
-            max_output: crate::models::max_output_tokens_for_model(resolved_model).unwrap_or(4096),
+            // No documented output maximum for these routes: stay unknown so
+            // no compatibility clamp is applied downstream.
+            max_output: crate::models::max_output_tokens_for_model(resolved_model),
             thinking_supported: crate::models::model_supports_reasoning(resolved_model),
             cache_telemetry_supported: false,
             request_payload_mode: RequestPayloadMode::ChatCompletions,
@@ -589,10 +606,17 @@ pub fn provider_capability(provider: ApiProvider, resolved_model: &str) -> Provi
 
     // Max output tokens: official DeepSeek V4 API metadata lists 384K;
     // runtime request caps remain separate and more conservative.
+    //
+    // Everything else answers from the static model catalogue, and answers
+    // `None` when the catalogue has no row. That is the truthful state for
+    // membership routes such as the `kimi-for-coding` family, whose ceilings
+    // are owned by the membership catalog. It must not become a placeholder
+    // number: a fabricated 4K here silently clamped offline membership routes
+    // to 4K output via `route_budget`.
     let max_output = if is_v4_pro || is_v4_flash {
-        384_000
+        Some(384_000)
     } else {
-        crate::models::max_output_tokens_for_model(resolved_model).unwrap_or(4096)
+        crate::models::max_output_tokens_for_model(resolved_model)
     };
 
     // Thinking support: V4 models support thinking on all providers, but
@@ -7930,6 +7954,19 @@ pub(crate) const KIMI_CODE_MEMBERSHIP_MODELS: [&str; 3] = [
     DEFAULT_KIMI_CODE_MODEL,
     KIMI_CODE_HIGHSPEED_MODEL,
 ];
+
+/// Whether `model` is a Kimi Code membership model id.
+///
+/// The single membership-roster predicate. Callers that need to name the
+/// product — output-ceiling provenance, picker rosters, setup validation, and
+/// the model picker's route label — must use this rather than re-listing ids.
+#[must_use]
+pub(crate) fn is_kimi_code_membership_model(model: &str) -> bool {
+    let model = model.trim();
+    KIMI_CODE_MEMBERSHIP_MODELS
+        .iter()
+        .any(|id| model.eq_ignore_ascii_case(id))
+}
 
 /// The Moonshot direct-platform roster, as one fact. Mirror of
 /// [`KIMI_CODE_MEMBERSHIP_MODELS`] for the pay-as-you-go product.

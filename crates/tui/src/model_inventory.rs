@@ -29,7 +29,10 @@ pub(crate) struct ModelRouteCandidate {
     pub(crate) provider_display_name: &'static str,
     pub(crate) model: String,
     pub(crate) context_window: u32,
-    pub(crate) max_output: u32,
+    /// Known output ceiling, or `None` when this route publishes none. The
+    /// classifier is told "unknown" rather than a fabricated number.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) max_output: Option<u32>,
     pub(crate) thinking_supported: bool,
     pub(crate) cache_telemetry_supported: bool,
     pub(crate) auth_source: ModelAuthSource,
@@ -95,6 +98,18 @@ impl ModelInventory {
                 {
                     if let Some(context_window) = route.candidate.limits().context_tokens {
                         capability.context_window = context_window.min(u64::from(u32::MAX)) as u32;
+                    }
+                    // A concrete offering maximum is a stronger fact than the
+                    // static compatibility matrix — and is the only way a
+                    // membership route (no static cap) gets a known ceiling.
+                    if let Some(max_output) = route
+                        .candidate
+                        .limits()
+                        .output_tokens
+                        .and_then(|tokens| u32::try_from(tokens).ok())
+                        .filter(|tokens| *tokens > 0)
+                    {
+                        capability.max_output = Some(max_output);
                     }
                     // Do not promote bare `k3` into the global capability
                     // catalog. Its thinking trace contract belongs only to
@@ -227,7 +242,8 @@ impl ModelInventory {
             provider_display_name: &'a str,
             model: &'a str,
             context_window: u32,
-            max_output: u32,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            max_output: Option<u32>,
             thinking_supported: bool,
             cache_telemetry_supported: bool,
             default_for_provider: bool,
@@ -655,7 +671,7 @@ mod tests {
             provider_display_name: "OpenAI",
             model: "gpt-5.5".to_string(),
             context_window: 128_000,
-            max_output: 16_384,
+            max_output: Some(16_384),
             thinking_supported: true,
             cache_telemetry_supported: false,
             auth_source: ModelAuthSource::Config,
@@ -682,7 +698,7 @@ mod tests {
                 provider_display_name: "OpenAI",
                 model: "unsupported-model".to_string(),
                 context_window: 1,
-                max_output: 1,
+                max_output: Some(1),
                 thinking_supported: false,
                 cache_telemetry_supported: false,
                 auth_source: ModelAuthSource::Config,
@@ -716,7 +732,7 @@ mod tests {
             provider_display_name: "OpenAI",
             model: "unsupported-model".to_string(),
             context_window: 1,
-            max_output: 1,
+            max_output: Some(1),
             thinking_supported: false,
             cache_telemetry_supported: false,
             auth_source: ModelAuthSource::Config,
