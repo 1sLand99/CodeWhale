@@ -1002,7 +1002,7 @@ pub struct App {
     /// Sender for spawned dispatch tasks to report completion back to the
     /// event loop. The closure is called with `&mut App` so the async phase
     /// never needs `&mut App` while awaiting network I/O (#4605).
-    pub dispatch_completion_tx: Option<tokio::sync::mpsc::UnboundedSender<DispatchApplyFn>>,
+    pub dispatch_completion_tx: Option<tokio::sync::mpsc::Sender<DispatchApplyFn>>,
     /// True while a spawned dispatch task is in flight (#4605). Set in the
     /// sync prepare phase and cleared when the completion closure runs, so a
     /// submit after an Esc-cancel (which clears `is_loading`) still queues
@@ -2057,13 +2057,18 @@ impl App {
             self.yolo = matches!(policy.approval_mode, ApprovalMode::Bypass);
         }
 
-        // Execute mode change hooks
-        let context = HookContext::new()
+        // Execute mode change hooks. Built from `base_hook_context` so this
+        // event carries the same session id, workspace, model, and token total
+        // as every other event — it used to omit `DEEPSEEK_SESSION_ID`
+        // entirely, which made mode transitions uncorrelatable with the
+        // session they belonged to.
+        let context = self
+            .base_hook_context()
             .with_mode(mode.label())
-            .with_previous_mode(previous_mode.label())
-            .with_workspace(self.workspace.clone())
-            .with_model(&self.model);
-        let _ = self.hooks.execute(HookEvent::ModeChange, &context);
+            .with_previous_mode(previous_mode.label());
+        if let Err(error) = self.submit_hooks(HookEvent::ModeChange, context) {
+            self.surface_observer_hook_submission_failure(error);
+        }
         self.needs_redraw = true;
         true
     }
@@ -2611,6 +2616,23 @@ impl App {
     /// Execute hooks for a specific event with the given context
     pub fn execute_hooks(&self, event: HookEvent, context: &HookContext) -> Vec<HookResult> {
         self.hooks.execute(event, context)
+    }
+
+    /// Submit observer hooks off the terminal event loop. Foreground in hook
+    /// configuration still means ordered/awaited within the worker; it no
+    /// longer means the UI waits on the child process.
+    pub fn submit_hooks(&self, event: HookEvent, context: HookContext) -> Result<(), String> {
+        self.hooks.submit_observer(event, context)
+    }
+
+    /// Preserve a lost observer event independently of the ordinary status
+    /// line. Agent lifecycle handlers immediately replace `status_message`
+    /// with their normal progress text, so a submission failure belongs in
+    /// the toast queue instead of that transient slot.
+    pub fn surface_observer_hook_submission_failure(&mut self, error: String) {
+        tracing::warn!(target: "hooks", %error, "observer hook was not submitted");
+        self.push_status_toast(error, StatusToastLevel::Error, Some(12_000));
+        self.needs_redraw = true;
     }
 
     /// Create a hook context with common fields pre-populated

@@ -5804,9 +5804,15 @@ async fn immediate_submit_closed_mailbox_restores_composer_and_skill() {
     let engine = mock_engine_handle();
     drop(engine.rx_op);
 
-    submit_or_steer_message(&mut app, &Config::default(), &engine.handle, queued)
-        .await
-        .expect("UI submit failures must remain inside the TUI");
+    submit_or_steer_message(
+        &mut app,
+        &Config::default(),
+        &engine.handle,
+        queued,
+        DispatchRecovery::Immediate,
+    )
+    .await
+    .expect("UI submit failures must remain inside the TUI");
 
     assert_eq!(app.input, "retry this exactly");
     assert_eq!(app.cursor_position, app.input.chars().count());
@@ -5849,9 +5855,15 @@ async fn immediate_submit_custom_provider_preflight_restores_exact_message() {
     let queued = build_queued_message(&mut app, input);
     let (_engine, handle) = crate::core::engine::Engine::new(EngineConfig::default(), &config);
 
-    submit_or_steer_message(&mut app, &config, &handle, queued)
-        .await
-        .expect("provider preflight failures must remain inside the TUI");
+    submit_or_steer_message(
+        &mut app,
+        &config,
+        &handle,
+        queued,
+        DispatchRecovery::Immediate,
+    )
+    .await
+    .expect("provider preflight failures must remain inside the TUI");
 
     assert_eq!(app.input, "preserve 用户 input");
     assert_eq!(app.cursor_position, app.input.chars().count());
@@ -6174,6 +6186,326 @@ fn configure_message_submit_hooks(app: &mut App, dir: &TempDir, commands: Vec<St
 
 #[cfg(not(windows))]
 #[tokio::test]
+async fn foreground_message_submit_hook_does_not_park_terminal_dispatch() {
+    let dir = TempDir::new().expect("tempdir");
+    let slow = write_message_submit_hook(
+        &dir,
+        "slow_replace.sh",
+        r#"#!/bin/sh
+sleep 1
+printf '%s\n' '{"text":"off-loop replacement"}'
+"#,
+    );
+    let mut app = create_test_app();
+    configure_single_message_submit_hook(&mut app, &dir, slow);
+    let (completion_tx, mut completion_rx) =
+        tokio::sync::mpsc::channel::<crate::tui::app::DispatchApplyFn>(2);
+    app.dispatch_completion_tx = Some(completion_tx);
+    let engine = crate::core::engine::mock_engine_handle();
+    let config = Config::default();
+
+    let started = std::time::Instant::now();
+    dispatch_user_message(
+        &mut app,
+        &config,
+        &engine.handle,
+        QueuedMessage::new("original".to_string(), None),
+    )
+    .await
+    .expect("queue hook gate");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(250),
+        "terminal dispatch waited on the foreground hook: {:?}",
+        started.elapsed()
+    );
+    assert!(app.dispatch_in_flight);
+    assert!(app.api_messages.is_empty(), "gate has not answered yet");
+
+    let apply_hook = tokio::time::timeout(std::time::Duration::from_secs(3), completion_rx.recv())
+        .await
+        .expect("hook result timed out")
+        .expect("hook result channel closed");
+    apply_hook(&mut app, &engine.handle, &config).expect("apply hook result");
+    assert!(matches!(
+        &app.api_messages[0].content[0],
+        ContentBlock::Text { text, .. } if text == "off-loop replacement"
+    ));
+
+    let apply_dispatch =
+        tokio::time::timeout(std::time::Duration::from_secs(3), completion_rx.recv())
+            .await
+            .expect("dispatch result timed out")
+            .expect("dispatch result channel closed");
+    apply_dispatch(&mut app, &engine.handle, &config).expect("apply dispatch result");
+    assert!(!app.dispatch_in_flight);
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn live_steer_crosses_message_submit_transform_exactly_once() {
+    let dir = TempDir::new().expect("tempdir");
+    let count = dir.path().join("count.txt");
+    let replace = write_message_submit_hook(
+        &dir,
+        "steer_replace.sh",
+        &format!(
+            "#!/bin/sh\nprintf x >> '{}'\nprintf '%s\\n' '{{\"text\":\"transformed steer\"}}'\n",
+            count.display()
+        ),
+    );
+    let mut app = create_test_app();
+    app.is_loading = true;
+    configure_single_message_submit_hook(&mut app, &dir, replace);
+    let mut engine = crate::core::engine::mock_engine_handle();
+
+    attempt_steer_with_queue_fallback(
+        &mut app,
+        &engine.handle,
+        QueuedMessage::new("original steer".to_string(), None),
+        DispatchRecovery::Immediate,
+    )
+    .await;
+
+    assert_eq!(
+        engine.rx_steer.recv().await.as_deref(),
+        Some("transformed steer")
+    );
+    assert_eq!(std::fs::read_to_string(count).expect("hook count"), "x");
+    assert!(app.api_messages.iter().any(|message| matches!(
+        &message.content[0],
+        ContentBlock::Text { text, .. } if text == "transformed steer"
+    )));
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn denied_steer_restores_queued_draft_and_keeps_active_turn() {
+    let dir = TempDir::new().expect("tempdir");
+    let deny = write_message_submit_hook(
+        &dir,
+        "steer_deny.sh",
+        "#!/bin/sh\nprintf '%s\\n' '{\"reason\":\"policy denied steer\"}'\nexit 2\n",
+    );
+    let mut app = create_test_app();
+    app.is_loading = true;
+    configure_single_message_submit_hook(&mut app, &dir, deny);
+    let mut engine = crate::core::engine::mock_engine_handle();
+    let message = QueuedMessage::new("preserve edited draft".to_string(), None);
+
+    attempt_steer_with_queue_fallback(
+        &mut app,
+        &engine.handle,
+        message.clone(),
+        DispatchRecovery::Draft,
+    )
+    .await;
+
+    assert!(engine.rx_steer.try_recv().is_err());
+    assert!(app.is_loading, "denial must not stop the active turn");
+    assert_eq!(app.input, "preserve edited draft");
+    assert_eq!(app.queued_draft, Some(message));
+    assert_eq!(app.queued_message_count(), 0);
+    assert!(app.status_toasts.back().is_some_and(|toast| {
+        toast.level == StatusToastLevel::Warning && toast.text.contains("blocked the steer")
+    }));
+}
+
+#[tokio::test]
+async fn lost_strict_message_submit_executor_keeps_dispatch_atomic_and_recoverable() {
+    let mut app = create_test_app();
+    app.api_messages
+        .push(text_message("assistant", "existing conversation"));
+    app.add_message(HistoryCell::System {
+        content: "existing receipt".to_string(),
+    });
+    let mut strict = crate::hooks::Hook::new(
+        crate::hooks::HookEvent::MessageSubmit,
+        "unused because dispatch loss is injected",
+    );
+    strict.continue_on_error = false;
+    app.hooks = crate::hooks::HookExecutor::new(
+        crate::hooks::HooksConfig {
+            enabled: true,
+            hooks: vec![strict],
+            ..crate::hooks::HooksConfig::default()
+        },
+        app.workspace.clone(),
+    );
+    app.hooks.inject_message_submit_executor_loss_for_test();
+    let mut engine = crate::core::engine::mock_engine_handle();
+    let (completion_tx, mut completion_rx) =
+        tokio::sync::mpsc::channel::<crate::tui::app::DispatchApplyFn>(2);
+    app.dispatch_completion_tx = Some(completion_tx);
+
+    dispatch_user_message(
+        &mut app,
+        &Config::default(),
+        &engine.handle,
+        QueuedMessage::new("must stay out of the model".to_string(), None),
+    )
+    .await
+    .expect("lost strict gate is scheduled through the production mailbox");
+    assert!(app.dispatch_in_flight);
+    let apply_gate = tokio::time::timeout(std::time::Duration::from_secs(2), completion_rx.recv())
+        .await
+        .expect("lost strict gate result timed out")
+        .expect("production completion mailbox closed");
+    apply_gate(&mut app, &engine.handle, &Config::default()).expect("apply lost strict gate");
+
+    assert_eq!(app.api_messages.len(), 1);
+    assert_eq!(app.history.len(), 1);
+    assert!(matches!(
+        &app.history[0],
+        HistoryCell::System { content } if content == "existing receipt"
+    ));
+    assert!(!app.is_loading);
+    assert!(!app.dispatch_in_flight);
+    assert!(app.dispatch_started_at.is_none());
+    assert!(app.runtime_turn_status.is_none());
+    assert!(engine.rx_op.try_recv().is_err());
+    assert_eq!(app.input, "must stay out of the model");
+
+    // The failed gate leaves no poisoned dispatch state: a later ordinary
+    // message can start and reaches the engine exactly once.
+    app.hooks = crate::hooks::HookExecutor::disabled();
+    dispatch_user_message(
+        &mut app,
+        &Config::default(),
+        &engine.handle,
+        QueuedMessage::new("recover now".to_string(), None),
+    )
+    .await
+    .expect("later dispatch remains usable");
+    match engine.rx_op.recv().await.expect("recovery SendMessage") {
+        crate::core::ops::Op::SendMessage { content, .. } => {
+            assert_eq!(content, "recover now");
+        }
+        other => panic!("expected SendMessage, got {other:?}"),
+    }
+    let apply_dispatch =
+        tokio::time::timeout(std::time::Duration::from_secs(2), completion_rx.recv())
+            .await
+            .expect("recovery dispatch result timed out")
+            .expect("production completion mailbox closed");
+    apply_dispatch(&mut app, &engine.handle, &Config::default()).expect("apply recovery dispatch");
+    assert!(app.history.iter().any(|cell| matches!(
+        cell,
+        HistoryCell::User { content } if content == "recover now"
+    )));
+}
+
+#[tokio::test]
+async fn full_dispatch_completion_mailbox_restores_message_without_stuck_dispatch() {
+    let mut app = create_test_app();
+    let engine = crate::core::engine::mock_engine_handle();
+    let (completion_tx, _completion_rx) =
+        tokio::sync::mpsc::channel::<crate::tui::app::DispatchApplyFn>(1);
+    completion_tx
+        .try_send(Box::new(|_, _, _| Ok(())))
+        .expect("fill production completion mailbox");
+    app.dispatch_completion_tx = Some(completion_tx);
+
+    let error = dispatch_user_message(
+        &mut app,
+        &Config::default(),
+        &engine.handle,
+        QueuedMessage::new("recover from full mailbox".to_string(), None),
+    )
+    .await
+    .expect_err("full mailbox must reject before dispatch starts");
+
+    assert!(error.to_string().contains("mailbox is full"));
+    assert!(!app.dispatch_in_flight);
+    assert!(!app.is_loading);
+    assert!(app.api_messages.is_empty());
+    assert!(app.history.is_empty());
+    assert_eq!(app.input, "recover from full mailbox");
+    assert!(app.status_toasts.back().is_some_and(|toast| {
+        toast.level == StatusToastLevel::Error && toast.text.contains("mailbox is full")
+    }));
+}
+
+#[tokio::test]
+async fn closed_dispatch_completion_mailbox_restores_message_without_stuck_dispatch() {
+    let mut app = create_test_app();
+    let engine = crate::core::engine::mock_engine_handle();
+    let (completion_tx, completion_rx) =
+        tokio::sync::mpsc::channel::<crate::tui::app::DispatchApplyFn>(1);
+    drop(completion_rx);
+    app.dispatch_completion_tx = Some(completion_tx);
+
+    let error = dispatch_user_message(
+        &mut app,
+        &Config::default(),
+        &engine.handle,
+        QueuedMessage::new("recover from closed mailbox".to_string(), None),
+    )
+    .await
+    .expect_err("closed mailbox must reject before dispatch starts");
+
+    assert!(error.to_string().contains("mailbox is closed"));
+    assert!(!app.dispatch_in_flight);
+    assert!(!app.is_loading);
+    assert!(app.api_messages.is_empty());
+    assert!(app.history.is_empty());
+    assert_eq!(app.input, "recover from closed mailbox");
+    assert!(app.status_toasts.back().is_some_and(|toast| {
+        toast.level == StatusToastLevel::Error && toast.text.contains("mailbox is closed")
+    }));
+}
+
+#[test]
+fn subagent_event_handlers_preserve_dispatch_failures_as_separate_toasts() {
+    let mut app = create_test_app();
+    app.hooks = crate::hooks::HookExecutor::new(
+        crate::hooks::HooksConfig {
+            enabled: true,
+            hooks: vec![
+                crate::hooks::Hook::new(crate::hooks::HookEvent::SubagentSpawn, "unused"),
+                crate::hooks::Hook::new(crate::hooks::HookEvent::SubagentComplete, "unused"),
+            ],
+            ..crate::hooks::HooksConfig::default()
+        },
+        app.workspace.clone(),
+    );
+    app.hooks.inject_observer_dispatch_full_for_test();
+
+    apply_agent_spawned_status_and_observer(
+        &mut app,
+        "agent-test",
+        "inspect the repository",
+        "inspect the repository",
+    );
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Agent 1 starting: inspect the repository")
+    );
+    assert!(app.status_toasts.back().is_some_and(|toast| {
+        toast
+            .text
+            .contains("subagent_spawn observer hook queue is full")
+    }));
+
+    app.hooks.inject_observer_dispatch_disconnect_for_test();
+    apply_agent_complete_status_and_observer(
+        &mut app,
+        "agent-test",
+        "finished cleanly",
+        "completed",
+    );
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Agent 1 completed: finished cleanly")
+    );
+    assert!(app.status_toasts.back().is_some_and(|toast| {
+        toast
+            .text
+            .contains("subagent_complete observer hook dispatcher is unavailable")
+    }));
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
 async fn dispatch_user_message_surfaces_continued_message_submit_timeout() {
     let dir = TempDir::new().expect("tempdir");
     let slow = write_message_submit_hook(
@@ -6218,7 +6550,7 @@ printf '%s\n' '{"text":"after timeout"}'
 
     assert_eq!(
         app.status_message.as_deref(),
-        Some("Hook timed out after 1s")
+        Some("hook timed out after 1s")
     );
     match engine.rx_op.recv().await.expect("send message op") {
         crate::core::ops::Op::SendMessage { content, .. } => {
@@ -6261,7 +6593,10 @@ printf '%s\n' '{"text":"after soft failure"}'
     .await
     .expect("dispatch user message");
 
-    assert_eq!(app.status_message.as_deref(), Some("soft failure"));
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("message_submit hook exited with code 9")
+    );
     match engine.rx_op.recv().await.expect("send message op") {
         crate::core::ops::Op::SendMessage { content, .. } => {
             assert_eq!(content, "after soft failure");
@@ -10825,9 +11160,15 @@ async fn enter_while_model_waiting_queues_instead_of_steering() {
     let mut engine = crate::core::engine::mock_engine_handle();
     let queued = build_queued_message(&mut app, "adjust current turn".to_string());
 
-    submit_or_steer_message(&mut app, &config, &engine.handle, queued)
-        .await
-        .expect("busy waiting submit queues");
+    submit_or_steer_message(
+        &mut app,
+        &config,
+        &engine.handle,
+        queued,
+        DispatchRecovery::Immediate,
+    )
+    .await
+    .expect("busy waiting submit queues");
 
     assert_eq!(app.queued_message_count(), 1);
     assert_eq!(
@@ -10897,7 +11238,13 @@ async fn steer_failure_queues_message_and_surfaces_toast() {
     drop(engine.rx_steer);
     let queued = crate::tui::app::QueuedMessage::new("follow up while busy".to_string(), None);
 
-    attempt_steer_with_queue_fallback(&mut app, &engine.handle, queued).await;
+    attempt_steer_with_queue_fallback(
+        &mut app,
+        &engine.handle,
+        queued,
+        DispatchRecovery::Immediate,
+    )
+    .await;
 
     assert_eq!(app.queued_message_count(), 1);
     let toast = app.status_toasts.back().expect("steer failure toast");
@@ -10914,9 +11261,15 @@ async fn streaming_enter_queue_pushes_visible_toast() {
     let engine = crate::core::engine::mock_engine_handle();
     let queued = build_queued_message(&mut app, "follow up during stream".to_string());
 
-    submit_or_steer_message(&mut app, &config, &engine.handle, queued)
-        .await
-        .expect("streaming submit queues");
+    submit_or_steer_message(
+        &mut app,
+        &config,
+        &engine.handle,
+        queued,
+        DispatchRecovery::Immediate,
+    )
+    .await
+    .expect("streaming submit queues");
 
     assert_eq!(app.queued_message_count(), 1);
     let toast = app.status_toasts.back().expect("queue toast");
@@ -10935,9 +11288,15 @@ async fn empty_enter_promotes_the_oldest_queued_message() {
     let mut engine = crate::core::engine::mock_engine_handle();
     let queued = build_queued_message(&mut app, "coordinate parallel tasks".to_string());
 
-    submit_or_steer_message(&mut app, &config, &engine.handle, queued)
-        .await
-        .expect("first enter queues while streaming");
+    submit_or_steer_message(
+        &mut app,
+        &config,
+        &engine.handle,
+        queued,
+        DispatchRecovery::Immediate,
+    )
+    .await
+    .expect("first enter queues while streaming");
     assert_eq!(app.queued_message_count(), 1);
     assert!(app.input.is_empty());
 
@@ -10963,9 +11322,15 @@ async fn operate_streaming_enter_queues_another_parallel_task() {
     let engine = crate::core::engine::mock_engine_handle();
     let queued = build_queued_message(&mut app, "check the docs too".to_string());
 
-    submit_or_steer_message(&mut app, &config, &engine.handle, queued)
-        .await
-        .expect("Operate streaming submit queues another task");
+    submit_or_steer_message(
+        &mut app,
+        &config,
+        &engine.handle,
+        queued,
+        DispatchRecovery::Immediate,
+    )
+    .await
+    .expect("Operate streaming submit queues another task");
 
     assert_eq!(app.queued_message_count(), 1);
     assert!(app.status_message.as_deref().is_some_and(
@@ -10988,9 +11353,15 @@ async fn inline_skill_request_keeps_instruction_when_busy_queueing() {
 
     let queued = build_queued_message(&mut app, "do X".to_string());
     assert!(app.active_skill.is_none(), "skill must be consumed once");
-    submit_or_steer_message(&mut app, &config, &engine.handle, queued)
-        .await
-        .expect("streaming skill request queues");
+    submit_or_steer_message(
+        &mut app,
+        &config,
+        &engine.handle,
+        queued,
+        DispatchRecovery::Immediate,
+    )
+    .await
+    .expect("streaming skill request queues");
 
     let queued = app.queued_messages.front().expect("queued skill request");
     assert_eq!(queued.display, "do X");
@@ -16525,6 +16896,48 @@ fn merge_pending_steers_keeps_first_skill_instruction_only() {
     let merged = merge_pending_steers(&mut app).expect("merge yields a message");
     assert_eq!(merged.skill_instruction.as_deref(), Some("first skill"));
     assert_eq!(merged.display, "a\n\nb");
+}
+
+#[test]
+fn restored_queued_message_crosses_bounded_message_submit_serialization() {
+    let app = create_test_app();
+    let original = "restored 用户 \"quoted\"\n".repeat(8_000);
+    let persisted = queued_ui_to_session(&QueuedMessage::new(original.clone(), None));
+    let restored = queued_session_to_ui(persisted);
+    let payload = crate::hooks::message_submit_payload(&app.base_hook_context(), &restored.display);
+    let encoded = serde_json::to_vec(&payload).expect("serialize restored payload");
+
+    assert!(
+        encoded.len() <= crate::hooks::HOOK_MESSAGE_SUBMIT_PAYLOAD_MAX_BYTES,
+        "restored payload was {} bytes",
+        encoded.len()
+    );
+    assert_eq!(payload["text_original_bytes"], original.len());
+    assert_eq!(payload["text_truncated"], true);
+    assert!(original.starts_with(payload["text"].as_str().expect("text")));
+}
+
+#[test]
+fn merged_pending_steers_cross_bounded_message_submit_serialization() {
+    let mut app = create_test_app();
+    app.push_pending_steer(QueuedMessage::new("first \"quoted\"\n".repeat(5_000), None));
+    app.push_pending_steer(QueuedMessage::new("second 用户\n".repeat(5_000), None));
+    let merged = merge_pending_steers(&mut app).expect("merged message");
+    let payload = crate::hooks::message_submit_payload(&app.base_hook_context(), &merged.display);
+    let encoded = serde_json::to_vec(&payload).expect("serialize merged payload");
+
+    assert!(
+        encoded.len() <= crate::hooks::HOOK_MESSAGE_SUBMIT_PAYLOAD_MAX_BYTES,
+        "merged payload was {} bytes",
+        encoded.len()
+    );
+    assert_eq!(payload["text_original_bytes"], merged.display.len());
+    assert_eq!(payload["text_truncated"], true);
+    assert!(
+        merged
+            .display
+            .starts_with(payload["text"].as_str().expect("text"))
+    );
 }
 
 #[test]

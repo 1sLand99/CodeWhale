@@ -56,7 +56,9 @@ pub fn hooks(app: &App, arg: Option<&str>) -> CommandResult {
 fn events() -> CommandResult {
     let mut out = String::new();
     out.push_str(
-        "Available hook events (use one of these as `event = \"...\"` in your `[[hooks.hooks]]` entry):\n\n",
+        "Available hook events (use one of these as `event = \"...\"` in your `[[hooks.hooks]]` entry).\n\
+         Hooks are a TUI runtime feature: `codewhale exec`, the CLI dispatcher, the app-server,\n\
+         and the workflow tool do not fire them.\n\n",
     );
     // Order matters — group lifecycle events first, then per-tool,
     // then situational. Stays stable across releases so users can
@@ -74,11 +76,11 @@ fn events() -> CommandResult {
         ),
         (
             HookEvent::ToolCallBefore,
-            "fires before each tool call (read-only observer for now)",
+            "fires before each tool call; can allow/deny/ask, rewrite input, add context",
         ),
         (
             HookEvent::ToolCallAfter,
-            "fires after each tool call (read-only observer for now)",
+            "fires after each tool call (observer-only)",
         ),
         (
             HookEvent::ModeChange,
@@ -96,19 +98,35 @@ fn events() -> CommandResult {
             HookEvent::SubagentComplete,
             "fires when a sub-agent completes, fails, or is cancelled (observer-only)",
         ),
+        (
+            HookEvent::ShellEnv,
+            "fires before each exec_shell; stdout KEY=VALUE lines are merged into its environment",
+        ),
     ];
     for (event, desc) in ordered {
         out.push_str(&format!("  - `{}` — {desc}\n", event_label(event)));
     }
+    out.push_str(
+        "\nOnly `message_submit`, `tool_call_before`, and `shell_env` can steer a turn.\n\
+         Observer-only means the *result* is ignored — the command still runs\n\
+         and can have any external side effect.\n\n\
+         Full contract: docs/HOOKS.md\n",
+    );
     CommandResult::message(out.trim_end().to_string())
 }
 
 fn list(app: &App) -> CommandResult {
     let config = app.hooks.config();
-    if config.hooks.is_empty() {
+    if config.hooks.is_empty() && config.problems.is_empty() {
         return CommandResult::message(
             "No hooks configured. Add a `[[hooks.hooks]]` entry to `~/.codewhale/config.toml` to define one.",
         );
+    }
+    if config.hooks.is_empty() {
+        let mut out =
+            String::from("No runnable hooks. Every configured entry was rejected at load:\n\n");
+        out.push_str(&render_problems(&config.problems));
+        return CommandResult::message(out.trim_end().to_string());
     }
 
     let mut out = String::new();
@@ -134,13 +152,18 @@ fn list(app: &App) -> CommandResult {
     for (event, hooks) in by_event {
         out.push_str(&format!("### {event}\n"));
         for hook in hooks {
-            let label = hook
-                .name
-                .as_deref()
-                .filter(|n| !n.trim().is_empty())
-                .map_or_else(|| "(unnamed)".to_string(), str::to_string);
-            let bg = if hook.background { " [bg]" } else { "" };
-            let timeout = format!("{}s", hook.timeout_secs);
+            // `name` is operator-supplied and otherwise unbounded: a name made
+            // of ANSI escapes would repaint this listing, and a long one would
+            // push the rest of the row off screen.
+            let label = crate::hooks::sanitize_hook_label(hook.name.as_deref());
+            // `[bg]` describes actual scheduling: `shell_env` ignores the flag
+            // and always runs in the foreground, so it is not labelled.
+            let bg = if hook.background && hook.event.honors_background() {
+                " [bg, submitted not awaited]"
+            } else {
+                ""
+            };
+            let timeout = render_timeout(config, hook);
             let condition = match &hook.condition {
                 None | Some(crate::hooks::HookCondition::Always) => String::new(),
                 Some(c) => format!(" if {}", condition_summary(c)),
@@ -153,6 +176,12 @@ fn list(app: &App) -> CommandResult {
         out.push('\n');
     }
 
+    if !config.problems.is_empty() {
+        out.push_str("### configuration problems\n");
+        out.push_str(&render_problems(&config.problems));
+        out.push('\n');
+    }
+
     if !config.enabled {
         out.push_str(
             "Hooks are globally disabled — set `[hooks].enabled = true` in `config.toml` to fire them.\n",
@@ -160,6 +189,32 @@ fn list(app: &App) -> CommandResult {
     }
 
     CommandResult::message(out.trim_end().to_string())
+}
+
+/// The timeout this hook will actually run with, plus where it came from.
+///
+/// `[hooks].default_timeout_secs` *replaces* every hook's own `timeout_secs`
+/// (see `HooksConfig::effective_timeout_secs`). Rendering `hook.timeout_secs`
+/// unconditionally made `/hooks list` report a budget no hook would ever run
+/// with — a listing that disagrees with the runtime is worse than no listing.
+fn render_timeout(config: &crate::hooks::HooksConfig, hook: &crate::hooks::Hook) -> String {
+    let effective = config.effective_timeout_secs(hook);
+    if config.timeout_is_overridden() {
+        format!("{effective}s — `[hooks].default_timeout_secs` override")
+    } else {
+        format!("{effective}s")
+    }
+}
+
+/// Render load-time problems. Only the hook's own `name`, its event, and a
+/// fixed explanation are shown — never the command line, stdin payload, or
+/// any resolved filesystem path.
+fn render_problems(problems: &[crate::hooks::HookConfigProblem]) -> String {
+    let mut out = String::new();
+    for problem in problems {
+        out.push_str(&format!("  - {}\n", problem.summary()));
+    }
+    out
 }
 
 fn event_label(event: HookEvent) -> &'static str {
@@ -181,11 +236,15 @@ fn event_label(event: HookEvent) -> &'static str {
 fn condition_summary(condition: &crate::hooks::HookCondition) -> String {
     match condition {
         crate::hooks::HookCondition::Always => "always".to_string(),
-        crate::hooks::HookCondition::ToolName { name } => format!("tool_name=`{name}`"),
-        crate::hooks::HookCondition::ToolCategory { category } => {
-            format!("tool_category=`{category}`")
+        crate::hooks::HookCondition::ToolName { name } => {
+            format!("tool_name=`{}`", condition_value(name))
         }
-        crate::hooks::HookCondition::Mode { mode } => format!("mode=`{mode}`"),
+        crate::hooks::HookCondition::ToolCategory { category } => {
+            format!("tool_category=`{}`", condition_value(category))
+        }
+        crate::hooks::HookCondition::Mode { mode } => {
+            format!("mode=`{}`", condition_value(mode))
+        }
         crate::hooks::HookCondition::ExitCode { code } => format!("exit_code={code}"),
         crate::hooks::HookCondition::All { conditions } => format!(
             "all of [{}]",
@@ -207,8 +266,12 @@ fn condition_summary(condition: &crate::hooks::HookCondition) -> String {
 }
 
 /// Single-line preview of the shell command, capped at `max_chars`.
+///
+/// Filtering newlines is not enough on its own: the command is operator text
+/// and can contain escape sequences, so it goes through the shared sanitizer
+/// before the cap.
 fn preview_command(command: &str, max_chars: usize) -> String {
-    let single_line: String = command.chars().filter(|c| *c != '\n').collect();
+    let single_line = crate::hooks::sanitize_hook_line(command, usize::MAX);
     if single_line.chars().count() <= max_chars {
         return single_line;
     }
@@ -218,6 +281,14 @@ fn preview_command(command: &str, max_chars: usize) -> String {
         .collect();
     out.push('…');
     out
+}
+
+/// Operator-supplied strings inside a rendered condition.
+///
+/// `tool_name`, `tool_category`, and `mode` come from config verbatim, so the
+/// same bound-and-de-fang rule that governs hook names governs these.
+fn condition_value(value: &str) -> String {
+    crate::hooks::sanitize_hook_line(value, crate::hooks::HOOK_LABEL_MAX_CHARS)
 }
 
 #[cfg(test)]
@@ -236,8 +307,73 @@ mod tests {
     fn preview_command_strips_newlines() {
         assert_eq!(
             preview_command("line one\nline two", 50),
-            "line oneline two"
+            "line one line two"
         );
+    }
+
+    /// A hook command is operator text. Filtering `\n` kept the row from
+    /// splitting, but left every other control character — including the CSI
+    /// introducer — free to repaint the terminal from inside `/hooks list`.
+    #[test]
+    fn preview_command_defangs_control_characters() {
+        let preview = preview_command("echo \u{1b}[2Jhi\r\tthere\u{7}", 100);
+        assert!(!preview.contains('\u{1b}'), "{preview:?}");
+        assert!(!preview.contains('\r'), "{preview:?}");
+        assert!(!preview.contains('\u{7}'), "{preview:?}");
+        assert!(!preview.contains('\t'), "{preview:?}");
+        assert!(preview.contains("there"), "{preview:?}");
+    }
+
+    #[test]
+    fn hook_labels_are_bounded_and_defanged() {
+        let noisy = format!("\u{1b}[31mgate\n{}", "x".repeat(500));
+        let label = crate::hooks::sanitize_hook_label(Some(&noisy));
+        assert!(!label.contains('\u{1b}'), "{label}");
+        assert!(!label.contains('\n'), "{label}");
+        assert!(
+            label.chars().count() <= crate::hooks::HOOK_LABEL_MAX_CHARS + 16,
+            "{} chars",
+            label.chars().count()
+        );
+        // A name that is only whitespace, or absent, still renders something.
+        assert_eq!(crate::hooks::sanitize_hook_label(Some("   ")), "(unnamed)");
+        assert_eq!(crate::hooks::sanitize_hook_label(None), "(unnamed)");
+    }
+
+    /// Condition values are config strings too, and they were being
+    /// interpolated raw into the same row the label was being sanitized in.
+    #[test]
+    fn condition_summary_defangs_operator_supplied_values() {
+        let rendered = condition_summary(&HookCondition::ToolName {
+            name: format!("\u{1b}[2Jexec_shell{}", "y".repeat(500)),
+        });
+        assert!(!rendered.contains('\u{1b}'), "{rendered}");
+        assert!(
+            rendered.chars().count() <= crate::hooks::HOOK_LABEL_MAX_CHARS + 32,
+            "{} chars",
+            rendered.chars().count()
+        );
+    }
+
+    /// `default_timeout_secs = 0` is rejected at load, so the listing must
+    /// report the per-hook budget the runtime will actually apply and must not
+    /// credit the provenance to a setting that was ignored — while the
+    /// rejection itself still shows up in the problems section.
+    #[test]
+    fn listed_timeout_ignores_a_rejected_zero_override() {
+        let hook = Hook::new(HookEvent::SessionStart, "echo hi").with_timeout(90);
+        let zeroed = crate::hooks::HooksConfig {
+            enabled: true,
+            hooks: vec![hook.clone()],
+            default_timeout_secs: Some(0),
+            ..crate::hooks::HooksConfig::default()
+        };
+        assert_eq!(render_timeout(&zeroed, &hook), "90s");
+
+        let problems = zeroed.validate();
+        let rendered = render_problems(&problems);
+        assert!(rendered.contains("`[hooks]` setting"), "{rendered}");
+        assert!(rendered.contains("default_timeout_secs = 0"), "{rendered}");
     }
 
     #[test]
@@ -300,6 +436,7 @@ mod tests {
             "on_error",
             "subagent_spawn",
             "subagent_complete",
+            "shell_env",
         ]
         .iter()
         .map(|name| {
@@ -323,7 +460,14 @@ mod tests {
         }
         // Each event line includes the descriptive blurb.
         assert!(body.contains("fires once when the TUI launches"));
-        assert!(body.contains("read-only observer"));
+        // `tool_call_before` has been a steering hook since #3026; the listing
+        // must not keep advertising it as read-only.
+        assert!(
+            !body.contains("read-only observer"),
+            "stale read-only wording in events listing:\n{body}"
+        );
+        assert!(body.contains("can allow/deny/ask"));
+        assert!(body.contains("docs/HOOKS.md"));
     }
 
     #[test]
@@ -375,5 +519,78 @@ mod tests {
         let events: Vec<&&str> = by_event.keys().collect();
         // BTreeMap sorts alphabetically — `session_start` before `tool_call_after`.
         assert_eq!(events, vec![&"session_start", &"tool_call_after"]);
+    }
+
+    #[test]
+    fn events_listing_states_scope_and_the_steering_allowlist() {
+        let body = events().message.expect("non-empty body");
+        // Scope truth: this is a TUI runtime feature.
+        assert!(body.contains("TUI runtime feature"), "{body}");
+        assert!(body.contains("codewhale exec"), "{body}");
+        // Steering allowlist, matching docs/HOOKS.md.
+        assert!(body.contains("`message_submit`, `tool_call_before`, and `shell_env`"));
+        // And the honest caveat about what observer-only does not mean.
+        assert!(body.contains("can have any external side effect"), "{body}");
+    }
+
+    #[test]
+    fn events_listing_covers_every_runtime_event() {
+        let body = events().message.expect("non-empty body");
+        for event in crate::hooks::ALL_HOOK_EVENTS {
+            assert!(
+                body.contains(event.as_str()),
+                "event `{}` missing from /hooks events",
+                event.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn listed_timeout_is_the_one_the_runtime_will_apply() {
+        let hook = Hook::new(HookEvent::SessionStart, "echo hi").with_timeout(90);
+
+        let per_hook = crate::hooks::HooksConfig {
+            enabled: true,
+            hooks: vec![hook.clone()],
+            ..crate::hooks::HooksConfig::default()
+        };
+        assert_eq!(render_timeout(&per_hook, &hook), "90s");
+
+        // With the global override set, the runtime uses 5s — the listing must
+        // say 5s, and say why.
+        let overridden = crate::hooks::HooksConfig {
+            enabled: true,
+            hooks: vec![hook.clone()],
+            default_timeout_secs: Some(5),
+            ..crate::hooks::HooksConfig::default()
+        };
+        let rendered = render_timeout(&overridden, &hook);
+        assert!(rendered.starts_with("5s"), "{rendered}");
+        assert!(!rendered.contains("90"), "{rendered}");
+        assert!(rendered.contains("default_timeout_secs"), "{rendered}");
+    }
+
+    #[test]
+    fn rendered_problems_name_the_hook_without_leaking_the_command() {
+        let problems = vec![
+            crate::hooks::HookConfigProblem {
+                name: Some("gate".to_string()),
+                event: Some(HookEvent::SessionStart),
+                detail: "condition can never match".to_string(),
+                rejected: true,
+            },
+            crate::hooks::HookConfigProblem {
+                name: None,
+                event: Some(HookEvent::ShellEnv),
+                detail: "`background = true` is not honored".to_string(),
+                rejected: false,
+            },
+        ];
+        let rendered = render_problems(&problems);
+        assert!(rendered.contains("rejected: `session_start` hook `gate`"));
+        assert!(rendered.contains("warning: `shell_env` hook `(unnamed)`"));
+        // Only the hook name, event, and fixed detail — nothing else.
+        assert!(!rendered.contains('$'), "{rendered}");
+        assert!(!rendered.contains('/'), "{rendered}");
     }
 }

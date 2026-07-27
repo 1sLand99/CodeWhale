@@ -550,6 +550,82 @@ fn visible_tool_output(content: &str) -> Option<String> {
     }
 }
 
+/// Read the process exit code a tool reported, when it reported one.
+///
+/// Only process-backed tools (`exec_shell`, task runners) carry one, and only
+/// a real, integer-valued `exit_code` counts. Everything else stays `None` so
+/// an `exit_code` condition never matches on a fabricated value.
+/// Reported as `i64`, not `i32`: a Windows crash code such as `3221225477`
+/// (`0xC0000005`) is a real value the shell tool records in its metadata, and
+/// narrowing it dropped exactly those codes — the hook saw no exit code at all
+/// for the crashes it most wanted to catch.
+pub(crate) fn reported_tool_exit_code(result: &Result<ToolResult, ToolError>) -> Option<i64> {
+    let metadata = result.as_ref().ok()?.metadata.as_ref()?;
+    let code = metadata.get("exit_code")?;
+    if code.is_null() {
+        return None;
+    }
+    code.as_i64()
+}
+
+/// Fire `tool_call_after` for every settled tool call, plus `on_error` when
+/// the call failed.
+///
+/// `on_error` is documented as covering tool failures, not just transport and
+/// auth failures, so the tool path has to raise it too — the engine-error path
+/// in `apply_engine_error_to_app` never sees a tool that returned
+/// `success: false`.
+///
+/// Both are observer events: their stdout is ignored and neither can change
+/// the result that goes back to the model. That is a statement about
+/// Codewhale's control flow only — the commands themselves are arbitrary
+/// shells and may have any external side effect.
+fn fire_tool_completion_hooks(
+    app: &mut App,
+    id: &str,
+    name: &str,
+    result: &Result<ToolResult, ToolError>,
+) {
+    let wants_after = app.hooks.has_hooks_for_event(HookEvent::ToolCallAfter);
+    let wants_error = app
+        .hooks
+        .has_hooks_for_event(crate::hooks::HookEvent::OnError);
+    if !wants_after && !wants_error {
+        // Fast path: skip the result clone and HookContext allocation when
+        // the user has configured neither event.
+        return;
+    }
+
+    let (result_text, success): (String, bool) = match result.as_ref() {
+        Ok(tool_result) => (tool_result.content.clone(), tool_result.success),
+        Err(err) => (err.to_string(), false),
+    };
+    let exit_code = reported_tool_exit_code(result);
+
+    if wants_after {
+        let context = app
+            .base_hook_context()
+            .with_tool_name(name)
+            .with_tool_call_id(id)
+            .with_tool_result(&result_text, success, exit_code);
+        if let Err(error) = app.submit_hooks(HookEvent::ToolCallAfter, context) {
+            app.surface_observer_hook_submission_failure(error);
+        }
+    }
+
+    if wants_error && !success {
+        let context = app
+            .base_hook_context()
+            .with_tool_name(name)
+            .with_tool_call_id(id)
+            .with_tool_result(&result_text, success, exit_code)
+            .with_error(&format!("tool `{name}` failed: {result_text}"));
+        if let Err(error) = app.submit_hooks(crate::hooks::HookEvent::OnError, context) {
+            app.surface_observer_hook_submission_failure(error);
+        }
+    }
+}
+
 pub(super) fn handle_tool_call_complete(
     app: &mut App,
     id: &str,
@@ -557,6 +633,13 @@ pub(super) fn handle_tool_call_complete(
     result: &Result<ToolResult, ToolError>,
 ) {
     if app.ignored_tool_calls.remove(id) {
+        // "Ignored" is a *presentation* decision: these are real settled
+        // results — repeated `wait` polls, background-shell status reads —
+        // that the transcript deliberately does not redraw. Observers still
+        // have to see them, or `tool_call_after` silently skips a whole class
+        // of completions while claiming to fire after each tool call. Fired
+        // here and returned immediately, so each id emits exactly once.
+        fire_tool_completion_hooks(app, id, name, result);
         return;
     }
     // Preserve the execution/audit name while recovering the action-qualified
@@ -579,6 +662,12 @@ pub(super) fn handle_tool_call_complete(
     // get accrued without needing a per-tool hook (#524).
     accrue_child_token_cost_if_any(app, result);
     record_spillover_artifact_if_any(app, id, name, result);
+
+    // #455: fire `tool_call_after` (and `on_error` for failures) here, before
+    // any of the presentation early-returns below. Firing it further down meant
+    // exploring-tool completions and orphaned completions never emitted the
+    // event at all, so "fires after each tool call" was not true.
+    fire_tool_completion_hooks(app, id, name, result);
 
     // Exploring entries land in the per-tool map regardless of whether they
     // live in the active cell or in finalized history; the path is the same.
@@ -833,25 +922,6 @@ pub(super) fn handle_tool_call_complete(
 
     if refreshes_workspace_context_on_completion(&semantic_name) && status != ToolStatus::Running {
         workspace_context::refresh_now(app, Instant::now());
-    }
-
-    // #455 (observer-only): fire `tool_call_after` hooks once the
-    // result has settled. Hooks see tool_name + the result content
-    // (or error message) + success flag. Read-only — they cannot
-    // mutate the result that goes back to the model. Mutation
-    // remains a v0.8.9 follow-up. Fast-path skip avoids the
-    // result.content.clone() and HookContext allocation when no
-    // hooks are configured.
-    if app.hooks.has_hooks_for_event(HookEvent::ToolCallAfter) {
-        let (result_text, success): (String, bool) = match result.as_ref() {
-            Ok(tool_result) => (tool_result.content.clone(), tool_result.success),
-            Err(err) => (err.to_string(), false),
-        };
-        let context = app
-            .base_hook_context()
-            .with_tool_name(name)
-            .with_tool_result(&result_text, success, None);
-        let _ = app.execute_hooks(HookEvent::ToolCallAfter, &context);
     }
 
     // Collect evidence for the post-turn receipt.
@@ -1736,6 +1806,90 @@ mod tests {
     use crate::tools::plan::StepStatus;
     use serde_json::json;
 
+    #[cfg(unix)]
+    fn hook_log_lines_eventually(path: &std::path::Path, expected: usize) -> Vec<String> {
+        for _ in 0..100 {
+            let lines = std::fs::read_to_string(path)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            if lines.len() >= expected {
+                return lines;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// A UI-ignored completion is still a completion. `tool_call_after` and
+    /// `on_error` must fire for it — exactly once — or the documented "fires
+    /// after each tool call" silently excludes repeated `wait` and background
+    /// results, which is the class of call an observer most wants to record.
+    #[cfg(unix)]
+    #[test]
+    fn ignored_tool_calls_still_fire_after_and_error_hooks_once() {
+        use crate::hooks::{Hook, HookEvent, HookExecutor, HooksConfig};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let after_log = dir.path().join("after.log");
+        let error_log = dir.path().join("error.log");
+        let script = |path: &std::path::Path| {
+            format!(
+                "printf '%s\\n' \"$DEEPSEEK_TOOL_CALL_ID\" >> {}",
+                path.display()
+            )
+        };
+
+        let mut app = crate::test_support::test_app_with_options(
+            crate::test_support::test_tui_options(dir.path()),
+        );
+        app.workspace = dir.path().to_path_buf();
+        app.hooks = HookExecutor::new(
+            HooksConfig {
+                enabled: true,
+                hooks: vec![
+                    Hook::new(HookEvent::ToolCallAfter, &script(&after_log)).with_name("after"),
+                    Hook::new(HookEvent::OnError, &script(&error_log)).with_name("error"),
+                ],
+                ..HooksConfig::default()
+            },
+            dir.path().to_path_buf(),
+        );
+
+        let id = "call_ignored_1";
+        app.ignored_tool_calls.insert(id.to_string());
+        let failed: Result<ToolResult, ToolError> = Ok(ToolResult::error("boom"));
+
+        handle_tool_call_complete(&mut app, id, "exec_shell", &failed);
+
+        // The presentation state still consumed the id...
+        assert!(!app.ignored_tool_calls.contains(id));
+        // ...and both observers saw the call, once each.
+        let after = hook_log_lines_eventually(&after_log, 1);
+        let errors = hook_log_lines_eventually(&error_log, 1);
+        assert_eq!(after, vec![id]);
+        assert_eq!(errors, vec![id]);
+
+        // A successful ignored completion fires `tool_call_after` only.
+        let second = "call_ignored_2";
+        app.ignored_tool_calls.insert(second.to_string());
+        handle_tool_call_complete(
+            &mut app,
+            second,
+            "exec_shell",
+            &Ok(ToolResult::success("ok")),
+        );
+        let after = hook_log_lines_eventually(&after_log, 2);
+        let errors = hook_log_lines_eventually(&error_log, 1);
+        assert_eq!(after, vec![id, second]);
+        assert_eq!(errors, vec![id]);
+    }
+
     #[test]
     fn adaptive_evidence_late_foreign_and_duplicate_completions_are_ignored() {
         let result = Ok(ToolResult::success("bounded").with_metadata(json!({
@@ -1937,5 +2091,62 @@ mod tests {
             transcript.contains("(no output)"),
             "Transcript mode still records the placeholder: {transcript:?}"
         );
+    }
+
+    /// #455 — `exit_code` conditions must only ever see a real, reported exit
+    /// code. `tool_call_after` used to hard-code `None`, which made every
+    /// `{ type = "exit_code" }` condition permanently unmatchable.
+    #[test]
+    fn reported_tool_exit_code_reads_only_real_metadata_codes() {
+        let with_code = Ok(ToolResult {
+            content: "boom".to_string(),
+            success: false,
+            metadata: Some(serde_json::json!({ "exit_code": 127 })),
+        });
+        assert_eq!(super::reported_tool_exit_code(&with_code), Some(127));
+
+        // Zero is a real code, not a missing one.
+        let zero = Ok(ToolResult {
+            content: "ok".to_string(),
+            success: true,
+            metadata: Some(serde_json::json!({ "exit_code": 0 })),
+        });
+        assert_eq!(super::reported_tool_exit_code(&zero), Some(0));
+
+        // Tools that report no exit code stay `None` — never synthesized from
+        // the success flag.
+        let no_metadata = Ok(ToolResult::error("failed"));
+        assert_eq!(super::reported_tool_exit_code(&no_metadata), None);
+
+        let null_code = Ok(ToolResult {
+            content: String::new(),
+            success: true,
+            metadata: Some(serde_json::json!({ "exit_code": serde_json::Value::Null })),
+        });
+        assert_eq!(super::reported_tool_exit_code(&null_code), None);
+
+        let wrong_type = Ok(ToolResult {
+            content: String::new(),
+            success: false,
+            metadata: Some(serde_json::json!({ "exit_code": "127" })),
+        });
+        assert_eq!(super::reported_tool_exit_code(&wrong_type), None);
+
+        // A Windows crash code does not fit in an `i32`, but it is a real code
+        // and a hook scoped to it must be able to see it.
+        let windows_crash = Ok(ToolResult {
+            content: String::new(),
+            success: false,
+            metadata: Some(serde_json::json!({ "exit_code": 3_221_225_477_i64 })),
+        });
+        assert_eq!(
+            super::reported_tool_exit_code(&windows_crash),
+            Some(3_221_225_477)
+        );
+
+        // A transport-level tool error has no metadata at all.
+        let errored: Result<ToolResult, ToolError> =
+            Err(ToolError::execution_failed("no such tool"));
+        assert_eq!(super::reported_tool_exit_code(&errored), None);
     }
 }

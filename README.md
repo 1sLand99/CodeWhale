@@ -72,6 +72,9 @@ path.
 - [docs/FLEET.md](docs/FLEET.md) — fleets, the ledger, and resume
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`, hooks, and
   the constitution
+- [docs/HOOKS.md](docs/HOOKS.md) — the eleven TUI lifecycle hook events, their
+  payloads, and which three of them can steer a turn (`codewhale exec` and the
+  CLI subcommands do not fire hooks)
 - [docs/WEB.md](docs/WEB.md) — the loopback-only browser client and its one-time
   authentication boundary
 

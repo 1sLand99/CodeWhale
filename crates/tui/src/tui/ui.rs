@@ -781,7 +781,11 @@ fn open_setup_checkpoint_if_due(app: &mut App, config: &Config, skip_onboarding:
 fn complete_trust_directory_onboarding(app: &mut App, config: &Config) -> Result<(), String> {
     onboarding::mark_trusted(&app.workspace).map_err(|err| err.to_string())?;
     app.trust_mode = true;
-    app.hooks = HookExecutor::new(
+    // `rebind`, not `new`: trusting the directory can add project hooks, but
+    // it does not start a new session. Hooks that already fired this session
+    // reported a `DEEPSEEK_SESSION_ID`, and it has to keep meaning the same
+    // session afterwards.
+    app.hooks = app.hooks.rebind(
         crate::hooks::HooksConfig::load_with_project(config.hooks_config(), &app.workspace),
         app.workspace.clone(),
     );
@@ -1283,7 +1287,14 @@ pub async fn run_tui(
     // Fire session start hook
     {
         let context = app.base_hook_context();
-        let _ = app.execute_hooks(HookEvent::SessionStart, &context);
+        let hooks = app.hooks.clone();
+        if let Err(error) =
+            tokio::task::spawn_blocking(move || hooks.execute(HookEvent::SessionStart, &context))
+                .await
+        {
+            tracing::error!(target: "hooks", %error, "session_start executor task was lost");
+            app.status_message = Some("session_start hook executor did not run".to_string());
+        }
     }
 
     // Spawn the persistence actor so checkpoint/session-save I/O stays off
@@ -1307,8 +1318,11 @@ pub async fn run_tui(
     // #4605: create the dispatch completion channel before any submit path so
     // initial input and queued follow-ups can dispatch without blocking the
     // startup sequence.
+    // At most one user dispatch is allowed in flight. A two-slot completion
+    // mailbox covers the hook stage plus the send stage without turning a
+    // stalled UI into an unbounded queue of captured App mutations.
     let (dispatch_completion_tx, dispatch_completion_rx) =
-        tokio::sync::mpsc::unbounded_channel::<crate::tui::app::DispatchApplyFn>();
+        tokio::sync::mpsc::channel::<crate::tui::app::DispatchApplyFn>(2);
     app.dispatch_completion_tx = Some(dispatch_completion_tx);
 
     submit_initial_input_if_ready(&mut app, config, &engine_handle).await?;
@@ -1497,9 +1511,9 @@ fn execute_subagent_observer_hook(
     agent_id: &str,
     text_field: &str,
     text: &str,
-) {
+) -> Result<(), String> {
     if !app.hooks.has_hooks_for_event(event) {
-        return;
+        return Ok(());
     }
 
     let (preview, truncated) = bounded_subagent_hook_preview(text);
@@ -1530,12 +1544,44 @@ fn execute_subagent_observer_hook(
         );
     }
 
-    let hooks = app.hooks.clone();
-    let _ = std::thread::Builder::new()
-        .name(format!("{}-observer-hook", event.as_str()))
-        .spawn(move || {
-            let _ = hooks.execute_json_observer(event, &context, &payload);
-        });
+    app.hooks.submit_json_observer(event, context, payload)
+}
+
+/// Apply the normal spawn status first, then submit its observer event.
+/// Submission diagnostics go to the independent toast queue, so they remain
+/// visible without replacing the agent's authoritative lifecycle status.
+fn apply_agent_spawned_status_and_observer(
+    app: &mut App,
+    agent_id: &str,
+    prompt: &str,
+    prompt_summary: &str,
+) {
+    let label = app.ensure_agent_label(agent_id);
+    app.status_message = Some(format!("{label} starting: {prompt_summary}"));
+    if let Err(error) =
+        execute_subagent_observer_hook(app, HookEvent::SubagentSpawn, agent_id, "prompt", prompt)
+    {
+        surface_observer_hook_submission_failure(app, error);
+    }
+}
+
+/// Completion counterpart to [`apply_agent_spawned_status_and_observer`].
+fn apply_agent_complete_status_and_observer(
+    app: &mut App,
+    agent_id: &str,
+    result: &str,
+    terminal_verb: &str,
+) {
+    let label = app.agent_display_label(agent_id);
+    app.status_message = Some(format!(
+        "{label} {terminal_verb}: {}",
+        bound_agent_activity_text(result)
+    ));
+    if let Err(error) =
+        execute_subagent_observer_hook(app, HookEvent::SubagentComplete, agent_id, "result", result)
+    {
+        surface_observer_hook_submission_failure(app, error);
+    }
 }
 
 fn execute_turn_end_observer_hook(
@@ -1545,9 +1591,9 @@ fn execute_turn_end_observer_hook(
     billing_surface: Option<&str>,
     duration: Duration,
     error: Option<&str>,
-) {
+) -> Result<(), String> {
     if !app.hooks.has_hooks_for_event(HookEvent::TurnEnd) {
-        return;
+        return Ok(());
     }
 
     let metadata = turn_end_observer_metadata(turn);
@@ -1573,12 +1619,12 @@ fn execute_turn_end_observer_hook(
         tool_count: app.tool_evidence.len(),
         queued_message_count: app.queued_message_count(),
     });
-    let hooks = app.hooks.clone();
-    let _ = std::thread::Builder::new()
-        .name("turn_end-observer-hook".to_string())
-        .spawn(move || {
-            let _ = hooks.execute_json_observer(HookEvent::TurnEnd, &context, &payload);
-        });
+    app.hooks
+        .submit_json_observer(HookEvent::TurnEnd, context, payload)
+}
+
+fn surface_observer_hook_submission_failure(app: &mut App, error: String) {
+    app.surface_observer_hook_submission_failure(error);
 }
 
 struct TurnEndObserverMetadata<'a> {
@@ -2548,9 +2594,7 @@ async fn run_event_loop(
     task_manager: SharedTaskManager,
     event_broker: &EventBroker,
     translation_client: Option<Arc<DeepSeekClient>>,
-    mut dispatch_completion_rx: tokio::sync::mpsc::UnboundedReceiver<
-        crate::tui::app::DispatchApplyFn,
-    >,
+    mut dispatch_completion_rx: tokio::sync::mpsc::Receiver<crate::tui::app::DispatchApplyFn>,
 ) -> Result<()> {
     // Track streaming state
     let mut current_streaming_text = String::new();
@@ -3731,14 +3775,16 @@ async fn run_event_loop(
                             }
                         }
 
-                        execute_turn_end_observer_hook(
+                        if let Err(error) = execute_turn_end_observer_hook(
                             app,
                             completed_turn.as_ref(),
                             &usage,
                             billing_surface,
                             turn_elapsed,
                             error.as_deref(),
-                        );
+                        ) {
+                            surface_observer_hook_submission_failure(app, error);
+                        }
 
                         if queued_to_send.is_none() {
                             queued_to_send = app.pop_queued_message();
@@ -3958,13 +4004,6 @@ async fn run_event_loop(
                         spawn_depth,
                     } => {
                         let prompt_summary = bound_agent_activity_text(&prompt);
-                        execute_subagent_observer_hook(
-                            app,
-                            HookEvent::SubagentSpawn,
-                            &id,
-                            "prompt",
-                            &prompt,
-                        );
                         app.agent_progress
                             .insert(id.clone(), format!("starting: {prompt_summary}"));
                         let meta = app.agent_progress_meta.entry(id.clone()).or_default();
@@ -3982,8 +4021,7 @@ async fn run_event_loop(
                         }
                         // #3030: Assign a stable user-facing label for this
                         // agent and keep the raw id out of the status bar.
-                        let label = app.ensure_agent_label(&id);
-                        app.status_message = Some(format!("{label} starting: {prompt_summary}"));
+                        apply_agent_spawned_status_and_observer(app, &id, &prompt, &prompt_summary);
                         subagent_list_refresh_requested = true;
                     }
                     EngineEvent::AgentProgress {
@@ -4055,13 +4093,6 @@ async fn run_event_loop(
                         }
                     }
                     EngineEvent::AgentComplete { id, result } => {
-                        execute_subagent_observer_hook(
-                            app,
-                            HookEvent::SubagentComplete,
-                            &id,
-                            "result",
-                            &result,
-                        );
                         let subagent_elapsed = app
                             .agent_activity_started_at
                             .or(app.turn_started_at)
@@ -4083,11 +4114,7 @@ async fn run_event_loop(
                             Some(bound_agent_activity_text(&result)),
                         );
                         // #3030: stable label with raw-id fallback.
-                        let label = app.agent_display_label(&id);
-                        app.status_message = Some(format!(
-                            "{label} {terminal_verb}: {}",
-                            bound_agent_activity_text(&result)
-                        ));
+                        apply_agent_complete_status_and_observer(app, &id, &result, terminal_verb);
                         let should_recapture_terminal =
                             !has_other_running_subagents && app.use_alt_screen;
                         let subagent_notification_mode =
@@ -6521,26 +6548,28 @@ async fn run_event_loop(
                                 return Ok(());
                             }
                         } else {
-                            let queued = if let Some(mut draft) = app.queued_draft.take() {
-                                draft.display = input;
-                                draft
-                            } else {
-                                build_queued_message(app, input)
-                            };
+                            let (queued, recovery) = message_from_submitted_input(app, input);
                             if app.is_loading {
                                 // Engine is busy — steer into the current turn.
                                 attempt_steer_with_queue_fallback(
                                     app,
                                     &engine_handle,
                                     queued.clone(),
+                                    recovery,
                                 )
                                 .await;
                             } else {
                                 // Engine is idle — send as a regular message
                                 // so the content is not lost to rx_steer's
                                 // stale-drain in handle_send_message (#1331).
-                                submit_or_steer_message(app, config, &engine_handle, queued)
-                                    .await?;
+                                submit_or_steer_message(
+                                    app,
+                                    config,
+                                    &engine_handle,
+                                    queued,
+                                    recovery,
+                                )
+                                .await?;
                             }
                         }
                     }
@@ -6607,12 +6636,7 @@ async fn run_event_loop(
                                 return Ok(());
                             }
                         } else {
-                            let queued = if let Some(mut draft) = app.queued_draft.take() {
-                                draft.display = input;
-                                draft
-                            } else {
-                                build_queued_message(app, input)
-                            };
+                            let (queued, recovery) = message_from_submitted_input(app, input);
                             // #383: /edit — if the user invoked /edit to revise
                             // the last message, undo the last exchange before
                             // dispatching the replacement. Sync the engine
@@ -6632,7 +6656,8 @@ async fn run_event_loop(
                                     })
                                     .await;
                             }
-                            submit_or_steer_message(app, config, &engine_handle, queued).await?;
+                            submit_or_steer_message(app, config, &engine_handle, queued, recovery)
+                                .await?;
                         }
                     }
                 }
@@ -8171,7 +8196,9 @@ pub(crate) fn apply_engine_error_to_app(
         .has_hooks_for_event(crate::hooks::HookEvent::OnError)
     {
         let context = app.base_hook_context().with_error(&message);
-        let _ = app.execute_hooks(crate::hooks::HookEvent::OnError, &context);
+        if let Err(error) = app.submit_hooks(crate::hooks::HookEvent::OnError, context) {
+            surface_observer_hook_submission_failure(app, error);
+        }
     }
 
     app.add_message(HistoryCell::Error {
@@ -8635,11 +8662,28 @@ async fn submit_initial_input_if_ready(
     Ok(())
 }
 
-fn take_next_queued_message(app: &mut App) -> Option<(QueuedMessage, Option<usize>)> {
+fn message_from_submitted_input(app: &mut App, input: String) -> (QueuedMessage, DispatchRecovery) {
+    if let Some(mut draft) = app.queued_draft.take() {
+        draft.display = input;
+        (draft, DispatchRecovery::Draft)
+    } else {
+        (
+            build_queued_message(app, input),
+            DispatchRecovery::Immediate,
+        )
+    }
+}
+
+fn take_next_queued_message(app: &mut App) -> Option<(QueuedMessage, DispatchRecovery)> {
     if app.input.is_empty() {
-        return app
-            .remove_queued_message(0)
-            .map(|message| (message, Some(0)));
+        return app.remove_queued_message(0).map(|message| {
+            (
+                message,
+                DispatchRecovery::Queued {
+                    restore_index: Some(0),
+                },
+            )
+        });
     }
     None
 }
@@ -8649,10 +8693,10 @@ async fn send_next_queued_message_now(
     config: &Config,
     engine_handle: &EngineHandle,
 ) -> Result<bool> {
-    let Some((message, restore_index)) = take_next_queued_message(app) else {
+    let Some((message, recovery)) = take_next_queued_message(app) else {
         return Ok(false);
     };
-    send_taken_queued_message_now(app, config, engine_handle, message, restore_index).await?;
+    send_taken_queued_message_now(app, config, engine_handle, message, recovery).await?;
     Ok(true)
 }
 
@@ -8666,7 +8710,16 @@ async fn send_queued_message_at_index_now(
         app.status_message = Some("Queued message not found".to_string());
         return Ok(true);
     };
-    send_taken_queued_message_now(app, config, engine_handle, message, Some(index)).await?;
+    send_taken_queued_message_now(
+        app,
+        config,
+        engine_handle,
+        message,
+        DispatchRecovery::Queued {
+            restore_index: Some(index),
+        },
+    )
+    .await?;
     Ok(true)
 }
 
@@ -8675,10 +8728,10 @@ async fn send_taken_queued_message_now(
     config: &Config,
     engine_handle: &EngineHandle,
     message: QueuedMessage,
-    restore_index: Option<usize>,
+    recovery: DispatchRecovery,
 ) -> Result<()> {
     if app.offline_mode {
-        restore_queued_message(app, restore_index, message);
+        restore_queued_or_draft_message(app, recovery, message);
         app.status_message = Some(format!(
             "Offline: {} queued follow-up(s) — /queue send <n>, /queue clear",
             app.queued_message_count()
@@ -8691,7 +8744,7 @@ async fn send_taken_queued_message_now(
         // A spawned dispatch is still resolving route/sending its op (#4605):
         // there is no turn to steer into yet. Re-queue; the completion/turn
         // lifecycle will drive the next drain.
-        restore_queued_message(app, restore_index, message);
+        restore_queued_or_draft_message(app, recovery, message);
         app.status_message = Some(format!(
             "{} queued follow-up(s) — sends after current dispatch starts",
             app.queued_message_count()
@@ -8699,27 +8752,30 @@ async fn send_taken_queued_message_now(
         return Ok(());
     }
     if app.is_loading {
-        if let Err(err) = steer_user_message(app, engine_handle, message.clone()).await {
-            restore_queued_message(app, restore_index, message);
-            app.status_message = Some(format!(
-                "Steer failed ({err}); {} queued follow-up(s) — /queue send <n>, /queue clear",
-                app.queued_message_count()
-            ));
-        } else {
-            app.push_status_toast(
+        match steer_user_message(app, engine_handle, message.clone()).await {
+            Ok(true) => app.push_status_toast(
                 "Sent queued follow-up into current turn",
                 StatusToastLevel::Info,
                 Some(1_500),
-            );
+            ),
+            Ok(false) => {
+                restore_queued_or_draft_message(app, recovery, message);
+                app.push_status_toast(
+                    "message_submit hook blocked the follow-up; original queue/draft restored",
+                    StatusToastLevel::Warning,
+                    Some(4_000),
+                );
+            }
+            Err(err) => {
+                restore_queued_or_draft_message(app, recovery, message);
+                app.status_message = Some(format!(
+                    "Steer failed ({err}); {} queued follow-up(s) — /queue send <n>, /queue clear",
+                    app.queued_message_count()
+                ));
+            }
         }
-    } else if let Err(_err) = dispatch_user_message_with_recovery(
-        app,
-        config,
-        engine_handle,
-        message,
-        DispatchRecovery::Queued { restore_index },
-    )
-    .await
+    } else if let Err(_err) =
+        dispatch_user_message_with_recovery(app, config, engine_handle, message, recovery).await
     {
         // The completion closure re-queued the message and set the status.
     } else {
@@ -8735,6 +8791,27 @@ fn restore_queued_message(app: &mut App, index: Option<usize>, message: QueuedMe
         app.queued_messages.insert(index, message);
     } else {
         app.queue_message(message);
+    }
+}
+
+fn restore_queued_or_draft_message(
+    app: &mut App,
+    recovery: DispatchRecovery,
+    message: QueuedMessage,
+) {
+    match recovery {
+        DispatchRecovery::Draft => {
+            app.input.clone_from(&message.display);
+            app.cursor_position = app.input.chars().count();
+            app.active_skill = message.skill_instruction.clone();
+            app.active_skill_provenance = message.skill_provenance.clone();
+            app.queued_draft = Some(message);
+            app.needs_redraw = true;
+        }
+        DispatchRecovery::Queued { restore_index } => {
+            restore_queued_message(app, restore_index, message);
+        }
+        DispatchRecovery::Immediate | DispatchRecovery::Initial => app.queue_message(message),
     }
 }
 
@@ -9000,10 +9077,90 @@ fn validated_profile_default_route(
 enum DispatchRecovery {
     /// Normal immediate composer submit: restore the composer on failure.
     Immediate,
+    /// A queued follow-up that was being edited in the composer.
+    Draft,
     /// A queued follow-up pulled from the queue; re-insert at the prior index.
     Queued { restore_index: Option<usize> },
     /// Initial `--prompt` / startup input.
     Initial,
+}
+
+fn dispatch_completion_permit(
+    app: &App,
+) -> std::result::Result<
+    tokio::sync::mpsc::OwnedPermit<crate::tui::app::DispatchApplyFn>,
+    &'static str,
+> {
+    let sender = app
+        .dispatch_completion_tx
+        .clone()
+        .ok_or("dispatch completion mailbox is unavailable")?;
+    sender.try_reserve_owned().map_err(|error| match error {
+        tokio::sync::mpsc::error::TrySendError::Full(_) => "dispatch completion mailbox is full",
+        tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+            "dispatch completion mailbox is closed"
+        }
+    })
+}
+
+fn recover_unstarted_external_message(
+    app: &mut App,
+    message: QueuedMessage,
+    recovery: DispatchRecovery,
+    error: &str,
+) {
+    app.dispatch_in_flight = false;
+    match recovery {
+        DispatchRecovery::Immediate | DispatchRecovery::Initial => {
+            restore_failed_immediate_submit(app, message, &anyhow::Error::msg(error.to_string()));
+        }
+        DispatchRecovery::Draft => {
+            restore_queued_or_draft_message(app, recovery, message);
+            app.status_message = Some(format!("{error}; queued draft restored"));
+        }
+        DispatchRecovery::Queued { restore_index } => {
+            restore_queued_message(app, restore_index, message);
+            app.status_message = Some(format!(
+                "{error}; {} queued follow-up(s) restored",
+                app.queued_message_count()
+            ));
+        }
+    }
+    app.push_status_toast(
+        error.to_string(),
+        StatusToastLevel::Error,
+        Some(App::STICKY_ERROR_TTL_MS),
+    );
+    app.needs_redraw = true;
+}
+
+fn restore_message_submit_denial(
+    app: &mut App,
+    message: QueuedMessage,
+    recovery: DispatchRecovery,
+) {
+    let denial = app
+        .status_message
+        .clone()
+        .unwrap_or_else(|| "message_submit hook blocked submission".to_string());
+    app.dispatch_in_flight = false;
+    match recovery {
+        DispatchRecovery::Immediate | DispatchRecovery::Initial => {
+            app.input.clone_from(&message.display);
+            app.cursor_position = app.input.chars().count();
+            app.active_skill = message.skill_instruction;
+            app.active_skill_provenance = message.skill_provenance;
+        }
+        DispatchRecovery::Draft => {
+            restore_queued_or_draft_message(app, recovery, message);
+        }
+        DispatchRecovery::Queued { restore_index } => {
+            restore_queued_message(app, restore_index, message);
+        }
+    }
+    app.status_message = Some(denial.clone());
+    app.push_status_toast(denial, StatusToastLevel::Warning, Some(6_000));
+    app.needs_redraw = true;
 }
 
 /// Snapshot of App state taken before the sync prepare phase so a failed
@@ -9074,6 +9231,7 @@ struct UserDispatchOutcome {
     auto_selection: Option<crate::model_routing::AutoRouteSelection>,
 }
 
+#[cfg(test)]
 async fn dispatch_user_message(
     app: &mut App,
     config: &Config,
@@ -9106,27 +9264,134 @@ async fn dispatch_user_message_with_recovery(
         .has_hooks_for_event(crate::hooks::HookEvent::MessageSubmit)
     {
         let context = app.base_hook_context().with_message(&message.display);
-        let outcome = app
+        let strict_gates = app
             .hooks
-            .execute_message_submit_transform(&context, &message.display);
-        if let Some(warning) = outcome.warning() {
-            app.status_message = Some(warning.to_string());
+            .matched_strict_gate_labels(crate::hooks::HookEvent::MessageSubmit, &context);
+        let hooks = app.hooks.clone();
+        let original_text = message.display.clone();
+
+        if app.dispatch_completion_tx.is_some() {
+            // The foreground transform is a gate, but its child wait belongs
+            // on the blocking pool, never on the terminal event loop. Result
+            // delivery reserves bounded mailbox capacity before any work or
+            // state mutation, so the recovery closure cannot be dropped.
+            let completion_permit = match dispatch_completion_permit(app) {
+                Ok(permit) => permit,
+                Err(error) => {
+                    recover_unstarted_external_message(app, message, recovery, error);
+                    return Err(anyhow::Error::msg(error));
+                }
+            };
+            app.dispatch_in_flight = true;
+            tokio::spawn(async move {
+                let outcome = match tokio::task::spawn_blocking(move || {
+                    hooks.execute_message_submit_transform_for_dispatch(&context, &original_text)
+                })
+                .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        tracing::error!(target: "hooks", %error, "message_submit executor task was lost");
+                        lost_message_submit_outcome(&strict_gates)
+                    }
+                };
+                let apply: crate::tui::app::DispatchApplyFn = Box::new(
+                    move |app: &mut App,
+                          engine_handle: &EngineHandle,
+                          config: &Config|
+                          -> anyhow::Result<()> {
+                        if !apply_message_submit_outcome(app, &mut message, outcome) {
+                            app.dispatch_in_flight = false;
+                            restore_message_submit_denial(app, message, recovery);
+                            return Ok(());
+                        }
+                        let _ = start_user_dispatch(app, config, engine_handle, message, recovery);
+                        Ok(())
+                    },
+                );
+                completion_permit.send(apply);
+            });
+            return Ok(());
         }
-        match outcome {
-            crate::hooks::MessageSubmitOutcome::Unchanged { .. } => {}
-            crate::hooks::MessageSubmitOutcome::Replaced { text, .. } => {
-                message.display = text;
+
+        // Unit tests intentionally omit the event-loop completion channel.
+        // Keep those synchronous from the test's perspective while still
+        // running the blocking child wait off the async runtime worker.
+        let outcome = match tokio::task::spawn_blocking(move || {
+            hooks.execute_message_submit_transform_for_dispatch(&context, &original_text)
+        })
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                tracing::error!(target: "hooks", %error, "message_submit executor task was lost");
+                lost_message_submit_outcome(&strict_gates)
             }
-            crate::hooks::MessageSubmitOutcome::Blocked { reason } => {
-                app.status_message = Some(reason);
-                app.is_loading = false;
-                app.dispatch_started_at = None;
-                app.runtime_turn_status = None;
-                return Ok(());
-            }
+        };
+        if !apply_message_submit_outcome(app, &mut message, outcome) {
+            restore_message_submit_denial(app, message, recovery);
+            return Ok(());
         }
     }
 
+    if app.dispatch_completion_tx.is_some() {
+        return start_user_dispatch(app, config, engine_handle, message, recovery);
+    }
+
+    let prepare = match prepare_user_dispatch(app, config, message.clone()) {
+        Ok(prepare) => prepare,
+        Err(error) => {
+            recover_unstarted_external_message(app, message, recovery, &error.to_string());
+            return Err(error);
+        }
+    };
+    run_prepared_dispatch(app, config, engine_handle, prepare, recovery).await
+}
+
+fn lost_message_submit_outcome(strict_gates: &[String]) -> crate::hooks::MessageSubmitOutcome {
+    if strict_gates.is_empty() {
+        crate::hooks::MessageSubmitOutcome::Unchanged {
+            warning: Some(
+                "message_submit hook executor did not run; submission continued because no strict gate matched"
+                    .to_string(),
+            ),
+        }
+    } else {
+        crate::hooks::MessageSubmitOutcome::Blocked {
+            reason: "message_submit hook executor did not run; a strict gate blocked submission"
+                .to_string(),
+        }
+    }
+}
+
+/// Apply the gate result on the event loop. Returns `true` when dispatch may
+/// continue; a denial leaves the original message out of history/model input.
+fn apply_message_submit_outcome(
+    app: &mut App,
+    message: &mut QueuedMessage,
+    outcome: crate::hooks::MessageSubmitOutcome,
+) -> bool {
+    if let Some(warning) = outcome.warning() {
+        app.status_message = Some(warning.to_string());
+    }
+    match outcome {
+        crate::hooks::MessageSubmitOutcome::Unchanged { .. } => true,
+        crate::hooks::MessageSubmitOutcome::Replaced { text, .. } => {
+            message.display = text;
+            true
+        }
+        crate::hooks::MessageSubmitOutcome::Blocked { reason } => {
+            app.status_message = Some(reason);
+            false
+        }
+    }
+}
+
+fn prepare_user_dispatch(
+    app: &mut App,
+    config: &Config,
+    message: QueuedMessage,
+) -> Result<UserDispatchPrepare> {
     let _ = app.maybe_nudge_for_planning_prompt(&message.display);
 
     // Plan paused-command changes without touching App or the engine pause
@@ -9194,7 +9459,7 @@ async fn dispatch_user_message_with_recovery(
 
     let goal_objective = paused_dispatch.goal_objective(app);
 
-    let prepare = UserDispatchPrepare {
+    Ok(UserDispatchPrepare {
         message,
         content,
         references,
@@ -9227,50 +9492,63 @@ async fn dispatch_user_message_with_recovery(
         snapshot,
         message_index,
         history_cell,
-    };
+    })
+}
 
-    let completion_tx = match app.dispatch_completion_tx.clone() {
-        Some(tx) => tx,
-        None => {
-            // Tests don't set the completion channel; await the spawned task
-            // inline so the test observes the final App state synchronously.
-            let (tx, mut rx) =
-                tokio::sync::mpsc::unbounded_channel::<crate::tui::app::DispatchApplyFn>();
-            tokio::spawn(spawned_dispatch_execute(
-                prepare,
-                recovery,
-                engine_handle.clone(),
-                tx,
-            ));
-            let apply = rx
-                .recv()
-                .await
-                .ok_or_else(|| anyhow::Error::msg("dispatch completion channel closed"))?;
-            return apply(app, engine_handle, config);
+fn start_user_dispatch(
+    app: &mut App,
+    config: &Config,
+    engine_handle: &EngineHandle,
+    message: QueuedMessage,
+    recovery: DispatchRecovery,
+) -> Result<()> {
+    let completion_permit = match dispatch_completion_permit(app) {
+        Ok(permit) => permit,
+        Err(error) => {
+            recover_unstarted_external_message(app, message, recovery, error);
+            return Err(anyhow::Error::msg(error));
         }
     };
-
-    // #4605: spawn the async phase so the event loop can draw immediately.
-    // Mark the dispatch in flight so a submit after an Esc-cancel queues
-    // instead of spawning a second dispatch that could reorder ops.
+    let recovery_message = message.clone();
+    let prepare = match prepare_user_dispatch(app, config, message) {
+        Ok(prepare) => prepare,
+        Err(error) => {
+            recover_unstarted_external_message(app, recovery_message, recovery, &error.to_string());
+            return Err(error);
+        }
+    };
     app.dispatch_in_flight = true;
     tokio::spawn(spawned_dispatch_execute(
         prepare,
         recovery,
         engine_handle.clone(),
-        completion_tx,
+        completion_permit,
     ));
     Ok(())
+}
+
+async fn run_prepared_dispatch(
+    app: &mut App,
+    config: &Config,
+    engine_handle: &EngineHandle,
+    prepare: UserDispatchPrepare,
+    recovery: DispatchRecovery,
+) -> Result<()> {
+    // Unit tests that intentionally omit the production completion mailbox
+    // apply the result inline. Production always enters through
+    // `start_user_dispatch`, which reserves a mailbox permit first.
+    let apply = spawned_dispatch_inner(prepare, recovery, engine_handle.clone()).await;
+    apply(app, engine_handle, config)
 }
 
 async fn spawned_dispatch_execute(
     prepare: UserDispatchPrepare,
     recovery: DispatchRecovery,
     engine_handle: EngineHandle,
-    completion_tx: tokio::sync::mpsc::UnboundedSender<crate::tui::app::DispatchApplyFn>,
+    completion_permit: tokio::sync::mpsc::OwnedPermit<crate::tui::app::DispatchApplyFn>,
 ) {
     let apply = spawned_dispatch_inner(prepare, recovery, engine_handle).await;
-    let _ = completion_tx.send(apply);
+    completion_permit.send(apply);
 }
 
 async fn spawned_dispatch_inner(
@@ -9494,10 +9772,20 @@ fn build_dispatch_error_closure(
                             .replace("{count}", &app.queued_message_count().to_string()),
                     );
                 }
+                DispatchRecovery::Draft => {
+                    restore_queued_or_draft_message(app, DispatchRecovery::Draft, prepare.message);
+                    app.status_message = Some(format!(
+                        "Message dispatch failed ({error}); queued draft restored"
+                    ));
+                }
                 DispatchRecovery::Initial => {
-                    app.status_message = Some(
-                        app.tr(MessageId::DispatchFailedInitial)
-                            .replace("{error}", &error),
+                    let initial_error = app
+                        .tr(MessageId::DispatchFailedInitial)
+                        .replace("{error}", &error);
+                    restore_failed_immediate_submit(
+                        app,
+                        prepare.message,
+                        &anyhow::Error::msg(initial_error),
                     );
                 }
             }
@@ -10863,7 +11151,14 @@ async fn apply_command_result(
             }
             AppAction::SendMessage(content) => {
                 let queued = build_queued_message(app, content);
-                submit_or_steer_message(app, config, engine_handle, queued).await?;
+                submit_or_steer_message(
+                    app,
+                    config,
+                    engine_handle,
+                    queued,
+                    DispatchRecovery::Immediate,
+                )
+                .await?;
             }
             AppAction::SetGoalStatus { status, clear } => {
                 let _ = engine_handle
@@ -10884,7 +11179,14 @@ async fn apply_command_result(
                         app.status_message =
                             Some(tr(app.ui_locale, MessageId::VoiceTranscribed).to_string());
                         let queued = build_queued_message(app, content);
-                        submit_or_steer_message(app, config, engine_handle, queued).await?;
+                        submit_or_steer_message(
+                            app,
+                            config,
+                            engine_handle,
+                            queued,
+                            DispatchRecovery::Immediate,
+                        )
+                        .await?;
                     }
                     Err(err) => {
                         app.voice_enabled = false;
@@ -11556,7 +11858,9 @@ fn apply_workspace_runtime_state(app: &mut App, config: &Config, workspace: Path
     app.plugin_registry = app.plugin_registry.rediscover_for_workspace(&workspace);
     app.active_skill = None;
     app.active_skill_provenance = None;
-    app.hooks = HookExecutor::new(
+    // Switching workspace reloads the hook set (project hooks are per-repo)
+    // but stays inside the same TUI session, so the session id is preserved.
+    app.hooks = app.hooks.rebind(
         crate::hooks::HooksConfig::load_with_project(config.hooks_config(), &workspace),
         workspace.clone(),
     );
@@ -12161,8 +12465,37 @@ fn strip_queue_command_prefix(input: &str) -> Option<&str> {
 async fn steer_user_message(
     app: &mut App,
     engine_handle: &EngineHandle,
-    message: QueuedMessage,
-) -> Result<()> {
+    mut message: QueuedMessage,
+) -> Result<bool> {
+    // Same-turn steering is an engine-bound external-user path just like a
+    // fresh dispatch. Run the mutable gate exactly once on the blocking pool
+    // before pause state, history, references, or engine input are touched.
+    if app
+        .hooks
+        .has_hooks_for_event(crate::hooks::HookEvent::MessageSubmit)
+    {
+        let context = app.base_hook_context().with_message(&message.display);
+        let strict_gates = app
+            .hooks
+            .matched_strict_gate_labels(crate::hooks::HookEvent::MessageSubmit, &context);
+        let hooks = app.hooks.clone();
+        let original_text = message.display.clone();
+        let outcome = match tokio::task::spawn_blocking(move || {
+            hooks.execute_message_submit_transform_for_dispatch(&context, &original_text)
+        })
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                tracing::error!(target: "hooks", %error, "steer message_submit executor task was lost");
+                lost_message_submit_outcome(&strict_gates)
+            }
+        };
+        if !apply_message_submit_outcome(app, &mut message, outcome) {
+            return Ok(false);
+        }
+    }
+
     let paused_snapshot = snapshot_steer_paused_state(app);
     let paused_dispatch = plan_paused_command_message(app, &message.display);
     let paused_note = paused_dispatch.note().map(str::to_string);
@@ -12209,7 +12542,7 @@ async fn steer_user_message(
     });
 
     app.status_message = Some("Steering current turn...".to_string());
-    Ok(())
+    Ok(true)
 }
 
 #[derive(Debug, Clone)]
@@ -12249,17 +12582,26 @@ async fn attempt_steer_with_queue_fallback(
     app: &mut App,
     engine_handle: &EngineHandle,
     message: QueuedMessage,
+    recovery: DispatchRecovery,
 ) {
     match steer_user_message(app, engine_handle, message.clone()).await {
-        Ok(()) => {
+        Ok(true) => {
             app.push_status_toast(
                 "Steering into current turn",
                 StatusToastLevel::Info,
                 Some(1_500),
             );
         }
+        Ok(false) => {
+            restore_queued_or_draft_message(app, recovery, message);
+            app.push_status_toast(
+                "message_submit hook blocked the steer; original queue/draft restored",
+                StatusToastLevel::Warning,
+                Some(4_000),
+            );
+        }
         Err(err) => {
-            enqueue_offline_message(app, message);
+            restore_queued_or_draft_message(app, recovery, message);
             let status = format!(
                 "Steer failed ({err}); {} queued follow-up(s) — /queue send <n>",
                 app.queued_message_count()
@@ -12297,13 +12639,16 @@ async fn submit_or_steer_message(
     config: &Config,
     engine_handle: &EngineHandle,
     message: QueuedMessage,
+    recovery: DispatchRecovery,
 ) -> Result<()> {
     match app
         .enter_with_double_tap()
         .unwrap_or(SubmitDisposition::Immediate)
     {
         SubmitDisposition::Immediate => {
-            let _ = dispatch_user_message(app, config, engine_handle, message).await;
+            let _ =
+                dispatch_user_message_with_recovery(app, config, engine_handle, message, recovery)
+                    .await;
             Ok(())
         }
         SubmitDisposition::Queue => {
@@ -12335,7 +12680,7 @@ async fn submit_or_steer_message(
         }
         // Steer: reached only via Ctrl+Enter in a busy state.
         SubmitDisposition::Steer => {
-            attempt_steer_with_queue_fallback(app, engine_handle, message).await;
+            attempt_steer_with_queue_fallback(app, engine_handle, message, recovery).await;
             Ok(())
         }
         SubmitDisposition::QueueFollowUp => queue_follow_up(app, message).await,

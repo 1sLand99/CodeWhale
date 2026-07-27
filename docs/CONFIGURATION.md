@@ -822,15 +822,48 @@ Rules:
   `<workspace>/.deepseek/config.toml`) ignores `instructions` so a cloned repo
   cannot choose arbitrary local files to place into the prompt.
 
+### Hooks
+
+Hooks are a **TUI runtime feature**. They fire from the interactive TUI and
+the engine turn loop it drives; `codewhale exec`, the CLI subcommands, the
+app-server / ACP surfaces, and the `workflow` tool do not fire them.
+
+[`docs/HOOKS.md`](HOOKS.md) is the authoritative reference for all eleven hook
+events — their firing points, environment variables, stdin payloads, timeout
+and background semantics, and which three of them can steer Codewhale. The
+sections below cover the configuration surface and the steering contracts in
+more depth.
+
+Two contract points worth reading there before writing a hook:
+
+- `background = true` means **submitted and never awaited**. The hook still
+  gets the documented stdin payload and the same timeout, but it has no exit
+  code and cannot steer.
+- A condition that references context its event never carries (an `exit_code`
+  condition outside `tool_call_after` / `on_error`, a `mode` condition on
+  `shell_env`, a tool condition on a non-tool event) is **rejected at load**,
+  logged, and shown in `/hooks list`. It does not silently never match.
+  Rejection is per entry, so a broken hook never drops another one that merely
+  shares its `name` or is likewise unnamed.
+
 ### `/hooks` listing
 
 Run `/hooks` (or `/hooks list`) inside the TUI to see every
 configured lifecycle hook grouped by event, including each
-hook's name, command preview, timeout, and condition. The
+hook's name, command preview, effective timeout, and condition. When
+`[hooks].default_timeout_secs` is set it replaces every per-hook
+`timeout_secs`, and the listing shows that effective value and names the
+override rather than echoing the per-hook number. A
+`default_timeout_secs = 0` is rejected at load — it would expire every hook
+in the config immediately — so the override is ignored, per-hook
+`timeout_secs` applies, the listing shows that per-hook value with no
+override provenance, and the rejection appears under `configuration
+problems`. The
 `[hooks].enabled` flag's state is shown at the top so it's
-obvious when hooks are globally suppressed. Hooks are
-configured under `[[hooks.hooks]]` entries — see the existing
-hook-system documentation for the full schema.
+obvious when hooks are globally suppressed, and any entry rejected
+at load is listed under `configuration problems` with the reason.
+Hooks are configured under `[[hooks.hooks]]` entries — see
+[`docs/HOOKS.md`](HOOKS.md) for the full schema.
 
 ### Mutable `message_submit` hooks
 
@@ -853,6 +886,9 @@ The hook receives JSON on stdin:
 {
   "event": "message_submit",
   "text": "original user text",
+  "text_bytes": 18,
+  "text_original_bytes": 18,
+  "text_truncated": false,
   "session_id": "sess_12345678",
   "workspace": "/path/to/workspace",
   "mode": "agent",
@@ -860,6 +896,12 @@ The hook receives JSON on stdin:
   "total_tokens": 1234
 }
 ```
+
+The entire serialized document is capped at 32 KiB. Codewhale retains the
+largest UTF-8-safe `text` prefix that fits after JSON escaping and bounded
+metadata, and the three `text_*` fields make truncation explicit. Immediate
+messages, restored queue entries, merged steers, and prior-hook replacements
+all cross this same serialization boundary.
 
 If the hook exits `0` and prints JSON with a non-empty string `text` field,
 that value replaces the submitted text:
@@ -871,8 +913,9 @@ that value replaces the submitted text:
 Exit `0` with empty stdout, or stdout JSON without `text`, leaves
 the current text unchanged. A JSON `text` field must not be empty;
 `{"text":""}` is treated as invalid stdout and ignored. Exit `2`
-blocks the submission before the turn starts; a `reason` field,
-stderr, or stdout can provide the status message shown in the TUI.
+blocks the submission before the turn starts; a structured `reason` field can
+provide the bounded, redacted status message shown in the TUI. Raw stdout,
+stderr, and process-error text are not copied into denial receipts.
 Other non-zero exits follow the hook's `continue_on_error` setting.
 Timeouts and spawn failures are also surfaced as transient TUI status
 messages when `continue_on_error = true` lets submission continue.
@@ -880,7 +923,9 @@ messages when `continue_on_error = true` lets submission continue.
 Multiple `message_submit` hooks run in config order, and each hook
 receives the text produced by the previous hook. Hooks marked
 `background = true` are observer-only and cannot transform or block
-the message. Existing environment variables remain available.
+the message — they still receive the same stdin payload and the same
+environment, they are simply never awaited. Existing environment
+variables remain available.
 `shell_env` hooks keep their existing `KEY=VALUE` stdout contract;
 JSON stdout contracts exist for `message_submit` (above) and
 `tool_call_before` (below).
@@ -903,7 +948,8 @@ stdout with exit code `0`:
 
 All fields are optional. Empty stdout, non-JSON stdout, and JSON
 without a `decision` field behave exactly as before (allow). An
-unrecognized `decision` string logs a warning and is treated as allow.
+unrecognized `decision` string logs a fixed warning without echoing the
+untrusted value and is treated as allow.
 
 - `deny` blocks the tool; the model receives a permission-denied tool
   result containing `reason`.
@@ -917,8 +963,23 @@ unrecognized `decision` string logs a warning and is treated as allow.
   concatenated.
 
 When multiple hooks match, precedence is deny > ask > allow. Hooks
-marked `background = true` cannot steer tool calls — they exit
-immediately without a captured result.
+marked `background = true` cannot steer tool calls — they are
+submitted and never awaited, so they have no verdict to contribute.
+
+A foreground hook that produced no verdict at all — it hit its timeout, the
+process could not be started, or a strict process exited non-zero without an
+explicit JSON decision — is not treated as permission. If
+*that* hook is configured with `continue_on_error = false`, the outcome
+denies the tool call and the denial names the hook and a bounded reason.
+Strictness is read off the hooks that actually matched this call, so a
+strict gate scoped to another tool cannot deny it, and a lenient hook's
+timeout does not deny merely because a strict hook exists elsewhere in
+config. Under the default `continue_on_error = true` the outcome is
+logged and the call proceeds.
+
+`reason` and `additionalContext` are capped (2 000 characters per field,
+8 000 for the concatenated context of one call) and stripped of control
+characters before they reach the TUI or the model.
 
 Example deny hook:
 
@@ -987,6 +1048,12 @@ observer-only: stdout is ignored, failures are logged as warnings, and
 the hook cannot block user input, mutate the transcript, or change the
 next queued follow-up.
 
+Observer-only UI events share one 32-entry queue and two persistent workers;
+the terminal loop uses non-blocking submission and does not create a thread per
+event. A full queue or unavailable dispatcher drops that observer event and is
+kept as an event-specific error toast, independent of ordinary agent/turn
+status text.
+
 ```toml
 [[hooks.hooks]]
 event = "turn_end"
@@ -1017,6 +1084,7 @@ The payload includes common hook metadata plus post-turn accounting:
     "output_tokens": 180,
     "prompt_cache_hit_tokens": 900,
     "prompt_cache_miss_tokens": 300,
+    "prompt_cache_write_tokens": 0,
     "reasoning_tokens": null,
     "reasoning_replay_tokens": null
   },

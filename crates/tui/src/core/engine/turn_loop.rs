@@ -1824,31 +1824,84 @@ impl Engine {
                         );
                     }
 
+                    // `hook_executor.session_id()`, not `self.session.id`:
+                    // the hook session identity is minted once per TUI launch
+                    // and every other event reports it. Using the engine's own
+                    // session id here made `tool_call_before` the one event
+                    // whose `DEEPSEEK_SESSION_ID` did not match the rest.
                     let hook_context = crate::hooks::HookContext::new()
                         .with_tool_name(&tool_name)
+                        .with_tool_call_id(&tool_id)
                         .with_tool_args(&tool_input)
                         .with_mode(&format!("{mode:?}"))
                         .with_workspace(self.session.workspace.clone())
                         .with_model(&self.config.model)
-                        .with_session_id(&self.session.id);
+                        .with_session_id(hook_executor.session_id());
                     // Run hooks off the Tokio worker thread: `execute()` calls
                     // `child.wait_timeout()` which is a blocking syscall that
                     // would stall all other async tasks on this thread.
                     let executor = hook_executor.clone();
-                    let hook_results = tokio::task::spawn_blocking(move || {
+                    // Collected *before* the spawn, and deliberately not
+                    // derived from the results: if the blocking task dies, the
+                    // results are gone and there is no way to ask afterwards
+                    // which gates were supposed to run. This names exactly the
+                    // strict foreground hooks whose conditions match this call
+                    // — never a hook that would not have run anyway.
+                    let strict_gates = hook_executor.matched_strict_gate_labels(
+                        crate::hooks::HookEvent::ToolCallBefore,
+                        &hook_context,
+                    );
+                    let hook_results = match tokio::task::spawn_blocking(move || {
                         executor.execute(crate::hooks::HookEvent::ToolCallBefore, &hook_context)
                     })
                     .await
-                    .unwrap_or_else(|join_err| {
-                        tracing::error!("Hook executor task panicked: {join_err}");
-                        Vec::new()
-                    });
+                    {
+                        Ok(results) => Some(results),
+                        Err(join_err) => {
+                            tracing::error!(
+                                target: "hooks",
+                                tool = %tool_name,
+                                strict_gates = strict_gates.len(),
+                                "hook executor task panicked or was cancelled: {join_err}"
+                            );
+                            // `None`, not `Vec::new()`. An empty result set is
+                            // what "every hook matched and allowed" looks
+                            // like, so returning one here let a lost executor
+                            // silently open every strict gate configured for
+                            // this call.
+                            None
+                        }
+                    };
                     // #3026: fold all foreground hook results into one
                     // decision: deny (exit code 2 or JSON) > ask > allow;
                     // last `updatedInput` writer wins; `additionalContext`
                     // strings are concatenated.
-                    let fold = fold_tool_call_before_results(&hook_results);
-                    if let Some(reason) = fold.deny_reason {
+                    let fold = match &hook_results {
+                        Some(results) => fold_tool_call_before_results(results),
+                        None => lost_executor_fold(&strict_gates),
+                    };
+                    if !fold.unavailable.is_empty() {
+                        tracing::warn!(
+                            target: "hooks",
+                            tool = %tool_name,
+                            gates = %fold.unavailable.join("; "),
+                            blocking = fold.blocking_unavailable.len(),
+                            "tool_call_before hook(s) returned no verdict"
+                        );
+                    }
+                    // A gate that timed out or could not start returned no
+                    // verdict. Fail closed only for the gates that *matched
+                    // this call* and declared `continue_on_error = false`:
+                    // silently allowing those is the one outcome the operator
+                    // ruled out, while a lenient hook's timeout — or an
+                    // unrelated strict hook that never matched — must not deny.
+                    if !fold.blocking_unavailable.is_empty() {
+                        blocked_error = Some(ToolError::permission_denied(format!(
+                            "ToolCallBefore hook returned no verdict for tool '{tool_name}' \
+                             and `continue_on_error = false` is configured: {}",
+                            fold.blocking_unavailable.join("; ")
+                        )));
+                    } else if let Some(reason) = fold.deny_reason {
                         blocked_error = Some(ToolError::permission_denied(format!(
                             "ToolCallBefore hook denied tool '{tool_name}': {reason}"
                         )));
@@ -2923,6 +2976,10 @@ impl Engine {
 
                         // #3026: pipe `additionalContext` from tool_call_before
                         // hooks back to the model alongside the tool result.
+                        // Sanitized per field at the parser and bounded in
+                        // aggregate by the fold, so what lands here is already
+                        // capped — the number of tokens this adds to the turn
+                        // is knowable rather than whatever the hook printed.
                         let output_for_context = match hook_contexts.get(&outcome.id) {
                             Some(context) => {
                                 format!("{output_for_context}\n\n[hook context] {context}")
@@ -3560,47 +3617,145 @@ struct ToolCallHookFold {
     updated_input: Option<serde_json::Value>,
     /// Concatenated `additionalContext` strings from all hooks.
     additional_context: Option<String>,
+    /// Foreground hooks that returned no verdict (timed out, failed to start,
+    /// or a strict process exited unsuccessfully without a JSON verdict).
+    /// Bounded, redacted labels only — `name: reason`, never stdout, stdin
+    /// payload, or the resolved command path.
+    unavailable: Vec<String>,
+    /// The subset of [`Self::unavailable`] whose hooks declared
+    /// `continue_on_error = false`.
+    ///
+    /// Only these deny the call. Strictness is read off the results, which are
+    /// exactly the hooks whose conditions matched *this* call — a strict
+    /// `write_file` gate that never matched an `exec_shell` call has no say in
+    /// whether that call proceeds.
+    blocking_unavailable: Vec<String>,
+}
+
+/// Longest hook name kept in a no-verdict receipt. Shared with every other
+/// surface that prints a hook name, so one `name` cannot be bounded here and
+/// unbounded in `/hooks list`.
+#[cfg(test)]
+const HOOK_RECEIPT_NAME_MAX_CHARS: usize = crate::hooks::HOOK_LABEL_MAX_CHARS;
+/// Longest failure detail kept in a no-verdict receipt.
+const HOOK_RECEIPT_DETAIL_MAX_CHARS: usize = 160;
+
+/// One `name: detail` line for a gate that could not answer.
+///
+/// Both halves are sanitized and truncated: the name is operator-supplied and
+/// otherwise unbounded, and the detail is a runtime error string. Neither is
+/// allowed to smuggle escape sequences or an unbounded blob into the TUI and
+/// the model-facing denial.
+fn hook_unavailable_label(result: &crate::hooks::HookResult) -> String {
+    hook_unavailable_receipt(result.name.as_deref(), result.error.as_deref())
+}
+
+/// One receipt line, built only from parts this module chose.
+///
+/// The name goes through the shared label sanitizer, and the detail goes
+/// through [`crate::hooks::generic_unavailable_detail`], which re-renders a
+/// fixed set of recognized failures and collapses everything else to a generic
+/// phrase. That second step is the point: it is a boundary rather than a
+/// restatement, so a future producer that puts a command line or a resolved
+/// path into `HookResult::error` cannot leak it here just by not being
+/// genericized at the source.
+fn hook_unavailable_receipt(name: Option<&str>, error: Option<&str>) -> String {
+    let name = crate::hooks::sanitize_hook_label(name);
+    let detail = crate::hooks::sanitize_hook_line(
+        &crate::hooks::generic_unavailable_detail(error),
+        HOOK_RECEIPT_DETAIL_MAX_CHARS,
+    );
+    format!("{name}: {detail}")
+}
+
+/// The fold to use when the hook executor task was lost (panic or cancellation)
+/// and produced no results at all.
+///
+/// Every strict gate that matched this call is reported as unavailable *and*
+/// blocking. This is the fail-closed direction, and it is bounded to the gates
+/// that were actually going to run: with no strict gate configured for this
+/// context the call proceeds exactly as before, because nobody asked for it not
+/// to.
+fn lost_executor_fold(strict_gates: &[String]) -> ToolCallHookFold {
+    let labels: Vec<String> = strict_gates
+        .iter()
+        .map(|name| hook_unavailable_receipt(Some(name), Some("hook executor did not run")))
+        .collect();
+    ToolCallHookFold {
+        unavailable: labels.clone(),
+        blocking_unavailable: labels,
+        ..ToolCallHookFold::default()
+    }
 }
 
 fn fold_tool_call_before_results(results: &[crate::hooks::HookResult]) -> ToolCallHookFold {
-    let mut fold = ToolCallHookFold::default();
+    // A foreground hook that never produced an exit code (timeout/spawn
+    // failure) returned no verdict at all. A strict hook that exited non-zero
+    // without an explicit JSON verdict also did not answer its gate: process
+    // failure is not permission. Record both separately from "allowed".
+    let mut unavailable = Vec::new();
+    let mut blocking_unavailable = Vec::new();
+    for result in results.iter().filter(|result| {
+        if result.background {
+            return false;
+        }
+        if result.observed_exit_code().is_none() {
+            return true;
+        }
+        result.strict
+            && !result.success
+            && result.observed_exit_code() != Some(2)
+            && crate::hooks::parse_tool_call_before_stdout(&result.stdout)
+                .decision
+                .is_none()
+    }) {
+        let label = hook_unavailable_label(result);
+        if result.strict {
+            blocking_unavailable.push(label.clone());
+        }
+        unavailable.push(label);
+    }
+    let mut fold = ToolCallHookFold {
+        unavailable,
+        blocking_unavailable,
+        ..ToolCallHookFold::default()
+    };
 
     // Legacy hard deny: exit code 2 wins regardless of stdout (backwards
     // compatible with pre-#3026 hooks).
-    if let Some(denial) = results.iter().find(|result| result.exit_code == Some(2)) {
-        let reason = denial
-            .stdout
-            .trim()
-            .lines()
-            .next()
-            .filter(|line| !line.is_empty())
-            .or_else(|| {
-                denial
-                    .stderr
-                    .trim()
-                    .lines()
-                    .next()
-                    .filter(|line| !line.is_empty())
-            })
-            .or(denial.error.as_deref())
-            .unwrap_or("ToolCallBefore hook denied tool execution");
-        fold.deny_reason = Some(reason.to_string());
+    if let Some(denial) = results
+        .iter()
+        .find(|result| result.observed_exit_code() == Some(2))
+    {
+        // Exit 2 is an explicit deny, but raw stdout/stderr/error are process
+        // diagnostics and can contain commands, paths, and secrets. Persist
+        // only a structured JSON reason after the denial redaction boundary.
+        fold.deny_reason = Some(
+            crate::hooks::parse_tool_call_before_stdout(&denial.stdout)
+                .reason
+                .map_or_else(
+                    || "ToolCallBefore hook denied tool execution".to_string(),
+                    |reason| crate::hooks::sanitize_hook_denial_reason(&reason),
+                ),
+        );
         return fold;
     }
 
     for result in results {
-        // Background hooks return immediately with no process result and
-        // cannot steer (the caller warns about that configuration).
-        if result.exit_code.is_none() {
+        // Background hooks are submitted, never awaited, so they have no
+        // verdict to fold (the caller warns about that configuration). The
+        // same is true of a foreground hook that timed out — that case is
+        // already recorded in `fold.unavailable` above.
+        if result.observed_exit_code().is_none() {
             continue;
         }
         let parsed = crate::hooks::parse_tool_call_before_stdout(&result.stdout);
         match parsed.decision {
             Some(crate::hooks::ToolCallDecision::Deny) => {
-                fold.deny_reason =
-                    Some(parsed.reason.unwrap_or_else(|| {
-                        "ToolCallBefore hook denied tool execution".to_string()
-                    }));
+                fold.deny_reason = Some(parsed.reason.map_or_else(
+                    || "ToolCallBefore hook denied tool execution".to_string(),
+                    |reason| crate::hooks::sanitize_hook_denial_reason(&reason),
+                ));
                 return fold;
             }
             Some(crate::hooks::ToolCallDecision::Ask) => fold.requires_approval = true,
@@ -3618,6 +3773,15 @@ fn fold_tool_call_before_results(results: &[crate::hooks::HookResult]) -> ToolCa
                 None => fold.additional_context = Some(context),
             }
         }
+    }
+    // Each hook's contribution is already bounded; the *sum* is not. Ten hooks
+    // at the per-field cap would still be 20k characters appended to one tool
+    // result, which is real context budget the model pays for.
+    if let Some(context) = fold.additional_context.take() {
+        fold.additional_context = Some(crate::hooks::sanitize_hook_text(
+            &context,
+            crate::hooks::HOOK_CONTEXT_AGGREGATE_MAX_CHARS,
+        ));
     }
     fold
 }
@@ -4222,7 +4386,7 @@ mod tests {
     }
 
     #[test]
-    fn hook_gate_denial_reason_can_come_from_stdout() {
+    fn hook_gate_captures_legacy_stdout_but_receipt_does_not_persist_it() {
         use crate::hooks::{Hook, HookContext, HookEvent, HookExecutor, HooksConfig};
 
         let deny_cmd = if cfg!(windows) {
@@ -4242,6 +4406,11 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].exit_code, Some(2));
         assert!(results[0].stdout.contains("security"));
+        let fold = fold_tool_call_before_results(&results);
+        assert_eq!(
+            fold.deny_reason.as_deref(),
+            Some("ToolCallBefore hook denied tool execution")
+        );
     }
 
     // ── #3026: JSON decision contract fold ─────────────────────────────────
@@ -4249,12 +4418,48 @@ mod tests {
     fn hook_result(stdout: &str, exit_code: Option<i32>) -> crate::hooks::HookResult {
         crate::hooks::HookResult {
             name: None,
+            background: false,
+            strict: false,
             success: exit_code == Some(0),
             exit_code,
             stdout: stdout.to_string(),
             stderr: String::new(),
             duration: Duration::from_millis(1),
             error: None,
+        }
+    }
+
+    /// A background submission: no exit code, no captured output, and flagged
+    /// so the fold can tell it apart from a foreground hook that timed out.
+    fn background_hook_result(name: &str) -> crate::hooks::HookResult {
+        crate::hooks::HookResult {
+            name: Some(name.to_string()),
+            background: true,
+            strict: false,
+            success: true,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            duration: Duration::from_millis(1),
+            error: None,
+        }
+    }
+
+    /// A foreground hook that never produced a verdict.
+    ///
+    /// `strict` is the hook's own `continue_on_error = false`, carried on the
+    /// result because only the results tell you which hooks matched this call.
+    fn timed_out_hook_result(name: &str, strict: bool) -> crate::hooks::HookResult {
+        crate::hooks::HookResult {
+            name: Some(name.to_string()),
+            background: false,
+            strict,
+            success: false,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            duration: Duration::from_secs(1),
+            error: Some("Hook timed out after 1s".to_string()),
         }
     }
 
@@ -4312,13 +4517,270 @@ mod tests {
 
     #[test]
     fn hook_fold_background_results_cannot_steer() {
-        // Background hooks return exit_code: None immediately — their stdout
-        // (if any were captured) must not deny, ask, or rewrite input.
-        let fold = fold_tool_call_before_results(&[hook_result(
-            r#"{"decision":"deny","reason":"too late"}"#,
-            None,
-        )]);
+        // A background hook is submitted and never awaited, so it has no
+        // verdict to contribute — and it is not an "unavailable" gate either,
+        // because nothing was ever supposed to wait for it.
+        let fold = fold_tool_call_before_results(&[background_hook_result("notify")]);
         assert_eq!(fold, ToolCallHookFold::default());
+        assert!(fold.unavailable.is_empty());
+    }
+
+    #[test]
+    fn hook_fold_records_a_foreground_gate_that_returned_no_verdict() {
+        // A timed-out gate must not read as permission. The fold records it so
+        // the caller can fail closed when `continue_on_error = false`.
+        let fold = fold_tool_call_before_results(&[timed_out_hook_result("gate", true)]);
+        assert!(
+            fold.deny_reason.is_none(),
+            "the fold itself does not decide"
+        );
+        assert_eq!(fold.unavailable.len(), 1);
+        assert!(fold.unavailable[0].contains("gate"));
+        assert!(fold.unavailable[0].contains("timed out"));
+        assert_eq!(fold.blocking_unavailable, fold.unavailable);
+    }
+
+    #[test]
+    fn strict_nonzero_exit_without_json_verdict_fails_closed() {
+        let mut failed = hook_result("diagnostic only", Some(1));
+        failed.name = Some("strict-gate".to_string());
+        failed.strict = true;
+        let fold = fold_tool_call_before_results(&[failed]);
+        assert_eq!(fold.blocking_unavailable.len(), 1, "{fold:?}");
+        assert!(fold.blocking_unavailable[0].contains("strict-gate"));
+        assert!(!fold.blocking_unavailable[0].contains("diagnostic"));
+
+        let mut answered = hook_result(r#"{"decision":"allow"}"#, Some(1));
+        answered.strict = true;
+        let fold = fold_tool_call_before_results(&[answered]);
+        assert!(fold.blocking_unavailable.is_empty(), "{fold:?}");
+    }
+
+    /// The bug this pins: fail-closed used to be answered per *event* — "is
+    /// any strict hook configured for `tool_call_before`?" — so a lenient
+    /// hook's timeout denied the call whenever some unrelated strict hook
+    /// existed, even one whose condition never matched this tool.
+    #[test]
+    fn hook_fold_does_not_block_when_the_unavailable_gate_is_lenient() {
+        let fold = fold_tool_call_before_results(&[timed_out_hook_result("lenient", false)]);
+        assert_eq!(fold.unavailable.len(), 1, "still recorded and logged");
+        assert!(
+            fold.blocking_unavailable.is_empty(),
+            "a lenient hook that could not answer must not deny the call"
+        );
+        assert!(fold.deny_reason.is_none());
+    }
+
+    #[test]
+    fn hook_fold_blocks_only_on_the_strict_gate_among_several() {
+        let fold = fold_tool_call_before_results(&[
+            timed_out_hook_result("lenient", false),
+            timed_out_hook_result("strict", true),
+        ]);
+        assert_eq!(fold.unavailable.len(), 2);
+        assert_eq!(fold.blocking_unavailable.len(), 1);
+        assert!(fold.blocking_unavailable[0].contains("strict"));
+    }
+
+    #[test]
+    fn hook_fold_unavailable_labels_carry_no_command_or_payload() {
+        let mut result = timed_out_hook_result("gate", true);
+        result.stdout = "/Users/someone/secret/path --token=abc".to_string();
+        result.stderr = "leaky stderr".to_string();
+        let fold = fold_tool_call_before_results(&[result]);
+        let label = &fold.unavailable[0];
+        assert!(!label.contains("secret"), "{label}");
+        assert!(!label.contains("token"), "{label}");
+        assert!(!label.contains("leaky"), "{label}");
+    }
+
+    /// The receipt is claimed to be bounded and one line, and the hook `name`
+    /// is operator-supplied text of arbitrary length and content. (The other
+    /// half of this claim — that a spawn failure does not name the command or
+    /// path in the first place — lives in `hooks::executor`, which is where
+    /// that string is produced.)
+    #[test]
+    fn hook_fold_unavailable_labels_are_bounded_and_stripped() {
+        let mut result =
+            timed_out_hook_result(&format!("\u{1b}[2Jgate\n{}", "n".repeat(4_000)), true);
+        result.error = Some(format!("Hook timed out after 1s\n{}", "e".repeat(4_000)));
+        let fold = fold_tool_call_before_results(&[result]);
+        let label = &fold.unavailable[0];
+
+        assert!(
+            label.chars().count()
+                <= HOOK_RECEIPT_NAME_MAX_CHARS + HOOK_RECEIPT_DETAIL_MAX_CHARS + 40,
+            "receipt is not bounded: {} chars",
+            label.chars().count()
+        );
+        assert!(!label.contains('\u{1b}'), "escape sequence survived");
+        assert!(!label.contains('\n'), "receipt must stay one line");
+        assert!(label.contains("timed out"), "{label}");
+    }
+
+    /// The runtime side of the same claim, end to end: a real strict gate that
+    /// cannot answer produces a receipt that denies the call, names the hook,
+    /// and carries nothing else.
+    #[cfg(unix)]
+    #[test]
+    fn timed_out_strict_gate_produces_a_bounded_receipt_from_the_executor() {
+        use crate::hooks::{Hook, HookContext, HookEvent, HookExecutor, HooksConfig};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let secret_path = dir.path().join("s3cret-token-dir");
+        let mut hook = Hook::new(
+            HookEvent::ToolCallBefore,
+            &format!("cd {} 2>/dev/null; sleep 30", secret_path.display()),
+        )
+        .with_name("gate")
+        .with_timeout(1);
+        hook.continue_on_error = false;
+        let executor = HookExecutor::new(
+            HooksConfig {
+                enabled: true,
+                hooks: vec![hook],
+                ..HooksConfig::default()
+            },
+            dir.path().to_path_buf(),
+        );
+
+        let results = executor.execute(
+            HookEvent::ToolCallBefore,
+            &HookContext::new().with_tool_name("exec_shell"),
+        );
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0].strict,
+            "the hook declared continue_on_error=false"
+        );
+
+        let fold = fold_tool_call_before_results(&results);
+        assert_eq!(fold.blocking_unavailable.len(), 1, "{fold:?}");
+        let receipt = &fold.blocking_unavailable[0];
+        assert!(receipt.starts_with("gate: "), "{receipt}");
+        assert!(receipt.contains("timed out"), "{receipt}");
+        assert!(!receipt.contains("s3cret-token-dir"), "{receipt}");
+        assert!(!receipt.contains("sleep"), "{receipt}");
+    }
+
+    /// The join-failure hole: when the `spawn_blocking` hook task panicked or
+    /// was cancelled, the results became `Vec::new()` — which is precisely what
+    /// "every matching hook ran and allowed the call" looks like. Every strict
+    /// gate configured for that call failed *open*, silently.
+    #[test]
+    fn lost_executor_fails_closed_for_every_matched_strict_gate() {
+        let fold = lost_executor_fold(&["shell-gate".to_string(), "audit".to_string()]);
+        assert_ne!(
+            fold,
+            ToolCallHookFold::default(),
+            "a lost executor must not read as an allow"
+        );
+        assert_eq!(fold.blocking_unavailable.len(), 2);
+        assert_eq!(fold.unavailable, fold.blocking_unavailable);
+        assert!(fold.blocking_unavailable[0].starts_with("shell-gate: "));
+        assert!(
+            fold.blocking_unavailable[0].contains("hook executor did not run"),
+            "{:?}",
+            fold.blocking_unavailable
+        );
+        // It denies via the same field the caller already checks, so the
+        // receipt text and the deny path are shared with the timeout case.
+        assert!(fold.deny_reason.is_none());
+    }
+
+    /// Fail-closed is scoped to the gates that would have run. With no strict
+    /// gate matching this call, a lost executor changes nothing — the operator
+    /// never asked for this call to be blocked.
+    #[test]
+    fn lost_executor_does_not_deny_when_no_strict_gate_matched() {
+        assert_eq!(lost_executor_fold(&[]), ToolCallHookFold::default());
+    }
+
+    #[test]
+    fn lost_executor_receipts_are_bounded_and_defanged() {
+        let noisy = format!("\u{1b}[2Jgate\n{}", "g".repeat(4_000));
+        let fold = lost_executor_fold(&[noisy]);
+        let receipt = &fold.blocking_unavailable[0];
+        assert!(!receipt.contains('\u{1b}'), "{receipt}");
+        assert!(!receipt.contains('\n'), "{receipt}");
+        assert!(
+            receipt.chars().count()
+                <= HOOK_RECEIPT_NAME_MAX_CHARS + HOOK_RECEIPT_DETAIL_MAX_CHARS + 40,
+            "{} chars",
+            receipt.chars().count()
+        );
+    }
+
+    /// The receipt detail is an allowlist boundary, not a copy of whatever the
+    /// producer put in `error`. A future path that stops genericizing at the
+    /// source still cannot leak a path or a token through here.
+    #[test]
+    fn unavailable_receipt_scrubs_an_unrecognized_error_string() {
+        let mut result = timed_out_hook_result("gate", true);
+        result.error = Some("exec /Users/someone/.aws/credentials --token=SECRET failed".into());
+        let fold = fold_tool_call_before_results(&[result]);
+        let receipt = &fold.blocking_unavailable[0];
+        assert_eq!(receipt, "gate: hook returned no verdict");
+        assert!(!receipt.contains("SECRET"));
+        assert!(!receipt.contains('/'));
+    }
+
+    #[test]
+    fn hook_fold_still_denies_when_another_hook_returned_a_verdict() {
+        // An unavailable gate does not mask a real deny from a hook that did
+        // answer.
+        let fold = fold_tool_call_before_results(&[
+            timed_out_hook_result("slow", true),
+            hook_result(r#"{"decision":"deny","reason":"policy"}"#, Some(0)),
+        ]);
+        assert_eq!(fold.deny_reason.as_deref(), Some("policy"));
+        assert_eq!(fold.unavailable.len(), 1);
+    }
+
+    #[test]
+    fn hook_fold_bounds_context_and_drops_unstructured_denial_output() {
+        let big = "c".repeat(crate::hooks::HOOK_TEXT_FIELD_MAX_CHARS * 2);
+        let results: Vec<crate::hooks::HookResult> = (0..12)
+            .map(|_| {
+                hook_result(
+                    &serde_json::json!({ "additionalContext": big }).to_string(),
+                    Some(0),
+                )
+            })
+            .collect();
+        let fold = fold_tool_call_before_results(&results);
+        let context = fold.additional_context.expect("context kept");
+        assert!(
+            context.chars().count() <= crate::hooks::HOOK_CONTEXT_AGGREGATE_MAX_CHARS + 16,
+            "aggregate context is unbounded: {} chars",
+            context.chars().count()
+        );
+
+        // Legacy exit-2 stdout is process output, not safe receipt copy.
+        let mut shouting = hook_result(&format!("\u{1b}[2Jdenied {big}"), Some(2));
+        shouting.success = false;
+        let fold = fold_tool_call_before_results(&[shouting]);
+        let reason = fold.deny_reason.expect("denied");
+        assert_eq!(reason, "ToolCallBefore hook denied tool execution");
+        assert!(!reason.contains(&big));
+    }
+
+    #[test]
+    fn hook_fold_redacts_structured_denial_secrets_paths_and_commands() {
+        let stdout = serde_json::json!({
+            "decision": "deny",
+            "reason": "blocked /Users/alice/private --command token=SUPERSECRET safe"
+        })
+        .to_string();
+        let fold = fold_tool_call_before_results(&[hook_result(&stdout, Some(0))]);
+        assert_eq!(
+            fold.deny_reason.as_deref(),
+            Some("blocked [path] [argument] [secret] safe")
+        );
+        let receipt = fold.deny_reason.unwrap_or_default();
+        assert!(!receipt.contains("alice"));
+        assert!(!receipt.contains("SUPERSECRET"));
+        assert!(!receipt.contains("--command"));
     }
 
     #[test]

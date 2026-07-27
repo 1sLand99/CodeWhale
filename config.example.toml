@@ -1090,18 +1090,55 @@ default_text_model = "deepseek-ai/deepseek-v4-pro"
 # Hooks run shell commands on lifecycle events (session start/end, tool calls, etc.).
 # Configure as `[[hooks.hooks]]` under a `[hooks]` table.
 #
-# Available events: session_start, session_end, message_submit,
-# tool_call_before, tool_call_after, mode_change, on_error,
+# SCOPE: hooks are a TUI runtime feature. They fire from the interactive TUI
+# and the engine turn loop it drives. `codewhale exec`, the CLI subcommands,
+# the app-server / ACP surfaces, and the `workflow` tool do NOT fire them.
+#
+# Available events (all 11): session_start, session_end, message_submit,
+# tool_call_before, tool_call_after, mode_change, on_error, turn_end,
 # subagent_spawn, subagent_complete, shell_env.
+# See docs/HOOKS.md for the per-event payload, env var, and steering contract.
+#
+# `message_submit`, `tool_call_before`, and `shell_env` are the only events
+# whose result can change what Codewhale does. The rest are observer-only —
+# which means their RESULT is ignored, not that the command is harmless. Every
+# hook is an arbitrary shell command running with your credentials.
+#
+# Note: `default_timeout_secs` below OVERRIDES each hook's own `timeout_secs`.
+# Leave it unset if you want per-hook timeouts to apply. `/hooks list` shows the
+# effective value and names the override. `default_timeout_secs = 0` is
+# REJECTED at load — it would expire every hook immediately — and per-hook
+# `timeout_secs` applies instead. The timeout applies to background hooks too:
+# on expiry the whole process group is killed and then reaped, best-effort,
+# with a bounded reap wait (see docs/HOOKS.md → Timeouts).
+#
+# `background = true` means submitted and never awaited. The hook still gets
+# the documented stdin payload, environment, and timeout — it just has no exit
+# code, so it cannot steer. `shell_env` ignores the flag and always runs in the
+# foreground because its stdout is the contract.
+#
+# A condition that references context its event never carries is REJECTED at
+# load, logged, and shown by `/hooks list` — for example an `exit_code`
+# condition outside `tool_call_after` / `on_error`, or a `mode` condition on
+# `shell_env`. Rejection is per entry: a broken hook never drops another one
+# that happens to share its name. `on_error` fires for tool failures with the
+# tool name, call id, and reported exit code attached, so tool-scoped and
+# exit-code-scoped `on_error` hooks are supported.
 #
 # `shell_env` (#456) is special: the hook runs immediately before each
 # `exec_shell` invocation and its stdout is parsed as `KEY=VALUE\n` lines.
-# Those vars are merged into the spawned process environment (later hooks
-# override earlier ones). Use this for ephemeral credentials, per-skill
-# PATH adjustments, or short-lived tokens. The resolved KEY names (NEVER
-# values) are written to `~/.codewhale/audit.log` so each session can be
-# reconciled later. Hook failure / timeout simply contributes no vars —
-# it does not abort the shell call.
+# Those vars are applied on top of `exec_shell`'s environment. For LOCAL
+# execution that environment is built from a fixed allowlist of parent
+# variables (PATH, HOME, LANG, TERM, …) — an ambient secret exported in your
+# terminal is NOT forwarded to `exec_shell` by itself, so this hook is the
+# supported way to supply one. If an external sandbox backend is configured,
+# that allowlist does NOT apply: the backend owns its base environment and your
+# `shell_env` values are TRANSMITTED to it. Later hooks override
+# earlier ones. Use this for ephemeral credentials, per-skill PATH adjustments,
+# or short-lived tokens. The resolved KEY names (NEVER values) are written to
+# `~/.codewhale/audit.log` so each session can be reconciled later. Hook
+# failure / timeout simply contributes no vars — it does not abort the shell
+# call.
 #
 # [hooks]
 # enabled = true
