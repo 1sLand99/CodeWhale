@@ -1944,6 +1944,8 @@ mod tests {
 
     #[test]
     fn minimax_requires_an_explicit_saved_billing_mode() {
+        let _lock = crate::test_support::lock_test_env();
+        let _env = minimax_env_guard();
         for provider in [ApiProvider::Minimax, ApiProvider::MinimaxAnthropic] {
             assert_eq!(
                 for_route(&Config::default(), provider),
