@@ -227,6 +227,11 @@ struct SetupRuntimeFacts {
     remote_mode_result: String,
     remote_command_provider: String,
     remote_result: String,
+    /// The four observed remote modes (#3409). Empty only before facts load.
+    remote_modes: Vec<remote::RemoteModeFact>,
+    /// True when a mode is missing a token or config. Recorded as
+    /// `NeedsAction`, which by contract never blocks the ready screen.
+    remote_needs_action: bool,
     persistence: SetupPersistenceFacts,
     default_mode: String,
     approval_policy_value: String,
@@ -280,6 +285,8 @@ impl Default for SetupRuntimeFacts {
             remote_mode_result: "remote setup mode not loaded".to_string(),
             remote_command_provider: "deepseek".to_string(),
             remote_result: "remote runtime not loaded".to_string(),
+            remote_modes: Vec::new(),
+            remote_needs_action: false,
             persistence: SetupPersistenceFacts::default(),
             default_mode: "agent".to_string(),
             approval_policy_value: "on-request".to_string(),
@@ -448,6 +455,7 @@ impl SetupRuntimeFacts {
         let tools_mcp_skills_path_display = tools_mcp.skills_path_display;
         let tools_mcp_plugins_path_display = tools_mcp.plugins_path_display;
         let remote = SetupRemoteFacts::from_app(app);
+        let remote_needs_action = remote.needs_action();
         let constitution_autonomy = UserConstitution::load()
             .ok()
             .and_then(|load| {
@@ -501,6 +509,8 @@ impl SetupRuntimeFacts {
             remote_mode_result: remote.mode_result,
             remote_command_provider: remote.command_provider,
             remote_result: remote.result,
+            remote_needs_action,
+            remote_modes: remote.modes,
             persistence,
             default_mode: app.mode.as_setting().to_string(),
             approval_policy_value: config
@@ -2517,11 +2527,22 @@ impl SetupWizardView {
         })
     }
 
+    /// Record the remote step honestly (#3409).
+    ///
+    /// Local-only always works, so Enter alone settles the step — a user who
+    /// never wants remote access is finished in one key. When a *reachable*
+    /// mode is missing a token or config the entry is `NeedsAction`, which the
+    /// setup report and doctor inherit verbatim and which never blocks ready.
     fn commit_remote_runtime_review(&mut self) -> ViewAction {
         let mut state = self.state.clone();
+        let status = if self.facts.remote_needs_action {
+            StepStatus::NeedsAction
+        } else {
+            StepStatus::Verified
+        };
         state.set_step(
             SetupStep::RemoteRuntime,
-            StepEntry::new(StepStatus::Verified, false, CONSTITUTION_CHECKPOINT_VERSION)
+            StepEntry::new(status, false, CONSTITUTION_CHECKPOINT_VERSION)
                 .with_result(self.facts.remote_result.clone()),
         );
         self.state = state.clone();
@@ -3470,29 +3491,36 @@ impl SetupWizardView {
         ]
     }
 
+    /// #3409: one row per mode, each carrying its own observed status. The
+    /// registry counts stay available in the preview; the card itself answers
+    /// "where can this be reached from?" in four plain lines.
     fn remote_runtime_detail_lines(&self) -> Vec<Line<'static>> {
-        vec![
-            self.detail_row(
-                MessageId::SetupRemoteCloudsLabel,
-                &self.facts.remote_clouds_result,
-            ),
-            self.detail_row(
-                MessageId::SetupRemoteBridgesLabel,
-                &self.facts.remote_bridges_result,
-            ),
-            self.detail_row(
-                MessageId::SetupRemoteProvidersLabel,
-                &self.facts.remote_providers_result,
-            ),
-            self.detail_row(
+        let mut lines = Vec::new();
+        for fact in &self.facts.remote_modes {
+            lines.push(self.detail_row(
+                fact.mode.label_id(),
+                &format!(
+                    "{} · {}",
+                    tr(self.locale, fact.status.label_id()),
+                    fact.detail
+                ),
+            ));
+        }
+        if lines.is_empty() {
+            lines.push(self.detail_row(
                 MessageId::SetupRemoteModeLabel,
                 &self.facts.remote_mode_result,
-            ),
-            self.setup_review_hint_line(
-                MessageId::SetupRemoteReviewHint,
-                Some("Press R to preview."),
-            ),
-        ]
+            ));
+        }
+        lines.push(self.detail_row(
+            MessageId::SetupRemoteProvidersLabel,
+            &self.facts.remote_providers_result,
+        ));
+        lines.push(self.setup_review_hint_line(
+            MessageId::SetupRemoteReviewHint,
+            Some("Press R to preview (nothing is written). Enter keeps local-only."),
+        ));
+        lines
     }
 
     fn persistence_detail_lines(&self) -> Vec<Line<'static>> {
@@ -7338,16 +7366,27 @@ mod tests {
         assert!(!content.contains("sk-"));
     }
 
+    /// #3409: the card answers "where can this be reached from?" with one row
+    /// per observed mode. The registry counts it used to list are still
+    /// reachable — they moved into the `R` preview — so the card itself stays
+    /// four plain lines plus the active route.
     #[test]
-    fn remote_runtime_detail_lines_show_read_only_registry_facts() {
+    fn remote_runtime_detail_lines_show_one_row_per_observed_mode() {
         let facts = SetupRuntimeFacts {
-            remote_clouds_result: "3 cloud targets: lighthouse, azure, digitalocean".to_string(),
-            remote_bridges_result: "2 chat bridges: feishu, telegram".to_string(),
+            remote_modes: vec![
+                remote::RemoteModeFact {
+                    mode: remote::RemoteMode::LocalOnly,
+                    status: remote::RemoteModeStatus::Ready,
+                    detail: "this machine only; nothing is exposed".to_string(),
+                },
+                remote::RemoteModeFact {
+                    mode: remote::RemoteMode::MobileLan,
+                    status: remote::RemoteModeStatus::Disabled,
+                    detail: "runtime binds 127.0.0.1 only".to_string(),
+                },
+            ],
             remote_providers_result:
                 "12 providers from the provider registry; active route deepseek / deepseek-chat"
-                    .to_string(),
-            remote_mode_result:
-                "generate-only bundle; --apply not implemented; default port 7878, workers 2"
                     .to_string(),
             ..SetupRuntimeFacts::default()
         };
@@ -7360,13 +7399,55 @@ mod tests {
 
         let text = lines_to_text(view.remote_runtime_detail_lines());
 
-        assert!(text.contains("Cloud targets:"));
-        assert!(text.contains("lighthouse"));
-        assert!(text.contains("Chat bridges:"));
-        assert!(text.contains("feishu"));
+        assert!(text.contains("This machine only:"));
+        assert!(text.contains("ready · this machine only; nothing is exposed"));
+        assert!(text.contains("Phone on your network:"));
+        assert!(text.contains("not available · runtime binds 127.0.0.1 only"));
+        assert!(text.contains("Providers:"));
+        assert!(text.contains("deepseek-chat"));
+        // Local-only is always usable, so the hint says Enter alone is enough.
+        assert!(text.contains("Enter keeps local-only."));
+    }
+
+    /// Before facts load there are no modes to show; the card falls back to the
+    /// single mode line rather than rendering an empty panel.
+    #[test]
+    fn remote_runtime_detail_lines_fall_back_when_no_mode_is_observed_yet() {
+        let facts = SetupRuntimeFacts {
+            remote_mode_result: "remote setup mode not loaded".to_string(),
+            ..SetupRuntimeFacts::default()
+        };
+        let view = SetupWizardView::new_at_with_facts(
+            SetupState::default(),
+            Locale::En,
+            SetupStep::RemoteRuntime,
+            facts,
+        );
+
+        let text = lines_to_text(view.remote_runtime_detail_lines());
         assert!(text.contains("Remote mode:"));
-        assert!(text.contains("--apply not implemented"));
-        assert!(text.contains("Enter records this setup snapshot. Press R to preview."));
+        assert!(text.contains("remote setup mode not loaded"));
+    }
+
+    /// A missing token records `NeedsAction` — surfaced, never blocking.
+    #[test]
+    fn remote_runtime_review_records_needs_action_without_blocking_ready() {
+        let facts = SetupRuntimeFacts {
+            remote_needs_action: true,
+            remote_result: "runtime_api=needs_action".to_string(),
+            ..SetupRuntimeFacts::default()
+        };
+        let mut view = SetupWizardView::new_at_with_facts(
+            SetupState::default(),
+            Locale::En,
+            SetupStep::RemoteRuntime,
+            facts,
+        );
+        let _ = view.commit_remote_runtime_review();
+
+        let entry = view.state().status(SetupStep::RemoteRuntime);
+        assert_eq!(entry, StepStatus::NeedsAction);
+        assert!(entry.is_settled(), "needs-action must not block ready");
     }
 
     #[test]
