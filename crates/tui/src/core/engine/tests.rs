@@ -585,6 +585,14 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
         .expect("custom route")
         .base_url = Some(second_base_url.clone());
     *authoritative.write() = reloaded;
+    let refreshed_route = engine
+        .current_runtime_route()
+        .expect("resolve the updated authoritative route");
+    assert_eq!(
+        refreshed_route.candidate.endpoint().base_url,
+        second_base_url,
+        "the synthetic continuation must resolve the latest authoritative endpoint"
+    );
     let run_task = tokio::spawn(engine.run());
 
     let mut starts = 0;
@@ -673,12 +681,10 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
             }
             Event::TurnComplete { base_url, .. } => {
                 completes += 1;
-                let expected = if completes == 1 {
-                    first_base_url.as_str()
-                } else {
-                    second_base_url.as_str()
-                };
-                assert_eq!(base_url.as_deref(), Some(expected));
+                assert!(
+                    base_url.is_none(),
+                    "an injected provider-neutral transport must not claim the auxiliary route's endpoint"
+                );
             }
             _ => {}
         }
