@@ -1,4 +1,4 @@
-﻿{
+{
     "ComposerPlaceholder": "编写任务或使用 /。",
     "ComposerDispatchFailedRestored": "消息未发送（{error}）；已恢复到输入框。",
     "DispatchFailedQueued": "发送失败（{error}）；保留了 {count} 个排队后续消息。",
@@ -193,7 +193,7 @@
     "CmdDiffDescription": "显示会话开始以来的文件变更",
     "CmdEditDescription": "修改并重新提交最后一条消息",
     "CmdExitDescription": "退出应用",
-    "CmdExportDescription": "将对话安全地复制导出，或写入到指定文件（/export turn 用于压缩后交接）",
+    "CmdExportDescription": "将对话安全地复制导出，或写入到指定文件",
     "CmdFeedbackDescription": "生成 GitHub 反馈链接",
     "CmdHfDescription": "检查 Hugging Face MCP 设置和概念",
     "CmdHelpDescription": "理解概念、命令与快捷键",
