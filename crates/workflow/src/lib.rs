@@ -603,25 +603,34 @@ pub struct LeafResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WorkflowUsage {
-    #[serde(default)]
-    pub input_tokens: u64,
-    #[serde(default)]
-    pub output_tokens: u64,
-    #[serde(default)]
-    pub cost_microusd: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_microusd: Option<u64>,
 }
 
 impl WorkflowUsage {
     #[must_use]
-    pub fn total_tokens(self) -> u64 {
-        self.input_tokens.saturating_add(self.output_tokens)
+    pub fn total_tokens(self) -> Option<u64> {
+        self.input_tokens
+            .zip(self.output_tokens)
+            .map(|(input, output)| input.saturating_add(output))
     }
 
+    /// Add two independently observed usage receipts. A field remains known
+    /// only when both contributors reported it; `Some(0)` is still observed.
     pub(crate) fn add_assign(&mut self, other: Self) {
-        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
-        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
-        self.cost_microusd = self.cost_microusd.saturating_add(other.cost_microusd);
+        self.input_tokens = sum_reported(self.input_tokens, other.input_tokens);
+        self.output_tokens = sum_reported(self.output_tokens, other.output_tokens);
+        self.cost_microusd = sum_reported(self.cost_microusd, other.cost_microusd);
     }
+}
+
+fn sum_reported(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    left.zip(right)
+        .map(|(left, right)| left.saturating_add(right))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -932,8 +941,12 @@ impl MockWorkflowExecutor {
         let status = aggregate_mock_status(&execution.leaf_results[before..]);
         let mut usage = WorkflowUsage::default();
         let mut memo_usage = WorkflowMemoUsage::default();
-        for result in &execution.leaf_results[before..] {
-            usage.add_assign(result.usage);
+        for (index, result) in execution.leaf_results[before..].iter().enumerate() {
+            if index == 0 {
+                usage = result.usage;
+            } else {
+                usage.add_assign(result.usage);
+            }
             memo_usage.add_assign(result.memo_usage);
         }
         mark_execution_for_status(execution, status);
@@ -959,7 +972,11 @@ impl MockWorkflowExecutor {
     fn execute_leaf(&mut self, spec: &LeafSpec, execution: &mut WorkflowExecution) {
         let outcome = self.mock_leaf_outcome(spec);
         mark_execution_for_status(execution, outcome.status);
-        execution.usage.add_assign(outcome.usage);
+        if execution.leaf_results.is_empty() {
+            execution.usage = outcome.usage;
+        } else {
+            execution.usage.add_assign(outcome.usage);
+        }
         execution.memo_usage.add_assign(outcome.memo_usage);
         execution.leaf_results.push(LeafResult {
             leaf_id: spec.id.clone(),
@@ -1072,7 +1089,11 @@ impl MockWorkflowExecutor {
         if self.cancelled {
             return MockLeafOutcome {
                 status: WorkflowRunStatus::Cancelled,
-                usage: WorkflowUsage::default(),
+                usage: WorkflowUsage {
+                    input_tokens: Some(0),
+                    output_tokens: Some(0),
+                    cost_microusd: Some(0),
+                },
                 memo_usage: WorkflowMemoUsage::default(),
                 output: Some("mock workflow cancelled before leaf execution".to_string()),
                 artifacts: Vec::new(),
@@ -1082,7 +1103,13 @@ impl MockWorkflowExecutor {
         {
             return MockLeafOutcome {
                 status: WorkflowRunStatus::BudgetExceeded,
-                usage: WorkflowUsage::default(),
+                // The leaf was rejected before execution, so zero usage is a
+                // known observation rather than missing provider telemetry.
+                usage: WorkflowUsage {
+                    input_tokens: Some(0),
+                    output_tokens: Some(0),
+                    cost_microusd: Some(0),
+                },
                 memo_usage: WorkflowMemoUsage::default(),
                 output: Some("mock workflow leaf step budget exhausted".to_string()),
                 artifacts: Vec::new(),
@@ -1095,7 +1122,11 @@ impl MockWorkflowExecutor {
         {
             return MockLeafOutcome {
                 status: WorkflowRunStatus::BudgetExceeded,
-                usage: WorkflowUsage::default(),
+                usage: WorkflowUsage {
+                    input_tokens: Some(0),
+                    output_tokens: Some(0),
+                    cost_microusd: Some(0),
+                },
                 memo_usage: WorkflowMemoUsage::default(),
                 output: Some("mock workflow leaf token budget exhausted".to_string()),
                 artifacts: Vec::new(),
@@ -1107,7 +1138,7 @@ impl MockWorkflowExecutor {
             .remove(&spec.id)
             .unwrap_or_else(|| MockLeafOutcome::succeeded(format!("mock leaf {}", spec.id)));
         let tokens = outcome.usage.total_tokens();
-        if let Some(per_leaf_token_cap) = spec.budget.max_tokens
+        if let (Some(per_leaf_token_cap), Some(tokens)) = (spec.budget.max_tokens, tokens)
             && tokens > per_leaf_token_cap
         {
             return MockLeafOutcome {
@@ -1120,7 +1151,9 @@ impl MockWorkflowExecutor {
                 artifacts: outcome.artifacts,
             };
         }
-        self.leaf_tokens_used = self.leaf_tokens_used.saturating_add(tokens);
+        if let Some(tokens) = tokens {
+            self.leaf_tokens_used = self.leaf_tokens_used.saturating_add(tokens);
+        }
         outcome
     }
 
@@ -1424,11 +1457,19 @@ fn teacher_candidate_from_branch(
             TeacherCandidateKind::BranchHeuristic
         };
     let mut evidence = vec![format!("status={:?}", branch.status)];
-    if branch.usage.total_tokens() > 0 || branch.usage.cost_microusd > 0 {
+    if branch.usage.total_tokens().is_some_and(|tokens| tokens > 0)
+        || branch.usage.cost_microusd.is_some_and(|cost| cost > 0)
+    {
         evidence.push(format!(
             "tokens={}, cost_microusd={}",
-            branch.usage.total_tokens(),
-            branch.usage.cost_microusd
+            branch
+                .usage
+                .total_tokens()
+                .map_or_else(|| "unknown".to_string(), |value| value.to_string()),
+            branch
+                .usage
+                .cost_microusd
+                .map_or_else(|| "unknown".to_string(), |value| value.to_string())
         ));
     }
     if branch.memo_usage.armh_hits > 0 || branch.memo_usage.provider_prompt_cache_hits > 0 {
@@ -2845,9 +2886,9 @@ mod tests {
             task_id: "scan".to_string(),
             status: WorkflowRunStatus::Succeeded,
             usage: WorkflowUsage {
-                input_tokens: 100,
-                output_tokens: 25,
-                cost_microusd: 42,
+                input_tokens: Some(100),
+                output_tokens: Some(25),
+                cost_microusd: Some(42),
             },
             memo_usage: WorkflowMemoUsage::default(),
             artifacts: vec!["trace://branches/discover".to_string()],
@@ -2871,6 +2912,27 @@ mod tests {
     }
 
     #[test]
+    fn workflow_usage_serialization_distinguishes_unknown_from_reported_zero() {
+        let unknown = serde_json::to_value(WorkflowUsage::default()).expect("unknown usage JSON");
+        assert_eq!(unknown, serde_json::json!({}));
+
+        let reported_zero = serde_json::to_value(WorkflowUsage {
+            input_tokens: Some(0),
+            output_tokens: Some(0),
+            cost_microusd: Some(0),
+        })
+        .expect("reported zero usage JSON");
+        assert_eq!(
+            reported_zero,
+            serde_json::json!({
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cost_microusd": 0,
+            })
+        );
+    }
+
+    #[test]
     fn leaf_result_serialization() {
         let result = LeafResult {
             leaf_id: "scan-readme".to_string(),
@@ -2879,9 +2941,9 @@ mod tests {
             profile: Some("reviewer".to_string()),
             status: WorkflowRunStatus::Failed,
             usage: WorkflowUsage {
-                input_tokens: 11,
-                output_tokens: 7,
-                cost_microusd: 3,
+                input_tokens: Some(11),
+                output_tokens: Some(7),
+                cost_microusd: Some(3),
             },
             memo_usage: WorkflowMemoUsage {
                 armh_hits: 1,
@@ -3111,17 +3173,17 @@ mod tests {
             .with_leaf_outcome(
                 "scan-readme",
                 MockLeafOutcome::succeeded("readme ok").with_usage(WorkflowUsage {
-                    input_tokens: 100,
-                    output_tokens: 25,
-                    cost_microusd: 500,
+                    input_tokens: Some(100),
+                    output_tokens: Some(25),
+                    cost_microusd: Some(500),
                 }),
             )
             .with_leaf_outcome(
                 "scan-tests",
                 MockLeafOutcome::succeeded("tests ok").with_usage(WorkflowUsage {
-                    input_tokens: 50,
-                    output_tokens: 10,
-                    cost_microusd: 250,
+                    input_tokens: Some(50),
+                    output_tokens: Some(10),
+                    cost_microusd: Some(250),
                 }),
             );
 
@@ -3130,12 +3192,12 @@ mod tests {
         assert_eq!(
             execution.usage,
             WorkflowUsage {
-                input_tokens: 150,
-                output_tokens: 35,
-                cost_microusd: 750,
+                input_tokens: Some(150),
+                output_tokens: Some(35),
+                cost_microusd: Some(750),
             }
         );
-        assert_eq!(execution.usage.total_tokens(), 185);
+        assert_eq!(execution.usage.total_tokens(), Some(185));
         assert_eq!(execution.branch_results[0].usage, execution.usage);
         assert_eq!(
             execution
@@ -3143,7 +3205,7 @@ mod tests {
                 .iter()
                 .map(|result| result.usage.cost_microusd)
                 .collect::<Vec<_>>(),
-            vec![500, 250]
+            vec![Some(500), Some(250)]
         );
     }
 
@@ -3338,17 +3400,17 @@ mod tests {
             .with_leaf_outcome(
                 "scan-readme",
                 MockLeafOutcome::succeeded("readme done").with_usage(WorkflowUsage {
-                    input_tokens: 300,
-                    output_tokens: 300,
-                    cost_microusd: 0,
+                    input_tokens: Some(300),
+                    output_tokens: Some(300),
+                    cost_microusd: Some(0),
                 }),
             )
             .with_leaf_outcome(
                 "scan-config",
                 MockLeafOutcome::succeeded("config done").with_usage(WorkflowUsage {
-                    input_tokens: 250,
-                    output_tokens: 250,
-                    cost_microusd: 0,
+                    input_tokens: Some(250),
+                    output_tokens: Some(250),
+                    cost_microusd: Some(0),
                 }),
             );
         let execution = executor.run(&workflow).expect("mock workflow should run");
@@ -3372,7 +3434,7 @@ mod tests {
             execution.leaf_results[2].status,
             WorkflowRunStatus::BudgetExceeded
         );
-        assert_eq!(execution.usage.total_tokens(), 1100);
+        assert_eq!(execution.usage.total_tokens(), Some(1100));
     }
 
     #[test]
@@ -3443,9 +3505,9 @@ mod tests {
         let mut executor = MockWorkflowExecutor::new().with_leaf_outcome(
             "expensive-scan",
             MockLeafOutcome::succeeded("scan done").with_usage(WorkflowUsage {
-                input_tokens: 500,
-                output_tokens: 300,
-                cost_microusd: 0,
+                input_tokens: Some(500),
+                output_tokens: Some(300),
+                cost_microusd: Some(0),
             }),
         );
         let execution = executor.run(&workflow).expect("mock workflow should run");
@@ -3740,9 +3802,9 @@ mod tests {
                 task_id: "winning-branch".to_string(),
                 status: WorkflowRunStatus::Succeeded,
                 usage: WorkflowUsage {
-                    input_tokens: 30,
-                    output_tokens: 12,
-                    cost_microusd: 7,
+                    input_tokens: Some(30),
+                    output_tokens: Some(12),
+                    cost_microusd: Some(7),
                 },
                 memo_usage: WorkflowMemoUsage::default(),
                 artifacts: vec!["trace://branches/winning-branch".to_string()],

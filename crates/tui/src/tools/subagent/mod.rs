@@ -1696,6 +1696,13 @@ pub(crate) struct WorkflowTaskSpawnMetadata {
     pub resolved_provider: String,
     pub resolved_model: String,
     pub route_source: String,
+    /// Reasoning the caller asked for, verbatim (`inherit`/`auto`/effort).
+    /// `None` only when the spawn request carried no reasoning at all (#4039).
+    pub requested_reasoning: Option<String>,
+    /// Reasoning the installed child runtime was actually launched with, after
+    /// route resolution. `None` means the provider route carries no reasoning
+    /// control — it is never rendered as an effort value (#4039).
+    pub effective_reasoning: Option<String>,
     /// Fleet role resolved for this spawn, if any (#4177).
     pub resolved_role: Option<String>,
     /// AgentProfile id resolved for this spawn, if any (#4177).
@@ -1764,6 +1771,19 @@ impl SubAgentThinking {
                     )
                 }),
         }
+    }
+}
+
+/// Stable, non-secret label for the reasoning a caller *requested* (#4039).
+///
+/// `inherit`/`auto` are requests, not efforts: they must stay distinguishable
+/// from the effort the route resolved to, or a row could claim the user asked
+/// for something they only got.
+pub(crate) fn subagent_thinking_label(thinking: SubAgentThinking) -> &'static str {
+    match thinking {
+        SubAgentThinking::Inherit => "inherit",
+        SubAgentThinking::Auto => "auto",
+        SubAgentThinking::Effort(effort) => effort.as_setting(),
     }
 }
 
@@ -7279,6 +7299,12 @@ async fn spawn_subagent_from_input(
             .unwrap_or_else(|| child_runtime.client.api_provider().as_str().to_string()),
         resolved_model: effective_model.clone(),
         route_source: model_selection.source.as_str().to_string(),
+        // #4039: requested is what the caller asked for; effective is what the
+        // child runtime was installed with a line above. Both are read here,
+        // at the spawn seam, so a later session-level model/reasoning switch
+        // can never rewrite a launched row's receipt.
+        requested_reasoning: Some(subagent_thinking_label(spawn_request.thinking).to_string()),
+        effective_reasoning: child_runtime.reasoning_effort.clone(),
         resolved_role,
         resolved_profile,
         parent_task_id: child_runtime.parent_agent_id.clone(),

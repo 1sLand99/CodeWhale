@@ -160,8 +160,12 @@ impl WorkflowReplayExecutor {
         let status = branch_status(&execution.leaf_results[before..]);
         let mut usage = WorkflowUsage::default();
         let mut memo_usage = WorkflowMemoUsage::default();
-        for result in &execution.leaf_results[before..] {
-            usage.add_assign(result.usage);
+        for (index, result) in execution.leaf_results[before..].iter().enumerate() {
+            if index == 0 {
+                usage = result.usage;
+            } else {
+                usage.add_assign(result.usage);
+            }
             memo_usage.add_assign(result.memo_usage);
         }
         if status == WorkflowRunStatus::ReplayDiverged {
@@ -221,6 +225,11 @@ impl WorkflowReplayExecutor {
                 schema_error: None,
             };
             self.resolved_outputs.insert(leaf.id.clone(), None);
+            if execution.leaf_results.is_empty() {
+                execution.usage = result.usage;
+            } else {
+                execution.usage.add_assign(result.usage);
+            }
             execution.leaf_results.push(result);
             return Ok(());
         };
@@ -230,7 +239,11 @@ impl WorkflowReplayExecutor {
         } else if result.status == WorkflowRunStatus::Failed {
             execution.mark_failed();
         }
-        execution.usage.add_assign(result.usage);
+        if execution.leaf_results.is_empty() {
+            execution.usage = result.usage;
+        } else {
+            execution.usage.add_assign(result.usage);
+        }
         execution.memo_usage.add_assign(result.memo_usage);
         self.resolved_outputs
             .insert(leaf.id.clone(), result.output.clone());
@@ -565,9 +578,9 @@ mod tests {
             profile: None,
             status: WorkflowRunStatus::Succeeded,
             usage: WorkflowUsage {
-                input_tokens: 10,
-                output_tokens: 5,
-                cost_microusd: 2,
+                input_tokens: Some(10),
+                output_tokens: Some(5),
+                cost_microusd: Some(2),
             },
             memo_usage: WorkflowMemoUsage::default(),
             output: Some(output.to_string()),
@@ -629,7 +642,7 @@ mod tests {
             execution.leaf_results[0].output.as_deref(),
             Some("recorded output")
         );
-        assert_eq!(execution.usage.cost_microusd, 2);
+        assert_eq!(execution.usage.cost_microusd, Some(2));
     }
 
     #[test]
@@ -672,8 +685,8 @@ mod tests {
             execution.branch_results[0].status,
             WorkflowRunStatus::Succeeded
         );
-        assert_eq!(execution.branch_results[0].usage.cost_microusd, 4);
-        assert_eq!(execution.usage.cost_microusd, 4);
+        assert_eq!(execution.branch_results[0].usage.cost_microusd, Some(4));
+        assert_eq!(execution.usage.cost_microusd, Some(4));
     }
 
     #[test]

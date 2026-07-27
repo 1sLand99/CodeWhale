@@ -402,41 +402,59 @@ struct WorkflowTaskUsage {
     duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     result_ref: Option<String>,
+    /// Provenance of the token counts. This producer currently emits only
+    /// `provider_reported`; absent means unknown and must never render as zero
+    /// (#4039).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    token_source: Option<WorkflowTokenSource>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum WorkflowTokenSource {
+    ProviderReported,
 }
 
 /// Run-wide usage totals reconciled from per-task telemetry, carried on
 /// `run_completed` events and the persisted run record (#2974).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 struct WorkflowRunUsage {
-    #[serde(default)]
-    input_tokens: u64,
-    #[serde(default)]
-    output_tokens: u64,
-    #[serde(default)]
-    total_tokens: u64,
-    #[serde(default)]
-    tool_calls: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    total_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<u64>,
     /// Number of completed tasks that contributed telemetry.
     #[serde(default)]
     tasks_reported: u64,
 }
 
 impl WorkflowRunUsage {
+    fn from_task(usage: &WorkflowTaskUsage) -> Self {
+        Self {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            total_tokens: usage.total_tokens,
+            tool_calls: usage.tool_calls.map(u64::from),
+            tasks_reported: 1,
+        }
+    }
+
     fn add_task(&mut self, usage: &WorkflowTaskUsage) {
-        self.input_tokens = self
-            .input_tokens
-            .saturating_add(usage.input_tokens.unwrap_or(0));
-        self.output_tokens = self
-            .output_tokens
-            .saturating_add(usage.output_tokens.unwrap_or(0));
-        self.total_tokens = self
-            .total_tokens
-            .saturating_add(usage.total_tokens.unwrap_or(0));
-        self.tool_calls = self
-            .tool_calls
-            .saturating_add(u64::from(usage.tool_calls.unwrap_or(0)));
+        self.input_tokens = sum_optional_usage(self.input_tokens, usage.input_tokens);
+        self.output_tokens = sum_optional_usage(self.output_tokens, usage.output_tokens);
+        self.total_tokens = sum_optional_usage(self.total_tokens, usage.total_tokens);
+        self.tool_calls = sum_optional_usage(self.tool_calls, usage.tool_calls.map(u64::from));
         self.tasks_reported = self.tasks_reported.saturating_add(1);
     }
+}
+
+fn sum_optional_usage(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    left.zip(right)
+        .map(|(left, right)| left.saturating_add(right))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -449,6 +467,14 @@ struct WorkflowTaskStartedEvent {
     model: Option<String>,
     strength: Option<String>,
     thinking: Option<String>,
+    /// Reasoning the task requested, verbatim (`inherit`/`auto`/effort) (#4039).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    requested_reasoning: Option<String>,
+    /// Reasoning the child runtime was actually installed with (#4039). Absent
+    /// when the resolved route carries no reasoning control; consumers render
+    /// that as unknown rather than inventing an effort.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    effective_reasoning: Option<String>,
     /// Resolved fleet role after roster lookup (#4177).
     resolved_role: Option<String>,
     /// Resolved AgentProfile id after fleet resolution (#4177).
@@ -3018,6 +3044,14 @@ impl SubAgentWorkflowDriver {
                 model: request.model.clone(),
                 strength: request.model_strength.clone(),
                 thinking: request.thinking.clone(),
+                // #4039: both sides of the reasoning receipt come from the
+                // spawn metadata the runtime minted, never from the request or
+                // from current session config.
+                requested_reasoning: metadata
+                    .requested_reasoning
+                    .clone()
+                    .or_else(|| request.thinking.clone()),
+                effective_reasoning: metadata.effective_reasoning.clone(),
                 // Prefer spawn metadata (fleet-resolved); fall back to request.
                 resolved_role: metadata
                     .resolved_role
@@ -3377,24 +3411,22 @@ fn task_completion_status(completion: &TaskCompletion) -> (IrWorkflowRunStatus, 
 /// Returns `None` when no task contributed telemetry (e.g. a plan that ran
 /// zero children) so the event stays byte-identical to its pre-#2974 shape.
 fn run_usage_totals(records: &[RuntimeTaskRecord]) -> Option<WorkflowRunUsage> {
-    let mut totals = WorkflowRunUsage::default();
-    let mut any = false;
-    for record in records {
-        if let Some(usage) = record.usage.as_ref() {
-            totals.add_task(usage);
-            any = true;
-        }
+    let mut usages = records.iter().filter_map(|record| record.usage.as_ref());
+    let mut totals = WorkflowRunUsage::from_task(usages.next()?);
+    for usage in usages {
+        totals.add_task(usage);
     }
-    any.then_some(totals)
+    Some(totals)
 }
 
 /// Convert captured task telemetry into the shared `WorkflowUsage` aggregate
 /// used by the workflow execution record (#2974).
 fn workflow_usage_from_task(usage: &WorkflowTaskUsage) -> WorkflowUsage {
     WorkflowUsage {
-        input_tokens: usage.input_tokens.unwrap_or(0),
-        output_tokens: usage.output_tokens.unwrap_or(0),
-        cost_microusd: 0,
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        // The worker ledger currently carries no provider cost receipt.
+        cost_microusd: None,
     }
 }
 
@@ -3411,17 +3443,19 @@ fn execution_from_declarative_spec(
     for node in &spec.nodes {
         push_execution_node(node, &by_label, &mut execution);
     }
-    execution.usage =
-        execution
-            .leaf_results
-            .iter()
-            .fold(WorkflowUsage::default(), |mut totals, leaf| {
-                totals.input_tokens = totals.input_tokens.saturating_add(leaf.usage.input_tokens);
-                totals.output_tokens = totals
-                    .output_tokens
-                    .saturating_add(leaf.usage.output_tokens);
+    let mut leaf_usage = execution.leaf_results.iter().map(|leaf| leaf.usage);
+    execution.usage = leaf_usage
+        .next()
+        .map_or_else(WorkflowUsage::default, |first| {
+            leaf_usage.fold(first, |mut totals, usage| {
+                totals.input_tokens = sum_optional_usage(totals.input_tokens, usage.input_tokens);
+                totals.output_tokens =
+                    sum_optional_usage(totals.output_tokens, usage.output_tokens);
+                totals.cost_microusd =
+                    sum_optional_usage(totals.cost_microusd, usage.cost_microusd);
                 totals
-            });
+            })
+        });
     match terminal_status {
         WorkflowRunStatus::Completed => {}
         WorkflowRunStatus::Failed => mark_ir_status(&mut execution, IrWorkflowRunStatus::Failed),
@@ -3749,14 +3783,32 @@ fn task_usage_from_manager(
             .or_else(|| record.artifacts.last())
             .map(|artifact| artifact.target.clone())
     });
+    let input_tokens = usage.and_then(|usage| usage.input_tokens);
+    let output_tokens = usage.and_then(|usage| usage.output_tokens);
+    let total_tokens = usage.and_then(|usage| usage.total_tokens);
+    // #4039: the worker ledger leaves these fields `None` until it receives a
+    // typed provider usage envelope. Presence, not magnitude, is the receipt:
+    // a provider-reported zero is still a real observation and must survive.
+    let reported = provider_usage_was_reported(input_tokens, output_tokens, total_tokens);
     WorkflowTaskUsage {
-        input_tokens: usage.and_then(|usage| usage.input_tokens),
-        output_tokens: usage.and_then(|usage| usage.output_tokens),
-        total_tokens: usage.and_then(|usage| usage.total_tokens),
+        input_tokens: reported.then_some(input_tokens).flatten(),
+        output_tokens: reported.then_some(output_tokens).flatten(),
+        total_tokens: reported.then_some(total_tokens).flatten(),
         tool_calls: Some(snapshot.steps_taken),
         duration_ms: Some(snapshot.duration_ms),
         result_ref,
+        token_source: reported.then_some(WorkflowTokenSource::ProviderReported),
     }
+}
+
+fn provider_usage_was_reported(
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+) -> bool {
+    [input_tokens, output_tokens, total_tokens]
+        .iter()
+        .any(Option::is_some)
 }
 
 fn cancel_child_agents(manager: SharedSubAgentManager, ids: Vec<String>) {
@@ -5558,6 +5610,13 @@ export default workflow({
         assert_eq!(task_started["model"], "deepseek-v4-flash");
         assert_eq!(task_started["strength"], "same");
         assert_eq!(task_started["thinking"], "low");
+        assert_eq!(task_started["requested_reasoning"], "low");
+        assert!(
+            task_started["effective_reasoning"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()),
+            "{task_started}"
+        );
         assert_eq!(task_started["resolved_provider"], "deepseek");
         assert_eq!(task_started["resolved_model"], "deepseek-v4-flash");
         assert_eq!(task_started["route_source"], "task.model");
@@ -5585,6 +5644,88 @@ export default workflow({
             .expect("child result");
         assert_eq!(child.status, SubAgentStatus::Completed);
         assert_eq!(child.result.as_deref(), Some("child done"));
+
+        // Full receipt chain: the spawn-minted event survives the JSONL
+        // journal reload, hydrates the live projection, and round-trips into
+        // history without following a later route or inventing missing usage.
+        let reloaded = WorkflowWorkspaceState::open(tmp.path());
+        let persisted = reloaded
+            .runs
+            .lock()
+            .expect("reloaded workflow runs")
+            .get(payload["run_id"].as_str().expect("run id"))
+            .cloned()
+            .expect("persisted run");
+        let persisted_json = serde_json::to_value(&persisted).expect("persisted run JSON");
+        let persisted_started = persisted_json["events"]
+            .as_array()
+            .and_then(|events| events.iter().find(|event| event["type"] == "task_started"))
+            .expect("persisted task_started receipt");
+        assert_eq!(persisted_started["requested_reasoning"], "low");
+        assert_eq!(
+            persisted_started["effective_reasoning"],
+            task_started["effective_reasoning"]
+        );
+        assert_eq!(persisted_started["resolved_provider"], "deepseek");
+        assert_eq!(persisted_started["resolved_model"], "deepseek-v4-flash");
+        assert_eq!(persisted_started["route_source"], "task.model");
+
+        let mut panel =
+            crate::tui::widgets::workflow_panel::WorkflowPanel::from_run_json(&persisted_json)
+                .expect("journal should hydrate workflow panel");
+        let original_receipt = panel
+            .phases
+            .iter()
+            .flat_map(|phase| phase.rows.iter())
+            .find(|row| row.task_id == child_id)
+            .map(crate::tui::widgets::workflow_panel::row_receipt_text)
+            .expect("spawned child receipt");
+        assert!(original_receipt.contains("deepseek/deepseek-v4-flash"));
+        assert!(original_receipt.contains("reasoning low→"));
+        assert!(original_receipt.contains("via task.model"));
+
+        panel.apply_json_event(&json!({
+            "type": "task_started",
+            "at_ms": 9_000,
+            "task_id": "later-route",
+            "label": "later-route",
+            "resolved_role": "consultant",
+            "resolved_provider": "moonshot",
+            "resolved_model": "kimi-k3",
+            "requested_reasoning": "auto",
+            "effective_reasoning": "medium",
+            "route_source": "agent_profile.model",
+            "worktree": false,
+        }));
+        panel.apply_json_event(&json!({
+            "type": "task_completed",
+            "at_ms": 9_100,
+            "task_id": "later-route",
+            "status": "succeeded"
+        }));
+        let unchanged = panel
+            .phases
+            .iter()
+            .flat_map(|phase| phase.rows.iter())
+            .find(|row| row.task_id == child_id)
+            .map(crate::tui::widgets::workflow_panel::row_receipt_text)
+            .expect("original child after later route");
+        assert_eq!(unchanged, original_receipt);
+
+        let history =
+            crate::tui::widgets::workflow_panel::WorkflowPanel::from_run_json(&panel.to_run_json())
+                .expect("history receipt round trip");
+        let later_receipt = history
+            .phases
+            .iter()
+            .flat_map(|phase| phase.rows.iter())
+            .find(|row| row.task_id == "later-route")
+            .map(crate::tui::widgets::workflow_panel::row_receipt_text)
+            .expect("later route history receipt");
+        assert!(later_receipt.contains("moonshot/kimi-k3"));
+        assert!(later_receipt.contains("reasoning auto→medium"));
+        assert!(later_receipt.contains("tokens unknown"));
+        assert!(!later_receipt.contains("tokens 0"));
     }
 
     #[tokio::test]
@@ -7305,6 +7446,12 @@ FINAL RECEIPT
             "{task_completed}"
         );
         assert!(usage["duration_ms"].is_u64(), "{task_completed}");
+        // #4039: a row may only label tokens as provider-reported when the
+        // worker ledger actually received them.
+        assert_eq!(
+            usage["token_source"], "provider_reported",
+            "{task_completed}"
+        );
         assert!(
             usage["result_ref"]
                 .as_str()
@@ -7340,6 +7487,13 @@ FINAL RECEIPT
     }
 
     #[test]
+    fn provider_usage_presence_preserves_a_real_zero_receipt() {
+        assert!(!provider_usage_was_reported(None, None, None));
+        assert!(provider_usage_was_reported(Some(0), Some(0), Some(0)));
+        assert!(provider_usage_was_reported(None, Some(0), None));
+    }
+
+    #[test]
     fn run_usage_totals_reconcile_task_telemetry() {
         let task_usage = |total: u64, calls: u32| WorkflowTaskUsage {
             input_tokens: Some(total / 2),
@@ -7348,6 +7502,7 @@ FINAL RECEIPT
             tool_calls: Some(calls),
             duration_ms: Some(7),
             result_ref: None,
+            token_source: Some(WorkflowTokenSource::ProviderReported),
         };
         let record = |agent_id: &str, usage: Option<WorkflowTaskUsage>| RuntimeTaskRecord {
             agent_id: agent_id.to_string(),
@@ -7364,14 +7519,74 @@ FINAL RECEIPT
             record("c", None),
         ];
         let totals = run_usage_totals(&records).expect("totals");
-        assert_eq!(totals.total_tokens, 160);
-        assert_eq!(totals.input_tokens, 80);
-        assert_eq!(totals.output_tokens, 80);
-        assert_eq!(totals.tool_calls, 3);
+        assert_eq!(totals.total_tokens, Some(160));
+        assert_eq!(totals.input_tokens, Some(80));
+        assert_eq!(totals.output_tokens, Some(80));
+        assert_eq!(totals.tool_calls, Some(3));
         assert_eq!(totals.tasks_reported, 2);
 
         assert!(run_usage_totals(&[]).is_none());
         assert!(run_usage_totals(&[record("d", None)]).is_none());
+    }
+
+    #[test]
+    fn run_and_ir_usage_keep_unknown_distinct_from_reported_zero() {
+        let record = |agent_id: &str, usage: WorkflowTaskUsage| RuntimeTaskRecord {
+            agent_id: agent_id.to_string(),
+            label: Some(agent_id.to_string()),
+            role: None,
+            status: IrWorkflowRunStatus::Succeeded,
+            output: None,
+            schema_error: None,
+            usage: Some(usage),
+        };
+        let unknown = WorkflowTaskUsage {
+            tool_calls: Some(1),
+            duration_ms: Some(4),
+            ..WorkflowTaskUsage::default()
+        };
+        let reported_zero = WorkflowTaskUsage {
+            input_tokens: Some(0),
+            output_tokens: Some(0),
+            total_tokens: Some(0),
+            tool_calls: Some(0),
+            duration_ms: Some(0),
+            token_source: Some(WorkflowTokenSource::ProviderReported),
+            ..WorkflowTaskUsage::default()
+        };
+
+        let unknown_totals = run_usage_totals(&[record("unknown", unknown.clone())])
+            .expect("tool/duration receipt still creates run usage");
+        assert_eq!(unknown_totals.input_tokens, None);
+        assert_eq!(unknown_totals.output_tokens, None);
+        assert_eq!(unknown_totals.total_tokens, None);
+        assert_eq!(unknown_totals.tool_calls, Some(1));
+
+        let zero_totals = run_usage_totals(&[record("zero", reported_zero.clone())])
+            .expect("reported zero receipt");
+        assert_eq!(zero_totals.input_tokens, Some(0));
+        assert_eq!(zero_totals.output_tokens, Some(0));
+        assert_eq!(zero_totals.total_tokens, Some(0));
+        assert_eq!(zero_totals.tool_calls, Some(0));
+
+        let unknown_ir = workflow_usage_from_task(&unknown);
+        assert_eq!(unknown_ir.input_tokens, None);
+        assert_eq!(unknown_ir.output_tokens, None);
+        assert_eq!(unknown_ir.cost_microusd, None);
+        let zero_ir = workflow_usage_from_task(&reported_zero);
+        assert_eq!(zero_ir.input_tokens, Some(0));
+        assert_eq!(zero_ir.output_tokens, Some(0));
+        assert_eq!(zero_ir.cost_microusd, None);
+
+        let mixed = run_usage_totals(&[record("zero", reported_zero), record("unknown", unknown)])
+            .expect("mixed receipts");
+        assert_eq!(
+            mixed.total_tokens, None,
+            "one unknown contributor taints total"
+        );
+        assert_eq!(mixed.input_tokens, None);
+        assert_eq!(mixed.output_tokens, None);
+        assert_eq!(mixed.tool_calls, Some(1));
     }
 
     #[test]
@@ -7388,6 +7603,7 @@ FINAL RECEIPT
                     tool_calls: Some(2),
                     duration_ms: Some(42),
                     result_ref: Some("agent:child-1".to_string()),
+                    token_source: Some(WorkflowTokenSource::ProviderReported),
                 }),
             },
         );
