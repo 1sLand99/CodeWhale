@@ -435,7 +435,7 @@
     "HomeGoalModeTip": "Goal tracking - Set /goal <objective> to pursue objectives",
     "OnboardLanguageTitle": "Choose your language",
     "OnboardLanguageBlurb": "Pick the UI language. You can change it any time with `/settings set locale <tag>`.",
-    "OnboardLanguageFooter": "Press 1-9 to choose, or Enter to keep the current setting",
+    "OnboardLanguageFooter": "Press the key shown next to a language, or Enter to keep the current setting",
     "OnboardProviderTitle": "Choose your model provider",
     "OnboardProviderBlurb": "Pick where your model runs. Hosted providers need a key; local runtimes can continue without one.",
     "OnboardProviderFooter": "Enter opens the provider list · Esc goes back · Ctrl+C quits.",
