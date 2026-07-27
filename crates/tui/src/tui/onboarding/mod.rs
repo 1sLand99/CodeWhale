@@ -110,7 +110,7 @@ pub fn tips_lines(app: &App) -> Vec<ratatui::text::Line<'static>> {
     use ratatui::style::Modifier;
     use ratatui::text::{Line, Span};
 
-    vec![
+    let mut lines = vec![
         Line::from(Span::styled(
             app.tr(MessageId::OnboardTipsTitle).to_string(),
             Style::default()
@@ -118,6 +118,17 @@ pub fn tips_lines(app: &App) -> Vec<ratatui::text::Line<'static>> {
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
+    ];
+    // The offline choice is a durable posture, not a passing toast: the final
+    // screen states it plainly alongside the one command that recovers.
+    if app.onboarding_explore_offline {
+        lines.push(Line::from(Span::styled(
+            app.tr(MessageId::OnboardOfflineTipsLine).to_string(),
+            Style::default().fg(palette::STATUS_WARNING),
+        )));
+        lines.push(Line::from(""));
+    }
+    lines.extend([
         Line::from(Span::raw(app.tr(MessageId::OnboardTipsLine1).to_string())),
         Line::from(Span::raw(app.tr(MessageId::OnboardTipsLine2).to_string())),
         Line::from(Span::raw(app.tr(MessageId::OnboardTipsLine3).to_string())),
@@ -144,7 +155,8 @@ pub fn tips_lines(app: &App) -> Vec<ratatui::text::Line<'static>> {
                 Style::default().fg(palette::TEXT_MUTED),
             ),
         ]),
-    ]
+    ]);
+    lines
 }
 
 pub fn default_marker_path() -> Option<PathBuf> {
@@ -315,6 +327,46 @@ pub fn advance_onboarding_after_language(app: &mut App) {
     }
 }
 
+/// Take the explicit "explore offline" exit advertised on the Provider and
+/// API-key screens (#3927).
+///
+/// The contract this encodes, in full:
+///
+/// * **No provider is selected and no route is activated.** This function must
+///   never reach `switch_provider`, never persist `provider`, and never write a
+///   credential. Callers pass only `&mut App`, which makes that structural.
+/// * **Draft secrets are dropped**, so an abandoned half-typed key cannot
+///   linger in memory or be re-submitted by a later Enter.
+/// * **`onboarding_needs_api_key` stays true**, because nothing was supplied.
+///   The launch surface, `/setup`, and doctor keep telling the truth.
+/// * **The remaining onboarding steps still run** — trust, then the mental
+///   model primer and tips — so browsing offline is a complete first run and
+///   not an early exit.
+/// * Queue semantics are inherited from `offline_mode`, untouched here.
+pub fn choose_offline_explore(app: &mut App) {
+    app.api_key_input.clear();
+    app.api_key_cursor = 0;
+    app.api_key_env_only = false;
+    app.onboarding_needs_api_key = true;
+    app.onboarding_explore_offline = true;
+    app.offline_mode = true;
+    // `advance_*` clears the status bar, so the label is applied after it.
+    advance_onboarding_after_api_key(app);
+    app.status_message = Some(
+        app.tr(crate::localization::MessageId::OnboardOfflineNotice)
+            .into_owned(),
+    );
+    app.needs_redraw = true;
+}
+
+/// Clear the offline-explore label once a real route is activated (#3927).
+///
+/// This is the *only* thing that retires the label: it is not time-based and
+/// not cleared by dismissing a screen.
+pub fn clear_offline_explore_on_route_activation(app: &mut App) {
+    app.onboarding_explore_offline = false;
+}
+
 pub fn advance_onboarding_after_api_key(app: &mut App) {
     app.status_message = None;
     if !app.trust_mode && needs_trust(&app.workspace) {
@@ -355,6 +407,10 @@ fn provider_lines(app: &App) -> Vec<ratatui::text::Line<'static>> {
             Style::default().fg(palette::TEXT_MUTED),
         )),
         Line::from(""),
+        Line::from(Span::styled(
+            app.tr(MessageId::OnboardOfflineOption).to_string(),
+            Style::default().fg(palette::TEXT_MUTED),
+        )),
         Line::from(Span::styled(
             app.tr(MessageId::OnboardProviderFooter).to_string(),
             Style::default().fg(palette::TEXT_MUTED),
@@ -520,6 +576,135 @@ mod tests {
             !ambient_home.join(".codewhale").exists(),
             "an explicit state root must not write into the ambient profile"
         );
+    }
+
+    // ── #3927: the explicit offline ("explore") choice ───────────────────
+
+    #[test]
+    fn explore_offline_selects_no_provider_and_keeps_the_key_still_missing() {
+        let mut app = test_app_with_locale(Locale::En);
+        let provider_before = app.api_provider;
+        let model_before = app.model.clone();
+        app.onboarding = OnboardingState::ApiKey;
+        app.onboarding_needs_api_key = true;
+        app.api_key_input = "sk-hostile-draft-value".to_string();
+        app.api_key_cursor = app.api_key_input.len();
+        app.trust_mode = true;
+
+        choose_offline_explore(&mut app);
+
+        // No provider selected, no route activated.
+        assert_eq!(app.api_provider, provider_before);
+        assert_eq!(app.model, model_before);
+        // The draft secret is gone, and never reachable from a later Enter.
+        assert!(app.api_key_input.is_empty());
+        assert_eq!(app.api_key_cursor, 0);
+        assert!(!app.api_key_env_only);
+        // The install still honestly reports that no credential exists.
+        assert!(app.onboarding_needs_api_key);
+        assert!(app.onboarding_explore_offline);
+        assert!(app.offline_mode);
+    }
+
+    #[test]
+    fn explore_offline_never_leaks_the_draft_secret_into_the_label() {
+        let mut app = test_app_with_locale(Locale::En);
+        let hostile = "sk-\u{202e}../../etc/passwd\u{0000}AKIAIOSFODNN7EXAMPLE";
+        app.onboarding = OnboardingState::ApiKey;
+        app.api_key_input = hostile.to_string();
+        app.trust_mode = true;
+
+        choose_offline_explore(&mut app);
+
+        let label = app.status_message.clone().expect("offline label");
+        assert!(!label.contains("AKIA"), "label leaked a token: {label}");
+        assert!(!label.contains("passwd"), "label leaked a path: {label}");
+        assert!(
+            label.contains("/provider"),
+            "label must name recovery: {label}"
+        );
+
+        app.onboarding = OnboardingState::Tips;
+        let tips = flattened(tips_lines(&app));
+        assert!(!tips.contains("AKIA"), "tips leaked a token: {tips}");
+        assert!(!tips.contains(hostile));
+        assert!(tips.contains("/provider"));
+    }
+
+    #[test]
+    fn explore_offline_still_traverses_trust_then_the_rest_of_onboarding() {
+        let mut app = test_app_with_locale(Locale::En);
+        app.onboarding = OnboardingState::Provider;
+        app.trust_mode = false;
+        app.workspace = tempfile::tempdir().expect("tempdir").path().to_path_buf();
+
+        choose_offline_explore(&mut app);
+        assert_eq!(app.onboarding, OnboardingState::TrustDirectory);
+
+        // A trusted workspace skips only the trust screen, never the primer.
+        let mut trusted = test_app_with_locale(Locale::En);
+        trusted.onboarding = OnboardingState::Provider;
+        trusted.trust_mode = true;
+        choose_offline_explore(&mut trusted);
+        assert_eq!(trusted.onboarding, OnboardingState::MentalModels);
+    }
+
+    #[test]
+    fn offline_label_only_clears_when_a_route_is_activated() {
+        let mut app = test_app_with_locale(Locale::En);
+        app.trust_mode = true;
+        choose_offline_explore(&mut app);
+        assert!(app.onboarding_explore_offline);
+
+        // Walking the rest of onboarding does not clear it.
+        app.onboarding = OnboardingState::Tips;
+        assert!(app.onboarding_explore_offline);
+        back_from_mental_models(&mut app);
+        assert!(app.onboarding_explore_offline);
+
+        clear_offline_explore_on_route_activation(&mut app);
+        assert!(!app.onboarding_explore_offline);
+    }
+
+    #[test]
+    fn provider_and_api_key_screens_both_advertise_the_offline_choice() {
+        let app = test_app_with_locale(Locale::En);
+        let provider = flattened(provider_lines(&app));
+        let api_key = flattened(api_key::lines(&app));
+
+        for body in [&provider, &api_key] {
+            assert!(
+                body.contains("Ctrl+O"),
+                "offline exit must be advertised: {body}"
+            );
+            assert!(body.contains("offline"), "{body}");
+        }
+    }
+
+    #[test]
+    fn offline_choice_copy_is_translated_in_every_complete_pack() {
+        use crate::localization::{MessageId, tr};
+
+        for locale in Locale::shipped_complete() {
+            for id in [
+                MessageId::OnboardOfflineOption,
+                MessageId::OnboardOfflineNotice,
+                MessageId::OnboardOfflineTipsLine,
+            ] {
+                let text = tr(*locale, id);
+                assert!(!text.is_empty(), "{locale:?} {id:?} is empty");
+                if *locale != Locale::En {
+                    assert_ne!(
+                        text,
+                        tr(Locale::En, id),
+                        "{locale:?} {id:?} silently fell back to English"
+                    );
+                }
+            }
+            // Commands and key names are composed in code, never translated.
+            assert!(tr(*locale, MessageId::OnboardOfflineNotice).contains("/provider"));
+            assert!(tr(*locale, MessageId::OnboardOfflineOption).contains("Ctrl+O"));
+        }
     }
 
     #[test]

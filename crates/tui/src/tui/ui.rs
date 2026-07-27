@@ -830,8 +830,21 @@ enum OnboardingKeyRoute {
     Quit,
     /// Hand the key to the provider picker on the view stack.
     ProviderPicker,
+    /// Take the advertised offline exit (#3927). Reachable from the Provider
+    /// and API-key steps even while the provider picker owns the screen, so
+    /// the choice is never hidden behind a modal the user cannot satisfy.
+    ExploreOffline,
     /// Fall through to the legacy onboarding key switch.
     Legacy,
+}
+
+/// Ctrl+O — the one gesture that selects "explore offline".
+///
+/// A plain letter cannot be used: the API-key screen is a text field and would
+/// swallow it into the draft secret.
+fn is_explore_offline_shortcut(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 /// Decide the onboarding route for one key press.
@@ -851,6 +864,15 @@ fn onboarding_key_route(
     }
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return OnboardingKeyRoute::Quit;
+    }
+    // Checked before the picker claim: the offline exit must stay reachable
+    // from behind a modal the user cannot satisfy.
+    if matches!(
+        onboarding,
+        OnboardingState::Provider | OnboardingState::ApiKey
+    ) && is_explore_offline_shortcut(key)
+    {
+        return OnboardingKeyRoute::ExploreOffline;
     }
     if onboarding == OnboardingState::Provider && top_kind == Some(ModalKind::ProviderPicker) {
         return OnboardingKeyRoute::ProviderPicker;
@@ -5444,6 +5466,16 @@ async fn run_event_loop(
                 OnboardingKeyRoute::Quit => {
                     let _ = engine_handle.send(Op::Shutdown).await;
                     return Ok(());
+                }
+                // #3927: no provider is selected and no route is activated.
+                // The picker (a preview surface, never route authority) is
+                // popped without applying anything it was showing.
+                OnboardingKeyRoute::ExploreOffline => {
+                    if app.view_stack.top_kind() == Some(ModalKind::ProviderPicker) {
+                        let _ = app.view_stack.pop();
+                    }
+                    onboarding::choose_offline_explore(app);
+                    continue;
                 }
                 // Every other key, Escape included, belongs to the picker.
                 // The picker's own per-stage Escape walks key/OAuth entry
@@ -10794,6 +10826,9 @@ async fn switch_provider(
         status_message.push_str(" (not fully persisted)");
     }
     app.status_message = Some(status_message);
+    // #3927: activating a route is the single event that retires the
+    // explore-offline label. Nothing time-based or screen-based clears it.
+    onboarding::clear_offline_explore_on_route_activation(app);
     if persisted {
         record_provider_model_setup_progress(app, config);
     }

@@ -642,6 +642,10 @@ pub enum MessageId {
     OnboardMentalCyclePermission,
     OnboardMentalContinue,
     OnboardMentalBack,
+    // Onboarding screens — explicit offline ("explore") choice (#3927).
+    OnboardOfflineOption,
+    OnboardOfflineNotice,
+    OnboardOfflineTipsLine,
     // Onboarding screens — final tips screen.
     OnboardTipsTitle,
     OnboardTipsLine1,
@@ -1917,6 +1921,9 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::OnboardMentalCyclePermission,
     MessageId::OnboardMentalContinue,
     MessageId::OnboardMentalBack,
+    MessageId::OnboardOfflineOption,
+    MessageId::OnboardOfflineNotice,
+    MessageId::OnboardOfflineTipsLine,
     MessageId::OnboardTipsTitle,
     MessageId::OnboardTipsLine1,
     MessageId::OnboardTipsLine2,

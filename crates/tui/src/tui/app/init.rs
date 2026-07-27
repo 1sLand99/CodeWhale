@@ -724,6 +724,7 @@ impl App {
             onboarding_provider: provider,
             onboarding_workspace_trust_gate,
             onboarding_missing_key_recovery,
+            onboarding_explore_offline: false,
             onboarding_had_api_key_step: !was_onboarded && needs_api_key,
             onboarding_had_trust_step: !was_onboarded && needs_workspace_trust,
             api_key_env_only,

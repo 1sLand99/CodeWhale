@@ -1469,6 +1469,11 @@ pub struct App {
     /// provider is missing its key. Esc then exits to the offline composer
     /// instead of walking back through first-run steps.
     pub onboarding_missing_key_recovery: bool,
+    /// True when the user explicitly chose "Explore offline" during onboarding
+    /// (#3927). No provider was selected, no route was activated, and no secret
+    /// was saved: the session browses with queued input until a route is
+    /// activated later (`/provider`), which is the only thing that clears it.
+    pub onboarding_explore_offline: bool,
     /// First-run route receipts used by the mental-model screen's Back action.
     pub onboarding_had_api_key_step: bool,
     pub onboarding_had_trust_step: bool,

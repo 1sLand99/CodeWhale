@@ -11843,6 +11843,44 @@ fn onboarding_ctrl_c_quits_even_with_the_provider_picker_on_the_view_stack() {
     );
 }
 
+/// #3927: the offline exit must be reachable from both credential steps even
+/// while the provider picker owns the keys — otherwise the only advertised way
+/// out of a modal the user cannot satisfy is to quit.
+#[test]
+fn explore_offline_shortcut_escapes_the_provider_picker_from_both_credential_steps() {
+    let ctrl_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+
+    assert_eq!(
+        onboarding_key_route(
+            OnboardingState::Provider,
+            Some(ModalKind::ProviderPicker),
+            &ctrl_o,
+        ),
+        OnboardingKeyRoute::ExploreOffline,
+    );
+    assert_eq!(
+        onboarding_key_route(OnboardingState::ApiKey, None, &ctrl_o),
+        OnboardingKeyRoute::ExploreOffline,
+    );
+
+    // It is scoped to the credential steps: elsewhere it stays an ordinary key.
+    assert_eq!(
+        onboarding_key_route(OnboardingState::Language, None, &ctrl_o),
+        OnboardingKeyRoute::Legacy,
+    );
+    assert_eq!(
+        onboarding_key_route(OnboardingState::None, None, &ctrl_o),
+        OnboardingKeyRoute::Legacy,
+    );
+
+    // A bare "o" is text on the API-key screen and must never trigger it.
+    let plain_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE);
+    assert_eq!(
+        onboarding_key_route(OnboardingState::ApiKey, None, &plain_o),
+        OnboardingKeyRoute::Legacy,
+    );
+}
+
 /// Escape is no longer intercepted on the picker's behalf, so the picker can
 /// back out one stage (key/OAuth entry → list) and only dismiss from the
 /// list. Non-onboarding keys still reach the legacy switch.
