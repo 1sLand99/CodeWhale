@@ -43,7 +43,10 @@ pub async fn run_acp_server(config: Config, model: String, default_cwd: PathBuf)
         if message.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
             write_jsonrpc_error(
                 &mut writer,
-                message.get("id").cloned(),
+                message
+                    .get("id")
+                    .cloned()
+                    .map(|id| server.response_id_policy.response_id(id)),
                 -32600,
                 "jsonrpc version must be 2.0",
             )
@@ -55,7 +58,13 @@ pub async fn run_acp_server(config: Config, model: String, default_cwd: PathBuf)
         let method = match message.get("method").and_then(Value::as_str) {
             Some(method) => method,
             None => {
-                write_jsonrpc_error(&mut writer, id, -32600, "missing method").await?;
+                write_jsonrpc_error(
+                    &mut writer,
+                    id.map(|id| server.response_id_policy.response_id(id)),
+                    -32600,
+                    "missing method",
+                )
+                .await?;
                 continue;
             }
         };
@@ -64,16 +73,19 @@ pub async fn run_acp_server(config: Config, model: String, default_cwd: PathBuf)
         match server.handle_request(method, params, &mut writer).await {
             Ok(AcpDispatch::Response(result)) => {
                 if let Some(id) = id {
+                    let id = server.response_id_policy.response_id(id);
                     write_jsonrpc_result(&mut writer, id, result).await?;
                 }
             }
             Ok(AcpDispatch::Shutdown) => {
                 if let Some(id) = id {
+                    let id = server.response_id_policy.response_id(id);
                     write_jsonrpc_result(&mut writer, id, json!(null)).await?;
                 }
                 break;
             }
             Err(err) => {
+                let id = id.map(|id| server.response_id_policy.response_id(id));
                 write_jsonrpc_error(&mut writer, id, err.code, err.message).await?;
             }
         }
@@ -87,6 +99,7 @@ struct AcpServer {
     model: String,
     default_cwd: PathBuf,
     sessions: HashMap<String, AcpSession>,
+    response_id_policy: JsonRpcResponseIdPolicy,
 }
 
 struct AcpSession {
@@ -110,6 +123,7 @@ impl AcpServer {
             model,
             default_cwd,
             sessions: HashMap::new(),
+            response_id_policy: JsonRpcResponseIdPolicy::Preserve,
         }
     }
 
@@ -123,10 +137,13 @@ impl AcpServer {
         W: AsyncWrite + Unpin,
     {
         match method {
-            "initialize" => Ok(AcpDispatch::Response(initialize_result(
-                params.get("protocolVersion").and_then(Value::as_u64),
-                &self.config,
-            ))),
+            "initialize" => {
+                self.response_id_policy = JsonRpcResponseIdPolicy::from_initialize_params(&params);
+                Ok(AcpDispatch::Response(initialize_result(
+                    params.get("protocolVersion").and_then(Value::as_u64),
+                    &self.config,
+                )))
+            }
             "session/new" => Ok(AcpDispatch::Response(self.new_session(params)?)),
             "session/prompt" => {
                 self.prompt(params, writer).await?;
@@ -376,7 +393,6 @@ async fn write_jsonrpc_result<W>(writer: &mut W, id: Value, result: Value) -> Re
 where
     W: AsyncWrite + Unpin,
 {
-    let id = jsonrpc_response_id(id);
     write_json_line(
         writer,
         json!({
@@ -397,7 +413,6 @@ async fn write_jsonrpc_error<W>(
 where
     W: AsyncWrite + Unpin,
 {
-    let id = id.map(jsonrpc_response_id);
     write_json_line(
         writer,
         json!({
@@ -422,13 +437,34 @@ where
     Ok(())
 }
 
-/// Mirror the id type back as received. The ACP protocol requires
-/// echo-format matching: if the client sent a numeric id the response
-/// must also be numeric. avante.nvim's Lua client uses strict table keys
-/// (callbacks[1] ≠ callbacks["1"]) so converting types breaks the callback
-/// lookup.
-fn jsonrpc_response_id(id: Value) -> Value {
-    id
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JsonRpcResponseIdPolicy {
+    /// JSON-RPC's normal contract: echo the request id without changing type.
+    Preserve,
+    /// Zed's ACP client currently decodes response ids as strings even when it
+    /// sent a number. Keep this narrow compatibility mode client-identified.
+    StringifyNumeric,
+}
+
+impl JsonRpcResponseIdPolicy {
+    fn from_initialize_params(params: &Value) -> Self {
+        let client_name = params
+            .pointer("/clientInfo/name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if client_name.eq_ignore_ascii_case("zed") {
+            Self::StringifyNumeric
+        } else {
+            Self::Preserve
+        }
+    }
+
+    fn response_id(self, id: Value) -> Value {
+        match (self, id) {
+            (Self::StringifyNumeric, Value::Number(number)) => Value::String(number.to_string()),
+            (_, id) => id,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -495,7 +531,12 @@ mod tests {
     async fn jsonrpc_result_preserves_numeric_ids_for_avante_acp() {
         let mut out = Vec::new();
 
-        write_jsonrpc_result(&mut out, json!(1), json!({"ok": true}))
+        let params = json!({
+            "protocolVersion": 1,
+            "clientCapabilities": {}
+        });
+        let id = JsonRpcResponseIdPolicy::from_initialize_params(&params).response_id(json!(1));
+        write_jsonrpc_result(&mut out, id, json!({"ok": true}))
             .await
             .expect("write result");
 
@@ -508,6 +549,29 @@ mod tests {
             "numeric id must stay numeric, got {:?}",
             value["id"]
         );
+        assert_eq!(value["result"], json!({"ok": true}));
+    }
+
+    #[tokio::test]
+    async fn jsonrpc_result_stringifies_numeric_ids_for_zed_acp() {
+        let mut out = Vec::new();
+
+        let params = json!({
+            "protocolVersion": 1,
+            "clientCapabilities": {},
+            "clientInfo": {
+                "name": "zed",
+                "version": "1.2.6"
+            }
+        });
+        let id = JsonRpcResponseIdPolicy::from_initialize_params(&params).response_id(json!(1));
+        write_jsonrpc_result(&mut out, id, json!({"ok": true}))
+            .await
+            .expect("write result");
+
+        let line = String::from_utf8(out).expect("utf8");
+        let value: Value = serde_json::from_str(line.trim()).expect("json");
+        assert_eq!(value["id"], "1");
         assert_eq!(value["result"], json!({"ok": true}));
     }
 
