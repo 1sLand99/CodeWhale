@@ -1207,6 +1207,10 @@ pub struct App {
     /// Last concrete thinking tier chosen while `reasoning_effort` is auto.
     pub last_effective_reasoning_effort: Option<ReasoningEffort>,
     pub workspace: PathBuf,
+    /// Off-event-loop worker for durable Lane control writes. `/lane interrupt`
+    /// submits here instead of tearing down a Runtime on the composer thread
+    /// (#4022).
+    pub lane_control: crate::lane_control::LaneControlQueue,
     /// Immutable plugin catalogue scoped to this App's effective workspace.
     pub plugin_registry: std::sync::Arc<crate::plugins::PluginRegistry>,
     pub config_path: Option<PathBuf>,

@@ -2638,9 +2638,10 @@ fn subagent_output_handle(row: &SidebarAgentRow) -> Option<String> {
 }
 
 /// Build the Agents panel lines together with a parallel per-line
-/// click-action vector (#3028). Agent label rows open the Fleet worker status
-/// view via `/fleet status`; header, role-mix, detail, and RLM lines are not
-/// clickable.
+/// click-action vector (#3028). Agent label rows open the current-session
+/// Fleet worker view (`/fleet workers`, formerly spelled `/fleet status`
+/// before that name moved to the durable ledger in #4022); header, role-mix,
+/// detail, and RLM lines are not clickable.
 fn subagent_panel_rows(
     summary: &SidebarSubagentSummary,
     rows: &[SidebarAgentRow],
@@ -5498,7 +5499,8 @@ mod tests {
     fn subagent_panel_actions_skip_role_mix_slot_for_progress_only_agents() {
         // Progress-only agents have no cached role counts, so there is no
         // role-mix line — the first agent row sits directly under the count
-        // header and must still resolve to /fleet status (#3028 audit fix).
+        // header and must still resolve to the session worker view (#3028
+        // audit fix).
         let summary = SidebarSubagentSummary {
             progress_only_count: 1,
             ..SidebarSubagentSummary::default()

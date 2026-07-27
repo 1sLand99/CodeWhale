@@ -2114,6 +2114,60 @@ mod tests {
         }
     }
 
+    /// #1888: the hotbar is not a control surface. It binds the owning slash
+    /// command and dispatches it through `commands::execute` with no argument,
+    /// so what runs is the slash surface — there is no hotbar verb table and
+    /// no `ControlSurface::Hotbar` for a test to assert into existence.
+    ///
+    /// What must hold is narrower and real: every owning command is bound and
+    /// directly dispatchable, and a bare press can only reach a verb that
+    /// declares `hotbar_bare_dispatch` — which is necessarily targetless and
+    /// read-only, because a keypress supplies no id.
+    #[test]
+    fn control_plane_commands_are_bound_and_bare_dispatch_is_read_only() {
+        use codewhale_lane::control::OPERATIONS;
+        use codewhale_lane::{ControlAuthority, ControlSurface, TargetKind};
+
+        let registry = HotbarActionRegistry::with_builtins();
+        for descriptor in OPERATIONS {
+            let action_id = descriptor.hotbar_action_id();
+            assert_eq!(action_id, format!("slash.{}", descriptor.slash_command));
+            let action = registry
+                .get(&action_id)
+                .unwrap_or_else(|| panic!("{} has no hotbar action {action_id}", descriptor.id));
+            assert_eq!(action.category(), "slash");
+            // The dispatch runs as the slash surface, which must therefore be
+            // one the descriptor actually offers.
+            assert!(descriptor.offers(ControlSurface::Slash));
+
+            // A bare hotbar press fires the command with no arguments, so the
+            // owning command must never require one — otherwise the slot would
+            // silently become a composer prefill instead of the verb.
+            let info = commands::get_command_info(descriptor.slash_command)
+                .unwrap_or_else(|| panic!("/{} is not registered", descriptor.slash_command));
+            assert!(
+                !info.requires_required_argument(),
+                "/{} must stay directly dispatchable",
+                descriptor.slash_command
+            );
+
+            if descriptor.hotbar_bare_dispatch {
+                assert_eq!(descriptor.target, TargetKind::None, "{}", descriptor.id);
+                assert_eq!(
+                    descriptor.authority,
+                    ControlAuthority::Read,
+                    "{} would mutate durable state from one keypress",
+                    descriptor.id
+                );
+            }
+        }
+
+        // Both control domains are bound.
+        for id in ["slash.lane", "slash.fleet"] {
+            assert!(registry.get(id).is_some(), "{id} must be bindable");
+        }
+    }
+
     #[test]
     fn slash_hotbar_action_dispatches_argless_command() {
         let registry = HotbarActionRegistry::with_builtins();
