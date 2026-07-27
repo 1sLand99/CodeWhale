@@ -24,6 +24,7 @@ use crate::tools::subagent::{
 };
 use crate::tui::app::App;
 use crate::tui::approval::{ElevationOption, ReviewDecision};
+use crate::tui::focus_texture::FocusTextureMode;
 use crate::tui::history::{HistoryCell, SubAgentCell, summarize_tool_output};
 use crate::tui::menu_style;
 use crate::tui::widgets::agent_card::AgentLifecycle;
@@ -1002,11 +1003,29 @@ pub trait ModalView: std::any::Any {
 #[derive(Default)]
 pub struct ViewStack {
     views: Vec<Box<dyn ModalView>>,
+    /// Focus-context texture prototype mode (#4823). `Off` by default, which
+    /// keeps the render output byte-identical to the pre-prototype path.
+    focus_texture: FocusTextureMode,
+    /// Theme snapshot for the texture pass, set alongside the mode each
+    /// frame. `None` (e.g. tests that never opt in) disables the texture.
+    focus_texture_theme: Option<crate::palette::UiTheme>,
 }
 
 impl ViewStack {
     pub fn new() -> Self {
-        Self { views: Vec::new() }
+        Self {
+            views: Vec::new(),
+            focus_texture: FocusTextureMode::Off,
+            focus_texture_theme: None,
+        }
+    }
+
+    /// Set the focus-context texture mode and theme for subsequent renders
+    /// (#4823 prototype). Called once per frame from the UI render path with
+    /// the parsed setting; a plain enum/theme copy, no allocation.
+    pub fn set_focus_texture(&mut self, mode: FocusTextureMode, theme: crate::palette::UiTheme) {
+        self.focus_texture = mode;
+        self.focus_texture_theme = Some(theme);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1060,6 +1079,26 @@ impl ViewStack {
     }
 
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
+        // Focus-context texture prototype (#4823): runs over the already
+        // rendered background BEFORE any backdrop or view paint, so the
+        // focused modal is painted afterwards at full strength and the
+        // texture can never overwrite it. `Off` (the default) leaves the
+        // buffer untouched, keeping output byte-identical to the
+        // pre-prototype path.
+        if self.focus_texture != FocusTextureMode::Off {
+            if let (Some(focus), Some(theme)) =
+                (self.top_occupied_region(area), self.focus_texture_theme)
+            {
+                crate::tui::focus_texture::apply_focus_texture(
+                    area,
+                    buf,
+                    focus,
+                    &theme,
+                    self.focus_texture,
+                    crate::tui::color_compat::ascii_safe_enabled(),
+                );
+            }
+        }
         // Dim each view's own occupied region rather than the whole frame, so
         // an inline modal (the approval prompt) leaves the transcript above it
         // visible instead of blacking out the screen. Full-screen modals keep
@@ -1597,6 +1636,13 @@ impl ConfigView {
                 section: ConfigSection::Display,
                 key: "ocean_treatment".to_string(),
                 value: settings.ocean_treatment.clone(),
+                editable: true,
+                scope: ConfigScope::Saved,
+            },
+            ConfigRow {
+                section: ConfigSection::Display,
+                key: "focus_texture".to_string(),
+                value: settings.focus_texture.clone(),
                 editable: true,
                 scope: ConfigScope::Saved,
             },
@@ -2925,6 +2971,7 @@ fn config_choice_values(key: &str, provider: ApiProvider) -> Option<Vec<String>>
             vec!["default", "auto", "off", "low", "medium", "high", "max"]
         }
         "ocean_treatment" => vec!["ombre", "flat"],
+        "focus_texture" => vec!["off", "scrim", "grain"],
         "work_surface_placement" => vec!["top", "left", "right"],
         "status_indicator" => vec!["cw", "whale", "dots", "off"],
         "synchronized_output" => vec!["auto", "on", "off"],
@@ -4335,12 +4382,13 @@ fn fit_config_column(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionHint, ConfigListItem, ConfigScope, ConfigTab, ConfigView, EmptyState, HelpView,
-        ListDetailLayout, ModalKind, ModalView, SettingKind, SettingsRegistry, ViewAction,
-        ViewEvent, ViewStack, action_footer_lines, canonical_config_choice, centered_modal_area,
-        config_choice_detail, config_choice_label, config_choice_values, config_label_for_key,
-        config_label_for_key_for_locale, render_modal_footer_with_gutter,
-        render_underwater_surface, subagent_view_agents, truncate_view_text,
+        ActionHint, ConfigListItem, ConfigScope, ConfigTab, ConfigView, EmptyState,
+        FocusTextureMode, HelpView, ListDetailLayout, ModalKind, ModalView, SettingKind,
+        SettingsRegistry, ViewAction, ViewEvent, ViewStack, action_footer_lines,
+        canonical_config_choice, centered_modal_area, config_choice_detail, config_choice_label,
+        config_choice_values, config_label_for_key, config_label_for_key_for_locale,
+        render_modal_footer_with_gutter, render_underwater_surface, subagent_view_agents,
+        truncate_view_text,
     };
     use crate::config::Config;
     use crate::localization::{Locale, MessageId, tr};
@@ -4444,6 +4492,142 @@ mod tests {
             || SubAgentsView::new(Vec::new()),
             &["close", "refresh", "setup"],
         );
+    }
+
+    /// Focus-texture prototype (#4823): with a mode forced on, a real
+    /// full-screen modal must render exactly as before — the texture pass
+    /// no-ops because the focus region covers (nearly) the whole frame.
+    /// The default `Off` case is pinned by the existing
+    /// `*_modal_is_usable_and_opaque_at_blocker_sizes` tests above: they run
+    /// unmodified because `ViewStack::new()` defaults to `Off`, which leaves
+    /// the buffer byte-identical to the pre-prototype render.
+    #[test]
+    fn focus_texture_modes_keep_fullscreen_modal_usable_and_opaque() {
+        let _lock = crate::test_support::lock_test_env();
+        let theme = crate::palette::ThemeId::Whale.ui_theme();
+        for mode in [FocusTextureMode::Scrim, FocusTextureMode::Grain] {
+            for (w, h) in BLOCKER_SIZES {
+                let area = Rect::new(0, 0, w, h);
+                let mut buf = Buffer::empty(area);
+                let sentinel_style = Style::default().fg(Color::Magenta).bg(Color::Green);
+                for y in 0..h {
+                    for x in 0..w {
+                        buf[(x, y)].set_symbol("X").set_style(sentinel_style);
+                    }
+                }
+                let mut stack = ViewStack::new();
+                stack.push(create_config_view(Locale::En));
+                stack.set_focus_texture(mode, theme);
+                stack.render(area, &mut buf);
+
+                let rows: Vec<String> = (0..h)
+                    .map(|y| {
+                        (0..w)
+                            .map(|x| buf[(x, y)].symbol().to_string())
+                            .collect::<String>()
+                    })
+                    .collect();
+                let text = rows.join("\n");
+
+                assert!(
+                    text.contains("Search"),
+                    "{mode:?} {w}x{h}: missing 'Search'"
+                );
+                let unpainted = (0..h).find_map(|y| {
+                    (0..w).find_map(|x| {
+                        let cell = &buf[(x, y)];
+                        (cell.symbol() == "X"
+                            && cell.fg == Color::Magenta
+                            && cell.bg == Color::Green)
+                            .then_some((x, y))
+                    })
+                });
+                assert!(
+                    unpainted.is_none(),
+                    "{mode:?} {w}x{h}: background bleed-through at {unpainted:?}"
+                );
+                assert_eq!(
+                    buf[(w / 2, h / 2)].bg,
+                    palette::WHALE_BG,
+                    "{mode:?} {w}x{h}: modal interior must be opaque"
+                );
+            }
+        }
+    }
+
+    /// The texture actually engages outside an *inline* modal's band: the
+    /// approval prompt only occupies a bottom strip, so the sentinel field
+    /// above it goes through the scrim/grain pass. The modal is painted
+    /// after the texture, so its band stays fully opaque and its labels
+    /// survive at every blocker size.
+    #[test]
+    fn focus_texture_modes_keep_inline_modal_usable() {
+        let theme = crate::palette::ThemeId::Whale.ui_theme();
+        for mode in [FocusTextureMode::Scrim, FocusTextureMode::Grain] {
+            for (w, h) in BLOCKER_SIZES {
+                let area = Rect::new(0, 0, w, h);
+                let mut buf = Buffer::empty(area);
+                let sentinel_style = Style::default().fg(Color::Magenta).bg(Color::Green);
+                for y in 0..h {
+                    for x in 0..w {
+                        buf[(x, y)].set_symbol("X").set_style(sentinel_style);
+                    }
+                }
+                let request = crate::tui::approval::ApprovalRequest::new(
+                    "test-id",
+                    "read_file",
+                    "Read a file from disk",
+                    &serde_json::json!({"path": "src/main.rs"}),
+                    "tool:read_file",
+                );
+                let mut stack = ViewStack::new();
+                stack.push(crate::tui::approval::ApprovalView::new(request));
+                stack.set_focus_texture(mode, theme);
+                let focus = stack
+                    .top_occupied_region(area)
+                    .expect("approval view on the stack");
+                stack.render(area, &mut buf);
+
+                let rows: Vec<String> = (0..h)
+                    .map(|y| {
+                        (0..w)
+                            .map(|x| buf[(x, y)].symbol().to_string())
+                            .collect::<String>()
+                    })
+                    .collect();
+                let text = rows.join("\n");
+
+                assert!(
+                    text.contains("Do you want to proceed?") && text.contains("read_file"),
+                    "{mode:?} {w}x{h}: approval prompt must survive the texture"
+                );
+                // Zero sentinel bleed INSIDE the focused band: the backdrop
+                // and the modal own every cell there. Outside the band the
+                // texture intentionally leaves the sentinel glyphs in place
+                // (Scrim only re-colors; Grain never overwrites text).
+                let mut whale_bg_cells = 0_u32;
+                for y in focus.top()..focus.bottom() {
+                    for x in focus.left()..focus.right() {
+                        let cell = &buf[(x, y)];
+                        assert!(
+                            !(cell.symbol() == "X"
+                                && cell.fg == Color::Magenta
+                                && cell.bg == Color::Green),
+                            "{mode:?} {w}x{h}: sentinel bleed inside focus at ({x},{y})"
+                        );
+                        if cell.bg == palette::WHALE_BG {
+                            whale_bg_cells += 1;
+                        }
+                    }
+                }
+                // The band keeps the opaque modal ink. (Not every cell: the
+                // selected option row carries its own highlight background.)
+                assert!(
+                    whale_bg_cells > 0,
+                    "{mode:?} {w}x{h}: modal band lost its opaque WHALE_BG surface"
+                );
+            }
+        }
     }
 
     #[test]

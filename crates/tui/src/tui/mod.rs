@@ -38,6 +38,7 @@ pub mod file_mention;
 pub mod file_picker;
 pub mod file_picker_relevance;
 pub mod file_tree;
+pub mod focus_texture;
 pub mod footer_ui;
 pub mod format_helpers;
 pub mod frame_rate_limiter;

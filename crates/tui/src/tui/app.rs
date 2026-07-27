@@ -1211,6 +1211,10 @@ pub struct App {
     /// Typed appearance treatment; appearance is independent from motion
     /// settings, and every underwater treatment keeps ambient life.
     pub ocean_treatment: crate::tui::ocean::OceanTreatment,
+    /// Focus-context texture prototype mode (#4823), parsed once from the
+    /// `focus_texture` setting. `Off` by default; while off the modal render
+    /// path is byte-identical to the pre-prototype path.
+    pub focus_texture: crate::tui::focus_texture::FocusTextureMode,
     /// Distinct pre-session menu. Once dismissed, the normal idle ocean owns
     /// the empty session and this state stays hidden.
     pub launch: LaunchState,

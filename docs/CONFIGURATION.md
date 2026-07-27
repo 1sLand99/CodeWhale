@@ -1247,6 +1247,16 @@ Common settings keys:
   rail. Side choices fall back to the top layout on narrow terminals and in
   Classic without changing the saved Ocean preference. Set it live with
   `/config work_surface_placement right --save` (or `left` / `top`).
+- `focus_texture` (`off`, `scrim`, or `grain`; default `off`): focus-context
+  texture for modal views. `scrim` dims the already-rendered background
+  outside the focused modal toward the theme surface; `grain` sprinkles
+  sparse dots over blank cells there. The texture is static (no time
+  component, so it is unaffected by `low_motion`), never writes over a cell
+  that carries text, and preserves the 4.5:1 body-text contrast floor
+  wherever both colors are resolvable. It is skipped entirely on frames
+  below the ambient-life minimum size and when the focused modal already
+  covers 90% or more of the frame. Set it live with
+  `/config focus_texture scrim --save`.
 - `mention_menu_limit` (integer, default `128`): maximum number of
   `@`-mention popup candidates retained before the composer renders the
   visible window. The visible rows still depend on terminal height.

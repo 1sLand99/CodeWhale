@@ -12873,6 +12873,11 @@ fn render_classic_header(area: Rect, buf: &mut Buffer, app: &App) {
 fn render(f: &mut Frame, app: &mut App, config: &Config) {
     let size = f.area();
     let classic_shell = app.ocean_treatment.is_classic();
+    // Keep the view stack's focus-context texture prototype (#4823) in step
+    // with the parsed setting each frame: a plain enum/theme copy, no
+    // allocation. `Off` leaves the render byte-identical to before.
+    app.view_stack
+        .set_focus_texture(app.focus_texture, app.ui_theme);
     app.sidebar_hover = crate::tui::app::SidebarHoverState::default();
     app.viewport.last_approval_area = None;
     // Keep the OSC-0 whale title truthful to the current shell phase so

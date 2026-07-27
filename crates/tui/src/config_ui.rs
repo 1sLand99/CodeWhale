@@ -62,6 +62,7 @@ pub struct SettingsSection {
     pub low_motion: bool,
     pub fancy_animations: bool,
     pub ocean_treatment: OceanTreatmentValue,
+    pub focus_texture: FocusTextureValue,
     pub work_surface_placement: WorkSurfacePlacementValue,
     #[schemars(range(min = 2, max = 16))]
     pub work_surface_top_height: u16,
@@ -248,6 +249,14 @@ pub enum OceanTreatmentValue {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum FocusTextureValue {
+    Off,
+    Scrim,
+    Grain,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum ComposerDensityValue {
     Compact,
     Comfortable,
@@ -404,6 +413,7 @@ pub fn build_document(app: &App, config: &Config) -> Result<ConfigUiDocument> {
             low_motion: settings.low_motion,
             fancy_animations: settings.fancy_animations,
             ocean_treatment: settings.ocean_treatment.as_str().into(),
+            focus_texture: settings.focus_texture.as_str().into(),
             work_surface_placement: settings.work_surface_placement.as_str().into(),
             work_surface_top_height: settings.work_surface_top_height,
             work_surface_side_width: settings.work_surface_side_width,
@@ -594,6 +604,7 @@ pub fn apply_document(
         ("low_motion", bool_str(doc.settings.low_motion)),
         ("fancy_animations", bool_str(doc.settings.fancy_animations)),
         ("ocean_treatment", doc.settings.ocean_treatment.as_setting()),
+        ("focus_texture", doc.settings.focus_texture.as_setting()),
         (
             "work_surface_placement",
             doc.settings.work_surface_placement.as_setting(),
@@ -1017,6 +1028,26 @@ impl From<&str> for OceanTreatmentValue {
             Self::Flat
         } else {
             Self::Ombre
+        }
+    }
+}
+
+impl FocusTextureValue {
+    fn as_setting(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Scrim => "scrim",
+            Self::Grain => "grain",
+        }
+    }
+}
+
+impl From<&str> for FocusTextureValue {
+    fn from(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "scrim" => Self::Scrim,
+            "grain" => Self::Grain,
+            _ => Self::Off,
         }
     }
 }
