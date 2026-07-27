@@ -5,10 +5,25 @@
 //! top only after their cancellation and evidence semantics are proven.
 
 mod elevation;
+/// Setup-time Fleet composition: a suggestion schema with no runtime authority.
+///
+/// Deliberately **not** re-exported from the crate root. Nothing consumes it
+/// yet — the UI lane that turns a proposal into a saved Fleet has not landed —
+/// and a crate-root export would advertise a public API that no call path
+/// reaches. Kept `pub mod` so the lane that wires it can address it by path
+/// (`codewhale_workflow::fleet_composition::…`) without a second review of the
+/// schema itself.
+pub mod fleet_composition;
+pub mod fleet_exact;
+pub mod fleet_preflight;
+pub mod fleet_reasoning;
+pub mod fleet_snapshot;
 mod gates;
 mod js_authoring;
 mod model_policy;
 mod named_fleet;
+pub mod reasoning_router;
+mod redaction;
 mod replay;
 mod review_repair;
 mod role_resolve;
@@ -23,6 +38,29 @@ pub use elevation::{
     DEFAULT_HIGH_BUDGET_THRESHOLD, ElevationOptions, PlanRiskHint, WorkflowPlanElevation,
     assess_plan_risk_string, assess_workflow_elevation, is_shell_tool, is_write_tool,
 };
+pub use fleet_exact::{
+    EXACT_FLEET_SCHEMA_KIND, EXACT_FLEET_SCHEMA_REVISION, ExactFleet, ExactFleetError, ExactMember,
+    FrozenRoute, LEGACY_FLEET_SCHEMA_KIND, PermissionCeiling, ROLE_ALIASES, ROUTER_PUBLIC_ID,
+    ROUTER_PUBLIC_ROLE, ReasoningTier, RequestedReasoning, RouterMember, ShellCeiling,
+    canonical_member_key, canonical_role_key,
+};
+pub use fleet_preflight::{
+    CredentialReadiness, EndpointIdentity, PreflightError, PreflightedRoute, RoutePreflight,
+};
+pub use fleet_reasoning::{
+    EffectiveReasoning, EffectiveReasoningSource, FAITHFUL_WIRE_TIERS, FleetTaskReceipt,
+    ProviderEffectiveReasoning, ProviderReasoningControl, ROUTER_CALL_REASONING,
+    ROUTER_MAX_OUTPUT_TOKENS, ROUTER_REASONING_FIELD, ROUTER_SUMMARY_MAX_CHARS, ROUTING_SCOPE,
+    ReasoningCapability, ReasoningResolveError, ResolvedReasoning, RouterAvailability,
+    RouterCallDisclosure, RouterCallInput, RouterCallPlan, RouterDecision, RouterDecisionError,
+    RouterIdentity, RoutingDisclosure, RoutingPayload, TaskShape, bounded_routing_payload,
+    parse_router_decision, resolve_exact_member_reasoning, resolve_legacy_reasoning,
+    router_call_plan, router_system_prompt, router_user_message, transport_disclosure,
+};
+pub use fleet_snapshot::{
+    FleetSnapshot, FleetSnapshotLegacyRole, FleetSnapshotMember, FleetSnapshotRouter,
+    QualifiedFleetId, captured_legacy_inline_router, verify_snapshot_content_hash,
+};
 pub use gates::{
     GateError, GateKind, GateOn, GateOnFail, GateOutcome, GateSpec, GateState, GateStatusLine,
     HandoffArtifact, LaneGateBoard, stopship_gate_pipeline,
@@ -33,8 +71,18 @@ pub use js_authoring::{
 };
 pub use model_policy::*;
 pub use named_fleet::{
-    NamedFleet, NamedFleetError, STOPSHIP_REQUIRED_ROLES, load_named_fleet, load_named_fleet_file,
+    FleetDocument, FleetSchema, FleetSearchRoot, NamedFleet, NamedFleetError,
+    STOPSHIP_REQUIRED_ROLES, exact_schema_revision, load_named_fleet, load_named_fleet_file,
     parse_named_fleet,
+};
+pub use reasoning_router::{
+    CapturedReasoningRouter, FleetRouterRef, LEGACY_INLINE_ROUTER_ORIGIN, QualifiedRouterId,
+    REASONING_ROUTER_DIR, REASONING_ROUTER_SCHEMA_KIND, REASONING_ROUTER_SERVICE_KIND,
+    ReasoningRouterError, ReasoningRouterProfile, RouterCallReasoning,
+};
+pub use redaction::{
+    REDACTION_ABSOLUTE_PATH, REDACTION_RELATIVE_PATH, REDACTION_SECRET, Redaction,
+    redact_for_disclosure,
 };
 pub use replay::*;
 pub use review_repair::{

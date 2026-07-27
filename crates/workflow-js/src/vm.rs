@@ -847,6 +847,8 @@ fn parse_task_options(opts_json: &str) -> Result<TaskRequest, String> {
         dependencies: options.dependencies,
         acceptance: options.acceptance,
         allowed_tools: options.allowed_tools,
+        // Host-imposed only: a script cannot set (or clear) a deny list.
+        disallowed_tools: Vec::new(),
         max_depth: options.max_depth,
         token_budget: options.token_budget,
         max_steps: options.max_steps,

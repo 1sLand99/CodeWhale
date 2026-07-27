@@ -69,6 +69,16 @@ impl FleetRoster {
         }
     }
 
+    /// A roster built from an explicit member list.
+    ///
+    /// Used for run-scoped rosters that are not a merge of the config layers —
+    /// notably an exact named Fleet, whose members are frozen at Workflow
+    /// start and must not pick up built-in or workspace profiles by name.
+    #[must_use]
+    pub fn from_members(members: Vec<AgentProfile>) -> Self {
+        Self { members }
+    }
+
     /// Load and merge the full roster for a workspace.
     ///
     /// Config members come from `[fleet.profiles]` (id = map key). Personal
@@ -153,8 +163,8 @@ impl FleetRoster {
     /// The default party. Built-ins carry no permission grants (permissions
     /// stay at the [`FleetProfilePermissions::default`] floor); behavior comes
     /// from the role posture / system prompts plus the role `instructions`
-    /// below, which encode the operation hierarchy: the **operator** (the
-    /// session's `/model` selection) runs the operation and assigns managers
+    /// below, which encode the coordination hierarchy: the **operator** (the
+    /// session's `/model` selection) directs the work and assigns managers
     /// to workflows; a **manager** is the middle manager of one workflow.
     #[must_use]
     pub fn built_in_members() -> Vec<AgentProfile> {
@@ -172,9 +182,9 @@ impl FleetRoster {
                 "operator",
                 FleetSlot::Operator,
                 FleetLoadout::Inherit,
-                "The helm of the operation — the session's /model selection. Assigns managers to workflows, routes work between them, arbitrates conflicts, and reviews what comes back.",
+                "The helm of the session — the session's /model selection. Assigns managers to Workflows, routes work between them, arbitrates conflicts, and reviews what comes back.",
                 Some(
-                    "You run the operation, not individual workflows. Assign a manager per workflow, route work and context between them, arbitrate conflicts and priorities, review the receipts that come back, and decide what runs next. Delegate execution; keep judgment.",
+                    "You direct the overall work, not individual Workflow steps. Assign a manager per Workflow, route work and context between them, arbitrate conflicts and priorities, review the receipts that come back, and decide what runs next. Delegate execution; keep judgment.",
                 ),
             ),
             (

@@ -2150,10 +2150,15 @@ pub struct AutoConfig {
 
 /// Explicit classifier route for Auto model mode (`[auto.router]`).
 ///
-/// When `provider` + `model` are set, Auto mode's classifier call goes to
-/// that route instead of the built-in DeepSeek flash default. When unset,
-/// the legacy behavior stands: `deepseek-v4-flash` via DeepSeek when a
-/// DeepSeek key exists, else the local heuristic with no classifier call.
+/// When `provider` + `model` are set, Auto mode's classifier call goes to that
+/// route. When unset, Auto stays local and free: it uses the heuristic and
+/// makes no classifier call at all.
+///
+/// There is deliberately no implicit default. Holding a DeepSeek key used to
+/// elect `deepseek-v4-flash` as the classifier for every Auto turn, which spent
+/// a user's tokens on a route they never chose and privileged one provider over
+/// the rest. Electing a network classifier is now something the operator writes
+/// down.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AutoRouterConfig {
     /// Provider id for the classifier route (e.g. `"deepseek"`, `"zai"`).

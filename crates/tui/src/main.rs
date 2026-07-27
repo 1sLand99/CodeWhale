@@ -9126,6 +9126,23 @@ fn cli_reasoning_effort_value_for_prompt(
     cli_reasoning_effort_value(config, model, resolved)
 }
 
+/// Whether a CLI launch is an Auto *reasoning* request.
+///
+/// Auto reasoning and Auto model are independent decisions. A Fleet worker
+/// subprocess launches with `--model <exact> --reasoning-effort auto`: the
+/// model is pinned (so `auto_model` is false) while the reasoning tier is
+/// still Auto. Reading the flag off `auto_model` alone therefore mislabels
+/// exactly the launch shape the exact-Fleet path uses.
+const fn cli_reasoning_is_auto(
+    reasoning_effort: Option<crate::tui::app::ReasoningEffort>,
+    auto_model: bool,
+) -> bool {
+    matches!(
+        reasoning_effort,
+        Some(crate::tui::app::ReasoningEffort::Auto)
+    ) || auto_model
+}
+
 fn normalize_cli_reasoning_effort(value: &str) -> Result<Option<String>> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -9916,6 +9933,13 @@ async fn build_direct_workflow_tool(
     surface.goal_state = Some(new_shared_goal_state());
 
     let client = DeepSeekClient::new(config)?;
+    // A FIXED model with `reasoning_effort = auto` (the shape a Fleet worker
+    // subprocess launches with: `--model <exact> --reasoning-effort auto`) is
+    // still Auto. Deriving the auto flag from `route.auto_model` alone left it
+    // raw AND non-auto: the runtime carried the literal string `"auto"` while
+    // nothing was allowed to resolve it. Auto is a reasoning decision, not a
+    // model decision — it does not require `--model auto`.
+    let reasoning_effort_auto = cli_reasoning_is_auto(route.reasoning_effort, route.auto_model);
     let reasoning_effort = route
         .reasoning_effort
         .and_then(|effort| cli_reasoning_effort_value(config, &route.model, effort));
@@ -9954,7 +9978,7 @@ async fn build_direct_workflow_tool(
     .with_api_config(config.clone())
     .with_fleet_roster(roster)
     .with_auto_model(route.auto_model)
-    .with_reasoning_effort(reasoning_effort, route.auto_model)
+    .with_reasoning_effort(reasoning_effort, reasoning_effort_auto)
     .with_agent_tool_surface_options(surface)
     .with_max_spawn_depth(config.subagent_max_spawn_depth_for_provider(provider))
     .with_step_api_timeout(Duration::from_secs(
@@ -10397,9 +10421,19 @@ async fn run_exec_agent(
     } else {
         max_subagents
     };
-    let effective_reasoning_effort = route
-        .reasoning_effort
-        .and_then(|effort| cli_reasoning_effort_value(&execution_config, &effective_model, effort));
+    // A FIXED model with `--reasoning-effort auto` (the exact shape a Fleet
+    // worker subprocess launches with: `--model <exact> --reasoning-effort
+    // auto`) is still Auto. `auto_model` is a *model* decision and is false
+    // here, so deriving the auto flag from it left this path both raw and
+    // non-auto: the literal string `"auto"` travelled to the engine while the
+    // receipt claimed no Auto was in play.
+    let reasoning_effort_auto = cli_reasoning_is_auto(route.reasoning_effort, auto_model);
+    // Resolve Auto against this run's prompt at the CLI boundary, exactly like
+    // `run_one_shot`/`run_one_shot_json` and the interactive launch path do,
+    // so the tier the engine (and the receipt below) sees is concrete.
+    let effective_reasoning_effort = route.reasoning_effort.and_then(|effort| {
+        cli_reasoning_effort_value_for_prompt(&execution_config, &effective_model, effort, prompt)
+    });
 
     let settings = crate::settings::Settings::load().unwrap_or_default();
     let auto_compact_enabled = if crate::settings::Settings::auto_compact_explicitly_configured() {
@@ -10611,7 +10645,7 @@ async fn run_exec_agent(
             dynamic_tools: Vec::new(),
             hook_executor: None,
             reasoning_effort: effective_reasoning_effort,
-            reasoning_effort_auto: auto_model,
+            reasoning_effort_auto,
             auto_model,
             allow_shell: auto_approve || execution_config.allow_shell(),
             trust_mode,
@@ -13768,6 +13802,53 @@ mod terminal_mode_tests {
             .as_deref(),
             Some("low"),
             "membership K3 still applies its exact-route always-thinking floor"
+        );
+    }
+
+    /// The exact shape a Fleet worker subprocess launches with:
+    /// `codewhale exec --model <exact> --reasoning-effort auto`. The model is
+    /// pinned, so `auto_model` is false — but the run is still an Auto
+    /// *reasoning* request and must be labelled and resolved as one.
+    #[test]
+    fn a_fixed_model_exec_with_reasoning_auto_is_still_an_auto_reasoning_run() {
+        use crate::tui::app::ReasoningEffort;
+
+        assert!(
+            cli_reasoning_is_auto(Some(ReasoningEffort::Auto), false),
+            "--model <exact> --reasoning-effort auto is an Auto reasoning run"
+        );
+        assert!(
+            cli_reasoning_is_auto(None, true),
+            "an Auto model route keeps its historic Auto labelling"
+        );
+        assert!(!cli_reasoning_is_auto(Some(ReasoningEffort::High), false));
+        assert!(!cli_reasoning_is_auto(None, false));
+    }
+
+    /// `run_exec_agent` must hand the engine a concrete tier, never the literal
+    /// `"auto"` sentinel, for a fixed-model Auto launch.
+    #[test]
+    fn fixed_model_exec_auto_resolves_to_a_concrete_tier_not_the_auto_sentinel() {
+        let config = Config {
+            provider: Some("zai".to_string()),
+            ..Default::default()
+        };
+
+        let resolved = cli_reasoning_effort_value_for_prompt(
+            &config,
+            crate::config::ZAI_GLM_5_2_MODEL,
+            crate::tui::app::ReasoningEffort::Auto,
+            "debug this failing integration test",
+        )
+        .expect("Auto must resolve to a concrete tier");
+
+        assert_ne!(
+            resolved, "auto",
+            "the literal auto sentinel must never reach a provider"
+        );
+        assert!(
+            matches!(resolved.as_str(), "off" | "low" | "medium" | "high" | "max"),
+            "unexpected resolved tier: {resolved}"
         );
     }
 

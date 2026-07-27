@@ -2446,13 +2446,41 @@ mod tests {
             "{local}"
         );
 
+        // A provider key is not a request for a network classifier. Holding a
+        // DeepSeek key used to silently elect `deepseek-v4-flash` for every
+        // Auto turn; the hint must keep saying "local heuristic" so the
+        // disclosure matches what actually runs.
         let _deepseek =
             crate::test_support::EnvVarGuard::set("DEEPSEEK_API_KEY", "test-router-key");
-        let network = auto_picker_hint(&app, &config);
-        // #4411: the default classifier scope is the active provider, and the
-        // hint must not advertise the wider "runnable providers" scope.
+        let still_local = auto_picker_hint(&app, &config);
+        assert!(still_local.contains("local heuristic"), "{still_local}");
+        assert!(still_local.contains("no router request"), "{still_local}");
+        assert!(!still_local.contains("test-router-key"), "{still_local}");
+
+        // …an explicit `[auto.router]` turns the classifier on, and #4411
+        // keeps its default scope confined to the active provider — the hint
+        // must not advertise the wider "runnable providers" scope.
+        let mut routed = config.clone();
+        routed.auto = Some(crate::config::AutoConfig {
+            cost_saving: None,
+            router: Some(crate::config::AutoRouterConfig {
+                provider: Some("deepseek".to_string()),
+                model: Some("deepseek-v4-flash".to_string()),
+                thinking: None,
+            }),
+            cross_provider: None,
+        });
+        let network = auto_picker_hint(&app, &routed);
         assert!(network.contains("active provider only"), "{network}");
         assert!(!network.contains("runnable providers"), "{network}");
+
+        // Only the persisted `[auto] cross_provider = true` opt-in widens it.
+        let mut widened = routed.clone();
+        if let Some(auto) = widened.auto.as_mut() {
+            auto.cross_provider = Some(true);
+        }
+        let network = auto_picker_hint(&app, &widened);
+        assert!(network.contains("runnable providers"), "{network}");
         assert!(network.contains("request + recent context"), "{network}");
         assert!(
             network.contains("DeepSeek / deepseek-v4-flash"),

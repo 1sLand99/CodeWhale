@@ -11,8 +11,8 @@ Model selection is separate. `--model auto` and `/model auto` route each turn to
 a concrete model and thinking level; they are not TUI modes and are not part of
 the `Tab` cycle.
 
-Workflow is also separate from the mode itself. It is the visible
-continuous-work layer for repeatable workflows and fleet workers. High fan-out
+Workflow is also separate from the mode itself. It is the visible ordered
+orchestration layer for repeatable workflows and Fleet workers. High fan-out
 routes through durable Fleet-backed workers instead of prompt-only sub-agent
 fanout. The active mode
 still controls permissions; Workflow controls whether a large task is planned
