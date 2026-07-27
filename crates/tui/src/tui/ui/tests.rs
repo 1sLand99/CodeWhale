@@ -4051,6 +4051,7 @@ fn saved_session_with_messages(messages: Vec<Message>) -> SavedSession {
             parent_session_id: None,
             forked_from_message_count: None,
             cumulative_turn_secs: 0,
+            archived: false,
         },
         messages,
         system_prompt: None,
