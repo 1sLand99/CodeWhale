@@ -3986,6 +3986,22 @@ mod journal {
             .clone()
     }
 
+    /// Read-only lookup that never creates workspace state, a journal
+    /// directory, or a ledger file. Used by the human-only `/structcopy`
+    /// command (#2033), which must stay side-effect free.
+    pub(super) fn peek_shared_workflow_state(
+        workspace: &Path,
+    ) -> Option<Arc<WorkflowWorkspaceState>> {
+        let key = workspace
+            .canonicalize()
+            .unwrap_or_else(|_| workspace.to_path_buf());
+        workspace_store()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(&key)
+            .cloned()
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(tag = "kind", rename_all = "snake_case")]
     enum WorkflowJournalRecord {
@@ -4324,7 +4340,60 @@ mod journal {
     }
 }
 
-use journal::{WorkflowWorkspaceState, shared_workflow_state};
+use journal::{WorkflowWorkspaceState, peek_shared_workflow_state, shared_workflow_state};
+
+/// Bounded, read-only projection of one workflow run for the human-only
+/// `/structcopy` command (#2033).
+///
+/// Built on the existing [`WorkflowRunSummary`] projection so retention and
+/// truncation accounting (`events_total` / `events_dropped`) stay in exactly
+/// one place. Two extra constraints beyond the model-facing summary:
+/// `source_path` collapses to a bare file-name label so no filesystem path
+/// leaves the process, and raw event/hook payloads never enter the
+/// projection. Returns `None` when `run_id` is unknown to this session;
+/// never creates workspace state or touches the journal.
+pub(crate) fn structcopy_run_projection(workspace: &Path, run_id: &str) -> Option<Value> {
+    let state = peek_shared_workflow_state(workspace)?;
+    let runs = state
+        .runs
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let record = runs.get(run_id)?;
+    let mut value = serde_json::to_value(record.summary()).ok()?;
+    if let Some(object) = value.as_object_mut() {
+        let source_file = record
+            .source_path
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .map(|name| Value::String(name.to_string()))
+            .unwrap_or(Value::Null);
+        object.remove("source_path");
+        object.insert("source_file".to_string(), source_file);
+        // `WorkflowRunSummary` predates truthful unavailable-state rendering
+        // and uses zero defaults when no execution projection exists. A
+        // structural export must not turn that absence into measured zeros.
+        if record.execution.is_none() {
+            object.insert("leaf_count".to_string(), Value::Null);
+            object.insert("branch_count".to_string(), Value::Null);
+            object.insert("control_count".to_string(), Value::Null);
+        }
+    }
+    Some(value)
+}
+
+/// Seed a minimal run record so `/structcopy` tests can exercise the
+/// workflow projection without standing up the JS VM.
+#[cfg(test)]
+pub(crate) fn structcopy_test_seed_run(workspace: &Path, run_id: &str) {
+    let state = shared_workflow_state(workspace);
+    let record = WorkflowRunRecord::new(run_id.to_string(), None, None, None);
+    state
+        .runs
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .insert(run_id.to_string(), record);
+}
 
 /// Reconcile workflow bindings after the journal has replayed restart
 /// recovery. The journal owns lifecycle truth; the graph only receives its

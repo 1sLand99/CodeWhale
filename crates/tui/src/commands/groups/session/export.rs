@@ -612,7 +612,9 @@ fn push_json(out: &mut String, value: &Value) {
     let _ = writeln!(out, "{fence}json\n{json}\n{fence}\n");
 }
 
-fn redact_json(value: &mut Value, key: Option<&str>) {
+// Widened to `pub(super)` so `/structcopy` (#2033) reuses this exact seam
+// instead of copying it.
+pub(super) fn redact_json(value: &mut Value, key: Option<&str>) {
     if key.is_some_and(is_sensitive_key) {
         *value = Value::String("[redacted]".to_string());
         return;
@@ -633,7 +635,10 @@ fn redact_json(value: &mut Value, key: Option<&str>) {
     }
 }
 
-fn is_sensitive_key(key: &str) -> bool {
+// Widened to `pub(super)` so `/structcopy` can classify a key again after
+// removing control/ANSI obfuscation. Classification before and after
+// normalization keeps the shared sensitive-key vocabulary authoritative.
+pub(super) fn is_sensitive_key(key: &str) -> bool {
     let normalized = key
         .trim()
         .trim_matches(['\'', '"'])
@@ -657,7 +662,9 @@ fn is_sensitive_key(key: &str) -> bool {
     .any(|hint| normalized.contains(hint))
 }
 
-fn sanitize_text(input: &str) -> String {
+// Widened to `pub(super)` so `/structcopy` (#2033) reuses this exact seam
+// instead of copying it.
+pub(super) fn sanitize_text(input: &str) -> String {
     let mut visible = String::with_capacity(input.len());
     crate::tui::osc8::strip_ansi_into(input, &mut visible);
     let visible = visible.replace("\r\n", "\n").replace('\r', "\n");
@@ -692,7 +699,9 @@ fn inline_text(input: &str) -> String {
         .replace('`', "'")
 }
 
-fn is_internal_role(role: &str) -> bool {
+// Widened to `pub(super)` so `/structcopy` (#2033) reuses this exact seam
+// instead of copying it.
+pub(super) fn is_internal_role(role: &str) -> bool {
     matches!(
         role.trim().to_ascii_lowercase().as_str(),
         "system" | "developer" | "internal"
