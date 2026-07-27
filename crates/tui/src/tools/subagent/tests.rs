@@ -1810,7 +1810,14 @@ fn fleet_role_deserialize_rejects_unknown_values_with_canonical_hint() {
         "error should name the rejected token: {message}"
     );
     for canonical in [
-        "worker", "scout", "planner", "reviewer", "builder", "verifier", "oracle", "custom",
+        "worker",
+        "scout",
+        "planner",
+        "reviewer",
+        "builder",
+        "verifier",
+        "consultant",
+        "custom",
     ] {
         assert!(
             message.contains(canonical),
@@ -2178,43 +2185,60 @@ fn read_only_roles_reject_write_authority_but_implementers_can_be_narrowed() {
     );
 }
 
-/// #4752: Oracle must be a role, not a special-cased code path — so it has to
+/// #4752: Consultant must be a role, not a special-cased code path — so it has to
 /// travel the same spawn/schema machinery as every other role, and be refused
 /// write authority by the same guard that refuses reviewer.
 #[test]
-fn oracle_spawns_as_a_first_class_read_only_role() {
-    let oracle = parse_spawn_request(&json!({
+fn consultant_spawns_as_a_first_class_read_only_role() {
+    let consultant = parse_spawn_request(&json!({
         "prompt": "is this design sound?",
-        "type": "oracle"
+        "type": "consultant"
     }))
-    .expect("oracle parses through the normal spawn path");
-    assert_eq!(oracle.agent_type, FleetRole::Oracle);
+    .expect("consultant parses through the normal spawn path");
+    assert_eq!(consultant.agent_type, FleetRole::Consultant);
 
     let escalation = parse_spawn_request(&json!({
         "prompt": "advise, and also patch it",
-        "type": "oracle",
+        "type": "consultant",
         "write_authority": "workspace_write",
         "write_roots": ["src"]
     }))
-    .expect_err("an oracle must not be able to request writes")
+    .expect_err("a consultant must not be able to request writes")
     .to_string();
     assert!(escalation.contains("read-only role"), "{escalation}");
 }
 
 /// The role name has to survive the wire, or receipts and resumed sessions
-/// silently reclassify an oracle as the default worker.
+/// silently reclassify a consultant as the default worker.
 #[test]
-fn oracle_round_trips_through_the_role_schema() {
-    assert_eq!(FleetRole::from_str("oracle"), Some(FleetRole::Oracle));
-    assert_eq!(FleetRole::Oracle.as_str(), "oracle");
+fn consultant_round_trips_canonically_and_accepts_compatibility_aliases() {
+    assert_eq!(
+        FleetRole::from_str("consultant"),
+        Some(FleetRole::Consultant)
+    );
+    assert_eq!(FleetRole::from_str("oracle"), Some(FleetRole::Consultant));
+    assert_eq!(FleetRole::from_str("advisor"), Some(FleetRole::Consultant));
+    assert_eq!(FleetRole::Consultant.as_str(), "consultant");
 
-    let json = serde_json::to_string(&FleetRole::Oracle).expect("serialize");
-    assert_eq!(json, "\"oracle\"");
+    let json = serde_json::to_string(&FleetRole::Consultant).expect("serialize");
+    assert_eq!(json, "\"consultant\"");
     let back: FleetRole = serde_json::from_str(&json).expect("deserialize");
-    assert_eq!(back, FleetRole::Oracle);
+    assert_eq!(back, FleetRole::Consultant);
+
+    for legacy in ["oracle", "advisor"] {
+        let migrated: FleetRole = serde_json::from_str(&format!("\"{legacy}\""))
+            .expect("deserialize compatibility alias");
+        assert_eq!(migrated, FleetRole::Consultant);
+        assert_eq!(
+            serde_json::to_string(&migrated).expect("re-serialize canonical role"),
+            "\"consultant\""
+        );
+    }
 
     // Advertised in the tool schema, so the model can actually pick it.
-    assert!(FLEET_ROLE_SCHEMA_VALUES.contains(&"oracle"));
+    assert!(FLEET_ROLE_SCHEMA_VALUES.contains(&"consultant"));
+    assert!(!FLEET_ROLE_SCHEMA_VALUES.contains(&"oracle"));
+    assert!(!FLEET_ROLE_SCHEMA_VALUES.contains(&"advisor"));
 }
 
 #[test]
@@ -2723,6 +2747,7 @@ fn test_apply_spawn_profile_unknown_lists_available_members() {
         "builder",
         "reviewer",
         "verifier",
+        "consultant",
         "synthesizer",
         "general",
     ] {
@@ -3253,6 +3278,9 @@ fn test_parse_spawn_request_accepts_full_role_vocabulary() {
         ("verification", FleetRole::Verifier, "verifier"),
         ("validator", FleetRole::Verifier, "verifier"),
         ("tester", FleetRole::Verifier, "verifier"),
+        ("consultant", FleetRole::Consultant, "consultant"),
+        ("oracle", FleetRole::Consultant, "consultant"),
+        ("advisor", FleetRole::Consultant, "consultant"),
         ("custom", FleetRole::Custom, "custom"),
     ] {
         assert_eq!(
@@ -3337,7 +3365,14 @@ fn subagent_tool_schemas_advertise_real_type_and_role_vocabulary() {
 
     let description = schema_property_description(&agent_schema, "type");
     for alias in [
-        "worker", "scout", "planner", "reviewer", "builder", "verifier", "oracle", "custom",
+        "worker",
+        "scout",
+        "planner",
+        "reviewer",
+        "builder",
+        "verifier",
+        "consultant",
+        "custom",
     ] {
         assert!(
             description.contains(alias),
@@ -3380,7 +3415,14 @@ fn agent_tool_role_schema_is_a_closed_canonical_enum() {
     // Exact canonical values, exact order. New models are told the closed
     // Fleet vocabulary and nothing else.
     let expected = json!([
-        "worker", "scout", "planner", "reviewer", "builder", "verifier", "oracle", "custom"
+        "worker",
+        "scout",
+        "planner",
+        "reviewer",
+        "builder",
+        "verifier",
+        "consultant",
+        "custom"
     ]);
     assert_eq!(
         agent_schema["properties"]["type"]["enum"], expected,
@@ -3418,7 +3460,14 @@ fn provider_schema_sanitizers_preserve_the_closed_fleet_role_enum() {
     let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 1);
     let agent_schema = AgentTool::new(manager, stub_runtime()).input_schema();
     let expected = json!([
-        "worker", "scout", "planner", "reviewer", "builder", "verifier", "oracle", "custom"
+        "worker",
+        "scout",
+        "planner",
+        "reviewer",
+        "builder",
+        "verifier",
+        "consultant",
+        "custom"
     ]);
 
     // Generic Chat Completions sanitize pass.

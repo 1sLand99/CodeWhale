@@ -52,7 +52,7 @@ const CHOICE_TWO_COLUMN_MIN_WIDTH: u16 = CHOICE_LIST_WIDTH + CHOICE_DETAIL_MIN_W
 
 /// Agent-team roles. `label` doubles as the profile `role_hint` and file stem,
 /// so these strings are part of the generated-profile contract.
-const ROLES: [Choice; 8] = [
+const ROLES: [Choice; 9] = [
     Choice {
         label: Cow::Borrowed("manager"),
         summary: Cow::Borrowed("Plan & split queued work"),
@@ -86,6 +86,13 @@ const ROLES: [Choice; 8] = [
         summary: Cow::Borrowed("Runs focused validation"),
         description: Cow::Borrowed(
             "Runs targeted validation and reports receipts back to the orchestrator.",
+        ),
+    },
+    Choice {
+        label: Cow::Borrowed("consultant"),
+        summary: Cow::Borrowed("Read-only second opinion"),
+        description: Cow::Borrowed(
+            "Short-lived, high-reasoning counsel for difficult decisions and overlooked risks. Read-only and shell-less.",
         ),
     },
     Choice {

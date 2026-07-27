@@ -318,21 +318,28 @@ fn subagent_perf_enabled() -> bool {
     })
 }
 
-const VALID_SUBAGENT_TYPES: &str = "worker, scout, planner, reviewer, builder, verifier, custom \
-     (legacy aliases remain accepted: general, explore/explorer, plan/awaiter, review, implementer)";
+const VALID_SUBAGENT_TYPES: &str = "worker, scout, planner, reviewer, builder, verifier, consultant, custom \
+     (legacy aliases remain accepted: general, explore/explorer, plan/awaiter, review, implementer, oracle/advisor)";
 /// Role aliases accepted by `normalize_role_alias`. Kept in sync with the
 /// match arms below so every input that `FleetRole::from_str` accepts also
 /// resolves to a canonical role (avoids the dual-validation rejection in #2649).
-const VALID_ROLE_ALIASES: &str = "default; worker; scout; planner; reviewer; builder; verifier; custom \
+const VALID_ROLE_ALIASES: &str = "default; worker; scout; planner; reviewer; builder; verifier; consultant; custom \
      (legacy aliases remain accepted)";
 /// Canonical model-facing Fleet role values, in schema order. This is the
 /// closed `enum` advertised on the Agent tool's `type` property. Legacy
 /// aliases are accepted only at replay/deserialization boundaries
 /// ([`migrate_legacy_role_token`]) and are never advertised to models.
 const FLEET_ROLE_SCHEMA_VALUES: [&str; 8] = [
-    "worker", "scout", "planner", "reviewer", "builder", "verifier", "oracle", "custom",
+    "worker",
+    "scout",
+    "planner",
+    "reviewer",
+    "builder",
+    "verifier",
+    "consultant",
+    "custom",
 ];
-const SUBAGENT_TYPE_DESCRIPTION: &str = "Fleet role for this delegated worker. worker: full tool access for multi-step tasks. scout: fast read-only exploration. planner: analysis-only planning. reviewer: reads and grades code. builder: lands focused code changes. verifier: runs tests/validation gates and reports evidence. oracle: read-only high-reasoning advisor for judgement calls and design critique. custom: exactly the tools listed in allowed_tools.";
+const SUBAGENT_TYPE_DESCRIPTION: &str = "Fleet role for this delegated worker. worker: full tool access for multi-step tasks. scout: fast read-only exploration. planner: analysis-only planning. reviewer: reads and grades code. builder: lands focused code changes. verifier: runs tests/validation gates and reports evidence. consultant: read-only high-reasoning counsel for judgement calls and design critique. custom: exactly the tools listed in allowed_tools.";
 /// Whale species used as friendly names for sub-agents in the UI. The full
 /// Cetacea infraorder — baleen whales (Mysticeti), toothed whales
 /// (Odontoceti), plus select dolphin species (family Delphinidae) that
@@ -747,12 +754,12 @@ pub enum FleetRole {
     /// Advisory counsel — a strong-model second opinion the operator can ask
     /// for guidance, judgement calls, and design critique (#4752).
     ///
-    /// Read-only and shell-less by construction: an Oracle reasons about the
+    /// Read-only and shell-less by construction: a Consultant reasons about the
     /// code and says what it thinks. It is distinct from `Reviewer`, which
     /// grades a specific change against a standard, and from `Planner`, which
-    /// produces a plan to execute. An Oracle answers "what should we do here,
+    /// produces a plan to execute. A Consultant answers "what should we do here,
     /// and what are we not seeing".
-    Oracle,
+    Consultant,
     /// Custom tool access defined at spawn time.
     Custom,
 }
@@ -792,6 +799,7 @@ pub fn migrate_legacy_role_token(token: &str) -> Option<&'static str> {
         "review" | "code-review" | "code_review" => Some("reviewer"),
         "implementer" | "implement" | "implementation" => Some("builder"),
         "verify" | "verification" | "validator" | "tester" => Some("verifier"),
+        "oracle" | "advisor" => Some("consultant"),
         _ => None,
     }
 }
@@ -813,7 +821,7 @@ impl FleetRole {
             "reviewer" => Some(Self::Reviewer),
             "builder" => Some(Self::Builder),
             "verifier" => Some(Self::Verifier),
-            "oracle" => Some(Self::Oracle),
+            "consultant" => Some(Self::Consultant),
             "custom" => Some(Self::Custom),
             _ => None,
         }
@@ -829,7 +837,7 @@ impl FleetRole {
             Self::Reviewer => "reviewer",
             Self::Builder => "builder",
             Self::Verifier => "verifier",
-            Self::Oracle => "oracle",
+            Self::Consultant => "consultant",
             Self::Custom => "custom",
         }
     }
@@ -845,8 +853,8 @@ impl FleetRole {
             Self::Reviewer => "review",
             Self::Builder => "implementer",
             Self::Verifier => "verifier",
-            // Oracle is post-Fleet; it never had a pre-Fleet override table key.
-            Self::Oracle => "oracle",
+            // Consultant is post-Fleet; it never had a pre-Fleet override table key.
+            Self::Consultant => "consultant",
             Self::Custom => "custom",
         }
     }
@@ -861,7 +869,7 @@ impl FleetRole {
             Self::Reviewer => REVIEW_AGENT_INTRO,
             Self::Builder => IMPLEMENTER_AGENT_INTRO,
             Self::Verifier => VERIFIER_AGENT_INTRO,
-            Self::Oracle => ORACLE_AGENT_INTRO,
+            Self::Consultant => CONSULTANT_AGENT_INTRO,
             Self::Custom => CUSTOM_AGENT_INTRO,
         };
         format!("{role_intro}{SUBAGENT_OUTPUT_FORMAT}")
@@ -7448,7 +7456,7 @@ fn spawn_request_is_write_capable(request: &SpawnRequest) -> bool {
         | FleetRole::Planner
         | FleetRole::Reviewer
         | FleetRole::Verifier
-        | FleetRole::Oracle => false,
+        | FleetRole::Consultant => false,
     }
 }
 
@@ -9989,7 +9997,7 @@ fn validate_spawn_write_contract(
             | FleetRole::Planner
             | FleetRole::Reviewer
             | FleetRole::Verifier
-            | FleetRole::Oracle
+            | FleetRole::Consultant
     ) && request
         .write_authority
         .is_some_and(|authority| authority != SpawnWriteAuthority::ReadOnly)
@@ -11245,6 +11253,7 @@ fn normalize_role_alias(input: &str) -> Option<&'static str> {
         "reviewer" | "review" | "code-review" | "code_review" => Some("reviewer"),
         "implementer" | "implement" | "implementation" | "builder" => Some("builder"),
         "verifier" | "verify" | "verification" | "validator" | "tester" => Some("verifier"),
+        "consultant" | "oracle" | "advisor" => Some("consultant"),
         "custom" => Some("custom"),
         _ => None,
     }
@@ -12195,14 +12204,14 @@ const WRITE_CHILD_VERIFY_CONTRACT: &str = concat!(
     "3. Do not claim PASS without command or inspection evidence. If you cannot run checks, report FAIL or BLOCKED with the blocker — never invent success.\n",
 );
 
-const ORACLE_AGENT_INTRO: &str = concat!(
-    "You are a trusted Fleet oracle (role: `oracle`). You are asked for judgement, not for labour.\n",
+const CONSULTANT_AGENT_INTRO: &str = concat!(
+    "You are a trusted Fleet consultant (role: `consultant`). You are asked for judgement, not for labour.\n",
     "You are read-only and have no shell. Read what you need, then give counsel.\n",
     "Lead with your actual recommendation, not a survey of options. If you would do something different from what was proposed, say so first and say why.\n",
     "Name what the asker appears not to have considered: the failure mode, the constraint, the cheaper alternative, the reason this is harder than it looks.\n",
     "Distinguish what you verified by reading from what you are inferring. An unverified hunch is still useful — labelled as one.\n",
     "If the question is underspecified in a way that changes the answer, say which detail decides it rather than answering both ways at length.\n",
-    "CHANGES will always be \"None.\" for an oracle.\n\n"
+    "CHANGES will always be \"None.\" for a consultant.\n\n"
 );
 
 const VERIFIER_AGENT_INTRO: &str = concat!(

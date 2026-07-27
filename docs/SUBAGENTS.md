@@ -1,8 +1,8 @@
 # Fleet Workers and Sub-Agent Compatibility
 
 Fleet roles are the user-facing vocabulary for delegated work: a parent
-launches a focused `worker`, `scout`, `planner`, `reviewer`, `builder`, or
-`verifier` through `agent` and gets back an `agent_id` plus transcript handle
+launches a focused `worker`, `scout`, `planner`, `reviewer`, `builder`,
+`verifier`, or `consultant` through `agent` and gets back an `agent_id` plus transcript handle
 while the worker runs. The internal runtime type is `FleetRole` (formerly
 `SubAgentType`); the older role spellings (`general`, `explore`, `plan`,
 `review`, `implementer`, …) remain accepted only as a persisted/deserialize
@@ -62,11 +62,12 @@ stewardship.
 | `reviewer`    | read-and-grade with severity scores    | no      | read-only     | "audit this PR for bugs"                     |
 | `builder`     | land a specific change with min edit   | yes     | yes           | "rewrite `bar.rs::Foo::bar` to do X"         |
 | `verifier`    | run tests / validation, report outcome | no      | test-focused  | "run cargo test --workspace, report"         |
+| `consultant`  | short-lived, high-reasoning counsel     | no      | none          | "what are we missing in this design?"        |
 | `custom`      | explicit narrow tool allowlist         | depends | depends       | locked-down dispatch with hand-picked tools  |
 
 Each role's full system prompt lives in
 `crates/tui/src/tools/subagent/mod.rs` (search for
-`*_AGENT_PROMPT`). The prompt prefix loads automatically when the
+`*_AGENT_INTRO`). The prompt prefix loads automatically when the
 child agent boots; the parent's assignment prompt becomes the first
 turn's user message.
 
@@ -223,6 +224,11 @@ OUTPUT: VERDICT, EVIDENCE, GAPS, NEXT.
   on the test suite or other validation. Verifiers don't fix
   failures; they capture the failing assertion + stack and put fix
   candidates under RISKS.
+- **`consultant`** — when the operator wants a high-leverage second opinion
+  before cheaper execution continues. Consultants read enough to ground a
+  recommendation, but cannot write or run shell commands. `oracle` and
+  `advisor` remain accepted only when loading older requests or persisted
+  records; new prompts, receipts, and UI use `consultant`.
 - **`custom`** — only when the parent needs to constrain the tool
   set explicitly. Pass the allowlist via the `allowed_tools` field
   on legacy/internal sub-agent records; the model-facing `agent` tool keeps the
@@ -240,6 +246,7 @@ The model can spell each role multiple ways:
 | `reviewer`    | `review`, `code-review`, `code_review`                           |
 | `builder`     | `implementer`, `implement`, `implementation`                     |
 | `verifier`    | `verify`, `verification`, `validator`, `tester`                  |
+| `consultant`  | `oracle`, `advisor` (compatibility input only)                    |
 | `custom`      | (none; explicit `allowed_tools` array required)                  |
 
 All matching is case-insensitive. Unknown values produce a typed

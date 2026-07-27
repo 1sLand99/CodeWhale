@@ -90,11 +90,14 @@ impl FleetRoster {
         let mut extras: Vec<AgentProfile> = Vec::new();
 
         for (id, profile) in &fleet_config.profiles {
+            let mut profile = profile.clone();
+            profile.role.name = super::profile::canonical_public_role_name(&profile.role.name);
+            profile.slot = FleetSlot::from_name(&profile.role.name);
             let member = AgentProfile {
                 id: id.clone(),
                 display_name: None,
                 description: profile.role.description.clone(),
-                profile: profile.clone(),
+                profile,
                 source: PathBuf::from("config.toml"),
                 origin: ProfileOrigin::Config,
             };
@@ -205,6 +208,15 @@ impl FleetRoster {
                 None,
             ),
             (
+                "consultant",
+                FleetSlot::Custom("consultant".to_string()),
+                FleetLoadout::Inherit,
+                "Short-lived, high-reasoning, read-only counsel for difficult decisions and overlooked risks.",
+                Some(
+                    "Give the operator a direct second opinion grounded in what you can read. Surface the decisive tradeoff, overlooked failure mode, and your recommendation. Advise only: do not edit files or run commands.",
+                ),
+            ),
+            (
                 "synthesizer",
                 FleetSlot::Summarizer,
                 FleetLoadout::Inherit,
@@ -234,7 +246,7 @@ impl FleetRoster {
                 loadout,
                 model: None,
                 provider: None,
-                reasoning_effort: None,
+                reasoning_effort: (id == "consultant").then(|| "high".to_string()),
                 permissions: FleetProfilePermissions::default(),
                 delegation: FleetDelegationHints::default(),
             },
@@ -343,6 +355,7 @@ mod tests {
                 "builder",
                 "reviewer",
                 "verifier",
+                "consultant",
                 "synthesizer",
                 "general"
             ]
@@ -362,11 +375,19 @@ mod tests {
                 member.id
             );
             assert!(member.profile.model.is_none(), "{}", member.id);
+            assert_eq!(
+                member.profile.reasoning_effort.as_deref(),
+                (member.id == "consultant").then_some("high"),
+                "built-in {} reasoning",
+                member.id
+            );
             // The coordination hierarchy (operator/manager) and the
             // adversarial reviewer carry role doctrine; the remaining
             // built-ins get behavior from posture / system prompts alone.
-            let carries_doctrine =
-                matches!(member.id.as_str(), "manager" | "operator" | "reviewer");
+            let carries_doctrine = matches!(
+                member.id.as_str(),
+                "manager" | "operator" | "reviewer" | "consultant"
+            );
             assert_eq!(
                 member.profile.role.instructions.is_some(),
                 carries_doctrine,
@@ -378,8 +399,9 @@ mod tests {
         assert_eq!(members[0].profile.slot, FleetSlot::Manager);
         assert_eq!(members[1].profile.slot, FleetSlot::Operator);
         assert_eq!(members[2].profile.loadout, FleetLoadout::Inherit);
-        assert_eq!(members[6].profile.slot, FleetSlot::Summarizer);
-        assert_eq!(members[6].profile.loadout, FleetLoadout::Inherit);
+        assert_eq!(members[6].profile.slot.as_str(), "consultant");
+        assert_eq!(members[7].profile.slot, FleetSlot::Summarizer);
+        assert_eq!(members[7].profile.loadout, FleetLoadout::Inherit);
     }
 
     #[test]
@@ -406,6 +428,7 @@ mod tests {
                 "builder",
                 "reviewer",
                 "verifier",
+                "consultant",
                 "synthesizer",
                 "general",
                 "alpha",

@@ -919,9 +919,9 @@ pub(crate) fn fleet_role_to_agent_type(role: Option<&str>) -> FleetRole {
         Some("builder") => FleetRole::Builder,
         Some("verifier") | Some("tester") => FleetRole::Verifier,
         Some("planner") => FleetRole::Planner,
-        // Advisory counsel (#4752). "advisor" is accepted because that is what
-        // people call it before they learn the roster name.
-        Some("oracle") | Some("advisor") => FleetRole::Oracle,
+        // Advisory counsel (#4752). `oracle` and `advisor` are compatibility
+        // aliases for the canonical public role name, `consultant`.
+        Some("consultant") | Some("oracle") | Some("advisor") => FleetRole::Consultant,
         Some("explorer") => FleetRole::Scout,
         // Coordination happens through delegation, which needs the full
         // General surface (#fleet-roster cutover (v0.8.67)). The operator is
@@ -1522,6 +1522,17 @@ mod tests {
             fleet_role_to_agent_type(Some("operator")),
             FleetRole::Worker
         );
+    }
+
+    #[test]
+    fn consultant_and_legacy_advisory_aliases_share_the_consultant_posture() {
+        for role in ["consultant", "oracle", "advisor"] {
+            assert_eq!(
+                fleet_role_to_agent_type(Some(role)),
+                FleetRole::Consultant,
+                "role {role}"
+            );
+        }
     }
 
     #[test]

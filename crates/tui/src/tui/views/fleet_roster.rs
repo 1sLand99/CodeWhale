@@ -750,6 +750,7 @@ mod tests {
                 "builder",
                 "reviewer",
                 "verifier",
+                "consultant",
                 "synthesizer",
                 "general"
             ]
