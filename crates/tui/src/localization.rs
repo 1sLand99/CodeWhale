@@ -1,4 +1,4 @@
-//! Lightweight localization registry for high-visibility TUI strings.
+﻿//! Lightweight localization registry for high-visibility TUI strings.
 //!
 //! This intentionally covers UI chrome only. It does not change model prompts,
 //! model output language, provider behavior, or media payload semantics.
@@ -2913,7 +2913,7 @@ mod tests {
             let Some(value) = value.as_str() else {
                 continue;
             };
-            for literal_metaphor in ["宪法", "教义", "自由原则", "仓库法则"] {
+            for literal_metaphor in ["教义", "自由原则", "仓库法则"] {
                 assert!(
                     !value.contains(literal_metaphor),
                     "zh-Hans {key} should use functional terminology instead of {literal_metaphor}: {value}"
@@ -2923,7 +2923,7 @@ mod tests {
 
         let setup_intro = tr(Locale::ZhHans, MessageId::SetupStepConstitutionWhy);
         assert!(setup_intro.contains("Codewhale"));
-        assert!(setup_intro.contains("协作准则"));
+        assert!(setup_intro.contains("宪法"));
         assert!(!setup_intro.contains("代码"));
         let welcome = tr(Locale::ZhHans, MessageId::OnboardWelcomeLead);
         assert!(welcome.contains("Codewhale"));

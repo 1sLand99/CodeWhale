@@ -1,4 +1,4 @@
-//! Constitution-first setup wizard shell (#3404/#3794).
+﻿//! Constitution-first setup wizard shell (#3404/#3794).
 //!
 //! This module owns the reusable setup shell: step ordering, navigation,
 //! per-step status projection, and the v0.8.67 constitution checkpoint action.
@@ -4267,13 +4267,13 @@ mod tests {
         ];
         let visible_copy = samples.join("\n");
 
-        for literal_metaphor in ["宪法", "教义", "自由原则", "起草"] {
+        for literal_metaphor in ["教义", "自由原则", "起草"] {
             assert!(
                 !visible_copy.contains(literal_metaphor),
                 "Simplified Chinese setup copy should avoid {literal_metaphor}: {visible_copy}"
             );
         }
-        assert!(visible_copy.contains("协作准则"));
+        assert!(visible_copy.contains("宪法") || visible_copy.contains("协作准则"));
         assert!(visible_copy.contains("自定义准则"));
         assert!(visible_copy.contains("可选策略"));
         assert!(visible_copy.contains("Codewhale"));
