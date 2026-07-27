@@ -1897,6 +1897,7 @@ fn receipt_parts(row: &WorkflowPanelRow, locale: Locale) -> Vec<String> {
 /// exports. Renderers use [`receipt_line_strings`] so narrow terminals wrap
 /// fields instead of dropping them.
 #[must_use]
+#[cfg(test)]
 pub fn row_receipt_text(row: &WorkflowPanelRow) -> String {
     receipt_parts(row, Locale::En).join(" · ")
 }

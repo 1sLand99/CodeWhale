@@ -453,9 +453,7 @@ fn html_meta_encoding(bytes: &[u8]) -> Option<&'static Encoding> {
             cursor = start + 1;
             continue;
         }
-        let Some(relative_end) = html[start..].find('>') else {
-            return None;
-        };
+        let relative_end = html[start..].find('>')?;
         let end = start + relative_end + 1;
         let tag = &html[start..end];
         if let Some(label) = html_attribute_value(tag, "charset")

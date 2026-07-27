@@ -32,6 +32,7 @@ impl Engine {
         options
     }
 
+    #[cfg(test)]
     pub(super) fn build_turn_tool_registry_builder(
         &self,
         mode: AppMode,
