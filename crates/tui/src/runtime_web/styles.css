@@ -313,6 +313,95 @@ textarea::placeholder {
   background: var(--danger);
 }
 
+/* Read-only peek for a saved session. Visually distinct from the live
+   transcript so a recording is never mistaken for a running thread. */
+.session-peek {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.session-peek[hidden] {
+  display: none;
+}
+
+.peek-entry {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+  padding: 6px 0;
+  border-top: 1px solid var(--line);
+}
+
+.peek-kind {
+  min-width: 72px;
+  color: var(--text-dim);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.peek-text {
+  flex: 1 1 240px;
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.peek-flag,
+.peek-omitted {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+/* Narrow viewports: the peek must not force horizontal scrolling, and the
+   kind label stacks above its text rather than squeezing it. */
+@media (max-width: 480px) {
+  .session-peek {
+    padding: 10px 12px;
+    max-height: 45vh;
+  }
+
+  .peek-entry {
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .peek-text {
+    flex-basis: auto;
+  }
+
+  .saved-sessions {
+    max-height: 30%;
+  }
+}
+
+/* Saved sessions sit under the live thread list and are capped so a large
+   session store cannot push the connection footer off-screen. */
+.saved-sessions {
+  min-height: 0;
+  max-height: 34%;
+  display: flex;
+  flex-direction: column;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+}
+
+.saved-sessions[hidden] {
+  display: none;
+}
+
+.rail-section-title {
+  margin: 0 0 6px;
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .rail-footer {
   min-width: 0;
   gap: 8px;
