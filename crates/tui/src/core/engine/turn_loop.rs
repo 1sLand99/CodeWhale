@@ -725,7 +725,9 @@ impl Engine {
                 })
                 .await;
             if let Some(mut route) = turn.pending_route.take() {
-                route.dispatched_at = chrono::Utc::now();
+                if let Some(billing) = route.billing.as_mut() {
+                    billing.dispatched_at = chrono::Utc::now();
+                }
                 let _ = self
                     .tx_event
                     .send(Event::RouteDispatched {

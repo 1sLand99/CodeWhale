@@ -48,9 +48,22 @@ pub struct TurnRoute {
     /// `None` when no concrete client was installed (injected-client engines,
     /// or a client that failed to construct).
     pub receipt: Option<crate::route_receipt::TurnRouteReceipt>,
-    /// Billing evidence captured with this exact effective route before the
-    /// request starts; completion must never reconstruct it from mutable app
-    /// config.
+    /// Billing evidence for the request that was actually put on the wire.
+    ///
+    /// `None` at `TurnStarted`: a lifecycle start is not a dispatch, and a
+    /// route that has not been sent has no billing time, no metering surface,
+    /// and no endpoint to attest. Populated exactly once, at the wire
+    /// boundary, and delivered on `RouteDispatched`. Consumers that price a
+    /// turn must treat `None` as *unknown*, never as a zero-cost turn.
+    pub billing: Option<RouteBillingEnvelope>,
+}
+
+/// Dispatch-time billing evidence. Separate from [`TurnRoute`] so the type
+/// system — not a convention — enforces that no caller can read a billing
+/// surface, endpoint fingerprint, or dispatch instant off a route that was
+/// only *planned*.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteBillingEnvelope {
     pub billing_surface: Option<String>,
     pub endpoint_fingerprint: Option<String>,
     pub billing_mode: crate::cost_status::RouteBillingMode,
@@ -58,17 +71,21 @@ pub struct TurnRoute {
 }
 
 impl TurnRoute {
+    /// Priceable envelope for this route, or `None` when the route was never
+    /// dispatched. Deliberately not a `Default`-filled envelope: an undispatched
+    /// route has no cost, and "no cost" is not "zero cost".
     #[must_use]
-    pub fn cost_envelope(&self) -> crate::cost_status::EffectiveRouteEnvelope {
-        crate::cost_status::EffectiveRouteEnvelope {
+    pub fn cost_envelope(&self) -> Option<crate::cost_status::EffectiveRouteEnvelope> {
+        let billing = self.billing.as_ref()?;
+        Some(crate::cost_status::EffectiveRouteEnvelope {
             provider: self.provider,
             provider_identity: self.provider_identity.clone(),
             model: self.model.clone(),
-            billing_surface: self.billing_surface.clone(),
-            endpoint_fingerprint: self.endpoint_fingerprint.clone(),
-            billing_mode: self.billing_mode,
-            dispatched_at: self.dispatched_at,
-        }
+            billing_surface: billing.billing_surface.clone(),
+            endpoint_fingerprint: billing.endpoint_fingerprint.clone(),
+            billing_mode: billing.billing_mode,
+            dispatched_at: billing.dispatched_at,
+        })
     }
 }
 

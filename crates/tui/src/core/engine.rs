@@ -3707,21 +3707,37 @@ impl Engine {
             model: model.clone(),
             auto_model,
             receipt: route_receipt,
-            billing_surface: crate::route_billing::billing_surface_for_dispatch(
-                Some(&self.api_config),
-                effective_provider,
-                route_base_url,
-            )
-            .map(str::to_string),
-            endpoint_fingerprint: route_base_url.and_then(crate::cost_status::endpoint_fingerprint),
-            billing_mode: crate::route_billing::for_route(&self.api_config, effective_provider)
-                .into(),
-            // Provisional. Replaced with the true wire-boundary instant when
-            // `handle_deepseek_turn` emits `Event::RouteDispatched`; billing
-            // reads the dispatched envelope, never this one.
-            dispatched_at: turn_started_at,
+            // A start is not a dispatch. The billing envelope is attached
+            // below, on the route held for the wire boundary only.
+            billing: None,
         };
-        turn.pending_route = Some(turn_route.clone());
+        // An injected model client performs the I/O; `deepseek_client` is only
+        // an auxiliary route-shaping client and cannot attest the endpoint that
+        // was actually billed. Rather than fabricate a surface from config, the
+        // route is dispatched with no billing envelope and prices as unknown —
+        // the same rule that already governs `receipt` and `TurnComplete`'s
+        // `base_url`.
+        let dispatch_billing = (!self.model_client_injected).then(|| {
+            crate::core::events::RouteBillingEnvelope {
+                billing_surface: crate::route_billing::billing_surface_for_dispatch(
+                    Some(&self.api_config),
+                    effective_provider,
+                    route_base_url,
+                )
+                .map(str::to_string),
+                endpoint_fingerprint: route_base_url
+                    .and_then(crate::cost_status::endpoint_fingerprint),
+                billing_mode: crate::route_billing::for_route(&self.api_config, effective_provider)
+                    .into(),
+                // Provisional. Replaced with the true wire-boundary instant
+                // when `handle_deepseek_turn` emits `Event::RouteDispatched`.
+                dispatched_at: turn_started_at,
+            }
+        });
+        turn.pending_route = Some(TurnRoute {
+            billing: dispatch_billing,
+            ..turn_route.clone()
+        });
 
         // Emit turn started event IMMEDIATELY so the UI knows the turn is
         // active. The snapshot below can take 30+ seconds on slow filesystems

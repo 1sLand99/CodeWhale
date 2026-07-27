@@ -307,8 +307,12 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
                     lifecycle_stage, 0,
                     "duplicate/reordered start: {diagnostics:?}"
                 );
+                // Lifecycle start still carries the installed-route receipt
+                // hosts authorize follow-up work against, but it must carry no
+                // billing envelope: nothing has been dispatched yet, and an
+                // undispatched route has no metering surface or billing time.
                 assert!(
-                    route.is_none(),
+                    route.as_ref().is_none_or(|route| route.billing.is_none()),
                     "billing route must not be stamped at lifecycle start"
                 );
                 lifecycle_stage = 1;
@@ -322,7 +326,10 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
                 assert_eq!(route.provider_identity, "custom-a");
                 assert_eq!(route.model, "local-model");
                 assert_eq!(
-                    route.endpoint_fingerprint,
+                    route
+                        .billing
+                        .as_ref()
+                        .and_then(|billing| billing.endpoint_fingerprint.clone()),
                     crate::cost_status::endpoint_fingerprint(&custom_base_url),
                     "dispatch receipt borrowed the later ambient route"
                 );
@@ -675,7 +682,7 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
         match event {
             Event::TurnStarted { route, .. } => {
                 assert!(
-                    route.is_none(),
+                    route.as_ref().is_none_or(|route| route.billing.is_none()),
                     "lifecycle start must not carry billing time"
                 );
                 lifecycle_starts += 1;
@@ -692,7 +699,10 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
                     second_base_url.as_str()
                 };
                 assert_eq!(
-                    route.endpoint_fingerprint,
+                    route
+                        .billing
+                        .as_ref()
+                        .and_then(|billing| billing.endpoint_fingerprint.clone()),
                     crate::cost_status::endpoint_fingerprint(expected_base_url),
                     "goal continuation dispatch borrowed the wrong authoritative route"
                 );

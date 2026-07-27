@@ -70,7 +70,11 @@ fn test_tokens_shows_usage_info() {
     assert!(msg.contains("Cache hit/miss:"));
     assert!(msg.contains("70 hit / 30 miss"));
     assert!(msg.contains("Cumulative tokens:"));
-    assert!(msg.contains("Approx session cost:"));
+    // Not "approx session cost": the figure is the priced subtotal, and a
+    // session with no priced turn reports `unknown` rather than the raw
+    // accumulator (#4318).
+    assert!(msg.contains("Priced amount:"));
+    assert!(msg.contains("Priced amount:         unknown"), "{msg}");
     assert!(msg.contains("API messages:"));
     assert!(msg.contains("Chat messages:"));
     assert!(msg.contains("Model:"));

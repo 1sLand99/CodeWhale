@@ -5896,8 +5896,13 @@ impl RuntimeThreadManager {
                         let _turn_mutation = self.store.turn_mutation.lock();
                         let mut turn = self.store.load_turn(&turn_id)?;
                         turn.started_at = Some(created_at);
-                        if let Some(route) = route {
-                            let route = route.cost_envelope();
+                        // A lifecycle start carries no billing envelope, so
+                        // there is nothing to persist yet. The dispatch event
+                        // below is the only writer of effective-route columns.
+                        if let Some(route) = route
+                            .as_ref()
+                            .and_then(crate::core::events::TurnRoute::cost_envelope)
+                        {
                             turn.persist_effective_route(&route);
                         }
                         self.store.save_turn(&turn)?;
@@ -5921,7 +5926,9 @@ impl RuntimeThreadManager {
                     {
                         let _turn_mutation = self.store.turn_mutation.lock();
                         let mut turn = self.store.load_turn(&turn_id)?;
-                        turn.persist_effective_route(&route.cost_envelope());
+                        if let Some(envelope) = route.cost_envelope() {
+                            turn.persist_effective_route(&envelope);
+                        }
                         self.store.save_turn(&turn)?;
                     }
                 }

@@ -3524,7 +3524,8 @@ async fn run_event_loop(
                         let cost_audit = completed_turn
                             .as_ref()
                             .and_then(|turn| turn.route.as_ref())
-                            .map(|route| route.cost_envelope().audit(&usage));
+                            .and_then(crate::core::events::TurnRoute::cost_envelope)
+                            .map(|route| route.audit(&usage));
                         app.push_turn_cache_record(crate::tui::app::TurnCacheRecord {
                             provider,
                             provider_identity,
@@ -3796,7 +3797,8 @@ async fn run_event_loop(
                             completed_turn
                                 .as_ref()
                                 .and_then(|turn| turn.route.as_ref())
-                                .and_then(|route| route.billing_surface.as_deref()),
+                                .and_then(|route| route.billing.as_ref())
+                                .and_then(|billing| billing.billing_surface.as_deref()),
                             turn_elapsed,
                             error.as_deref(),
                         ) {
@@ -17984,7 +17986,7 @@ fn completed_turn_cost_route_receipt(
     audit: &crate::pricing::TurnCostAudit,
 ) -> Option<String> {
     let route = completed_turn?.route.as_ref()?;
-    Some(route.cost_envelope().receipt(audit))
+    Some(route.cost_envelope()?.receipt(audit))
 }
 
 #[cfg(test)]

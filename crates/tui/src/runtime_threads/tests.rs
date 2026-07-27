@@ -3150,10 +3150,12 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
                 model: "step-3.7-flash".to_string(),
                 auto_model: false,
                 receipt: None,
-                billing_surface: Some(crate::pricing::STEPFUN_PAYG_BILLING_SURFACE.to_string()),
-                endpoint_fingerprint: Some(endpoint_fingerprint.clone()),
-                billing_mode: crate::cost_status::RouteBillingMode::Metered,
-                dispatched_at,
+                billing: Some(crate::core::events::RouteBillingEnvelope {
+                    billing_surface: Some(crate::pricing::STEPFUN_PAYG_BILLING_SURFACE.to_string()),
+                    endpoint_fingerprint: Some(endpoint_fingerprint.clone()),
+                    billing_mode: crate::cost_status::RouteBillingMode::Metered,
+                    dispatched_at,
+                }),
             },
         })
         .await?;

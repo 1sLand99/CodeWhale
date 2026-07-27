@@ -51,6 +51,10 @@ fn test_mailbox_route(
     )
 }
 
+fn served_endpoint_fingerprint() -> Option<String> {
+    crate::cost_status::endpoint_fingerprint("https://api.deepseek.com/v1")
+}
+
 #[test]
 fn completed_turn_cost_receipt_uses_the_captured_effective_route() {
     let usage = crate::models::Usage {
@@ -74,10 +78,15 @@ fn completed_turn_cost_receipt_uses_the_captured_effective_route() {
             model: "deepseek-v4-flash".to_string(),
             auto_model: false,
             receipt: None,
-            billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
-            endpoint_fingerprint: Some("served-endpoint-fingerprint".to_string()),
-            billing_mode: crate::cost_status::RouteBillingMode::Metered,
-            dispatched_at: chrono::Utc::now(),
+            billing: Some(crate::core::events::RouteBillingEnvelope {
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+                // A real fingerprint, produced by the production hasher. A
+                // receipt fails closed on anything that is not one, so a
+                // hand-written placeholder here would have tested nothing.
+                endpoint_fingerprint: served_endpoint_fingerprint(),
+                billing_mode: crate::cost_status::RouteBillingMode::Metered,
+                dispatched_at: chrono::Utc::now(),
+            }),
         }),
         auto_route_receipt: None,
         suggestion_authority: None,
@@ -90,7 +99,10 @@ fn completed_turn_cost_receipt_uses_the_captured_effective_route() {
     assert!(receipt.contains("identity=deepseek-cn"), "{receipt}");
     assert!(receipt.contains("model=deepseek-v4-flash"), "{receipt}");
     assert!(
-        receipt.contains("endpoint_fp=served-endpoint-fingerprint"),
+        receipt.contains(&format!(
+            "endpoint_fp={}",
+            served_endpoint_fingerprint().expect("fingerprintable endpoint")
+        )),
         "{receipt}"
     );
     assert!(receipt.contains("billing_mode=metered"), "{receipt}");
@@ -7530,10 +7542,12 @@ fn turn_liveness_recovers_stalled_in_progress_turn() {
             model: "gpt-5.5".to_string(),
             auto_model: false,
             receipt: None,
-            billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
-            endpoint_fingerprint: Some("openai-endpoint".to_string()),
-            billing_mode: crate::cost_status::RouteBillingMode::Metered,
-            dispatched_at: chrono::Utc::now(),
+            billing: Some(crate::core::events::RouteBillingEnvelope {
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+                endpoint_fingerprint: Some("openai-endpoint".to_string()),
+                billing_mode: crate::cost_status::RouteBillingMode::Metered,
+                dispatched_at: chrono::Utc::now(),
+            }),
         }),
         auto_route_receipt: None,
         suggestion_authority: None,
@@ -7577,10 +7591,12 @@ fn engine_event_disconnect_recovers_live_turn_immediately() {
             model: "gpt-5.5".to_string(),
             auto_model: false,
             receipt: None,
-            billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
-            endpoint_fingerprint: Some("openai-endpoint".to_string()),
-            billing_mode: crate::cost_status::RouteBillingMode::Metered,
-            dispatched_at: chrono::Utc::now(),
+            billing: Some(crate::core::events::RouteBillingEnvelope {
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+                endpoint_fingerprint: Some("openai-endpoint".to_string()),
+                billing_mode: crate::cost_status::RouteBillingMode::Metered,
+                dispatched_at: chrono::Utc::now(),
+            }),
         }),
         auto_route_receipt: None,
         suggestion_authority: None,
@@ -7648,10 +7664,12 @@ fn engine_event_disconnect_cleans_cancelled_turn_metadata() {
             model: "gpt-5.5".to_string(),
             auto_model: false,
             receipt: None,
-            billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
-            endpoint_fingerprint: Some("openai-endpoint".to_string()),
-            billing_mode: crate::cost_status::RouteBillingMode::Metered,
-            dispatched_at: chrono::Utc::now(),
+            billing: Some(crate::core::events::RouteBillingEnvelope {
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+                endpoint_fingerprint: Some("openai-endpoint".to_string()),
+                billing_mode: crate::cost_status::RouteBillingMode::Metered,
+                dispatched_at: chrono::Utc::now(),
+            }),
         }),
         auto_route_receipt: None,
         suggestion_authority: None,
@@ -10104,10 +10122,12 @@ fn turn_started_route_is_captured_before_cancel_suppression() {
             model: "gpt-5.5".to_string(),
             auto_model: true,
             receipt: None,
-            billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
-            endpoint_fingerprint: Some("openai-endpoint".to_string()),
-            billing_mode: crate::cost_status::RouteBillingMode::Metered,
-            dispatched_at: created_at.clone(),
+            billing: Some(crate::core::events::RouteBillingEnvelope {
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+                endpoint_fingerprint: Some("openai-endpoint".to_string()),
+                billing_mode: crate::cost_status::RouteBillingMode::Metered,
+                dispatched_at: created_at.clone(),
+            }),
         }),
     };
 
@@ -10164,10 +10184,12 @@ fn turn_started_suggestion_authority_comes_from_the_route_receipt_not_config() {
             model: "deepseek-chat".to_string(),
             auto_model: false,
             receipt: Some(receipt),
-            billing_surface: None,
-            endpoint_fingerprint: None,
-            billing_mode: crate::cost_status::RouteBillingMode::Unknown,
-            dispatched_at: chrono::Utc::now(),
+            billing: Some(crate::core::events::RouteBillingEnvelope {
+                billing_surface: None,
+                endpoint_fingerprint: None,
+                billing_mode: crate::cost_status::RouteBillingMode::Unknown,
+                dispatched_at: chrono::Utc::now(),
+            }),
         }),
     };
 
@@ -10202,10 +10224,12 @@ fn turn_started_without_a_route_receipt_captures_no_suggestion_authority() {
             model: "deepseek-chat".to_string(),
             auto_model: false,
             receipt: None,
-            billing_surface: None,
-            endpoint_fingerprint: None,
-            billing_mode: crate::cost_status::RouteBillingMode::Unknown,
-            dispatched_at: chrono::Utc::now(),
+            billing: Some(crate::core::events::RouteBillingEnvelope {
+                billing_surface: None,
+                endpoint_fingerprint: None,
+                billing_mode: crate::cost_status::RouteBillingMode::Unknown,
+                dispatched_at: chrono::Utc::now(),
+            }),
         }),
     };
 
@@ -10234,10 +10258,12 @@ fn engine_error_health_accounting_uses_active_turn_route() {
             model: "gpt-5.5".to_string(),
             auto_model: true,
             receipt: None,
-            billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
-            endpoint_fingerprint: Some("openai-endpoint".to_string()),
-            billing_mode: crate::cost_status::RouteBillingMode::Metered,
-            dispatched_at: chrono::Utc::now(),
+            billing: Some(crate::core::events::RouteBillingEnvelope {
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+                endpoint_fingerprint: Some("openai-endpoint".to_string()),
+                billing_mode: crate::cost_status::RouteBillingMode::Metered,
+                dispatched_at: chrono::Utc::now(),
+            }),
         }),
     };
     capture_turn_started_metadata(&mut app, &event);
@@ -13230,7 +13256,12 @@ fn child_usage_metadata_carries_cache_write_and_reasoning_end_to_end() {
         provider_identity: "anthropic-api".to_string(),
         model: "claude-haiku-4-5".to_string(),
         billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
-        endpoint_fingerprint: Some("test-anthropic-endpoint".to_string()),
+        // Must be a real fingerprint: persistence and receipt boundaries drop
+        // anything that is not one, and a dropped field would have made the
+        // round-trip assertion below vacuously pass on both sides.
+        endpoint_fingerprint: crate::cost_status::endpoint_fingerprint(
+            "https://api.anthropic.com/v1",
+        ),
         billing_mode: crate::cost_status::RouteBillingMode::Metered,
         dispatched_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).expect("epoch"),
     };
