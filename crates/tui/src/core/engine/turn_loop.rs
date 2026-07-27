@@ -304,6 +304,26 @@ impl Engine {
         count
     }
 
+    /// The request projection's provider receipt.
+    ///
+    /// Derived from the *resolved model client*. A tool registry existing says
+    /// nothing about whether a route was resolved, so it is deliberately not
+    /// consulted here.
+    pub(crate) fn tool_surface_provider_receipt(
+        &self,
+    ) -> crate::tool_inspection::ProviderAvailability {
+        if self.model_client.is_some() {
+            crate::tool_inspection::ProviderAvailability::Available {
+                provider: format!("{:?}", self.api_provider),
+                model: self.session.model.clone(),
+            }
+        } else {
+            crate::tool_inspection::ProviderAvailability::Unavailable {
+                reason: "no model client resolved for this turn".to_string(),
+            }
+        }
+    }
+
     pub(super) async fn handle_deepseek_turn(
         &mut self,
         turn: &mut TurnContext,
@@ -311,6 +331,10 @@ impl Engine {
         tools: Option<Vec<Tool>>,
         mode: AppMode,
         dynamic_active_tools: Vec<&'static str>,
+        // Out-of-request facts resolved once for this turn. `None` means the
+        // caller captured none, and the projection reports every
+        // registry-derived field as unknown rather than guessing.
+        tool_surface: Option<crate::tool_inspection::ToolSurfaceContext>,
     ) -> (TurnOutcomeStatus, Option<String>) {
         // Only interactive TUI hosts own terminal chrome. Headless exec,
         // app-server, and stream-json stdout must remain byte-clean.
@@ -708,10 +732,11 @@ impl Engine {
                 top_p: None,
             };
             let tool_request_snapshot =
-                crate::tool_inspection::ToolInspectionSnapshot::from_prepared_request(
+                crate::tool_inspection::ToolInspectionSnapshot::from_prepared_request_with_surface(
                     &turn.id,
                     turn.step,
                     request.tools.as_deref(),
+                    tool_surface.as_ref(),
                 );
 
             // Stream the response. Keep the request around (cloned into the

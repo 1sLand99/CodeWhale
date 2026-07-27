@@ -653,6 +653,29 @@ fn suggest_tool_names(catalog: &[Tool], requested: &str, limit: usize) -> Vec<St
         .collect()
 }
 
+/// Catalog tools the engine injects itself rather than registering, plus the
+/// legacy tool-search spellings. Exposed so the read-only request projection
+/// can label their provenance as `synthetic` from the same source of truth as
+/// [`is_synthetic_catalog_tool`] instead of guessing.
+///
+/// MCP-contributed names are deliberately *not* here: those resolve through the
+/// real pool, and stay unknown when the pool did not resolve them.
+/// [`MULTI_TOOL_PARALLEL_NAME`] is not here either — it is a call name the model
+/// may emit, never a catalog entry, so it can never appear in a transmitted
+/// tool array and has no catalog provenance to report.
+pub(super) fn default_synthetic_catalog_tool_names() -> Vec<String> {
+    let mut names: Vec<String> = vec![
+        TOOL_SEARCH_NAME.to_string(),
+        LEGACY_TOOL_SEARCH_REGEX_NAME.to_string(),
+        LEGACY_TOOL_SEARCH_BM25_NAME.to_string(),
+        CODE_EXECUTION_TOOL_NAME.to_string(),
+        JS_EXECUTION_TOOL_NAME.to_string(),
+    ];
+    names.sort();
+    names.dedup();
+    names
+}
+
 fn is_synthetic_catalog_tool(name: &str) -> bool {
     is_tool_search_tool(name)
         || matches!(name, CODE_EXECUTION_TOOL_NAME | JS_EXECUTION_TOOL_NAME)
@@ -1137,4 +1160,41 @@ pub(super) async fn execute_code_execution_tool(
         success,
         metadata: Some(payload),
     })
+}
+
+#[cfg(test)]
+mod synthetic_name_tests {
+    use super::{default_synthetic_catalog_tool_names, is_synthetic_catalog_tool};
+
+    /// The published synthetic-name list and the predicate that classifies a
+    /// catalog entry as synthetic must agree. A name that appears in the list
+    /// but is not classified synthetic would let the request projection report
+    /// a provenance the engine itself disputes.
+    #[test]
+    fn published_synthetic_names_agree_with_the_synthetic_predicate() {
+        let names = default_synthetic_catalog_tool_names();
+        assert!(!names.is_empty());
+        for name in &names {
+            assert!(
+                is_synthetic_catalog_tool(name),
+                "'{name}' is published as synthetic but the predicate disagrees"
+            );
+        }
+        let mut sorted = names.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(names, sorted, "the list must be sorted and deduplicated");
+
+        // MCP names resolve through the real pool, so they are deliberately
+        // absent here even though the predicate accepts them.
+        assert!(!names.iter().any(|name| name.starts_with("mcp_")));
+
+        // `multi_tool_use.parallel` is a call name, never a catalog entry, so
+        // it has no catalog provenance and must not be published as synthetic.
+        assert!(
+            !names
+                .iter()
+                .any(|name| name == super::MULTI_TOOL_PARALLEL_NAME)
+        );
+    }
 }

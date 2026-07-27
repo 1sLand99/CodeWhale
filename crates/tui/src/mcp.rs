@@ -3012,6 +3012,62 @@ impl McpPool {
         errors
     }
 
+    /// The single definition of an MCP tool's model-facing name.
+    ///
+    /// [`Self::all_tools`] (which builds the model catalog) and
+    /// [`Self::resolved_tool_servers`] (which tells tool inspection which
+    /// server owns a name) both call this, so a human-facing server
+    /// attribution can never drift from the name the model actually received.
+    #[must_use]
+    pub fn mcp_model_tool_name(server: &str, tool: &str) -> String {
+        format!("mcp_{server}_{tool}")
+    }
+
+    /// Fold `(server, tool)` pairs into `model name -> owning server`.
+    ///
+    /// Mirrors [`Self::all_tools`]' ambiguity rule: when two servers produce
+    /// the same model name, the name is dropped entirely rather than
+    /// attributed to an arbitrary winner. Callers then report it as unknown.
+    #[must_use]
+    pub fn resolve_tool_server_map<'a>(
+        pairs: impl Iterator<Item = (&'a str, &'a str)>,
+    ) -> std::collections::BTreeMap<String, String> {
+        let mut resolved: std::collections::BTreeMap<String, Option<String>> =
+            std::collections::BTreeMap::new();
+        for (server, tool) in pairs {
+            match resolved.entry(Self::mcp_model_tool_name(server, tool)) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(Some(server.to_string()));
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    entry.insert(None);
+                }
+            }
+        }
+        resolved
+            .into_iter()
+            .filter_map(|(name, server)| server.map(|server| (name, server)))
+            .collect()
+    }
+
+    /// Model tool name -> owning server name, for the tools this pool actually
+    /// resolved. Names the pool did not resolve are simply absent, so callers
+    /// report them as unknown instead of parsing `mcp_{server}_{tool}` (a
+    /// server name may itself contain `_`, so that split is a guess).
+    ///
+    /// Read-only projection used by tool inspection; it never connects or
+    /// executes.
+    #[must_use]
+    pub fn resolved_tool_servers(&self) -> std::collections::BTreeMap<String, String> {
+        Self::resolve_tool_server_map(self.connections.iter().flat_map(|(server, conn)| {
+            let authorized = conn.catalog_authorized();
+            conn.tools().iter().filter_map(move |tool| {
+                (authorized && conn.config().is_tool_enabled(&tool.name))
+                    .then_some((server.as_str(), tool.name.as_str()))
+            })
+        }))
+    }
+
     /// Get all discovered tools with server-prefixed names
     pub fn all_tools(&self) -> Vec<(String, &McpTool)> {
         let mut by_name: std::collections::BTreeMap<String, Option<&McpTool>> =
@@ -3024,8 +3080,7 @@ impl McpPool {
                 if !conn.config().is_tool_enabled(&tool.name) {
                     continue;
                 }
-                // Format: mcp_{server}_{tool}
-                let name = format!("mcp_{}_{}", server, tool.name);
+                let name = Self::mcp_model_tool_name(server, &tool.name);
                 match by_name.entry(name.clone()) {
                     std::collections::btree_map::Entry::Vacant(entry) => {
                         entry.insert(Some(tool));

@@ -286,6 +286,39 @@ impl ToolRegistry {
         tools
     }
 
+    /// Flatten every registered tool into the exact facts the read-only
+    /// request projection is allowed to report: name, description, model
+    /// visibility, declared capabilities, declared approval requirement, and
+    /// whether the tool came from the plugin surface.
+    ///
+    /// This hands out *data*, never tool objects, so the projection layer
+    /// cannot execute anything. Output is sorted by name and does not touch the
+    /// registry's own ordering or the memoised API catalog.
+    #[must_use]
+    pub fn registry_facts(
+        &self,
+        plugin_names: &std::collections::HashSet<String>,
+    ) -> Vec<crate::tool_inspection::RegistryFacts> {
+        let mut facts: Vec<crate::tool_inspection::RegistryFacts> = self
+            .tools
+            .values()
+            .map(|tool| crate::tool_inspection::RegistryFacts {
+                name: tool.name().to_string(),
+                description: tool.description().to_string(),
+                model_visible: tool.model_visible(),
+                capabilities: tool
+                    .capabilities()
+                    .iter()
+                    .map(|capability| format!("{capability:?}"))
+                    .collect(),
+                approval: format!("{:?}", tool.approval_requirement()),
+                plugin: plugin_names.contains(tool.name()),
+            })
+            .collect();
+        facts.sort_by(|a, b| a.name.cmp(&b.name));
+        facts
+    }
+
     /// Filter tools by capability.
     #[must_use]
     #[allow(dead_code)]

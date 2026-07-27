@@ -3534,6 +3534,7 @@ impl Engine {
             mcp: mcp_state,
             subagent_runtime_model,
             mailbox: mailbox_for_runtime,
+            plugin_tool_names,
         }
     }
 
@@ -3886,6 +3887,7 @@ impl Engine {
             registry: tool_registry,
             catalog: tools,
             mailbox: mut mailbox_for_runtime,
+            plugin_tool_names,
             ..
         } = self
             .build_turn_tool_registry_and_catalog(
@@ -3912,6 +3914,27 @@ impl Engine {
             )
             .await;
         let tool_catalog_for_event = tools.clone();
+
+        // Resolve, once per turn, the out-of-request facts the read-only
+        // request projection is allowed to report: flattened registry facts,
+        // the MCP pool's own server attribution, and the engine-injected
+        // catalog names. This is where `plugin_tool_names` and the pool lock
+        // live; the snapshot itself is built later, at the request seam, from
+        // the tools actually prepared for that step.
+        let mut tool_surface = crate::tool_inspection::ToolSurfaceContext {
+            registry: tool_registry
+                .as_ref()
+                .map(|registry| registry.registry_facts(&plugin_tool_names))
+                .unwrap_or_default(),
+            mcp_servers: match self.mcp_pool.as_ref() {
+                Some(pool) => pool.lock().await.resolved_tool_servers(),
+                None => std::collections::BTreeMap::new(),
+            },
+            synthetic_names: default_synthetic_catalog_tool_names(),
+            provider: crate::tool_inspection::ProviderAvailability::Unknown,
+        };
+        tool_surface.provider = self.tool_surface_provider_receipt();
+
         let base_url_for_event = if self.model_client_injected {
             None
         } else {
@@ -3931,6 +3954,7 @@ impl Engine {
             tools,
             input_policy.mode,
             input_policy.dynamic_active_tools,
+            Some(tool_surface),
         ))
         .catch_unwind()
         .await;
@@ -5526,6 +5550,10 @@ pub(crate) struct TurnToolBuild {
     /// emits `TurnComplete`: that is what makes detached-child usage accounting
     /// exactly-once rather than "whatever arrived in time".
     pub(crate) mailbox: Option<TurnMailboxBarrier>,
+    /// Tools this build loaded from the plugin surface rather than the built-in
+    /// registry builder. Carried out so the read-only request projection can
+    /// tell `plugin` provenance from `builtin` instead of collapsing both.
+    pub(crate) plugin_tool_names: std::collections::HashSet<String>,
 }
 
 /// The route a tool catalog is being shaped for.
@@ -5755,9 +5783,9 @@ use self::streaming::{
 use self::tool_catalog::{
     CODE_EXECUTION_TOOL_NAME, JS_EXECUTION_TOOL_NAME, MULTI_TOOL_PARALLEL_NAME,
     REQUEST_USER_INPUT_NAME, active_tools_for_request, build_model_tool_catalog_with_surface,
-    execute_code_execution_tool, execute_tool_search, is_tool_search_tool,
-    maybe_hydrate_requested_deferred_tool, missing_tool_error_message, plan_turn_tools,
-    tool_catalog_consistency_issues,
+    default_synthetic_catalog_tool_names, execute_code_execution_tool, execute_tool_search,
+    is_tool_search_tool, maybe_hydrate_requested_deferred_tool, missing_tool_error_message,
+    plan_turn_tools, tool_catalog_consistency_issues,
 };
 #[cfg(test)]
 use self::tool_catalog::{
