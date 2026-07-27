@@ -1240,7 +1240,7 @@ mod tests {
         PreparedOutboundRequest::new(
             WireDialect::ChatCompletions,
             endpoint(
-                "https://user:hunter2@api.z.ai:8443/api/paas/v4/chat/completions?api_key=sk-abcdef0123456789abcdef0123456789",
+                "https://user:hunter2@api.z.ai:8443/api/paas/v4/chat/completions?api_key=sk-fixture-not-a-real-key-00000000",
             ),
             "glm-5.2".to_string(),
             body,

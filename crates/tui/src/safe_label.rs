@@ -421,7 +421,7 @@ mod tests {
             "~/.codewhale/config.toml",
             "https://internal.example.com/v1/deployments/prod",
             "C:\\Users\\someone\\models\\weights.bin",
-            "sk-abcdef0123456789abcdef0123456789",
+            "sk-fixture-not-a-real-key-00000000",
             "deployments/9f8e7d6c5b4a39281706abcdef012345",
             "../../etc/passwd",
             "model with spaces and a /path/inside",
