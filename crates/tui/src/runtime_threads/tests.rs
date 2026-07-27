@@ -1612,7 +1612,10 @@ async fn aggregate_usage_keeps_codex_tokens_without_api_dollar_pricing() -> Resu
         ApiProvider::Deepseek,
         ApiProvider::Deepseek.as_str(),
         "deepseek-v4-flash",
-        None,
+        // A real dispatch persists the classified surface. Leaving it absent
+        // here would price the row at official DeepSeek rates on nothing but
+        // the provider name, which is what the route audit now refuses.
+        Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
         crate::cost_status::RouteBillingMode::Metered,
     );
     manager.store.save_turn(&deepseek)?;
@@ -1682,7 +1685,7 @@ async fn aggregate_usage_marks_unknown_cost_as_subtotal_and_keeps_cache_writes()
         ApiProvider::Deepseek,
         ApiProvider::Deepseek.as_str(),
         "deepseek-v4-flash",
-        None,
+        Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
         crate::cost_status::RouteBillingMode::Metered,
     );
     manager.store.save_turn(&priced)?;
@@ -1746,7 +1749,7 @@ async fn aggregate_usage_prices_slow_predispatch_turn_at_dispatch_boundary() -> 
             ApiProvider::Anthropic,
             ApiProvider::Anthropic.as_str(),
             "claude-sonnet-5",
-            None,
+            Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
             crate::cost_status::RouteBillingMode::Metered,
         );
         turn.effective_dispatched_at = Some(dispatched_at.parse().expect("dispatch time"));
@@ -1833,7 +1836,7 @@ async fn aggregate_usage_includes_exclusive_child_calls_and_zero_usage_receipts(
         ApiProvider::Deepseek,
         "deepseek-parent",
         "deepseek-v4-flash",
-        None,
+        Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
         crate::cost_status::RouteBillingMode::Metered,
     );
     turn.routed_usage
@@ -1842,7 +1845,9 @@ async fn aggregate_usage_includes_exclusive_child_calls_and_zero_usage_receipts(
                 provider: ApiProvider::Deepseek,
                 provider_identity: "deepseek-child".to_string(),
                 model: "deepseek-v4-flash".to_string(),
-                billing_surface: None,
+                // A child call carries the surface its own dispatch classified;
+                // the route audit will not price a metered route without one.
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
                 endpoint_fingerprint: None,
                 billing_mode: crate::cost_status::RouteBillingMode::Metered,
                 dispatched_at: turn.created_at,
@@ -1911,7 +1916,7 @@ async fn aggregate_usage_filters_each_call_by_its_dispatch_timestamp() -> Result
         ApiProvider::Deepseek,
         "deepseek-parent",
         "deepseek-v4-flash",
-        None,
+        Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
         crate::cost_status::RouteBillingMode::Metered,
     );
     turn.routed_usage

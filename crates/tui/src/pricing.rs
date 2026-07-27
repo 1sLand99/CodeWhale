@@ -952,6 +952,15 @@ pub enum UnpricedReason {
     /// One provider/model pair spans several billing systems and the non-secret
     /// endpoint provenance needed to pick one is missing.
     AmbiguousBillingSurface,
+    /// No endpoint classification was supplied for the route at all.
+    ///
+    /// Distinct from [`Self::UnknownBillingBasis`], which means an endpoint was
+    /// classified and could not be placed. This means none was offered, so
+    /// there is no evidence the turn was served by the provider's own official
+    /// surface rather than a proxy, a gateway, or a self-hosted clone that
+    /// happens to speak the same protocol. A provider enum plus a familiar
+    /// model id is not that evidence (#4318).
+    UnestablishedEndpoint,
     /// The turn's endpoint classified as a per-token surface, but the pricing
     /// layer holds no rates for that specific surface (as opposed to no rates
     /// for the model at all).
@@ -990,6 +999,7 @@ impl UnpricedReason {
             Self::NotMoneyMetered => "not_money_metered",
             Self::UnknownBillingBasis => "unknown_billing_basis",
             Self::AmbiguousBillingSurface => "ambiguous_billing_surface",
+            Self::UnestablishedEndpoint => "unestablished_endpoint",
             Self::UnpricedBillingSurface => "unpriced_billing_surface",
             Self::UnverifiedLivePricing => "unverified_live_pricing",
             Self::RetiredAlias => "retired_alias",
@@ -1471,6 +1481,19 @@ pub(crate) fn audit_turn_cost_for_route_on_endpoint_at(
     }
     if model.trim().eq_ignore_ascii_case(DEFAULT_STEPFUN_MODEL) {
         return TurnCostAudit::unpriced(UnpricedReason::AmbiguousBillingSurface);
+    }
+    // This is the *route* audit: the caller is asserting it knows which
+    // endpoint served the turn. With no classification at all, nothing
+    // distinguishes the provider's own official surface from a proxy, a
+    // gateway, or a self-hosted clone speaking the same protocol — a provider
+    // enum plus a familiar model id is not evidence of an official endpoint.
+    // So the turn prices as unknown rather than at official rates.
+    //
+    // Callers that genuinely hold only a provider and a model use
+    // `audit_turn_cost_for_provider_*`, which says so in its name and carries
+    // its own weaker claim.
+    if billing_surface.is_none() {
+        return TurnCostAudit::unpriced(UnpricedReason::UnestablishedEndpoint);
     }
     audit_turn_cost_for_provider_on_endpoint_at(
         provider,
@@ -2071,6 +2094,83 @@ mod tests {
                 "{unknown:?}"
             );
         }
+    }
+
+    #[test]
+    /// An endpoint that was never established is not the official endpoint.
+    ///
+    /// The route audit used to fall through to the provider/model catalog when
+    /// no billing surface was supplied, which meant a persisted or recorded row
+    /// carrying nothing but `provider: "openai"` and a familiar model id got
+    /// billed at OpenAI's published first-party rates — even though the turn
+    /// could equally have been served by a proxy, a gateway, or a self-hosted
+    /// clone speaking the same protocol. Absence of endpoint evidence is not
+    /// evidence of the official endpoint.
+    #[test]
+    fn an_unestablished_endpoint_is_never_priced_as_the_official_one() {
+        let usage = Usage {
+            input_tokens: 10_000,
+            output_tokens: 1_000,
+            ..Usage::default()
+        };
+        let now = Utc::now();
+        for (provider, model) in [
+            (ApiProvider::Openai, "gpt-5.5"),
+            (ApiProvider::Anthropic, "claude-haiku-4-5"),
+            (ApiProvider::Deepseek, "deepseek-v4-flash"),
+            (ApiProvider::Openrouter, "openai/gpt-5.5"),
+            (ApiProvider::Moonshot, "kimi-k2.7-code"),
+        ] {
+            let audit = audit_turn_cost_for_route_at(provider, model, None, &usage, now);
+            assert_eq!(
+                audit.unpriced_reason,
+                Some(UnpricedReason::UnestablishedEndpoint),
+                "{provider:?}/{model}: {audit:?}"
+            );
+            assert!(!audit.is_priced(), "{provider:?}/{model}: {audit:?}");
+            assert_eq!(audit.estimate, None, "{provider:?}/{model}");
+            // An unknown route is still possibly-spent money, so it stays in
+            // the coverage denominator rather than being excused like an OAuth
+            // or local route.
+            assert!(
+                audit.counts_toward_money_coverage(),
+                "{provider:?}/{model}: an unknown route must not leave money coverage"
+            );
+
+            // The same route with its endpoint actually classified prices
+            // normally: this is a fail-closed rule, not a refusal to price.
+            // (OpenRouter is excluded here only because its aggregator surface
+            // carries no bundled rate at all, which is a different gap.)
+            if provider == ApiProvider::Openrouter {
+                continue;
+            }
+            let classified = audit_turn_cost_for_route_at(
+                provider,
+                model,
+                billing_surface_for_route(provider, Some(provider.default_base_url())),
+                &usage,
+                now,
+            );
+            assert!(
+                classified.is_priced(),
+                "{provider:?}/{model} must price on its own official endpoint: {classified:?}"
+            );
+        }
+
+        // The distinction is preserved end to end: "no endpoint offered" and
+        // "endpoint offered but unplaceable" are different findings, and
+        // neither is a price.
+        let unplaceable = audit_turn_cost_for_route_at(
+            ApiProvider::Openai,
+            "gpt-5.5",
+            billing_surface_for_route(ApiProvider::Openai, Some("https://proxy.example/v1")),
+            &usage,
+            now,
+        );
+        assert_eq!(
+            unplaceable.unpriced_reason,
+            Some(UnpricedReason::UnknownBillingBasis)
+        );
     }
 
     #[test]
@@ -3222,11 +3322,11 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            calculate_turn_cost_estimate_for_route(
+            calculate_turn_cost_estimate_for_billing_surface(
                 ApiProvider::Anthropic,
                 "claude-sonnet-5",
+                Some(FIRST_PARTY_PAYG_BILLING_SURFACE),
                 &usage,
-                crate::route_billing::BillingPresentation::Metered,
             )
             .is_some()
         );
