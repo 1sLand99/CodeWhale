@@ -12,7 +12,7 @@ use std::thread;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::registry::{LaneRecord, LaneRegistry, LaneStatus};
+use crate::registry::{LaneRecord, LaneRegistry, LaneStatus, TerminalTransition};
 use crate::worktree::{WorktreeProvision, provision_worktree, remove_worktree_if_expired};
 
 /// Execution backend for a lane.
@@ -100,14 +100,31 @@ pub trait RuntimeBackend {
     fn attach_command(&self, record: &LaneRecord) -> Option<String>;
 
     /// Stop the running session/process.
-    fn stop(&self, registry: &LaneRegistry, record: &mut LaneRecord) -> Result<()>;
+    ///
+    /// `fence` pins the durable lifecycle generation the caller observed. It is
+    /// evaluated under the registry's per-Lane lock, so a record that moved on
+    /// between the caller's read and this call is refused rather than stopped.
+    /// The return value distinguishes "this call stopped it" from "it was
+    /// already terminal" and "the fence did not match", so a caller can report
+    /// a truthful outcome instead of claiming a transition someone else made.
+    fn stop(
+        &self,
+        registry: &LaneRegistry,
+        record: &mut LaneRecord,
+        fence: Option<u64>,
+    ) -> Result<TerminalTransition>;
 
     /// Reconcile durable backend state into the Lane record before display.
     /// Most backends update synchronously and need no refresh; tmux records
     /// the detached process exit in a private sidecar and folds it in on the
     /// next read.
-    fn reconcile(&self, _registry: &LaneRegistry, _record: &mut LaneRecord) -> Result<()> {
-        Ok(())
+    ///
+    /// Returns `true` when reconciliation *changed durable state*. Reads are
+    /// allowed to fold a finished Runtime exit into the record, but a surface
+    /// that calls this must be able to say so rather than reporting a pure
+    /// observation (#4022).
+    fn reconcile(&self, _registry: &LaneRegistry, _record: &mut LaneRecord) -> Result<bool> {
+        Ok(false)
     }
 
     /// Optional worktree TTL cleanup after stop.
@@ -813,26 +830,37 @@ impl RuntimeBackend for TmuxRuntime {
         ))
     }
 
-    fn stop(&self, registry: &LaneRegistry, record: &mut LaneRecord) -> Result<()> {
+    fn stop(
+        &self,
+        registry: &LaneRegistry,
+        record: &mut LaneRecord,
+        fence: Option<u64>,
+    ) -> Result<TerminalTransition> {
         let dry_run = std::env::var_os("CODEWHALE_LANE_TMUX_DRY_RUN").is_some();
-        if registry.mark_terminal_if_active_with(record, LaneStatus::Stopped, |current| {
-            if !dry_run {
-                match (
-                    current.tmux_socket.as_deref(),
-                    current.tmux_session.as_deref(),
-                ) {
-                    (Some(socket), Some(session)) => stop_tmux_session(socket, session)?,
-                    _ if current.status == LaneStatus::Running => {
-                        bail!(
-                            "running tmux lane `{}` has incomplete pinned session metadata; refusing unsafe stop",
-                            current.id
-                        );
+        let transition = registry.mark_terminal_if_active_fenced(
+            record,
+            LaneStatus::Stopped,
+            fence,
+            |current| {
+                if !dry_run {
+                    match (
+                        current.tmux_socket.as_deref(),
+                        current.tmux_session.as_deref(),
+                    ) {
+                        (Some(socket), Some(session)) => stop_tmux_session(socket, session)?,
+                        _ if current.status == LaneStatus::Running => {
+                            bail!(
+                                "running tmux lane `{}` has incomplete pinned session metadata; refusing unsafe stop",
+                                current.id
+                            );
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
-            }
-            Ok(())
-        })? {
+                Ok(())
+            },
+        )?;
+        if transition.transitioned() {
             append_log_event(
                 &record.log_path,
                 serde_json::json!({
@@ -844,15 +872,15 @@ impl RuntimeBackend for TmuxRuntime {
             remove_file_if_present(&lane_environment_path(&record.log_path))?;
             self.cleanup_worktree(record)?;
         }
-        Ok(())
+        Ok(transition)
     }
 
-    fn reconcile(&self, registry: &LaneRegistry, record: &mut LaneRecord) -> Result<()> {
+    fn reconcile(&self, registry: &LaneRegistry, record: &mut LaneRecord) -> Result<bool> {
         // Pending is the pre-launch state. Never reconcile it: a concurrent
         // status read must not race a fast `tmux new-session` and overwrite
         // the start path's later Running transition.
         if record.status != LaneStatus::Running {
-            return Ok(());
+            return Ok(false);
         }
 
         let receipt = read_lane_exit_receipt(&record.log_path, &record.id)?;
@@ -868,7 +896,7 @@ impl RuntimeBackend for TmuxRuntime {
             )
         } else {
             if std::env::var_os("CODEWHALE_LANE_TMUX_DRY_RUN").is_some() {
-                return Ok(());
+                return Ok(false);
             }
             let (Some(socket), Some(session)) = (
                 record.tmux_socket.as_deref(),
@@ -880,7 +908,7 @@ impl RuntimeBackend for TmuxRuntime {
                 );
             };
             match tmux_session_state(socket, session)? {
-                TmuxSessionState::Present => return Ok(()),
+                TmuxSessionState::Present => return Ok(false),
                 TmuxSessionState::Absent => {}
             }
             (
@@ -903,8 +931,9 @@ impl RuntimeBackend for TmuxRuntime {
             )?;
             remove_file_if_present(&lane_environment_path(&record.log_path))?;
             self.cleanup_worktree(record)?;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 }
 
@@ -1020,19 +1049,30 @@ impl RuntimeBackend for InlineRuntime {
         None
     }
 
-    fn stop(&self, registry: &LaneRegistry, record: &mut LaneRecord) -> Result<()> {
-        if registry.mark_terminal_if_active_with(record, LaneStatus::Stopped, |current| {
-            if current.status == LaneStatus::Running {
-                bail!(
-                    "inline lane `{}` cannot be stopped safely from another process",
-                    current.id
-                );
-            }
-            Ok(())
-        })? {
+    fn stop(
+        &self,
+        registry: &LaneRegistry,
+        record: &mut LaneRecord,
+        fence: Option<u64>,
+    ) -> Result<TerminalTransition> {
+        let transition = registry.mark_terminal_if_active_fenced(
+            record,
+            LaneStatus::Stopped,
+            fence,
+            |current| {
+                if current.status == LaneStatus::Running {
+                    bail!(
+                        "inline lane `{}` cannot be stopped safely from another process",
+                        current.id
+                    );
+                }
+                Ok(())
+            },
+        )?;
+        if transition.transitioned() {
             self.cleanup_worktree(record)?;
         }
-        Ok(())
+        Ok(transition)
     }
 }
 
@@ -1074,9 +1114,13 @@ impl RuntimeBackend for StubRuntime {
         None
     }
 
-    fn stop(&self, registry: &LaneRegistry, record: &mut LaneRecord) -> Result<()> {
-        let _ = registry.mark_terminal_if_active(record, LaneStatus::Stopped)?;
-        Ok(())
+    fn stop(
+        &self,
+        registry: &LaneRegistry,
+        record: &mut LaneRecord,
+        fence: Option<u64>,
+    ) -> Result<TerminalTransition> {
+        registry.mark_terminal_if_active_fenced(record, LaneStatus::Stopped, fence, |_| Ok(()))
     }
 }
 
@@ -1186,7 +1230,7 @@ mod tests {
         let log = std::fs::read_to_string(&record.log_path).unwrap();
         assert!(log.contains("lane_started"));
 
-        backend.stop(&reg, &mut record).unwrap();
+        backend.stop(&reg, &mut record, None).unwrap();
         assert_eq!(record.status, LaneStatus::Stopped);
         let reloaded = reg.load(&record.id).unwrap();
         assert_eq!(reloaded.status, LaneStatus::Stopped);
@@ -1599,7 +1643,7 @@ mod tests {
         .unwrap();
         assert!(reg.mark_running_if_pending(&mut record).unwrap());
 
-        let error = TmuxRuntime.stop(&reg, &mut record).unwrap_err();
+        let error = TmuxRuntime.stop(&reg, &mut record, None).unwrap_err();
         assert!(format!("{error:#}").contains("tmux has-session"));
         assert_eq!(record.status, LaneStatus::Running);
         assert_eq!(reg.load(&record.id).unwrap().status, LaneStatus::Running);

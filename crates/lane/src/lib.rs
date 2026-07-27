@@ -6,11 +6,21 @@
 //! Persistence: `$CODEWHALE_HOME/lanes/<lane-id>.json` plus stream-json logs
 //! under `$CODEWHALE_HOME/lanes/logs/<lane-id>.ndjson`.
 
+pub mod control;
 mod registry;
 mod runtime;
 mod worktree;
 
-pub use registry::{LaneRecord, LaneRegistry, LaneStatus, lanes_dir};
+pub use control::{
+    Availability, BackendCapability, ControlAuthority, ControlContext, ControlDomain,
+    ControlExecution, ControlFailure, ControlFailureKind, ControlOperation, ControlReceipt,
+    ControlSurface, ControlTarget, Known, LifecycleOutcome, OperationDescriptor, PersistenceScope,
+    Retryability, RunListPage, RunRouteDto, RunSummaryDto, RunUsageDto, TargetKind,
+    UnavailableReason, UnknownReason,
+};
+pub use registry::{
+    LaneRecord, LaneRegistry, LaneStatus, TerminalTransition, lane_registry_root, lanes_dir,
+};
 pub use runtime::{
     InlineRuntime, LaneLogProxySpec, LaneStartSpec, RuntimeBackend, RuntimeBackendKind,
     TmuxRuntime, backend_for, resolve_backend, run_lane_log_proxy,
