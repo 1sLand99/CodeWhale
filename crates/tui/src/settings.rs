@@ -2635,9 +2635,30 @@ mod tests {
                 );
                 let path = Settings::path().expect("resolve the shared settings path");
                 let ready = result.with_extension("ready");
-                std::fs::write(&ready, b"ready").expect("announce that the reader is ready");
                 let deadline = Instant::now() + Duration::from_secs(60);
                 let (mut reads, mut torn) = (0_u64, 0_u64);
+
+                // A ready marker must mean that the reader has actually run.
+                // On Windows the child can otherwise create the marker, lose
+                // its time slice, and perform no reads before the parent
+                // completes every write and signals it to stop.
+                loop {
+                    assert!(
+                        Instant::now() < deadline,
+                        "reader did not observe the seeded settings file"
+                    );
+                    match std::fs::read_to_string(&path) {
+                        Ok(raw)
+                            if !raw.is_empty() && toml::from_str::<toml::Value>(&raw).is_ok() =>
+                        {
+                            reads += 1;
+                            break;
+                        }
+                        Ok(_) | Err(_) => std::thread::yield_now(),
+                    }
+                }
+                std::fs::write(&ready, b"ready").expect("announce that the reader is ready");
+
                 while !path_exists_for_test(&signal) && Instant::now() < deadline {
                     let Ok(raw) = std::fs::read_to_string(&path) else {
                         // The file legitimately does not exist yet.
