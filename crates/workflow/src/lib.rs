@@ -10,6 +10,7 @@ mod js_authoring;
 mod model_policy;
 mod named_fleet;
 mod replay;
+mod review_repair;
 mod role_resolve;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,6 +37,10 @@ pub use named_fleet::{
     parse_named_fleet,
 };
 pub use replay::*;
+pub use review_repair::{
+    IterationReceipt, IterationVerdict, ReviewRepairBounds, ReviewRepairError, ReviewRepairLoop,
+    ReviewRepairPolicy, RouteReceipt, RoutedBy, StopReason,
+};
 pub use role_resolve::{
     FleetRoleMap, FleetRoleResolveError, ResolvedWorkflowAgent, normalize_token,
     resolve_workflow_agent, validate_role_token,
