@@ -19,8 +19,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use codewhale_lane::control::{
-    ControlFailure, ControlFailureKind, ControlOperation, ControlReceipt, ControlSurface,
-    execute_lane_control_in, parse_target,
+    ControlContext, ControlFailure, ControlFailureKind, ControlOperation, ControlReceipt,
+    ControlSurface, execute_lane_control_in, parse_target,
 };
 
 /// Maximum submissions that may be in flight before the queue refuses.
@@ -114,6 +114,20 @@ impl LaneControlQueue {
         let descriptor = operation.descriptor();
         let surface = ControlSurface::Slash;
 
+        // #1888: a surface must never advertise a backend that does not exist.
+        // A verb that is declared but unbuilt (`restart`, `resume`) or not
+        // offered on this surface can never succeed no matter what the durable
+        // store looks like, so it is refused here with its typed reason rather
+        // than answered `queued` for work that will never run. The stores are
+        // deliberately assumed present for this check: whether the registry
+        // exists is a *runtime* fact the executor probes on the worker thread,
+        // and probing it here would put a filesystem answer on the composer
+        // thread and make an empty workspace look like an unbuilt feature.
+        let availability = descriptor.availability(surface, ControlContext::new(true, true));
+        if !availability.is_available() {
+            return ControlReceipt::unavailable(descriptor, surface, availability);
+        }
+
         // Validate the target on the calling thread: a typo must be refused
         // now, not silently queued and refused a tick later.
         let target = match parse_target(descriptor, raw_target) {
@@ -204,7 +218,10 @@ impl LaneControlQueue {
         }
     }
 
-    /// How many submissions are waiting. Used by the UI to show backpressure.
+    /// How many submissions are waiting. Test-only: nothing in the UI reads
+    /// backpressure yet, and an unused public accessor would be a claim the
+    /// build does not back.
+    #[cfg(test)]
     #[must_use]
     pub fn pending_len(&self) -> usize {
         let (lock, _) = &*self.shared;
@@ -250,6 +267,13 @@ impl LaneControlQueue {
     }
 
     /// Stop the worker thread after it finishes the current submission.
+    ///
+    /// Test-only for now, and deliberately not wired into TUI exit: there is
+    /// no join handle to wait on, so calling it on quit would signal the
+    /// worker without actually letting it finish — an orderly-shutdown claim
+    /// the build could not keep. The worker is a detached thread whose unit of
+    /// work is a bounded registry write, so process exit is what ends it.
+    #[cfg(test)]
     pub fn shutdown(&self) {
         let (lock, condvar) = &*self.shared;
         if let Ok(mut shared) = lock.lock() {
@@ -365,6 +389,26 @@ mod tests {
             assert!(receipt.ticket.is_none());
         }
         assert_eq!(queue.pending_len(), 0);
+    }
+
+    /// #1888: a verb with no backend must be refused on the calling thread.
+    /// Queueing it would answer `queued` — a receipt that implies work is
+    /// under way — for work that can never run.
+    #[test]
+    fn declared_but_unbuilt_verbs_are_refused_without_queueing() {
+        let queue = LaneControlQueue::new();
+        for operation in [ControlOperation::LaneRestart, ControlOperation::LaneResume] {
+            let receipt = queue.submit(operation, Some("lane-a1b2c3d4"), None);
+            assert_eq!(receipt.outcome, LifecycleOutcome::Rejected);
+            assert_eq!(
+                receipt.availability.reason(),
+                Some(codewhale_lane::UnavailableReason::BackendNotImplemented),
+                "{operation:?}"
+            );
+            assert!(receipt.ticket.is_none());
+            assert!(!receipt.retryable);
+        }
+        assert_eq!(queue.pending_len(), 0, "nothing may have been enqueued");
     }
 
     /// #1888: a saturated queue refuses with a typed, retryable receipt rather

@@ -4506,6 +4506,18 @@ async fn run_event_loop(
         if commit_streaming_display_tick(app, &mut stream_display_clock, Instant::now()) {
             transcript_batch_updated = true;
         }
+        // #4022: `/lane interrupt` answers immediately with a queued receipt,
+        // which is not an outcome. The terminal receipt lands here, under the
+        // ticket the composer printed, so a queued write is never left looking
+        // like it succeeded. Drain is non-blocking: it only takes the queue
+        // mutex, and a poisoned one yields nothing rather than panicking the
+        // event loop.
+        for receipt in app.lane_control.drain_completed() {
+            app.add_message(HistoryCell::System {
+                content: receipt.render(),
+            });
+            transcript_batch_updated = true;
+        }
         if transcript_batch_updated {
             app.mark_history_updated();
         }
