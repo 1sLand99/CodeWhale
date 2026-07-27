@@ -1,4 +1,5 @@
 {
+  "name": "codewhale",
   "private": true,
   "workspaces": [
     "npm/codewhale",
@@ -6,9 +7,11 @@
     "npm/runtime-sdk"
   ],
   "devDependencies": {
-    "wrangler": "^4.94.0"
+    "wrangler": "^4.103.0"
   },
   "overrides": {
-    "esbuild": "0.28.1"
+    "esbuild": "0.28.1",
+    "sharp": "0.35.3",
+    "ws": "8.21.0"
   }
 }

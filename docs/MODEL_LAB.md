@@ -1,8 +1,8 @@
 # Model Lab Roadmap
 
-Model Lab is the planned open-model workbench for CodeWhale. The north star is
-simple: CodeWhale should become the best terminal coding agent for open-source
-and open-weight models across every provider that offers them. Model Lab is how
+Model Lab is the planned open-model workbench for Codewhale. The north star is
+simple: Codewhale should make open-source and open-weight models practical in
+terminal coding workflows across every provider that offers them. Model Lab is how
 those models become discoverable, evaluable, routable, servable, and exportable
 without weakening the current terminal-agent contract: local workspace control,
 explicit provider auth, approval gates, and clear privacy boundaries.
@@ -39,8 +39,8 @@ This document is roadmap language. Some worksets below are roadmap-only.
   Jobs workflows.
 - Native Unsloth, NeMo, or Arcee integrations.
 - A dedicated Model Lab UI tab.
-- Built-in benchmark suites, eval leaderboards, hosted observability, or
-  training-infrastructure orchestration.
+- Built-in eval leaderboards, hosted observability, or training-infrastructure
+  orchestration.
 
 Until those land, use the provider paths above, MCP servers, or external
 workflows explicitly configured by the user.
@@ -58,7 +58,7 @@ Model Lab should help users answer practical questions:
 - Can I reproduce, export, or self-host the route?
 
 It should never hide provider boundaries, silently upload local artifacts, or
-describe a model as available before CodeWhale can actually route to it.
+describe a model as available before Codewhale can actually route to it.
 
 ## Hugging Face Workset
 

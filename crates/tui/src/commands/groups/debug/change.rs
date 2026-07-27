@@ -3,7 +3,7 @@
 //!
 //! Usage: `/change [version]`
 //!
-//! Uses the CodeWhale changelog embedded at compile time. With no argument,
+//! Uses the Codewhale changelog embedded at compile time. With no argument,
 //! extracts the most recent section. With a version argument like `0.8.32`,
 //! extracts that specific version's section. When the UI locale is not
 //! English and the current session can reach a model, the command also fires a
@@ -43,14 +43,14 @@ pub fn change(app: &mut App, version: Option<&str>) -> CommandResult {
             let msg = if let Some(ver) = version {
                 let ver = ver.trim();
                 if ver.is_empty() {
-                    "Could not find a version section in the bundled CodeWhale changelog. \
+                    "Could not find a version section in the bundled Codewhale changelog. \
                      Expected a line starting with `## [`."
                         .to_string()
                 } else {
-                    format!("Could not find version \"{ver}\" in the bundled CodeWhale changelog.")
+                    format!("Could not find version \"{ver}\" in the bundled Codewhale changelog.")
                 }
             } else {
-                "Could not find a version section in the bundled CodeWhale changelog. \
+                "Could not find a version section in the bundled Codewhale changelog. \
                  Expected a line starting with `## [`."
                     .to_string()
             };
@@ -93,16 +93,7 @@ pub fn change(app: &mut App, version: Option<&str>) -> CommandResult {
 {section_text}{prev_hint}"
         );
         let translation_source = format!("{latest_section}{prev_hint}");
-        let lang_name = match locale {
-            Locale::ZhHans => "Simplified Chinese (中文)",
-            Locale::ZhHant => "Traditional Chinese (繁體中文)",
-            Locale::Ja => "Japanese (日本語)",
-            Locale::PtBr => "Brazilian Portuguese (Português)",
-            Locale::Es419 => "Latin American Spanish (Español latinoamericano)",
-            Locale::Vi => "Vietnamese (Tiếng Việt)",
-            // Fallback — should never reach here since we check En above.
-            Locale::En => "English",
-        };
+        let lang_name = locale.translation_target_name();
 
         let translation_prompt = format!(
             "Translate the following changelog into {lang_name}. \
@@ -128,7 +119,7 @@ fn inline_changelog_section(section: &str) -> String {
     format!(
         "{truncated}\n\
 \n\
-[... {} characters omitted from the bundled CodeWhale changelog]",
+[... {} characters omitted from the bundled Codewhale changelog]",
         section.len() - MAX_INLINE_CHANGELOG_CHARS
     )
 }
@@ -319,25 +310,11 @@ mod tests {
         }
         let mut app = App::new(
             TuiOptions {
-                model: "deepseek-v4-pro".to_string(),
-                workspace: tmpdir.path().to_path_buf(),
-                config_path: None,
-                config_profile: None,
-                allow_shell: false,
-                use_alt_screen: true,
-                use_mouse_capture: false,
-                use_bracketed_paste: true,
-                max_subagents: 1,
                 skills_dir: tmpdir.path().join("skills"),
                 memory_path: tmpdir.path().join("memory.md"),
                 notes_path: tmpdir.path().join("notes.txt"),
                 mcp_config_path: tmpdir.path().join("mcp.json"),
-                use_memory: false,
-                start_in_agent_mode: false,
-                skip_onboarding: true,
-                yolo: false,
-                resume_session_id: None,
-                initial_input: None,
+                ..crate::test_support::test_tui_options(tmpdir.path().to_path_buf())
             },
             &config,
         );
@@ -484,7 +461,7 @@ Previous release.\n";
             let result = change(&mut app, None);
             assert!(!result.is_error, "Failed for locale {locale:?}");
             let msg = result.message.expect("should have a message");
-            assert!(msg.contains(tr(locale, MessageId::CmdChangeTranslationQueued)));
+            assert!(msg.contains(&*tr(locale, MessageId::CmdChangeTranslationQueued)));
             assert!(
                 matches!(result.action, Some(AppAction::SendMessage(_))),
                 "Non-English locale should send translation, got {:?}",
@@ -516,7 +493,7 @@ Previous release.\n";
         let result = change(&mut app, None);
         assert!(!result.is_error);
         let msg = result.message.expect("should have a message");
-        assert!(msg.contains(tr(
+        assert!(msg.contains(&*tr(
             Locale::ZhHans,
             MessageId::CmdChangeTranslationUnavailable
         )));
@@ -534,7 +511,7 @@ Previous release.\n";
         let result = change(&mut app, None);
         assert!(!result.is_error);
         let msg = result.message.expect("should have a message");
-        assert!(msg.contains(tr(Locale::Ja, MessageId::CmdChangeTranslationUnavailable)));
+        assert!(msg.contains(&*tr(Locale::Ja, MessageId::CmdChangeTranslationUnavailable)));
         assert!(
             result.action.is_none(),
             "offline mode should not send translation"

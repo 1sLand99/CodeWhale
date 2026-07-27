@@ -11,10 +11,11 @@
 //!   CodeWhale's `reasoning_effort` tiers, sampling-parameter rules for
 //!   models that reject them, and `cache_control` breakpoint placement
 //!   aligned with the prefix-zone model in `prefix_cache.rs`;
-//! - usage normalization (#2961): `prompt_cache_hit_tokens` comes from
-//!   `cache_read_input_tokens`, `prompt_cache_miss_tokens` is `input_tokens`
-//!   plus `cache_creation_input_tokens`, and the normalized `input_tokens`
-//!   is the sum of all three (total prompt, the DeepSeek convention);
+//! - usage normalization (#2961 / #4318): `prompt_cache_hit_tokens` comes from
+//!   `cache_read_input_tokens`, `prompt_cache_write_tokens` from
+//!   `cache_creation_input_tokens`, `prompt_cache_miss_tokens` is the raw
+//!   non-cached `input_tokens`, and the normalized `input_tokens` is the sum
+//!   of all three (total prompt, the DeepSeek convention);
 //! - signed-thinking handling: `signature_delta` is captured into
 //!   [`crate::models::Delta::SignatureDelta`] and assistant thinking blocks
 //!   replay verbatim (signature included); unsigned thinking blocks are
@@ -26,9 +27,11 @@
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
+use crate::config::{ApiProvider, wire_model_for_provider_route};
 use crate::llm_client::StreamEventBox;
 use crate::logging;
 use crate::models::{ContentBlock, MessageRequest, MessageResponse, StreamEvent, Usage};
+use crate::tools::schema_sanitize;
 
 use super::{DeepSeekClient, ERROR_BODY_MAX_BYTES, bounded_error_text};
 
@@ -38,8 +41,10 @@ const MAX_CACHE_BREAKPOINTS: usize = 4;
 impl DeepSeekClient {
     /// Build the native Messages API request body from a [`MessageRequest`].
     pub(super) fn build_anthropic_body(&self, request: &MessageRequest, stream: bool) -> Value {
+        let model =
+            wire_model_for_provider_route(self.api_provider, &self.base_url, &request.model);
         let mut body = json!({
-            "model": request.model,
+            "model": model,
             "max_tokens": request.max_tokens,
             "stream": stream,
         });
@@ -80,10 +85,23 @@ impl DeepSeekClient {
                 tools
                     .iter()
                     .map(|tool| {
+                        // Sanitize the tool's input_schema the same way the
+                        // OpenAI Responses adapter does: strip top-level
+                        // oneOf/anyOf/allOf (which Anthropic rejects), merge
+                        // alternative properties into the root, and surface
+                        // the dropped constraint as a description note so the
+                        // model still knows which parameters are expected.
+                        let mut schema = tool.input_schema.clone();
+                        let constraint_note = schema_sanitize::sanitize_for_responses(&mut schema);
+                        let description = match constraint_note {
+                            Some(note) if tool.description.trim().is_empty() => note,
+                            Some(note) => format!("{}\n\n{}", tool.description.trim(), note),
+                            None => tool.description.clone(),
+                        };
                         let mut value = json!({
                             "name": tool.name,
-                            "description": tool.description,
-                            "input_schema": tool.input_schema,
+                            "description": description,
+                            "input_schema": schema,
                         });
                         if let Some(strict) = tool.strict {
                             value["strict"] = json!(strict);
@@ -101,25 +119,40 @@ impl DeepSeekClient {
             body["tool_choice"] = anthropic_tool_choice(tool_choice);
         }
 
-        // Thinking + effort shaping. "off" omits thinking entirely; any other
-        // tier enables adaptive thinking, with `output_config.effort` only on
-        // models the capability matrix marks as thinking-capable.
-        let thinking_capable = crate::models::model_supports_reasoning(&request.model);
+        // Thinking + effort shaping. MiniMax supports adaptive/disabled but
+        // not Anthropic's output_config effort field; native Anthropic routes
+        // keep the existing effort mapping.
+        let thinking_capable = crate::models::model_supports_reasoning(&model);
+        let is_minimax_provider = self.api_provider == ApiProvider::MinimaxAnthropic;
+        let is_minimax = crate::config::is_exact_minimax_anthropic_m3_route(
+            self.api_provider,
+            &self.base_url,
+            &model,
+        );
+        let is_deepseek = self.api_provider == ApiProvider::DeepseekAnthropic;
         let effort = request
             .reasoning_effort
             .as_deref()
             .map(|raw| raw.trim().to_ascii_lowercase());
         match effort.as_deref() {
+            _ if is_minimax_provider && !is_minimax => {}
+            Some("off" | "disabled" | "none" | "false")
+                if (is_minimax || is_deepseek) && thinking_capable =>
+            {
+                body["thinking"] = json!({ "type": "disabled" });
+            }
             Some("off" | "disabled" | "none" | "false") => {}
             Some(level) if thinking_capable => {
                 body["thinking"] = json!({ "type": "adaptive" });
-                let mapped = match level {
-                    "low" | "minimal" => "low",
-                    "medium" | "mid" => "medium",
-                    "max" | "xhigh" | "highest" => "max",
-                    _ => "high",
-                };
-                body["output_config"] = json!({ "effort": mapped });
+                if !is_minimax {
+                    let mapped = match level {
+                        "low" | "minimal" => "low",
+                        "medium" | "mid" => "medium",
+                        "max" | "xhigh" | "highest" => "max",
+                        _ => "high",
+                    };
+                    body["output_config"] = json!({ "effort": mapped });
+                }
             }
             None if thinking_capable => {
                 body["thinking"] = json!({ "type": "adaptive" });
@@ -142,8 +175,8 @@ impl DeepSeekClient {
         body
     }
 
-    async fn send_anthropic_request(&self, body: &Value) -> Result<reqwest::Response> {
-        let url = anthropic_messages_url(&self.base_url);
+    async fn send_anthropic_request(&self, url: &str, body: &Value) -> Result<reqwest::Response> {
+        let url = self.messages_transport_url(url);
         self.wait_for_rate_limit().await;
         let response = self
             .http_client
@@ -153,7 +186,15 @@ impl DeepSeekClient {
             .send()
             .await
             .context("Anthropic Messages API request failed")?;
+        self.check_anthropic_response(response).await
+    }
 
+    /// Shared status/error-envelope handling for streaming and
+    /// non-streaming Messages responses.
+    async fn check_anthropic_response(
+        &self,
+        response: reqwest::Response,
+    ) -> Result<reqwest::Response> {
         let status = response.status();
         if !status.is_success() {
             let raw = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
@@ -166,13 +207,62 @@ impl DeepSeekClient {
         Ok(response)
     }
 
+    /// Open the streaming Messages request through the shared stream-entry
+    /// transport policy: bounded header wait, dual-client selection, and at
+    /// most one HTTP/1.1 fallback retry on a classified H2 header stall.
+    /// Wire-specific request construction (headers, endpoint, body) stays
+    /// here at the adapter edge.
+    async fn open_anthropic_stream_response(
+        &self,
+        url: &str,
+        body: &Value,
+    ) -> Result<reqwest::Response> {
+        let url = self.messages_transport_url(url);
+        let open_req = super::stream_entry::StreamOpenRequest::new(
+            super::stream_entry::stream_open_timeout(),
+            self.stream_idle_timeout,
+        );
+        let opened = super::stream_entry::open_sse_response(&open_req, |policy| {
+            let url = url.clone();
+            async move {
+                self.wait_for_rate_limit().await;
+                let client = super::stream_entry::client_for_policy(
+                    &self.http_client,
+                    self.http1_fallback_client(),
+                    policy,
+                );
+                client
+                    .post(&url)
+                    .header("Accept", "text/event-stream")
+                    .json(body)
+                    .send()
+                    .await
+                    .context("Anthropic Messages API request failed")
+            }
+        })
+        .await;
+        let response = match opened {
+            Ok(response) => response,
+            Err(err) => {
+                self.mark_request_failure(&format!("anthropic stream open: {err}"))
+                    .await;
+                return Err(err);
+            }
+        };
+        self.check_anthropic_response(response).await
+    }
+
     /// Handle a streaming Messages API request.
     pub(super) async fn handle_anthropic_stream(
         &self,
-        request: MessageRequest,
+        prepared: &super::PreparedOutboundRequest,
     ) -> Result<StreamEventBox> {
-        let body = self.build_anthropic_body(&request, true);
-        let response = self.send_anthropic_request(&body).await?;
+        // Body and endpoint come from the shared prepared-request seam
+        // (`prepare_outbound_request`), never from a second builder.
+        let body = &prepared.body;
+        let response = self
+            .open_anthropic_stream_response(&prepared.endpoint.url, body)
+            .await?;
 
         let stream_idle_timeout = self.stream_idle_timeout;
         let byte_stream = response.bytes_stream();
@@ -180,7 +270,14 @@ impl DeepSeekClient {
         let stream = async_stream::stream! {
             use futures_util::StreamExt;
 
-            let mut buffer = String::new();
+            // Raw byte buffer: decode only COMPLETE lines so a multi-byte
+            // UTF-8 char (CJK/emoji) split across two network reads is never
+            // corrupted to U+FFFD. Line boundaries ('\n') are ASCII and can
+            // never fall inside a multi-byte sequence. (Mirrors chat.rs.)
+            let mut buffer: Vec<u8> = Vec::new();
+            let stream_start = std::time::Instant::now();
+            let mut last_chunk_at = std::time::Instant::now();
+            let mut bytes_received: usize = 0;
             tokio::pin!(byte_stream);
 
             loop {
@@ -192,16 +289,21 @@ impl DeepSeekClient {
                     }
                     Ok(None) => break,
                     Err(_) => {
-                        yield Err(anyhow::anyhow!("Stream idle timeout"));
+                        yield Err(anyhow::anyhow!(super::stream_entry::idle_timeout_message(
+                            stream_idle_timeout,
+                            bytes_received,
+                            stream_start.elapsed(),
+                            last_chunk_at.elapsed(),
+                        )));
                         return;
                     }
                 };
 
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                bytes_received += chunk.len();
+                last_chunk_at = std::time::Instant::now();
+                buffer.extend_from_slice(&chunk);
 
-                while let Some(line_end) = buffer.find('\n') {
-                    let line = buffer[..line_end].trim().to_string();
-                    buffer = buffer[line_end + 1..].to_string();
+                while let Some(line) = super::take_sse_line(&mut buffer) {
 
                     // `event:` lines are redundant (the data payload carries
                     // `type`) and comment/heartbeat lines are ignorable.
@@ -239,10 +341,11 @@ impl DeepSeekClient {
     /// Handle a non-streaming Messages API request.
     pub(super) async fn handle_anthropic_message(
         &self,
-        request: MessageRequest,
+        prepared: &super::PreparedOutboundRequest,
     ) -> Result<MessageResponse> {
-        let body = self.build_anthropic_body(&request, false);
-        let response = self.send_anthropic_request(&body).await?;
+        let response = self
+            .send_anthropic_request(&prepared.endpoint.url, &prepared.body)
+            .await?;
         let mut value: Value = response
             .json()
             .await
@@ -256,7 +359,7 @@ impl DeepSeekClient {
 
 /// Build the `/v1/messages` endpoint URL, tolerating base URLs that already
 /// carry a `/v1` suffix.
-fn anthropic_messages_url(base_url: &str) -> String {
+pub(super) fn anthropic_messages_url(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
     if trimmed.ends_with("/v1") {
         format!("{trimmed}/messages")
@@ -494,8 +597,8 @@ fn convert_anthropic_sse_data(data: &str) -> Option<Result<StreamEvent>> {
 }
 
 /// Map Anthropic's usage payload onto the normalized [`Usage`] convention
-/// (#2961): hit = cache reads, miss = uncached input + cache writes,
-/// `input_tokens` = the total prompt across all three.
+/// (#2961 / #4318): hit = cache reads, write = cache creation, miss = raw
+/// uncached input, `input_tokens` = the total prompt across all three.
 fn parse_anthropic_usage(usage: &Value) -> Usage {
     let field = |name: &str| {
         usage
@@ -515,7 +618,8 @@ fn parse_anthropic_usage(usage: &Value) -> Usage {
             .saturating_add(cache_read),
         output_tokens: output,
         prompt_cache_hit_tokens: Some(cache_read),
-        prompt_cache_miss_tokens: Some(input_raw.saturating_add(cache_creation)),
+        prompt_cache_miss_tokens: Some(input_raw),
+        prompt_cache_write_tokens: Some(cache_creation),
         reasoning_tokens: None,
         reasoning_replay_tokens: None,
         server_tool_use: None,
@@ -602,6 +706,44 @@ mod tests {
         DeepSeekClient::new(&config).expect("anthropic client constructs")
     }
 
+    fn minimax_test_client() -> DeepSeekClient {
+        minimax_test_client_for(crate::config::DEFAULT_MINIMAX_ANTHROPIC_BASE_URL)
+    }
+
+    fn minimax_test_client_for(base_url: &str) -> DeepSeekClient {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let config = crate::config::Config {
+            provider: Some("minimax-anthropic".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                minimax_anthropic: crate::config::ProviderConfig {
+                    api_key: Some("test-key".to_string()),
+                    base_url: Some(base_url.to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        DeepSeekClient::new(&config).expect("MiniMax Messages client constructs")
+    }
+
+    fn deepseek_test_client(base_url: &str) -> DeepSeekClient {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let config = crate::config::Config {
+            provider: Some("deepseek-anthropic".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                deepseek_anthropic: crate::config::ProviderConfig {
+                    api_key: Some("test-key".to_string()),
+                    base_url: Some(base_url.to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        DeepSeekClient::new(&config).expect("DeepSeek Messages client constructs")
+    }
+
     #[test]
     fn body_keeps_native_cache_control_on_system_and_tools() {
         let client = test_client();
@@ -686,6 +828,166 @@ mod tests {
         );
         assert!(body.get("thinking").is_none(), "{body}");
         assert!(body.get("output_config").is_none(), "{body}");
+    }
+
+    #[test]
+    fn deepseek_messages_body_retires_aliases_and_keeps_thinking_control() {
+        let client = deepseek_test_client(crate::config::DEFAULT_DEEPSEEK_ANTHROPIC_BASE_URL);
+
+        let chat = client.build_anthropic_body(
+            &request_with("deepseek-chat", Some("off"), None, None),
+            true,
+        );
+        assert_eq!(
+            chat.get("model").and_then(Value::as_str),
+            Some(crate::config::DEEPSEEK_ALIAS_REPLACEMENT)
+        );
+        assert_eq!(
+            chat.pointer("/thinking/type").and_then(Value::as_str),
+            Some("disabled")
+        );
+
+        let reasoner = client.build_anthropic_body(
+            &request_with("deepseek-reasoner", Some("high"), None, None),
+            true,
+        );
+        assert_eq!(
+            reasoner.get("model").and_then(Value::as_str),
+            Some(crate::config::DEEPSEEK_ALIAS_REPLACEMENT)
+        );
+        assert_eq!(
+            reasoner.pointer("/thinking/type").and_then(Value::as_str),
+            Some("adaptive")
+        );
+        assert_eq!(
+            reasoner
+                .pointer("/output_config/effort")
+                .and_then(Value::as_str),
+            Some("high")
+        );
+
+        let custom = deepseek_test_client("https://messages.example/v1");
+        let custom_body = custom.build_anthropic_body(
+            &request_with("deepseek-reasoner", Some("high"), None, None),
+            true,
+        );
+        assert_eq!(
+            custom_body.get("model").and_then(Value::as_str),
+            Some("deepseek-reasoner")
+        );
+    }
+
+    #[test]
+    fn omitted_alias_effort_is_migrated_into_deepseek_messages_body() {
+        for (alias, expected_effort, expected_thinking) in [
+            ("deepseek-chat", "off", "disabled"),
+            ("deepseek-reasoner", "high", "adaptive"),
+        ] {
+            let mut config = crate::config::Config {
+                provider: Some("deepseek-anthropic".to_string()),
+                providers: Some(crate::config::ProvidersConfig {
+                    deepseek_anthropic: crate::config::ProviderConfig {
+                        api_key: Some("test-key".to_string()),
+                        model: Some(alias.to_string()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            assert!(
+                config.reasoning_effort().is_none(),
+                "fixture must omit effort"
+            );
+
+            crate::config::normalize_model_config_for_test(&mut config);
+            let client = DeepSeekClient::new(&config).expect("DeepSeek Messages client");
+            let model = config.default_model();
+            let body = client.build_anthropic_body(
+                &request_with(&model, config.reasoning_effort(), None, None),
+                true,
+            );
+
+            assert_eq!(
+                body.get("model").and_then(Value::as_str),
+                Some(crate::config::DEEPSEEK_ALIAS_REPLACEMENT),
+                "{alias}: {body}"
+            );
+            assert_eq!(config.reasoning_effort(), Some(expected_effort));
+            assert_eq!(
+                body.pointer("/thinking/type").and_then(Value::as_str),
+                Some(expected_thinking),
+                "{alias}: {body}"
+            );
+            if alias == "deepseek-reasoner" {
+                assert_eq!(
+                    body.pointer("/output_config/effort")
+                        .and_then(Value::as_str),
+                    Some("high"),
+                    "{body}"
+                );
+            } else {
+                assert!(body.get("output_config").is_none(), "{body}");
+            }
+        }
+    }
+
+    #[test]
+    fn minimax_body_uses_supported_thinking_controls() {
+        let client = minimax_test_client();
+        let body =
+            client.build_anthropic_body(&request_with("MiniMax-M3", Some("off"), None, None), true);
+        assert_eq!(
+            body.pointer("/thinking/type").and_then(Value::as_str),
+            Some("disabled")
+        );
+        assert!(body.get("output_config").is_none(), "{body}");
+
+        let mut enabled_bodies = Vec::new();
+        for effort in ["high", "max"] {
+            let body = client
+                .build_anthropic_body(&request_with("MiniMax-M3", Some(effort), None, None), true);
+            assert_eq!(
+                body.pointer("/thinking/type").and_then(Value::as_str),
+                Some("adaptive"),
+                "{effort}: {body}"
+            );
+            assert!(body.get("output_config").is_none(), "{effort}: {body}");
+            enabled_bodies.push(body);
+        }
+        assert_eq!(
+            enabled_bodies[0].get("thinking"),
+            enabled_bodies[1].get("thinking"),
+            "MiniMax high/max select the same untiered adaptive wire control"
+        );
+    }
+
+    #[test]
+    fn minimax_messages_reasoning_controls_require_exact_first_party_m3_route() {
+        for (base_url, model) in [
+            (
+                "https://gateway.example/anthropic",
+                crate::config::DEFAULT_MINIMAX_MODEL,
+            ),
+            (
+                crate::config::DEFAULT_MINIMAX_ANTHROPIC_BASE_URL,
+                "MiniMax-M2",
+            ),
+        ] {
+            let client = minimax_test_client_for(base_url);
+            for effort in ["off", "high", "max"] {
+                let body = client
+                    .build_anthropic_body(&request_with(model, Some(effort), None, None), true);
+                assert!(
+                    body.get("thinking").is_none(),
+                    "{base_url} {model} {effort}: {body}"
+                );
+                assert!(
+                    body.get("output_config").is_none(),
+                    "{base_url} {model} {effort}: {body}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -850,7 +1152,8 @@ mod tests {
         };
         assert_eq!(message.usage.input_tokens, 3 + 2045 + 18000);
         assert_eq!(message.usage.prompt_cache_hit_tokens, Some(18000));
-        assert_eq!(message.usage.prompt_cache_miss_tokens, Some(3 + 2045));
+        assert_eq!(message.usage.prompt_cache_miss_tokens, Some(3));
+        assert_eq!(message.usage.prompt_cache_write_tokens, Some(2045));
 
         assert!(matches!(
             &decoded[1],
@@ -925,6 +1228,21 @@ mod tests {
         assert_eq!(usage.output_tokens, 5);
         assert_eq!(usage.prompt_cache_hit_tokens, Some(0));
         assert_eq!(usage.prompt_cache_miss_tokens, Some(10));
+        assert_eq!(usage.prompt_cache_write_tokens, Some(0));
+    }
+
+    #[test]
+    fn usage_mapping_keeps_cache_write_separate_from_miss() {
+        let usage = parse_anthropic_usage(&json!({
+            "input_tokens": 3,
+            "cache_creation_input_tokens": 2045,
+            "cache_read_input_tokens": 18000,
+            "output_tokens": 1,
+        }));
+        assert_eq!(usage.input_tokens, 3 + 2045 + 18000);
+        assert_eq!(usage.prompt_cache_hit_tokens, Some(18000));
+        assert_eq!(usage.prompt_cache_miss_tokens, Some(3));
+        assert_eq!(usage.prompt_cache_write_tokens, Some(2045));
     }
 
     #[test]
@@ -953,6 +1271,135 @@ mod tests {
         assert_eq!(
             anthropic_messages_url("https://gateway.example/v1"),
             "https://gateway.example/v1/messages"
+        );
+        assert_eq!(
+            anthropic_messages_url("https://api.deepseek.com/anthropic"),
+            "https://api.deepseek.com/anthropic/v1/messages"
+        );
+        assert_eq!(
+            anthropic_messages_url("https://api.minimax.io/anthropic"),
+            "https://api.minimax.io/anthropic/v1/messages"
+        );
+        assert_eq!(
+            anthropic_messages_url("https://api.minimaxi.com/anthropic"),
+            "https://api.minimaxi.com/anthropic/v1/messages"
+        );
+    }
+
+    #[test]
+    fn anthropic_body_serializes_exactly_one_load_skill_definition() {
+        // The real child catalog fixture (not a hand-built tool list) must
+        // survive Messages serialization with exactly one load_skill entry —
+        // no dedup, filter, or sanitizer may drop or duplicate it.
+        let tools = crate::tools::subagent::kimi_general_child_request_tools_fixture();
+        assert_eq!(
+            tools
+                .iter()
+                .filter(|tool| tool.name == "load_skill")
+                .count(),
+            1,
+            "catalog fixture carries one load_skill"
+        );
+        let client = test_client();
+        let mut request = request_with("claude-sonnet-4-6", None, None, None);
+        request.tools = Some(tools);
+        let body = client.build_anthropic_body(&request, true);
+        let serialized = body["tools"]
+            .as_array()
+            .expect("tools serialize as an array");
+        let load_skills: Vec<_> = serialized
+            .iter()
+            .filter(|tool| tool["name"] == "load_skill")
+            .collect();
+        assert_eq!(
+            load_skills.len(),
+            1,
+            "exactly one load_skill definition reaches the Messages wire"
+        );
+        assert!(
+            load_skills[0]["input_schema"]["properties"].is_object(),
+            "load_skill keeps a valid object schema: {}",
+            load_skills[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_opens_through_shared_seam_preserving_headers() {
+        use futures_util::StreamExt;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // The wire-specific Accept header must survive the shared stream-entry
+        // open path; the mock only answers when it is present.
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(header("Accept", "text/event-stream"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "text/event-stream")
+                    .set_body_string("data: {\"type\":\"message_stop\"}\n\n"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = deepseek_test_client(&server.uri());
+        let mut stream = client
+            .handle_anthropic_stream(
+                &client
+                    .prepare_outbound_request(request_with("deepseek-v4", None, None, None), true)
+                    .expect("anthropic request prepares"),
+            )
+            .await
+            .expect("stream opens through the shared seam");
+
+        let mut saw_stop = false;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(event) = stream.next().await {
+                if matches!(event.expect("stream event"), StreamEvent::MessageStop) {
+                    saw_stop = true;
+                }
+            }
+        })
+        .await
+        .expect("stream finishes after message_stop");
+        assert!(saw_stop, "message_stop should arrive through the seam");
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_open_error_is_not_retried() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // A definitive provider error before any stream body must fail fast:
+        // exactly one request, no H1 fallback, envelope preserved.
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(401).set_body_string(
+                "{\"error\":{\"type\":\"authentication_error\",\"message\":\"bad key\"}}",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = deepseek_test_client(&server.uri());
+        let err = match client
+            .handle_anthropic_stream(
+                &client
+                    .prepare_outbound_request(request_with("deepseek-v4", None, None, None), true)
+                    .expect("anthropic request prepares"),
+            )
+            .await
+        {
+            Ok(_) => panic!("auth errors must fail fast"),
+            Err(err) => err,
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("HTTP 401") && text.contains("authentication_error"),
+            "error envelope should be preserved: {text}"
         );
     }
 }

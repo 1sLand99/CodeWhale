@@ -31,6 +31,10 @@ impl ToolSpec for GitStatusTool {
         "git_status"
     }
 
+    fn model_visible(&self) -> bool {
+        false
+    }
+
     fn description(&self) -> &'static str {
         "Run `git status --porcelain=v1 -b` in the workspace (optionally scoped to a path)."
     }
@@ -110,6 +114,10 @@ pub struct GitDiffTool;
 impl ToolSpec for GitDiffTool {
     fn name(&self) -> &'static str {
         "git_diff"
+    }
+
+    fn model_visible(&self) -> bool {
+        false
     }
 
     fn description(&self) -> &'static str {
@@ -278,14 +286,9 @@ fn run_git_command(working_dir: &Path, args: &[String]) -> Result<std::process::
 }
 
 fn format_command(working_dir: &Path, args: &[String]) -> String {
-    format!(
-        "git -C {} {}",
-        working_dir.display(),
-        args.iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(" ")
-    )
+    // `[String]::join` produces the same string as collecting `&str` first, so
+    // join the slice directly and skip the intermediate `Vec<&str>` allocation.
+    format!("git -C {} {}", working_dir.display(), args.join(" "))
 }
 
 fn truncate_with_note(text: &str, max_chars: usize) -> (String, bool, usize) {
@@ -329,7 +332,7 @@ mod tests {
     fn init_git_repo(root: &Path) {
         let run = |args: &[&str]| {
             let status = crate::dependencies::Git::status(args, root).expect("git should spawn");
-            assert!(status.success(), "git {:?} failed", args);
+            assert!(status.success(), "git {args:?} failed");
         };
 
         run(&["init", "-q"]);
@@ -341,7 +344,7 @@ mod tests {
     fn commit_all(root: &Path, message: &str) {
         let run = |args: &[&str]| {
             let status = crate::dependencies::Git::status(args, root).expect("git should spawn");
-            assert!(status.success(), "git {:?} failed", args);
+            assert!(status.success(), "git {args:?} failed");
         };
         run(&["add", "."]);
         run(&["commit", "-q", "-m", message]);
@@ -479,6 +482,31 @@ mod tests {
         assert!(result.content.contains(unicode_name));
         assert!(!result.content.contains("\\344"));
         assert!(!result.content.contains("\\320"));
+    }
+
+    #[test]
+    fn format_command_joins_args_without_intermediate_vec() {
+        // Locks the output shape after dropping the collect-before-join
+        // allocation: joining the `&[String]` slice directly must be byte-for-byte
+        // identical to the previous `.map(String::as_str).collect().join(" ")`.
+        let args = vec![
+            "-c".to_string(),
+            "core.quotepath=false".to_string(),
+            "status".to_string(),
+            "--porcelain=v1".to_string(),
+            "-b".to_string(),
+        ];
+        let rendered = format_command(Path::new("/tmp/repo"), &args);
+        assert_eq!(
+            rendered,
+            "git -C /tmp/repo -c core.quotepath=false status --porcelain=v1 -b"
+        );
+
+        // Empty args still render cleanly (trailing space, matching prior behavior).
+        assert_eq!(
+            format_command(Path::new("/tmp/repo"), &[]),
+            "git -C /tmp/repo "
+        );
     }
 
     #[test]

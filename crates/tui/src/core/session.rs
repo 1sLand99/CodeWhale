@@ -84,11 +84,11 @@ pub struct Session {
     pub frozen_prefix: Option<FrozenPrefix>,
 
     /// Monotonic counter bumped on every direct mutation of `messages`.
-    /// Consumed by [`crate::core::engine::token_estimate_cache::TokenEstimateCache`]
+    /// Consumed by the engine token-estimate cache
     /// to memoize the per-turn token estimate without re-walking the message
     /// list. Defaults to 0; bumped in [`Session::add_message`],
-    /// [`Session::replace_messages`], and at every other mutation site in
-    /// `core/engine.rs` / `core/engine/capacity_flow.rs`.
+    /// [`Session::replace_messages`], and at other mutation sites in
+    /// `core/engine.rs`.
     pub messages_revision: u64,
 }
 
@@ -98,8 +98,8 @@ pub struct Session {
 pub struct SessionUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
-    /// Cache creation (miss) tokens. `None` when never observed by the API —
-    /// do NOT display as 0, which would be indistinguishable from "no misses".
+    /// Cache creation (write) tokens. `None` when never observed by the API —
+    /// do NOT display as 0, which would be indistinguishable from "no writes".
     pub cache_creation_input_tokens: Option<u64>,
     /// Cache read (hit) tokens. `None` when never observed by the API —
     /// do NOT display as 0, which would be indistinguishable from "no hits".
@@ -111,7 +111,7 @@ impl SessionUsage {
     pub fn add(&mut self, usage: &Usage) {
         self.input_tokens += u64::from(usage.input_tokens);
         self.output_tokens += u64::from(usage.output_tokens);
-        if let Some(tokens) = usage.prompt_cache_miss_tokens {
+        if let Some(tokens) = usage.prompt_cache_write_tokens {
             self.cache_creation_input_tokens =
                 Some(self.cache_creation_input_tokens.unwrap_or(0) + u64::from(tokens));
         }
@@ -174,9 +174,9 @@ impl Session {
     }
 
     /// Replace the entire message history. Used by session resume and
-    /// capacity interventions. Bumps `messages_revision` exactly once even
-    /// when the new history has a different length, so downstream caches
-    /// invalidate atomically.
+    /// compaction. Bumps `messages_revision` exactly once even when the new
+    /// history has a different length, so downstream caches invalidate
+    /// atomically.
     #[allow(dead_code)]
     pub fn replace_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages.into();
@@ -218,6 +218,7 @@ mod tests {
             output_tokens: 50,
             prompt_cache_hit_tokens: None,
             prompt_cache_miss_tokens: None,
+            prompt_cache_write_tokens: None,
             reasoning_tokens: None,
             reasoning_replay_tokens: None,
             server_tool_use: None,
@@ -234,17 +235,18 @@ mod tests {
             input_tokens: 100,
             output_tokens: 50,
             prompt_cache_hit_tokens: Some(30),
-            prompt_cache_miss_tokens: Some(70),
+            prompt_cache_miss_tokens: Some(50),
+            prompt_cache_write_tokens: Some(20),
             reasoning_tokens: None,
             reasoning_replay_tokens: None,
             server_tool_use: None,
         };
         usage.add(&api_usage);
         assert_eq!(usage.cache_read_input_tokens, Some(30));
-        assert_eq!(usage.cache_creation_input_tokens, Some(70));
+        assert_eq!(usage.cache_creation_input_tokens, Some(20));
         usage.add(&api_usage);
         assert_eq!(usage.cache_read_input_tokens, Some(60));
-        assert_eq!(usage.cache_creation_input_tokens, Some(140));
+        assert_eq!(usage.cache_creation_input_tokens, Some(40));
     }
 
     #[test]
@@ -254,7 +256,8 @@ mod tests {
             input_tokens: 100,
             output_tokens: 50,
             prompt_cache_hit_tokens: Some(0), // explicit zero from provider
-            prompt_cache_miss_tokens: Some(1234),
+            prompt_cache_miss_tokens: Some(50),
+            prompt_cache_write_tokens: Some(1234),
             reasoning_tokens: None,
             reasoning_replay_tokens: None,
             server_tool_use: None,

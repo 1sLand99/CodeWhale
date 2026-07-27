@@ -1,9 +1,9 @@
 //! End-to-end harness composing [`PtySession`] + [`Frame`].
 //!
 //! Tests build a [`Harness`] via [`Harness::builder`], drive the TUI with
-//! [`Harness::send`] / [`Harness::paste`] / [`Harness::resize`], poll the
-//! parsed terminal state with [`Harness::wait_for`], and assert on
-//! [`Harness::frame`] / filesystem state.
+//! [`Harness::send`] / [`Harness::paste`], poll the parsed terminal state
+//! with [`Harness::wait_for`], and assert on [`Harness::frame`] /
+//! filesystem state.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -12,6 +12,24 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow};
 
 use super::{Frame, PtySession};
+
+/// Scale a wait budget for shared CI runners.
+///
+/// PTY scenarios boot a real binary and wait on real terminal output, and the
+/// budgets in the scenarios are tuned for a developer laptop running one test
+/// at a time. CI runs the whole workspace suite on a shared runner, where the
+/// same output can legitimately arrive several times later. Every budget this
+/// scales is a deadline on a poll that returns as soon as the condition holds,
+/// so a larger budget never slows a passing run — it only changes how long a
+/// genuinely stuck scenario waits before failing. Local runs keep the tight
+/// value so a real hang still surfaces quickly while developing.
+pub fn ci_scaled(base: Duration) -> Duration {
+    if std::env::var_os("CI").is_some() {
+        base * 4
+    } else {
+        base
+    }
+}
 
 pub struct Harness {
     pty: PtySession,
@@ -42,11 +60,6 @@ impl HarnessBuilder {
             clear_env: false,
             seal_home: None,
         }
-    }
-
-    pub fn arg(mut self, a: impl Into<String>) -> Self {
-        self.args.push(a.into());
-        self
     }
 
     pub fn args<I, S>(mut self, args: I) -> Self
@@ -128,8 +141,18 @@ impl Harness {
         HarnessBuilder::new(program)
     }
 
+    pub fn pid(&self) -> Option<u32> {
+        self.pty.pid()
+    }
+
     pub fn send(&mut self, bytes: impl AsRef<[u8]>) -> Result<()> {
         self.pty.write_bytes(bytes.as_ref())
+    }
+
+    pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
+        self.pty.resize(rows, cols)?;
+        self.frame.resize(rows, cols);
+        Ok(())
     }
 
     pub fn paste(&mut self, text: &str) -> Result<()> {
@@ -138,12 +161,6 @@ impl Harness {
 
     pub fn paste_unbracketed(&mut self, text: &str) -> Result<()> {
         self.pty.write_bytes(&super::paste::unbracketed(text))
-    }
-
-    pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
-        self.pty.resize(rows, cols)?;
-        self.frame.resize(rows, cols);
-        Ok(())
     }
 
     /// Pull whatever the child has written since last call into the frame
@@ -170,7 +187,8 @@ impl Harness {
     where
         F: FnMut(&Frame) -> bool,
     {
-        let deadline = Instant::now() + timeout;
+        let budget = ci_scaled(timeout);
+        let deadline = Instant::now() + budget;
         loop {
             self.pump();
             if predicate(&self.frame) {
@@ -179,7 +197,7 @@ impl Harness {
             if Instant::now() >= deadline {
                 return Err(anyhow!(
                     "wait_for timed out after {:?}.\n{}",
-                    timeout,
+                    budget,
                     self.frame.debug_dump()
                 ));
             }
@@ -196,7 +214,10 @@ impl Harness {
     /// Wait for stable output: no new bytes for `quiet_for` consecutive
     /// pump ticks, bounded by `max`. Useful for "let the UI settle".
     pub fn wait_for_idle(&mut self, quiet_for: Duration, max: Duration) -> Result<()> {
-        let max_deadline = Instant::now() + max;
+        // Only the ceiling scales: `quiet_for` is the definition of "settled",
+        // not a budget, and stretching it would change what the test asserts.
+        let budget = ci_scaled(max);
+        let max_deadline = Instant::now() + budget;
         let mut quiet_since = Instant::now();
         loop {
             if self.pump() {
@@ -208,7 +229,7 @@ impl Harness {
             if Instant::now() >= max_deadline {
                 return Err(anyhow!(
                     "wait_for_idle: never settled within {:?}\n{}",
-                    max,
+                    budget,
                     self.frame.debug_dump()
                 ));
             }
@@ -238,9 +259,34 @@ impl Harness {
         self.pty.shutdown(Duration::from_secs(2))
     }
 
+    /// Wait for the child process to exit without sending it a signal.
+    pub fn wait_for_exit(&mut self, timeout: Duration) -> Option<i32> {
+        self.pty.wait_until(Instant::now() + ci_scaled(timeout))
+    }
+
     pub fn debug_dump(&mut self) -> String {
         self.pump();
         self.frame.debug_dump()
+    }
+
+    /// Every byte the child has written, from spawn to now. Survives `pump`,
+    /// so terminal-mode assertions stay valid after the frame parser has
+    /// consumed the stream.
+    pub fn transcript(&self) -> Vec<u8> {
+        self.pty.transcript()
+    }
+
+    /// Replay the transcript into a [`TerminalModeLedger`].
+    pub fn terminal_modes(&self) -> super::TerminalModeLedger {
+        super::TerminalModeLedger::from_transcript(&self.transcript())
+    }
+
+    /// Frame dump plus terminal-mode ledger. Every bounded wait in the matrix
+    /// fails with this rather than a bare `assertion failed`, so a CI timeout
+    /// carries the screen *and* the control-stream state that produced it.
+    pub fn diagnostics(&mut self) -> String {
+        let modes = self.terminal_modes().debug_dump();
+        format!("{}{modes}", self.debug_dump())
     }
 }
 
@@ -253,6 +299,17 @@ pub fn make_sealed_workspace() -> Result<SealedWorkspace> {
     std::fs::create_dir_all(&workspace).context("mkdir workspace")?;
     std::fs::create_dir_all(home.join(".codewhale")).context("mkdir home/.codewhale")?;
     std::fs::create_dir_all(home.join(".deepseek")).context("mkdir home/.deepseek")?;
+    let silent_notifications = "[notifications]\nmethod = \"off\"\ncompletion_sound = \"off\"\n";
+    std::fs::write(
+        home.join(".codewhale").join("config.toml"),
+        silent_notifications,
+    )
+    .context("write silent CodeWhale PTY config")?;
+    std::fs::write(
+        home.join(".deepseek").join("config.toml"),
+        silent_notifications,
+    )
+    .context("write silent legacy PTY config")?;
     Ok(SealedWorkspace {
         _tmp: tmp,
         workspace,

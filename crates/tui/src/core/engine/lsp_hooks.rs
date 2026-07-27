@@ -53,6 +53,8 @@ impl Engine {
             return;
         }
         let paths = edited_paths_for_tool(tool_name, tool_input);
+        let mut found = 0usize;
+        let mut files = 0usize;
         for path in paths {
             let absolute = if path.is_absolute() {
                 path.clone()
@@ -64,8 +66,20 @@ impl Engine {
             // batch by sequence.
             let seq = self.turn_counter;
             if let Some(block) = self.lsp_manager.diagnostics_for(&absolute, seq).await {
+                found = found.saturating_add(block.items.len());
+                files = files.saturating_add(1);
                 self.pending_lsp_blocks.push(block);
             }
+        }
+        if found > 0 {
+            let _ = self
+                .tx_event
+                .send(Event::LspRepairUpdate {
+                    diagnostics_found: found,
+                    files,
+                    injected: false,
+                })
+                .await;
         }
     }
 
@@ -79,11 +93,24 @@ impl Engine {
             return;
         }
         let blocks = std::mem::take(&mut self.pending_lsp_blocks);
+        let found: usize = blocks.iter().map(|b| b.items.len()).sum();
+        let files = blocks.len();
         let rendered = crate::lsp::render_blocks(&blocks);
         if rendered.is_empty() {
             return;
         }
-        self.add_session_message(self.user_text_message_with_turn_metadata(rendered))
+        self.add_session_message(self.runtime_text_message_with_turn_metadata(
+            rendered,
+            crate::core::ops::UserInputProvenance::Runtime,
+        ))
+        .await;
+        let _ = self
+            .tx_event
+            .send(Event::LspRepairUpdate {
+                diagnostics_found: found,
+                files,
+                injected: true,
+            })
             .await;
     }
 }

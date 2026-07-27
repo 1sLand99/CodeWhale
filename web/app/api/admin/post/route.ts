@@ -1,5 +1,12 @@
 import { NextResponse } from "next/server";
-import { getAgentEnv, getDraft, deleteDraft, validateSession, type CommunityAgentEnv } from "@/lib/community-agent";
+import {
+  deleteDraft,
+  getAgentEnv,
+  getDraft,
+  parseDraftKey,
+  validateSession,
+  type CommunityAgentEnv,
+} from "@/lib/community-agent";
 
 export const dynamic = "force-dynamic";
 
@@ -57,6 +64,9 @@ export async function POST(req: Request) {
   }
   if (typeof draftKey !== "string" || !draftKey || draftKey.length > 256) {
     return NextResponse.json({ error: "missing or invalid draftKey" }, { status: 400 });
+  }
+  if (!parseDraftKey(draftKey)) {
+    return NextResponse.json({ error: "invalid draftKey namespace" }, { status: 400 });
   }
   if (editedBody !== undefined && (typeof editedBody !== "string" || editedBody.length > MAX_BODY_BYTES)) {
     return NextResponse.json({ error: "editedBody too long" }, { status: 413 });

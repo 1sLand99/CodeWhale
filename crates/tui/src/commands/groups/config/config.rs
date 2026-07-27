@@ -2,23 +2,30 @@
 
 use super::CommandResult;
 use crate::config::{
-    ApiProvider, COMMON_DEEPSEEK_MODELS, Config, DEFAULT_STREAM_CHUNK_TIMEOUT_SECS,
-    DEFAULT_XIAOMI_MIMO_BASE_URL, MAX_STREAM_CHUNK_TIMEOUT_SECS, MIN_STREAM_CHUNK_TIMEOUT_SECS,
+    ApiProvider, Config, DEFAULT_STREAM_CHUNK_TIMEOUT_SECS, DEFAULT_SUBAGENT_API_TIMEOUT_SECS,
+    DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS, DEFAULT_XIAOMI_MIMO_BASE_URL,
+    MAX_STREAM_CHUNK_TIMEOUT_SECS, MAX_SUBAGENT_API_TIMEOUT_SECS,
+    MAX_SUBAGENT_HEARTBEAT_TIMEOUT_SECS, MAX_SUBAGENTS, MIN_STREAM_CHUNK_TIMEOUT_SECS,
+    MIN_SUBAGENT_API_TIMEOUT_SECS, MIN_SUBAGENT_HEARTBEAT_TIMEOUT_SECS, SubagentsConfig,
     XIAOMI_MIMO_PAY_AS_YOU_GO_BASE_URL, clear_active_provider_api_key,
-    normalize_model_name_for_provider,
+    normalize_model_name_for_provider, validate_route,
 };
 use crate::config_persistence::{
     persist_provider_base_url_key, persist_root_bool_key, persist_root_string_key,
-    persist_tui_integer_key,
+    persist_subagents_bool_key, persist_subagents_integer_key, persist_tui_integer_key,
+    persist_unset_root_key,
 };
 use crate::config_ui::{ConfigUiMode, parse_mode};
-use crate::localization::resolve_locale;
+use crate::localization::{MessageId, resolve_locale};
 use crate::settings::Settings;
 use crate::tui::app::{
-    App, AppAction, AppMode, OnboardingState, ReasoningEffort, SidebarFocus, VimMode,
+    App, AppAction, AppMode, OnboardingState, ReasoningEffort, SettingSelection, SidebarFocus,
+    VimMode,
 };
 use crate::tui::approval::ApprovalMode;
+use crate::tui::ui::{SidebarRenderState, sidebar_render_state};
 use anyhow::Result;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 /// Open the interactive config editor.
@@ -49,12 +56,34 @@ pub fn show_config(_app: &mut App, arg: Option<&str>) -> CommandResult {
 /// - `/config` (no args) — opens the schemaui-driven TUI editor.
 /// - `/config tui` / `/config web` / `/config native` — open a specific
 ///   editor mode (web requires the `web` build feature).
+/// - `/config ask-rules` — shows configured ask-only permission rules.
 /// - `/config <key>` — shows the current value of a setting.
 /// - `/config <key> <value>` — sets a runtime value (session only, add --save to persist).
 pub fn config_command(app: &mut App, arg: Option<&str>) -> CommandResult {
     let raw = arg.map(str::trim).unwrap_or("");
     if raw.is_empty() {
         return show_config(app, None);
+    }
+    if matches!(
+        raw.to_ascii_lowercase().as_str(),
+        "audit" | "editability" | "editable" | "status"
+    ) {
+        return config_editability_audit(app);
+    }
+    let mut raw_words = raw.splitn(2, char::is_whitespace);
+    let first_word = raw_words.next();
+    if first_word.is_some_and(is_ask_rules_config_token) {
+        let rest = raw_words.next().unwrap_or("").trim();
+        return configured_ask_rules_command(app, rest);
+    }
+    if first_word.is_some_and(|token| token.eq_ignore_ascii_case("subagents")) {
+        let rest = raw_words.next().unwrap_or("").trim();
+        return subagents_config_command(app, rest);
+    }
+    // `/config preset <name> [--save|-s]` — apply a bundled settings preset (#3478).
+    if first_word.is_some_and(|token| token.eq_ignore_ascii_case("preset")) {
+        let rest = raw_words.next().unwrap_or("").trim();
+        return config_preset_command(app, rest);
     }
     let parts: Vec<&str> = raw.splitn(2, ' ').collect();
     if parts.len() == 1 {
@@ -84,9 +113,102 @@ pub fn config_command(app: &mut App, arg: Option<&str>) -> CommandResult {
     }
 }
 
+/// Reject a preset bundle *before* anything is written, returning the message
+/// to show, or `None` when every field can be applied.
+///
+/// The bundle is persisted in one transaction and then mirrored field by field
+/// into the live session. A per-field refusal during that mirror pass therefore
+/// arrives *after* the file has already been rewritten — the user gets an error
+/// and a saved file, which is the partial apply this preflight exists to make
+/// impossible. Both refusals a field can raise are knowable up front:
+///
+/// 1. A live-route key while a turn is running (#2982).
+/// 2. A value the setter would reject, checked against a throwaway `Settings`
+///    so the real file is never touched by the check.
+fn preset_preflight(app: &App, fields: &[(&str, &str)]) -> Option<String> {
+    for (key, value) in fields {
+        if app.is_loading
+            && let Some(subject) = live_route_setting_subject(&key.to_lowercase())
+        {
+            return Some(app.setting_locked_message(subject));
+        }
+        if let Err(e) = Settings::default().set(key, value) {
+            return Some(format!("Failed to apply preset field {key}={value}: {e}"));
+        }
+    }
+    None
+}
+
+/// Apply a bundled settings preset, e.g. `/config preset calm [--save]` (#3478).
+///
+/// The preset is applied to the live session through the same per-key setter a
+/// single `/config <key> <value>` uses, so app state mirroring and (with
+/// `--save`) persistence stay consistent. The preset name is validated before
+/// any field is touched.
+fn config_preset_command(app: &mut App, rest: &str) -> CommandResult {
+    let tokens: Vec<&str> = rest.split_whitespace().collect();
+    let persist = matches!(tokens.last(), Some(&"--save") | Some(&"-s"));
+    let name = tokens.first().copied().unwrap_or("");
+    if name.is_empty() || name.starts_with('-') {
+        return CommandResult::message(
+            "Usage: /config preset <name> [--save]. Available presets: calm.",
+        );
+    }
+
+    let Some(fields) = crate::settings::preset_fields(name) else {
+        return CommandResult::error(format!("Unknown preset '{name}'. Available presets: calm."));
+    };
+
+    if let Some(refusal) = preset_preflight(app, fields) {
+        return CommandResult::error(refusal);
+    }
+
+    // Persist the whole bundle atomically when requested (one load/apply/save),
+    // now that every field is known to be applicable.
+    if persist {
+        // `Settings::transact` is what makes "one load/apply/save" true against
+        // the *other* writers in this process, not just against a second preset
+        // apply: an unsynchronized load/save pair here would write back a
+        // pre-image that reverts a concurrent mode/thinking/posture write.
+        if let Err(e) = Settings::transact(|settings| settings.apply_preset(name)) {
+            return CommandResult::error(format!("Failed to save settings: {e}"));
+        }
+    }
+
+    // Mirror the bundle into the live session via the per-key setter (the
+    // persisted write, if any, already happened atomically above, so this pass
+    // is session-only).
+    let mut applied = Vec::with_capacity(fields.len());
+    for (key, value) in fields {
+        let result = set_config_value(app, key, value, false);
+        if result.is_error {
+            let message = result
+                .message
+                .unwrap_or_else(|| "unknown apply error".to_string());
+            return CommandResult::error(format!(
+                "Failed to apply preset field {key}={value}: {message}"
+            ));
+        }
+        applied.push(format!("{key}={value}"));
+    }
+
+    let suffix = if persist {
+        " (saved)"
+    } else {
+        " (session only — add --save to persist)"
+    };
+    CommandResult::message(format!(
+        "Applied '{name}' transcript preset{suffix}: {}. Thinking stays visible and tool runs stay expandable.",
+        applied.join(", ")
+    ))
+}
+
 /// Show the current value of a single setting.
 fn show_single_setting(app: &App, key: &str) -> CommandResult {
     let key = key.to_lowercase();
+    if let Some(subagent_key) = key.strip_prefix("subagents.") {
+        return show_subagents_setting(app, subagent_key);
+    }
     fn locale_display(l: crate::localization::Locale) -> &'static str {
         match l {
             crate::localization::Locale::En => "en",
@@ -96,6 +218,14 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
             crate::localization::Locale::PtBr => "pt-BR",
             crate::localization::Locale::Es419 => "es-419",
             crate::localization::Locale::Vi => "vi",
+            crate::localization::Locale::Ko => "ko",
+            crate::localization::Locale::Ca => "ca",
+            crate::localization::Locale::De => "de",
+            crate::localization::Locale::Fr => "fr",
+            crate::localization::Locale::Id => "id",
+            crate::localization::Locale::Hi => "hi",
+            crate::localization::Locale::Ru => "ru",
+            crate::localization::Locale::Uk => "uk",
         }
     }
     fn density_display(d: crate::tui::app::ComposerDensity) -> &'static str {
@@ -126,8 +256,8 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
                 Some(app.model.clone())
             }
         }
-        "provider" => Some(app.api_provider.as_str().to_string()),
-        "approval_mode" | "approval" => Some(app.approval_mode.label().to_string()),
+        "provider" => Some(app.provider_identity_for_persistence().to_string()),
+        "approval_mode" | "approval" => Some(app.approval_mode.permission_chip_label().to_string()),
         "allow_shell" | "shell" | "exec_shell" => Some(app.allow_shell.to_string()),
         "base_url" => {
             let config = match Config::load(app.config_path.clone(), app.config_profile.as_deref())
@@ -143,7 +273,7 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
             let config = match Config::load(app.config_path.clone(), app.config_profile.as_deref())
             {
                 Ok(mut config) => {
-                    config.provider = Some(app.api_provider.as_str().to_string());
+                    config.provider = Some(app.provider_identity_for_persistence().to_string());
                     config
                 }
                 Err(err) => {
@@ -193,6 +323,14 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
         "show_thinking" | "thinking" => {
             Some(if app.show_thinking { "true" } else { "false" }.to_string())
         }
+        "thinking_highlight" | "reasoning_highlight" => Some(
+            if app.thinking_highlight {
+                "true"
+            } else {
+                "false"
+            }
+            .to_string(),
+        ),
         "show_tool_details" | "tool_details" => Some(
             if app.show_tool_details {
                 "true"
@@ -201,16 +339,46 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
             }
             .to_string(),
         ),
+        "inline_diffs" | "inline_diff" | "diffs" => {
+            Some(app.inline_diff_mode.as_setting().to_string())
+        }
         "mode" | "default_mode" => Some(app.mode.as_setting().to_string()),
         "max_history" | "history" => Some(app.max_input_history.to_string()),
         "sidebar_width" | "sidebar" => Some(app.sidebar_width_percent.to_string()),
         "sidebar_focus" | "focus" => Some(app.sidebar_focus.as_setting().to_string()),
+        "work_surface_placement" | "work_surface" | "work_rail" => {
+            Some(app.work_surface.placement.as_setting().to_string())
+        }
+        "work_surface_top_height" | "work_top_height" => {
+            Some(app.work_surface.top_height.to_string())
+        }
+        "work_surface_side_width" | "work_side_width" => {
+            Some(app.work_surface.side_width.to_string())
+        }
         "tool_collapse" | "tool_collapse_mode" | "collapse" => {
             Some(app.tool_collapse_mode.as_setting().to_string())
         }
         "context_panel" | "context" | "session_panel" => {
             Some(if app.context_panel { "true" } else { "false" }.to_string())
         }
+        "sessions_rail" | "sessions_panel" | "session_rail" => {
+            Some(if app.sessions_rail { "true" } else { "false" }.to_string())
+        }
+        // Read the persisted value rather than reporting a hard-coded default:
+        // this setting is consumed at startup by `main`, so `App` has no live
+        // copy, and printing "false" unconditionally would misreport a user who
+        // has it on.
+        "session_auto_resume" | "auto_resume" => Some(
+            if crate::settings::Settings::load_persisted()
+                .map(|settings| settings.session_auto_resume)
+                .unwrap_or(false)
+            {
+                "true"
+            } else {
+                "false"
+            }
+            .to_string(),
+        ),
         "composer_density" | "composer" => Some(density_display(app.composer_density).to_string()),
         "composer_border" | "border" => {
             Some(if app.composer_border { "true" } else { "false" }.to_string())
@@ -255,6 +423,12 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
         "prefer_external_pdftotext" | "external_pdftotext" | "pdftotext" => Settings::load()
             .ok()
             .map(|settings| settings.prefer_external_pdftotext.to_string()),
+        "workspace_follow_symlinks" | "follow_symlinks" => Settings::load().ok().map(|settings| {
+            format!(
+                "{} (restart required for engine tools)",
+                settings.workspace_follow_symlinks
+            )
+        }),
         _ => {
             let known = Settings::available_settings()
                 .iter()
@@ -274,7 +448,17 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
     }
 }
 
-/// Show persistent settings
+/// Open the typed settings editor. `text` preserves the legacy diagnostic
+/// output for scripts and terminals that cannot render the modal.
+pub fn settings_command(app: &mut App, arg: Option<&str>) -> CommandResult {
+    match arg.map(str::trim).filter(|value| !value.is_empty()) {
+        None => CommandResult::action(AppAction::OpenConfigView),
+        Some("text" | "show" | "diagnostic" | "diagnostics") => show_settings(app),
+        Some(_) => CommandResult::error("Usage: /settings [text]"),
+    }
+}
+
+/// Show persistent settings as plain text (legacy compatibility path).
 pub fn show_settings(app: &mut App) -> CommandResult {
     match Settings::load() {
         Ok(settings) => CommandResult::message(settings.display(app.ui_locale)),
@@ -314,7 +498,7 @@ pub fn verbose(app: &mut App, arg: Option<&str>) -> CommandResult {
 
 /// Toggle or focus the right sidebar.
 ///
-/// Bare `/sidebar` toggles between hidden and auto. Explicit values mirror
+/// Bare `/sidebar` toggles between hidden and pinned. Explicit values mirror
 /// `sidebar_focus` so users have a discoverable copy-friendly path that does
 /// not depend on terminal-specific key translations.
 pub fn sidebar(app: &mut App, arg: Option<&str>) -> CommandResult {
@@ -328,28 +512,29 @@ pub fn sidebar(app: &mut App, arg: Option<&str>) -> CommandResult {
     let target = match tokens.as_slice() {
         [] | ["toggle"] => {
             if app.sidebar_focus == SidebarFocus::Hidden {
-                SidebarFocus::Auto
+                SidebarFocus::Pinned
             } else {
                 SidebarFocus::Hidden
             }
         }
         [value] => match value.to_ascii_lowercase().as_str() {
-            "on" | "show" | "visible" => SidebarFocus::Auto,
+            "on" | "show" | "visible" | "pinned" => SidebarFocus::Pinned,
             "off" | "hide" | "hidden" | "closed" | "none" => SidebarFocus::Hidden,
             "auto" => SidebarFocus::Auto,
-            "work" | "plan" | "todos" => SidebarFocus::Work,
-            "tasks" => SidebarFocus::Tasks,
+            "work" | "plan" | "todos" => SidebarFocus::Pinned,
+            // Panel label is Activity; "tasks" remains the config/compat key (#4147/#4135).
+            "tasks" | "activity" | "live" | "running" => SidebarFocus::Tasks,
             "agents" | "subagents" | "sub-agents" => SidebarFocus::Agents,
             "context" | "session" => SidebarFocus::Context,
             _ => {
                 return CommandResult::error(
-                    "Usage: /sidebar [on|off|auto|work|tasks|agents|context] [--save]",
+                    "Usage: /sidebar [on|off|pinned|auto|activity|tasks|agents|context] [--save]",
                 );
             }
         },
         _ => {
             return CommandResult::error(
-                "Usage: /sidebar [on|off|auto|work|tasks|agents|context] [--save]",
+                "Usage: /sidebar [on|off|pinned|auto|activity|tasks|agents|context] [--save]",
             );
         }
     };
@@ -364,15 +549,23 @@ pub fn sidebar(app: &mut App, arg: Option<&str>) -> CommandResult {
     }
 
     app.needs_redraw = true;
-    let message = sidebar_status_message(target).to_string();
+    let message = sidebar_status_message(app);
     CommandResult::message(message)
 }
 
-fn sidebar_status_message(focus: SidebarFocus) -> &'static str {
-    if focus == SidebarFocus::Hidden {
-        "Sidebar is hidden"
-    } else {
-        "Sidebar is visible"
+fn sidebar_status_message(app: &mut App) -> String {
+    match sidebar_render_state(app) {
+        SidebarRenderState::Hidden => "Sidebar is hidden".to_string(),
+        SidebarRenderState::SuppressedByWidth {
+            available_width,
+            min_width,
+        } => format!(
+            "Sidebar is on, but hidden because the terminal is too narrow ({available_width} cols; needs at least {min_width})"
+        ),
+        SidebarRenderState::AutoCollapsed => {
+            "Sidebar auto mode is on, but currently collapsed while idle".to_string()
+        }
+        SidebarRenderState::Visible => "Sidebar is visible".to_string(),
     }
 }
 
@@ -413,6 +606,413 @@ fn parse_config_bool(value: &str) -> Result<bool, String> {
     }
 }
 
+fn approval_mode_config_value(mode: ApprovalMode) -> &'static str {
+    match mode {
+        ApprovalMode::Auto => "auto",
+        ApprovalMode::Bypass => "bypass",
+        ApprovalMode::Suggest => "on-request",
+        ApprovalMode::Never => "never",
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PermissionsFileStatus {
+    Missing,
+    Empty,
+    Present,
+    Malformed,
+}
+
+impl PermissionsFileStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Empty => "empty",
+            Self::Present => "present",
+            Self::Malformed => "malformed",
+        }
+    }
+
+    fn exists_label(self) -> &'static str {
+        match self {
+            Self::Missing => "no",
+            Self::Empty | Self::Present | Self::Malformed => "yes",
+        }
+    }
+}
+
+fn is_ask_rules_config_token(token: &str) -> bool {
+    matches!(
+        token.to_ascii_lowercase().as_str(),
+        "ask-rules"
+            | "ask_rules"
+            | "askrules"
+            | "rules"
+            | "permission-rules"
+            | "permission_rules"
+            | "permissions"
+    )
+}
+
+fn configured_ask_rules_command(app: &App, raw: &str) -> CommandResult {
+    match raw.to_ascii_lowercase().as_str() {
+        "" | "list" | "status" => configured_ask_rules(app),
+        _ => CommandResult::error(
+            "Usage: /config ask-rules [list|status] (read-only; does not edit permissions.toml)",
+        ),
+    }
+}
+
+fn configured_ask_rules(app: &App) -> CommandResult {
+    let permissions_path = match codewhale_config::resolve_permissions_path(app.config_path.clone())
+    {
+        Ok(path) => path,
+        Err(err) => {
+            return CommandResult::error(format!("Failed to resolve permissions.toml path: {err}"));
+        }
+    };
+    let status = match permissions_file_status(&permissions_path) {
+        Ok(status) => status,
+        Err(err) => return CommandResult::error(err),
+    };
+    let mut rules = Vec::new();
+    let mut parse_error = None;
+
+    let status = match status {
+        PermissionsFileStatus::Missing | PermissionsFileStatus::Empty => status,
+        PermissionsFileStatus::Present => {
+            match codewhale_config::read_permissions_file(&permissions_path) {
+                Ok(raw) => match toml::from_str::<codewhale_config::PermissionsToml>(&raw) {
+                    Ok(permissions) => {
+                        rules = permissions.rules;
+                        PermissionsFileStatus::Present
+                    }
+                    Err(err) => {
+                        parse_error = Some(err.to_string());
+                        PermissionsFileStatus::Malformed
+                    }
+                },
+                Err(err) => {
+                    return CommandResult::error(format!(
+                        "Failed to read permissions.toml at {}\n\
+Permissions path: {}\n\
+File exists: {}\n\
+File status: {}\n\
+Rule count: unavailable\n\
+Read error: permissions.toml at {} could not be read: {err}",
+                        permissions_path.display(),
+                        permissions_path.display(),
+                        status.exists_label(),
+                        status.label(),
+                        permissions_path.display()
+                    ));
+                }
+            }
+        }
+        PermissionsFileStatus::Malformed => PermissionsFileStatus::Malformed,
+    };
+
+    let output =
+        format_configured_ask_rules(&permissions_path, status, &rules, parse_error.as_deref());
+    if parse_error.is_some() {
+        CommandResult::error(output)
+    } else {
+        CommandResult::message(output)
+    }
+}
+
+fn permissions_file_status(path: &Path) -> Result<PermissionsFileStatus, String> {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.len() == 0 => Ok(PermissionsFileStatus::Empty),
+        Ok(_) => Ok(PermissionsFileStatus::Present),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(PermissionsFileStatus::Missing),
+        Err(err) => Err(format!(
+            "Failed to inspect permissions.toml at {}: {err}",
+            path.display()
+        )),
+    }
+}
+
+fn format_configured_ask_rules(
+    permissions_path: &Path,
+    status: PermissionsFileStatus,
+    rules: &[codewhale_config::ToolAskRule],
+    parse_error: Option<&str>,
+) -> String {
+    let mut lines = Vec::new();
+    lines.push("Configured ask rules".to_string());
+    lines.push(format!("Permissions path: {}", permissions_path.display()));
+    lines.push(format!("File exists: {}", status.exists_label()));
+    lines.push(format!("File status: {}", status.label()));
+    if parse_error.is_some() {
+        lines.push("Rule count: unavailable".to_string());
+    } else {
+        lines.push(format!("Rule count: {}", rules.len()));
+    }
+
+    if let Some(err) = parse_error {
+        lines.push(format!(
+            "Parse error: permissions.toml at {} could not be parsed: {err}",
+            permissions_path.display()
+        ));
+        return lines.join("\n");
+    }
+
+    if rules.is_empty() {
+        lines.push("No ask rules configured.".to_string());
+        return lines.join("\n");
+    }
+
+    lines.push("# | action | tool | command | path".to_string());
+    for (index, rule) in rules.iter().enumerate() {
+        lines.push(format!(
+            "{} | {} | {} | {} | {}",
+            index + 1,
+            format_rule_action(rule.action),
+            format_rule_field(Some(&rule.tool)),
+            format_rule_field(rule.command.as_deref()),
+            format_rule_field(rule.path.as_deref())
+        ));
+    }
+    lines.join("\n")
+}
+
+fn format_rule_action(action: codewhale_execpolicy::PermissionAction) -> &'static str {
+    match action {
+        codewhale_execpolicy::PermissionAction::Allow => "allow",
+        codewhale_execpolicy::PermissionAction::Ask => "ask",
+        codewhale_execpolicy::PermissionAction::Deny => "deny",
+    }
+}
+
+fn format_rule_field(value: Option<&str>) -> String {
+    match value {
+        Some("") => "\"\"".to_string(),
+        Some(value) => value.replace('\n', "\\n").replace('\r', "\\r"),
+        None => "(any)".to_string(),
+    }
+}
+
+fn config_editability_audit(app: &App) -> CommandResult {
+    let config = match load_command_config(app) {
+        Ok(config) => config,
+        Err(err) => return CommandResult::error(err),
+    };
+    let config_path = crate::config_persistence::config_toml_path(app.config_path.as_deref())
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "(unresolved)".to_string());
+
+    let mut provider_config = config.clone();
+    provider_config.provider = Some(app.provider_identity_for_persistence().to_string());
+    let model = if app.auto_model {
+        "auto".to_string()
+    } else {
+        app.model.clone()
+    };
+    let saved_permission_posture = Settings::load()
+        .ok()
+        .and_then(|settings| settings.permission_posture)
+        .unwrap_or_else(|| "(unset)".to_string());
+    let configured_approval_policy = config
+        .approval_policy
+        .clone()
+        .unwrap_or_else(|| "(unset)".to_string());
+    let effective_permissions = if app.mode == AppMode::Plan {
+        "Read Only"
+    } else {
+        app.approval_mode.permission_chip_label()
+    };
+
+    let rows = [
+        (
+            "provider",
+            app.provider_identity_for_persistence().to_string(),
+            "session",
+            "/config provider <name>",
+            "Switches the active provider now; edit provider in config.toml for startup default.",
+        ),
+        (
+            "model",
+            model,
+            "session",
+            "/config model <id|auto>",
+            "Switches the active model now; use default_text_model in config.toml for startup default.",
+        ),
+        (
+            "effective_permissions",
+            effective_permissions.to_string(),
+            "runtime",
+            "Shift+Tab",
+            "Shows the effective Act permission posture; Plan remains Read Only.",
+        ),
+        (
+            "permission_posture",
+            saved_permission_posture,
+            "TUI settings",
+            "Shift+Tab",
+            "Saved in settings.toml and ignored when config/requirements manage approval policy.",
+        ),
+        (
+            "approval_policy",
+            configured_approval_policy,
+            "persisted config",
+            "/config approval_mode <auto|on-request|never> --save",
+            "Top-level managed policy; Full Access is not a valid value here.",
+        ),
+        (
+            "allow_shell",
+            app.allow_shell.to_string(),
+            "runtime+persisted",
+            "/config allow_shell <true|false> --save",
+            "Writes top-level allow_shell and applies to subsequent turns.",
+        ),
+        (
+            "stream_chunk_timeout_secs",
+            app.stream_chunk_timeout_secs.to_string(),
+            "runtime+persisted",
+            "/config stream_chunk_timeout_secs <0|1..3600> --save",
+            "Writes [tui].stream_chunk_timeout_secs and updates the running stream timeout.",
+        ),
+        (
+            "subagents.enabled",
+            subagents_config_display_value(&config, "enabled"),
+            "runtime+persisted",
+            "/config subagents on|off --save",
+            "Writes [subagents].enabled and updates subsequent sub-agent launches.",
+        ),
+        (
+            "subagents.max_concurrent",
+            subagents_config_display_value(&config, "max_concurrent"),
+            "runtime+persisted",
+            "/config subagents max_concurrent <n> --save",
+            "Clamped with Config::max_subagents and written to [subagents].max_concurrent.",
+        ),
+        (
+            "subagents.max_depth",
+            subagents_config_display_value(&config, "max_depth"),
+            "runtime+persisted",
+            "/config subagents max_depth <n> --save",
+            "Clamped to the configured spawn-depth ceiling.",
+        ),
+        (
+            "subagents.launch_concurrency",
+            subagents_config_display_value(&config, "launch_concurrency"),
+            "runtime+persisted",
+            "/config subagents launch_concurrency <n> --save",
+            "Clamped to the resolved sub-agent concurrency cap.",
+        ),
+        (
+            "subagents.api_timeout_secs",
+            subagents_config_display_value(&config, "api_timeout_secs"),
+            "runtime+persisted",
+            "/config subagents api_timeout_secs <seconds> --save",
+            "0 means the compiled default; non-zero values are clamped to the documented range.",
+        ),
+        (
+            "subagents.heartbeat_timeout_secs",
+            subagents_config_display_value(&config, "heartbeat_timeout_secs"),
+            "runtime+persisted",
+            "/config subagents heartbeat_timeout_secs <seconds> --save",
+            "0 means the compiled default; non-zero values are clamped to the documented range.",
+        ),
+        (
+            "base_url",
+            config.deepseek_base_url(),
+            "persisted restart",
+            "/config base_url <url> --save",
+            "Writes top-level base_url; model clients read it on startup.",
+        ),
+        (
+            "providers.<active>.base_url",
+            provider_config.deepseek_base_url(),
+            "persisted restart",
+            "/config provider_url <url> --save",
+            "Writes the active provider table; model clients read it on startup.",
+        ),
+        (
+            "mcp_config_path",
+            app.mcp_config_path.display().to_string(),
+            "persisted live reload",
+            "/config mcp_config_path <path> --save",
+            "Run /mcp reload to rebuild the live model-visible tool pool.",
+        ),
+        (
+            "workspace_follow_symlinks",
+            app.workspace_follow_symlinks.to_string(),
+            "partial restart",
+            "/config workspace_follow_symlinks <true|false> --save",
+            "Updates TUI file completion now; engine tools require restart.",
+        ),
+        (
+            "instructions",
+            file_only_status(config.instructions.as_ref().map(|v| !v.is_empty())),
+            "file-only restart",
+            "edit config.toml",
+            "Prompt layers are loaded before the first turn.",
+        ),
+        (
+            "hooks",
+            file_only_status(config.hooks.as_ref().map(|_| true)),
+            "file-only",
+            "edit config.toml",
+            "Hook definitions are structured TOML, not a scalar runtime setting.",
+        ),
+        (
+            "network",
+            file_only_status(config.network.as_ref().map(|_| true)),
+            "file-only",
+            "edit config.toml",
+            "Network policy is evaluated by tool dispatch and should be reviewed as TOML.",
+        ),
+        (
+            "tools",
+            file_only_status(config.tools.as_ref().map(|_| true)),
+            "file-only restart",
+            "edit config.toml",
+            "Tool catalog policy is built before model/tool negotiation.",
+        ),
+        (
+            "memory",
+            file_only_status(config.memory.as_ref().map(|_| true)),
+            "file-only restart",
+            "edit config.toml",
+            "Memory loading changes prompt context and is resolved at startup.",
+        ),
+        (
+            "runtime_api",
+            file_only_status(config.runtime_api.as_ref().map(|_| true)),
+            "file-only restart",
+            "edit config.toml",
+            "Serve/API tuning belongs to the runtime server startup path.",
+        ),
+        (
+            "vision_model",
+            file_only_status(config.vision_model.as_ref().map(|_| true)),
+            "file-only restart",
+            "edit config.toml",
+            "Image-analysis provider clients are configured outside the scalar /config editor.",
+        ),
+    ];
+
+    let mut lines = Vec::new();
+    lines.push("Config editability audit".to_string());
+    lines.push(format!("Config path: {config_path}"));
+    lines.push("Key | Current | Editability | Command / reason".to_string());
+    for (key, current, editability, command, note) in rows {
+        lines.push(format!("{key} | {current} | {editability} | {command}"));
+        lines.push(format!("  {note}"));
+    }
+    CommandResult::message(lines.join("\n"))
+}
+
+fn file_only_status(configured: Option<bool>) -> String {
+    match configured {
+        Some(true) => "configured".to_string(),
+        Some(false) => "empty".to_string(),
+        None => "unset".to_string(),
+    }
+}
+
 fn stream_chunk_timeout_value_label(raw: u64, resolved: u64) -> String {
     if raw == 0 {
         format!("0 (default {resolved})")
@@ -421,9 +1021,500 @@ fn stream_chunk_timeout_value_label(raw: u64, resolved: u64) -> String {
     }
 }
 
+fn subagents_config_command(app: &mut App, raw: &str) -> CommandResult {
+    let mut tokens = raw.split_whitespace().collect::<Vec<_>>();
+    let persist = matches!(tokens.last(), Some(&"--save" | &"-s"));
+    if persist {
+        tokens.pop();
+    }
+
+    match tokens.as_slice() {
+        [] | ["status"] => subagents_status(app),
+        ["on"] | ["enable"] | ["enabled"] => {
+            set_subagents_config_value(app, "enabled", "true", persist)
+        }
+        ["off"] | ["disable"] | ["disabled"] => {
+            set_subagents_config_value(app, "enabled", "false", persist)
+        }
+        [key] => show_subagents_setting(app, key),
+        [key, value] => set_subagents_config_value(app, key, value, persist),
+        _ => CommandResult::error(
+            "Usage: /config subagents [status|on|off|enabled|max_concurrent|max_depth|launch_concurrency|api_timeout_secs|heartbeat_timeout_secs <value>] [--save]",
+        ),
+    }
+}
+
+fn load_command_config(app: &App) -> Result<Config, String> {
+    Config::load(app.config_path.clone(), app.config_profile.as_deref())
+        .map_err(|err| format!("Failed to load config: {err}"))
+}
+
+fn subagents_status(app: &App) -> CommandResult {
+    let config = match load_command_config(app) {
+        Ok(config) => config,
+        Err(err) => return CommandResult::error(err),
+    };
+    let path = crate::config_persistence::config_toml_path(app.config_path.as_deref())
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "(unresolved)".to_string());
+    let disabled_reason = config.subagents_disabled_reason();
+    let active_provider = app.api_provider;
+    let subagents = config.subagents.as_ref();
+    let provider_subagents = config.subagent_provider_config(active_provider);
+    let explicit_enabled = subagents.and_then(|cfg| cfg.enabled);
+    let raw_max_concurrent = subagents.and_then(|cfg| cfg.max_concurrent);
+    let raw_max_depth = subagents.and_then(|cfg| cfg.max_depth);
+    let raw_launch = subagents.and_then(|cfg| cfg.launch_concurrency);
+    let raw_api = subagents.and_then(|cfg| cfg.api_timeout_secs);
+    let raw_heartbeat = subagents.and_then(|cfg| cfg.heartbeat_timeout_secs);
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "Sub-agents: {}",
+        disabled_reason
+            .map(|reason| format!("disabled ({reason})"))
+            .unwrap_or_else(|| "enabled".to_string())
+    ));
+    lines.push(format!("Config path: {path}"));
+    lines.push(format!(
+        "Active provider: {} ({})",
+        active_provider.as_str(),
+        active_provider.display_name()
+    ));
+    lines.push(format!(
+        "subagents.enabled = {}",
+        explicit_enabled
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "default true".to_string())
+    ));
+    lines.push(format!(
+        "subagents.max_concurrent = {} (resolved global {}; active provider {})",
+        option_display(raw_max_concurrent),
+        config.max_subagents(),
+        config.max_subagents_for_provider(active_provider)
+    ));
+    lines.push(format!(
+        "subagents.max_depth = {} (resolved global {}; active provider {})",
+        option_display(raw_max_depth),
+        config.subagent_max_spawn_depth(),
+        config.subagent_max_spawn_depth_for_provider(active_provider)
+    ));
+    lines.push(format!(
+        "subagents.launch_concurrency = {} (resolved global {}; active provider {})",
+        option_display(raw_launch),
+        config.launch_concurrency(),
+        config.launch_concurrency_for_provider(active_provider)
+    ));
+    lines.push(format!(
+        "subagents.api_timeout_secs = {} (resolved global {}; active provider {})",
+        option_display(raw_api),
+        config.subagent_api_timeout_secs(),
+        config.subagent_api_timeout_secs_for_provider(active_provider)
+    ));
+    lines.push(format!(
+        "subagents.heartbeat_timeout_secs = {} (resolved global {}; active provider {})",
+        option_display(raw_heartbeat),
+        config.subagent_heartbeat_timeout_secs(),
+        config.subagent_heartbeat_timeout_secs_for_provider(active_provider)
+    ));
+    if let Some(provider_subagents) = provider_subagents {
+        lines.push(format!(
+            "subagents.providers.{}.enabled = {}",
+            active_provider.as_str(),
+            provider_subagents
+                .enabled
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "inherits".to_string())
+        ));
+        lines.push(format!(
+            "subagents.providers.{}.max_concurrent = {}",
+            active_provider.as_str(),
+            option_display(provider_subagents.max_concurrent)
+        ));
+        lines.push(format!(
+            "subagents.providers.{}.max_depth = {}",
+            active_provider.as_str(),
+            option_display(provider_subagents.max_depth)
+        ));
+        lines.push(format!(
+            "subagents.providers.{}.launch_concurrency = {}",
+            active_provider.as_str(),
+            option_display(provider_subagents.launch_concurrency)
+        ));
+        lines.push(format!(
+            "subagents.providers.{}.max_admitted = {}",
+            active_provider.as_str(),
+            option_display(provider_subagents.max_admitted)
+        ));
+    } else {
+        lines.push(format!(
+            "subagents.providers.{} = inherits global",
+            active_provider.as_str()
+        ));
+    }
+    CommandResult::message(lines.join("\n"))
+}
+
+fn show_subagents_setting(app: &App, key: &str) -> CommandResult {
+    let config = match load_command_config(app) {
+        Ok(config) => config,
+        Err(err) => return CommandResult::error(err),
+    };
+    let Some(key) = canonical_subagents_key(key) else {
+        return CommandResult::error(format!(
+            "Unknown subagents setting '{key}'. Use `/config subagents status`."
+        ));
+    };
+    let active_provider = app.api_provider;
+    let subagents = config.subagents.as_ref();
+    let value = match key {
+        "enabled" => subagents
+            .and_then(|cfg| cfg.enabled)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "default true".to_string()),
+        "max_concurrent" => format!(
+            "{} (resolved global {}; active provider {})",
+            option_display(subagents.and_then(|cfg| cfg.max_concurrent)),
+            config.max_subagents(),
+            config.max_subagents_for_provider(active_provider)
+        ),
+        "max_depth" => format!(
+            "{} (resolved global {}; active provider {})",
+            option_display(subagents.and_then(|cfg| cfg.max_depth)),
+            config.subagent_max_spawn_depth(),
+            config.subagent_max_spawn_depth_for_provider(active_provider)
+        ),
+        "launch_concurrency" => format!(
+            "{} (resolved global {}; active provider {})",
+            option_display(subagents.and_then(|cfg| cfg.launch_concurrency)),
+            config.launch_concurrency(),
+            config.launch_concurrency_for_provider(active_provider)
+        ),
+        "api_timeout_secs" => format!(
+            "{} (resolved global {}; active provider {})",
+            option_display(subagents.and_then(|cfg| cfg.api_timeout_secs)),
+            config.subagent_api_timeout_secs(),
+            config.subagent_api_timeout_secs_for_provider(active_provider)
+        ),
+        "heartbeat_timeout_secs" => format!(
+            "{} (resolved global {}; active provider {})",
+            option_display(subagents.and_then(|cfg| cfg.heartbeat_timeout_secs)),
+            config.subagent_heartbeat_timeout_secs(),
+            config.subagent_heartbeat_timeout_secs_for_provider(active_provider)
+        ),
+        _ => unreachable!("canonical subagent key"),
+    };
+    CommandResult::message(format!("subagents.{key} = {value}"))
+}
+
+fn option_display<T: std::fmt::Display>(value: Option<T>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "default".to_string())
+}
+
+fn canonical_subagents_key(key: &str) -> Option<&'static str> {
+    let normalized = key.trim().to_ascii_lowercase();
+    let key = normalized
+        .strip_prefix("subagents.")
+        .unwrap_or(normalized.as_str());
+    match key {
+        "enabled" | "enable" => Some("enabled"),
+        "max_concurrent" | "max_subagents" | "concurrency" | "cap" => Some("max_concurrent"),
+        "max_depth" | "depth" | "spawn_depth" => Some("max_depth"),
+        "launch_concurrency" | "launches" | "launch" => Some("launch_concurrency"),
+        "api_timeout_secs" | "api_timeout" | "step_timeout_secs" => Some("api_timeout_secs"),
+        "heartbeat_timeout_secs" | "heartbeat_timeout" | "heartbeat" => {
+            Some("heartbeat_timeout_secs")
+        }
+        _ => None,
+    }
+}
+
+fn set_subagents_config_value(
+    app: &mut App,
+    key: &str,
+    value: &str,
+    persist: bool,
+) -> CommandResult {
+    let Some(key) = canonical_subagents_key(key) else {
+        return CommandResult::error(format!(
+            "Unknown subagents setting '{key}'. Use `/config subagents status`."
+        ));
+    };
+    let mut config = match load_command_config(app) {
+        Ok(config) => config,
+        Err(err) => return CommandResult::error(err),
+    };
+    let current_max_subagents = config.max_subagents() as u64;
+    let subagents = config
+        .subagents
+        .get_or_insert_with(SubagentsConfig::default);
+
+    let mut note = None;
+    let save_result = match key {
+        "enabled" => {
+            let enabled = match parse_config_bool(value) {
+                Ok(enabled) => enabled,
+                Err(err) => return CommandResult::error(err),
+            };
+            subagents.enabled = Some(enabled);
+            if persist {
+                Some(persist_subagents_bool_key(
+                    app.config_path.as_deref(),
+                    "enabled",
+                    enabled,
+                ))
+            } else {
+                None
+            }
+        }
+        "max_concurrent" => {
+            let raw = match parse_subagents_u64(key, value) {
+                Ok(raw) => raw,
+                Err(err) => return CommandResult::error(err),
+            };
+            let clamped = raw.min(MAX_SUBAGENTS as u64);
+            if clamped != raw {
+                note = Some(format!("clamped from {raw} to {clamped}"));
+            }
+            subagents.max_concurrent = Some(clamped as usize);
+            if persist {
+                Some(persist_subagents_integer_key(
+                    app.config_path.as_deref(),
+                    "max_concurrent",
+                    clamped,
+                ))
+            } else {
+                None
+            }
+        }
+        "max_depth" => {
+            let raw = match parse_subagents_u64(key, value) {
+                Ok(raw) => raw,
+                Err(err) => return CommandResult::error(err),
+            };
+            let ceiling = u64::from(codewhale_config::MAX_SPAWN_DEPTH_CEILING);
+            let clamped = raw.min(ceiling);
+            if clamped != raw {
+                note = Some(format!("clamped from {raw} to {clamped}"));
+            }
+            subagents.max_depth = Some(clamped as u32);
+            if persist {
+                Some(persist_subagents_integer_key(
+                    app.config_path.as_deref(),
+                    "max_depth",
+                    clamped,
+                ))
+            } else {
+                None
+            }
+        }
+        "launch_concurrency" => {
+            let raw = match parse_subagents_u64(key, value) {
+                Ok(raw) => raw,
+                Err(err) => return CommandResult::error(err),
+            };
+            let clamped = raw.clamp(1, current_max_subagents);
+            if clamped != raw {
+                note = Some(format!("clamped from {raw} to {clamped}"));
+            }
+            subagents.launch_concurrency = Some(clamped as usize);
+            if persist {
+                Some(persist_subagents_integer_key(
+                    app.config_path.as_deref(),
+                    "launch_concurrency",
+                    clamped,
+                ))
+            } else {
+                None
+            }
+        }
+        "api_timeout_secs" => {
+            let raw = match parse_subagents_u64(key, value) {
+                Ok(raw) => raw,
+                Err(err) => return CommandResult::error(err),
+            };
+            let stored = if raw == 0 {
+                0
+            } else {
+                raw.clamp(MIN_SUBAGENT_API_TIMEOUT_SECS, MAX_SUBAGENT_API_TIMEOUT_SECS)
+            };
+            if stored != raw {
+                note = Some(format!("clamped from {raw} to {stored}"));
+            }
+            subagents.api_timeout_secs = Some(stored);
+            if persist {
+                Some(persist_subagents_integer_key(
+                    app.config_path.as_deref(),
+                    "api_timeout_secs",
+                    stored,
+                ))
+            } else {
+                None
+            }
+        }
+        "heartbeat_timeout_secs" => {
+            let raw = match parse_subagents_u64(key, value) {
+                Ok(raw) => raw,
+                Err(err) => return CommandResult::error(err),
+            };
+            let stored = if raw == 0 {
+                0
+            } else {
+                raw.clamp(
+                    MIN_SUBAGENT_HEARTBEAT_TIMEOUT_SECS,
+                    MAX_SUBAGENT_HEARTBEAT_TIMEOUT_SECS,
+                )
+            };
+            if stored != raw {
+                note = Some(format!("clamped from {raw} to {stored}"));
+            }
+            subagents.heartbeat_timeout_secs = Some(stored);
+            if persist {
+                Some(persist_subagents_integer_key(
+                    app.config_path.as_deref(),
+                    "heartbeat_timeout_secs",
+                    stored,
+                ))
+            } else {
+                None
+            }
+        }
+        _ => unreachable!("canonical subagent key"),
+    };
+
+    let save_suffix = if let Some(result) = save_result {
+        match result {
+            Ok(path) => format!("saved to {}", path.display()),
+            Err(err) => return CommandResult::error(format!("Failed to save: {err}")),
+        }
+    } else {
+        "session only, add --save to persist".to_string()
+    };
+
+    if key == "max_concurrent" {
+        app.max_subagents = config.max_subagents_for_provider(app.api_provider);
+    }
+    let display_value = subagents_config_display_value(&config, key);
+    let note = note.map(|note| format!("; {note}")).unwrap_or_default();
+    CommandResult::with_message_and_action(
+        format!(
+            "subagents.{key} = {display_value} ({save_suffix}; runtime updated for subsequent turns{note})"
+        ),
+        subagents_runtime_action(app, &config),
+    )
+}
+
+fn parse_subagents_u64(key: &str, value: &str) -> Result<u64, String> {
+    value
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| format!("subagents.{key} must be a whole number"))
+}
+
+fn subagents_config_display_value(config: &Config, key: &str) -> String {
+    let subagents = config.subagents.as_ref();
+    match key {
+        "enabled" => subagents
+            .and_then(|cfg| cfg.enabled)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "default true".to_string()),
+        "max_concurrent" => {
+            if subagents.and_then(|cfg| cfg.max_concurrent) == Some(0) {
+                "0 (disabled)".to_string()
+            } else {
+                config.max_subagents().to_string()
+            }
+        }
+        "max_depth" => {
+            if subagents.and_then(|cfg| cfg.max_depth) == Some(0) {
+                "0 (agent tool disabled)".to_string()
+            } else {
+                config.subagent_max_spawn_depth().to_string()
+            }
+        }
+        "launch_concurrency" => config.launch_concurrency().to_string(),
+        "api_timeout_secs" => {
+            let raw = subagents.and_then(|cfg| cfg.api_timeout_secs);
+            if raw == Some(0) {
+                format!("0 (default {DEFAULT_SUBAGENT_API_TIMEOUT_SECS})")
+            } else {
+                config.subagent_api_timeout_secs().to_string()
+            }
+        }
+        "heartbeat_timeout_secs" => {
+            let raw = subagents.and_then(|cfg| cfg.heartbeat_timeout_secs);
+            if raw == Some(0) {
+                format!("0 (default {DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS})")
+            } else {
+                config.subagent_heartbeat_timeout_secs().to_string()
+            }
+        }
+        _ => unreachable!("canonical subagent key"),
+    }
+}
+
+fn subagents_runtime_action(app: &App, config: &Config) -> AppAction {
+    let provider = app.api_provider;
+    let max_subagents = config
+        .max_subagents_for_provider(provider)
+        .clamp(1, MAX_SUBAGENTS);
+    AppAction::UpdateSubagentRuntimeConfig {
+        enabled: config.subagents_enabled_for_provider(provider),
+        max_subagents,
+        launch_concurrency: config.launch_concurrency_for_provider(provider),
+        max_spawn_depth: config.subagent_max_spawn_depth_for_provider(provider),
+        api_timeout_secs: config.subagent_api_timeout_secs_for_provider(provider),
+        heartbeat_timeout_secs: config.subagent_heartbeat_timeout_secs_for_provider(provider),
+    }
+}
+
+/// The subject a live-route key belongs to, or `None` if the key does not touch
+/// the route the engine is currently acting on.
+///
+/// This is the single list the #2982 turn lock is enforced from. It exists
+/// because the lock used to live in the *selectors* — the Tab cycle, the
+/// pickers, the hotbar — while `/set <key> <value>` and `/config <key> <value>`
+/// reached the same live state through a different door. A slash command is
+/// reachable mid-turn (the composer accepts Shift+Enter and the slash menu while
+/// `is_loading`), so during a running turn `/set model …` could swap the route
+/// out from under the engine and persist it.
+///
+/// `default_mode` is deliberately absent: it is a restart default that
+/// `set_config_value` explicitly does *not* apply to the live session, so
+/// refusing it would lock a key that cannot affect the turn.
+fn live_route_setting_subject(key: &str) -> Option<MessageId> {
+    match key {
+        "mode" => Some(MessageId::SettingSubjectMode),
+        // `default_model` is not merely a startup default: for the DeepSeek
+        // routes `set_config_value` installs it as the live model.
+        "model" | "default_model" => Some(MessageId::SettingSubjectModel),
+        "reasoning_effort" | "effort" => Some(MessageId::SettingSubjectThinking),
+        "provider" => Some(MessageId::SettingSubjectProvider),
+        "approval_mode" | "approval_policy" | "approval" => {
+            Some(MessageId::SettingSubjectPermissions)
+        }
+        _ => None,
+    }
+}
+
 /// Modify a setting at runtime
 pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) -> CommandResult {
     let key = key.to_lowercase();
+    if let Some(subagent_key) = key.strip_prefix("subagents.") {
+        return set_subagents_config_value(app, subagent_key, value, persist);
+    }
+
+    // Refuse before *anything* — before the disk write, and before the live
+    // `App` mutation each arm performs. Placing the check at the top is what
+    // makes it central: every caller of this function (`/set`, `/config k v`,
+    // the preset mirror, the schema-driven config editor, the runtime
+    // `ConfigUpdated` event) inherits it, and none of them can half-apply.
+    if let Some(subject) = live_route_setting_subject(key.as_str())
+        && app.is_loading
+    {
+        return CommandResult::error(app.setting_locked_message(subject));
+    }
 
     match key.as_str() {
         "model" => {
@@ -435,6 +1526,7 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                 app.update_model_compaction_budget();
                 app.session.last_prompt_tokens = None;
                 app.session.last_completion_tokens = None;
+                app.session.last_output_throughput = None;
                 return CommandResult::with_message_and_action(
                     "model = auto (auto-select model and thinking per turn)".to_string(),
                     AppAction::UpdateCompaction(app.compaction_config()),
@@ -443,14 +1535,18 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             // Clear auto mode when a specific model is set
             let Some(model) = normalize_model_name_for_provider(app.api_provider, value) else {
                 return CommandResult::error(format!(
-                    "Invalid model '{value}'. Expected a DeepSeek model ID. Common models: {}",
-                    COMMON_DEEPSEEK_MODELS.join(", ")
+                    "Invalid model '{value}' for provider {}.",
+                    app.api_provider.as_str()
                 ));
             };
+            if let Err(reason) = validate_route(app.api_provider, &model) {
+                return CommandResult::error(reason);
+            }
             app.set_model_selection(model.clone());
             app.update_model_compaction_budget();
             app.session.last_prompt_tokens = None;
             app.session.last_completion_tokens = None;
+            app.session.last_output_throughput = None;
             return CommandResult::with_message_and_action(
                 format!("model = {model}"),
                 AppAction::UpdateCompaction(app.compaction_config()),
@@ -475,24 +1571,150 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                 },
             );
         }
-        "approval_mode" | "approval" => {
+        "approval_mode" | "approval_policy" | "approval" => {
+            let use_tui_default = matches!(
+                value
+                    .trim()
+                    .to_ascii_lowercase()
+                    .replace([' ', '_'], "-")
+                    .as_str(),
+                "default" | "tui-default" | "use-tui-default"
+            );
+            if use_tui_default {
+                if !persist {
+                    return CommandResult::error(
+                        "Removing the config approval override requires --save.",
+                    );
+                }
+                let control = match load_command_config(app) {
+                    Ok(config) => config.approval_policy_control(
+                        app.config_path.as_deref(),
+                        app.config_profile.as_deref(),
+                        &app.workspace,
+                    ),
+                    Err(err) => return CommandResult::error(err),
+                };
+                if !matches!(
+                    control,
+                    crate::config::ApprovalPolicyControl::RootConfig
+                        | crate::config::ApprovalPolicyControl::Unset
+                ) {
+                    return CommandResult::error(format!(
+                        "Approval posture is controlled by {}; change that source first.",
+                        control.label()
+                    ));
+                }
+                return match persist_unset_root_key(app.config_path.as_deref(), "approval_policy") {
+                    Ok(path) => {
+                        let saved_mode = Settings::load_persisted()
+                            .ok()
+                            .and_then(|settings| settings.permission_posture)
+                            .as_deref()
+                            .and_then(ApprovalMode::from_config_value)
+                            .unwrap_or(ApprovalMode::Suggest);
+                        app.set_agent_approval_posture(saved_mode);
+                        app.clear_saved_approval_policy_lock();
+                        CommandResult::with_message_and_action(
+                            format!(
+                                "approval_policy removed from {}; new sessions use the TUI {} default",
+                                path.display(),
+                                saved_mode.permission_chip_label()
+                            ),
+                            AppAction::ApprovalPolicyPersisted { policy: None },
+                        )
+                    }
+                    Err(err) => CommandResult::error(format!("Failed to save: {err}")),
+                };
+            }
+            let control = match load_command_config(app) {
+                Ok(config) => config.approval_policy_control(
+                    app.config_path.as_deref(),
+                    app.config_profile.as_deref(),
+                    &app.workspace,
+                ),
+                Err(err) => return CommandResult::error(err),
+            };
+            let control_allows_change = if persist {
+                control.editable_root()
+            } else {
+                matches!(control, crate::config::ApprovalPolicyControl::Unset)
+            };
+            if !control_allows_change {
+                return CommandResult::error(format!(
+                    "Approval posture is controlled by {}; {}.",
+                    control.label(),
+                    if matches!(control, crate::config::ApprovalPolicyControl::RootConfig) {
+                        "save a new config value or choose Use TUI permission default"
+                    } else {
+                        "change that source first"
+                    }
+                ));
+            }
             let mode = ApprovalMode::from_config_value(value);
             return match mode {
+                Some(ApprovalMode::Bypass) if persist => CommandResult::error(
+                    "Full Access is not a valid top-level approval_policy. Use Shift+Tab to save the TUI-only posture.",
+                ),
                 Some(m) => {
-                    app.approval_mode = m;
-                    CommandResult::message(format!("approval_mode = {}", m.label()))
+                    if persist {
+                        let saved = approval_mode_config_value(m);
+                        match persist_root_string_key(
+                            app.config_path.as_deref(),
+                            "approval_policy",
+                            saved,
+                        ) {
+                            Ok(path) => {
+                                app.set_agent_approval_posture(m);
+                                app.mark_approval_policy_locked();
+                                CommandResult::with_message_and_action(
+                                    format!(
+                                        "approval_mode = {} (saved to {} as approval_policy = \"{}\")",
+                                        m.permission_chip_label(),
+                                        path.display(),
+                                        saved
+                                    ),
+                                    AppAction::ApprovalPolicyPersisted {
+                                        policy: Some(saved.to_string()),
+                                    },
+                                )
+                            }
+                            Err(err) => CommandResult::error(format!("Failed to save: {err}")),
+                        }
+                    } else {
+                        app.set_agent_approval_posture(m);
+                        CommandResult::with_message_and_action(
+                            format!(
+                                "approval_mode = {} (session only, add --save to persist)",
+                                m.permission_chip_label()
+                            ),
+                            AppAction::ModeChanged(app.mode),
+                        )
+                    }
                 }
                 None => CommandResult::error(
-                    "Invalid approval_mode. Use: auto, suggest/on-request/untrusted, never/deny",
+                    "Invalid approval_mode. Use: auto-review/auto, ask/suggest/on-request, full-access, never/deny",
                 ),
             };
         }
         "allow_shell" | "shell" | "exec_shell" => {
+            let control = match load_command_config(app) {
+                Ok(config) => config.allow_shell_control(
+                    app.config_path.as_deref(),
+                    app.config_profile.as_deref(),
+                    &app.workspace,
+                ),
+                Err(err) => return CommandResult::error(err),
+            };
+            if !control.editable_root() {
+                return CommandResult::error(format!(
+                    "Shell access is controlled by {}; change that source first.",
+                    control.label()
+                ));
+            }
             let enabled = match parse_config_bool(value) {
                 Ok(enabled) => enabled,
                 Err(err) => return CommandResult::error(err),
             };
-            app.allow_shell = enabled;
             let suffix = if persist {
                 match persist_root_bool_key(app.config_path.as_deref(), "allow_shell", enabled) {
                     Ok(path) => format!(" (saved to {})", path.display()),
@@ -501,8 +1723,9 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             } else {
                 " (session only, add --save to persist)".to_string()
             };
+            app.set_agent_shell_access(enabled);
             let mode_hint = if enabled {
-                " Agent mode will expose shell on the next turn with approval gating. YOLO also enables shell and auto-approves."
+                " Act mode will expose shell on the next turn with approval gating. Full Access (Shift+Tab) also enables shell and auto-approves."
             } else {
                 " Shell tools will be hidden on the next turn. Re-enable with `/config allow_shell true`."
             };
@@ -512,22 +1735,33 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             if value.trim().is_empty() {
                 return CommandResult::error("mcp_config_path cannot be empty");
             }
-            app.mcp_config_path = PathBuf::from(expand_tilde(value));
-            app.mcp_restart_required = true;
+            let next_path = PathBuf::from(expand_tilde(value));
+            let path_changed = next_path != app.mcp_config_path;
+            app.mcp_config_path = next_path;
+            if path_changed {
+                app.mcp_reload_required = true;
+            }
+            let reload_note = if path_changed {
+                "; run /mcp reload to rebuild the live tool pool"
+            } else {
+                ""
+            };
             let message = if persist {
                 match persist_root_string_key(app.config_path.as_deref(), "mcp_config_path", value)
                 {
                     Ok(path) => format!(
-                        "mcp_config_path = {} (saved to {}; restart required for MCP tool pool)",
+                        "mcp_config_path = {} (saved to {}){}",
                         app.mcp_config_path.display(),
-                        path.display()
+                        path.display(),
+                        reload_note
                     ),
                     Err(err) => return CommandResult::error(format!("Failed to save: {err}")),
                 }
             } else {
                 format!(
-                    "mcp_config_path = {} (session only; restart required for MCP tool pool)",
-                    app.mcp_config_path.display()
+                    "mcp_config_path = {} (session only){}",
+                    app.mcp_config_path.display(),
+                    reload_note
                 )
             };
             return CommandResult::message(message);
@@ -605,8 +1839,7 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                 && !(MIN_STREAM_CHUNK_TIMEOUT_SECS..=MAX_STREAM_CHUNK_TIMEOUT_SECS).contains(&raw)
             {
                 return CommandResult::error(format!(
-                    "stream_chunk_timeout_secs must be 0 or {}..={}",
-                    MIN_STREAM_CHUNK_TIMEOUT_SECS, MAX_STREAM_CHUNK_TIMEOUT_SECS
+                    "stream_chunk_timeout_secs must be 0 or {MIN_STREAM_CHUNK_TIMEOUT_SECS}..={MAX_STREAM_CHUNK_TIMEOUT_SECS}"
                 ));
             }
             let resolved = if raw == 0 {
@@ -644,7 +1877,10 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
         _ => {}
     }
 
-    let mut settings = match Settings::load() {
+    // This copy exists to validate the value and to project it onto live `App`
+    // state. It is deliberately *not* what gets saved: see
+    // [`persist_single_setting`].
+    let mut settings = match Settings::load_persisted() {
         Ok(s) => s,
         Err(e) if !persist => {
             app.status_message = Some(format!(
@@ -655,10 +1891,27 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
         Err(e) => return CommandResult::error(format!("Failed to load settings: {e}")),
     };
 
+    if key == "default_model"
+        && !matches!(
+            app.api_provider,
+            ApiProvider::Deepseek | ApiProvider::DeepseekCN
+        )
+        && !persist
+    {
+        return CommandResult::error(format!(
+            "default_model is the DeepSeek startup fallback and cannot change the active {} session. Use /model for the current provider, or add --save to change only future DeepSeek sessions.",
+            app.api_provider.as_str()
+        ));
+    }
+
     if let Err(e) = settings.set(&key, value) {
         return CommandResult::error(format!("{e}"));
     }
-    settings.apply_env_overrides();
+    // Runtime/environment constraints are an effective projection, not saved
+    // preferences. Keep the persisted copy pristine so NO_ANIMATIONS or a
+    // terminal quirk cannot become permanent during an unrelated edit.
+    let mut effective_settings = settings.clone();
+    effective_settings.apply_env_overrides();
 
     let mut action = None;
     match key.as_str() {
@@ -672,11 +1925,38 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             app.mark_history_updated();
         }
         "low_motion" | "motion" => {
-            app.low_motion = settings.low_motion;
+            app.low_motion = effective_settings.low_motion;
             app.needs_redraw = true;
         }
         "fancy_animations" | "fancy" | "animations" => {
-            app.fancy_animations = settings.fancy_animations;
+            app.fancy_animations = effective_settings.fancy_animations;
+            app.needs_redraw = true;
+        }
+        "ocean_treatment" | "treatment" | "background_treatment" => {
+            app.ocean_treatment =
+                crate::tui::ocean::OceanTreatment::parse(&settings.ocean_treatment);
+            app.needs_redraw = true;
+        }
+        "focus_texture" | "texture" => {
+            app.focus_texture =
+                crate::tui::focus_texture::FocusTextureMode::parse(&settings.focus_texture)
+                    .unwrap_or_default();
+            app.needs_redraw = true;
+        }
+        "work_surface_placement" | "work_surface" | "work_rail" => {
+            app.work_surface.placement = crate::tui::work_surface::WorkSurfacePlacement::parse(
+                &settings.work_surface_placement,
+            );
+            app.work_surface.focused = false;
+            app.work_surface.last_area = None;
+            app.needs_redraw = true;
+        }
+        "work_surface_top_height" | "work_top_height" => {
+            app.work_surface.top_height = settings.work_surface_top_height;
+            app.needs_redraw = true;
+        }
+        "work_surface_side_width" | "work_side_width" => {
+            app.work_surface.side_width = settings.work_surface_side_width;
             app.needs_redraw = true;
         }
         "bracketed_paste" | "paste" => {
@@ -688,16 +1968,25 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             app.needs_redraw = true;
         }
         "synchronized_output" | "sync_output" | "sync" => {
-            app.synchronized_output_enabled = settings.synchronized_output_enabled();
+            app.synchronized_output_enabled = effective_settings.synchronized_output_enabled();
             app.needs_redraw = true;
         }
         "show_thinking" | "thinking" => {
             app.show_thinking = settings.show_thinking;
             app.mark_history_updated();
         }
+        "thinking_highlight" | "reasoning_highlight" => {
+            app.thinking_highlight = settings.thinking_highlight;
+            app.mark_history_updated();
+        }
         "show_tool_details" | "tool_details" => {
             app.show_tool_details = settings.show_tool_details;
             app.mark_history_updated();
+        }
+        "inline_diffs" | "inline_diff" | "diffs" => {
+            app.inline_diff_mode = crate::settings::InlineDiffMode::parse(&settings.inline_diffs);
+            app.mark_history_updated();
+            app.needs_redraw = true;
         }
         "locale" | "language" => {
             app.ui_locale = resolve_locale(&settings.locale);
@@ -705,12 +1994,31 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             app.needs_redraw = true;
         }
         "theme" | "ui_theme" | "background_color" | "background" | "bg" => {
-            app.theme_id = crate::palette::ThemeId::from_name(&settings.theme)
-                .unwrap_or(crate::palette::ThemeId::System);
-            app.ui_theme = crate::palette::ui_theme_from_settings(
+            // Theme previews reload persisted settings for each cursor move.
+            // Keep a session-only background overlay live unless this command
+            // is itself updating (or clearing) the background.
+            let background_color_override = if matches!(key.as_str(), "theme" | "ui_theme") {
+                app.background_color_override
+            } else {
+                settings
+                    .background_color
+                    .as_deref()
+                    .and_then(crate::palette::parse_hex_rgb_color)
+            };
+            let background_setting =
+                background_color_override.and_then(crate::palette::hex_rgb_string);
+            let (_, theme_id, ui_theme) = match crate::palette::resolve_theme_setting(
                 &settings.theme,
-                settings.background_color.as_deref(),
-            );
+                background_setting.as_deref(),
+            ) {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    return CommandResult::error(format!("Failed to apply theme: {error}"));
+                }
+            };
+            app.background_color_override = background_color_override;
+            app.theme_id = theme_id;
+            app.ui_theme = ui_theme;
             app.needs_redraw = true;
         }
         "cost_currency" | "currency" => {
@@ -746,17 +2054,41 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
         "mention_menu_limit" | "mention_limit" => {
             app.mention_menu_limit = settings.mention_menu_limit;
             app.composer.mention_completion_cache = None;
+            app.composer.mention_discovery.invalidate();
             app.needs_redraw = true;
         }
         "mention_menu_behavior" | "mention_behavior" | "mention_menu" => {
             app.mention_menu_behavior = settings.mention_menu_behavior.clone();
             app.composer.mention_completion_cache = None;
+            app.composer.mention_discovery.invalidate();
             app.needs_redraw = true;
         }
         "mention_walk_depth" | "mention_depth" | "completions_walk_depth" => {
             app.mention_walk_depth = settings.mention_walk_depth;
             app.composer.mention_completion_cache = None;
+            app.composer.mention_discovery.invalidate();
             app.needs_redraw = true;
+        }
+        "workspace_follow_symlinks" | "follow_symlinks" => {
+            app.workspace_follow_symlinks = settings.workspace_follow_symlinks;
+            app.composer.mention_completion_cache = None;
+            app.composer.mention_discovery.invalidate();
+            app.needs_redraw = true;
+            // Engine tools use EngineConfig which is fixed at startup
+            return CommandResult::message(if persist {
+                if let Err(e) = persist_single_setting(&key, value) {
+                    return CommandResult::error(format!("Failed to save: {e}"));
+                }
+                format!(
+                    "workspace_follow_symlinks = {} (saved; restart required for engine tools)",
+                    settings.workspace_follow_symlinks
+                )
+            } else {
+                format!(
+                    "workspace_follow_symlinks = {} (session only for UI; restart required for engine tools)",
+                    settings.workspace_follow_symlinks
+                )
+            });
         }
         "transcript_spacing" | "spacing" => {
             app.transcript_spacing =
@@ -769,15 +2101,23 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             app.expanded_tool_runs.clear();
             app.mark_history_updated();
         }
-        "default_mode" | "mode" => {
+        // `default_mode` is a restart default, not a live mode switch. The
+        // `/mode` command owns synchronized session transitions.
+        "default_mode" => {}
+        "mode" => {
             let mode = AppMode::from_setting(&settings.default_mode);
             app.set_mode(mode);
+            action = Some(AppAction::ModeChanged(mode));
         }
         "max_history" | "history" => {
             app.max_input_history = settings.max_input_history;
         }
         "default_model" => {
-            if let Some(ref model) = settings.default_model {
+            if matches!(
+                app.api_provider,
+                ApiProvider::Deepseek | ApiProvider::DeepseekCN
+            ) && let Some(ref model) = settings.default_model
+            {
                 app.set_model_selection(model.clone());
                 if app.auto_model {
                     app.reasoning_effort = ReasoningEffort::Auto;
@@ -786,6 +2126,7 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                 app.update_model_compaction_budget();
                 app.session.last_prompt_tokens = None;
                 app.session.last_completion_tokens = None;
+                app.session.last_output_throughput = None;
                 action = Some(AppAction::UpdateCompaction(app.compaction_config()));
             }
         }
@@ -815,6 +2156,14 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             app.context_panel = settings.context_panel;
             app.needs_redraw = true;
         }
+        "sessions_rail" | "sessions_panel" | "session_rail" => {
+            app.sessions_rail = settings.sessions_rail;
+            // The rail reads from disk, so a fresh enable must invalidate the
+            // cached rows rather than render an empty panel until the next
+            // session write.
+            app.sessions_rail_cache = None;
+            app.needs_redraw = true;
+        }
         _ => {}
     }
 
@@ -841,14 +2190,26 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
         _ => value.to_string(),
     };
 
-    let message = if persist {
-        if let Err(e) = settings.save() {
+    let mut message = if persist {
+        if let Err(e) = persist_single_setting(&key, value) {
             return CommandResult::error(format!("Failed to save: {e}"));
         }
         format!("{key} = {display_value} (saved)")
     } else {
         format!("{key} = {display_value} (session only, add --save to persist)")
     };
+    if key == "default_model"
+        && !matches!(
+            app.api_provider,
+            ApiProvider::Deepseek | ApiProvider::DeepseekCN
+        )
+    {
+        message.push_str(&format!(
+            "; DeepSeek fallback only — active {}/{} is unchanged",
+            app.api_provider.as_str(),
+            app.model_display_label()
+        ));
+    }
 
     CommandResult {
         message: Some(message),
@@ -857,12 +2218,26 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
     }
 }
 
+/// Persist exactly the one key `/set --save` changed.
+///
+/// `/set` loads a `Settings` copy up front to validate the value and to project
+/// it onto live `App` state, and a lot of `App` mutation happens in between. That
+/// copy is a stale snapshot by the time we get here, so saving *it* would write
+/// back every other field as it looked before — reverting any mode, thinking,
+/// model, or permission write that landed in the meantime. Re-applying the single
+/// key inside [`Settings::transact`] persists the user's actual edit and nothing
+/// else. `Settings::set` is the same normalizer the copy above already accepted
+/// the value through, so this cannot fail for a value that validated.
+fn persist_single_setting(key: &str, value: &str) -> anyhow::Result<()> {
+    Settings::transact(|settings| settings.set(key, value))
+}
+
 /// Select the TUI operating mode.
 pub fn mode(app: &mut App, arg: Option<&str>) -> CommandResult {
     let Some(arg) = arg.filter(|value| !value.trim().is_empty()) else {
         return CommandResult::action(AppAction::OpenModePicker);
     };
-    match parse_mode_arg(arg) {
+    match AppMode::parse(arg) {
         Some(mode) => {
             let (message, changed) = switch_mode_with_status(app, mode);
             if changed {
@@ -871,7 +2246,7 @@ pub fn mode(app: &mut App, arg: Option<&str>) -> CommandResult {
                 CommandResult::message(message)
             }
         }
-        None => CommandResult::error("Usage: /mode [agent|plan|yolo|1|2|3]"),
+        None => CommandResult::error("Usage: /mode [act|agent|plan|operate|1|2|3]"),
     }
 }
 
@@ -879,34 +2254,22 @@ pub fn switch_mode(app: &mut App, mode: AppMode) -> String {
     switch_mode_with_status(app, mode).0
 }
 
+/// Returns the user-facing sentence and whether live mode moved (the caller
+/// emits `AppAction::ModeChanged` only for the latter).
+///
+/// The three outcomes read differently on purpose. Before the typed
+/// [`SettingSelection`], a refusal and a same-mode selection that *did* persist
+/// the startup default both came back as "Already in X mode." — so the one case
+/// where `/mode` had written something looked exactly like the case where it had
+/// written nothing.
 fn switch_mode_with_status(app: &mut App, mode: AppMode) -> (String, bool) {
-    if app.set_mode(mode) {
-        (
-            format!("Switched to {} mode.", mode_display_name(mode)),
-            true,
-        )
-    } else {
-        (
-            format!("Already in {} mode.", mode_display_name(mode)),
+    match app.select_mode(mode) {
+        SettingSelection::Changed => (format!("Switched to {} mode.", mode.display_name()), true),
+        SettingSelection::PersistedSame => (app.mode_startup_default_receipt(mode), false),
+        SettingSelection::Refused => (
+            app.setting_locked_message(MessageId::SettingSubjectMode),
             false,
-        )
-    }
-}
-
-fn parse_mode_arg(arg: &str) -> Option<AppMode> {
-    match arg.trim().to_ascii_lowercase().as_str() {
-        "agent" | "1" => Some(AppMode::Agent),
-        "plan" | "2" => Some(AppMode::Plan),
-        "yolo" | "3" => Some(AppMode::Yolo),
-        _ => None,
-    }
-}
-
-fn mode_display_name(mode: AppMode) -> &'static str {
-    match mode {
-        AppMode::Agent => "Agent",
-        AppMode::Plan => "Plan",
-        AppMode::Yolo => "YOLO",
+        ),
     }
 }
 
@@ -917,25 +2280,33 @@ fn mode_display_name(mode: AppMode) -> &'static str {
 pub fn theme(app: &mut App, arg: Option<&str>) -> CommandResult {
     match arg.map(str::trim).filter(|s| !s.is_empty()) {
         None => CommandResult::action(AppAction::OpenThemePicker),
+        Some("schema") => CommandResult::message(crate::palette::user_theme_schema_json()),
+        Some("path") => match crate::palette::user_themes_dir() {
+            Ok(path) => CommandResult::message(format!(
+                "User themes: {}\nSelect with: /theme custom:<name>",
+                path.display()
+            )),
+            Err(error) => CommandResult::error(error),
+        },
         Some(name) => set_config_value(app, "theme", name, true),
     }
 }
 
-/// `/slop [query|export]` — inspect or export the slop ledger (#2127).
+/// `/debt [query|export]` — inspect or export the debt ledger (#2127).
 /// With no arguments, prints a summary. `query` shows filtered results;
 /// `export` outputs the full ledger as Markdown.
 pub fn slop(_app: &mut App, arg: Option<&str>) -> CommandResult {
     let arg = arg.map(str::trim).unwrap_or("");
     let ledger = match crate::slop_ledger::SlopLedger::load() {
         Ok(l) => l,
-        Err(e) => return CommandResult::error(format!("Failed to load slop ledger: {e}")),
+        Err(e) => return CommandResult::error(format!("Failed to load debt ledger: {e}")),
     };
 
     match arg {
         "" => CommandResult::message(ledger.summary()),
         "query" | "q" => {
             if ledger.is_empty() {
-                return CommandResult::message("Slop ledger is empty.");
+                return CommandResult::message("Debt ledger is empty.");
             }
             let mut out = String::new();
             for entry in &ledger.query(&Default::default()) {
@@ -957,7 +2328,7 @@ pub fn slop(_app: &mut App, arg: Option<&str>) -> CommandResult {
             CommandResult::message(md)
         }
         _ => CommandResult::error(format!(
-            "Unknown /slop action '{arg}'. Use /slop, /slop query, or /slop export."
+            "Unknown /debt action '{arg}'. Use /debt, /debt query, or /debt export."
         )),
     }
 }
@@ -1064,11 +2435,11 @@ fn trust_remove(workspace: &Path, raw: &str) -> CommandResult {
 
 fn expand_tilde(raw: &str) -> String {
     if let Some(rest) = raw.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
+        && let Some(home) = crate::config::effective_home_dir()
     {
         return home.join(rest).to_string_lossy().into_owned();
     } else if raw == "~"
-        && let Some(home) = dirs::home_dir()
+        && let Some(home) = crate::config::effective_home_dir()
     {
         return home.to_string_lossy().into_owned();
     }
@@ -1115,8 +2486,8 @@ pub fn lsp_command(app: &mut App, arg: Option<&str>) -> CommandResult {
 /// `codewhale auth clear --provider <id>` and
 /// `codewhale auth set --provider <id>`.
 pub fn logout(app: &mut App) -> CommandResult {
-    let provider_name = app.api_provider.as_str();
-    match clear_active_provider_api_key(provider_name) {
+    let provider_name = app.provider_identity_for_persistence().to_string();
+    match clear_active_provider_api_key(&provider_name) {
         Ok(()) => {
             app.onboarding = OnboardingState::ApiKey;
             app.onboarding_needs_api_key = true;
@@ -1150,7 +2521,13 @@ mod tests {
         userprofile: Option<OsString>,
         codewhale_config_path: Option<OsString>,
         deepseek_config_path: Option<OsString>,
-        _lock: std::sync::MutexGuard<'static, ()>,
+        codewhale_allow_shell: Option<OsString>,
+        deepseek_allow_shell: Option<OsString>,
+        deepseek_approval_policy: Option<OsString>,
+        no_animations: Option<OsString>,
+        term_program: Option<OsString>,
+        ptyxis_version: Option<OsString>,
+        _lock: crate::test_support::TestEnvLock,
     }
 
     impl EnvGuard {
@@ -1163,6 +2540,12 @@ mod tests {
             let userprofile_prev = env::var_os("USERPROFILE");
             let codewhale_config_prev = env::var_os("CODEWHALE_CONFIG_PATH");
             let deepseek_config_prev = env::var_os("DEEPSEEK_CONFIG_PATH");
+            let codewhale_allow_shell_prev = env::var_os("CODEWHALE_ALLOW_SHELL");
+            let deepseek_allow_shell_prev = env::var_os("DEEPSEEK_ALLOW_SHELL");
+            let deepseek_approval_policy_prev = env::var_os("DEEPSEEK_APPROVAL_POLICY");
+            let no_animations_prev = env::var_os("NO_ANIMATIONS");
+            let term_program_prev = env::var_os("TERM_PROGRAM");
+            let ptyxis_version_prev = env::var_os("PTYXIS_VERSION");
 
             // Safety: test-only environment mutation guarded by process-wide mutex.
             unsafe {
@@ -1170,6 +2553,12 @@ mod tests {
                 env::set_var("USERPROFILE", &home_str);
                 env::remove_var("CODEWHALE_CONFIG_PATH");
                 env::set_var("DEEPSEEK_CONFIG_PATH", &config_str);
+                env::remove_var("CODEWHALE_ALLOW_SHELL");
+                env::remove_var("DEEPSEEK_ALLOW_SHELL");
+                env::remove_var("DEEPSEEK_APPROVAL_POLICY");
+                env::remove_var("NO_ANIMATIONS");
+                env::remove_var("TERM_PROGRAM");
+                env::remove_var("PTYXIS_VERSION");
             }
 
             Self {
@@ -1177,6 +2566,12 @@ mod tests {
                 userprofile: userprofile_prev,
                 codewhale_config_path: codewhale_config_prev,
                 deepseek_config_path: deepseek_config_prev,
+                codewhale_allow_shell: codewhale_allow_shell_prev,
+                deepseek_allow_shell: deepseek_allow_shell_prev,
+                deepseek_approval_policy: deepseek_approval_policy_prev,
+                no_animations: no_animations_prev,
+                term_program: term_program_prev,
+                ptyxis_version: ptyxis_version_prev,
                 _lock: lock,
             }
         }
@@ -1231,32 +2626,65 @@ mod tests {
                     env::remove_var("DEEPSEEK_CONFIG_PATH");
                 }
             }
+
+            for (key, value) in [
+                ("CODEWHALE_ALLOW_SHELL", self.codewhale_allow_shell.take()),
+                ("DEEPSEEK_ALLOW_SHELL", self.deepseek_allow_shell.take()),
+                (
+                    "DEEPSEEK_APPROVAL_POLICY",
+                    self.deepseek_approval_policy.take(),
+                ),
+            ] {
+                // Safety: test-only environment mutation guarded by a global mutex.
+                unsafe {
+                    if let Some(value) = value {
+                        env::set_var(key, value);
+                    } else {
+                        env::remove_var(key);
+                    }
+                }
+            }
+
+            if let Some(value) = self.no_animations.take() {
+                // Safety: test-only environment mutation guarded by a global mutex.
+                unsafe {
+                    env::set_var("NO_ANIMATIONS", value);
+                }
+            } else {
+                // Safety: test-only environment mutation guarded by a global mutex.
+                unsafe {
+                    env::remove_var("NO_ANIMATIONS");
+                }
+            }
+
+            for (key, value) in [
+                ("TERM_PROGRAM", self.term_program.take()),
+                ("PTYXIS_VERSION", self.ptyxis_version.take()),
+            ] {
+                // Safety: test-only environment mutation guarded by a global mutex.
+                unsafe {
+                    if let Some(value) = value {
+                        env::set_var(key, value);
+                    } else {
+                        env::remove_var(key);
+                    }
+                }
+            }
         }
     }
 
-    fn create_test_app() -> App {
+    fn create_test_app_with_config(config: &Config) -> App {
         let options = TuiOptions {
             model: "test-model".to_string(),
-            workspace: PathBuf::from("."),
-            config_path: None,
-            config_profile: None,
-            allow_shell: false,
-            use_alt_screen: true,
-            use_mouse_capture: false,
-            use_bracketed_paste: true,
-            max_subagents: 1,
-            skills_dir: PathBuf::from("."),
-            memory_path: PathBuf::from("memory.md"),
-            notes_path: PathBuf::from("notes.txt"),
-            mcp_config_path: PathBuf::from("mcp.json"),
-            use_memory: false,
-            start_in_agent_mode: false,
+            // Keep command tests independent from the developer's saved
+            // `default_mode` setting: with `false`, App::new starts in the
+            // saved mode, so a machine with `default_mode = "yolo"` flips
+            // `allow_shell` on and breaks the allow_shell assertions.
+            start_in_agent_mode: true,
             skip_onboarding: false,
-            yolo: false,
-            resume_session_id: None,
-            initial_input: None,
+            ..crate::test_support::test_tui_options(PathBuf::from("."))
         };
-        let mut app = App::new(options, &Config::default());
+        let mut app = App::new(options, config);
         // App::new folds in saved TUI settings from the developer machine.
         // Pin command tests back to DeepSeek semantics so model aliases are
         // not normalized through a provider selected in an interactive run.
@@ -1267,6 +2695,412 @@ mod tests {
         app
     }
 
+    fn create_test_app() -> App {
+        create_test_app_with_config(&Config::default())
+    }
+
+    /// The shipped preset must survive its own preflight, or `/config preset
+    /// calm` would be refused for a reason the user cannot act on.
+    #[test]
+    fn the_shipped_preset_passes_its_own_preflight() {
+        let app = create_test_app();
+        let fields = crate::settings::preset_fields("calm").expect("the calm preset exists");
+        assert_eq!(preset_preflight(&app, fields), None);
+    }
+
+    /// A field the setter would reject must be caught *before* the transaction
+    /// opens. Previously the bundle was saved first and the per-field mirror
+    /// pass then failed, leaving the user with an error message and a rewritten
+    /// settings file.
+    #[test]
+    fn preset_preflight_refuses_an_invalid_field_before_any_write() {
+        let app = create_test_app();
+        let refusal = preset_preflight(&app, &[("calm_mode", "true"), ("low_motion", "banana")])
+            .expect("an invalid value must be refused");
+        assert!(
+            refusal.contains("low_motion"),
+            "the refusal must name the offending field, got {refusal:?}"
+        );
+    }
+
+    /// A preset carrying a live-route key is refused whole while a turn runs,
+    /// rather than saving the bundle and then failing on that one field.
+    #[test]
+    fn preset_preflight_refuses_a_live_route_field_while_a_turn_runs() {
+        let mut app = create_test_app();
+        app.is_loading = true;
+        let bundle = [("calm_mode", "true"), ("reasoning_effort", "high")];
+        let refusal =
+            preset_preflight(&app, &bundle).expect("a live-route field must be refused mid-turn");
+        assert!(
+            refusal.contains("locked while a turn is running"),
+            "got {refusal:?}"
+        );
+
+        app.is_loading = false;
+        assert_eq!(
+            preset_preflight(&app, &bundle),
+            None,
+            "the same bundle must apply once the turn ends"
+        );
+    }
+
+    /// The refusal list is the contract for #2982 on the slash surfaces. Keep
+    /// restart-only `default_mode` out of it: `set_config_value` deliberately
+    /// does not apply that key to the live session.
+    #[test]
+    fn live_route_key_list_covers_every_route_mutating_alias() {
+        for key in [
+            "mode",
+            "model",
+            "default_model",
+            "reasoning_effort",
+            "effort",
+            "provider",
+            "approval_mode",
+            "approval_policy",
+            "approval",
+        ] {
+            assert!(
+                live_route_setting_subject(key).is_some(),
+                "{key} mutates the active route and must be locked mid-turn"
+            );
+        }
+        for key in ["default_mode", "theme", "calm_mode", "sidebar_width"] {
+            assert!(
+                live_route_setting_subject(key).is_none(),
+                "{key} does not mutate the active route and must stay settable"
+            );
+        }
+    }
+
+    #[test]
+    fn approval_aliases_are_inert_while_a_turn_is_running() {
+        let mut app = create_test_app();
+        app.approval_mode = ApprovalMode::Suggest;
+        app.is_loading = true;
+
+        for key in ["approval_mode", "approval_policy", "approval"] {
+            let result = set_config_value(&mut app, key, "never", false);
+            assert!(result.is_error, "{key} must be refused mid-turn");
+            assert!(
+                result
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("locked while a turn is running")),
+                "unexpected refusal for {key}: {:?}",
+                result.message
+            );
+            assert_eq!(app.approval_mode, ApprovalMode::Suggest);
+        }
+    }
+
+    #[test]
+    fn config_command_ask_rules_reports_missing_permissions_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let permissions_path =
+            codewhale_config::resolve_permissions_path(Some(config_path.clone())).unwrap();
+        let mut app = create_test_app();
+        app.config_path = Some(config_path);
+
+        let result = config_command(&mut app, Some("ask-rules"));
+        let msg = result.message.unwrap();
+
+        assert!(!result.is_error);
+        assert!(msg.contains("Configured ask rules"));
+        assert!(msg.contains(&format!("Permissions path: {}", permissions_path.display())));
+        assert!(msg.contains("File exists: no"));
+        assert!(msg.contains("File status: missing"));
+        assert!(msg.contains("Rule count: 0"));
+        assert!(msg.contains("No ask rules configured."));
+    }
+
+    #[test]
+    fn config_command_ask_rules_reports_empty_permissions_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let permissions_path =
+            codewhale_config::resolve_permissions_path(Some(config_path.clone())).unwrap();
+        fs::write(&permissions_path, "").unwrap();
+        let mut app = create_test_app();
+        app.config_path = Some(config_path);
+
+        let result = config_command(&mut app, Some("ask_rules"));
+        let msg = result.message.unwrap();
+
+        assert!(!result.is_error);
+        assert!(msg.contains(&format!("Permissions path: {}", permissions_path.display())));
+        assert!(msg.contains("File exists: yes"));
+        assert!(msg.contains("File status: empty"));
+        assert!(msg.contains("Rule count: 0"));
+        assert!(msg.contains("No ask rules configured."));
+    }
+
+    #[test]
+    fn config_command_ask_rules_lists_loaded_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let permissions_path =
+            codewhale_config::resolve_permissions_path(Some(config_path.clone())).unwrap();
+        fs::write(
+            &permissions_path,
+            r#"
+[[rules]]
+tool = "exec_shell"
+command = "cargo test"
+
+[[rules]]
+tool = "edit_file"
+path = "src/a.rs"
+action = "allow"
+
+[[rules]]
+tool = "read_file"
+path = "secrets/api_key.txt"
+action = "deny"
+"#,
+        )
+        .unwrap();
+        let mut app = create_test_app();
+        app.config_path = Some(config_path);
+
+        let result = config_command(&mut app, Some("permissions status"));
+        let msg = result.message.unwrap();
+
+        assert!(!result.is_error);
+        assert!(msg.contains(&format!("Permissions path: {}", permissions_path.display())));
+        assert!(msg.contains("File exists: yes"));
+        assert!(msg.contains("File status: present"));
+        assert!(msg.contains("Rule count: 3"));
+        assert!(msg.contains("# | action | tool | command | path"));
+        assert!(msg.contains("1 | ask | exec_shell | cargo test | (any)"));
+        assert!(msg.contains("2 | allow | edit_file | (any) | src/a.rs"));
+        assert!(msg.contains("3 | deny | read_file | (any) | secrets/api_key.txt"));
+    }
+
+    #[test]
+    fn config_command_ask_rules_reports_malformed_permissions_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let permissions_path =
+            codewhale_config::resolve_permissions_path(Some(config_path.clone())).unwrap();
+        fs::write(
+            &permissions_path,
+            r#"
+[[rules]]
+tool =
+"#,
+        )
+        .unwrap();
+        let mut app = create_test_app();
+        app.config_path = Some(config_path);
+
+        let result = config_command(&mut app, Some("ask-rules"));
+        let msg = result.message.unwrap();
+
+        assert!(result.is_error);
+        assert!(msg.contains("Error: Configured ask rules"));
+        assert!(msg.contains(&format!("Permissions path: {}", permissions_path.display())));
+        assert!(msg.contains("File exists: yes"));
+        assert!(msg.contains("File status: malformed"));
+        assert!(msg.contains("Rule count: unavailable"));
+        assert!(msg.contains("Parse error: permissions.toml"));
+        assert!(msg.contains(&permissions_path.display().to_string()));
+    }
+
+    #[test]
+    fn config_command_ask_rules_output_format_is_stable() {
+        let mut allow_rule = codewhale_config::ToolAskRule::file_path("edit_file", r"src\a.rs");
+        allow_rule.action = codewhale_execpolicy::PermissionAction::Allow;
+        let mut deny_rule =
+            codewhale_config::ToolAskRule::file_path("read_file", "secrets/api_key.txt");
+        deny_rule.action = codewhale_execpolicy::PermissionAction::Deny;
+        let rules = vec![
+            codewhale_config::ToolAskRule::exec_shell("cargo test"),
+            allow_rule,
+            deny_rule,
+        ];
+
+        let output = format_configured_ask_rules(
+            Path::new("permissions.toml"),
+            PermissionsFileStatus::Present,
+            &rules,
+            None,
+        );
+
+        assert_eq!(
+            output,
+            "Configured ask rules\n\
+Permissions path: permissions.toml\n\
+File exists: yes\n\
+File status: present\n\
+Rule count: 3\n\
+# | action | tool | command | path\n\
+1 | ask | exec_shell | cargo test | (any)\n\
+2 | allow | edit_file | (any) | src\\a.rs\n\
+3 | deny | read_file | (any) | secrets/api_key.txt"
+        );
+    }
+
+    #[test]
+    fn config_command_ask_rules_parse_error_output_format_is_stable() {
+        let output = format_configured_ask_rules(
+            Path::new("permissions.toml"),
+            PermissionsFileStatus::Malformed,
+            &[],
+            Some("expected a string"),
+        );
+
+        assert_eq!(
+            output,
+            "Configured ask rules\n\
+Permissions path: permissions.toml\n\
+File exists: yes\n\
+File status: malformed\n\
+Rule count: unavailable\n\
+Parse error: permissions.toml at permissions.toml could not be parsed: expected a string"
+        );
+    }
+
+    #[test]
+    fn config_preset_calm_applies_bundle_to_session_and_keeps_evidence() {
+        let mut app = create_test_app();
+        app.calm_mode = false;
+        app.show_thinking = true;
+        app.show_tool_details = true;
+        app.fancy_animations = true;
+
+        let result = config_command(&mut app, Some("preset calm"));
+        let message = result.message.unwrap_or_default();
+        assert!(
+            message.contains("calm"),
+            "summary should name the preset: {message}"
+        );
+
+        assert!(app.calm_mode);
+        assert!(!app.show_tool_details);
+        assert!(app.low_motion);
+        assert!(!app.fancy_animations);
+        assert_eq!(
+            app.tool_collapse_mode,
+            crate::tui::app::ToolCollapseMode::Calm
+        );
+        assert_eq!(
+            app.transcript_spacing,
+            crate::tui::app::TranscriptSpacing::Compact
+        );
+        // Evidence preserved: thinking is not hidden by the preset.
+        assert!(app.show_thinking, "calm preset must not hide thinking");
+    }
+
+    #[test]
+    fn config_preset_unknown_name_reports_error() {
+        let mut app = create_test_app();
+        let result = config_command(&mut app, Some("preset turbo"));
+        let message = result.message.unwrap_or_default();
+        assert!(
+            message.to_lowercase().contains("unknown preset"),
+            "expected unknown-preset error, got: {message}"
+        );
+    }
+
+    #[test]
+    fn config_preset_save_without_name_reports_usage() {
+        let mut app = create_test_app();
+        let result = config_command(&mut app, Some("preset --save"));
+        let message = result.message.unwrap_or_default();
+        assert!(
+            message.contains("Usage: /config preset"),
+            "expected usage hint, got: {message}"
+        );
+        assert!(!result.is_error);
+    }
+
+    #[test]
+    fn work_surface_config_applies_live_and_rejects_bottom() {
+        let mut app = create_test_app();
+
+        let result = set_config_value(&mut app, "work_surface_placement", "left", false);
+        assert!(!result.is_error, "{:?}", result.message);
+        assert_eq!(
+            app.work_surface.placement,
+            crate::tui::work_surface::WorkSurfacePlacement::Left
+        );
+        let shown = show_single_setting(&app, "work_surface_placement");
+        assert_eq!(
+            shown.message.as_deref(),
+            Some("work_surface_placement = left")
+        );
+
+        let result = set_config_value(&mut app, "work_surface_placement", "bottom", false);
+        assert!(result.is_error);
+        assert_eq!(
+            app.work_surface.placement,
+            crate::tui::work_surface::WorkSurfacePlacement::Left
+        );
+    }
+
+    #[test]
+    fn sidebar_config_command_restores_pinned_sidebar_by_default() {
+        let mut app = create_test_app();
+        app.sidebar_focus = SidebarFocus::Hidden;
+        app.last_sidebar_host_width = Some(120);
+
+        let result = sidebar(&mut app, Some("on"));
+
+        assert!(!result.is_error);
+        assert_eq!(app.sidebar_focus, SidebarFocus::Pinned);
+        assert_eq!(result.message.as_deref(), Some("Sidebar is visible"));
+    }
+
+    #[test]
+    fn sidebar_config_command_reports_width_suppression() {
+        let mut app = create_test_app();
+        app.sidebar_focus = SidebarFocus::Hidden;
+        app.last_sidebar_host_width = Some(59);
+
+        let result = sidebar(&mut app, Some("on"));
+
+        assert!(!result.is_error);
+        assert_eq!(app.sidebar_focus, SidebarFocus::Pinned);
+        assert_eq!(
+            result.message.as_deref(),
+            Some(
+                "Sidebar is on, but hidden because the terminal is too narrow (59 cols; needs at least 60)"
+            )
+        );
+    }
+
+    #[test]
+    fn sidebar_config_command_is_visible_at_minimum_width() {
+        let mut app = create_test_app();
+        app.sidebar_focus = SidebarFocus::Hidden;
+        app.last_sidebar_host_width = Some(60);
+
+        let result = sidebar(&mut app, Some("on"));
+
+        assert!(!result.is_error);
+        assert_eq!(app.sidebar_focus, SidebarFocus::Pinned);
+        assert_eq!(result.message.as_deref(), Some("Sidebar is visible"));
+    }
+
+    #[test]
+    fn sidebar_config_command_reports_auto_idle_collapse() {
+        let mut app = create_test_app();
+        app.sidebar_focus = SidebarFocus::Hidden;
+        app.last_sidebar_host_width = Some(120);
+
+        let result = sidebar(&mut app, Some("auto"));
+
+        assert!(!result.is_error);
+        assert_eq!(app.sidebar_focus, SidebarFocus::Auto);
+        assert_eq!(
+            result.message.as_deref(),
+            Some("Sidebar auto mode is on, but currently collapsed while idle")
+        );
+    }
+
     #[test]
     fn test_mode_yolo_sets_all_flags() {
         let mut app = create_test_app();
@@ -1274,13 +3108,15 @@ mod tests {
         // user settings on the host machine.
         let _ = mode(&mut app, Some("agent"));
         let result = mode(&mut app, Some("yolo"));
-        assert!(result.message.unwrap().contains("Switched to YOLO mode"));
+        // YOLO is invisible Act+Bypass shorthand — user-facing copy says Act.
+        assert!(result.message.unwrap().contains("Switched to Act mode"));
         assert_eq!(result.action, Some(AppAction::ModeChanged(AppMode::Yolo)));
         assert!(app.allow_shell);
         assert!(app.trust_mode);
         assert!(app.yolo);
-        assert_eq!(app.approval_mode, ApprovalMode::Auto);
-        assert_eq!(app.mode, AppMode::Yolo);
+        assert_eq!(app.approval_mode, ApprovalMode::Bypass);
+        // The deprecated YOLO alias remaps to Agent mode (M6 compat shim).
+        assert_eq!(app.mode, AppMode::Agent);
     }
 
     #[test]
@@ -1291,9 +3127,29 @@ mod tests {
         let result = mode(&mut app, Some("2"));
         assert_eq!(result.action, Some(AppAction::ModeChanged(AppMode::Plan)));
         assert_eq!(app.mode, AppMode::Plan);
+        let result = mode(&mut app, Some("act"));
+        assert_eq!(result.action, Some(AppAction::ModeChanged(AppMode::Agent)));
+        assert_eq!(app.mode, AppMode::Agent);
+        let _ = mode(&mut app, Some("plan"));
+        assert_eq!(app.mode, AppMode::Plan);
         let result = mode(&mut app, Some("3"));
+        assert_eq!(
+            result.action,
+            Some(AppAction::ModeChanged(AppMode::Operate))
+        );
+        assert_eq!(app.mode, AppMode::Operate);
+        let result = mode(&mut app, Some("5"));
+        assert!(result.is_error);
+        assert_eq!(app.mode, AppMode::Operate);
+        let result = mode(&mut app, Some("9"));
+        assert!(result.is_error);
+        assert_eq!(app.mode, AppMode::Operate);
+        let result = mode(&mut app, Some("4"));
         assert_eq!(result.action, Some(AppAction::ModeChanged(AppMode::Yolo)));
-        assert_eq!(app.mode, AppMode::Yolo);
+        // "4" still parses as the deprecated YOLO alias, which lands in Agent
+        // mode with bypass approvals (M6 compat shim).
+        assert_eq!(app.mode, AppMode::Agent);
+        assert!(app.yolo);
     }
 
     #[test]
@@ -1339,6 +3195,23 @@ mod tests {
     }
 
     #[test]
+    fn settings_command_opens_typed_editor_and_preserves_text_mode() {
+        let _lock = lock_test_env();
+        let mut app = create_test_app();
+
+        let modal = settings_command(&mut app, None);
+        assert!(modal.message.is_none());
+        assert!(matches!(modal.action, Some(AppAction::OpenConfigView)));
+
+        let text = settings_command(&mut app, Some("text"));
+        let message = text.message.as_deref().expect("settings diagnostic text");
+        assert!(message.contains("Settings:"), "{message}");
+        assert!(message.contains("provider_models:"), "{message}");
+        assert!(message.contains("Config file:"), "{message}");
+        assert!(text.action.is_none());
+    }
+
+    #[test]
     fn config_model_updates_app_state() {
         let mut app = create_test_app();
         let _old_model = app.model.clone();
@@ -1354,6 +3227,26 @@ mod tests {
     }
 
     #[test]
+    fn config_model_rejects_foreign_model_for_direct_provider() {
+        let mut app = create_test_app();
+        app.api_provider = ApiProvider::Zai;
+        app.model = crate::config::ZAI_GLM_5_2_MODEL.to_string();
+
+        let result = set_config_value(&mut app, "model", "deepseek-v4-pro", false);
+
+        assert!(result.is_error);
+        assert_eq!(app.model, crate::config::ZAI_GLM_5_2_MODEL);
+        assert!(result.action.is_none());
+        let message = result.message.as_deref().expect("rejection message");
+        assert!(
+            message.contains("not compatible with provider 'zai'")
+                || message.contains("not served by direct provider zai"),
+            "unexpected rejection message: {message}"
+        );
+        assert!(message.contains("deepseek-v4-pro"), "{message}");
+    }
+
+    #[test]
     fn config_model_auto_enables_auto_thinking() {
         let mut app = create_test_app();
         app.reasoning_effort = ReasoningEffort::Off;
@@ -1366,6 +3259,49 @@ mod tests {
         assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
         assert!(app.last_effective_model.is_none());
         assert!(app.last_effective_reasoning_effort.is_none());
+    }
+
+    #[test]
+    fn config_default_model_cannot_replace_a_non_deepseek_live_route() {
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-tui-provider-scoped-default-model-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&temp_root).unwrap();
+        let _guard = EnvGuard::new(&temp_root);
+        let mut app = create_test_app();
+        app.api_provider = ApiProvider::Zai;
+        app.model = crate::config::ZAI_GLM_5_2_MODEL.to_string();
+        app.auto_model = false;
+
+        let session_only = set_config_value(&mut app, "default_model", "deepseek-v4-flash", false);
+
+        assert!(session_only.is_error);
+        assert_eq!(app.model, crate::config::ZAI_GLM_5_2_MODEL);
+        assert!(session_only.action.is_none());
+        assert!(
+            session_only
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("DeepSeek startup fallback"))
+        );
+
+        let saved = set_config_value(&mut app, "default_model", "deepseek-v4-flash", true);
+
+        assert!(!saved.is_error);
+        assert_eq!(app.model, crate::config::ZAI_GLM_5_2_MODEL);
+        assert!(saved.action.is_none());
+        assert!(
+            saved
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("active zai/GLM-5.2 is unchanged"))
+        );
+        let persisted = Settings::load_persisted().expect("saved settings");
+        assert_eq!(
+            persisted.default_model.as_deref(),
+            Some("deepseek-v4-flash")
+        );
     }
 
     #[test]
@@ -1398,7 +3334,7 @@ mod tests {
     }
 
     #[test]
-    fn config_fancy_animations_obeys_ghostty_override() {
+    fn config_fancy_animations_keeps_ghostty_frame_cap_without_disabling_motion() {
         let temp_root = env::temp_dir().join(format!(
             "codewhale-tui-ghostty-fancy-config-test-{}",
             std::process::id()
@@ -1412,18 +3348,19 @@ mod tests {
         }
 
         let mut app = create_test_app();
-        assert!(!app.fancy_animations);
+        assert!(app.fancy_animations);
+        assert!(app.constrained_frame_rate);
 
         let result = set_config_value(&mut app, "fancy_animations", "true", false);
 
         assert!(!result.is_error);
         assert!(
-            !app.fancy_animations,
-            "Ghostty compatibility override must keep the water strip disabled"
+            app.fancy_animations,
+            "Ghostty compatibility must cap redraws without disabling motion"
         );
         assert_eq!(
             result.message.as_deref(),
-            Some("fancy_animations = false (session only, add --save to persist)")
+            Some("fancy_animations = true (session only, add --save to persist)")
         );
 
         // Safety: cleanup under EnvGuard's lock.
@@ -1447,10 +3384,10 @@ mod tests {
 
     #[test]
     fn config_model_with_save_flag() {
+        let temp_root = tempfile::tempdir().expect("isolated settings dir");
+        let _guard = EnvGuard::new(temp_root.path());
         let mut app = create_test_app();
         let _result = config_command(&mut app, Some("model deepseek-v4-flash --save"));
-        // Note: This test may fail in environments where settings can't be saved
-        // The important thing is that the model is updated
         assert_eq!(app.model, "deepseek-v4-flash");
     }
 
@@ -1579,21 +3516,18 @@ mod tests {
 
         assert!(msg.contains("allow_shell = true"));
         assert!(msg.contains("session only"));
-        assert!(msg.contains("Agent mode"));
+        assert!(msg.contains("Act mode"));
         assert!(msg.contains("approval gating"));
         assert!(msg.contains("next turn"));
-        assert!(msg.contains("YOLO also enables shell and auto-approves"));
+        assert!(msg.contains("Full Access (Shift+Tab) also enables shell and auto-approves"));
     }
 
     #[test]
     fn config_command_allow_shell_save_persists_root_boolean() {
-        let temp_root = env::temp_dir().join(format!(
-            "codewhale-allow-shell-save-app-path-test-{}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&temp_root).unwrap();
+        let temp_root = tempfile::tempdir().expect("isolated config dir");
+        let _guard = EnvGuard::new(temp_root.path());
 
-        let config_path = temp_root.join("custom-config.toml");
+        let config_path = temp_root.path().join("custom-config.toml");
 
         let mut app = create_test_app();
         app.config_path = Some(config_path.clone());
@@ -1605,7 +3539,7 @@ mod tests {
         assert_eq!(
             msg,
             format!(
-                "allow_shell = true (saved to {}). Agent mode will expose shell on the next turn with approval gating. YOLO also enables shell and auto-approves.",
+                "allow_shell = true (saved to {}). Act mode will expose shell on the next turn with approval gating. Full Access (Shift+Tab) also enables shell and auto-approves.",
                 config_path.display()
             )
         );
@@ -1620,6 +3554,299 @@ mod tests {
         assert!(!app.allow_shell);
         let msg = result.message.unwrap();
         assert!(msg.contains("Failed to parse boolean 'maybe'"));
+    }
+
+    #[test]
+    fn config_command_cannot_bypass_project_shell_constraint() {
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-project-shell-control-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(temp_root.join(".deepseek")).unwrap();
+        let _guard = EnvGuard::new(&temp_root);
+        let root_config = temp_root.join(".deepseek").join("config.toml");
+        fs::write(&root_config, "# user root\n").unwrap();
+        let workspace = temp_root.join("workspace");
+        fs::create_dir_all(workspace.join(codewhale_config::CODEWHALE_APP_DIR)).unwrap();
+        fs::write(
+            workspace
+                .join(codewhale_config::CODEWHALE_APP_DIR)
+                .join("config.toml"),
+            "allow_shell = false\n",
+        )
+        .unwrap();
+        let mut app = create_test_app();
+        app.config_path = Some(root_config.clone());
+        app.workspace = workspace;
+        app.set_agent_shell_access(false);
+
+        let result = config_command(&mut app, Some("allow_shell true --save"));
+
+        assert!(result.is_error, "{:?}", result.message);
+        assert!(!app.allow_shell);
+        assert!(
+            result
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("project configuration"))
+        );
+        assert!(
+            !fs::read_to_string(root_config)
+                .unwrap()
+                .contains("allow_shell")
+        );
+    }
+
+    #[test]
+    fn config_command_cannot_bypass_environment_shell_constraint() {
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-env-shell-control-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(temp_root.join(".deepseek")).unwrap();
+        let _guard = EnvGuard::new(&temp_root);
+        let config_path = temp_root.join(".deepseek").join("config.toml");
+        fs::write(&config_path, "# root\n").unwrap();
+        // Safety: EnvGuard holds the process-wide environment lock and restores
+        // this variable on drop.
+        unsafe { env::set_var("DEEPSEEK_ALLOW_SHELL", "false") };
+        let config = Config::load(Some(config_path.clone()), None).unwrap();
+        let mut app = create_test_app_with_config(&config);
+        app.config_path = Some(config_path);
+        app.set_agent_shell_access(false);
+
+        let result = config_command(&mut app, Some("allow_shell true"));
+
+        assert!(result.is_error, "{:?}", result.message);
+        assert!(!app.allow_shell);
+        assert!(
+            result
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("DEEPSEEK_ALLOW_SHELL"))
+        );
+    }
+
+    #[test]
+    fn config_command_cannot_bypass_project_or_environment_approval() {
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-external-approval-control-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(temp_root.join(".deepseek")).unwrap();
+        let _guard = EnvGuard::new(&temp_root);
+        let root_config = temp_root.join(".deepseek").join("config.toml");
+        fs::write(&root_config, "# root\n").unwrap();
+        let workspace = temp_root.join("workspace");
+        fs::create_dir_all(workspace.join(codewhale_config::CODEWHALE_APP_DIR)).unwrap();
+        fs::write(
+            workspace
+                .join(codewhale_config::CODEWHALE_APP_DIR)
+                .join("config.toml"),
+            "approval_policy = \"never\"\n",
+        )
+        .unwrap();
+        let mut app = create_test_app();
+        app.config_path = Some(root_config.clone());
+        app.workspace = workspace;
+        app.set_agent_approval_posture(ApprovalMode::Never);
+
+        let project_result = config_command(&mut app, Some("approval_mode full-access"));
+        assert!(project_result.is_error, "{:?}", project_result.message);
+        assert_eq!(app.approval_mode, ApprovalMode::Never);
+
+        // Move outside the project and make the environment the controlling
+        // source for the second half of the regression.
+        app.workspace = temp_root.join("clean-workspace");
+        fs::create_dir_all(&app.workspace).unwrap();
+        // Safety: EnvGuard holds the process-wide environment lock and restores
+        // this variable on drop.
+        unsafe { env::set_var("DEEPSEEK_APPROVAL_POLICY", "never") };
+        let env_result = config_command(&mut app, Some("approval_mode auto"));
+        assert!(env_result.is_error, "{:?}", env_result.message);
+        assert_eq!(app.approval_mode, ApprovalMode::Never);
+        assert!(
+            env_result
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("DEEPSEEK_APPROVAL_POLICY"))
+        );
+    }
+
+    #[test]
+    fn config_command_shell_choice_survives_plan_round_trip() {
+        let mut app = create_test_app();
+        app.set_agent_approval_posture(ApprovalMode::Bypass);
+
+        let result = config_command(&mut app, Some("allow_shell true"));
+
+        assert!(!result.is_error, "{:?}", result.message);
+        app.set_mode(AppMode::Plan);
+        assert!(!app.allow_shell);
+        app.set_mode(AppMode::Agent);
+        assert!(app.allow_shell);
+        assert_eq!(app.approval_mode, ApprovalMode::Bypass);
+    }
+
+    #[test]
+    fn config_command_subagents_off_save_persists_and_updates_runtime() {
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-subagents-off-save-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&temp_root).unwrap();
+        let config_path = temp_root.join("custom-config.toml");
+
+        let mut app = create_test_app();
+        app.config_path = Some(config_path.clone());
+        let result = config_command(&mut app, Some("subagents off --save"));
+        let msg = result.message.unwrap();
+        let saved = fs::read_to_string(&config_path).unwrap();
+
+        assert!(!result.is_error);
+        assert!(msg.contains("subagents.enabled = false"));
+        assert!(msg.contains("saved to"));
+        assert!(saved.contains("[subagents]"));
+        assert!(saved.contains("enabled = false"));
+        match result.action {
+            Some(AppAction::UpdateSubagentRuntimeConfig { enabled, .. }) => {
+                assert!(!enabled);
+            }
+            other => panic!("expected subagent runtime update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_command_subagents_depth_save_clamps_to_ceiling() {
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-subagents-depth-save-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&temp_root).unwrap();
+        let config_path = temp_root.join("custom-config.toml");
+
+        let mut app = create_test_app();
+        app.config_path = Some(config_path.clone());
+        let result = config_command(&mut app, Some("subagents max_depth 99 --save"));
+        let msg = result.message.unwrap();
+        let saved = fs::read_to_string(&config_path).unwrap();
+        let ceiling = codewhale_config::MAX_SPAWN_DEPTH_CEILING;
+
+        assert!(!result.is_error);
+        assert!(msg.contains(&format!("subagents.max_depth = {ceiling}")));
+        assert!(msg.contains(&format!("clamped from 99 to {ceiling}")));
+        assert!(saved.contains(&format!("max_depth = {ceiling}")));
+        match result.action {
+            Some(AppAction::UpdateSubagentRuntimeConfig {
+                max_spawn_depth, ..
+            }) => {
+                assert_eq!(max_spawn_depth, ceiling);
+            }
+            other => panic!("expected subagent runtime update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_command_subagents_status_shows_raw_and_resolved_values() {
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-subagents-status-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&temp_root).unwrap();
+        let config_path = temp_root.join("custom-config.toml");
+        fs::write(
+            &config_path,
+            r#"
+[subagents]
+enabled = true
+max_concurrent = 2
+max_depth = 0
+launch_concurrency = 5
+api_timeout_secs = 0
+heartbeat_timeout_secs = 1
+"#,
+        )
+        .unwrap();
+
+        let mut app = create_test_app();
+        app.config_path = Some(config_path);
+        let result = config_command(&mut app, Some("subagents status"));
+        let msg = result.message.unwrap();
+
+        assert!(!result.is_error);
+        assert!(msg.contains("Sub-agents: disabled (subagents.max_depth=0)"));
+        assert!(msg.contains("Active provider: deepseek"));
+        assert!(
+            msg.contains("subagents.max_concurrent = 2 (resolved global 2; active provider 2)")
+        );
+        assert!(
+            msg.contains("subagents.launch_concurrency = 5 (resolved global 2; active provider 2)")
+        );
+        assert!(
+            msg.contains(
+                "subagents.api_timeout_secs = 0 (resolved global 120; active provider 120)"
+            )
+        );
+        assert!(msg.contains(
+            "subagents.heartbeat_timeout_secs = 1 (resolved global 150; active provider 150)"
+        ));
+        assert!(msg.contains("subagents.providers.deepseek = inherits global"));
+    }
+
+    #[test]
+    fn config_command_audit_lists_editability_and_current_values() {
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-config-audit-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&temp_root).unwrap();
+        // Hermetic: the audit reads Settings::load(); without this guard the
+        // developer's real saved permission_posture leaks in and the
+        // "(unset)" assertion below becomes machine-dependent.
+        let _guard = EnvGuard::new(&temp_root);
+        let config_path = temp_root.join("custom-config.toml");
+        fs::write(
+            &config_path,
+            r#"
+base_url = "https://api.from-config.local/v1"
+instructions = ["~/global.md"]
+
+[subagents]
+enabled = false
+max_concurrent = 4
+"#,
+        )
+        .unwrap();
+
+        let mut app = create_test_app();
+        app.config_path = Some(config_path.clone());
+        app.approval_mode = ApprovalMode::Never;
+        app.stream_chunk_timeout_secs = 45;
+
+        let result = config_command(&mut app, Some("audit"));
+        let msg = result.message.unwrap();
+
+        assert!(!result.is_error);
+        assert!(msg.contains("Config editability audit"));
+        assert!(msg.contains(&format!("Config path: {}", config_path.display())));
+        assert!(msg.contains("effective_permissions | Never | runtime"));
+        assert!(msg.contains("permission_posture | (unset) | TUI settings"));
+        assert!(msg.contains("approval_policy | (unset) | persisted config"));
+        assert!(msg.contains("stream_chunk_timeout_secs | 45 | runtime+persisted"));
+        assert!(msg.contains("subagents.enabled | false | runtime+persisted"));
+        assert!(msg.contains("subagents.max_concurrent | 4 | runtime+persisted"));
+        assert!(msg.contains("base_url | https://api.from-config.local/v1 | persisted restart"));
+        assert!(msg.contains("instructions | configured | file-only restart"));
+        assert!(msg.contains("network | unset | file-only"));
+
+        app.mode = AppMode::Plan;
+        let plan_msg = config_command(&mut app, Some("audit"))
+            .message
+            .expect("Plan audit message");
+        assert!(
+            plan_msg.contains("effective_permissions | Read Only | runtime"),
+            "{plan_msg}"
+        );
     }
 
     #[test]
@@ -1812,7 +4039,7 @@ mod tests {
         assert_eq!(
             result.message.as_deref(),
             Some(
-                "stream_chunk_timeout_secs = 0 (default 300) (session only; affects subsequent turns in this session)"
+                "stream_chunk_timeout_secs = 0 (default 900) (session only; affects subsequent turns in this session)"
             )
         );
         assert!(matches!(
@@ -1849,7 +4076,7 @@ mod tests {
             )
         );
         assert!(saved.contains("[providers.xiaomi_mimo]"));
-        assert!(saved.contains(&format!("base_url = \"{}\"", DEFAULT_XIAOMI_MIMO_BASE_URL)));
+        assert!(saved.contains(&format!("base_url = \"{DEFAULT_XIAOMI_MIMO_BASE_URL}\"")));
     }
 
     #[test]
@@ -1891,6 +4118,91 @@ mod tests {
     }
 
     #[test]
+    fn explicit_default_background_override_survives_theme_preview() {
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-tui-background-override-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(temp_root.join(".deepseek")).expect("settings dir");
+        let _guard = EnvGuard::new(&temp_root);
+        fs::write(
+            temp_root.join(".deepseek").join("settings.toml"),
+            "theme = \"solarized-light\"\nbackground_color = \"#fdf6e3\"\n",
+        )
+        .expect("seed settings");
+
+        let mut app = create_test_app();
+        let explicit_base3 = ratatui::style::Color::Rgb(0xfd, 0xf6, 0xe3);
+        assert_eq!(app.background_color_override, Some(explicit_base3));
+
+        let result = set_config_value(&mut app, "theme", "dark", false);
+
+        assert!(!result.is_error, "{:?}", result.message);
+        assert_eq!(app.theme_id, crate::palette::ThemeId::Whale);
+        assert_eq!(app.background_color_override, Some(explicit_base3));
+        assert_eq!(app.ui_theme.surface_bg, explicit_base3);
+        assert!(
+            crate::tui::ocean::OceanRamp::for_theme(&app.ui_theme).is_some(),
+            "the explicit surface must retain ombre when previewing another theme"
+        );
+    }
+
+    #[test]
+    fn session_only_background_override_survives_theme_preview() {
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-tui-session-background-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(temp_root.join(".deepseek")).expect("settings dir");
+        let _guard = EnvGuard::new(&temp_root);
+        fs::write(
+            temp_root.join(".deepseek").join("settings.toml"),
+            "theme = \"solarized-light\"\n",
+        )
+        .expect("seed settings");
+
+        let mut app = create_test_app();
+        let custom = ratatui::style::Color::Rgb(0x1a, 0x1b, 0x26);
+        let background = set_config_value(&mut app, "background_color", "#1a1b26", false);
+        assert!(!background.is_error, "{:?}", background.message);
+        assert_eq!(app.background_color_override, Some(custom));
+
+        let preview = set_config_value(&mut app, "theme", "dark", false);
+        assert!(!preview.is_error, "{:?}", preview.message);
+        assert_eq!(app.background_color_override, Some(custom));
+        assert_eq!(app.ui_theme.surface_bg, custom);
+
+        let solarized_preview = set_config_value(&mut app, "theme", "solarized-light", false);
+        assert!(
+            !solarized_preview.is_error,
+            "{:?}",
+            solarized_preview.message
+        );
+        assert_eq!(app.background_color_override, Some(custom));
+        assert_eq!(app.ui_theme.surface_bg, custom);
+        assert!(crate::tui::ocean::OceanRamp::for_theme(&app.ui_theme).is_some());
+
+        let saved_theme = set_config_value(&mut app, "theme", "dark", true);
+        assert!(!saved_theme.is_error, "{:?}", saved_theme.message);
+        assert_eq!(app.background_color_override, Some(custom));
+        assert_eq!(app.ui_theme.surface_bg, custom);
+        let persisted = Settings::load_persisted().expect("persisted settings");
+        assert_eq!(persisted.theme, "dark");
+        assert_eq!(
+            persisted.background_color, None,
+            "saving a theme must not persist the session-only background"
+        );
+    }
+
+    #[test]
     fn set_theme_save_updates_live_app_and_persists() {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1917,8 +4229,97 @@ mod tests {
     }
 
     #[test]
-    fn config_approval_mode_valid_values() {
+    fn unrelated_save_does_not_persist_no_animations_runtime_overlay() {
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-no-animations-save-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(temp_root.join(".deepseek")).expect("settings dir");
+        let _guard = EnvGuard::new(&temp_root);
+        fs::write(
+            temp_root.join(".deepseek").join("settings.toml"),
+            "low_motion = false\nfancy_animations = true\ntheme = \"system\"\n",
+        )
+        .expect("seed settings");
+        // Safety: test-only environment mutation is serialized by EnvGuard.
+        unsafe {
+            env::set_var("NO_ANIMATIONS", "1");
+        }
+
         let mut app = create_test_app();
+        assert!(app.low_motion, "runtime overlay should reduce motion");
+        assert!(
+            !app.fancy_animations,
+            "runtime overlay should disable ocean animations"
+        );
+
+        let result = set_config_value(&mut app, "theme", "grayscale", true);
+        assert!(!result.is_error, "{:?}", result.message);
+        let saved = Settings::load_persisted().expect("persisted settings");
+        assert_eq!(saved.theme, "grayscale");
+        assert!(
+            !saved.low_motion,
+            "NO_ANIMATIONS must not become a saved preference"
+        );
+        assert!(
+            saved.fancy_animations,
+            "NO_ANIMATIONS must not overwrite the saved animation preference"
+        );
+        assert!(app.low_motion);
+        assert!(!app.fancy_animations);
+    }
+
+    #[test]
+    fn preset_save_does_not_persist_runtime_environment_overlays() {
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-preset-env-overlay-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(temp_root.join(".deepseek")).expect("settings dir");
+        let _guard = EnvGuard::new(&temp_root);
+        fs::write(
+            temp_root.join(".deepseek").join("settings.toml"),
+            "low_motion = false\nfancy_animations = true\nsynchronized_output = \"auto\"\n",
+        )
+        .expect("seed settings");
+        // NO_ANIMATIONS exercises the reported path. Ptyxis supplies an
+        // unrelated effective-only field, making an accidental
+        // apply_env_overrides()+save observable even though the calm preset
+        // intentionally selects reduced motion itself.
+        unsafe {
+            env::set_var("NO_ANIMATIONS", "1");
+            env::set_var("PTYXIS_VERSION", "50.0");
+        }
+
+        let mut app = create_test_app();
+        let result = config_command(&mut app, Some("preset calm --save"));
+        assert!(!result.is_error, "{:?}", result.message);
+
+        let saved = Settings::load_persisted().expect("persisted settings");
+        assert!(saved.low_motion, "calm preset should save reduced motion");
+        assert!(
+            !saved.fancy_animations,
+            "calm preset should save static ocean chrome"
+        );
+        assert_eq!(
+            saved.synchronized_output, "auto",
+            "Ptyxis runtime override must not leak into a preset save"
+        );
+    }
+
+    #[test]
+    fn config_approval_mode_valid_values() {
+        let dir = tempfile::tempdir().expect("isolated config dir");
+        let mut app = create_test_app();
+        app.config_path = Some(dir.path().join("config.toml"));
         // Test auto
         let result = config_command(&mut app, Some("approval_mode auto"));
         assert!(result.message.is_some());
@@ -1936,8 +4337,90 @@ mod tests {
     }
 
     #[test]
-    fn config_approval_mode_invalid_value() {
+    fn config_approval_mode_save_persists_top_level_policy() {
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-approval-policy-save-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&temp_root).unwrap();
+        let _guard = EnvGuard::new(&temp_root);
+        let config_path = temp_root.join("custom-config.toml");
+
         let mut app = create_test_app();
+        app.config_path = Some(config_path.clone());
+        let result = config_command(&mut app, Some("approval_mode suggest --save"));
+        let msg = result.message.unwrap();
+        let saved = fs::read_to_string(&config_path).unwrap();
+
+        assert!(!result.is_error);
+        assert_eq!(app.approval_mode, ApprovalMode::Suggest);
+        assert_eq!(
+            msg,
+            format!(
+                "approval_mode = Ask (saved to {} as approval_policy = \"on-request\")",
+                config_path.display()
+            )
+        );
+        assert!(saved.contains("approval_policy = \"on-request\""));
+
+        let loaded = Config::load(Some(config_path.clone()), None).unwrap();
+        assert_eq!(loaded.approval_policy.as_deref(), Some("on-request"));
+
+        let mut restarted = create_test_app_with_config(&loaded);
+        restarted.config_path = Some(config_path.clone());
+        assert!(restarted.approval_policy_locked());
+        assert!(!restarted.approval_policy_requirements_managed());
+        let changed = config_command(&mut restarted, Some("approval_mode auto --save"));
+        assert!(!changed.is_error, "{:?}", changed.message);
+        assert_eq!(
+            changed.action,
+            Some(AppAction::ApprovalPolicyPersisted {
+                policy: Some("auto".to_string())
+            })
+        );
+        assert_eq!(restarted.approval_mode, ApprovalMode::Auto);
+        let reloaded = Config::load(Some(config_path), None).unwrap();
+        assert_eq!(reloaded.approval_policy.as_deref(), Some("auto"));
+    }
+
+    #[test]
+    fn config_approval_policy_can_return_to_saved_tui_permission_default() {
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-approval-policy-tui-default-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(temp_root.join(".deepseek")).unwrap();
+        let _guard = EnvGuard::new(&temp_root);
+        let config_path = temp_root.join("custom-config.toml");
+        fs::write(&config_path, "# keep\napproval_policy = \"auto\"\n").unwrap();
+        fs::write(
+            temp_root.join(".deepseek").join("settings.toml"),
+            "permission_posture = \"full-access\"\n",
+        )
+        .unwrap();
+        let loaded = Config::load(Some(config_path.clone()), None).unwrap();
+        let mut app = create_test_app_with_config(&loaded);
+        app.config_path = Some(config_path.clone());
+
+        let result = set_config_value(&mut app, "approval_policy", "use-tui-default", true);
+
+        assert!(!result.is_error, "{:?}", result.message);
+        assert_eq!(app.approval_mode, ApprovalMode::Bypass);
+        assert!(!app.approval_policy_locked());
+        assert_eq!(
+            result.action,
+            Some(AppAction::ApprovalPolicyPersisted { policy: None })
+        );
+        let saved = fs::read_to_string(config_path).unwrap();
+        assert!(saved.contains("# keep"));
+        assert!(!saved.contains("approval_policy"));
+    }
+
+    #[test]
+    fn config_approval_mode_invalid_value() {
+        let dir = tempfile::tempdir().expect("isolated config dir");
+        let mut app = create_test_app();
+        app.config_path = Some(dir.path().join("config.toml"));
         let result = config_command(&mut app, Some("approval_mode invalid"));
         assert!(result.message.is_some());
         let msg = result.message.unwrap();
@@ -2022,5 +4505,53 @@ mod tests {
 
         let updated = fs::read_to_string(config_path).unwrap();
         assert!(!updated.contains("api_key"));
+    }
+
+    #[test]
+    fn logout_clears_only_exact_named_custom_provider_key() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-custom-logout-test-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        fs::create_dir_all(&temp_root).unwrap();
+        let _guard = EnvGuard::new(&temp_root);
+        let config_path = temp_root.join(".deepseek").join("config.toml");
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(
+            &config_path,
+            "[providers.custom-a]\napi_key = \"a-key\"\n\n[providers.custom-b]\napi_key = \"b-key\"\n",
+        )
+        .unwrap();
+        let mut app = create_test_app();
+        app.set_provider_identity(ApiProvider::Custom, "custom-a");
+
+        let result = logout(&mut app);
+
+        assert!(result.message.is_some());
+        let updated = fs::read_to_string(config_path).unwrap();
+        assert!(!updated.contains("a-key"), "{updated}");
+        assert!(updated.contains("b-key"), "{updated}");
+    }
+
+    #[test]
+    fn named_custom_provider_url_write_fails_closed() {
+        let mut app = create_test_app();
+        app.set_provider_identity(ApiProvider::Custom, "custom-a");
+
+        let result = config_command(
+            &mut app,
+            Some("provider_url http://127.0.0.1:18181/v1 --save"),
+        );
+        let message = result.message.expect("error message");
+
+        assert!(
+            message.contains("named [providers.<name>] table"),
+            "{message}"
+        );
     }
 }

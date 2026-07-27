@@ -21,13 +21,24 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_RS = ROOT / "crates" / "config" / "src" / "lib.rs"
+# ProviderKind's enum + identity impl were split out of lib.rs into this module.
+PROVIDER_KIND_RS = ROOT / "crates" / "config" / "src" / "provider_kind.rs"
 PROVIDER_RS = ROOT / "crates" / "config" / "src" / "provider.rs"
 TUI_CONFIG_RS = ROOT / "crates" / "tui" / "src" / "config.rs"
+# Default provider model/base-URL constants were split out of config.rs into
+# this leaf module (#3311); read them from there for the default-string check.
+TUI_CONFIG_MODELS_RS = ROOT / "crates" / "tui" / "src" / "config" / "models.rs"
 AGENT_RS = ROOT / "crates" / "agent" / "src" / "lib.rs"
 PROVIDERS_MD = ROOT / "docs" / "PROVIDERS.md"
 
 
 API_PROVIDER_ONLY_IDS = {"deepseek-cn"}
+
+# `custom` is the dynamic OpenAI-compatible meta-provider (#1519): a single
+# catch-all `[providers.custom]` table that backs arbitrary user-defined
+# endpoints, not a canonical shipped provider with a docs row. It is excluded
+# from the provider-table drift check.
+META_PROVIDER_TABLES = {"custom"}
 SHARED_PROVIDER_TABLES = {
     "siliconflow-CN": "siliconflow_cn",
 }
@@ -35,10 +46,27 @@ HUGGINGFACE_ALIASES = {"huggingface", "hugging-face", "hugging_face", "hf"}
 HUGGINGFACE_API_KEY_ENV_ORDER = ["HUGGINGFACE_API_KEY", "HF_TOKEN"]
 HUGGINGFACE_BASE_URL_ENV_ORDER = ["HUGGINGFACE_BASE_URL", "HF_BASE_URL"]
 HUGGINGFACE_MODEL_ENV_ORDER = ["HUGGINGFACE_MODEL", "HF_MODEL"]
+SENSITIVE_IDENTIFIER_RE = re.compile(r"(?i)(api[_-]?key|token|secret|password|credential)")
+SENSITIVE_BEARER_RE = re.compile(r"(?i)(authorization:\s*bearer\s+)\S+")
+SENSITIVE_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(api[_-]?key|token|secret|password|credential)(\s*[:=]\s*)\S+"
+)
 
 
 def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def display_public_value(value: str) -> str:
+    if SENSITIVE_IDENTIFIER_RE.search(value):
+        return "<redacted sensitive identifier>"
+    return value
+
+
+def redact_sensitive_text(value: str) -> str:
+    value = SENSITIVE_BEARER_RE.sub(r"\1<redacted>", value)
+    value = SENSITIVE_ASSIGNMENT_RE.sub(r"\1\2<redacted>", value)
+    return SENSITIVE_IDENTIFIER_RE.sub("<redacted sensitive identifier>", value)
 
 
 def require_index(source: str, needle: str, context: str, start: int = 0) -> int:
@@ -74,6 +102,12 @@ def extract_match_block(
 
 
 def parse_aliases_for_variant(source: str, enum_name: str, variant: str, context: str) -> set[str]:
+    # `ProviderKind`'s enum + identity impl (incl. `parse`) live in
+    # provider_kind.rs after the config module split; read the impl from there
+    # regardless of the file the caller passed for other lookups.
+    if enum_name == "ProviderKind":
+        source = read(PROVIDER_KIND_RS)
+        context = "crates/config/src/provider_kind.rs"
     impl_start = require_index(source, f"impl {enum_name}", context)
     block = extract_match_block(
         source,
@@ -109,10 +143,15 @@ def provider_kind_ids(config_rs: str) -> dict[str, str]:
         provider_rs,
     )
     ids: dict[str, str] = {variant: provider_id for variant, provider_id in pairs}
-    # OpenaiCodex and Anthropic use manual impls rather than the provider!() macro
+    # Providers with non-fixed wire policy or custom auth behavior use manual
+    # impls rather than the provider!() macro.
     for variant_name, id_literal in [
+        ("DeepseekAnthropic", "deepseek-anthropic"),
         ("OpenaiCodex", "openai-codex"),
         ("Anthropic", "anthropic"),
+        ("Openmodel", "openmodel"),
+        ("MinimaxAnthropic", "minimax-anthropic"),
+        ("OpencodeZen", "opencode-zen"),
     ]:
         match = re.search(
             rf'impl\s+Provider\s+for\s+{variant_name}.*?fn\s+id.*?\"({id_literal})\"',
@@ -174,10 +213,13 @@ def model_registry_providers(agent_rs: str, variant_to_id: dict[str, str]) -> se
 
 
 def default_strings(tui_config_rs: str) -> set[str]:
+    # Model/base-URL constants now live in config/models.rs (#3311); scan it
+    # alongside config.rs so the check follows the leaf split.
+    sources = tui_config_rs + "\n" + read(TUI_CONFIG_MODELS_RS)
     defaults = set()
     for name, value in re.findall(
         r'const\s+(DEFAULT_[A-Z0-9_]+(?:MODEL|BASE_URL)):\s*&str\s*=\s*"([^"]+)"',
-        tui_config_rs,
+        sources,
     ):
         if name == "DEFAULT_DEEPSEEKCN_BASE_URL":
             continue
@@ -265,7 +307,7 @@ def report_huggingface_coverage(
     )
 
     for label, env_order in [
-        ("Hugging Face API key env precedence", HUGGINGFACE_API_KEY_ENV_ORDER),
+        ("Hugging Face auth env precedence", HUGGINGFACE_API_KEY_ENV_ORDER),
         ("Hugging Face base URL env precedence", HUGGINGFACE_BASE_URL_ENV_ORDER),
         ("Hugging Face model env precedence", HUGGINGFACE_MODEL_ENV_ORDER),
     ]:
@@ -290,16 +332,23 @@ def report_env_lookup_order(
 def report_string_order(
     label: str, source: str, expected_order: list[str], context: str
 ) -> list[str]:
+    contains_sensitive_expected_value = any(
+        SENSITIVE_IDENTIFIER_RE.search(value) for value in expected_order
+    )
     positions = []
     for needle in expected_order:
         index = source.find(needle)
         if index == -1:
-            return [f"{label} missing {needle!r} in {context}"]
+            if contains_sensitive_expected_value:
+                return [f"{label} missing required entry in {context}"]
+            return [f"{label} missing {display_public_value(needle)!r} in {context}"]
         positions.append(index)
     if positions != sorted(positions):
+        if contains_sensitive_expected_value:
+            return [f"{label} has wrong order in {context}"]
         return [
             f"{label} has wrong order in {context}: expected "
-            + " before ".join(expected_order)
+            + " before ".join(display_public_value(value) for value in expected_order)
         ]
     return []
 
@@ -328,7 +377,11 @@ def main() -> int:
             canonical_ids,
             shipped_provider_rows(providers_md),
         )
-        errors += report_set("provider TOML tables", expected_tables, provider_tables(config_rs))
+        errors += report_set(
+            "provider TOML tables",
+            expected_tables,
+            provider_tables(config_rs) - META_PROVIDER_TABLES,
+        )
         errors += report_set(
             "documented provider TOML tables",
             expected_tables,
@@ -352,7 +405,7 @@ def main() -> int:
     if errors:
         print("Provider registry drift check failed:", file=sys.stderr)
         for error in errors:
-            print(f"- {error}", file=sys.stderr)
+            print(f"- {redact_sensitive_text(error)}", file=sys.stderr)
         return 1
 
     print("Provider registry drift check passed.")

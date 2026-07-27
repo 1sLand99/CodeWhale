@@ -1,7 +1,7 @@
 //! Plan tool implementation with step tracking and validation
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::Mutex;
 
 use async_trait::async_trait;
@@ -47,7 +47,7 @@ impl StepStatus {
 }
 
 /// Input representation for a plan item.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PlanItemArg {
     pub step: String,
     pub status: StepStatus,
@@ -105,38 +105,10 @@ impl PlanStep {
             completed_at: None,
         }
     }
-
-    /// Get the elapsed time if the step has timing info
-    #[must_use]
-    pub fn elapsed(&self) -> Option<Duration> {
-        match (self.started_at, self.completed_at) {
-            (Some(start), Some(end)) => Some(end.duration_since(start)),
-            (Some(start), None) if self.status == StepStatus::InProgress => Some(start.elapsed()),
-            _ => None,
-        }
-    }
-
-    /// Format elapsed time for display
-    #[must_use]
-    pub fn elapsed_str(&self) -> String {
-        match self.elapsed() {
-            Some(d) => {
-                let secs = d.as_secs();
-                if secs < 60 {
-                    format!("{secs}s")
-                } else if secs < 3600 {
-                    format!("{}m {}s", secs / 60, secs % 60)
-                } else {
-                    format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
-                }
-            }
-            None => String::new(),
-        }
-    }
 }
 
 /// Serializable snapshot for display
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PlanSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -244,23 +216,6 @@ pub struct PlanState {
 }
 
 impl PlanState {
-    /// Check whether the plan is empty.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.steps.is_empty()
-            && self.title.is_none()
-            && self.objective.is_none()
-            && self.context_summary.is_none()
-            && self.explanation.is_none()
-            && self.sources_used.is_empty()
-            && self.critical_files.is_empty()
-            && self.constraints.is_empty()
-            && self.recommended_approach.is_none()
-            && self.verification_plan.is_none()
-            && self.risks_and_unknowns.is_none()
-            && self.handoff_packet.is_none()
-    }
-
     pub fn update(&mut self, args: UpdatePlanArgs) {
         self.title = clean_optional(args.title);
         self.objective = clean_optional(args.objective);
@@ -348,10 +303,29 @@ impl PlanState {
         }
     }
 
-    pub fn explanation(&self) -> Option<&str> {
-        self.explanation.as_deref()
+    /// Restore persisted plan data through the same normalization path used by
+    /// `update_plan`. Timing is intentionally session-local and starts fresh.
+    #[must_use]
+    pub fn from_snapshot(snapshot: &PlanSnapshot) -> Self {
+        let mut state = Self::default();
+        state.update(UpdatePlanArgs {
+            title: snapshot.title.clone(),
+            objective: snapshot.objective.clone(),
+            context_summary: snapshot.context_summary.clone(),
+            explanation: snapshot.explanation.clone(),
+            sources_used: snapshot.sources_used.clone(),
+            critical_files: snapshot.critical_files.clone(),
+            constraints: snapshot.constraints.clone(),
+            recommended_approach: snapshot.recommended_approach.clone(),
+            verification_plan: snapshot.verification_plan.clone(),
+            risks_and_unknowns: snapshot.risks_and_unknowns.clone(),
+            handoff_packet: snapshot.handoff_packet.clone(),
+            plan: snapshot.items.clone(),
+        });
+        state
     }
 
+    #[allow(dead_code)] // retained for PlanState consumers / older tests
     pub fn steps(&self) -> &[PlanStep] {
         &self.steps
     }
@@ -400,48 +374,6 @@ fn clean_list(values: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-/// Validation result for plan transitions
-#[derive(Debug)]
-#[allow(dead_code)]
-pub enum PlanValidation {
-    Ok,
-    Warning(String),
-    Error(String),
-}
-
-/// Validate a plan update
-#[allow(dead_code)]
-pub fn validate_plan_update(current: &PlanState, update: &UpdatePlanArgs) -> PlanValidation {
-    let current_steps: std::collections::HashMap<_, _> = current
-        .steps()
-        .iter()
-        .map(|s| (s.text.clone(), &s.status))
-        .collect();
-
-    for item in &update.plan {
-        if let Some(old_status) = current_steps.get(&item.step) {
-            // Check for invalid transitions
-            match (old_status, &item.status) {
-                (StepStatus::Completed, StepStatus::Pending) => {
-                    return PlanValidation::Warning(format!(
-                        "Step '{}' was completed but is now pending",
-                        item.step
-                    ));
-                }
-                (StepStatus::Completed, StepStatus::InProgress) => {
-                    return PlanValidation::Warning(format!(
-                        "Step '{}' was completed but is now in progress",
-                        item.step
-                    ));
-                }
-                _ => {}
-            }
-        }
-    }
-
-    PlanValidation::Ok
-}
-
 // === UpdatePlanTool - ToolSpec implementation ===
 
 /// Shared reference to `PlanState` for use across tools
@@ -470,7 +402,14 @@ impl ToolSpec for UpdatePlanTool {
     }
 
     fn description(&self) -> &'static str {
-        "Update optional high-level strategy metadata for complex initiatives. Use checklist_write for primary Work progress; update_plan should capture phase-level approach changes, not duplicate checklist items. Include sources, critical files, constraints, verification, risks, and handoff context when they help the user review or continue the plan. Each strategy step has a description and status (pending, in_progress, completed)."
+        "Legacy compatibility tool for loading older Plan artifacts. New work uses the canonical work_update list and a normal Plan-mode response."
+    }
+
+    fn model_visible(&self) -> bool {
+        // Older transcripts and sessions can still replay this tool, but new
+        // model turns get one progress model (`work_update`) instead of the
+        // retired Strategy/Plan surface.
+        false
     }
 
     fn input_schema(&self) -> serde_json::Value {
@@ -526,22 +465,9 @@ impl ToolSpec for UpdatePlanTool {
                 },
                 "plan": {
                     "type": "array",
-                    "description": "List of plan steps",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "step": {
-                                "type": "string",
-                                "description": "Description of the step"
-                            },
-                            "status": {
-                                "type": "string",
-                                "enum": ["pending", "in_progress", "completed"],
-                                "description": "Step status"
-                            }
-                        },
-                        "required": ["step", "status"]
-                    }
+                    "description": "Legacy replay field; new work must use work_update",
+                    "deprecated": true,
+                    "items": { "type": "object" }
                 }
             }
         })
@@ -558,7 +484,7 @@ impl ToolSpec for UpdatePlanTool {
     async fn execute(
         &self,
         input: serde_json::Value,
-        _context: &ToolContext,
+        context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let empty_plan = Vec::new();
         let plan_items = match input.get("plan") {
@@ -603,11 +529,34 @@ impl ToolSpec for UpdatePlanTool {
             plan: plan_args,
         };
 
-        let mut state = self.plan_state.lock().await;
-
-        state.update(args);
-
-        let snapshot = state.snapshot();
+        let mut next_state = PlanState::default();
+        next_state.update(args);
+        let desired = next_state.snapshot();
+        let snapshot = if let Some(work) = context.runtime.work.as_ref()
+            && work.matches_plan(&self.plan_state)
+        {
+            work.apply_plan_update(&context.state_namespace, self.name(), &desired)
+                .await
+                .map_err(ToolError::execution_failed)?
+        } else {
+            let mut state = self.plan_state.lock().await;
+            state.update(UpdatePlanArgs {
+                title: desired.title.clone(),
+                objective: desired.objective.clone(),
+                context_summary: desired.context_summary.clone(),
+                explanation: desired.explanation.clone(),
+                sources_used: desired.sources_used.clone(),
+                critical_files: desired.critical_files.clone(),
+                constraints: desired.constraints.clone(),
+                recommended_approach: desired.recommended_approach.clone(),
+                verification_plan: desired.verification_plan.clone(),
+                risks_and_unknowns: desired.risks_and_unknowns.clone(),
+                handoff_packet: desired.handoff_packet.clone(),
+                plan: desired.items.clone(),
+            });
+            state.snapshot()
+        };
+        let state = PlanState::from_snapshot(&snapshot);
         let (pending, in_progress, completed) = state.counts();
         let progress = state.progress_percent();
 
@@ -644,6 +593,46 @@ mod tests {
     use super::*;
     use crate::tools::spec::{ToolContext, ToolSpec};
     use serde_json::json;
+
+    #[test]
+    fn update_plan_is_hidden_replay_compatibility() {
+        let tool = UpdatePlanTool::new(new_shared_plan_state());
+        let description = tool.description();
+
+        assert!(!tool.model_visible());
+        assert!(description.contains("Legacy compatibility"));
+        assert!(description.contains("canonical work_update list"));
+    }
+
+    #[tokio::test]
+    async fn update_plan_routes_through_attached_work_graph() {
+        let plan = new_shared_plan_state();
+        let todos = crate::tools::todo::new_shared_todo_list();
+        let work = crate::work_graph::new_shared_work_runtime(todos, plan.clone());
+        let tool = UpdatePlanTool::new(plan);
+        let mut context = ToolContext::new(std::env::temp_dir());
+        context.runtime.work = Some(work.clone());
+
+        tool.execute(
+            json!({
+                "objective": "Prove the real tool path",
+                "plan": [{"step": "Update graph", "status": "in_progress"}]
+            }),
+            &context,
+        )
+        .await
+        .expect("update_plan succeeds");
+
+        let state = work
+            .capture(Some(&context.state_namespace))
+            .expect("capture")
+            .expect("graph state");
+        assert_eq!(
+            state.plan.objective.as_deref(),
+            Some("Prove the real tool path")
+        );
+        assert_eq!(state.graph.compat.plan_order.len(), 1);
+    }
 
     #[test]
     fn plan_state_treats_every_artifact_field_as_non_empty() {
@@ -698,7 +687,7 @@ mod tests {
             let mut state = PlanState::default();
             state.update(args);
             assert!(
-                !state.is_empty(),
+                !state.snapshot().is_empty(),
                 "artifact metadata must keep plan state visible"
             );
         }
@@ -736,6 +725,27 @@ mod tests {
         assert_eq!(snapshot.items.len(), 1);
         assert_eq!(snapshot.items[0].step, "render sections");
         assert_eq!(snapshot.items[0].status, StepStatus::InProgress);
+    }
+
+    #[test]
+    fn plan_state_restores_from_persisted_snapshot() {
+        let snapshot = PlanSnapshot {
+            objective: Some("Restore Work state".to_string()),
+            items: vec![
+                PlanItemArg {
+                    step: "inspect".to_string(),
+                    status: StepStatus::Completed,
+                },
+                PlanItemArg {
+                    step: "verify".to_string(),
+                    status: StepStatus::InProgress,
+                },
+            ],
+            ..PlanSnapshot::default()
+        };
+
+        let restored = PlanState::from_snapshot(&snapshot);
+        assert_eq!(restored.snapshot(), snapshot);
     }
 
     #[test]

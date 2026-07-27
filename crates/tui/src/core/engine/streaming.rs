@@ -21,6 +21,7 @@ pub(super) struct ToolUseState {
     pub(super) input: serde_json::Value,
     pub(super) caller: Option<ToolCaller>,
     pub(super) input_buffer: String,
+    pub(super) input_parse_error: Option<String>,
 }
 
 /// Maximum total bytes of text/thinking content before aborting the stream.
@@ -103,21 +104,150 @@ pub(super) fn should_resume_after_sleep(
     sleep_detected && retry_attempts < MAX_STREAM_RETRIES && !cancelled
 }
 
-pub(crate) const TOOL_CALL_START_MARKERS: [&str; 5] = [
+/// Convert low-level reqwest/hyper stream read errors into an operator-facing
+/// message. The raw provider error remains attached, but the lead sentence
+/// explains why Codewhale may retry before any output and why it must surface
+/// the warning once partial output has already streamed.
+pub(super) fn stream_read_error_user_message(message: &str, any_content_received: bool) -> String {
+    let lower = message.to_ascii_lowercase();
+    let is_stream_read = lower.contains("stream read error")
+        || lower.contains("error decoding response body")
+        || lower.contains("chunk decode error")
+        || lower.contains("body decode");
+    if !is_stream_read {
+        return message.to_string();
+    }
+
+    let retry_note = if any_content_received {
+        "Some output had already streamed, so Codewhale is surfacing the warning instead of replaying the request and risking duplicated output."
+    } else {
+        "No output had streamed yet, so Codewhale will retry automatically while retry budget remains."
+    };
+    format!(
+        "Provider stream connection dropped while reading the response body. {retry_note} Details: {message}"
+    )
+}
+
+/// Wrapper shapes a model may emit as plain text instead of using the API tool
+/// channel. Each pair is `(start, end)`; the tables below are projections of
+/// this one and must stay in sync with it.
+///
+/// Three families are covered:
+///
+/// 1. Generic/Anthropic-style (`[TOOL_CALL]`, `<invoke …>`, `<function_calls>`).
+/// 2. DSML wrappers, in fullwidth `｜` (U+FF5C) and ASCII `|` delimiters, upper
+///    and lower case.
+/// 3. **DeepSeek's native tool-call tokens** (#3880). DeepSeek's chat template
+///    separates words with `▁` (U+2581 LOWER ONE EIGHTH BLOCK), not a space or
+///    underscore, so `<｜tool▁calls▁begin｜>` does not match any DSML entry and
+///    leaked into visible output. Both the `▁` and `_` separators are listed
+///    because a partially-normalizing tokenizer can emit either, and both
+///    delimiter forms because the ASCII fallback shows up in some renderings.
+///
+/// When adding a shape, add it here and to the two marker tables below.
+/// `marker_tables_are_consistent` enforces that they agree.
+pub(crate) const TOOL_CALL_MARKER_PAIRS: [(&str, &str); 28] = [
+    ("[TOOL_CALL]", "[/TOOL_CALL]"),
+    ("<codewhale:tool_call", "</codewhale:tool_call>"),
+    ("<tool_call", "</tool_call>"),
+    ("<invoke ", "</invoke>"),
+    ("<function_calls>", "</function_calls>"),
+    ("<｜DSML｜tool_calls>", "</｜DSML｜tool_calls>"),
+    ("<｜DSML｜invoke ", "</｜DSML｜invoke>"),
+    ("<|DSML|tool_calls>", "</|DSML|tool_calls>"),
+    ("<|DSML|invoke ", "</|DSML|invoke>"),
+    ("<|dsml|tool_calls>", "</|dsml|tool_calls>"),
+    ("<|dsml|invoke ", "</|dsml|invoke>"),
+    ("<|tool_calls>", "</|tool_calls>"),
+    // DeepSeek native, fullwidth delimiters, U+2581 separator.
+    ("<｜tool▁calls▁begin｜>", "<｜tool▁calls▁end｜>"),
+    ("<｜tool▁call▁begin｜>", "<｜tool▁call▁end｜>"),
+    ("<｜tool▁outputs▁begin｜>", "<｜tool▁outputs▁end｜>"),
+    ("<｜tool▁output▁begin｜>", "<｜tool▁output▁end｜>"),
+    // DeepSeek native, ASCII delimiters, U+2581 separator.
+    ("<|tool▁calls▁begin|>", "<|tool▁calls▁end|>"),
+    ("<|tool▁call▁begin|>", "<|tool▁call▁end|>"),
+    ("<|tool▁outputs▁begin|>", "<|tool▁outputs▁end|>"),
+    ("<|tool▁output▁begin|>", "<|tool▁output▁end|>"),
+    // DeepSeek native, underscore separator.
+    ("<｜tool_calls_begin｜>", "<｜tool_calls_end｜>"),
+    ("<｜tool_call_begin｜>", "<｜tool_call_end｜>"),
+    ("<｜tool_outputs_begin｜>", "<｜tool_outputs_end｜>"),
+    ("<｜tool_output_begin｜>", "<｜tool_output_end｜>"),
+    ("<|tool_calls_begin|>", "<|tool_calls_end|>"),
+    ("<|tool_call_begin|>", "<|tool_call_end|>"),
+    ("<|tool_outputs_begin|>", "<|tool_outputs_end|>"),
+    ("<|tool_output_begin|>", "<|tool_output_end|>"),
+];
+
+pub(crate) const TOOL_CALL_START_MARKERS: [&str; 28] = [
     "[TOOL_CALL]",
     "<codewhale:tool_call",
     "<tool_call",
     "<invoke ",
     "<function_calls>",
+    "<｜DSML｜tool_calls>",
+    "<｜DSML｜invoke ",
+    "<|DSML|tool_calls>",
+    "<|DSML|invoke ",
+    "<|dsml|tool_calls>",
+    "<|dsml|invoke ",
+    "<|tool_calls>",
+    "<｜tool▁calls▁begin｜>",
+    "<｜tool▁call▁begin｜>",
+    "<｜tool▁outputs▁begin｜>",
+    "<｜tool▁output▁begin｜>",
+    "<|tool▁calls▁begin|>",
+    "<|tool▁call▁begin|>",
+    "<|tool▁outputs▁begin|>",
+    "<|tool▁output▁begin|>",
+    "<｜tool_calls_begin｜>",
+    "<｜tool_call_begin｜>",
+    "<｜tool_outputs_begin｜>",
+    "<｜tool_output_begin｜>",
+    "<|tool_calls_begin|>",
+    "<|tool_call_begin|>",
+    "<|tool_outputs_begin|>",
+    "<|tool_output_begin|>",
 ];
 
-pub(crate) const TOOL_CALL_END_MARKERS: [&str; 5] = [
+pub(crate) const TOOL_CALL_END_MARKERS: [&str; 28] = [
     "[/TOOL_CALL]",
     "</codewhale:tool_call>",
     "</tool_call>",
     "</invoke>",
     "</function_calls>",
+    "</｜DSML｜tool_calls>",
+    "</｜DSML｜invoke>",
+    "</|DSML|tool_calls>",
+    "</|DSML|invoke>",
+    "</|dsml|tool_calls>",
+    "</|dsml|invoke>",
+    "</|tool_calls>",
+    "<｜tool▁calls▁end｜>",
+    "<｜tool▁call▁end｜>",
+    "<｜tool▁outputs▁end｜>",
+    "<｜tool▁output▁end｜>",
+    "<|tool▁calls▁end|>",
+    "<|tool▁call▁end|>",
+    "<|tool▁outputs▁end|>",
+    "<|tool▁output▁end|>",
+    "<｜tool_calls_end｜>",
+    "<｜tool_call_end｜>",
+    "<｜tool_outputs_end｜>",
+    "<｜tool_output_end｜>",
+    "<|tool_calls_end|>",
+    "<|tool_call_end|>",
+    "<|tool_outputs_end|>",
+    "<|tool_output_end|>",
 ];
+
+#[derive(Debug, Default)]
+pub(crate) struct ToolCallDeltaFilterState {
+    in_tool_call: bool,
+    marker_carry: String,
+    active_end_marker: Option<&'static str>,
+}
 
 /// Compact one-shot notice emitted when a model attempts to forge a tool-call
 /// wrapper in plain text instead of using the API tool channel. The visible
@@ -139,31 +269,125 @@ fn find_first_marker(text: &str, markers: &[&str]) -> Option<(usize, usize)> {
         .min_by_key(|(idx, _)| *idx)
 }
 
+fn find_first_start_marker(text: &str) -> Option<(usize, usize, &'static str)> {
+    TOOL_CALL_MARKER_PAIRS
+        .iter()
+        .filter_map(|(start, end)| text.find(start).map(|idx| (idx, start.len(), *end)))
+        .min_by_key(|(idx, _, _)| *idx)
+}
+
+fn trailing_marker_prefix_len(text: &str, markers: &[&str]) -> usize {
+    markers
+        .iter()
+        .flat_map(|marker| {
+            marker
+                .char_indices()
+                .map(|(idx, _)| idx)
+                .filter(|idx| *idx > 0)
+                .chain(std::iter::once(marker.len()))
+                .filter(|idx| *idx < marker.len())
+                .filter(|idx| {
+                    let prefix = &marker[..*idx];
+                    text.ends_with(prefix)
+                })
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+fn trailing_start_marker_prefix_len(text: &str) -> usize {
+    TOOL_CALL_MARKER_PAIRS
+        .iter()
+        .flat_map(|(marker, _)| {
+            marker
+                .char_indices()
+                .map(|(idx, _)| idx)
+                .filter(|idx| *idx > 0)
+                .chain(std::iter::once(marker.len()))
+                .filter(|idx| *idx < marker.len())
+                .filter(|idx| {
+                    let prefix = &marker[..*idx];
+                    text.ends_with(prefix)
+                })
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
 pub(crate) fn filter_tool_call_delta(delta: &str, in_tool_call: &mut bool) -> String {
+    let mut state = ToolCallDeltaFilterState {
+        in_tool_call: *in_tool_call,
+        ..ToolCallDeltaFilterState::default()
+    };
+    let output = filter_tool_call_delta_with_state(delta, &mut state);
+    *in_tool_call = state.in_tool_call;
+    output
+}
+
+pub(crate) fn filter_tool_call_delta_with_state(
+    delta: &str,
+    state: &mut ToolCallDeltaFilterState,
+) -> String {
     if delta.is_empty() {
         return String::new();
     }
 
+    let chunk;
+    let mut rest = if state.marker_carry.is_empty() {
+        delta
+    } else {
+        chunk = format!("{}{delta}", state.marker_carry);
+        state.marker_carry.clear();
+        &chunk
+    };
     let mut output = String::new();
-    let mut rest = delta;
 
     loop {
-        if *in_tool_call {
-            let Some((idx, len)) = find_first_marker(rest, &TOOL_CALL_END_MARKERS) else {
+        if state.in_tool_call {
+            let active_end_marker = state.active_end_marker;
+            let found = active_end_marker
+                .and_then(|marker| rest.find(marker).map(|idx| (idx, marker.len())))
+                .or_else(|| find_first_marker(rest, &TOOL_CALL_END_MARKERS));
+            let Some((idx, len)) = found else {
+                let keep = active_end_marker.map_or_else(
+                    || trailing_marker_prefix_len(rest, &TOOL_CALL_END_MARKERS),
+                    |marker| trailing_marker_prefix_len(rest, &[marker]),
+                );
+                if keep > 0 {
+                    state.marker_carry.push_str(&rest[rest.len() - keep..]);
+                }
                 break;
             };
             rest = &rest[idx + len..];
-            *in_tool_call = false;
+            state.in_tool_call = false;
+            state.active_end_marker = None;
         } else {
-            let Some((idx, len)) = find_first_marker(rest, &TOOL_CALL_START_MARKERS) else {
-                output.push_str(rest);
+            let Some((idx, len, end_marker)) = find_first_start_marker(rest) else {
+                let keep = trailing_start_marker_prefix_len(rest);
+                if keep > 0 {
+                    let split = rest.len() - keep;
+                    output.push_str(&rest[..split]);
+                    state.marker_carry.push_str(&rest[split..]);
+                } else {
+                    output.push_str(rest);
+                }
                 break;
             };
             output.push_str(&rest[..idx]);
             rest = &rest[idx + len..];
-            *in_tool_call = true;
+            state.in_tool_call = true;
+            state.active_end_marker = Some(end_marker);
         }
     }
 
     output
+}
+
+pub(crate) fn flush_tool_call_delta_state(state: &mut ToolCallDeltaFilterState) -> String {
+    if state.in_tool_call {
+        state.marker_carry.clear();
+        return String::new();
+    }
+    std::mem::take(&mut state.marker_carry)
 }

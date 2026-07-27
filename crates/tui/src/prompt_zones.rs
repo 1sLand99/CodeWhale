@@ -22,15 +22,11 @@
 //! for future phases — not yet wired into the request path.
 
 use crate::models::{Message, SystemPrompt, Tool};
-use sha2::{Digest, Sha256};
-
 // ── helpers ────────────────────────────────────────────────────────────
 
 #[allow(dead_code)]
 fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    crate::hashing::sha256_hex(bytes)
 }
 
 #[allow(dead_code)]
@@ -327,7 +323,7 @@ impl TurnScratch {
 /// A composed three-zone request ready for DeepSeek API serialization.
 ///
 /// **Phase 1 scaffolding** — not yet wired into the engine request path.
-/// Currently the engine continues to use [`MessageRequest`] directly.
+/// Currently the engine continues to use `MessageRequest` directly.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ThreeZoneRequest<'a> {

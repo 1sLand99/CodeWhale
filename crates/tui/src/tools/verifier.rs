@@ -156,6 +156,42 @@ enum GateStatus {
     Skipped,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum VerifierVerdict {
+    Pass,
+    Partial,
+    Fail,
+}
+
+impl VerifierVerdict {
+    fn from_counts(gate_count: usize, failed: usize, skipped: usize) -> Self {
+        if failed > 0 {
+            Self::Fail
+        } else if skipped > 0 || gate_count == 0 {
+            Self::Partial
+        } else {
+            Self::Pass
+        }
+    }
+
+    fn hunt_verdict(self) -> &'static str {
+        match self {
+            Self::Pass => "hunted",
+            Self::Partial => "wounded",
+            Self::Fail => "escaped",
+        }
+    }
+
+    fn goal_status(self) -> &'static str {
+        match self {
+            Self::Pass => "complete",
+            Self::Partial => "paused",
+            Self::Fail => "blocked",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RunVerifiersOutput {
     success: bool,
@@ -166,6 +202,9 @@ struct RunVerifiersOutput {
     passed: usize,
     failed: usize,
     skipped: usize,
+    verifier_verdict: VerifierVerdict,
+    hunt_verdict: String,
+    goal_status: String,
     summary: String,
     gates: Vec<GateResult>,
 }
@@ -201,6 +240,10 @@ struct RunVerifiersBackgroundOutput {
 impl ToolSpec for RunVerifiersTool {
     fn name(&self) -> &'static str {
         "run_verifiers"
+    }
+
+    fn model_visible(&self) -> bool {
+        false
     }
 
     fn description(&self) -> &'static str {
@@ -247,7 +290,6 @@ impl ToolSpec for RunVerifiersTool {
                             "args": {
                                 "type": "array",
                                 "items": { "type": "string" },
-                                "default": [],
                                 "description": "Arguments passed directly to the executable."
                             },
                             "cwd": {
@@ -258,12 +300,11 @@ impl ToolSpec for RunVerifiersTool {
                         "required": ["name", "program"],
                         "additionalProperties": false
                     },
-                    "default": []
                 },
                 "background": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Start verifier gates as background shell jobs and return task_ids immediately. Use for long build/test/lint gates, then poll with exec_shell_wait or task_shell_wait while continuing independent inspection."
+                    "description": "Start verifier gates as background shell jobs and return task_ids immediately. Use for long build/test/lint gates; completion is tracked in task/status state, and exec_shell_wait/task_shell_wait are only for early output, final output, or true dependency barriers."
                 }
             },
             "additionalProperties": false
@@ -306,6 +347,7 @@ impl ToolSpec for RunVerifiersTool {
             &input.commands,
         )?;
         if gates.is_empty() {
+            let verifier_verdict = VerifierVerdict::from_counts(0, 0, 0);
             let output = RunVerifiersOutput {
                 success: false,
                 profile: profile.as_str().to_string(),
@@ -315,11 +357,13 @@ impl ToolSpec for RunVerifiersTool {
                 passed: 0,
                 failed: 0,
                 skipped: 0,
+                verifier_verdict,
+                hunt_verdict: verifier_verdict.hunt_verdict().to_string(),
+                goal_status: verifier_verdict.goal_status().to_string(),
                 summary: "No verifier gates were detected. Provide custom commands or choose a profile that matches this workspace.".to_string(),
                 gates: Vec::new(),
             };
-            return ToolResult::json(&output)
-                .map_err(|err| ToolError::execution_failed(err.to_string()));
+            return verifier_tool_result(&output);
         }
 
         if input.background {
@@ -366,6 +410,7 @@ impl ToolSpec for RunVerifiersTool {
             .filter(|result| result.status == GateStatus::Skipped)
             .count();
         let success = failed == 0 && skipped == 0;
+        let verifier_verdict = VerifierVerdict::from_counts(results.len(), failed, skipped);
         let summary = if success {
             format!("All {passed} verifier gates passed.")
         } else {
@@ -381,12 +426,111 @@ impl ToolSpec for RunVerifiersTool {
             passed,
             failed,
             skipped,
+            verifier_verdict,
+            hunt_verdict: verifier_verdict.hunt_verdict().to_string(),
+            goal_status: verifier_verdict.goal_status().to_string(),
             summary,
             gates: results,
         };
 
-        ToolResult::json(&output).map_err(|err| ToolError::execution_failed(err.to_string()))
+        verifier_tool_result(&output)
     }
+}
+
+/// Run quick auto verifier gates after a successful workflow completion (#4013).
+pub(crate) async fn run_workflow_completion_gates(
+    context: &ToolContext,
+) -> Result<Value, ToolError> {
+    let gates = build_gate_plan(
+        context,
+        VerifierProfile::Auto,
+        VerifierLevel::Quick,
+        DEFAULT_MAX_PYTHON_FILES,
+        &[],
+    )?;
+    if gates.is_empty() {
+        return Ok(json!({
+            "success": false,
+            "profile": "auto",
+            "level": "quick",
+            "gate_count": 0,
+            "summary": "No verifier gates detected for this workspace.",
+            "gates": [],
+        }));
+    }
+
+    let workspace = context.workspace.display().to_string();
+    let mut handles = Vec::with_capacity(gates.len());
+    for gate in gates {
+        handles.push(tokio::task::spawn_blocking(move || run_gate(gate)));
+    }
+
+    let mut results = Vec::with_capacity(handles.len());
+    for handle in handles {
+        match handle.await {
+            Ok(result) => results.push(result),
+            Err(err) => results.push(GateResult {
+                name: "internal-join".to_string(),
+                ecosystem: "internal".to_string(),
+                status: GateStatus::Failed,
+                command: "tokio::task::spawn_blocking".to_string(),
+                cwd: workspace.clone(),
+                exit_code: None,
+                duration_ms: 0,
+                stdout: String::new(),
+                stderr: format!("Verifier task join failed: {err}"),
+                stdout_truncated: false,
+                stderr_truncated: false,
+                skipped_reason: None,
+            }),
+        }
+    }
+    results.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let passed = results
+        .iter()
+        .filter(|result| result.status == GateStatus::Passed)
+        .count();
+    let failed = results
+        .iter()
+        .filter(|result| result.status == GateStatus::Failed)
+        .count();
+    let skipped = results
+        .iter()
+        .filter(|result| result.status == GateStatus::Skipped)
+        .count();
+    let success = failed == 0 && skipped == 0;
+    if !success {
+        return Err(ToolError::execution_failed(format!(
+            "{passed} passed, {failed} failed, {skipped} skipped"
+        )));
+    }
+    Ok(json!({
+        "success": true,
+        "profile": "auto",
+        "level": "quick",
+        "gate_count": results.len(),
+        "passed": passed,
+        "failed": failed,
+        "skipped": skipped,
+        "summary": format!("All {passed} verifier gates passed."),
+        "gates": results,
+    }))
+}
+
+fn verifier_tool_result(output: &RunVerifiersOutput) -> Result<ToolResult, ToolError> {
+    ToolResult::json(output)
+        .map_err(|err| ToolError::execution_failed(err.to_string()))
+        .map(|result| {
+            result.with_metadata(json!({
+                "verifier_verdict": output.verifier_verdict,
+                "hunt_verdict": output.hunt_verdict,
+                "goal_status": output.goal_status,
+                "task_updates": {
+                    "hunt_verdict": output.hunt_verdict
+                }
+            }))
+        })
 }
 
 fn start_background_gates(
@@ -470,11 +614,11 @@ fn start_background_gates(
     let success = failed_to_start == 0 && started > 0;
     let summary = if failed_to_start == 0 {
         format!(
-            "Started {started} verifier gate(s) in the background; {skipped} skipped. Poll task_ids with exec_shell_wait or task_shell_wait."
+            "Started {started} verifier gate(s) in the background; {skipped} skipped. Completion is tracked in task/status state. Continue inspecting or implementing while they run."
         )
     } else {
         format!(
-            "Started {started} verifier gate(s), failed to start {failed_to_start}, and skipped {skipped}. Poll task_ids with exec_shell_wait or task_shell_wait."
+            "Started {started} verifier gate(s), failed to start {failed_to_start}, and skipped {skipped}. Completion is tracked in task/status state. Continue inspecting or implementing while they run."
         )
     };
     let task_ids = jobs
@@ -502,6 +646,9 @@ fn start_background_gates(
         "backgrounded": true,
         "detached_start": true,
         "verifier_background": true,
+        "auto_resume_on_completion": false,
+        "completion_surface": "task_status",
+        "background_policy": "nonblocking",
         "task_ids": task_ids,
         "poll_with": ["exec_shell_wait", "task_shell_wait"]
     })))
@@ -1119,7 +1266,27 @@ fn char_boundary_index(text: &str, max_chars: usize) -> usize {
 mod tests {
     use super::*;
     use crate::tools::shell::ShellStatus;
+    use std::time::Duration;
     use tempfile::tempdir;
+
+    const BACKGROUND_COMPLETION_WAIT_MS: u64 = 30_000;
+
+    fn wait_for_completed_shell(
+        manager: &mut crate::tools::shell::ShellManager,
+        task_id: &str,
+    ) -> crate::tools::shell::ShellResult {
+        let deadline = Instant::now() + Duration::from_millis(BACKGROUND_COMPLETION_WAIT_MS);
+
+        loop {
+            let result = manager
+                .get_output(task_id, true, 1_000)
+                .expect("background output");
+            if result.status != ShellStatus::Running || Instant::now() >= deadline {
+                return result;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
 
     #[test]
     fn run_verifiers_requires_user_approval() {
@@ -1248,10 +1415,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_verifiers_emits_hunt_verdict_mapping() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path());
+        let tool = RunVerifiersTool;
+
+        let partial = tool
+            .execute(json!({"profile": "auto"}), &ctx)
+            .await
+            .expect("execute partial verifier");
+        assert_hunt_mapping(&partial.content, "partial", "wounded", "paused");
+        assert_hunt_metadata(&partial, "partial", "wounded", "paused");
+
+        if !crate::dependencies::RustC::available() {
+            return;
+        }
+
+        let pass = tool
+            .execute(
+                json!({
+                    "profile": "auto",
+                    "commands": [
+                        {
+                            "name": "rustc-version",
+                            "program": crate::dependencies::RustC::resolve().expect("rustc"),
+                            "args": ["--version"]
+                        }
+                    ]
+                }),
+                &ctx,
+            )
+            .await
+            .expect("execute passing verifier");
+        assert_hunt_mapping(&pass.content, "pass", "hunted", "complete");
+        assert_hunt_metadata(&pass, "pass", "hunted", "complete");
+
+        let fail = tool
+            .execute(
+                json!({
+                    "profile": "auto",
+                    "commands": [
+                        {
+                            "name": "rustc-bad-flag",
+                            "program": crate::dependencies::RustC::resolve().expect("rustc"),
+                            "args": ["--definitely-not-a-rustc-flag"]
+                        }
+                    ]
+                }),
+                &ctx,
+            )
+            .await
+            .expect("execute failing verifier");
+        assert_hunt_mapping(&fail.content, "fail", "escaped", "blocked");
+        assert_hunt_metadata(&fail, "fail", "escaped", "blocked");
+    }
+
+    fn assert_hunt_mapping(content: &str, verifier: &str, hunt: &str, goal: &str) {
+        let parsed: Value = serde_json::from_str(content).expect("verifier output json");
+        assert_eq!(parsed["verifier_verdict"], verifier, "{content}");
+        assert_eq!(parsed["hunt_verdict"], hunt, "{content}");
+        assert_eq!(parsed["goal_status"], goal, "{content}");
+    }
+
+    fn assert_hunt_metadata(result: &ToolResult, verifier: &str, hunt: &str, goal: &str) {
+        let metadata = result.metadata.as_ref().expect("hunt metadata");
+        assert_eq!(metadata["verifier_verdict"], verifier, "{metadata}");
+        assert_eq!(metadata["hunt_verdict"], hunt, "{metadata}");
+        assert_eq!(metadata["goal_status"], goal, "{metadata}");
+        assert_eq!(metadata["task_updates"]["hunt_verdict"], hunt, "{metadata}");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn run_verifiers_background_starts_shell_jobs_and_returns_task_ids() {
         if !crate::dependencies::RustC::available() {
             return;
         }
+        // The spawned `rustc` is usually the rustup shim, which resolves its
+        // toolchain through $HOME. Hold the process-wide env mutex so tests
+        // that temporarily swap HOME cannot break the child process.
+        let _env_lock = crate::test_support::lock_test_env();
         let tmp = tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path());
         let tool = RunVerifiersTool;
@@ -1279,27 +1522,51 @@ mod tests {
         assert!(parsed.background);
         assert_eq!(parsed.started, 1);
         assert_eq!(parsed.failed_to_start, 0);
+        assert!(parsed.summary.contains("Completion is tracked"));
         let task_id = parsed.jobs[0]
             .task_id
             .as_deref()
             .expect("background task id");
+        let metadata = result.metadata.as_ref().expect("metadata");
         assert!(
-            result
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.get("verifier_background"))
+            metadata
+                .get("verifier_background")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             "metadata should mark verifier background start"
         );
+        assert_eq!(
+            metadata
+                .get("auto_notify_on_completion")
+                .and_then(Value::as_bool),
+            None
+        );
+        assert_eq!(
+            metadata
+                .get("auto_resume_on_completion")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            metadata.get("completion_surface").and_then(Value::as_str),
+            Some("task_status")
+        );
+        assert_eq!(
+            metadata.get("background_policy").and_then(Value::as_str),
+            Some("nonblocking")
+        );
 
-        let output = ctx
-            .shell_manager
-            .lock()
-            .expect("shell manager")
-            .get_output(task_id, true, 10_000)
-            .expect("background output");
-        assert_eq!(output.status, ShellStatus::Completed);
+        let output = wait_for_completed_shell(
+            &mut ctx.shell_manager.lock().expect("shell manager"),
+            task_id,
+        );
+        assert_eq!(
+            output.status,
+            ShellStatus::Completed,
+            "stdout: {:?} stderr: {:?}",
+            output.stdout,
+            output.stderr
+        );
         assert!(
             output.stdout.contains("rustc"),
             "stdout should include rustc version: {:?}",

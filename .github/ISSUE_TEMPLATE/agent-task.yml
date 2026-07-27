@@ -1,7 +1,6 @@
 name: Agent task
-description: Create a self-contained task that a headless agent (DeepSeek V4, remote droplet) can execute end-to-end without human context.
-title: "v0.8.58: "
-labels: ["agent-ready", "v0.8.58"]
+description: Create a self-contained task that a headless Codewhale agent can execute end-to-end without human context.
+labels: ["agent-ready"]
 body:
   - type: markdown
     attributes:
@@ -18,6 +17,10 @@ body:
 
         Fill every section.  Sections marked * are required.
 
+        This template is release-neutral. After filing, assign the intended
+        active milestone explicitly during triage; version labels are historical
+        metadata and do not choose or change a milestone.
+
   - type: textarea
     id: goal
     attributes:
@@ -25,7 +28,7 @@ body:
       description: "What problem does this fix, and why now? (2-4 sentences)"
       placeholder: |
         e.g. "The TUI freezes when 4+ sub-agents run concurrently because
-        AgentProgress events trigger a full redraw each.  This blocks v0.8.58's
+        AgentProgress events trigger a full redraw each.  This blocks
         recommended sub-agent fanout."
     validations:
       required: true

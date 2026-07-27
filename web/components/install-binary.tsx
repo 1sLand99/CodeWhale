@@ -1,65 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import {
+  detectFromBrowserSignals,
+  type Arch,
+  type UserAgentArchitecture,
+} from "@/lib/install-platform";
+import { SNIPPETS, VERIFY } from "@/lib/install-binary-snippets";
 import { InstallCodeBlock } from "./install-code-block";
-
-type Arch = "macos-arm64" | "macos-x64" | "linux-x64" | "linux-arm64" | "windows-x64";
-
-const SNIPPETS: Record<Arch, string> = {
-  "macos-arm64": `curl -fsSL -o codewhale \\
-  https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-macos-arm64
-curl -fsSL -o codewhale-tui \\
-  https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-tui-macos-arm64
-chmod +x codewhale codewhale-tui
-xattr -d com.apple.quarantine codewhale codewhale-tui 2>/dev/null || true
-sudo mv codewhale codewhale-tui /usr/local/bin/`,
-  "macos-x64": `curl -fsSL -o codewhale \\
-  https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-macos-x64
-curl -fsSL -o codewhale-tui \\
-  https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-tui-macos-x64
-chmod +x codewhale codewhale-tui
-xattr -d com.apple.quarantine codewhale codewhale-tui 2>/dev/null || true
-sudo mv codewhale codewhale-tui /usr/local/bin/`,
-  "linux-x64": `curl -fsSL -o codewhale \\
-  https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-linux-x64
-curl -fsSL -o codewhale-tui \\
-  https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-tui-linux-x64
-chmod +x codewhale codewhale-tui
-sudo mv codewhale codewhale-tui /usr/local/bin/`,
-  "linux-arm64": `curl -fsSL -o codewhale \\
-  https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-linux-arm64
-curl -fsSL -o codewhale-tui \\
-  https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-tui-linux-arm64
-chmod +x codewhale codewhale-tui
-sudo mv codewhale codewhale-tui /usr/local/bin/`,
-  "windows-x64": `# PowerShell
-$ErrorActionPreference = "Stop"
-$dest = "$Env:USERPROFILE\\bin"
-New-Item -ItemType Directory -Force $dest | Out-Null
-
-Invoke-WebRequest \`
-  -Uri https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-windows-x64.exe \`
-  -OutFile "$dest\\codewhale.exe"
-Invoke-WebRequest \`
-  -Uri https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-tui-windows-x64.exe \`
-  -OutFile "$dest\\codewhale-tui.exe"
-
-$Env:Path = "$dest;$Env:Path"`,
-};
-
-const VERIFY: Record<Arch, string> = {
-  "macos-arm64": `curl -fsSL -O https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-artifacts-sha256.txt
-shasum -a 256 -c codewhale-artifacts-sha256.txt --ignore-missing`,
-  "macos-x64": `curl -fsSL -O https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-artifacts-sha256.txt
-shasum -a 256 -c codewhale-artifacts-sha256.txt --ignore-missing`,
-  "linux-x64": `curl -fsSL -O https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-artifacts-sha256.txt
-sha256sum -c codewhale-artifacts-sha256.txt --ignore-missing`,
-  "linux-arm64": `curl -fsSL -O https://github.com/Hmbown/CodeWhale/releases/latest/download/codewhale-artifacts-sha256.txt
-sha256sum -c codewhale-artifacts-sha256.txt --ignore-missing`,
-  "windows-x64": `# PowerShell
-Get-FileHash "$Env:USERPROFILE\\bin\\codewhale.exe" -Algorithm SHA256
-Get-FileHash "$Env:USERPROFILE\\bin\\codewhale-tui.exe" -Algorithm SHA256`,
-};
 
 const LABELS: Record<Arch, string> = {
   "macos-arm64": "macOS · Apple Silicon",
@@ -67,17 +15,30 @@ const LABELS: Record<Arch, string> = {
   "linux-x64": "Linux · x64",
   "linux-arm64": "Linux · arm64",
   "windows-x64": "Windows · x64",
+  "windows-arm64": "Windows · arm64",
 };
 
-function detect(): Arch {
+interface NavigatorWithUserAgentData extends Navigator {
+  userAgentData?: {
+    getHighEntropyValues(hints: string[]): Promise<UserAgentArchitecture>;
+  };
+}
+
+async function detect(): Promise<Arch> {
   if (typeof navigator === "undefined") return "macos-arm64";
-  const ua = navigator.userAgent.toLowerCase();
-  if (ua.includes("win")) return "windows-x64";
-  if (ua.includes("linux")) {
-    if (ua.includes("aarch64") || ua.includes("arm64")) return "linux-arm64";
-    return "linux-x64";
+  const browserNavigator = navigator as NavigatorWithUserAgentData;
+  let architecture: UserAgentArchitecture | undefined;
+  if (navigator.userAgent.toLowerCase().includes("win")) {
+    try {
+      architecture = await browserNavigator.userAgentData?.getHighEntropyValues([
+        "architecture",
+        "bitness",
+      ]);
+    } catch {
+      // The manual platform buttons and frozen-UA fallback remain available.
+    }
   }
-  return "macos-arm64";
+  return detectFromBrowserSignals(navigator.userAgent, architecture);
 }
 
 interface Props {
@@ -89,7 +50,15 @@ interface Props {
 export function InstallBinary({ copyLabel, copiedLabel, verifyHeading = "Verify checksum" }: Props) {
   const [arch, setArch] = useState<Arch>("macos-arm64");
 
-  useEffect(() => { setArch(detect()); }, []);
+  useEffect(() => {
+    let active = true;
+    void detect().then((detected) => {
+      if (active) setArch(detected);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   return (
     <div>

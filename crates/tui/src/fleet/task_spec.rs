@@ -11,11 +11,12 @@ use codewhale_protocol::fleet::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 use super::ledger::FleetLedger;
 
 const MAX_SCORER_READ_BYTES: u64 = 1_000_000;
+const MAX_FLEET_ID_BYTES: usize = 128;
+const MAX_FLEET_NAME_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FleetTaskSpecDocument {
@@ -72,8 +73,14 @@ pub struct FleetTaskVerificationInput {
     pub run_id: FleetRunId,
     pub task_id: String,
     pub worker_id: String,
+    /// Durable lease generation whose result is being verified.
+    pub attempt: u32,
     pub exit_code: Option<i32>,
     pub artifacts: Vec<FleetArtifactRef>,
+    /// Resolved-route snapshot to persist on the receipt (#3154).
+    pub resolved_route: Option<FleetResolvedRoute>,
+    /// Effective worker authority snapshot to persist on the receipt (#3211).
+    pub effective_permissions: Option<FleetEffectivePermissions>,
 }
 
 #[derive(Debug, Clone)]
@@ -110,15 +117,11 @@ pub fn validate_task_spec_document(doc: &FleetTaskSpecDocument) -> Result<()> {
     }
     let mut ids = BTreeSet::new();
     for task in &doc.tasks {
-        if task.id.trim().is_empty() {
-            bail!("fleet task id cannot be empty");
-        }
+        validate_fleet_identity("task id", &task.id)?;
         if !ids.insert(task.id.clone()) {
             bail!("duplicate fleet task id {}", task.id);
         }
-        if task.name.trim().is_empty() {
-            bail!("fleet task {} name cannot be empty", task.id);
-        }
+        validate_fleet_name(&format!("task {} name", task.id), &task.name)?;
         if task.instructions.trim().is_empty() {
             bail!("fleet task {} instructions cannot be empty", task.id);
         }
@@ -127,8 +130,96 @@ pub fn validate_task_spec_document(doc: &FleetTaskSpecDocument) -> Result<()> {
         {
             bail!("fleet task {} objective cannot be empty", task.id);
         }
+        validate_worker_profile(&task.id, task.worker.as_ref())?;
         validate_tags(&task.id, &task.tags)?;
         validate_workspace_requirements(task)?;
+    }
+    let mut worker_ids = BTreeSet::new();
+    for worker in &doc.workers {
+        validate_fleet_identity("worker id", &worker.id)?;
+        if !worker_ids.insert(worker.id.clone()) {
+            bail!("duplicate fleet worker id {}", worker.id);
+        }
+        validate_fleet_name(&format!("worker {} name", worker.id), &worker.name)?;
+    }
+    Ok(())
+}
+
+fn validate_fleet_identity(field: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("fleet {field} cannot be empty");
+    }
+    if value.len() > MAX_FLEET_ID_BYTES || !value.chars().all(is_worker_token_char) {
+        bail!(
+            "fleet {field} must be a simple ASCII token no longer than {MAX_FLEET_ID_BYTES} bytes"
+        );
+    }
+    Ok(())
+}
+
+fn validate_fleet_name(field: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        bail!("fleet {field} cannot be empty");
+    }
+    if value.len() > MAX_FLEET_NAME_BYTES || value.chars().any(char::is_control) {
+        bail!(
+            "fleet {field} must be one printable line no longer than {MAX_FLEET_NAME_BYTES} bytes"
+        );
+    }
+    Ok(())
+}
+
+fn validate_worker_profile(task_id: &str, worker: Option<&FleetTaskWorkerProfile>) -> Result<()> {
+    let Some(worker) = worker else {
+        return Ok(());
+    };
+    validate_worker_token(
+        task_id,
+        "worker.agent_profile",
+        worker.agent_profile.as_deref(),
+    )?;
+    validate_worker_token(task_id, "worker.loadout", worker.loadout.as_deref())?;
+    validate_worker_token(task_id, "worker.model_class", worker.model_class.as_deref())?;
+    validate_worker_model(task_id, worker.model.as_deref())?;
+    Ok(())
+}
+
+fn validate_worker_token(task_id: &str, field: &str, value: Option<&str>) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        bail!("fleet task {task_id} {field} cannot be empty");
+    }
+    if trimmed != value || !trimmed.chars().all(is_worker_token_char) {
+        bail!(
+            "fleet task {task_id} {field} must be a simple token, not a path or provider/model id"
+        );
+    }
+    Ok(())
+}
+
+fn is_worker_token_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.')
+}
+
+fn validate_worker_model(task_id: &str, value: Option<&str>) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        bail!("fleet task {task_id} worker.model cannot be empty");
+    }
+    if trimmed != value
+        || !trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_graphic() && !matches!(ch, '=' | '\'' | '"'))
+    {
+        bail!(
+            "fleet task {task_id} worker.model must be a visible model id without whitespace or secrets"
+        );
     }
     Ok(())
 }
@@ -157,11 +248,10 @@ pub fn write_fleet_artifact_ref(
     }
     std::fs::write(&abs_path, contents)
         .with_context(|| format!("writing fleet artifact {}", abs_path.display()))?;
-    let digest = Sha256::digest(contents);
     Ok(FleetArtifactRef {
         kind,
         path: rel_path,
-        checksum: Some(format!("sha256:{digest:x}")),
+        checksum: Some(format!("sha256:{}", crate::hashing::sha256_hex(contents))),
         mime_type: mime_type.map(str::to_string),
         size_bytes: Some(contents.len() as u64),
     })
@@ -186,12 +276,16 @@ pub fn verify_task_result(
             "run the configured scorer command to finalize this receipt",
         ),
         Some(FleetScorerSpec::CodeWhaleVerifierPrompt { .. }) => partial(
-            "CodeWhale verifier prompt configured",
+            "Codewhale verifier prompt configured",
             "run a verifier prompt pass to finalize this receipt",
         ),
         Some(FleetScorerSpec::Manual) => partial(
             "manual scorer configured",
             "manual verification is required to finalize this receipt",
+        ),
+        None if !has_verifiable_artifact(input) => partial(
+            "no scorer configured and no verifiable artifacts recorded",
+            "worker exited successfully but produced no verifiable output",
         ),
         None => partial(
             "no scorer configured",
@@ -200,8 +294,7 @@ pub fn verify_task_result(
     }
 }
 
-pub fn record_verification_receipt(
-    ledger: &FleetLedger,
+pub fn prepare_verification_receipt(
     workspace: &Path,
     input: &FleetTaskVerificationInput,
     verification: FleetTaskVerification,
@@ -210,6 +303,7 @@ pub fn record_verification_receipt(
         "run_id": input.run_id.0.clone(),
         "task_id": input.task_id.clone(),
         "worker_id": input.worker_id.clone(),
+        "attempt": input.attempt,
         "result": verification.result.clone(),
         "failure_kind": verification.failure_kind.clone(),
         "score": verification.score.clone(),
@@ -218,13 +312,22 @@ pub fn record_verification_receipt(
     });
     let bytes =
         serde_json::to_vec_pretty(&evidence).context("serializing fleet receipt evidence")?;
+    // Content-address the evidence as well as namespacing it by attempt. A
+    // stale verifier may finish after a retry has started; it is allowed to
+    // leave an orphaned evidence file, but it must never overwrite the file a
+    // winning attempt's durable receipt references.
+    let evidence_hash = crate::hashing::sha256_hex(&bytes);
+    let filename = format!(
+        "verification-receipt-attempt-{:010}-{}.json",
+        input.attempt, evidence_hash
+    );
     let receipt_artifact = write_fleet_artifact_ref(
         workspace,
         &input.run_id,
         &input.task_id,
         &input.worker_id,
         FleetArtifactKind::Receipt,
-        "verification-receipt.json",
+        &filename,
         &bytes,
         Some("application/json"),
     )?;
@@ -234,12 +337,26 @@ pub fn record_verification_receipt(
         run_id: input.run_id.clone(),
         task_id: input.task_id.clone(),
         worker_id: input.worker_id.clone(),
+        attempt: Some(input.attempt),
+        terminal_seq: None,
         completed_at: timestamp(),
         result: verification.result,
         failure_kind: verification.failure_kind,
         artifacts,
         score: Some(verification.score),
+        resolved_route: input.resolved_route.clone(),
+        effective_permissions: input.effective_permissions.clone(),
     };
+    Ok(receipt)
+}
+
+pub fn record_verification_receipt(
+    ledger: &FleetLedger,
+    workspace: &Path,
+    input: &FleetTaskVerificationInput,
+    verification: FleetTaskVerification,
+) -> Result<FleetReceipt> {
+    let receipt = prepare_verification_receipt(workspace, input, verification)?;
     ledger.record_receipt(receipt.clone())?;
     Ok(receipt)
 }
@@ -439,6 +556,15 @@ fn fail(
     }
 }
 
+fn has_verifiable_artifact(input: &FleetTaskVerificationInput) -> bool {
+    input.artifacts.iter().any(|artifact| {
+        !matches!(
+            artifact.kind,
+            FleetArtifactKind::Log | FleetArtifactKind::Receipt
+        )
+    })
+}
+
 #[derive(Debug)]
 struct EvidenceReadError {
     failure_kind: FleetTaskFailureKind,
@@ -540,7 +666,11 @@ mod tests {
             objective: Some(format!("Verify {id}")),
             instructions: format!("do {id}"),
             worker: Some(FleetTaskWorkerProfile {
+                agent_profile: None,
                 role: Some("reviewer".to_string()),
+                loadout: None,
+                model_class: None,
+                model: None,
                 tool_profile: Some("read-only".to_string()),
                 tools: vec!["git".to_string()],
                 capabilities: vec!["rust".to_string()],
@@ -601,6 +731,136 @@ mod tests {
     }
 
     #[test]
+    fn fleet_task_spec_document_parses_worker_profile_loadout_intent() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("fleet-profile-task.json");
+        let doc = json!({
+            "name": "profile loadout smoke",
+            "tasks": [{
+                "id": "review",
+                "name": "review",
+                "instructions": "review the patch",
+                "worker": {
+                    "profile": "adversarial_reviewer",
+                    "role": "reviewer",
+                    "loadout": "auto",
+                    "model_class": "balanced",
+                    "model": "deepseek-v4-pro",
+                    "tool_profile": "read-only",
+                    "tools": ["read_file", "grep_files"],
+                    "capabilities": ["rust"]
+                }
+            }]
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+
+        let parsed = load_task_spec_document(&path).unwrap();
+        let worker = parsed.tasks[0].worker.as_ref().unwrap();
+
+        assert_eq!(
+            worker.agent_profile.as_deref(),
+            Some("adversarial_reviewer")
+        );
+        assert_eq!(worker.role.as_deref(), Some("reviewer"));
+        assert_eq!(worker.loadout.as_deref(), Some("auto"));
+        assert_eq!(worker.model_class.as_deref(), Some("balanced"));
+        assert_eq!(worker.model.as_deref(), Some("deepseek-v4-pro"));
+        assert_eq!(worker.tool_profile.as_deref(), Some("read-only"));
+    }
+
+    #[test]
+    fn fleet_task_spec_rejects_unsafe_worker_profile_intent_tokens() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("unsafe-profile-task.json");
+        let doc = json!({
+            "tasks": [{
+                "id": "review",
+                "name": "review",
+                "instructions": "review the patch",
+                "worker": {
+                    "profile": "../secrets",
+                    "loadout": "openrouter/deepseek",
+                    "model_class": "",
+                    "model": "deepseek/deepseek-v4-pro"
+                }
+            }]
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+
+        let err = load_task_spec_document(&path).unwrap_err().to_string();
+
+        assert!(
+            err.contains("worker.agent_profile must be a simple token"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn fleet_task_spec_rejects_secret_like_worker_model() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("unsafe-worker-model.json");
+        let doc = json!({
+            "tasks": [{
+                "id": "review",
+                "name": "review",
+                "instructions": "review the patch",
+                "worker": {
+                    "model": "deepseek-v4-pro api_key=secret"
+                }
+            }]
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+
+        let err = load_task_spec_document(&path).unwrap_err().to_string();
+
+        assert!(
+            err.contains("worker.model must be a visible model id"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn fleet_task_spec_rejects_unbounded_or_multiline_task_and_worker_identities() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("unsafe-identities.json");
+        let doc = json!({
+            "workers": [{
+                "id": "worker\r\nforged",
+                "name": "forged worker",
+                "host": {"kind": "local"}
+            }],
+            "tasks": [{
+                "id": "review",
+                "name": "review",
+                "instructions": "review the patch"
+            }]
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+
+        let err = load_task_spec_document(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("worker id must be a simple ASCII token"),
+            "unexpected error: {err}"
+        );
+
+        let mut doc = task("review", None);
+        doc.id = "a".repeat(MAX_FLEET_ID_BYTES + 1);
+        let err = validate_task_spec_document(&FleetTaskSpecDocument {
+            name: None,
+            labels: BTreeMap::new(),
+            security_policy: None,
+            workers: Vec::new(),
+            tasks: vec![doc],
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("task id must be a simple ASCII token"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn fleet_task_spec_artifact_refs_are_bounded_paths() {
         let tmp = TempDir::new().unwrap();
         let artifact = write_fleet_artifact_ref(
@@ -632,8 +892,11 @@ mod tests {
             run_id: FleetRunId::from("run-1"),
             task_id: "task-a".to_string(),
             worker_id: "worker-1".to_string(),
+            attempt: 1,
             exit_code: Some(0),
             artifacts: vec![],
+            resolved_route: None,
+            effective_permissions: None,
         };
 
         let pass = verify_task_result(
@@ -676,6 +939,17 @@ mod tests {
             &input,
         );
         assert_eq!(manual.result, FleetTaskResult::Partial);
+
+        let no_scorer_empty = verify_task_result(tmp.path(), &task("unscored", None), &input);
+        assert_eq!(no_scorer_empty.result, FleetTaskResult::Partial);
+        assert!(
+            no_scorer_empty
+                .score
+                .notes
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no verifiable output")
+        );
 
         let failed = verify_task_result(
             tmp.path(),
@@ -727,8 +1001,22 @@ mod tests {
             run_id: FleetRunId::from("run-1"),
             task_id: "task-a".to_string(),
             worker_id: "worker-1".to_string(),
+            attempt: 3,
             exit_code: Some(1),
             artifacts: vec![log],
+            resolved_route: None,
+            effective_permissions: Some(FleetEffectivePermissions {
+                write: false,
+                network: false,
+                shell: "read_only".to_string(),
+                tool_scope: "explicit".to_string(),
+                tools: vec!["read_file".to_string()],
+                background: true,
+                max_spawn_depth: 0,
+                profile_id: None,
+                profile_origin: None,
+                source: "worker_runtime_profile".to_string(),
+            }),
         };
         let verification = verify_task_result(
             tmp.path(),
@@ -741,15 +1029,65 @@ mod tests {
 
         assert_eq!(receipt.result, FleetTaskResult::Fail);
         assert_eq!(receipt.failure_kind, Some(FleetTaskFailureKind::Task));
+        assert_eq!(receipt.attempt, Some(3));
+        assert_eq!(receipt.terminal_seq, None);
+        assert_eq!(receipt.effective_permissions, input.effective_permissions);
         assert_eq!(receipt.artifacts.len(), 2);
         assert!(matches!(
             receipt.artifacts.last().unwrap().kind,
             FleetArtifactKind::Receipt
         ));
+        assert!(
+            receipt
+                .artifacts
+                .last()
+                .unwrap()
+                .path
+                .to_string_lossy()
+                .contains("verification-receipt-attempt-0000000003-")
+        );
         let state = ledger.rebuild_state().unwrap();
         assert_eq!(
             state.receipts["run-1:task-a"].failure_kind,
             Some(FleetTaskFailureKind::Task)
         );
+    }
+
+    #[test]
+    fn verification_evidence_is_attempt_and_content_addressed() {
+        let tmp = TempDir::new().unwrap();
+        let mut input = FleetTaskVerificationInput {
+            run_id: FleetRunId::from("run-1"),
+            task_id: "task-a".to_string(),
+            worker_id: "worker-1".to_string(),
+            attempt: 1,
+            exit_code: Some(1),
+            artifacts: Vec::new(),
+            resolved_route: None,
+            effective_permissions: None,
+        };
+        let scorer = task("task-a", Some(FleetScorerSpec::ExitCode));
+        let stale_verification = verify_task_result(tmp.path(), &scorer, &input);
+        let stale = prepare_verification_receipt(tmp.path(), &input, stale_verification).unwrap();
+
+        input.attempt = 2;
+        input.exit_code = Some(0);
+        let winning_verification = verify_task_result(tmp.path(), &scorer, &input);
+        let winning =
+            prepare_verification_receipt(tmp.path(), &input, winning_verification).unwrap();
+
+        let stale_path = &stale.artifacts.last().unwrap().path;
+        let winning_path = &winning.artifacts.last().unwrap().path;
+        assert_ne!(stale_path, winning_path);
+        assert!(stale_path.to_string_lossy().contains("attempt-0000000001-"));
+        assert!(
+            winning_path
+                .to_string_lossy()
+                .contains("attempt-0000000002-")
+        );
+        assert!(tmp.path().join(stale_path).is_file());
+        assert!(tmp.path().join(winning_path).is_file());
+        assert_eq!(stale.result, FleetTaskResult::Fail);
+        assert_eq!(winning.result, FleetTaskResult::Pass);
     }
 }

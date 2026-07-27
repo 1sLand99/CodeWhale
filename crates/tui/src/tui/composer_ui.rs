@@ -127,7 +127,7 @@ pub(crate) fn is_word_cursor_modifier(modifiers: KeyModifiers) -> bool {
 #[cfg(target_os = "macos")]
 pub(crate) fn normalize_macos_modifiers(modifiers: KeyModifiers) -> KeyModifiers {
     // Strip SUPER and add CONTROL so that exact modifier equality checks
-    // (e.g. `modifiers == KeyModifiers::CONTROL` in Ctrl+S stashing) work
+    // (e.g. `modifiers == KeyModifiers::CONTROL` in Ctrl+G/Ctrl+S stashing) work
     // correctly after normalization.
     if modifiers.contains(KeyModifiers::SUPER) {
         (modifiers - KeyModifiers::SUPER) | KeyModifiers::CONTROL
@@ -171,6 +171,10 @@ pub(crate) fn is_composer_newline_key(key: KeyEvent) -> bool {
         }
         _ => false,
     }
+}
+
+pub(crate) fn is_forced_submit_key(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Enter) && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 pub(crate) fn handle_history_search_key(app: &mut App, key: KeyEvent) {

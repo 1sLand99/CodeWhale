@@ -28,6 +28,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::tui::app::{App, MentionCompletionCache};
+use crate::tui::git_mention::{self, GitMentionCache, GitMentionKind};
+use crate::tui::mention_completion::{MentionDiscoveryBehavior, MentionDiscoveryKey};
 use crate::working_set::Workspace;
 
 /// Maximum number of `@`-mentions whose contents are inlined into one user
@@ -43,8 +45,8 @@ pub const MAX_DIRECTORY_MENTION_ENTRIES: usize = 80;
 /// the cost of walking large workspaces; subsequent keystrokes narrow further.
 const FILE_MENTION_COMPLETION_LIMIT: usize = 64;
 
-/// Compact composer preview row for local context that will be included or
-/// skipped when the user submits the current input.
+/// Compact composer preview row for local context. `included=false` also
+/// covers lexical `@` mentions whose exact inclusion is resolved on send.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileMentionPreview {
     pub kind: String,
@@ -85,6 +87,8 @@ pub enum ContextReferenceKind {
     Unsupported,
     MediaMention,
     MediaAttachment,
+    /// `@git` / `@diff` — curated git context rather than a path (#4067).
+    GitContext,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,6 +146,7 @@ pub fn partial_file_mention_at_cursor(input: &str, cursor_chars: usize) -> Optio
 /// Cwd-aware completion entry point. Shares its walker with the future
 /// Ctrl+P fuzzy picker (#97); see [`Workspace::completions`] for the
 /// ranking + display rules.
+#[cfg(test)]
 pub fn find_file_mention_completions(
     workspace: &Workspace,
     partial: &str,
@@ -162,36 +167,6 @@ pub fn find_file_mention_completions(
     entries
 }
 
-/// Deterministic directory-browser completion entry point. This deliberately
-/// skips frecency so the popup remains stable for users navigating deep trees.
-pub fn find_file_mention_browser_completions(
-    workspace: &Workspace,
-    partial: &str,
-    limit: usize,
-) -> Vec<String> {
-    let entries = workspace.browser_completions(partial, limit);
-    tracing::debug!(
-        target: "codewhale_tui::file_mention",
-        partial = %partial,
-        workspace = %workspace.root.display(),
-        cwd = ?std::env::current_dir().ok(),
-        match_count = entries.len(),
-        "file mention browser completion walk",
-    );
-    entries
-}
-
-/// Build a `Workspace` for the running app: anchors at `app.workspace` and
-/// captures the process CWD so the resolver and completion walker honor the
-/// user's launch directory when it differs from `--workspace`.
-fn workspace_for_app(app: &App) -> Workspace {
-    Workspace::with_cwd_and_depth(
-        app.workspace.clone(),
-        std::env::current_dir().ok(),
-        app.mention_walk_depth,
-    )
-}
-
 /// Resolve the `@`-mention completion popup contents for the current
 /// composer state. Returns an empty `Vec` when:
 ///
@@ -207,21 +182,62 @@ fn workspace_for_app(app: &App) -> Workspace {
 #[must_use]
 pub fn visible_mention_menu_entries(app: &mut App, limit: usize) -> Vec<String> {
     if app.mention_menu_hidden {
+        app.composer.mention_discovery.cancel();
         return Vec::new();
     }
     let Some((_byte_start, partial)) =
         partial_file_mention_at_cursor(&app.input, app.cursor_position)
     else {
+        app.composer.mention_discovery.cancel();
         return Vec::new();
     };
     if limit == 0 {
+        app.composer.mention_discovery.cancel();
         return Vec::new();
     }
 
+    mention_menu_entries(app, &partial, limit).0
+}
+
+/// Drain a completed discovery result without waiting. The event loop calls
+/// this once per tick so a finished scan repaints the popup even when the user
+/// has stopped typing.
+pub(crate) fn poll_background_mention_discovery(app: &mut App) -> bool {
+    if app.composer.mention_discovery.poll() {
+        app.composer.mention_completion_cache = None;
+        return true;
+    }
+    false
+}
+
+/// Return `(entries, ready)`. `ready = false` means discovery is still in the
+/// background; callers must not misreport that temporary empty result as "no
+/// matches".
+fn mention_menu_entries(app: &mut App, partial: &str, limit: usize) -> (Vec<String>, bool) {
+    if poll_background_mention_discovery(app) {
+        app.needs_redraw = true;
+    }
+
     let workspace = app.workspace.clone();
-    let cwd = std::env::current_dir().ok();
+    let cwd = app.composer.mention_cwd.clone();
     let walk_depth = app.mention_walk_depth;
     let behavior = app.mention_menu_behavior.clone();
+    let follow_links = app.workspace_follow_symlinks;
+    let discovery_key = if behavior == "browser" {
+        MentionDiscoveryKey::browser(
+            workspace.clone(),
+            cwd.clone(),
+            walk_depth,
+            follow_links,
+            partial.to_string(),
+        )
+    } else {
+        MentionDiscoveryKey::fuzzy(workspace.clone(), cwd.clone(), walk_depth, follow_links)
+    };
+    app.composer
+        .mention_discovery
+        .ensure_requested(discovery_key.clone());
+
     if let Some(ref cache) = app.composer.mention_completion_cache
         && cache.workspace == workspace
         && cache.cwd == cwd
@@ -229,28 +245,82 @@ pub fn visible_mention_menu_entries(app: &mut App, limit: usize) -> Vec<String> 
         && cache.limit == limit
         && cache.walk_depth == walk_depth
         && cache.behavior == behavior
+        && cache.follow_links == follow_links
     {
-        return cache.entries.clone();
+        return (cache.entries.clone(), true);
     }
 
-    let ws = Workspace::with_cwd_and_depth(workspace.clone(), cwd.clone(), walk_depth);
-    let entries = if behavior == "browser" {
-        find_file_mention_browser_completions(&ws, &partial, limit)
-    } else {
-        find_file_mention_completions(&ws, &partial, limit)
+    let Some(candidates) = app
+        .composer
+        .mention_discovery
+        .cached_entries(&discovery_key)
+    else {
+        return (Vec::new(), false);
     };
+    let entries = match &discovery_key.behavior {
+        MentionDiscoveryBehavior::Fuzzy => {
+            let ranked = crate::working_set::rank_completion_candidates(candidates, partial, limit);
+            super::file_frecency::rerank_by_frecency(ranked)
+        }
+        MentionDiscoveryBehavior::Browser { .. } => {
+            candidates.iter().take(limit).cloned().collect()
+        }
+    };
+
+    let entries = with_git_mention_entries(entries, partial, limit);
 
     app.composer.mention_completion_cache = Some(MentionCompletionCache {
         workspace,
         cwd,
-        partial,
+        partial: partial.to_string(),
         limit,
         walk_depth,
         behavior,
+        follow_links,
         entries: entries.clone(),
     });
 
-    entries
+    (entries, true)
+}
+
+/// Prepend the `@git` / `@diff` tokens that prefix-match `partial` to the path
+/// completions, so curated git context is discoverable from the same menu as
+/// files (#4067). They lead because a two-entry prefix match is what the user
+/// meant when they typed `gi` or `di`, and paths still fill the rest.
+///
+/// A bare `@` is deliberately left alone: that menu is the file picker, and
+/// pushing two fixed tokens above every path would cost a slot on every
+/// mention the user makes. The tokens appear as soon as a matching character
+/// is typed.
+fn with_git_mention_entries(entries: Vec<String>, partial: &str, limit: usize) -> Vec<String> {
+    // `mention_menu_limit = 0` is a documented way to disable the popup
+    // entirely. The git tokens are menu entries like any other and must
+    // respect the same cap, or setting 0 would still pop a one-entry menu.
+    if limit == 0 {
+        return Vec::new();
+    }
+    let needle = partial.trim().to_lowercase();
+    if needle.is_empty() {
+        return entries;
+    }
+    let matching: Vec<String> = GitMentionKind::iter_all()
+        .filter(|kind| kind.token().starts_with(&needle))
+        .map(|kind| kind.token().to_string())
+        .collect();
+    if matching.is_empty() {
+        return entries;
+    }
+    let mut combined = matching;
+    combined.truncate(limit);
+    for entry in entries {
+        if combined.len() >= limit {
+            break;
+        }
+        if !combined.contains(&entry) {
+            combined.push(entry);
+        }
+    }
+    combined
 }
 
 /// Apply the currently selected `@`-mention popup entry to the composer
@@ -293,12 +363,10 @@ pub fn try_autocomplete_file_mention(app: &mut App) -> bool {
     else {
         return false;
     };
-    let ws = workspace_for_app(app);
-    let candidates = if app.mention_menu_behavior == "browser" {
-        find_file_mention_browser_completions(&ws, &partial, FILE_MENTION_COMPLETION_LIMIT)
-    } else {
-        find_file_mention_completions(&ws, &partial, FILE_MENTION_COMPLETION_LIMIT)
-    };
+    let (candidates, ready) = mention_menu_entries(app, &partial, FILE_MENTION_COMPLETION_LIMIT);
+    if !ready {
+        return true;
+    }
     if candidates.is_empty() {
         app.status_message = Some(no_file_mention_matches_status(
             &partial,
@@ -406,40 +474,104 @@ pub fn longest_common_prefix<'a>(values: &[&'a str]) -> &'a str {
 /// `cwd` when `workspace.join(path)` doesn't exist, so the user's mental
 /// anchor (their shell's pwd) wins when it diverges from `--workspace`.
 /// Pass `None` to disable the cwd pass entirely (workspace-only).
+///
+/// Resolution here is deliberately exact. Fuzzy discovery belongs in the
+/// background completion popup; silently resolving a manually typed basename
+/// would require a tree walk on submit and could attach an arbitrary same-name
+/// file from a nested directory.
+/// Convenience wrapper that allocates a throwaway cache. Test-only: the real
+/// send paths share one cache across the references and payload passes.
+#[cfg(test)]
 pub fn user_request_with_file_mentions(
     input: &str,
     workspace: &Path,
     cwd: Option<PathBuf>,
 ) -> String {
-    let Some(context) = local_context_from_file_mentions(input, workspace, cwd) else {
+    user_request_with_file_mentions_cached(input, workspace, cwd, &mut GitMentionCache::default())
+}
+
+pub fn user_request_with_file_mentions_cached(
+    input: &str,
+    workspace: &Path,
+    cwd: Option<PathBuf>,
+    git_cache: &mut GitMentionCache,
+) -> String {
+    let Some(context) = local_context_from_file_mentions(input, workspace, cwd, git_cache) else {
         return input.to_string();
     };
     format!("{input}\n\n---\n\nLocal context from @mentions:\n{context}")
 }
 
 #[must_use]
-pub fn pending_context_previews(
-    input: &str,
-    workspace: &Path,
-    cwd: Option<PathBuf>,
-) -> Vec<FileMentionPreview> {
-    context_references_from_input(input, workspace, cwd)
+pub fn pending_context_previews(input: &str) -> Vec<FileMentionPreview> {
+    let mut previews = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for mention in extract_file_mentions(input)
         .into_iter()
-        .map(|reference| FileMentionPreview {
-            kind: reference.badge,
-            label: reference.label,
-            detail: reference.detail,
-            included: reference.included,
-            removable: reference.source == ContextReferenceSource::Attachment,
-        })
-        .collect()
+        .take(MAX_FILE_MENTIONS_PER_MESSAGE)
+    {
+        if !seen.insert(mention.clone()) {
+            continue;
+        }
+        // Composer previews stay lexical (no git subprocess from the render
+        // loop, same rule as #4365 for path stats); the payload is resolved
+        // once at submit time.
+        if let Some(kind) = git_mention::git_mention_kind(&mention) {
+            previews.push(FileMentionPreview {
+                kind: "git".to_string(),
+                label: kind.label().to_string(),
+                detail: Some("resolved on send".to_string()),
+                included: false,
+                removable: false,
+            });
+            continue;
+        }
+        let media = is_media_path(Path::new(&mention));
+        previews.push(FileMentionPreview {
+            kind: if media { "media" } else { "mention" }.to_string(),
+            label: mention,
+            detail: Some(if media {
+                "use /attach for media bytes".to_string()
+            } else {
+                "resolved on send".to_string()
+            }),
+            // Lexical preview deliberately does not stat the path while the
+            // user types. Exact inclusion/missing metadata is resolved once,
+            // at submit time, rather than from the render loop (#4365).
+            included: false,
+            removable: false,
+        });
+    }
+
+    for attachment in extract_media_attachment_references(input) {
+        previews.push(FileMentionPreview {
+            kind: attachment.kind,
+            label: attachment.path,
+            detail: Some("attached media".to_string()),
+            included: true,
+            removable: true,
+        });
+    }
+    previews
 }
 
+/// Convenience wrapper that allocates a throwaway cache. Test-only, as above.
+#[cfg(test)]
 #[must_use]
 pub fn context_references_from_input(
     input: &str,
     workspace: &Path,
     cwd: Option<PathBuf>,
+) -> Vec<ContextReference> {
+    context_references_from_input_cached(input, workspace, cwd, &mut GitMentionCache::default())
+}
+
+#[must_use]
+pub fn context_references_from_input_cached(
+    input: &str,
+    workspace: &Path,
+    cwd: Option<PathBuf>,
+    git_cache: &mut GitMentionCache,
 ) -> Vec<ContextReference> {
     let mut references = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -449,7 +581,37 @@ pub fn context_references_from_input(
         .into_iter()
         .take(MAX_FILE_MENTIONS_PER_MESSAGE)
     {
-        let (path, display_path, exists) = match ws.resolve(&mention) {
+        // Git mentions resolve against the working tree, not the path index,
+        // so the inspector reports their real size and budget (#4067).
+        if let Some(kind) = git_mention::git_mention_kind(&mention) {
+            let payload = git_cache.resolve(kind, workspace).clone();
+            let detail = match payload.unavailable_reason.as_deref() {
+                Some(reason) => format!("{}, {reason}", kind.label()),
+                None if payload.truncated => format!(
+                    "{}, {} bytes truncated at {} budget",
+                    kind.label(),
+                    payload.bytes,
+                    kind.byte_budget()
+                ),
+                None => format!("{}, {} bytes", kind.label(), payload.bytes),
+            };
+            let reference = ContextReference {
+                kind: ContextReferenceKind::GitContext,
+                source: ContextReferenceSource::AtMention,
+                badge: "git".to_string(),
+                label: kind.token().to_string(),
+                target: workspace.display().to_string(),
+                included: payload.unavailable_reason.is_none(),
+                expanded: false,
+                detail: Some(detail),
+            };
+            if seen.insert(format!("git-mention:{}", kind.token())) {
+                references.push(reference);
+            }
+            continue;
+        }
+
+        let (path, display_path, exists) = match ws.resolve_exact(&mention) {
             Ok(path) => {
                 let display = path.display().to_string();
                 (path, display, true)
@@ -619,6 +781,7 @@ fn local_context_from_file_mentions(
     input: &str,
     workspace: &Path,
     cwd: Option<PathBuf>,
+    git_cache: &mut GitMentionCache,
 ) -> Option<String> {
     let mentions = extract_file_mentions(input);
     if mentions.is_empty() {
@@ -630,12 +793,22 @@ fn local_context_from_file_mentions(
     let ws = Workspace::with_cwd(workspace.to_path_buf(), cwd);
 
     for mention in mentions.into_iter().take(MAX_FILE_MENTIONS_PER_MESSAGE) {
-        // `Workspace::resolve` already returns absolute paths when the root
+        // `@git` / `@diff` resolve to curated git context, not to a path, so
+        // they short-circuit before any workspace path resolution (#4067).
+        if let Some(kind) = git_mention::git_mention_kind(&mention) {
+            if !seen.insert(format!("git-mention:{}", kind.token())) {
+                continue;
+            }
+            blocks.push(git_cache.resolve(kind, workspace).block.clone());
+            continue;
+        }
+
+        // `Workspace::resolve_exact` already returns absolute paths when the root
         // is absolute (TUI always runs from an absolute workspace), so we
         // skip `canonicalize()` here — it's per-mention I/O on the
         // message-send hot path. Accept the rare symlink-aliasing dedup
         // miss as the cost of avoiding a syscall (Gemini code-review).
-        let (path, display_path, exists) = match ws.resolve(&mention) {
+        let (path, display_path, exists) = match ws.resolve_exact(&mention) {
             Ok(p) => {
                 let d = p.display().to_string();
                 (p, d, true)
@@ -989,23 +1162,18 @@ mod tests {
     }
 
     #[test]
-    fn pending_context_preview_marks_included_and_missing_mentions() {
-        let tmp = TempDir::new().expect("tempdir");
-        std::fs::write(tmp.path().join("guide.md"), "hello").expect("write");
-
-        let previews = pending_context_previews(
-            "read @guide.md and @missing.md",
-            tmp.path(),
-            Some(tmp.path().to_path_buf()),
-        );
+    fn pending_context_preview_is_lexical_and_does_not_probe_paths() {
+        let previews = pending_context_previews("read @guide.md and @missing.md");
 
         assert_eq!(previews.len(), 2);
-        assert_eq!(previews[0].kind, "file");
+        assert_eq!(previews[0].kind, "mention");
         assert_eq!(previews[0].label, "guide.md");
-        assert!(previews[0].included);
-        assert_eq!(previews[1].kind, "missing");
+        assert!(!previews[0].included);
+        assert_eq!(previews[0].detail.as_deref(), Some("resolved on send"));
+        assert_eq!(previews[1].kind, "mention");
         assert_eq!(previews[1].label, "missing.md");
         assert!(!previews[1].included);
+        assert_eq!(previews[1].detail.as_deref(), Some("resolved on send"));
     }
 
     #[test]
@@ -1015,7 +1183,7 @@ mod tests {
         let attached = tmp.path().join("photo.png").display().to_string();
         let input = format!("inspect @photo.png\n[Attached image: {attached}]");
 
-        let previews = pending_context_previews(&input, tmp.path(), Some(tmp.path().to_path_buf()));
+        let previews = pending_context_previews(&input);
 
         assert!(
             previews
@@ -1028,6 +1196,25 @@ mod tests {
                 .iter()
                 .any(|item| item.kind == "image" && item.included),
             "/attach media should be included: {previews:?}"
+        );
+    }
+
+    #[test]
+    fn manually_typed_basename_does_not_fuzzy_attach_nested_file() {
+        let tmp = TempDir::new().expect("tempdir");
+        let nested = tmp.path().join("nested");
+        std::fs::create_dir_all(&nested).expect("mkdir");
+        std::fs::write(nested.join("guide.md"), "nested secret").expect("write");
+
+        let content = user_request_with_file_mentions("read @guide.md", tmp.path(), None);
+
+        assert!(
+            content.contains("<missing-file mention=\"@guide.md\""),
+            "a manually typed basename should remain exact: {content}",
+        );
+        assert!(
+            !content.contains("nested secret"),
+            "exact resolution must not silently attach a fuzzy nested match: {content}",
         );
     }
 
@@ -1098,5 +1285,247 @@ mod tests {
             !text.contains('\u{FFFD}'),
             "truncated text must not contain replacement characters; got: {text:?}",
         );
+    }
+    // ---------------------------------------------------------------------
+    //  #4067 — @git / @diff composer mentions
+    // ---------------------------------------------------------------------
+
+    fn init_test_repo(dir: &Path) {
+        for args in [
+            vec!["init", "--initial-branch=main"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+        ] {
+            let out = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(dir)
+                .output()
+                .expect("git available in tests");
+            assert!(out.status.success(), "git {args:?} failed");
+        }
+    }
+
+    fn commit_test_repo(dir: &Path) {
+        for args in [vec!["add", "-A"], vec!["commit", "-m", "initial"]] {
+            std::process::Command::new("git")
+                .args(&args)
+                .current_dir(dir)
+                .output()
+                .expect("git available in tests");
+        }
+    }
+
+    #[test]
+    fn git_and_diff_mentions_inline_curated_context_not_paths() {
+        let tmp = TempDir::new().expect("tempdir");
+        init_test_repo(tmp.path());
+        std::fs::write(tmp.path().join("a.txt"), "one\n").expect("write");
+        commit_test_repo(tmp.path());
+        std::fs::write(tmp.path().join("a.txt"), "two\n").expect("write");
+
+        let expanded = user_request_with_file_mentions(
+            "look at @git and @diff",
+            tmp.path(),
+            Some(tmp.path().to_path_buf()),
+        );
+
+        assert!(expanded.contains("<git-status"), "{expanded}");
+        assert!(expanded.contains("<git-diff"), "{expanded}");
+        assert!(expanded.contains("a.txt"), "{expanded}");
+        // The tokens are not treated as paths, so no missing-file block.
+        assert!(!expanded.contains("<missing-file"), "{expanded}");
+    }
+
+    #[test]
+    fn git_mentions_outside_a_repository_say_so_explicitly() {
+        let tmp = TempDir::new().expect("tempdir");
+        let expanded = user_request_with_file_mentions(
+            "status? @git",
+            tmp.path(),
+            Some(tmp.path().to_path_buf()),
+        );
+        assert!(expanded.contains("<git-unavailable"), "{expanded}");
+        assert!(expanded.contains("not a git repository"), "{expanded}");
+    }
+
+    #[test]
+    fn git_mention_is_deduplicated_within_one_message() {
+        let tmp = TempDir::new().expect("tempdir");
+        init_test_repo(tmp.path());
+        std::fs::write(tmp.path().join("a.txt"), "one\n").expect("write");
+        commit_test_repo(tmp.path());
+        std::fs::write(tmp.path().join("a.txt"), "two\n").expect("write");
+
+        let expanded = user_request_with_file_mentions(
+            "@diff and again @diff",
+            tmp.path(),
+            Some(tmp.path().to_path_buf()),
+        );
+        assert_eq!(expanded.matches("<git-diff").count(), 1, "{expanded}");
+    }
+
+    #[test]
+    fn paths_that_merely_start_with_git_stay_file_mentions() {
+        let tmp = TempDir::new().expect("tempdir");
+        std::fs::write(tmp.path().join("diff.txt"), "plain file").expect("write");
+
+        let expanded = user_request_with_file_mentions(
+            "see @diff.txt",
+            tmp.path(),
+            Some(tmp.path().to_path_buf()),
+        );
+        assert!(expanded.contains("plain file"), "{expanded}");
+        assert!(!expanded.contains("<git-diff"), "{expanded}");
+    }
+
+    #[test]
+    fn large_diff_is_truncated_and_the_inspector_reports_the_budget() {
+        let tmp = TempDir::new().expect("tempdir");
+        init_test_repo(tmp.path());
+        std::fs::write(tmp.path().join("big.txt"), "seed\n").expect("write");
+        commit_test_repo(tmp.path());
+        let bulk: String = (0..40_000).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(tmp.path().join("big.txt"), bulk).expect("write");
+
+        let expanded =
+            user_request_with_file_mentions("@diff", tmp.path(), Some(tmp.path().to_path_buf()));
+        assert!(
+            expanded.contains("truncated=\"true\""),
+            "expected truncation marker"
+        );
+
+        let references =
+            context_references_from_input("@diff", tmp.path(), Some(tmp.path().to_path_buf()));
+        let git_ref = references
+            .iter()
+            .find(|r| r.kind == ContextReferenceKind::GitContext)
+            .expect("git reference present in the inspector");
+        assert_eq!(git_ref.label, "diff");
+        assert!(git_ref.included);
+        let detail = git_ref.detail.clone().unwrap_or_default();
+        assert!(detail.contains("truncated at"), "{detail}");
+        assert!(
+            detail.contains(&crate::tui::git_mention::MAX_GIT_DIFF_MENTION_BYTES.to_string()),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn empty_repository_reference_is_visible_but_not_included() {
+        let tmp = TempDir::new().expect("tempdir");
+        init_test_repo(tmp.path());
+        std::fs::write(tmp.path().join("a.txt"), "one\n").expect("write");
+        commit_test_repo(tmp.path());
+
+        let references =
+            context_references_from_input("@diff", tmp.path(), Some(tmp.path().to_path_buf()));
+        let git_ref = references
+            .iter()
+            .find(|r| r.kind == ContextReferenceKind::GitContext)
+            .expect("git reference present even when there is nothing to show");
+        assert!(!git_ref.included);
+        assert!(
+            git_ref
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("no working-tree changes")),
+            "{:?}",
+            git_ref.detail
+        );
+    }
+
+    #[test]
+    fn composer_preview_lists_git_mentions_without_running_git() {
+        let previews = pending_context_previews("@git @diff");
+        let kinds: Vec<&str> = previews.iter().map(|p| p.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["git", "git"]);
+        assert!(previews.iter().all(|p| !p.included));
+    }
+
+    /// #4067 review follow-up: `mention_menu_limit = 0` is a documented way to
+    /// disable the popup. The git tokens are menu entries like any other and
+    /// must respect the same cap — otherwise setting 0 still pops a one-entry
+    /// menu the moment the user types `@g`.
+    #[test]
+    fn git_mention_entries_respect_a_zero_menu_limit() {
+        let paths = vec!["src/main.rs".to_string()];
+        assert!(with_git_mention_entries(paths.clone(), "g", 0).is_empty());
+        assert!(with_git_mention_entries(paths.clone(), "d", 0).is_empty());
+        assert!(with_git_mention_entries(paths.clone(), "", 0).is_empty());
+        assert!(with_git_mention_entries(Vec::new(), "gi", 0).is_empty());
+    }
+
+    /// A small non-zero limit must cap the token list this function builds.
+    ///
+    /// The empty-partial branch is pass-through by design — those entries were
+    /// already capped upstream by `rank_completion_candidates`, and shrinking
+    /// them here would silently drop paths the caller asked for.
+    #[test]
+    fn git_mention_entries_never_exceed_the_menu_limit() {
+        let paths = vec!["a.rs".to_string(), "b.rs".to_string()];
+        for limit in 1..=4 {
+            let matched = with_git_mention_entries(paths.clone(), "d", limit);
+            assert!(matched.len() <= limit, "limit {limit}: {matched:?}");
+            // Both tokens match a bare prefix that hits `git` and `diff`
+            // through separate entries; the cap still holds.
+            let both = with_git_mention_entries(Vec::new(), "", limit);
+            assert!(both.len() <= limit, "limit {limit}: {both:?}");
+        }
+        // Pass-through: the caller's already-capped paths survive untouched.
+        assert_eq!(with_git_mention_entries(paths.clone(), "", 1), paths);
+    }
+
+    /// #4067 review follow-up: one submit resolves a git mention once, not
+    /// once per surface. `@diff` makes git compute the whole working-tree diff
+    /// before the byte budget applies, so a repeat is real wasted work.
+    #[test]
+    fn a_submit_resolves_each_git_mention_only_once() {
+        let tmp = TempDir::new().expect("tempdir");
+        init_test_repo(tmp.path());
+        std::fs::write(tmp.path().join("a.txt"), "one\n").expect("write");
+        commit_test_repo(tmp.path());
+        std::fs::write(tmp.path().join("a.txt"), "two\n").expect("write");
+
+        let mut cache = crate::tui::git_mention::GitMentionCache::default();
+        let references = context_references_from_input_cached(
+            "@diff",
+            tmp.path(),
+            Some(tmp.path().to_path_buf()),
+            &mut cache,
+        );
+        let expanded = user_request_with_file_mentions_cached(
+            "@diff",
+            tmp.path(),
+            Some(tmp.path().to_path_buf()),
+            &mut cache,
+        );
+
+        // Both surfaces describe the same resolution.
+        let git_ref = references
+            .iter()
+            .find(|r| r.kind == ContextReferenceKind::GitContext)
+            .expect("git reference");
+        assert!(git_ref.included);
+        assert!(expanded.contains("<git-diff"), "{expanded}");
+
+        // And the shared cache holds exactly one entry for it.
+        assert_eq!(cache.len(), 1, "the diff must be resolved once per submit");
+    }
+
+    #[test]
+    fn completion_offers_git_and_diff_alongside_paths() {
+        let paths = vec!["src/main.rs".to_string(), "docs/guide.md".to_string()];
+        // A bare `@` stays the file picker.
+        assert_eq!(with_git_mention_entries(paths.clone(), "", 8), paths);
+
+        let narrowed = with_git_mention_entries(paths.clone(), "di", 8);
+        assert_eq!(narrowed.first().map(String::as_str), Some("diff"));
+        assert!(narrowed.contains(&"src/main.rs".to_string()));
+
+        let git_only = with_git_mention_entries(paths.clone(), "g", 8);
+        assert_eq!(git_only.first().map(String::as_str), Some("git"));
+
+        // A partial that matches no token leaves path completion untouched.
+        assert_eq!(with_git_mention_entries(paths.clone(), "src", 8), paths);
     }
 }

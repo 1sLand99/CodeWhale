@@ -1,14 +1,14 @@
 //! Pseudo-terminal session wrapping `portable-pty`.
 //!
 //! Spawns a binary in a real PTY, pumps the child's stdout into an in-memory
-//! buffer on a background thread, and exposes write/resize/wait/kill primitives
+//! buffer on a background thread, and exposes write/wait/kill primitives
 //! the test harness composes.
 //!
 //! The reader thread is necessary because `portable-pty`'s reader is blocking
 //! and the test thread must remain free to send input + poll for screen
 //! changes.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -17,13 +17,18 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 pub struct PtySession {
+    /// Held (not read) so the PTY master stays open for the child's lifetime.
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
     writer: Box<dyn Write + Send>,
     buffer: Arc<Mutex<Vec<u8>>>,
+    /// Every byte the child ever wrote, never drained. `buffer` is consumed by
+    /// the frame parser, which is the wrong shape for assertions about the
+    /// control stream itself — terminal-mode setup/teardown is only visible as
+    /// escape sequences, and a mode that was enabled and then disabled leaves
+    /// no trace on the rendered screen at all.
+    transcript: Arc<Mutex<Vec<u8>>>,
     reader_handle: Option<JoinHandle<()>>,
-    rows: u16,
-    cols: u16,
 }
 
 pub struct PtySessionBuilder<'a> {
@@ -47,11 +52,6 @@ impl<'a> PtySessionBuilder<'a> {
             cols: 120,
             clear_env: false,
         }
-    }
-
-    pub fn arg(mut self, a: impl Into<String>) -> Self {
-        self.args.push(a.into());
-        self
     }
 
     pub fn args<I, S>(mut self, args: I) -> Self
@@ -127,7 +127,9 @@ impl<'a> PtySessionBuilder<'a> {
         let writer = pair.master.take_writer().context("take writer")?;
 
         let buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let transcript: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let buf_thread = Arc::clone(&buffer);
+        let transcript_thread = Arc::clone(&transcript);
         let reader_handle = thread::Builder::new()
             .name("qa-pty-reader".into())
             .spawn(move || {
@@ -138,6 +140,9 @@ impl<'a> PtySessionBuilder<'a> {
                         Ok(n) => {
                             if let Ok(mut b) = buf_thread.lock() {
                                 b.extend_from_slice(&chunk[..n]);
+                            }
+                            if let Ok(mut t) = transcript_thread.lock() {
+                                t.extend_from_slice(&chunk[..n]);
                             }
                         }
                         Err(_) => break,
@@ -151,9 +156,8 @@ impl<'a> PtySessionBuilder<'a> {
             child,
             writer,
             buffer,
+            transcript,
             reader_handle: Some(reader_handle),
-            rows: self.rows,
-            cols: self.cols,
         })
     }
 }
@@ -163,13 +167,17 @@ impl PtySession {
         PtySessionBuilder::new(program)
     }
 
+    pub fn pid(&self) -> Option<u32> {
+        self.child.process_id()
+    }
+
     pub fn write_bytes(&mut self, bytes: &[u8]) -> Result<()> {
         self.writer.write_all(bytes).context("pty write")?;
         self.writer.flush().context("pty flush")?;
         Ok(())
     }
 
-    pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
+    pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
         self.master
             .resize(PtySize {
                 rows,
@@ -177,19 +185,21 @@ impl PtySession {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|e| anyhow!("pty resize failed: {e}"))?;
-        self.rows = rows;
-        self.cols = cols;
-        Ok(())
-    }
-
-    pub fn size(&self) -> (u16, u16) {
-        (self.rows, self.cols)
+            .context("pty resize")
     }
 
     /// Drain any bytes the reader thread has pushed into the buffer. Returns
     /// the bytes read this call. Non-blocking — returns immediately even if
     /// the buffer is empty.
+    /// Every byte the child has written so far, including bytes already fed
+    /// to the frame parser. Non-destructive, so it can be sampled repeatedly.
+    pub fn transcript(&self) -> Vec<u8> {
+        self.transcript
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     pub fn drain(&mut self) -> Vec<u8> {
         let mut b = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
         std::mem::take(&mut *b)

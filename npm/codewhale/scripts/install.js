@@ -78,12 +78,18 @@ class DownloadTimeoutError extends Error {
   }
 }
 
-function resolvePackageVersion() {
+// Binary-version precedence must match run.js and verify-release-assets.js so
+// install-time asset resolution agrees with runtime and release verification.
+// `codewhaleBinaryVersion` lets a packaging-only npm release target a specific
+// CodeWhale binary; legacy env vars and `deepseekBinaryVersion` stay supported
+// for backward compatibility (#3769). `pkgObj`/`env` are injectable for tests.
+function resolvePackageVersion(pkgObj = pkg, env = process.env) {
   const configuredVersion =
-    process.env.DEEPSEEK_TUI_VERSION ||
-    process.env.DEEPSEEK_VERSION ||
-    pkg.deepseekBinaryVersion ||
-    pkg.version;
+    env.DEEPSEEK_TUI_VERSION ||
+    env.DEEPSEEK_VERSION ||
+    pkgObj.codewhaleBinaryVersion ||
+    pkgObj.deepseekBinaryVersion ||
+    pkgObj.version;
   return String(configuredVersion).trim();
 }
 
@@ -136,12 +142,16 @@ function maxAttempts(context = "runtime", env = process.env) {
 }
 
 function binaryPaths() {
-  const { codewhale, tui } = detectBinaryNames();
+  const { codewhale, codew, tui } = detectBinaryNames();
   const releaseDir = releaseBinaryDirectory();
   return {
     codewhale: {
       asset: codewhale,
       target: path.join(releaseDir, process.platform === "win32" ? "codewhale.exe" : "codewhale"),
+    },
+    codew: {
+      asset: codew,
+      target: path.join(releaseDir, process.platform === "win32" ? "codew.exe" : "codew"),
     },
     tui: {
       asset: tui,
@@ -197,7 +207,7 @@ function installFailureHint(error) {
       "codewhale install hint:",
       `  DEEPSEEK_TUI_RELEASE_BASE_URL is set to ${releaseBase}`,
       "  Verify that this directory contains codewhale-artifacts-sha256.txt",
-      "  plus the codewhale/codewhale-tui binary assets for your platform.",
+      "  plus the codewhale/codew/codewhale-tui binary assets for your platform.",
     ].join("\n");
   }
 
@@ -1127,6 +1137,7 @@ async function run(options = {}) {
 
   await Promise.all([
     ensureBinary(paths.codewhale.target, paths.codewhale.asset, version, repo, getChecksums, { context }),
+    ensureBinary(paths.codew.target, paths.codew.asset, version, repo, getChecksums, { context }),
     ensureBinary(paths.tui.target, paths.tui.asset, version, repo, getChecksums, { context }),
   ]);
 }
@@ -1136,6 +1147,9 @@ async function getBinaryPath(name) {
   const paths = binaryPaths();
   if (name === "codewhale") {
     return paths.codewhale.target;
+  }
+  if (name === "codew") {
+    return paths.codew.target;
   }
   if (name === "codewhale-tui") {
     return paths.tui.target;
@@ -1148,12 +1162,15 @@ module.exports = {
   installFailureHint,
   run,
   _internal: {
+    resolvePackageVersion,
     isOptionalInstall,
     adoptExistingBinaryIfValid,
     shouldIgnoreInstallFailure,
     shouldSkipOptionalPostinstall,
+    httpRequest,
     defaultTimeoutMs,
     defaultStallMs,
+    binaryPaths,
     ensureBinary,
     maxAttempts,
     withRetry,

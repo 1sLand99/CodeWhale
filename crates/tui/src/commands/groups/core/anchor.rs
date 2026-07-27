@@ -5,13 +5,35 @@
 //! preserve invariants like "This API's status field is unreliable" or
 //! ".ssh/ must never be touched".
 
-use crate::tui::app::App;
 use std::fs;
 use std::io::Write;
+
+use crate::commands::traits::{CommandInfo, RegisterCommand};
+use crate::localization::MessageId;
+use crate::tui::app::App;
 
 use super::CommandResult;
 
 const USAGE: &str = "/anchor <text> | /anchor list | /anchor remove <n>";
+
+pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
+    name: "anchor",
+    aliases: &["maodian"],
+    usage: USAGE,
+    description_id: MessageId::CmdAnchorDescription,
+};
+
+pub(in crate::commands) struct AnchorCmd;
+
+impl RegisterCommand for AnchorCmd {
+    fn info() -> &'static CommandInfo {
+        &COMMAND_INFO
+    }
+
+    fn execute(app: &mut App, arg: Option<&str>) -> CommandResult {
+        anchor(app, arg)
+    }
+}
 
 /// Handle the `/anchor` command with subcommands:
 /// - `/anchor <text>` — add a new anchor
@@ -166,25 +188,11 @@ mod tests {
 
     fn create_test_app_with_tmpdir(tmpdir: &TempDir) -> App {
         let options = TuiOptions {
-            model: "deepseek-v4-pro".to_string(),
-            workspace: tmpdir.path().to_path_buf(),
-            config_path: None,
-            config_profile: None,
-            allow_shell: false,
-            use_alt_screen: true,
-            use_mouse_capture: false,
-            use_bracketed_paste: true,
-            max_subagents: 1,
             skills_dir: tmpdir.path().join("skills"),
             memory_path: tmpdir.path().join("memory.md"),
             notes_path: tmpdir.path().join("notes.txt"),
             mcp_config_path: tmpdir.path().join("mcp.json"),
-            use_memory: false,
-            start_in_agent_mode: false,
-            skip_onboarding: true,
-            yolo: false,
-            resume_session_id: None,
-            initial_input: None,
+            ..crate::test_support::test_tui_options(tmpdir.path().to_path_buf())
         };
         App::new(options, &Config::default())
     }

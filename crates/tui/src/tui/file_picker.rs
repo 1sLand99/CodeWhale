@@ -10,21 +10,28 @@
 //! Enter emits a [`ViewEvent::FilePickerSelected`] which the UI handler turns
 //! into an `@<path>` insertion at the composer cursor.
 
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ignore::WalkBuilder;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Modifier, Style},
+    style::Style,
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Padding, Paragraph, Widget},
+    widgets::{Paragraph, Widget},
 };
 
+use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
-use crate::tui::views::{ModalKind, ModalView, ViewAction, ViewEvent};
+use crate::tui::menu_style;
+use crate::tui::views::{
+    ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,
+    render_panel_scroll_rail, render_underwater_surface,
+};
 use crate::workspace_discovery::{DISCOVERY_ALWAYS_DIRS, path_is_excluded_from_discovery};
 
 /// Maximum number of candidates collected from the initial walk. Keeps memory
@@ -123,6 +130,25 @@ pub struct FilePickerView {
     selected: usize,
     /// Top of the visible window within `filtered`.
     scroll: usize,
+    /// Exact visible row targets from the last render for mouse parity.
+    last_row_hitboxes: RefCell<Vec<(u16, usize)>>,
+    /// UI locale captured from the app at construction (#4057 wave 2).
+    locale: Locale,
+    /// True until the background workspace scan delivers (#3905). The picker
+    /// paints immediately in this state instead of blocking the event loop on
+    /// a `git status` subprocess and a 20k-file walk.
+    is_loading: bool,
+    /// Where the background scan drops its result. `None` once drained, or
+    /// when the scan ran synchronously (no tokio runtime, i.e. unit tests).
+    loading_cell: Option<Arc<Mutex<Option<WorkspaceScan>>>>,
+}
+
+/// What the off-thread workspace scan produces: the candidate paths and the
+/// git-reported modified paths, which are the only two blocking parts of
+/// building this picker.
+struct WorkspaceScan {
+    candidates: Vec<String>,
+    modified: Vec<String>,
 }
 
 impl FilePickerView {
@@ -132,7 +158,7 @@ impl FilePickerView {
     /// `mention_walk_depth`.
     #[cfg(test)]
     pub fn new_with_relevance(workspace_root: &Path, relevance: FilePickerRelevance) -> Self {
-        Self::new_with_relevance_and_depth(workspace_root, relevance, WALK_DEPTH)
+        Self::new_with_relevance_and_depth(workspace_root, relevance, WALK_DEPTH, Locale::En)
     }
 
     /// Build a picker with working-set relevance hints and an explicit walk
@@ -142,23 +168,98 @@ impl FilePickerView {
         workspace_root: &Path,
         relevance: FilePickerRelevance,
         walk_depth: usize,
+        locale: Locale,
     ) -> Self {
         let max_depth = if walk_depth == 0 {
             None
         } else {
             Some(walk_depth)
         };
-        let candidates = collect_candidates(workspace_root, max_depth);
+
+        // Outside a tokio runtime (plain unit tests) do the work inline, so
+        // tests keep observing a fully-populated picker from the constructor.
+        if tokio::runtime::Handle::try_current().is_err() {
+            let candidates = collect_candidates(workspace_root, max_depth);
+            let mut relevance = relevance;
+            for path in crate::tui::file_picker_relevance::modified_workspace_paths(workspace_root)
+            {
+                relevance.mark_modified(path);
+            }
+            let mut view = Self {
+                candidates,
+                relevance,
+                filtered: Vec::new(),
+                query: String::new(),
+                selected: 0,
+                scroll: 0,
+                last_row_hitboxes: RefCell::new(Vec::new()),
+                locale,
+                is_loading: false,
+                loading_cell: None,
+            };
+            view.refilter();
+            return view;
+        }
+
+        // Both halves of the scan are blocking: `git status` is a subprocess,
+        // and the walk visits up to MAX_CANDIDATES paths. Neither belongs on
+        // the event loop — Ctrl+P used to freeze the whole TUI until both
+        // finished (#3905), the same failure #3899/#3900 fixed for the
+        // adjacent @-mention and file-tree paths.
+        let loading_cell = Arc::new(Mutex::new(None));
+        let cell = loading_cell.clone();
+        let root = workspace_root.to_path_buf();
+        crate::utils::spawn_blocking_supervised("file-picker-scan", move || {
+            let scan = WorkspaceScan {
+                candidates: collect_candidates(&root, max_depth),
+                modified: crate::tui::file_picker_relevance::modified_workspace_paths(&root),
+            };
+            if let Ok(mut guard) = cell.lock() {
+                *guard = Some(scan);
+            }
+        });
+
         let mut view = Self {
-            candidates,
+            candidates: Vec::new(),
             relevance,
             filtered: Vec::new(),
             query: String::new(),
             selected: 0,
             scroll: 0,
+            last_row_hitboxes: RefCell::new(Vec::new()),
+            locale,
+            is_loading: true,
+            loading_cell: Some(loading_cell),
         };
         view.refilter();
         view
+    }
+
+    /// Drain the background scan if it has landed. Called from `tick`, which
+    /// the view stack runs on the top view every loop iteration.
+    fn poll_loading(&mut self) {
+        if !self.is_loading {
+            return;
+        }
+        // Take the Arc out temporarily to avoid a double-borrow of self.
+        let Some(cell) = self.loading_cell.take() else {
+            self.is_loading = false;
+            return;
+        };
+        let scan = cell.lock().ok().and_then(|mut guard| guard.take());
+        match scan {
+            Some(scan) => {
+                self.candidates = scan.candidates;
+                for path in scan.modified {
+                    self.relevance.mark_modified(path);
+                }
+                self.is_loading = false;
+                // The user may already have typed while the scan ran; refilter
+                // against the query they actually have, not an empty one.
+                self.refilter();
+            }
+            None => self.loading_cell = Some(cell),
+        }
     }
 
     fn refilter(&mut self) {
@@ -221,13 +322,7 @@ impl FilePickerView {
         if self.filtered.is_empty() {
             return;
         }
-        let max = self.filtered.len() - 1;
-        let next = if delta.is_negative() {
-            self.selected.saturating_sub(delta.unsigned_abs())
-        } else {
-            (self.selected + delta as usize).min(max)
-        };
-        self.selected = next;
+        self.selected = crate::tui::list_nav::wrap_index(self.selected, self.filtered.len(), delta);
         self.adjust_scroll();
     }
 
@@ -322,61 +417,98 @@ impl ModalView for FilePickerView {
         }
     }
 
+    fn handle_mouse(&mut self, mouse: MouseEvent) -> ViewAction {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.move_selection(-1);
+                ViewAction::None
+            }
+            MouseEventKind::ScrollDown => {
+                self.move_selection(1);
+                ViewAction::None
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let hit = self
+                    .last_row_hitboxes
+                    .borrow()
+                    .iter()
+                    .find_map(|(y, idx)| (*y == mouse.row).then_some(*idx));
+                let Some(idx) = hit else {
+                    return ViewAction::None;
+                };
+                if idx == self.selected {
+                    if let Some(path) = self.selected_path() {
+                        return ViewAction::EmitAndClose(ViewEvent::FilePickerSelected {
+                            path: path.to_string(),
+                        });
+                    }
+                } else {
+                    self.selected = idx;
+                    self.adjust_scroll();
+                }
+                ViewAction::None
+            }
+            _ => ViewAction::None,
+        }
+    }
+
+    fn tick(&mut self) -> ViewAction {
+        self.poll_loading();
+        ViewAction::None
+    }
+
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        let popup_width = 80.min(area.width.saturating_sub(4));
-        let popup_height = ((VISIBLE_ROWS as u16) + 6).min(area.height.saturating_sub(4));
-
-        let popup_area = Rect {
-            x: area.x + (area.width.saturating_sub(popup_width)) / 2,
-            y: area.y + (area.height.saturating_sub(popup_height)) / 2,
-            width: popup_width,
-            height: popup_height,
+        let match_count = self.filtered.len();
+        let title = if match_count == 1 {
+            tr(self.locale, MessageId::FilePickerMatchSingular).into_owned()
+        } else {
+            tr(self.locale, MessageId::FilePickerMatchesPlural)
+                .replace("{count}", &match_count.to_string())
         };
+        let inner = render_underwater_surface(area, buf, title);
 
-        Clear.render(popup_area, buf);
-
-        let title = Line::from(vec![Span::styled(
-            " File Picker ",
-            Style::default()
-                .fg(palette::DEEPSEEK_BLUE)
-                .add_modifier(Modifier::BOLD),
-        )]);
-        let footer_text = format!(
-            " {} match{}  ↑/↓ select  Enter insert @path  Esc close ",
-            self.filtered.len(),
-            if self.filtered.len() == 1 { "" } else { "es" },
+        let content = render_modal_footer(
+            inner,
+            buf,
+            &[
+                ActionHint::new("↑/↓", "move"),
+                ActionHint::new("Enter", "insert @path"),
+                ActionHint::new("Esc", "cancel"),
+            ],
         );
-        let block = Block::default()
-            .title(title)
-            .title_bottom(Line::from(Span::styled(
-                footer_text,
-                Style::default().fg(palette::TEXT_MUTED),
-            )))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(palette::BORDER_COLOR))
-            .style(Style::default().bg(palette::DEEPSEEK_INK))
-            .padding(Padding::uniform(1));
-
-        let inner = block.inner(popup_area);
-        block.render(popup_area, buf);
+        let visible = VISIBLE_ROWS.min(content.height.saturating_sub(2) as usize);
+        let content = render_panel_scroll_rail(
+            content,
+            buf,
+            self.filtered.len(),
+            self.scroll,
+            visible,
+            true,
+        );
 
         let mut lines: Vec<Line<'static>> = Vec::new();
         // Query line.
         lines.push(Line::from(vec![
-            Span::styled("> ", Style::default().fg(palette::DEEPSEEK_SKY).bold()),
+            Span::styled("> ", Style::default().fg(palette::WHALE_INFO).bold()),
             Span::raw(self.query.clone()),
             Span::styled(
                 " ",
                 Style::default()
-                    .fg(palette::DEEPSEEK_INK)
-                    .bg(palette::DEEPSEEK_SKY),
+                    .fg(palette::WHALE_BG)
+                    .bg(palette::WHALE_INFO),
             ),
         ]));
         lines.push(Line::from(""));
 
-        let visible = VISIBLE_ROWS.min(inner.height.saturating_sub(2) as usize);
         let end = (self.scroll + visible).min(self.filtered.len());
-        if self.filtered.is_empty() {
+        self.last_row_hitboxes.borrow_mut().clear();
+        if self.is_loading {
+            // "No matches" would be a lie while the walk is still running.
+            lines.push(Line::from(Span::styled(
+                format!("  {}", tr(self.locale, MessageId::FilePickerScanning)),
+                Style::default().fg(palette::TEXT_MUTED),
+            )));
+        } else if self.filtered.is_empty() {
             lines.push(Line::from(Span::styled(
                 "  No matches",
                 Style::default().fg(palette::TEXT_MUTED),
@@ -386,29 +518,32 @@ impl ModalView for FilePickerView {
                 let path = &self.candidates[self.filtered[idx]];
                 let selected = idx == self.selected;
                 let style = if selected {
-                    Style::default()
-                        .fg(palette::SELECTION_TEXT)
-                        .bg(palette::SELECTION_BG)
+                    menu_style::selected_row_bg_style().fg(palette::SELECTION_TEXT)
                 } else {
                     Style::default().fg(palette::TEXT_PRIMARY)
                 };
-                let prefix = if selected { "▶ " } else { "  " };
-                let marker_field = if inner.width >= 18 {
+                let prefix = format!("{} ", crate::tui::glyphs::selection_marker(selected));
+                let marker_field = if content.width >= 18 {
                     format!("{} ", self.relevance.markers_for(path))
                 } else {
                     String::new()
                 };
                 let reserved = prefix.chars().count() + marker_field.chars().count();
-                let display = truncate_path(path, (inner.width as usize).saturating_sub(reserved));
+                let display =
+                    truncate_path(path, (content.width as usize).saturating_sub(reserved));
                 let mut line = Line::from(format!("{prefix}{marker_field}{display}"));
                 line.style = style;
+                let y = content
+                    .y
+                    .saturating_add(u16::try_from(lines.len()).unwrap_or(u16::MAX));
+                self.last_row_hitboxes.borrow_mut().push((y, idx));
                 lines.push(line);
             }
         }
 
         Paragraph::new(lines)
             .style(Style::default().fg(palette::TEXT_PRIMARY))
-            .render(inner, buf);
+            .render(content, buf);
     }
 }
 
@@ -589,6 +724,7 @@ pub fn score(query: &str, path: &str) -> Option<i32> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::time::Duration;
     use tempfile::TempDir;
 
     #[test]
@@ -851,6 +987,168 @@ mod tests {
                 .iter()
                 .all(|path| !path.starts_with(".claude/worktrees/")),
             ".claude worktree files must not enter picker candidates: {candidates:?}",
+        );
+    }
+
+    /// The four terminal sizes the v0.8.66 modal blocker (#3732) requires
+    /// every overlay to remain readable and fully operable at.
+    const BLOCKER_SIZES: [(u16, u16); 4] = [(80, 24), (100, 30), (120, 32), (160, 40)];
+
+    #[test]
+    fn file_picker_is_usable_and_opaque_at_blocker_sizes() {
+        use crate::tui::views::ViewStack;
+        use ratatui::{buffer::Buffer, layout::Rect};
+        use unicode_width::UnicodeWidthStr;
+
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/main.rs"), "").unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+        fs::write(root.join("README.md"), "").unwrap();
+
+        for (w, h) in BLOCKER_SIZES {
+            let area = Rect::new(0, 0, w, h);
+            let mut buf = Buffer::empty(area);
+            for y in 0..h {
+                for x in 0..w {
+                    buf[(x, y)].set_symbol("X");
+                }
+            }
+            let mut stack = ViewStack::new();
+            stack.push(FilePickerView::new_with_relevance(
+                root,
+                FilePickerRelevance::default(),
+            ));
+            stack.render(area, &mut buf);
+
+            let rows: Vec<String> = (0..h)
+                .map(|y| {
+                    (0..w)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect();
+            let text = rows.join("\n");
+
+            for label in ["move", "insert @path", "cancel"] {
+                assert!(text.contains(label), "{w}x{h}: missing footer '{label}'");
+            }
+            assert!(
+                !text.contains('X'),
+                "{w}x{h}: background bleed-through into modal surface"
+            );
+            assert_eq!(
+                buf[(w / 2, h / 2)].bg,
+                palette::WHALE_BG,
+                "{w}x{h}: modal interior must be opaque"
+            );
+            for (y, row) in rows.iter().enumerate() {
+                assert!(
+                    UnicodeWidthStr::width(row.trim_end()) <= w as usize,
+                    "{w}x{h}: row {y} overflows width: {row:?}"
+                );
+            }
+        }
+    }
+
+    /// #3905: opening the picker used to block the event loop on a `git status`
+    /// subprocess plus a walk of up to MAX_CANDIDATES paths, freezing the whole
+    /// TUI between Ctrl+P and the picker appearing.
+    ///
+    /// Asserting "fast" by wall clock would be a flaky proxy for the real
+    /// contract, so this asserts the structural property instead: inside a
+    /// runtime the constructor returns a paintable view that has not yet done
+    /// the scan, and the results arrive later through `tick`.
+    #[tokio::test]
+    async fn opening_the_picker_does_not_block_on_the_workspace_scan() {
+        let ws = TempDir::new().unwrap();
+        fs::create_dir_all(ws.path().join("src")).unwrap();
+        for i in 0..200 {
+            fs::write(ws.path().join("src").join(format!("f{i}.rs")), "x").unwrap();
+        }
+
+        let mut view = FilePickerView::new_with_relevance_and_depth(
+            ws.path(),
+            FilePickerRelevance::default(),
+            WALK_DEPTH,
+            Locale::En,
+        );
+
+        assert!(
+            view.is_loading,
+            "the constructor must hand back a paintable view, not a finished scan"
+        );
+        assert!(
+            view.candidates.is_empty(),
+            "no walk may have run on the calling thread"
+        );
+
+        // The view is renderable in the loading state — this is the frame the
+        // user sees immediately after Ctrl+P.
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        view.render(area, &mut buf);
+
+        for _ in 0..500 {
+            view.tick();
+            if !view.is_loading {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        assert!(!view.is_loading, "the background scan must land via tick");
+        assert_eq!(
+            view.candidates.len(),
+            200,
+            "every workspace file is discovered once the scan lands"
+        );
+        assert_eq!(
+            view.filtered.len(),
+            200,
+            "results are refiltered after the scan, not left empty"
+        );
+    }
+
+    /// A query typed while the scan was still running must survive it.
+    #[tokio::test]
+    async fn a_query_typed_during_the_scan_is_applied_when_results_land() {
+        let ws = TempDir::new().unwrap();
+        fs::write(ws.path().join("alpha.rs"), "x").unwrap();
+        fs::write(ws.path().join("beta.rs"), "x").unwrap();
+
+        let mut view = FilePickerView::new_with_relevance_and_depth(
+            ws.path(),
+            FilePickerRelevance::default(),
+            WALK_DEPTH,
+            Locale::En,
+        );
+        assert!(view.is_loading);
+
+        for ch in "alpha".chars() {
+            view.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+
+        for _ in 0..500 {
+            view.tick();
+            if !view.is_loading {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        assert!(!view.is_loading);
+        assert_eq!(view.query, "alpha");
+        let matched: Vec<&str> = view
+            .filtered
+            .iter()
+            .map(|i| view.candidates[*i].as_str())
+            .collect();
+        assert_eq!(
+            matched,
+            vec!["alpha.rs"],
+            "the scan must refilter against the query the user already typed"
         );
     }
 }

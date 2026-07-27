@@ -13,11 +13,11 @@ use std::process::Command;
 use crate::project_context;
 use crate::tui::app::{App, AppAction};
 
-use super::CommandResult;
+use crate::commands::CommandResult;
 
 /// Generate an AGENTS.md file for the current project by gathering context and
 /// delegating content generation to the LLM agent.
-pub fn init(app: &mut App) -> CommandResult {
+fn init(app: &mut App) -> CommandResult {
     let workspace = &app.workspace;
 
     // Ensure .deepseek/ is gitignored if we're inside a git repo.
@@ -182,7 +182,7 @@ fn gather_project_context(workspace: &Path) -> String {
     }
 
     // Directory tree (from existing utility).
-    let tree = crate::utils::project_tree(workspace, 3);
+    let tree = crate::utils::project_tree(workspace, 3, false);
     ctx.push_str("## Directory Structure (depth 3)\n\n```\n");
     ctx.push_str(&tree);
     ctx.push_str("\n```\n\n");
@@ -794,6 +794,29 @@ fn build_init_prompt(
     prompt
 }
 
+pub(in crate::commands) const COMMAND_INFO: crate::commands::traits::CommandInfo =
+    crate::commands::traits::CommandInfo {
+        name: "init",
+        aliases: &[],
+        usage: "/init",
+        description_id: crate::localization::MessageId::CmdInitDescription,
+    };
+
+pub(in crate::commands) struct InitCmd;
+
+impl crate::commands::traits::RegisterCommand for InitCmd {
+    fn info() -> &'static crate::commands::traits::CommandInfo {
+        &COMMAND_INFO
+    }
+
+    fn execute(
+        app: &mut crate::tui::app::App,
+        _arg: Option<&str>,
+    ) -> crate::commands::CommandResult {
+        init(app)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -807,25 +830,11 @@ mod tests {
 
     fn create_test_app_with_tmpdir(tmpdir: &TempDir) -> App {
         let options = TuiOptions {
-            model: "deepseek-v4-pro".to_string(),
-            workspace: tmpdir.path().to_path_buf(),
-            config_path: None,
-            config_profile: None,
-            allow_shell: false,
-            use_alt_screen: true,
-            use_mouse_capture: false,
-            use_bracketed_paste: true,
-            max_subagents: 1,
             skills_dir: tmpdir.path().join("skills"),
             memory_path: tmpdir.path().join("memory.md"),
             notes_path: tmpdir.path().join("notes.txt"),
             mcp_config_path: tmpdir.path().join("mcp.json"),
-            use_memory: false,
-            start_in_agent_mode: false,
-            skip_onboarding: true,
-            yolo: false,
-            resume_session_id: None,
-            initial_input: None,
+            ..crate::test_support::test_tui_options(tmpdir.path().to_path_buf())
         };
         App::new(options, &Config::default())
     }

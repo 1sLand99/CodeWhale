@@ -1,5 +1,8 @@
 use futures_util::StreamExt;
 
+#[path = "../src/model_catalog.rs"]
+mod model_catalog;
+
 #[path = "../src/models.rs"]
 #[allow(dead_code)]
 mod models;

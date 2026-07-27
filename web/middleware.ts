@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { locales, defaultLocale } from "@/lib/i18n/config";
+import { locales } from "@/lib/i18n/config";
+import { detectLocaleFromHeaders } from "@/lib/i18n/detect";
 
 const COOKIE = "NEXT_LOCALE";
 
@@ -16,25 +17,15 @@ function applySecurityHeaders(res: NextResponse): NextResponse {
   return res;
 }
 
-function detectLocale(req: NextRequest): string {
-  // 1. Cookie
-  const cookie = req.cookies.get(COOKIE)?.value;
-  if (cookie && locales.includes(cookie as typeof locales[number])) return cookie;
-
-  // 2. Accept-Language header
-  const accept = req.headers.get("accept-language") ?? "";
-  if (/^zh/i.test(accept.split(",")[0])) return "zh";
-
-  return defaultLocale;
-}
-
 export function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
-  // Skip API routes, static files, _next (but still apply security headers).
+  // Skip API routes, static files, _next, and the dot-less metadata route
+  // for the shared OG image (but still apply security headers).
   if (
     pathname.startsWith("/api/") ||
     pathname.startsWith("/_next/") ||
+    pathname === "/opengraph-image" ||
     pathname.includes(".")
   ) {
     return applySecurityHeaders(NextResponse.next());
@@ -48,8 +39,12 @@ export function middleware(req: NextRequest) {
     return applySecurityHeaders(res);
   }
 
-  // Redirect bare paths to detected locale
-  const locale = detectLocale(req);
+  // Redirect bare paths to the detected locale (deterministic: cookie, then
+  // Accept-Language full-tag/primary-subtag matching, then the default).
+  const locale = detectLocaleFromHeaders(
+    req.cookies.get(COOKIE)?.value,
+    req.headers.get("accept-language"),
+  );
   const url = req.nextUrl.clone();
   url.pathname = `/${locale}${pathname}`;
   const res = NextResponse.redirect(url);

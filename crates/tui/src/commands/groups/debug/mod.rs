@@ -2,9 +2,15 @@
 //! and the change log.
 
 mod balance;
+mod cache;
 mod change;
-#[allow(clippy::module_inception)]
-mod debug;
+mod preview_request;
+mod tokens;
+mod tool_inspection;
+mod undo;
+
+#[cfg(test)]
+mod tests;
 
 use crate::commands::CommandResult;
 use crate::commands::traits::{Command, CommandGroup, CommandInfo, FunctionCommand};
@@ -14,12 +20,17 @@ use crate::tui::app::App;
 pub struct DebugCommands;
 
 impl CommandGroup for DebugCommands {
-    fn commands(&self) -> Vec<Box<dyn Command>> {
-        vec![
+    fn commands(&self) -> &'static [Box<dyn Command>] {
+        cached_command_list!(vec![
             Box::new(FunctionCommand::new(&TOKENS_INFO, run_tokens)),
             Box::new(FunctionCommand::new(&COST_INFO, run_cost)),
             Box::new(FunctionCommand::new(&BALANCE_INFO, run_balance)),
             Box::new(FunctionCommand::new(&CACHE_INFO, run_cache)),
+            Box::new(FunctionCommand::new(
+                &PREVIEW_REQUEST_INFO,
+                run_preview_request
+            )),
+            Box::new(FunctionCommand::new(&TOOLS_INFO, run_tools)),
             Box::new(FunctionCommand::new(&CHANGE_INFO, run_change)),
             Box::new(FunctionCommand::new(&SYSTEM_INFO, run_system)),
             Box::new(FunctionCommand::new(&CONTEXT_INFO, run_context)),
@@ -27,7 +38,7 @@ impl CommandGroup for DebugCommands {
             Box::new(FunctionCommand::new(&DIFF_INFO, run_diff)),
             Box::new(FunctionCommand::new(&UNDO_INFO, run_undo)),
             Box::new(FunctionCommand::new(&RETRY_INFO, run_retry)),
-        ]
+        ])
     }
 }
 
@@ -55,6 +66,20 @@ static CACHE_INFO: CommandInfo = CommandInfo {
     usage: "/cache [count|inspect|stats|zones|warmup]",
     description_id: MessageId::CmdCacheDescription,
 };
+static PREVIEW_REQUEST_INFO: CommandInfo = CommandInfo {
+    name: "preview-request",
+    // `dryrun` is the name PR #1099 used; `preview_request` covers the
+    // underscore spelling. Both stay wired so muscle memory keeps working.
+    aliases: &["dryrun", "preview_request"],
+    usage: "/preview-request [json] [--prompt <text>]",
+    description_id: MessageId::CmdPreviewRequestDescription,
+};
+static TOOLS_INFO: CommandInfo = CommandInfo {
+    name: "tools",
+    aliases: &["tool-studio"],
+    usage: "/tools [text|json]",
+    description_id: MessageId::CmdToolsDescription,
+};
 static CHANGE_INFO: CommandInfo = CommandInfo {
     name: "change",
     aliases: &[],
@@ -70,7 +95,7 @@ static SYSTEM_INFO: CommandInfo = CommandInfo {
 static CONTEXT_INFO: CommandInfo = CommandInfo {
     name: "context",
     aliases: &["ctx"],
-    usage: "/context [report|json|summary]",
+    usage: "/context [report|json|prompt-json|summary]",
     description_id: MessageId::CmdContextDescription,
 };
 static EDIT_INFO: CommandInfo = CommandInfo {
@@ -114,6 +139,12 @@ fn run_balance(app: &mut App, arg: Option<&str>) -> CommandResult {
 fn run_cache(app: &mut App, arg: Option<&str>) -> CommandResult {
     run_registered(app, "cache", arg)
 }
+fn run_preview_request(app: &mut App, arg: Option<&str>) -> CommandResult {
+    run_registered(app, "preview-request", arg)
+}
+fn run_tools(app: &mut App, arg: Option<&str>) -> CommandResult {
+    run_registered(app, "tools", arg)
+}
 fn run_change(app: &mut App, arg: Option<&str>) -> CommandResult {
     run_registered(app, "change", arg)
 }
@@ -142,31 +173,35 @@ pub(in crate::commands) fn dispatch(
     arg: Option<&str>,
 ) -> Option<CommandResult> {
     let result = match command {
-        "tokens" => debug::tokens(app),
-        "cost" => debug::cost(app),
+        "tokens" => tokens::tokens(app),
+        "cost" => tokens::cost(app),
         "balance" => balance::balance(app),
-        "cache" => debug::cache(app, arg),
+        "cache" => cache::cache(app, arg),
+        "preview-request" | "preview_request" | "dryrun" => {
+            preview_request::preview_request(app, arg)
+        }
+        "tools" | "tool-studio" => tool_inspection::tools(app, arg),
         "change" => change::change(app, arg),
-        "system" | "xitong" => debug::system_prompt(app),
-        "context" | "ctx" => debug::context(app, arg),
-        "edit" => debug::edit(app),
-        "diff" => debug::diff(app),
+        "system" | "xitong" => tokens::system_prompt(app),
+        "context" | "ctx" => tokens::context(app, arg),
+        "edit" => undo::edit(app),
+        "diff" => undo::diff(app),
         "undo" => {
             // Try surgical patch-undo first; fall back to conversation undo
             // if no snapshots are available or if the snapshot undo couldn't
             // find anything useful.
-            let result = debug::patch_undo(app);
+            let result = undo::patch_undo(app);
             if result.message.as_deref().is_none_or(|m| {
                 m.starts_with("No snapshots found")
                     || m.starts_with("No older tool or pre-turn")
                     || m.starts_with("Snapshot repo")
             }) {
-                debug::undo_conversation(app)
+                undo::undo_conversation(app)
             } else {
                 result
             }
         }
-        "retry" | "chongshi" => debug::retry(app),
+        "retry" | "chongshi" => undo::retry(app),
         _ => return None,
     };
     Some(result)

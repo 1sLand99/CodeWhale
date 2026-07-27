@@ -17,16 +17,15 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
-use unicode_width::UnicodeWidthChar;
 
 use crate::palette;
+use crate::tui::menu_style;
 use crate::tui::widgets::Renderable;
 
 /// Per-item line cap before we collapse the rest into a `…` overflow row.
 const PREVIEW_LINE_LIMIT: usize = 3;
-const PENDING_STEER_PREFIX: &str = "  ↳ Steer pending: ";
-const REJECTED_STEER_PREFIX: &str = "  ↳ Rejected steer: ";
-const QUEUED_MESSAGE_PREFIX: &str = "  ↳ Queued follow-up: ";
+const PENDING_STEER_PREFIX: &str = "  ↳ Live steer pending: ";
+const REJECTED_STEER_PREFIX: &str = "  ↳ Rejected live steer: ";
 const EDITING_QUEUED_PREFIX: &str = "  ↳ Editing queued follow-up: ";
 
 /// Description of the keybinding the hint line at the bottom should advertise
@@ -52,8 +51,8 @@ pub struct PendingInputPreview {
 }
 
 /// Compact pre-send context row shown above the composer. `included=false`
-/// marks missing/skipped context distinctly from files/media that will be
-/// sent or inlined.
+/// marks unconfirmed, missing, or skipped context distinctly from files/media
+/// already known to be sent or inlined.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextPreviewItem {
     pub kind: String,
@@ -83,6 +82,14 @@ impl PendingInputPreview {
             || self.editing_queued_message.is_some()
     }
 
+    fn is_queued_only(&self) -> bool {
+        self.context_items.is_empty()
+            && self.pending_steers.is_empty()
+            && self.rejected_steers.is_empty()
+            && self.editing_queued_message.is_none()
+            && !self.queued_messages.is_empty()
+    }
+
     /// Build the (possibly empty) ordered line list this widget would render
     /// at `width`. Pulled out so `desired_height` can ask the same renderer
     /// without duplicating wrapping logic.
@@ -97,6 +104,33 @@ impl PendingInputPreview {
         let dim_italic = dim.add_modifier(Modifier::ITALIC);
 
         let mut lines: Vec<Line<'static>> = Vec::new();
+
+        // The common queued-only state must remain actionable at the release
+        // floor. A compact summary avoids spending scarce rows on a section
+        // heading and two separate command choruses.
+        if self.is_queued_only() {
+            let count = self.queued_messages.len();
+            let prefix = if count == 1 {
+                "Queued #1: ".to_string()
+            } else {
+                format!("Queued {count} · next: ")
+            };
+            let next = self.queued_messages[0].replace('\n', " ");
+            let summary = crate::localization::truncate_to_width(
+                &format!("{prefix}{next}"),
+                usize::from(width),
+            );
+            let controls = crate::localization::truncate_to_width(
+                &format!(
+                    "Enter send now · {} edit · /queue drop 1",
+                    self.edit_binding.label
+                ),
+                usize::from(width),
+            );
+            lines.push(Line::from(Span::styled(summary, dim_italic)));
+            lines.push(Line::from(Span::styled(controls, dim)));
+            return lines;
+        }
 
         if !self.context_items.is_empty() {
             push_section_header(
@@ -153,20 +187,29 @@ impl PendingInputPreview {
                     dim,
                 )]));
             }
-            let queued_message_indent = continuation_indent(QUEUED_MESSAGE_PREFIX);
-            for message in &self.queued_messages {
+            for (idx, message) in self.queued_messages.iter().enumerate() {
+                let row_number = idx + 1;
+                let queued_prefix = format!("  ↳ Queued follow-up #{row_number}: ");
+                let queued_message_indent = continuation_indent(&queued_prefix);
                 push_truncated_item(
                     &mut lines,
                     message,
                     width,
                     dim_italic,
-                    QUEUED_MESSAGE_PREFIX,
+                    &queued_prefix,
                     &queued_message_indent,
                 );
+                lines.push(Line::from(vec![Span::styled(
+                    format!("    /queue send {row_number} · drop {row_number} · clear"),
+                    dim,
+                )]));
             }
             if !self.queued_messages.is_empty() {
                 lines.push(Line::from(vec![Span::styled(
-                    format!("    {} edit last queued message", self.edit_binding.label),
+                    format!(
+                        "    Enter send now · {} edit last queued",
+                        self.edit_binding.label
+                    ),
                     dim,
                 )]));
             }
@@ -187,9 +230,14 @@ impl Renderable for PendingInputPreview {
         if area.is_empty() {
             return;
         }
-        let lines = self.lines(area.width);
+        let mut lines = self.lines(area.width);
         if lines.is_empty() {
             return;
+        }
+        // If the rest of a 40x12 layout leaves one preview row, preserve the
+        // direct action rather than a non-actionable message summary.
+        if self.is_queued_only() && area.height == 1 && lines.len() == 2 {
+            lines.remove(0);
         }
         Paragraph::new(lines).render(area, buf);
     }
@@ -210,19 +258,14 @@ fn push_section_header(lines: &mut Vec<Line<'static>>, header: Line<'static>) {
 
 fn push_context_item(lines: &mut Vec<Line<'static>>, item: &ContextPreviewItem, width: u16) {
     let status_style = if item.selected {
-        Style::default()
-            .fg(palette::SELECTION_TEXT)
-            .bg(palette::SELECTION_BG)
-            .add_modifier(Modifier::BOLD)
+        menu_style::selected_row_style()
     } else if item.included {
         Style::default().fg(palette::TEXT_MUTED)
     } else {
         Style::default().fg(palette::STATUS_WARNING)
     };
     let label_style = if item.selected {
-        Style::default()
-            .fg(palette::SELECTION_TEXT)
-            .bg(palette::SELECTION_BG)
+        menu_style::selected_row_bg_style().fg(palette::SELECTION_TEXT)
     } else if item.included {
         Style::default().fg(palette::TEXT_PRIMARY)
     } else {
@@ -344,10 +387,12 @@ fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
     out
 }
 
+// Delegates to the canonical width contract (`ui_text::text_display_width`):
+// tabs are 4 columns and control chars occupy one, matching what the renderer
+// draws. The old local copy used `unwrap_or(0)` and ignored tabs, so preview
+// word-wrap disagreed with the real layout on those inputs (#3924).
 fn display_width(s: &str) -> usize {
-    s.chars()
-        .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
-        .sum()
+    crate::tui::ui_text::text_display_width(s)
 }
 
 #[cfg(test)]
@@ -372,6 +417,20 @@ mod tests {
             .collect()
     }
 
+    fn render_in_area(widget: &PendingInputPreview, width: u16, height: u16) -> Vec<String> {
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
+        widget.render(Rect::new(0, 0, width, height), &mut buf);
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
     #[test]
     fn empty_widget_has_zero_height() {
         let preview = PendingInputPreview::new();
@@ -383,11 +442,27 @@ mod tests {
         let mut preview = PendingInputPreview::new();
         preview.queued_messages.push("Hello, world!".to_string());
         let rows = render_to_string(&preview, 40);
-        // Expect: header line, message line, hint line.
-        assert_eq!(rows.len(), 3, "got rows: {rows:?}");
-        assert!(rows[0].contains("Pending inputs"));
-        assert!(rows[1].contains("Hello, world!"));
-        assert!(rows[2].contains("edit last queued message"));
+        assert_eq!(rows.len(), 2, "got rows: {rows:?}");
+        assert!(rows[0].contains("Queued #1: Hello, world!"));
+        assert!(rows[1].contains("Enter send now"));
+        assert!(rows[1].contains("↑ edit"));
+        assert!(rows[1].contains("/queue drop 1"));
+    }
+
+    #[test]
+    fn compact_queue_keeps_send_control_in_one_two_and_three_row_areas() {
+        let mut preview = PendingInputPreview::new();
+        preview
+            .queued_messages
+            .push("ship the compact fix".to_string());
+
+        for (width, height) in [(40, 1), (40, 2), (60, 3)] {
+            let rows = render_in_area(&preview, width, height);
+            assert!(
+                rows.iter().any(|row| row.contains("Enter send now")),
+                "send control clipped at {width}x{height}: {rows:?}"
+            );
+        }
     }
 
     #[test]
@@ -409,9 +484,7 @@ mod tests {
             "missing restore hint: {rows:?}"
         );
         assert!(
-            !rows
-                .iter()
-                .any(|row| row.contains("edit last queued message")),
+            !rows.iter().any(|row| row.contains("edit last queued")),
             "editing mode should not also advertise opening a queued edit: {rows:?}"
         );
     }
@@ -476,7 +549,7 @@ mod tests {
             "unexpected Esc hint: {rows:?}"
         );
         assert!(
-            !rows.iter().any(|r| r.contains("edit last queued message")),
+            !rows.iter().any(|r| r.contains("edit last queued")),
             "unexpected edit hint in pending-steer-only view: {rows:?}"
         );
     }
@@ -497,6 +570,7 @@ mod tests {
         assert!(rows.iter().any(|r| r.contains("rejected")));
         assert!(rows.iter().any(|r| r.contains("queued")));
         assert!(rows.iter().any(|r| r.contains("↑")));
+        assert!(rows.iter().any(|r| r.contains("Enter send now")));
     }
 
     #[test]
@@ -510,17 +584,18 @@ mod tests {
         let rows = render_to_string(&preview, 80);
 
         assert!(
-            rows.iter().any(|row| row.contains("Steer pending: steer")),
+            rows.iter()
+                .any(|row| row.contains("Live steer pending: steer")),
             "missing pending-steer label: {rows:?}"
         );
         assert!(
             rows.iter()
-                .any(|row| row.contains("Rejected steer: rejected")),
+                .any(|row| row.contains("Rejected live steer: rejected")),
             "missing rejected-steer label: {rows:?}"
         );
         assert!(
             rows.iter()
-                .any(|row| row.contains("Queued follow-up: queued")),
+                .any(|row| row.contains("Queued follow-up #1: queued")),
             "missing queued-follow-up label: {rows:?}"
         );
         assert!(
@@ -531,7 +606,7 @@ mod tests {
     }
 
     #[test]
-    fn wrapped_pending_input_aligns_continuation_under_label() {
+    fn queued_only_preview_truncates_instead_of_hiding_controls() {
         let mut preview = PendingInputPreview::new();
         preview
             .queued_messages
@@ -539,32 +614,24 @@ mod tests {
 
         let rows = render_to_string(&preview, 34);
 
-        assert!(rows[1].contains("Queued follow-up: alpha"));
-        assert!(
-            rows[2].starts_with(&continuation_indent(QUEUED_MESSAGE_PREFIX)),
-            "continuation should align under label: {rows:?}"
-        );
-        assert!(
-            !rows[2].trim().is_empty(),
-            "continuation should keep wrapped text: {rows:?}"
-        );
+        assert_eq!(rows.len(), 2, "got rows: {rows:?}");
+        assert!(rows[0].contains("Queued #1: alpha"));
+        assert!(rows[0].contains('…'));
+        assert!(rows[1].contains("Enter send now"));
     }
 
     #[test]
-    fn message_truncates_to_three_visible_lines() {
+    fn multiline_queued_message_collapses_to_one_truncated_summary() {
         let mut preview = PendingInputPreview::new();
         preview
             .queued_messages
-            .push("line1\nline2\nline3\nline4\nline5".to_string());
+            .push("line1\nline2\nline3\nline4\nline5\nline6\nline7".to_string());
         let rows = render_to_string(&preview, 40);
-        // Header + 3 visible lines + ellipsis row + hint = 6 rows.
-        assert_eq!(rows.len(), 6, "got rows: {rows:?}");
-        assert!(rows[0].contains("Pending inputs"));
-        assert!(rows[1].contains("line1"));
-        assert!(rows[2].contains("line2"));
-        assert!(rows[3].contains("line3"));
-        assert!(rows[4].contains("…"));
-        assert!(rows[5].contains("edit last queued message"));
+        assert_eq!(rows.len(), 2, "got rows: {rows:?}");
+        assert!(rows[0].contains("Queued #1: line1 line2"));
+        assert!(rows[0].contains('…'));
+        assert!(rows[1].contains("Enter send now"));
+        assert!(rows[1].contains("↑ edit"));
     }
 
     #[test]
@@ -575,10 +642,9 @@ mod tests {
                 .to_string(),
         );
         let rows = render_to_string(&preview, 36);
-        // Header + URL row + hint = 3 rows; the URL must NOT cause a chain of
-        // wrapped-ellipsis rows.
-        assert_eq!(rows.len(), 3, "got rows: {rows:?}");
-        assert!(!rows.iter().any(|r| r.contains("…")));
+        assert_eq!(rows.len(), 2, "got rows: {rows:?}");
+        assert!(rows[0].contains("Queued #1:"));
+        assert!(rows[1].contains("Enter send now"));
     }
 
     #[test]

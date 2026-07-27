@@ -13,7 +13,8 @@
 //! `/restore N` and the `revert_turn` tool both consume these
 //! snapshots.
 
-use crate::models::Usage;
+use crate::core::events::TurnRoute;
+use crate::models::{Message, Usage};
 use crate::snapshot::SnapshotRepo;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -34,8 +35,7 @@ pub struct TurnContext {
     /// Maximum steps allowed
     pub max_steps: u32,
 
-    /// Tool calls made in this turn
-    pub tool_calls: Vec<TurnToolCall>,
+    /// Number of tool calls made in this turn.
 
     /// Whether the turn has been cancelled
     #[allow(dead_code)]
@@ -43,17 +43,15 @@ pub struct TurnContext {
 
     /// Usage for this turn
     pub usage: Usage,
-}
 
-/// Record of a tool call within a turn.
-#[derive(Debug, Clone)]
-pub struct TurnToolCall {
-    pub id: String,
-    pub name: String,
-    pub input: serde_json::Value,
-    pub result: Option<String>,
-    pub error: Option<String>,
-    pub duration: Option<Duration>,
+    /// Route facts resolved for this turn but not timestamped until the first
+    /// provider request is actually dispatched.
+    pub(crate) pending_route: Option<TurnRoute>,
+
+    /// Exact initial user message carrying the mutable SlopLedger gate, when
+    /// one was attached. Compaction uses this turn-scoped identity as an
+    /// authoritative pin without retaining matching gates from older turns.
+    pub(crate) active_slop_gate_message: Option<Message>,
 }
 
 impl TurnContext {
@@ -64,13 +62,14 @@ impl TurnContext {
             started_at: Instant::now(),
             step: 0,
             max_steps,
-            tool_calls: Vec::new(),
             cancelled: false,
             usage: Usage {
                 input_tokens: 0,
                 output_tokens: 0,
                 ..Usage::default()
             },
+            pending_route: None,
+            active_slop_gate_message: None,
         }
     }
 
@@ -83,11 +82,6 @@ impl TurnContext {
     /// Check if the turn has reached max steps
     pub fn at_max_steps(&self) -> bool {
         self.step >= self.max_steps
-    }
-
-    /// Record a tool call
-    pub fn record_tool_call(&mut self, call: TurnToolCall) {
-        self.tool_calls.push(call);
     }
 
     /// Cancel the turn
@@ -104,8 +98,8 @@ impl TurnContext {
 
     /// Add usage from an API response
     pub fn add_usage(&mut self, usage: &Usage) {
-        self.usage.input_tokens += usage.input_tokens;
-        self.usage.output_tokens += usage.output_tokens;
+        self.usage.input_tokens = self.usage.input_tokens.saturating_add(usage.input_tokens);
+        self.usage.output_tokens = self.usage.output_tokens.saturating_add(usage.output_tokens);
         self.usage.prompt_cache_hit_tokens = add_optional_usage(
             self.usage.prompt_cache_hit_tokens,
             usage.prompt_cache_hit_tokens,
@@ -114,8 +108,23 @@ impl TurnContext {
             self.usage.prompt_cache_miss_tokens,
             usage.prompt_cache_miss_tokens,
         );
+        self.usage.prompt_cache_write_tokens = add_optional_usage(
+            self.usage.prompt_cache_write_tokens,
+            usage.prompt_cache_write_tokens,
+        );
         self.usage.reasoning_tokens =
             add_optional_usage(self.usage.reasoning_tokens, usage.reasoning_tokens);
+        self.usage.reasoning_replay_tokens = add_optional_usage(
+            self.usage.reasoning_replay_tokens,
+            usage.reasoning_replay_tokens,
+        );
+        if let Some(delta) = usage.server_tool_use.as_ref() {
+            let total = self.usage.server_tool_use.get_or_insert_default();
+            total.code_execution_requests =
+                add_optional_usage(total.code_execution_requests, delta.code_execution_requests);
+            total.tool_search_requests =
+                add_optional_usage(total.tool_search_requests, delta.tool_search_requests);
+        }
     }
 }
 
@@ -125,6 +134,38 @@ fn add_optional_usage(total: Option<u32>, delta: Option<u32>) -> Option<u32> {
         (None, Some(delta)) => Some(delta),
         (Some(total), None) => Some(total),
         (None, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+    use crate::models::ServerToolUsage;
+
+    #[test]
+    fn add_usage_preserves_replay_and_saturates_server_tool_counters() {
+        let mut turn = TurnContext::new(2);
+        turn.add_usage(&Usage {
+            reasoning_replay_tokens: Some(u32::MAX - 1),
+            server_tool_use: Some(ServerToolUsage {
+                code_execution_requests: Some(u32::MAX),
+                tool_search_requests: Some(2),
+            }),
+            ..Usage::default()
+        });
+        turn.add_usage(&Usage {
+            reasoning_replay_tokens: Some(9),
+            server_tool_use: Some(ServerToolUsage {
+                code_execution_requests: Some(1),
+                tool_search_requests: Some(3),
+            }),
+            ..Usage::default()
+        });
+
+        assert_eq!(turn.usage.reasoning_replay_tokens, Some(u32::MAX));
+        let server = turn.usage.server_tool_use.expect("server tool usage");
+        assert_eq!(server.code_execution_requests, Some(u32::MAX));
+        assert_eq!(server.tool_search_requests, Some(5));
     }
 }
 
@@ -138,19 +179,74 @@ const USER_PROMPT_LABEL_MAX: usize = 100;
 /// Takes the first line of the prompt (up to `USER_PROMPT_LABEL_MAX`
 /// characters) and appends it to the traditional `type:seq` label so
 /// users can identify which turn each snapshot belongs to.
-fn format_snapshot_label(prefix: &str, turn_seq: u64, user_prompt: Option<&str>) -> String {
+pub(crate) fn format_snapshot_label(
+    prefix: &str,
+    turn_seq: u64,
+    user_prompt: Option<&str>,
+) -> String {
     let base = format!("{prefix}:{turn_seq}");
     match user_prompt {
         None | Some("") => base,
-        Some(prompt) => {
-            let first_line = prompt.lines().next().unwrap_or("");
-            let truncated: String = first_line.chars().take(USER_PROMPT_LABEL_MAX).collect();
-            if truncated.chars().count() < first_line.chars().count() {
-                format!("{base}: {truncated}…")
-            } else {
-                format!("{base}: {truncated}")
-            }
-        }
+        Some(prompt) => match snapshot_label_prompt_snippet(prompt) {
+            None => base,
+            Some(snippet) => format!("{base}: {snippet}"),
+        },
+    }
+}
+
+/// The exact prompt snippet [`format_snapshot_label`] embeds after `type:seq`.
+///
+/// Read surfaces that want to correlate a recorded prompt back to a restore
+/// point must go through this function rather than re-deriving the truncation,
+/// so the reader and the writer can never disagree about what a label means.
+/// Returns `None` when the prompt contributes no snippet at all.
+pub(crate) fn snapshot_label_prompt_snippet(prompt: &str) -> Option<String> {
+    if prompt.is_empty() {
+        return None;
+    }
+    let first_line = prompt.lines().next().unwrap_or("");
+    let truncated: String = first_line.chars().take(USER_PROMPT_LABEL_MAX).collect();
+    if truncated.chars().count() < first_line.chars().count() {
+        Some(format!("{truncated}…"))
+    } else {
+        Some(truncated)
+    }
+}
+
+/// A snapshot label parsed back into its parts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParsedSnapshotLabel {
+    /// `pre-turn`, `post-turn`, `tool`, or whatever prefix produced it.
+    pub kind: String,
+    /// The turn sequence for `pre-turn`/`post-turn` labels. `tool` labels
+    /// carry a call id rather than a sequence, so this stays `None` for them.
+    pub seq: Option<u64>,
+    /// The embedded prompt snippet, exactly as
+    /// [`snapshot_label_prompt_snippet`] produced it.
+    pub prompt_snippet: Option<String>,
+}
+
+/// Parse a label produced by [`format_snapshot_label`].
+///
+/// This is deliberately total: an unrecognized label still yields a record with
+/// the raw text as `kind`, because a read surface must describe what is really
+/// stored rather than silently dropping rows it does not recognize.
+pub(crate) fn parse_snapshot_label(label: &str) -> ParsedSnapshotLabel {
+    let (head, snippet) = match label.split_once(": ") {
+        Some((head, rest)) => (head, Some(rest.to_string())),
+        None => (label, None),
+    };
+    match head.split_once(':') {
+        Some((kind, seq)) => ParsedSnapshotLabel {
+            kind: kind.to_string(),
+            seq: seq.parse::<u64>().ok(),
+            prompt_snippet: snippet,
+        },
+        None => ParsedSnapshotLabel {
+            kind: head.to_string(),
+            seq: None,
+            prompt_snippet: snippet,
+        },
     }
 }
 
@@ -228,28 +324,71 @@ fn snapshot_with_label(workspace: &Path, label: &str, cap_bytes: u64) -> Option<
     }
 }
 
-impl TurnToolCall {
-    /// Create a new tool call record
-    pub fn new(id: String, name: String, input: serde_json::Value) -> Self {
-        Self {
-            id,
-            name,
-            input,
-            result: None,
-            error: None,
-            duration: None,
-        }
+#[cfg(test)]
+mod snapshot_label_tests {
+    use super::*;
+
+    #[test]
+    fn label_writer_and_parser_agree_on_prompt_snippet() {
+        let prompt = "rename the widget\nsecond line is dropped";
+        let label = format_snapshot_label("pre-turn", 7, Some(prompt));
+        assert_eq!(label, "pre-turn:7: rename the widget");
+
+        let parsed = parse_snapshot_label(&label);
+        assert_eq!(parsed.kind, "pre-turn");
+        assert_eq!(parsed.seq, Some(7));
+        assert_eq!(
+            parsed.prompt_snippet.as_deref(),
+            snapshot_label_prompt_snippet(prompt).as_deref(),
+            "a reader must recover exactly the snippet the writer embedded"
+        );
     }
 
-    /// Set the result
-    pub fn set_result(&mut self, result: String, duration: Duration) {
-        self.result = Some(result);
-        self.duration = Some(duration);
+    #[test]
+    fn truncated_prompt_round_trips_with_its_ellipsis() {
+        let prompt = "x".repeat(USER_PROMPT_LABEL_MAX + 25);
+        let label = format_snapshot_label("post-turn", 2, Some(&prompt));
+        let parsed = parse_snapshot_label(&label);
+        let snippet = parsed.prompt_snippet.expect("snippet");
+        assert!(snippet.ends_with('…'));
+        assert_eq!(snippet.chars().count(), USER_PROMPT_LABEL_MAX + 1);
+        assert_eq!(
+            Some(snippet),
+            snapshot_label_prompt_snippet(&prompt),
+            "truncated snippets must also round-trip"
+        );
     }
 
-    /// Set an error
-    pub fn set_error(&mut self, error: String, duration: Duration) {
-        self.error = Some(error);
-        self.duration = Some(duration);
+    #[test]
+    fn labels_without_a_prompt_parse_without_inventing_one() {
+        let label = format_snapshot_label("pre-turn", 3, None);
+        assert_eq!(label, "pre-turn:3");
+        let parsed = parse_snapshot_label(&label);
+        assert_eq!(parsed.kind, "pre-turn");
+        assert_eq!(parsed.seq, Some(3));
+        assert_eq!(parsed.prompt_snippet, None);
+    }
+
+    #[test]
+    fn tool_labels_carry_a_call_id_not_a_sequence() {
+        let label = format!("tool:{}", "call_abc123");
+        let parsed = parse_snapshot_label(&label);
+        assert_eq!(parsed.kind, "tool");
+        assert_eq!(parsed.seq, None, "a call id is not a turn sequence");
+        assert_eq!(parsed.prompt_snippet, None);
+    }
+
+    #[test]
+    fn unrecognized_labels_are_reported_rather_than_dropped() {
+        let parsed = parse_snapshot_label("manual checkpoint");
+        assert_eq!(parsed.kind, "manual checkpoint");
+        assert_eq!(parsed.seq, None);
+        assert_eq!(parsed.prompt_snippet, None);
+    }
+
+    #[test]
+    fn empty_prompt_contributes_no_snippet() {
+        assert_eq!(snapshot_label_prompt_snippet(""), None);
+        assert_eq!(format_snapshot_label("pre-turn", 1, Some("")), "pre-turn:1");
     }
 }

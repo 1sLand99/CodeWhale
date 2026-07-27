@@ -1,5 +1,6 @@
 //! Command traits and registry support.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::localization::{Locale, MessageId, tr};
@@ -15,9 +16,104 @@ pub struct CommandInfo {
     pub description_id: MessageId,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandDiscovery {
+    Primary,
+    Advanced,
+    Compatibility,
+}
+
+pub(crate) const ADVANCED_DISCOVERY_COMMANDS: &[&str] = &[
+    "anchor",
+    "balance",
+    "cache",
+    "change",
+    "context",
+    "debt",
+    "diff",
+    "edit",
+    "goal",
+    "hf",
+    "hooks",
+    "lsp",
+    "modeldb",
+    "models",
+    "network",
+    "plugin",
+    "preview-request",
+    "profile",
+    "purge",
+    "relay",
+    "rename",
+    "rlm",
+    "settings",
+    "share",
+    "sidebar",
+    "status",
+    "system",
+    "theme",
+    "tokens",
+    "tools",
+    "translate",
+    "trust",
+    "verbose",
+    "workspace",
+];
+
+pub(crate) const COMPATIBILITY_DISCOVERY_COMMANDS: &[&str] = &["subagents"];
+
+/// Built-in commands that the palette pastes into the composer instead of
+/// executing, even though they have no *required* argument.
+///
+/// Prefer keeping this empty. Every name here must be a registered canonical
+/// command name — see `palette_paste_only_names_are_registered` in the
+/// command palette tests.
+pub(crate) const PALETTE_PASTE_ONLY: &[&str] = &[];
+
+impl CommandDiscovery {
+    pub fn show_at_root(self) -> bool {
+        matches!(self, CommandDiscovery::Primary)
+    }
+}
+
 impl CommandInfo {
     pub fn requires_argument(&self) -> bool {
         self.usage.contains('<') || self.usage.contains('[')
+    }
+
+    pub fn requires_required_argument(&self) -> bool {
+        let mut optional_depth = 0usize;
+        for ch in self.usage.chars() {
+            match ch {
+                '[' => optional_depth += 1,
+                ']' => optional_depth = optional_depth.saturating_sub(1),
+                '<' if optional_depth == 0 => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Whether the slash menu / composer should leave a trailing space so the
+    /// user can type arguments immediately. `/change` is bare-useful (opens
+    /// the latest changelog) even though its usage documents an optional
+    /// version, so it is the only historical carve-out.
+    pub fn composer_wants_trailing_space(&self) -> bool {
+        self.name != "change" && self.requires_argument()
+    }
+
+    /// Whether the command palette should run this command immediately when
+    /// selected, instead of pasting it into the composer.
+    ///
+    /// Default: run anything that does not require a mandatory positional
+    /// argument (including optional-arg commands that open a picker when bare).
+    /// [`PALETTE_PASTE_ONLY`] is the explicit opt-out for side-effectful or
+    /// multi-step no-arg commands that should still paste for confirmation.
+    pub fn palette_runs_directly(&self) -> bool {
+        if self.requires_required_argument() {
+            return false;
+        }
+        !PALETTE_PASTE_ONLY.contains(&self.name)
     }
 
     pub fn palette_command(&self) -> String {
@@ -28,7 +124,7 @@ impl CommandInfo {
         }
     }
 
-    pub fn description_for(&self, locale: Locale) -> &'static str {
+    pub fn description_for(&self, locale: Locale) -> Cow<'static, str> {
         tr(locale, self.description_id)
     }
 
@@ -40,6 +136,24 @@ impl CommandInfo {
             format!("{}  aliases: {}", desc, self.aliases.join(", "))
         }
     }
+
+    pub fn discovery(&self) -> CommandDiscovery {
+        if COMPATIBILITY_DISCOVERY_COMMANDS.contains(&self.name) {
+            CommandDiscovery::Compatibility
+        } else if ADVANCED_DISCOVERY_COMMANDS.contains(&self.name) {
+            CommandDiscovery::Advanced
+        } else {
+            CommandDiscovery::Primary
+        }
+    }
+
+    pub fn show_in_empty_discovery(&self) -> bool {
+        self.discovery().show_at_root()
+    }
+
+    pub fn show_in_slash_completion(&self, prefix: &str) -> bool {
+        !prefix.trim_start_matches('/').trim().is_empty() || self.show_in_empty_discovery()
+    }
 }
 
 pub trait Command: Send + Sync {
@@ -48,10 +162,19 @@ pub trait Command: Send + Sync {
 }
 
 pub trait CommandGroup: Send + Sync {
-    fn commands(&self) -> Vec<Box<dyn Command>>;
+    fn commands(&self) -> &'static [Box<dyn Command>];
 }
 
 pub(crate) type CommandHandler = fn(&mut App, Option<&str>) -> CommandResult;
+
+/// Trait implemented by focused built-in command modules.
+///
+/// A command module owns its metadata and exposes a static execution function
+/// that the group registry can wire into [`FunctionCommand`].
+pub trait RegisterCommand {
+    fn info() -> &'static CommandInfo;
+    fn execute(app: &mut App, arg: Option<&str>) -> CommandResult;
+}
 
 pub(crate) struct FunctionCommand {
     info: &'static CommandInfo,
@@ -75,7 +198,7 @@ impl Command for FunctionCommand {
 }
 
 pub struct CommandRegistry {
-    commands: Vec<Box<dyn Command>>,
+    commands: Vec<&'static dyn Command>,
     name_to_index: HashMap<&'static str, usize>,
 }
 
@@ -87,7 +210,7 @@ impl CommandRegistry {
         }
     }
 
-    pub fn register(&mut self, command: Box<dyn Command>) {
+    pub fn register(&mut self, command: &'static dyn Command) {
         let index = self.commands.len();
         let info = command.info();
         self.name_to_index.insert(info.name, index);
@@ -99,7 +222,7 @@ impl CommandRegistry {
 
     pub fn register_group(&mut self, group: &dyn CommandGroup) {
         for command in group.commands() {
-            self.register(command);
+            self.register(command.as_ref());
         }
     }
 
@@ -108,7 +231,7 @@ impl CommandRegistry {
         self.name_to_index
             .get(name)
             .and_then(|index| self.commands.get(*index))
-            .map(Box::as_ref)
+            .copied()
     }
 
     pub fn get_info(&self, name: &str) -> Option<&'static CommandInfo> {
@@ -116,7 +239,7 @@ impl CommandRegistry {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &dyn Command> {
-        self.commands.iter().map(Box::as_ref)
+        self.commands.iter().copied()
     }
 
     pub fn infos(&self) -> Vec<&'static CommandInfo> {

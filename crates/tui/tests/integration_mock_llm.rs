@@ -32,16 +32,19 @@
 //! Per the v0.7.0 mock-LLM issue (the parent of this file): "If the engine's
 //! API surfaces are too tangled to mock cleanly … document that as BLOCKED with
 //! what wiring needs to change. In that case still commit any partial work
-//! that lands cleanly." The full engine integration tests below are
-//! `#[ignore]`-marked with TODOs pointing at that refactor.
+//! that lands cleanly." Full engine integration coverage remains blocked on
+//! that seam; this file keeps the blocker documented instead of carrying
+//! ignored placeholder tests.
 //!
-//! Once `Arc<dyn LlmClient>` lands the ignored tests can flip on with no
-//! changes to the mock.
+//! Once `Arc<dyn LlmClient>` lands, add engine-level tests that reuse this mock.
 
 use futures_util::StreamExt;
 
 // Bring in the production model types verbatim — no other crate sources are
 // needed because the mock is self-contained against `models.rs`.
+#[path = "../src/model_catalog.rs"]
+mod model_catalog;
+
 #[path = "../src/models.rs"]
 #[allow(dead_code)]
 mod models;
@@ -411,7 +414,7 @@ async fn compaction_non_streaming_returns_queued_message_response() {
 
 // === 6. Sub-agent style turn ================================================
 //
-// The next turn after an `agent_result` summary must re-verify the claimed
+// The next turn after an `agent` summary must re-verify the claimed
 // side effect before reporting success.
 
 #[tokio::test]
@@ -441,13 +444,14 @@ Child results are self-reports; verify side effects with tools like read_file or
         .create_message_stream(make_request(vec![
             user_message("Use a child to create the file, then report back."),
             assistant_tool_call(
-                "agent_result_call",
-                "agent_result",
+                "agent_call",
+                "agent",
                 serde_json::json!({
-                    "agent_id": "agent_filecheck"
+                    "prompt": "Create the requested file and report the result.",
+                    "role": "implementer"
                 }),
             ),
-            tool_result_message("agent_result_call", &tool_summary),
+            tool_result_message("agent_call", &tool_summary),
         ]))
         .await
         .unwrap();
@@ -479,15 +483,11 @@ Child results are self-reports; verify side effects with tools like read_file or
     assert_eq!(parsed["path"], missing_path);
 }
 
-// === 7. Capacity-gate observation ===========================================
+// === 7. Request capture observation =========================================
 //
-// The capacity controller (core::capacity) inspects an upcoming request's
-// estimated input-token cost and may force a guardrail action (compaction,
-// hold, etc.) before the request is dispatched. The mock surfaces request
-// captures BEFORE the response stream is opened, which is exactly the seam
-// the capacity controller observes — so the trait-level test is to verify
-// that the captured request is observable per-call (not buffered across
-// calls).
+// The mock surfaces request captures BEFORE the response stream is opened, so
+// trait-level tests can verify that captured requests are observable per-call
+// rather than buffered across calls.
 
 #[tokio::test]
 async fn capacity_gate_can_observe_request_before_response_streams() {
@@ -553,65 +553,4 @@ fn compaction_config_defaults_are_enabled_for_session_survivability() {
     // Verify the threshold is reasonable (> 0 and < context window).
     assert!(config > 0, "compaction threshold must be positive");
     assert!(config < 1_000_000, "compaction threshold must be below 1M");
-}
-
-// === 9. BLOCKED: full engine integration ====================================
-//
-// These tests exercise the engine's turn loop end-to-end. They cannot run
-// today because `core::engine::Engine` holds a concrete `Option<DeepSeekClient>`
-// and there is no constructor seam to inject `Arc<dyn LlmClient>`. Once the
-// engine is refactored to take a trait object (or generic), drop the
-// `#[ignore]` and these tests light up.
-//
-// Blocked on #402 P0: refactor engine + tools::registry +
-// rlm::bridge + tools::review + tools::subagent + cycle_manager + compaction
-// to take `Arc<dyn LlmClient>` instead of `Option<DeepSeekClient>`. Then the
-// mock plugs in directly and these `#[ignore]`s come off.
-
-#[tokio::test]
-#[ignore = "blocked on #402: engine takes concrete DeepSeekClient; needs Arc<dyn LlmClient> refactor"]
-async fn engine_full_turn_loop_with_compaction_and_resume() {
-    // Once the refactor lands:
-    // 1. Build a session with N messages exceeding the compaction threshold.
-    // 2. Inject a MockLlmClient with one canned compaction-summary response
-    //    and one canned post-compaction assistant turn.
-    // 3. Drive a turn through the engine and assert the session resumes
-    //    cleanly with the summary message in place.
-    //
-    // The cycle_manager path replaces high-level compaction in v0.6.6+; this
-    // test should target whichever path is enabled by the test config.
-    unreachable!("ignored");
-}
-
-#[tokio::test]
-#[ignore = "blocked on #402: engine takes concrete DeepSeekClient; needs Arc<dyn LlmClient> refactor"]
-async fn engine_full_sub_agent_spawn_round_trip() {
-    // Once the refactor lands:
-    // 1. Inject MockLlmClient as the parent client AND wire the subagent
-    //    runtime to receive its own MockLlmClient.
-    // 2. Parent emits agent_spawn tool_call; child runs through the v0.6.7
-    //    mailbox and replies with text.
-    // 3. Assert the final assistant text bubbles back to the parent session.
-    unreachable!("ignored");
-}
-
-#[tokio::test]
-#[ignore = "blocked on #402: engine takes concrete DeepSeekClient; needs Arc<dyn LlmClient> refactor"]
-async fn engine_full_parallel_tool_execution() {
-    // Once the refactor lands:
-    // 1. Mock turn 1 returns two tool_calls in a single round.
-    // 2. Engine executes them in parallel via FuturesUnordered.
-    // 3. Assert ordered ToolResult messages are appended to the next request.
-    unreachable!("ignored");
-}
-
-#[tokio::test]
-#[ignore = "blocked on #402: engine takes concrete DeepSeekClient; needs Arc<dyn LlmClient> refactor"]
-async fn engine_capacity_controller_forces_compaction_at_threshold() {
-    // Once the refactor lands:
-    // 1. Inject a long history near the V4 soft cap.
-    // 2. Assert the capacity controller emits a forced-compaction guardrail
-    //    BEFORE dispatching the LLM call.
-    // 3. Verify the mock's call_count() reflects the observed sequence.
-    unreachable!("ignored");
 }

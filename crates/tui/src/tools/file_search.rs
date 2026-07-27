@@ -34,6 +34,10 @@ impl ToolSpec for FileSearchTool {
         "file_search"
     }
 
+    fn model_visible(&self) -> bool {
+        false
+    }
+
     fn description(&self) -> &'static str {
         "Find files by name using fuzzy matching with score-based ranking. Use this instead of `find -name` or `fd` in `exec_shell` for filename search. Pass `extensions` to filter by suffix."
     }
@@ -99,12 +103,14 @@ impl ToolSpec for FileSearchTool {
             limit,
             context.cancel_token.clone(),
             FILE_SEARCH_TIMEOUT,
+            context.follow_symlinks,
         )
         .await?;
         ToolResult::json(&matches).map_err(|e| ToolError::execution_failed(e.to_string()))
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn search_files_async(
     query: String,
     base_path: PathBuf,
@@ -113,6 +119,7 @@ async fn search_files_async(
     limit: usize,
     cancel_token: Option<CancellationToken>,
     timeout: Duration,
+    follow_symlinks: bool,
 ) -> Result<Vec<FileSearchMatch>, ToolError> {
     let worker_cancel_token = cancel_token.clone();
     run_blocking_file_search(timeout, cancel_token, move || {
@@ -123,6 +130,7 @@ async fn search_files_async(
             exclude_patterns,
             limit,
             worker_cancel_token.as_ref(),
+            follow_symlinks,
         )
     })
     .await
@@ -164,7 +172,7 @@ where
 }
 
 fn file_search_cancelled() -> ToolError {
-    ToolError::execution_failed("file_search cancelled before completion")
+    ToolError::cancelled("file_search cancelled before completion")
 }
 
 fn file_search_timeout(timeout: Duration) -> ToolError {
@@ -229,6 +237,7 @@ fn search_files(
     exclude_patterns: Vec<String>,
     limit: usize,
     cancel_token: Option<&CancellationToken>,
+    follow_symlinks: bool,
 ) -> Result<Vec<FileSearchMatch>, ToolError> {
     check_cancelled(cancel_token)?;
 
@@ -243,7 +252,10 @@ fn search_files(
     let mut results: Vec<FileSearchMatch> = Vec::new();
 
     let mut builder = WalkBuilder::new(base_path);
-    builder.hidden(false).follow_links(false).require_git(false);
+    builder
+        .hidden(false)
+        .follow_links(follow_symlinks)
+        .require_git(false);
     let walker = builder.build();
 
     for entry in walker {
@@ -477,7 +489,14 @@ mod tests {
             .expect("execute");
 
         assert!(result.success);
-        assert!(result.content.contains("\"path\": \"needle.txt\""));
+        let matches: Value = serde_json::from_str(&result.content).expect("search json");
+        assert!(
+            matches
+                .as_array()
+                .expect("matches")
+                .iter()
+                .any(|item| item.get("path").and_then(Value::as_str) == Some("needle.txt"))
+        );
         assert!(!result.content.contains("fixtures/needle.txt"));
     }
 
@@ -497,7 +516,14 @@ mod tests {
             .expect("execute");
 
         assert!(result.success);
-        assert!(result.content.contains("\"path\": \"needle.txt\""));
+        let matches: Value = serde_json::from_str(&result.content).expect("search json");
+        assert!(
+            matches
+                .as_array()
+                .expect("matches")
+                .iter()
+                .any(|item| item.get("path").and_then(Value::as_str) == Some("needle.txt"))
+        );
         assert!(!result.content.contains("target/needle.txt"));
     }
 

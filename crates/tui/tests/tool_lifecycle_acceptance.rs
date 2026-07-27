@@ -15,10 +15,17 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 const FEATURE_NAME: &str = "Tool call lifecycle";
 const FEATURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/tests/features/tool_lifecycle_happy_path.feature"
+    "/tests/features/tool_lifecycle.feature"
 );
 const HAPPY_PATH_SCENARIO: &str = "Happy path lists the current directory through a tool";
-const TOOL_CALL_ID: &str = "call_list_dir";
+const UNKNOWN_TOOL_SCENARIO: &str = "Unknown tool returns an error result";
+const MALFORMED_ARGUMENTS_SCENARIO: &str = "Malformed tool arguments return an error result";
+const REAL_TOOL_ERROR_SCENARIO: &str = "A real tool error is returned to the follow-up request";
+const EMPTY_TOOL_RESULT_SCENARIO: &str =
+    "An empty tool result is returned to the follow-up request";
+const MISSING_SUMMARY_SCENARIO: &str =
+    "A follow-up answer missing the expected summary is detected";
+const TOOL_CALL_ID: &str = "call_tool";
 const TEST_MODEL: &str = "acceptance-model";
 
 #[derive(Debug, Default, cucumber::World)]
@@ -27,8 +34,9 @@ struct ToolLifecycleWorld {
     home: Option<TempDir>,
     llm_server: Option<MockServer>,
     tool_name: Option<String>,
-    tool_input: Option<Value>,
+    tool_arguments: Option<String>,
     final_answer: Option<String>,
+    prompt: Option<String>,
     stdout: String,
     stderr: String,
     events: Vec<Value>,
@@ -72,7 +80,19 @@ fn mocked_llm_will_request_tool(world: &mut ToolLifecycleWorld, tool_name: Strin
     );
 
     world.tool_name = Some(tool_name);
-    world.tool_input = Some(input);
+    world.tool_arguments = Some(serde_json::to_string(&input).expect("tool input arguments"));
+}
+
+#[given(
+    regex = r#"^the mocked LLM will request the "([^"]+)" tool with malformed arguments "([^"]+)"$"#
+)]
+fn mocked_llm_will_request_tool_with_malformed_arguments(
+    world: &mut ToolLifecycleWorld,
+    tool_name: String,
+    arguments: String,
+) {
+    world.tool_name = Some(tool_name);
+    world.tool_arguments = Some(arguments);
 }
 
 #[given("the mocked LLM will answer after the tool result:")]
@@ -87,6 +107,7 @@ async fn user_asks(world: &mut ToolLifecycleWorld, prompt: String) {
     let server = start_mock_llm(world).await;
     let output = run_codewhale_exec(world, &server, &prompt);
 
+    world.prompt = Some(prompt);
     world.stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     world.stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(
@@ -120,7 +141,13 @@ fn codewhale_should_send_user_request_to_mocked_llm(world: &mut ToolLifecycleWor
         .expect("expected an initial chat request");
 
     assert!(
-        request_contains_user_text(first_request, "list the current directory"),
+        request_contains_user_text(
+            first_request,
+            world
+                .prompt
+                .as_deref()
+                .expect("scenario prompt should be set")
+        ),
         "initial request should include the user prompt:\n{first_request:#}"
     );
     assert!(
@@ -184,12 +211,192 @@ fn codewhale_should_send_tool_result_back_to_mocked_llm(world: &mut ToolLifecycl
         .get("content")
         .and_then(serde_json::Value::as_str)
         .expect("tool result content");
-    for entry in ["README.md", "notes.txt", "src"] {
-        assert!(
-            content.contains(entry),
-            "tool result sent to LLM should include {entry}:\n{content}"
-        );
-    }
+    assert_eq!(
+        content,
+        tool_result_output(world),
+        "follow-up request should preserve the exact public tool result"
+    );
+}
+
+#[then(regex = r#"^the public tool result should report an error for "([^"]+)"$"#)]
+fn public_tool_result_should_report_error_for(world: &mut ToolLifecycleWorld, tool_name: String) {
+    let _ = tool_use_event(world, &tool_name);
+    let event = tool_result_event(world);
+
+    assert_eq!(event.get("status").and_then(Value::as_str), Some("error"));
+    let output = event
+        .get("output")
+        .and_then(Value::as_str)
+        .expect("tool_result error output");
+    assert!(
+        output.contains(&tool_name) && output.contains("not available"),
+        "tool_result error should name the unavailable tool:\n{output}"
+    );
+}
+
+#[then("CodeWhale should send the tool error back to the mocked LLM")]
+fn codewhale_should_send_tool_error_back_to_mocked_llm(world: &mut ToolLifecycleWorld) {
+    let request = world
+        .requests
+        .iter()
+        .find(|request| request_contains_tool_result(request))
+        .expect("expected a follow-up chat request containing the tool error");
+    let tool_result = tool_result_message(request).expect("tool result message");
+    assert_eq!(
+        tool_result
+            .get("tool_call_id")
+            .and_then(serde_json::Value::as_str),
+        Some(TOOL_CALL_ID)
+    );
+
+    let content = tool_result
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .expect("tool result content");
+    let tool_name = world.tool_name.as_deref().expect("tool name");
+    assert!(
+        content.contains(tool_name) && content.contains("not available"),
+        "tool error sent to LLM should describe the unavailable tool:\n{content}"
+    );
+}
+
+#[then(
+    regex = r#"^the public tool lifecycle should show a running tool with raw input for "([^"]+)"$"#
+)]
+fn public_tool_lifecycle_should_show_running_tool_with_raw_input(
+    world: &mut ToolLifecycleWorld,
+    tool_name: String,
+) {
+    let event = tool_use_event(world, &tool_name);
+    assert!(
+        value_contains_text(event.get("input").expect("tool_use input"), "{not-json"),
+        "tool_use input should preserve malformed raw arguments:\n{event:#}"
+    );
+}
+
+#[then(regex = r#"^the public tool result should report malformed arguments for "([^"]+)"$"#)]
+fn public_tool_result_should_report_malformed_arguments_for(
+    world: &mut ToolLifecycleWorld,
+    tool_name: String,
+) {
+    let _ = tool_use_event(world, &tool_name);
+    let event = tool_result_event(world);
+
+    assert_eq!(event.get("status").and_then(Value::as_str), Some("error"));
+    let output = event
+        .get("output")
+        .and_then(Value::as_str)
+        .expect("tool_result error output");
+    assert_malformed_arguments_text(output);
+}
+
+#[then("CodeWhale should send the malformed argument error back to the mocked LLM")]
+fn codewhale_should_send_malformed_argument_error_back_to_mocked_llm(
+    world: &mut ToolLifecycleWorld,
+) {
+    let request = world
+        .requests
+        .iter()
+        .find(|request| request_contains_tool_result(request))
+        .expect("expected a follow-up chat request containing the malformed argument error");
+    let tool_result = tool_result_message(request).expect("tool result message");
+    assert_eq!(
+        tool_result
+            .get("tool_call_id")
+            .and_then(serde_json::Value::as_str),
+        Some(TOOL_CALL_ID)
+    );
+
+    let content = tool_result
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .expect("tool result content");
+    assert_malformed_arguments_text(content);
+}
+
+#[then(
+    regex = r#"^the public tool result should report a real error for "([^"]+)" containing "([^"]+)"$"#
+)]
+fn public_tool_result_should_report_real_error(
+    world: &mut ToolLifecycleWorld,
+    tool_name: String,
+    expected: String,
+) {
+    let _ = tool_use_event(world, &tool_name);
+    let event = tool_result_event(world);
+    assert_eq!(event.get("status").and_then(Value::as_str), Some("error"));
+
+    let output = event
+        .get("output")
+        .and_then(Value::as_str)
+        .expect("real tool error output");
+    assert!(
+        output.contains(&expected) && output.contains("Failed to read"),
+        "real {tool_name} failure should preserve the path and execution error:\n{output}"
+    );
+}
+
+#[then("CodeWhale should send the real tool error back to the mocked LLM")]
+fn codewhale_should_send_real_tool_error_back_to_mocked_llm(world: &mut ToolLifecycleWorld) {
+    let request = world
+        .requests
+        .iter()
+        .find(|request| request_contains_tool_result(request))
+        .expect("expected a follow-up chat request containing the real tool error");
+    let content = tool_result_message(request)
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        .expect("real tool error content");
+    assert!(
+        content.contains("missing.txt") && content.contains("Failed to read"),
+        "real tool error sent to the LLM should preserve the execution failure:\n{content}"
+    );
+}
+
+#[then("the public tool result should be an empty list")]
+fn public_tool_result_should_be_an_empty_list(world: &mut ToolLifecycleWorld) {
+    let output = tool_result_output(world);
+    let value: Value = serde_json::from_str(output).expect("empty list_dir result should be JSON");
+    assert_eq!(value, json!([]), "empty workspace should return []");
+    assert_eq!(
+        tool_result_event(world)
+            .get("status")
+            .and_then(Value::as_str),
+        Some("success")
+    );
+}
+
+#[then("CodeWhale should send the empty tool result back to the mocked LLM")]
+fn codewhale_should_send_empty_tool_result_back_to_mocked_llm(world: &mut ToolLifecycleWorld) {
+    let request = world
+        .requests
+        .iter()
+        .find(|request| request_contains_tool_result(request))
+        .expect("expected a follow-up chat request containing the empty tool result");
+    let content = tool_result_message(request)
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        .expect("empty tool result content");
+    let value: Value =
+        serde_json::from_str(content).expect("forwarded empty result should be JSON");
+    assert_eq!(value, json!([]), "follow-up request should preserve []");
+}
+
+#[then(
+    regex = r#"^the public tool lifecycle should show a failed tool with raw input for "([^"]+)"$"#
+)]
+fn public_tool_lifecycle_should_show_failed_tool_with_raw_input(
+    world: &mut ToolLifecycleWorld,
+    tool_name: String,
+) {
+    let event = tool_result_event(world);
+    assert_eq!(event.get("status").and_then(Value::as_str), Some("error"));
+
+    let tool_use = tool_use_event(world, &tool_name);
+    assert!(
+        value_contains_text(tool_use.get("input").expect("tool_use input"), "{not-json"),
+        "failed tool_use input should preserve malformed raw arguments:\n{tool_use:#}"
+    );
 }
 
 #[then("the public tool lifecycle should show a completed tool:")]
@@ -208,14 +415,25 @@ fn public_tool_lifecycle_should_show_completed_tool(world: &mut ToolLifecycleWor
     );
 }
 
+#[then("the public tool lifecycle should show a failed tool:")]
+fn public_tool_lifecycle_should_show_failed_tool(world: &mut ToolLifecycleWorld, step: &Step) {
+    let expected = one_table_row(step);
+    assert_eq!(row_value(&expected, "status"), "error");
+    assert_eq!(row_value(&expected, "marker"), "[!]");
+
+    let event = tool_result_event(world);
+    assert_eq!(event.get("status").and_then(Value::as_str), Some("error"));
+
+    let tool_use = tool_use_event(world, &row_value(&expected, "tool"));
+    assert_eq!(
+        tool_use.get("input").and_then(|input| input.get("path")),
+        Some(&json!(row_value(&expected, "input")))
+    );
+}
+
 #[then(regex = r#"^the public output should include "([^"]+)"$"#)]
 fn public_output_should_include(world: &mut ToolLifecycleWorld, expected: String) {
-    let content = world
-        .events
-        .iter()
-        .filter(|event| event.get("type").and_then(Value::as_str) == Some("content"))
-        .filter_map(|event| event.get("content").and_then(Value::as_str))
-        .collect::<String>();
+    let content = public_content_output(world);
     assert!(
         content.contains(&expected),
         "public content output should include {expected:?}:\nstdout:\n{}\nstderr:\n{}",
@@ -224,12 +442,50 @@ fn public_output_should_include(world: &mut ToolLifecycleWorld, expected: String
     );
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn happy_path_lists_current_directory_through_tool() {
-    run_scenario(HAPPY_PATH_SCENARIO).await;
+#[then(regex = r#"^acceptance should report the missing expected summary "([^"]+)"$"#)]
+fn acceptance_should_report_missing_expected_summary(
+    world: &mut ToolLifecycleWorld,
+    expected: String,
+) {
+    let report = require_follow_up_summary(world, &expected)
+        .expect_err("fixture answer intentionally omits the expected summary");
+    assert!(
+        report.contains(&expected) && report.contains("missing expected summary"),
+        "missing-summary oracle should name the absent contract:\n{report}"
+    );
 }
 
-async fn run_scenario(name: &'static str) {
+#[tokio::test(flavor = "current_thread")]
+async fn happy_path_lists_current_directory_through_tool() {
+    run_scenario(HAPPY_PATH_SCENARIO, 10).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unknown_tool_returns_error_result() {
+    run_scenario(UNKNOWN_TOOL_SCENARIO, 10).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn malformed_tool_arguments_return_error_result() {
+    run_scenario(MALFORMED_ARGUMENTS_SCENARIO, 10).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn real_tool_error_is_returned_to_follow_up_request() {
+    run_scenario(REAL_TOOL_ERROR_SCENARIO, 10).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn empty_tool_result_is_returned_to_follow_up_request() {
+    run_scenario(EMPTY_TOOL_RESULT_SCENARIO, 10).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn missing_follow_up_summary_is_detected() {
+    run_scenario(MISSING_SUMMARY_SCENARIO, 11).await;
+}
+
+async fn run_scenario(name: &'static str, expected_steps: usize) {
     let writer = ToolLifecycleWorld::cucumber()
         .fail_on_skipped()
         .with_default_cli()
@@ -239,7 +495,11 @@ async fn run_scenario(name: &'static str) {
         .await;
     assert_eq!(writer.failed_steps(), 0, "scenario failed: {name}");
     assert_eq!(writer.skipped_steps(), 0, "scenario skipped steps: {name}");
-    assert_eq!(writer.passed_steps(), 10, "scenario did not run: {name}");
+    assert_eq!(
+        writer.passed_steps(),
+        expected_steps,
+        "scenario did not run: {name}"
+    );
 }
 
 async fn start_mock_llm(world: &ToolLifecycleWorld) -> MockServer {
@@ -268,7 +528,7 @@ async fn start_mock_llm(world: &ToolLifecycleWorld) -> MockServer {
         .and(request_has_no_tool_result)
         .respond_with(sse_response(&tool_call_sse(
             world.tool_name.as_ref().expect("tool name"),
-            world.tool_input.as_ref().expect("tool input"),
+            world.tool_arguments.as_ref().expect("tool arguments"),
         )))
         .mount(&server)
         .await;
@@ -403,8 +663,7 @@ fn preserve_host_env(command: &mut Command) {
     }
 }
 
-fn tool_call_sse(tool_name: &str, tool_input: &Value) -> String {
-    let arguments = serde_json::to_string(tool_input).expect("tool input arguments");
+fn tool_call_sse(tool_name: &str, arguments: &str) -> String {
     [
         sse_chunk(json!({
             "id": "chatcmpl-tool",
@@ -478,6 +737,18 @@ fn final_answer_sse(answer: &str) -> String {
     .join("")
 }
 
+fn assert_malformed_arguments_text(text: &str) {
+    let lower = text.to_ascii_lowercase();
+    assert!(
+        lower.contains("argument")
+            && (lower.contains("malformed")
+                || lower.contains("parse")
+                || lower.contains("json")
+                || lower.contains("invalid")),
+        "expected malformed argument error text:\n{text}"
+    );
+}
+
 fn sse_chunk(value: Value) -> String {
     format!(
         "data: {}\n\n",
@@ -544,6 +815,26 @@ fn value_contains_text(value: &Value, expected: &str) -> bool {
             .values()
             .any(|value| value_contains_text(value, expected)),
         _ => false,
+    }
+}
+
+fn public_content_output(world: &ToolLifecycleWorld) -> String {
+    world
+        .events
+        .iter()
+        .filter(|event| event.get("type").and_then(Value::as_str) == Some("content"))
+        .filter_map(|event| event.get("content").and_then(Value::as_str))
+        .collect()
+}
+
+fn require_follow_up_summary(world: &ToolLifecycleWorld, expected: &str) -> Result<(), String> {
+    let content = public_content_output(world);
+    if content.contains(expected) {
+        Ok(())
+    } else {
+        Err(format!(
+            "missing expected summary {expected:?} in follow-up answer {content:?}"
+        ))
     }
 }
 

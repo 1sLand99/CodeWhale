@@ -95,10 +95,6 @@ pub struct FleetAlertDispatcher<R = FleetEnvSecretResolver> {
 }
 
 impl FleetAlertConfig {
-    pub fn disabled() -> Self {
-        Self::default()
-    }
-
     pub fn dry_run_for_adapter(adapter: FleetAlertAdapterConfig) -> Self {
         let mut adapters = BTreeMap::new();
         adapters.insert("dry-run".to_string(), adapter);
@@ -345,7 +341,7 @@ where
         .context("building fleet alert HTTP client")?;
     match adapter {
         FleetAlertAdapterConfig::Slack { webhook_env, .. } => {
-            let url = required_secret(resolver, webhook_env)?;
+            let url = required_https_url(resolver, webhook_env)?;
             client
                 .post(url)
                 .json(redacted_body)
@@ -358,7 +354,7 @@ where
             url_env,
             secret_env,
         } => {
-            let url = required_secret(resolver, url_env)?;
+            let url = required_https_url(resolver, url_env)?;
             let mut request = client.post(url).json(redacted_body);
             if let Some(secret_env) = secret_env {
                 request = request.header(
@@ -414,7 +410,7 @@ fn safe_event_payload(event: &FleetAlertEvent) -> Value {
 
 fn slack_body(event: &FleetAlertEvent, channel: Option<&str>) -> Value {
     let text = format!(
-        "CodeWhale fleet {}: run={} task={} reason={}",
+        "Codewhale fleet {}: run={} task={} reason={}",
         alert_class_label(event.class),
         event.run_id.0,
         event.task_id.as_deref().unwrap_or("-"),
@@ -454,7 +450,7 @@ fn pagerduty_body(event: &FleetAlertEvent, severity: &str, routing_key: String) 
         "routing_key": routing_key,
         "event_action": "trigger",
         "payload": {
-            "summary": format!("CodeWhale fleet {}: {}", alert_class_label(event.class), short_reason(&event.reason)),
+            "summary": format!("Codewhale fleet {}: {}", alert_class_label(event.class), short_reason(&event.reason)),
             "severity": severity,
             "source": "codewhale",
             "custom_details": safe_event_payload(event),
@@ -491,6 +487,26 @@ where
     resolver
         .resolve(name)
         .ok_or_else(|| anyhow!("fleet alert secret {name} is not configured"))
+}
+
+fn required_https_url<R>(resolver: &R, name: &str) -> Result<String>
+where
+    R: FleetAlertSecretResolver,
+{
+    let url = resolver
+        .resolve(name)
+        .ok_or_else(|| anyhow!("fleet alert URL {name} is not configured"))?;
+    validate_https_alert_url(name, &url)?;
+    Ok(url)
+}
+
+fn validate_https_alert_url(name: &str, url: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(url)
+        .with_context(|| format!("fleet alert URL from {name} is not a valid URL"))?;
+    if parsed.scheme() != "https" {
+        return Err(anyhow!("fleet alert URL from {name} must use https"));
+    }
+    Ok(())
 }
 
 fn short_reason(reason: &str) -> String {
@@ -631,6 +647,29 @@ mod tests {
     }
 
     #[test]
+    fn fleet_alert_url_validation_requires_https() {
+        validate_https_alert_url("FLEET_WEBHOOK_URL", "https://hooks.example.invalid/fleet")
+            .expect("https alert URL should be accepted");
+
+        let err =
+            validate_https_alert_url("FLEET_WEBHOOK_URL", "http://hooks.example.invalid/fleet")
+                .expect_err("cleartext alert URL should fail");
+        assert!(format!("{err:#}").contains("must use https"));
+    }
+
+    #[test]
+    fn required_https_url_uses_secret_resolver() {
+        let mut resolver = MapResolver::default();
+        resolver.values.insert(
+            "FLEET_WEBHOOK_URL".to_string(),
+            "https://hooks.example.invalid/fleet".to_string(),
+        );
+
+        let url = required_https_url(&resolver, "FLEET_WEBHOOK_URL").expect("resolve URL");
+        assert_eq!(url, "https://hooks.example.invalid/fleet");
+    }
+
+    #[test]
     fn fleet_alert_event_is_derived_from_ledgered_stale_worker_event() {
         let worker_event = FleetWorkerEvent {
             seq: 4,
@@ -664,6 +703,8 @@ mod tests {
             run_id: FleetRunId::from("run-1"),
             task_id: "task-a".to_string(),
             worker_id: "worker-1".to_string(),
+            attempt: None,
+            terminal_seq: None,
             completed_at: "2026-06-13T02:00:00Z".to_string(),
             result: FleetTaskResult::Fail,
             failure_kind: Some(FleetTaskFailureKind::Verifier),
@@ -673,6 +714,8 @@ mod tests {
                 max: Some(1.0),
                 notes: Some("regex scorer could not be compiled".to_string()),
             }),
+            resolved_route: None,
+            effective_permissions: None,
         };
 
         let alert = FleetAlertEvent::verifier_failed(&receipt).unwrap();

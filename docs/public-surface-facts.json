@@ -1,0 +1,148 @@
+{
+  "schemaVersion": 2,
+  "product": {
+    "name": "Codewhale",
+    "description": "Terminal coding agent for supported hosted and local models. One runtime on your machine. Rust, MIT.",
+    "positioning": "Terminal-native, model/provider-neutral, local-first coding agent",
+    "license": "MIT",
+    "terminology": {
+      "Fleet": "who does the work",
+      "Workflow": "what order the work follows",
+      "Lane": "one running Workflow instance",
+      "Runtime": "where and how a Lane executes"
+    },
+    "sources": ["Cargo.toml", "LICENSE", "README.md", "npm/codewhale/package.json", "docs/FLEET.md"]
+  },
+  "sourceCandidate": {
+    "version": "0.9.2",
+    "providerCount": 36,
+    "toolCount": 70,
+    "sandboxBackends": [
+      "seatbelt (macOS, when available)",
+      "bubblewrap (Linux, opt-in when installed)"
+    ],
+    "sources": [
+      "Cargo.toml",
+      "crates/tui/src/config.rs",
+      "crates/tui/src/sandbox/mod.rs",
+      "web/scripts/derive-facts.mjs"
+    ]
+  },
+  "latestPublishedRelease": {
+    "tag": "v0.9.1",
+    "version": "0.9.1",
+    "publishedAt": "2026-07-24T21:46:31Z",
+    "url": "https://github.com/Hmbown/CodeWhale/releases/tag/v0.9.1",
+    "sources": ["web/data/latest-published-release.json"]
+  },
+  "install": {
+    "recommended": "npm install -g codewhale",
+    "binaries": ["codewhale", "codew", "codewhale-tui"],
+    "channels": {
+      "npm": "published releases only",
+      "cargo": "published crates only",
+      "prebuiltArchives": "published GitHub Releases only",
+      "cnbMirror": "documented targets only"
+    },
+    "androidTermux": {
+      "status": "preview",
+      "npm": "preview",
+      "requiresMatchingPublishedAssets": true,
+      "sourceBuild": true
+    },
+    "sources": ["README.md", "npm/codewhale/package.json", "npm/codewhale/README.md", "npm/codewhale/scripts/artifacts.js", "docs/INSTALL.md", "docs/CNB_MIRROR.md"]
+  },
+  "control": {
+    "modes": ["Plan", "Act", "Operate"],
+    "permissionPostures": ["Ask", "Auto-Review", "Full Access"],
+    "shortcuts": {
+      "mode": { "chord": "Tab", "when": "composer idle" },
+      "permissionPosture": { "chord": "Shift+Tab", "when": "composer idle" }
+    },
+    "sources": ["docs/MODES.md", "docs/KEYBINDINGS.md", "crates/tui/src/settings.rs"]
+  },
+  "toolSurface": {
+    "defaultActive": ["Bash", "File", "Git", "Run", "agent", "remember", "tasks", "update_plan", "work_update", "tool_search"],
+    "actions": {
+      "Bash": ["run", "wait", "interact", "cancel"],
+      "File": ["read", "list", "search_name", "search_content", "write", "edit", "patch"],
+      "Git": ["status", "diff", "log", "show", "blame"],
+      "Run": ["tests", "verifiers"]
+    },
+    "deferred": {
+      "Web": ["search", "fetch", "wait"]
+    },
+    "compatibility": {
+      "legacyAliases": "replay-only",
+      "modelVisible": false,
+      "toolSearchDiscoverable": false
+    },
+    "agentConcurrency": {
+      "defaultConfigured": 64,
+      "maximumConfigured": 128,
+      "maximumAdmitted": 1024
+    },
+    "sources": [
+      "docs/TOOL_SURFACE.md",
+      "docs/RUNTIME_SIMPLIFICATION_DESIGN.md",
+      "crates/tui/src/core/engine/tool_catalog.rs",
+      "crates/tui/src/tools/registry.rs",
+      "crates/tui/src/config/subagent_limits.rs"
+    ]
+  },
+  "surfaces": {
+    "availableInSourceCandidate": ["TUI", "codewhale exec", "Web client", "Runtime API", "MCP", "Fleet"],
+    "sources": [
+      "docs/GUIDE.md",
+      "docs/WEB.md",
+      "docs/RUNTIME_API.md",
+      "docs/MCP.md",
+      "docs/FLEET.md"
+    ]
+  },
+  "trust": {
+    "localRuntime": "runtime, workspace state, and audit log stay on the user's machine",
+    "hostedProviderBoundary": "the selected hosted provider receives turn context required for inference",
+    "localInference": "a loopback local-model route can keep inference local",
+    "telemetry": "no Codewhale product telemetry or mandatory hosted relay",
+    "account": "no account required for the local runtime",
+    "plan": "Plan is read-only",
+    "sandbox": "Seatbelt is used on macOS when available; Linux bubblewrap is opt-in and must be installed; Windows currently reports no OS sandbox",
+    "audit": "sensitive events append best-effort to $CODEWHALE_HOME/audit.log (default ~/.codewhale/audit.log); write failures are logged",
+    "usage": "provider token and cache usage is shown locally when available",
+    "sources": [
+      "docs/PROVIDERS.md",
+      "docs/MODES.md",
+      "docs/SANDBOX.md",
+      "docs/RUNTIME_API.md",
+      "docs/WEB.md",
+      "crates/tui/src/audit.rs",
+      "web/app/[locale]/faq/page.tsx",
+      "web/app/[locale]/install/page.tsx"
+    ]
+  },
+  "platforms": {
+    "prebuilt": ["Linux x64", "Linux arm64", "macOS x64", "macOS arm64", "Windows x64", "Windows arm64"],
+    "preview": ["Android/Termux arm64"],
+    "sources": ["docs/INSTALL.md"]
+  },
+  "repository": {
+    "canonical": "https://github.com/Hmbown/CodeWhale",
+    "mirrors": [
+      "https://cnb.cool/codewhale.net/codewhale",
+      "https://npmmirror.com/package/codewhale"
+    ],
+    "creditSources": ["CHANGELOG.md", "docs/CONTRIBUTORS.md", "web/lib/release-credits.ts"],
+    "requiredCandidateCredits": ["@fleitz"]
+  },
+  "screenshot": {
+    "readme": "assets/screenshot.png",
+    "website": "web/public/codewhale-tui.png",
+    "sourceVersion": "0.9.1",
+    "sourceCommit": "4d197626d72b4bd27e1abf4eed92e86e914414a8",
+    "terminal": "120x32",
+    "theme": "Blue Stage dark",
+    "capture": "sealed local Ollama route rendered from the real v0.9.1 TUI in a 120x32 tmux PTY and rasterized with VHS",
+    "sources": ["crates/tui", "docs/evidence/v091-empty-work-surface-receipt.md"]
+  }
+}

@@ -2,13 +2,34 @@
 //!
 //! See `crates/tui/src/composer_stash.rs` for the on-disk format
 //! and persistence rules. The slash command is the user-facing
-//! surface; Ctrl+S in the composer is the corresponding push entry
+//! surface; Ctrl+G (or Ctrl+S) in the composer is the corresponding push entry
 //! point.
 
+use crate::commands::traits::{CommandInfo, RegisterCommand};
 use crate::composer_stash;
+use crate::localization::MessageId;
 use crate::tui::app::App;
 
 use super::CommandResult;
+
+pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
+    name: "stash",
+    aliases: &["park"],
+    usage: "/stash [list|pop|clear]",
+    description_id: MessageId::CmdStashDescription,
+};
+
+pub(in crate::commands) struct StashCmd;
+
+impl RegisterCommand for StashCmd {
+    fn info() -> &'static CommandInfo {
+        &COMMAND_INFO
+    }
+
+    fn execute(app: &mut App, arg: Option<&str>) -> CommandResult {
+        stash(app, arg)
+    }
+}
 
 /// Top-level dispatch for `/stash`. Subcommands:
 ///
@@ -34,7 +55,7 @@ fn list() -> CommandResult {
     let entries = composer_stash::load_stash();
     if entries.is_empty() {
         return CommandResult::message(
-            "Stash empty. Press Ctrl+S in the composer to park the current draft.",
+            "Stash empty. Press Ctrl+G (or Ctrl+S) in the composer to park the current draft.",
         );
     }
     let mut out = String::new();

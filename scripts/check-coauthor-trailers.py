@@ -4,7 +4,8 @@
 The check is intentionally scoped to new commits. Historical commits may carry
 raw or local emails, but new harvested commits should use GitHub's numeric
 `id+login@users.noreply.github.com` address so co-author credit lands in the
-contributor graph.
+contributor graph. Preserved integration commits may resolve a mapped identity
+without a history rewrite only through an exact-SHA exception below.
 """
 
 from __future__ import annotations
@@ -38,6 +39,57 @@ BOT_EMAILS = {
 }
 BOT_NAMES = ("claude", "codex", "cursor")
 
+# This commit is already immutable history on origin/main. Its trailer names a
+# local Codewhale automation actor, not a human contributor. It escaped the
+# existing gate and is now immutable on origin/main. Rewriting main would
+# invalidate every descendant, while mapping the actor to a human would
+# manufacture contributor credit. Exempt only the exact full SHA + exact actor
+# identity; every other malformed trailer still fails.
+LEGACY_AUTOMATION_TRAILER_EXCEPTIONS = {
+    (
+        "9a74825cd182a62465943bcbbcbcf591d1ce99ee",
+        "codewhale agent",
+        "codewhale-agent@hmbown.local",
+    ),
+}
+
+# These public-surface commits were merged into the v0.9.1 integration graph
+# before the credit gate ran. Rewriting them would replace the original commits
+# and every descendant merge. Resolve only their exact Hunter identities through
+# AUTHOR_MAP; a changed SHA, role, name, or email remains a hard failure.
+PRESERVED_MAPPED_IDENTITY_EXCEPTIONS = {
+    (
+        "5087269606fc8847487b0a8b51ef6adffa8eb2ca",
+        "author",
+        "hunter b",
+        "hmbown@gmail.com",
+    ),
+    (
+        "5087269606fc8847487b0a8b51ef6adffa8eb2ca",
+        "coauthor",
+        "hunter bown",
+        "hmbown@gmail.com",
+    ),
+    (
+        "e37df06caeb3064b2bb9263c1c98a903738f3a0a",
+        "coauthor",
+        "hunter bown",
+        "hmbown@gmail.com",
+    ),
+    (
+        "6d0ebc881a8bd2469c45b25f2a606fa63681e112",
+        "coauthor",
+        "fleitz",
+        "fleitzo@gmail.com",
+    ),
+    (
+        "338138eb546bcf8917b27395325f59af0d2e4f52",
+        "author",
+        "hunter b",
+        "hmbown@gmail.com",
+    ),
+}
+
 
 @dataclass(frozen=True)
 class Identity:
@@ -54,10 +106,14 @@ class Identity:
 @dataclass(frozen=True)
 class Commit:
     sha: str
+    parents: str
     author_name: str
     author_email: str
     subject: str
     body: str
+
+    def is_merge_commit(self) -> bool:
+        return len(self.parents.split()) > 1
 
 
 def norm_key(value: str) -> str:
@@ -110,7 +166,7 @@ def git_log(commit_range: str) -> list[Commit]:
             [
                 "git",
                 "log",
-                "--format=%H%x00%an%x00%ae%x00%s%x00%B%x1e",
+                "--format=%H%x00%P%x00%an%x00%ae%x00%s%x00%B%x1e",
                 commit_range,
             ],
             cwd=ROOT,
@@ -123,8 +179,12 @@ def git_log(commit_range: str) -> list[Commit]:
     for record in raw.split("\x1e"):
         if not record.strip():
             continue
-        parts = record.split("\x00", 4)
-        if len(parts) != 5:
+        # `git log` emits a newline after each record separator. Remove only
+        # that framing byte so the next record's full SHA remains exact while
+        # preserving commit-body whitespace.
+        record = record.lstrip("\n")
+        parts = record.split("\x00", 5)
+        if len(parts) != 6:
             raise RuntimeError("failed to parse git log output")
         commits.append(Commit(*parts))
     return commits
@@ -144,6 +204,15 @@ def lookup_identity(aliases: dict[str, Identity], *values: str) -> Identity | No
         if identity is not None:
             return identity
     return None
+
+
+def is_preserved_mapped_identity(commit: Commit, role: str, identity: Identity) -> bool:
+    return (
+        commit.sha.strip().lower(),
+        role,
+        norm_key(identity.name),
+        norm_key(identity.email),
+    ) in PRESERVED_MAPPED_IDENTITY_EXCEPTIONS
 
 
 def validate(commits: list[Commit], aliases: dict[str, Identity], check_authors: bool) -> list[str]:
@@ -169,6 +238,11 @@ def validate(commits: list[Commit], aliases: dict[str, Identity], check_authors:
                 is_harvested_commit
                 and mapped_author
                 and norm_key(commit.author_email) != norm_key(mapped_author.email)
+                and not is_preserved_mapped_identity(
+                    commit,
+                    "author",
+                    Identity(commit.author_name, commit.author_email),
+                )
             ):
                 errors.append(
                     f"{prefix}: author {commit.author_name} <{commit.author_email}> "
@@ -176,21 +250,28 @@ def validate(commits: list[Commit], aliases: dict[str, Identity], check_authors:
                 )
 
         for coauthor in coauthors:
-            if CANONICAL_NOREPLY_RE.match(coauthor.email):
+            if (
+                commit.sha.strip().lower(),
+                norm_key(coauthor.name),
+                norm_key(coauthor.email),
+            ) in LEGACY_AUTOMATION_TRAILER_EXCEPTIONS:
                 continue
             if is_bot_identity(coauthor.name, coauthor.email):
-                if is_harvested_commit:
+                if not commit.is_merge_commit():
                     errors.append(
                         f"{prefix}: remove bot/tool co-author trailer "
                         f"{coauthor.name} <{coauthor.email}>; contributor trailers are for humans."
                     )
                 continue
+            if CANONICAL_NOREPLY_RE.match(coauthor.email):
+                continue
             expected = lookup_identity(aliases, coauthor.email, coauthor.name)
             if expected:
-                errors.append(
-                    f"{prefix}: co-author {coauthor.name} <{coauthor.email}> is not "
-                    f"GitHub-mappable. Use `{expected.trailer()}`."
-                )
+                if not is_preserved_mapped_identity(commit, "coauthor", coauthor):
+                    errors.append(
+                        f"{prefix}: co-author {coauthor.name} <{coauthor.email}> is not "
+                        f"GitHub-mappable. Use `{expected.trailer()}`."
+                    )
             else:
                 errors.append(
                     f"{prefix}: co-author {coauthor.name} <{coauthor.email}> is not "
@@ -198,7 +279,12 @@ def validate(commits: list[Commit], aliases: dict[str, Identity], check_authors:
                     "or use `gh api users/<login> --jq '\"\\(.id)+\\(.login)@users.noreply.github.com\"'`."
                 )
 
-        coauthor_emails = {norm_key(coauthor.email) for coauthor in coauthors}
+        coauthor_emails: set[str] = set()
+        for coauthor in coauthors:
+            coauthor_emails.add(norm_key(coauthor.email))
+            expected = lookup_identity(aliases, coauthor.email, coauthor.name)
+            if expected and is_preserved_mapped_identity(commit, "coauthor", coauthor):
+                coauthor_emails.add(norm_key(expected.email))
         for login in harvested_logins:
             expected = lookup_identity(aliases, login)
             if expected is None:

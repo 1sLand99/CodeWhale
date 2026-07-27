@@ -1,4 +1,4 @@
-//! Persistent background task manager for DeepSeek agent work.
+//! Persistent background task manager for Codewhale agent work.
 //!
 //! Tasks are durable across restarts and execute with a bounded worker pool.
 //! Execution stays DeepSeek-only and now links every task to runtime
@@ -22,7 +22,7 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::config::{Config, DEFAULT_TEXT_MODEL, MAX_SUBAGENTS};
+use crate::config::{Config, DEFAULT_TEXT_MODEL};
 use crate::runtime_threads::{
     CreateThreadRequest, RuntimeThreadManager, RuntimeThreadManagerConfig, RuntimeTurnStatus,
     SharedRuntimeThreadManager, StartTurnRequest,
@@ -33,6 +33,9 @@ const DEFAULT_WORKERS: usize = 2;
 const MAX_WORKERS: usize = 8;
 const TIMELINE_SUMMARY_LIMIT: usize = 240;
 const ARTIFACT_THRESHOLD: usize = 1200;
+// `lifecycle_seq` is an additive, serde-defaulted field. Keep the durable task
+// schema at v2 so a v0.9.1 rollback can ignore it and still open tasks written
+// by this build; no existing field changed meaning.
 const CURRENT_TASK_SCHEMA_VERSION: u32 = 2;
 
 const fn default_task_schema_version() -> u32 {
@@ -48,6 +51,23 @@ pub enum TaskStatus {
     Completed,
     Failed,
     Canceled,
+}
+
+/// What the manager actually did while handling a cancellation request.
+///
+/// This is returned from the same state-lock transaction as the task record,
+/// so callers never have to infer an outcome from a stale pre-cancel read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskCancelDisposition {
+    Forced,
+    Requested,
+    AlreadyFinished,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskCancellation {
+    pub task: TaskRecord,
+    pub disposition: TaskCancelDisposition,
 }
 
 impl TaskStatus {
@@ -196,6 +216,8 @@ pub struct TaskRecord {
     pub started_at: Option<DateTime<Utc>>,
     pub ended_at: Option<DateTime<Utc>>,
     pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hunt_verdict: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result_summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -208,6 +230,11 @@ pub struct TaskRecord {
     pub turn_id: Option<String>,
     #[serde(default)]
     pub runtime_event_count: usize,
+    /// Monotonic owner-lifecycle sequence used by Work Graph reconciliation.
+    /// Output/progress events do not advance this counter; only lifecycle
+    /// transitions do, so replay after restart is stable.
+    #[serde(default)]
+    pub lifecycle_seq: u64,
     #[serde(default)]
     pub checklist: TaskChecklistState,
     #[serde(default)]
@@ -234,6 +261,10 @@ pub struct TaskSummary {
     pub started_at: Option<DateTime<Utc>>,
     pub ended_at: Option<DateTime<Utc>>,
     pub duration_ms: Option<u64>,
+    #[serde(default)]
+    pub lifecycle_seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hunt_verdict: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -254,6 +285,8 @@ impl From<&TaskRecord> for TaskSummary {
             started_at: value.started_at,
             ended_at: value.ended_at,
             duration_ms: value.duration_ms,
+            lifecycle_seq: value.lifecycle_seq,
+            hunt_verdict: value.hunt_verdict.clone(),
             error: value.error.clone(),
             thread_id: value.thread_id.clone(),
             turn_id: value.turn_id.clone(),
@@ -309,8 +342,6 @@ pub struct TaskManagerConfig {
     pub default_mode: String,
     pub allow_shell: bool,
     pub trust_mode: bool,
-    #[allow(dead_code)]
-    pub max_subagents: usize,
 }
 
 impl TaskManagerConfig {
@@ -334,7 +365,6 @@ impl TaskManagerConfig {
             default_mode: "agent".to_string(),
             allow_shell: config.allow_shell(),
             trust_mode: false,
-            max_subagents: config.max_subagents().clamp(1, MAX_SUBAGENTS),
         }
     }
 }
@@ -726,11 +756,16 @@ struct QueueFile {
 
 impl TaskManager {
     /// Start the manager with the default DeepSeek executor.
-    pub async fn start(cfg: TaskManagerConfig, api_config: Config) -> Result<SharedTaskManager> {
-        let runtime_threads = Arc::new(RuntimeThreadManager::open(
+    pub async fn start(
+        cfg: TaskManagerConfig,
+        api_config: Config,
+        plugin_registry: Arc<crate::plugins::PluginRegistry>,
+    ) -> Result<SharedTaskManager> {
+        let runtime_threads = Arc::new(RuntimeThreadManager::open_with_plugin_registry(
             api_config.clone(),
             cfg.default_workspace.clone(),
             RuntimeThreadManagerConfig::from_task_data_dir(cfg.data_dir.clone()),
+            plugin_registry,
         )?);
         Self::start_with_runtime_manager(cfg, api_config, runtime_threads).await
     }
@@ -766,7 +801,11 @@ impl TaskManager {
             )
         })?;
 
-        let (tasks, queue) = load_state(&tasks_dir, &queue_path)?;
+        let LoadedTaskState {
+            tasks,
+            queue,
+            recovered,
+        } = load_state(&tasks_dir, &queue_path)?;
 
         let cancel_token = CancellationToken::new();
         let default_workspace = cfg.default_workspace.clone();
@@ -787,8 +826,16 @@ impl TaskManager {
         });
 
         {
+            // Persist only what boot actually changed: the reconciled queue
+            // and any running->failed recoveries. Rewriting every task record
+            // on every launch was a full-store write storm (#3757).
             let state = manager.state.lock().await;
-            manager.persist_all_locked(&state)?;
+            manager.persist_queue_locked(&state.queue)?;
+            for id in &recovered {
+                if let Some(task) = state.tasks.get(id) {
+                    manager.persist_task_locked(task)?;
+                }
+            }
         }
 
         for _ in 0..workers {
@@ -826,14 +873,43 @@ impl TaskManager {
 
     /// Enqueue a new task.
     pub async fn add_task(&self, req: NewTaskRequest) -> Result<TaskRecord> {
+        self.add_task_with_id(req, Self::new_task_id()).await
+    }
+
+    /// Allocate the durable owner identity before queue insertion so callers
+    /// can register graph spawn intent first.
+    #[must_use]
+    pub(crate) fn new_task_id() -> String {
+        format!("task_{}", &Uuid::new_v4().simple().to_string()[..16])
+    }
+
+    /// Enqueue using a preallocated id. This is crate-visible only for the
+    /// model tool's register-before-work transaction.
+    pub(crate) async fn add_task_with_id(
+        &self,
+        req: NewTaskRequest,
+        task_id: String,
+    ) -> Result<TaskRecord> {
         let prompt = req.prompt.trim().to_string();
         if prompt.is_empty() {
             bail!("Task prompt cannot be empty");
         }
+        if task_id.len() != 21
+            || !task_id.starts_with("task_")
+            || !task_id[5..].chars().all(|ch| ch.is_ascii_hexdigit())
+        {
+            bail!("Invalid preallocated task id: expected task_<16hex>");
+        }
 
         let task = TaskRecord {
             schema_version: CURRENT_TASK_SCHEMA_VERSION,
-            id: format!("task_{}", &Uuid::new_v4().to_string()[..8]),
+            // 16 random hex chars (was 8; ~60 bits of entropy once UUIDv4's
+            // fixed version nibble is discounted): task ids live in durable
+            // state that accumulates across restarts, and a collision
+            // overwrites a record while leaving a duplicate queue entry.
+            // `resolve_task_id` matches by prefix, so short references still
+            // work.
+            id: task_id,
             prompt,
             model: req.model.unwrap_or_else(|| self.cfg.default_model.clone()),
             workspace: match req.workspace {
@@ -851,12 +927,14 @@ impl TaskManager {
             started_at: None,
             ended_at: None,
             duration_ms: None,
+            hunt_verdict: None,
             result_summary: None,
             result_detail_path: None,
             error: None,
             thread_id: None,
             turn_id: None,
             runtime_event_count: 0,
+            lifecycle_seq: 1,
             checklist: TaskChecklistState::default(),
             gates: Vec::new(),
             attempts: Vec::new(),
@@ -873,9 +951,51 @@ impl TaskManager {
 
         {
             let mut state = self.state.lock().await;
-            state.queue.push_back(task.id.clone());
+            let task_path = self.tasks_dir.join(format!("{}.json", task.id));
+            // The staged extension is intentionally not `.json`, so startup
+            // replay ignores an interrupted create until the queue write has
+            // succeeded and this file is atomically promoted.
+            let staged_task_path = self.tasks_dir.join(format!(".{}.json.pending", task.id));
+            if state.tasks.contains_key(&task.id) || task_path.exists() || staged_task_path.exists()
+            {
+                bail!("Task id already exists: {}", task.id);
+            }
+            let mut next_queue = state.queue.clone();
+            next_queue.push_back(task.id.clone());
+
+            // Stage the owner record, then persist its queue membership, then
+            // atomically promote it. A crash before promotion leaves either an
+            // ignored staged file or a queue entry with no task (which replay
+            // drops); a crash after promotion leaves the complete runnable
+            // pair. In-memory scheduling is published only after all three.
+            write_json_atomic(&staged_task_path, &task)?;
+            if let Err(err) = self.persist_queue_locked(&next_queue) {
+                if let Err(cleanup_err) = fs::remove_file(&staged_task_path) {
+                    tracing::warn!(
+                        task_id = %task.id,
+                        error = %cleanup_err,
+                        "failed to remove ignored staged task after queue write failure"
+                    );
+                }
+                return Err(err);
+            }
+            if let Err(promote_err) = fs::rename(&staged_task_path, &task_path) {
+                let rollback_error = self.persist_queue_locked(&state.queue).err();
+                let cleanup_error = fs::remove_file(&staged_task_path).err();
+                let mut message =
+                    format!("Failed to promote staged task {}: {promote_err}", task.id);
+                if let Some(rollback_error) = rollback_error {
+                    message.push_str(&format!("; queue rollback also failed: {rollback_error:#}"));
+                }
+                if let Some(cleanup_error) = cleanup_error {
+                    message.push_str(&format!(
+                        "; ignored staged-file cleanup also failed: {cleanup_error}"
+                    ));
+                }
+                bail!(message);
+            }
+            state.queue = next_queue;
             state.tasks.insert(task.id.clone(), task.clone());
-            self.persist_all_locked(&state)?;
         }
         self.notify.notify_one();
         Ok(task)
@@ -908,13 +1028,13 @@ impl TaskManager {
     }
 
     /// Cancel a queued or running task by id/prefix.
-    pub async fn cancel_task(&self, id_or_prefix: &str) -> Result<TaskRecord> {
+    pub async fn cancel_task(&self, id_or_prefix: &str) -> Result<TaskCancellation> {
         let mut state = self.state.lock().await;
         let id = resolve_task_id(&state.tasks, id_or_prefix)?;
         let now = Utc::now();
 
         let mut cancel_running = false;
-        {
+        let disposition = {
             let task = state
                 .tasks
                 .get_mut(&id)
@@ -922,6 +1042,7 @@ impl TaskManager {
             match task.status {
                 TaskStatus::Queued => {
                     task.status = TaskStatus::Canceled;
+                    task.lifecycle_seq = task.lifecycle_seq.saturating_add(1);
                     task.ended_at = Some(now);
                     task.duration_ms = Some(0);
                     task.timeline.push(TaskTimelineEntry {
@@ -931,30 +1052,36 @@ impl TaskManager {
                         detail_path: None,
                     });
                     state.queue.retain(|queued_id| queued_id != &id);
+                    TaskCancelDisposition::Forced
                 }
                 TaskStatus::Running => {
                     cancel_running = true;
+                    task.lifecycle_seq = task.lifecycle_seq.saturating_add(1);
                     task.timeline.push(TaskTimelineEntry {
                         timestamp: now,
                         kind: "cancel_requested".to_string(),
                         summary: "Cancellation requested".to_string(),
                         detail_path: None,
                     });
+                    TaskCancelDisposition::Requested
                 }
-                _ => {}
+                TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Canceled => {
+                    TaskCancelDisposition::AlreadyFinished
+                }
             }
-        }
+        };
 
         if cancel_running && let Some(token) = state.running_cancel.get(&id) {
             token.cancel();
         }
 
         self.persist_all_locked(&state)?;
-        state
+        let task = state
             .tasks
             .get(&id)
             .cloned()
-            .ok_or_else(|| anyhow!("Task not found: {id}"))
+            .ok_or_else(|| anyhow!("Task not found: {id}"))?;
+        Ok(TaskCancellation { task, disposition })
     }
 
     /// Return aggregate status counters.
@@ -1037,6 +1164,7 @@ impl TaskManager {
                             } else {
                                 let now = Utc::now();
                                 task.status = TaskStatus::Running;
+                                task.lifecycle_seq = task.lifecycle_seq.saturating_add(1);
                                 task.started_at = Some(now);
                                 task.ended_at = None;
                                 task.duration_ms = None;
@@ -1301,6 +1429,7 @@ impl TaskManager {
         }
 
         task.status = result.status;
+        task.lifecycle_seq = task.lifecycle_seq.saturating_add(1);
         task.mode = mode_label.to_string();
         task.ended_at = Some(now);
         task.duration_ms = task.started_at.map(|start| duration_ms(start, now));
@@ -1359,6 +1488,7 @@ impl TaskManager {
     }
 
     fn write_artifact(&self, task_id: &str, label: &str, content: &str) -> Result<PathBuf> {
+        ensure_safe_storage_id("task id", task_id)?;
         let artifact_dir = self.artifacts_dir.join(task_id);
         fs::create_dir_all(&artifact_dir)
             .with_context(|| format!("Failed to create artifact dir {}", artifact_dir.display()))?;
@@ -1413,6 +1543,22 @@ impl TaskManager {
                 summary: summarize_text(&summary, TIMELINE_SUMMARY_LIMIT),
                 detail_path: gate.log_path,
             });
+        }
+
+        if let Some(value) = updates.get("hunt_verdict") {
+            let raw = value
+                .as_str()
+                .ok_or_else(|| anyhow!("hunt_verdict task update must be a string"))?;
+            let verdict = normalize_hunt_verdict(raw)?;
+            if task.hunt_verdict.as_deref() != Some(verdict) {
+                task.hunt_verdict = Some(verdict.to_string());
+                task.timeline.push(TaskTimelineEntry {
+                    timestamp: now,
+                    kind: "hunt_verdict".to_string(),
+                    summary: format!("Hunt verdict updated: {verdict}"),
+                    detail_path: None,
+                });
+            }
         }
 
         if let Some(value) = updates.get("attempt") {
@@ -1488,11 +1634,30 @@ impl TaskManager {
     }
 }
 
-fn load_state(
-    tasks_dir: &Path,
-    queue_path: &Path,
-) -> Result<(HashMap<String, TaskRecord>, VecDeque<String>)> {
+fn normalize_hunt_verdict(raw: &str) -> Result<&'static str> {
+    match raw.trim() {
+        "hunting" => Ok("hunting"),
+        "hunted" => Ok("hunted"),
+        "wounded" => Ok("wounded"),
+        "escaped" => Ok("escaped"),
+        other => bail!(
+            "unsupported hunt_verdict task update '{other}'. Expected one of: hunting, hunted, wounded, escaped"
+        ),
+    }
+}
+
+/// Outcome of loading the persisted task store at boot: the reconciled task
+/// map + queue, plus the ids whose status was flipped running->failed by
+/// crash recovery (the only records boot needs to re-persist).
+struct LoadedTaskState {
+    tasks: HashMap<String, TaskRecord>,
+    queue: VecDeque<String>,
+    recovered: Vec<String>,
+}
+
+fn load_state(tasks_dir: &Path, queue_path: &Path) -> Result<LoadedTaskState> {
     let mut tasks = HashMap::new();
+    let mut recovered = Vec::new();
     if tasks_dir.exists() {
         for entry in fs::read_dir(tasks_dir)
             .with_context(|| format!("Failed to read tasks dir {}", tasks_dir.display()))?
@@ -1519,6 +1684,7 @@ fn load_state(
                     u64::try_from(now.signed_duration_since(started).num_milliseconds()).ok()
                 });
                 task.status = TaskStatus::Failed;
+                task.lifecycle_seq = task.lifecycle_seq.saturating_add(1);
                 task.ended_at = Some(now);
                 task.duration_ms = duration_ms;
                 task.error = Some(
@@ -1544,6 +1710,7 @@ fn load_state(
                         .to_string(),
                     detail_path: None,
                 });
+                recovered.push(task.id.clone());
             }
             tasks.insert(task.id.clone(), task);
         }
@@ -1576,7 +1743,11 @@ fn load_state(
         queue.push_back(id);
     }
 
-    Ok((tasks, queue))
+    Ok(LoadedTaskState {
+        tasks,
+        queue,
+        recovered,
+    })
 }
 
 fn resolve_task_id(tasks: &HashMap<String, TaskRecord>, id_or_prefix: &str) -> Result<String> {
@@ -1622,6 +1793,17 @@ fn summarize_text(text: &str, limit: usize) -> String {
     out
 }
 
+fn ensure_safe_storage_id(kind: &str, value: &str) -> Result<()> {
+    let mut components = Path::new(value).components();
+    let Some(component) = components.next() else {
+        bail!("{kind} must not be empty");
+    };
+    if components.next().is_some() || !matches!(component, std::path::Component::Normal(_)) {
+        bail!("{kind} must be a single path component");
+    }
+    Ok(())
+}
+
 fn sanitize_filename(input: &str) -> String {
     let mut out = String::new();
     for ch in input.chars() {
@@ -1665,12 +1847,14 @@ fn default_auto_approve() -> bool {
 /// `~/.deepseek/tasks` when only the legacy directory exists).
 #[must_use]
 pub fn default_tasks_dir() -> PathBuf {
-    if let Ok(path) = std::env::var("DEEPSEEK_TASKS_DIR")
-        && !path.trim().is_empty()
-    {
-        return PathBuf::from(path);
+    for var in ["CODEWHALE_TASKS_DIR", "DEEPSEEK_TASKS_DIR"] {
+        if let Ok(path) = std::env::var(var)
+            && !path.trim().is_empty()
+        {
+            return PathBuf::from(path);
+        }
     }
-    dirs::home_dir()
+    crate::config::effective_home_dir()
         .map(|home| default_tasks_dir_for_home(&home))
         .unwrap_or_else(|| PathBuf::from(".codewhale").join("tasks"))
 }
@@ -1779,7 +1963,6 @@ mod tests {
             default_mode: "agent".to_string(),
             allow_shell: false,
             trust_mode: false,
-            max_subagents: 2,
         }
     }
 
@@ -1799,6 +1982,10 @@ mod tests {
         assert_eq!(finished.turn_id.as_deref(), Some("turn_test"));
         assert_eq!(finished.checklist.items.len(), 1);
         assert_eq!(finished.checklist.in_progress_id, Some(1));
+        assert!(
+            finished.lifecycle_seq >= 3,
+            "queued, running, and terminal owner transitions must advance the sequence"
+        );
 
         drop(manager);
 
@@ -1809,6 +1996,105 @@ mod tests {
         assert_eq!(loaded.status, TaskStatus::Completed);
         assert!(!loaded.timeline.is_empty());
         assert_eq!(loaded.checklist.items[0].content, "read fixture");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn preallocated_task_ids_are_validated_and_collision_safe() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("deepseek-task-test-{}", Uuid::new_v4()));
+        let manager =
+            TaskManager::start_with_executor(test_config(root), Arc::new(MockExecutor)).await?;
+        let request = NewTaskRequest::from_prompt("preallocated owner identity");
+
+        let invalid = manager
+            .add_task_with_id(request.clone(), "task_short".to_string())
+            .await
+            .expect_err("invalid preallocated id");
+        assert!(invalid.to_string().contains("task_<16hex>"), "{invalid:#}");
+
+        let id = "task_0123456789abcdef".to_string();
+        let created = manager
+            .add_task_with_id(request.clone(), id.clone())
+            .await?;
+        assert_eq!(created.id, id);
+        assert_eq!(
+            created.schema_version, 2,
+            "the additive lifecycle field must remain rollback-readable"
+        );
+        assert_eq!(created.lifecycle_seq, 1);
+        let collision = manager
+            .add_task_with_id(request, id)
+            .await
+            .expect_err("task id collision");
+        assert!(
+            collision.to_string().contains("already exists"),
+            "{collision:#}"
+        );
+        assert_eq!(manager.list_tasks(None).await.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_queue_write_leaves_no_replayable_task_record() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("deepseek-task-test-{}", Uuid::new_v4()));
+        let manager =
+            TaskManager::start_with_executor(test_config(root.clone()), Arc::new(MockExecutor))
+                .await?;
+        std::fs::remove_file(root.join("queue.json"))?;
+        std::fs::create_dir(root.join("queue.json"))?;
+
+        let id = "task_fedcba9876543210".to_string();
+        let error = manager
+            .add_task_with_id(
+                NewTaskRequest::from_prompt("must not resurrect"),
+                id.clone(),
+            )
+            .await
+            .expect_err("queue path directory must reject the atomic queue write");
+        assert!(error.to_string().contains("queue.json"), "{error:#}");
+        assert!(manager.list_tasks(None).await.is_empty());
+        assert!(!root.join("tasks").join(format!("{id}.json")).exists());
+        assert!(
+            !root
+                .join("tasks")
+                .join(format!(".{id}.json.pending"))
+                .exists(),
+            "a failed queue write may leave no replayable or staged task record"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn boot_does_not_rewrite_non_recovered_task_files() -> Result<()> {
+        // #3757 boot-persist narrowing: TaskManager::start must persist only
+        // the reconciled queue and the running->failed recoveries — a
+        // completed task's file must be byte-identical across a restart.
+        let root = std::env::temp_dir().join(format!("deepseek-task-test-{}", Uuid::new_v4()));
+        let manager =
+            TaskManager::start_with_executor(test_config(root.clone()), Arc::new(MockExecutor))
+                .await?;
+        let task = manager
+            .add_task(NewTaskRequest::from_prompt("finish then persist"))
+            .await?;
+        let finished = wait_for_terminal_state(&manager, &task.id, Duration::from_secs(10)).await?;
+        assert_eq!(finished.status, TaskStatus::Completed);
+        drop(manager);
+
+        let task_file = root.join("tasks").join(format!("{}.json", task.id));
+        let before = fs::read(&task_file)?;
+
+        let recovered =
+            TaskManager::start_with_executor(test_config(root.clone()), Arc::new(MockExecutor))
+                .await?;
+        // Give start() a beat to run its (narrowed) boot persist.
+        sleep(Duration::from_millis(50)).await;
+        drop(recovered);
+
+        let after = fs::read(&task_file)?;
+        assert_eq!(
+            before, after,
+            "a completed task file must not be rewritten on boot"
+        );
         Ok(())
     }
 
@@ -1835,12 +2121,14 @@ mod tests {
             started_at: Some(started_at),
             ended_at: None,
             duration_ms: None,
+            hunt_verdict: None,
             result_summary: None,
             result_detail_path: None,
             error: None,
             thread_id: Some("thr_stale".to_string()),
             turn_id: Some("turn_stale".to_string()),
             runtime_event_count: 0,
+            lifecycle_seq: 2,
             checklist: TaskChecklistState::default(),
             gates: Vec::new(),
             attempts: Vec::new(),
@@ -1876,8 +2164,9 @@ mod tests {
             })?,
         )?;
 
-        let (tasks, queue) = load_state(&tasks_dir, &queue_path)?;
-        let recovered = tasks.get(&task_id).expect("task loaded");
+        let loaded = load_state(&tasks_dir, &queue_path)?;
+        let queue = loaded.queue;
+        let recovered = loaded.tasks.get(&task_id).expect("task loaded");
 
         assert!(queue.is_empty(), "stale running task must not be requeued");
         assert_eq!(recovered.status, TaskStatus::Failed);
@@ -1961,6 +2250,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn record_tool_metadata_updates_hunt_verdict_summary() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("deepseek-task-test-{}", Uuid::new_v4()));
+        let manager =
+            TaskManager::start_with_executor(test_config(root), Arc::new(MockExecutor)).await?;
+
+        let task = manager
+            .add_task(NewTaskRequest::from_prompt("test verdict metadata"))
+            .await?;
+        let finished = wait_for_terminal_state(&manager, &task.id, Duration::from_secs(10)).await?;
+        let updated = manager
+            .record_tool_metadata(
+                &finished.id,
+                &serde_json::json!({
+                    "task_updates": {
+                        "hunt_verdict": "wounded"
+                    }
+                }),
+            )
+            .await?;
+
+        assert_eq!(updated.hunt_verdict.as_deref(), Some("wounded"));
+        let summaries = manager.list_tasks(Some(10)).await;
+        let summary = summaries
+            .iter()
+            .find(|summary| summary.id == updated.id)
+            .expect("updated task summary");
+        assert_eq!(summary.hunt_verdict.as_deref(), Some("wounded"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_task_artifact_rejects_traversal_task_id() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("tasks-root");
+        let escaped = temp.path().join("escape");
+        let manager =
+            TaskManager::start_with_executor(test_config(root.clone()), Arc::new(MockExecutor))
+                .await?;
+
+        let err = manager
+            .write_task_artifact("../escape", "result", "artifact body")
+            .expect_err("traversal task ids must be rejected");
+
+        assert!(err.to_string().contains("single path component"));
+        assert!(!escaped.exists(), "artifact write escaped the task root");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn cancel_running_task_marks_canceled() -> Result<()> {
         let root = std::env::temp_dir().join(format!("deepseek-task-test-{}", Uuid::new_v4()));
         let manager =
@@ -1971,9 +2309,31 @@ mod tests {
             .await?;
 
         sleep(Duration::from_millis(10)).await;
-        let _ = manager.cancel_task(&task.id).await?;
+        let cancellation = manager.cancel_task(&task.id).await?;
+        assert_eq!(cancellation.disposition, TaskCancelDisposition::Requested);
         let finished = wait_for_terminal_state(&manager, &task.id, Duration::from_secs(10)).await?;
         assert_eq!(finished.status, TaskStatus::Canceled);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancel_finished_task_returns_atomic_already_finished_outcome() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("deepseek-task-test-{}", Uuid::new_v4()));
+        let manager =
+            TaskManager::start_with_executor(test_config(root), Arc::new(MockExecutor)).await?;
+        let task = manager
+            .add_task(NewTaskRequest::from_prompt("finish before cancellation"))
+            .await?;
+        let finished = wait_for_terminal_state(&manager, &task.id, Duration::from_secs(10)).await?;
+        assert_eq!(finished.status, TaskStatus::Completed);
+
+        let cancellation = manager.cancel_task(&task.id).await?;
+
+        assert_eq!(
+            cancellation.disposition,
+            TaskCancelDisposition::AlreadyFinished
+        );
+        assert_eq!(cancellation.task.status, TaskStatus::Completed);
         Ok(())
     }
 

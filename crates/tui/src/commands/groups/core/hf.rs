@@ -1,9 +1,30 @@
 //! `/hf` - Hugging Face MCP and provider concept helpers.
 
+use crate::commands::traits::{CommandInfo, RegisterCommand};
+use crate::localization::MessageId;
 use crate::mcp::{McpConfig, McpServerConfig};
 use crate::tui::app::App;
 
 use super::CommandResult;
+
+pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
+    name: "hf",
+    aliases: &["huggingface"],
+    usage: "/hf [mcp <status|setup>|concepts]",
+    description_id: MessageId::CmdHfDescription,
+};
+
+pub(in crate::commands) struct HfCmd;
+
+impl RegisterCommand for HfCmd {
+    fn info() -> &'static CommandInfo {
+        &COMMAND_INFO
+    }
+
+    fn execute(app: &mut App, arg: Option<&str>) -> CommandResult {
+        hf(app, arg)
+    }
+}
 
 const HF_MCP_SETTINGS_URL: &str = "https://huggingface.co/settings/mcp";
 const HF_MCP_DOCS_URL: &str = "https://huggingface.co/docs/hub/hf-mcp-server";
@@ -22,7 +43,7 @@ const HF_MCP_CONFIG_SKELETON: &str = r#"{
 
 /// Explainer shown by `/hf concepts`.
 const HF_CONCEPTS: &str = "\
-CodeWhale has three distinct Hugging Face surfaces:
+Codewhale has three distinct Hugging Face surfaces:
 
 1. Hugging Face provider route - chat inference
    Switch the active LLM backend to Hugging Face Inference Providers.
@@ -31,13 +52,13 @@ CodeWhale has three distinct Hugging Face surfaces:
    Auth: HF_TOKEN or HUGGINGFACE_API_KEY
 
 2. Hugging Face MCP - Hub, docs, datasets, Spaces, and community tools
-   Connect CodeWhale to Hugging Face's MCP server through mcp.json.
+   Connect Codewhale to Hugging Face's MCP server through mcp.json.
    Use: /hf mcp status or /hf mcp setup
-   Then: /mcp validate or restart CodeWhale so model-visible tools reload.
+   Then: /mcp validate or restart Codewhale so model-visible tools reload.
 
 3. Hugging Face Hub workflows - publish, upload, or manage repositories
    Use explicit Hub tooling such as huggingface_hub or git-based flows.
-   CodeWhale does not upload to the Hub through /hf.";
+   Codewhale does not upload to the Hub through /hf.";
 
 pub fn hf(app: &mut App, args: Option<&str>) -> CommandResult {
     let raw = args.unwrap_or("").trim();
@@ -80,7 +101,7 @@ fn hf_mcp_status(app: &App) -> CommandResult {
             if let Some(server_name) = configured_hf_mcp_server(&config) {
                 CommandResult::message(format!(
                     "Hugging Face MCP appears configured as `{server_name}` in {}.\n\
-                     Run /mcp validate or restart CodeWhale if tools are not visible yet.",
+                     Run /mcp reload to rebuild the live model-visible tool pool if tools are not visible yet.",
                     app.mcp_config_path.display()
                 ))
             } else {
@@ -104,8 +125,8 @@ fn hf_mcp_setup_message(app: &App) -> String {
          1. Open {HF_MCP_SETTINGS_URL} while signed in.\n\
          2. Choose your MCP client and copy the generated configuration snippet.\n\
          3. Paste the Hugging Face server entry into {}.\n\
-         4. Restart CodeWhale, or run /mcp reload for the TUI manager snapshot.\n\n\
-         CodeWhale-compatible placeholder shape:\n\n\
+         4. Run /mcp reload to rebuild the live model-visible tool pool.\n\n\
+         Codewhale-compatible placeholder shape:\n\n\
          ```json\n{HF_MCP_CONFIG_SKELETON}\n```\n\n\
          The placeholder is intentionally not runnable until your private MCP config has a real token value. \
          Do not commit real Hugging Face tokens.\n\n\
@@ -156,25 +177,10 @@ mod tests {
     fn app_with_mcp_path(mcp_config_path: PathBuf) -> App {
         App::new(
             TuiOptions {
-                model: "deepseek-v4-pro".to_string(),
-                workspace: PathBuf::from("."),
-                config_path: None,
-                config_profile: None,
-                allow_shell: false,
                 use_alt_screen: false,
-                use_mouse_capture: false,
-                use_bracketed_paste: true,
                 max_subagents: 2,
-                skills_dir: PathBuf::from("."),
-                memory_path: PathBuf::from("memory.md"),
-                notes_path: PathBuf::from("notes.txt"),
-                mcp_config_path,
-                use_memory: false,
-                start_in_agent_mode: false,
-                skip_onboarding: true,
-                yolo: false,
-                resume_session_id: None,
-                initial_input: None,
+                mcp_config_path: mcp_config_path,
+                ..crate::test_support::test_tui_options(PathBuf::from("."))
             },
             &Config::default(),
         )

@@ -5,6 +5,23 @@
 //! level, then `FooterWidget::new(props).render(area, buf)` paints the
 //! result. The widget owns no `App` knowledge; this mirrors the layout used
 //! by `HeaderWidget` (and Codex's `bottom_pane::footer::Footer`).
+//!
+//! # Compact glance facts (#4275)
+//!
+//! The footer is the default compact glance surface. Allowed facts and their
+//! drill-down owners:
+//!
+//! | Glance fact | Footer field | Drill-down owner |
+//! |-------------|--------------|------------------|
+//! | state | `state_label` (+ working strip) | transcript / live work strip |
+//! | work count | `work`, `agents` | To-do/Agents sidebar, `/fleet` |
+//! | mode | `mode_label` | `/mode` picker |
+//! | permission | `permission` | Shift+Tab cycle, `/config` |
+//! | cost/rate | `cost`, `balance`, `cache` | `/tokens`, context inspector |
+//! | anomalies | `retry`, MCP chip | retry banner, MCP manager |
+//!
+//! Dense proof (tool receipts, full workflow history, raw config keys) stays
+//! in inspect/audit surfaces — not duplicated as permanent footer chips.
 
 use ratatui::{
     buffer::Buffer,
@@ -17,7 +34,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
-use crate::tui::app::{App, AppMode};
+use crate::tui::app::{App, AppMode, SidebarFocus};
 
 use super::Renderable;
 
@@ -41,13 +58,11 @@ pub struct FooterProps {
     pub text_muted_color: Color,
     /// Background color for the full footer/status bar row.
     pub footer_bg: Color,
-    /// Status label like `"ready"`, `"thinking ⌫"`, `"working"`. When the
-    /// label equals `"ready"` the footer hides the status segment entirely.
+    /// Status label like `"idle"`, `"busy"`, `"working"`. When the label
+    /// equals `"ready"` the footer hides the status segment entirely.
     pub state_label: String,
     /// Color used for the status label.
     pub state_color: Color,
-    /// Coherence chip spans (empty when no active intervention).
-    pub coherence: Vec<Span<'static>>,
     /// Sub-agent count chip spans (empty when zero in-flight).
     pub agents: Vec<Span<'static>>,
     /// Reasoning-replay chip spans (empty when zero / not applicable).
@@ -57,7 +72,12 @@ pub struct FooterProps {
     /// MCP server health chip spans (empty when no MCP servers configured).
     /// Populated lazily — see [`footer_mcp_chip`]. (#502)
     pub mcp: Vec<Span<'static>>,
-    /// Cumulative model-work chip spans ("worked 3h 12m"). Sums the
+    /// Permission posture chip (Ask / Auto-Review / Full Access) when visible.
+    pub permission: Vec<Span<'static>>,
+    /// Compact nonempty Work indicator when terminal width suppresses the
+    /// sidebar. Empty when Work is visible or explicitly hidden.
+    pub work: Vec<Span<'static>>,
+    /// Cumulative model-work chip spans ("worked 3m 12s"). Sums the
     /// elapsed time of completed turns (from `App::cumulative_turn_duration`),
     /// **not** wall-clock since launch — an idle TUI shouldn't claim
     /// it's been "working." Empty until cumulative turn time crosses
@@ -148,22 +168,20 @@ pub fn footer_working_label(frame: u64, locale: Locale) -> String {
     let dots = (frame % 4) as usize;
     let base = tr(locale, MessageId::FooterWorking);
     let mut out = String::with_capacity(base.len() + dots);
-    out.push_str(base);
+    out.push_str(&base);
     for _ in 0..dots {
         out.push('.');
     }
     out
 }
 
-/// Build a "⏳ shell running" chip span when a foreground shell command is
-/// active. Empty when no shell is running, which hides the chip entirely.
 #[must_use]
-pub fn footer_shell_chip(active: bool) -> Vec<Span<'static>> {
-    if !active {
+pub fn footer_shell_label_chip(label: String) -> Vec<Span<'static>> {
+    if label.trim().is_empty() {
         return Vec::new();
     }
     vec![Span::styled(
-        "\u{23F3} shell running".to_string(),
+        format!("\u{23F3} {label}"),
         Style::default().fg(palette::STATUS_WARNING),
     )]
 }
@@ -183,26 +201,23 @@ pub fn footer_agents_chip(running: usize, locale: Locale) -> Vec<Span<'static>> 
     } else {
         tr(locale, MessageId::FooterAgentsPlural).replace("{count}", &running.to_string())
     };
-    vec![Span::styled(
-        text,
-        Style::default().fg(palette::DEEPSEEK_SKY),
-    )]
+    vec![Span::styled(text, Style::default().fg(palette::WHALE_INFO))]
 }
 
-/// Build the cumulative-elapsed chip ("worked 3h 12m") for the
+/// Build the cumulative-elapsed chip ("worked 3m 12s") for the
 /// footer's right cluster (#448). Hidden during the first minute of
 /// a session so a fresh launch doesn't render a noisy `worked 5s`
 /// indicator that immediately starts ticking. Above the threshold,
-/// reuses [`crate::tui::notifications::humanize_duration`] for
-/// consistent w/d/h/m formatting.
+/// reuses [`crate::elapsed::format_elapsed_secs`] for the shared
+/// m/s duration grammar.
 #[must_use]
-pub fn footer_worked_chip(elapsed: std::time::Duration) -> Vec<Span<'static>> {
+pub fn footer_worked_chip(elapsed: std::time::Duration, locale: Locale) -> Vec<Span<'static>> {
     if elapsed < std::time::Duration::from_secs(60) {
         return Vec::new();
     }
-    let label = format!(
-        "worked {}",
-        crate::tui::notifications::humanize_duration(elapsed)
+    let label = tr(locale, MessageId::FooterWorkedChip).replace(
+        "{duration}",
+        &crate::elapsed::format_elapsed_secs(elapsed.as_secs()),
     );
     vec![Span::styled(
         label,
@@ -243,8 +258,8 @@ pub struct FooterToast {
 
 impl FooterProps {
     /// Build footer props from common app state. Helpers in `tui/ui.rs`
-    /// (e.g. `footer_state_label`, `footer_coherence_spans`) supply the
-    /// pre-styled spans and labels — this constructor just bundles them.
+    /// supply the pre-styled spans and labels — this constructor just bundles
+    /// them.
     ///
     /// Argument fan-out is intentional: each input maps 1:1 to a piece of
     /// pre-computed footer content the caller resolved from `App`. Forcing
@@ -257,7 +272,6 @@ impl FooterProps {
         toast: Option<FooterToast>,
         state_label: &'static str,
         state_color: Color,
-        coherence: Vec<Span<'static>>,
         agents: Vec<Span<'static>>,
         reasoning_replay: Vec<Span<'static>>,
         cache: Vec<Span<'static>>,
@@ -274,12 +288,14 @@ impl FooterProps {
             .as_ref()
             .map(|s| s.servers.iter().filter(|server| server.connected).count());
         let mcp = footer_mcp_chip(mcp_connected, mcp_configured);
+        let permission = footer_permission_chip(app);
+        let work = footer_compact_work_chip(app);
         // #448: cumulative work-time chip. Sums actual turn durations
         // (set on `TurnComplete`) rather than wall-clock uptime — a TUI
         // that's been open and idle for 4 minutes shouldn't claim
         // "worked 4m". The chip stays empty until enough turns add up
         // to cross the 60s threshold inside `footer_worked_chip`.
-        let worked = footer_worked_chip(app.cumulative_turn_duration);
+        let worked = footer_worked_chip(app.cumulative_turn_duration, app.ui_locale);
         Self {
             model: app.model_display_label(),
             mode_label,
@@ -290,11 +306,12 @@ impl FooterProps {
             footer_bg: app.ui_theme.footer_bg,
             state_label: state_label.to_string(),
             state_color,
-            coherence,
             agents,
             reasoning_replay,
             cache,
             mcp,
+            permission,
+            work,
             worked,
             cost,
             balance,
@@ -307,16 +324,49 @@ impl FooterProps {
 
 fn mode_style(app: &App) -> (&'static str, Color) {
     let label = match app.mode {
-        AppMode::Agent => "agent",
-        AppMode::Yolo => "yolo",
+        AppMode::Agent | AppMode::Auto | AppMode::Yolo => "act",
         AppMode::Plan => "plan",
+        AppMode::Operate => "operate",
     };
+    // Visible modes get distinct badge colors (dogfood A7). YOLO is no longer
+    // a visible mode — it remaps to Act + bypass permissions.
     let color = match app.mode {
-        AppMode::Agent => app.ui_theme.mode_agent,
-        AppMode::Yolo => app.ui_theme.mode_yolo,
+        AppMode::Agent | AppMode::Auto | AppMode::Yolo => app.ui_theme.mode_agent,
         AppMode::Plan => app.ui_theme.mode_plan,
+        AppMode::Operate => app.ui_theme.mode_operate,
     };
     (label, color)
+}
+
+pub fn footer_permission_chip(app: &App) -> Vec<Span<'static>> {
+    let label = if app.mode == AppMode::Plan {
+        "Read Only"
+    } else {
+        app.approval_mode.permission_chip_label()
+    };
+    vec![
+        Span::raw("perm "),
+        Span::styled(
+            label.to_string(),
+            Style::default().fg(app.ui_theme.text_hint),
+        ),
+    ]
+}
+
+fn footer_compact_work_chip(app: &App) -> Vec<Span<'static>> {
+    if app.sidebar_focus == SidebarFocus::Hidden
+        || app
+            .last_sidebar_host_width
+            .is_none_or(|width| width >= crate::tui::ui::SIDEBAR_VISIBLE_MIN_WIDTH)
+    {
+        return Vec::new();
+    }
+    crate::tui::sidebar::compact_work_indicator(app).map_or_else(Vec::new, |label| {
+        vec![Span::styled(
+            label,
+            Style::default().fg(palette::WHALE_INFO),
+        )]
+    })
 }
 
 /// Pure-render footer. Build once per frame, then `render(area, buf)`.
@@ -332,11 +382,12 @@ impl FooterWidget {
 
     fn auxiliary_spans(&self, max_width: usize) -> Vec<Span<'static>> {
         // `cost` is rendered in the left cluster now — keep it out of the
-        // right-hand chip parade. Coherence / agents / replay / cache are
-        // transient signals; they belong on the right where they appear and
+        // right-hand chip parade. Agents / replay / cache are transient
+        // signals; they belong on the right where they appear and
         // disappear without disturbing the steady mode·model·cost line.
         let parts: Vec<&Vec<Span<'static>>> = [
-            &self.props.coherence,
+            &self.props.permission,
+            &self.props.work,
             &self.props.agents,
             &self.props.reasoning_replay,
             &self.props.cache,
@@ -374,14 +425,9 @@ impl FooterWidget {
 
     /// Build the left status line with priority-ordered hint dropping.
     ///
-    /// Priority order (highest to lowest — last to drop):
-    /// 1. Mode label (always visible at any width; truncated only as a last resort)
-    /// 2. Model name (always visible; then truncated mid-word once all hints are gone)
-    /// 3. Balance chip — drops third (account balance is more actionable than session cost)
-    /// 4. Cost chip — drops fourth
-    /// 5. Status label (e.g. "working", "draft") — drops first when space is tight
-    ///
-    /// At every width ≥40 cols the line never wraps mid-hint.
+    /// Production leaves mode/model blank because the header owns them. The
+    /// generic widget still supports callers that supply them, while the
+    /// header-owned path prioritizes state, then cost and balance.
     fn status_line_spans(&self, max_width: usize) -> Vec<Span<'static>> {
         if max_width == 0 {
             return Vec::new();
@@ -397,6 +443,36 @@ impl FooterWidget {
         let balance_text = spans_text(&self.props.balance);
         let show_balance = !balance_text.is_empty();
 
+        if mode_label.is_empty() && model.is_empty() {
+            let mut spans = Vec::new();
+            if show_status {
+                spans.push(Span::styled(
+                    truncate_to_width(status_label, max_width),
+                    Style::default().fg(self.props.state_color),
+                ));
+            }
+            for (text, color) in [
+                (cost_text.as_str(), self.props.text_muted_color),
+                (balance_text.as_str(), self.props.text_muted_color),
+            ] {
+                if text.is_empty() {
+                    continue;
+                }
+                let mut candidate = spans.clone();
+                if !candidate.is_empty() {
+                    candidate.push(Span::styled(
+                        sep.to_string(),
+                        Style::default().fg(self.props.text_dim_color),
+                    ));
+                }
+                candidate.push(Span::styled(text.to_string(), Style::default().fg(color)));
+                if span_width(&candidate) <= max_width {
+                    spans = candidate;
+                }
+            }
+            return spans;
+        }
+
         let mode_w = mode_label.width();
         let sep_w = sep.width();
         let model_w = UnicodeWidthStr::width(model);
@@ -409,10 +485,10 @@ impl FooterWidget {
         };
 
         let extra_sep = |w: usize| if w > 0 { sep_w } else { 0 };
+        let model_prefix_w = if mode_w > 0 { mode_w + sep_w } else { 0 };
 
-        // Tier 1: mode · model · balance · cost · status
-        let full_w = mode_w
-            + sep_w
+        // Tier 1: [mode ·] model · balance · cost · status
+        let full_w = model_prefix_w
             + model_w
             + extra_sep(balance_w)
             + balance_w
@@ -430,9 +506,8 @@ impl FooterWidget {
             );
         }
 
-        // Tier 2: mode · model · balance · cost — drop status.
-        let with_cost_w = mode_w
-            + sep_w
+        // Tier 2: [mode ·] model · balance · cost — drop status.
+        let with_cost_w = model_prefix_w
             + model_w
             + extra_sep(balance_w)
             + balance_w
@@ -448,9 +523,9 @@ impl FooterWidget {
             );
         }
 
-        // Tier 3: mode · model · balance — drop cost.
+        // Tier 3: [mode ·] model · balance — drop cost.
         if show_balance {
-            let with_balance_w = mode_w + sep_w + model_w + sep_w + balance_w;
+            let with_balance_w = model_prefix_w + model_w + sep_w + balance_w;
             if with_balance_w <= max_width {
                 return self.build_status_line_spans(
                     mode_label,
@@ -462,18 +537,15 @@ impl FooterWidget {
             }
         }
 
-        // Tier 4: mode · model — drop balance too.
-        let mode_model_w = mode_w + sep_w + model_w;
+        // Tier 4: [mode ·] model — drop balance too.
+        let mode_model_w = model_prefix_w + model_w;
         if mode_model_w <= max_width {
             return self.build_status_line_spans(mode_label, model.to_string(), None, None, None);
         }
 
-        // Tier 5: mode · <truncated model> — keep both labels visible by
-        // ellipsizing the model name. Only do this when there is enough room
-        // for at least the ellipsis ("..."). Below that we drop to mode-only.
-        let prefix_w = mode_w + sep_w;
-        if prefix_w < max_width {
-            let model_budget = max_width - prefix_w;
+        // Tier 5: [mode ·] <truncated model> — ellipsize model when prefix fits.
+        if model_prefix_w < max_width {
+            let model_budget = max_width - model_prefix_w;
             if model_budget >= 4 {
                 let truncated = truncate_to_width(model, model_budget);
                 if !truncated.is_empty() {
@@ -482,16 +554,16 @@ impl FooterWidget {
             }
         }
 
-        // Tier 6: mode-only.
-        if mode_w <= max_width {
+        // Tier 6: mode-only when present, otherwise truncated model.
+        if mode_w > 0 && mode_w <= max_width {
             return vec![Span::styled(
                 mode_label.to_string(),
                 Style::default().fg(self.props.mode_color),
             )];
         }
         vec![Span::styled(
-            truncate_to_width(mode_label, max_width),
-            Style::default().fg(self.props.mode_color),
+            truncate_to_width(model, max_width.max(1)),
+            Style::default().fg(self.props.text_hint_color),
         )]
     }
 
@@ -626,7 +698,23 @@ impl Renderable for FooterWidget {
             }
         }
 
-        let preview_left_spans = self.left_spans(available_width);
+        // Permission posture is a safety fact. Reserve it before allowing a
+        // long toast/model label to consume the row, then let lower-priority
+        // auxiliary chips fill whatever remains.
+        let permission_width = span_width(&self.props.permission);
+        let work_width = span_width(&self.props.work);
+        let critical_inner_gap = usize::from(permission_width > 0 && work_width > 0) * 2;
+        let critical_width = permission_width + critical_inner_gap + work_width;
+        let reserved_gap = usize::from(critical_width > 0) * 2;
+        let preview_left_budget = if critical_width > 0 {
+            available_width
+                .saturating_sub(critical_width)
+                .saturating_sub(reserved_gap)
+                .max(1)
+        } else {
+            available_width
+        };
+        let preview_left_spans = self.left_spans(preview_left_budget);
         let preview_left_width = span_width(&preview_left_spans);
         let right_budget = available_width
             .saturating_sub(preview_left_width)
@@ -648,7 +736,7 @@ impl Renderable for FooterWidget {
         let spacer_span = match self.props.working_strip_frame {
             Some(frame) if spacer_width > 0 => Span::styled(
                 footer_working_strip_string(spacer_width, frame),
-                Style::default().fg(palette::DEEPSEEK_SKY),
+                Style::default().fg(palette::WHALE_INFO),
             ),
             _ => Span::raw(" ".repeat(spacer_width)),
         };
@@ -716,24 +804,8 @@ mod tests {
     fn make_app() -> App {
         let options = TuiOptions {
             model: "deepseek-v4-flash".to_string(),
-            workspace: PathBuf::from("."),
-            config_path: None,
-            config_profile: None,
-            allow_shell: false,
-            use_alt_screen: true,
-            use_mouse_capture: false,
-            use_bracketed_paste: true,
-            max_subagents: 1,
-            skills_dir: PathBuf::from("."),
-            memory_path: PathBuf::from("memory.md"),
-            notes_path: PathBuf::from("notes.txt"),
-            mcp_config_path: PathBuf::from("mcp.json"),
-            use_memory: false,
             start_in_agent_mode: true,
-            skip_onboarding: true,
-            yolo: false,
-            resume_session_id: None,
-            initial_input: None,
+            ..crate::test_support::test_tui_options(PathBuf::from("."))
         };
         let mut app = App::new(options, &Config::default());
         // App::new may pick up local Settings, which override the option
@@ -759,12 +831,12 @@ mod tests {
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
-            Vec::<Span<'static>>::new(),
         );
         // `from_app` reads the process-wide retry-status surface; pin
         // `Idle` so footer tests don't pick up state set by retry-banner
         // tests running in parallel.
         props.retry = crate::retry_status::RetryState::Idle;
+        props.mode_label = "";
         props
     }
 
@@ -775,13 +847,12 @@ mod tests {
 
         assert_eq!(props.state_label, "ready");
         assert_eq!(props.state_color, palette::TEXT_MUTED);
-        assert_eq!(props.mode_label, "agent");
+        assert!(props.mode_label.is_empty());
         assert_eq!(props.mode_color, palette::MODE_AGENT);
         assert_eq!(props.text_dim_color, palette::TEXT_DIM);
         assert_eq!(props.text_hint_color, palette::TEXT_HINT);
         assert_eq!(props.text_muted_color, palette::TEXT_MUTED);
         assert_eq!(props.model, "deepseek-v4-flash");
-        assert!(props.coherence.is_empty());
         assert!(props.agents.is_empty());
         assert!(props.cache.is_empty());
         assert!(props.cost.is_empty());
@@ -816,9 +887,12 @@ mod tests {
         );
 
         // A real turn finishes for 90s of model work — chip lights up.
-        // (`humanize_duration` keeps both units when both are non-zero,
-        // so 90s renders as `1m 30s`, not `1m`.)
+        // (The shared elapsed formatter keeps both units when minutes
+        // appear, so 90s renders as `1m 30s`, not `90s`.)
         app.cumulative_turn_duration = std::time::Duration::from_secs(90);
+
+        // Pin the locale to English so the assertion below is deterministic.
+        app.ui_locale = crate::localization::Locale::En;
         let props = idle_props_for(&app);
         let text: String = props
             .worked
@@ -832,7 +906,7 @@ mod tests {
     fn footer_worked_chip_hidden_below_one_minute() {
         use std::time::Duration;
         for secs in [0, 1, 30, 59] {
-            let chip = super::footer_worked_chip(Duration::from_secs(secs));
+            let chip = super::footer_worked_chip(Duration::from_secs(secs), Locale::En);
             assert!(
                 chip.is_empty(),
                 "worked chip must be hidden at {secs}s; got {chip:?}"
@@ -844,30 +918,30 @@ mod tests {
     fn footer_worked_chip_shows_humanized_label_above_threshold() {
         use std::time::Duration;
         // 1 minute on the dot — boundary, must render.
-        let chip = super::footer_worked_chip(Duration::from_secs(60));
+        let chip = super::footer_worked_chip(Duration::from_secs(60), Locale::En);
         let text: String = chip.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "worked 1m");
+        assert_eq!(text, "worked 1m 00s");
 
-        // 3h 12m — the issue's golden example.
-        let chip = super::footer_worked_chip(Duration::from_secs(11_550));
+        // 3h 12m 30s — clamps at the minute/second representation.
+        let chip = super::footer_worked_chip(Duration::from_secs(11_550), Locale::En);
         let text: String = chip.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "worked 3h 12m");
+        assert_eq!(text, "worked 192m 30s");
 
-        // Multi-day session — exercises the d/h band.
-        let chip = super::footer_worked_chip(Duration::from_secs(2 * 86_400 + 5 * 3600));
+        // Multi-day session — minutes keep growing, no hours/days unit.
+        let chip =
+            super::footer_worked_chip(Duration::from_secs(2 * 86_400 + 5 * 3600), Locale::En);
         let text: String = chip.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "worked 2d 5h");
+        assert_eq!(text, "worked 3180m 00s");
     }
 
     #[test]
-    fn from_app_loading_state_uses_thinking_label_and_warning_color() {
+    fn from_app_loading_state_uses_busy_label_and_working_color() {
         let app = make_app();
         let props = FooterProps::from_app(
             &app,
             None,
-            "thinking \u{238B}",
-            palette::STATUS_WARNING,
-            Vec::<Span<'static>>::new(),
+            "busy",
+            palette::WHALE_INFO,
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
@@ -875,8 +949,8 @@ mod tests {
             Vec::<Span<'static>>::new(),
         );
 
-        assert!(props.state_label.starts_with("thinking"));
-        assert_eq!(props.state_color, palette::STATUS_WARNING);
+        assert_eq!(props.state_label, "busy");
+        assert_eq!(props.state_color, palette::WHALE_INFO);
     }
 
     #[test]
@@ -943,7 +1017,6 @@ mod tests {
             None,
             "ready",
             palette::TEXT_MUTED,
-            Vec::<Span<'static>>::new(),
             agents,
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
@@ -965,13 +1038,24 @@ mod tests {
     fn from_app_mode_color_matches_mode_for_each_variant() {
         let mut app = make_app();
         let cases = [
-            (AppMode::Agent, "agent", palette::MODE_AGENT),
-            (AppMode::Yolo, "yolo", palette::MODE_YOLO),
+            (AppMode::Agent, "act", palette::MODE_AGENT),
+            (AppMode::Yolo, "act", palette::MODE_AGENT),
             (AppMode::Plan, "plan", palette::MODE_PLAN),
+            (AppMode::Operate, "operate", palette::MODE_OPERATE),
         ];
         for (mode, expected_label, expected_color) in cases {
             app.mode = mode;
-            let props = idle_props_for(&app);
+            let props = FooterProps::from_app(
+                &app,
+                None,
+                "ready",
+                palette::TEXT_MUTED,
+                Vec::<Span<'static>>::new(),
+                Vec::<Span<'static>>::new(),
+                Vec::<Span<'static>>::new(),
+                Vec::<Span<'static>>::new(),
+                Vec::<Span<'static>>::new(),
+            );
             assert_eq!(
                 props.mode_label, expected_label,
                 "label mismatch for {mode:?}",
@@ -1071,7 +1155,7 @@ mod tests {
     }
 
     #[test]
-    fn render_emits_mode_and_model_when_idle() {
+    fn render_emits_model_when_idle() {
         let app = make_app();
         let props = idle_props_for(&app);
         let widget = FooterWidget::new(props);
@@ -1081,8 +1165,8 @@ mod tests {
         widget.render(area, &mut buf);
 
         let rendered: String = (0..area.width).map(|x| buf[(x, 0)].symbol()).collect();
-        assert!(rendered.contains("agent"));
         assert!(rendered.contains("deepseek-v4-flash"));
+        assert!(!rendered.contains("act"));
         assert!(!rendered.contains("ready"));
     }
 
@@ -1197,31 +1281,173 @@ mod tests {
             .to_string()
     }
 
+    #[test]
+    fn permission_chip_reports_effective_posture_for_every_visible_mode() {
+        let mut app = make_app();
+        app.approval_mode = crate::tui::approval::ApprovalMode::Bypass;
+
+        app.mode = AppMode::Agent;
+        assert_eq!(
+            super::spans_text(&super::footer_permission_chip(&app)),
+            "perm Full Access"
+        );
+        app.mode = AppMode::Operate;
+        assert_eq!(
+            super::spans_text(&super::footer_permission_chip(&app)),
+            "perm Full Access"
+        );
+        app.mode = AppMode::Plan;
+        assert_eq!(
+            super::spans_text(&super::footer_permission_chip(&app)),
+            "perm Read Only"
+        );
+    }
+
+    #[test]
+    fn width_suppressed_sidebar_falls_back_to_compact_work_chip() {
+        let mut app = make_app();
+        app.mode = AppMode::Operate;
+        app.approval_mode = crate::tui::approval::ApprovalMode::Bypass;
+        app.last_sidebar_host_width = Some(59);
+        {
+            let mut todos = app.todos.try_lock().expect("todos lock");
+            todos.add(
+                "inspect".to_string(),
+                crate::tools::todo::TodoStatus::Completed,
+            );
+            todos.add(
+                "patch".to_string(),
+                crate::tools::todo::TodoStatus::InProgress,
+            );
+        }
+
+        let props = FooterProps::from_app(
+            &app,
+            None,
+            "ready",
+            palette::TEXT_MUTED,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(super::spans_text(&props.work), "To-do 2 · 50%");
+        let line = render_at_width(props, 59);
+        assert!(line.contains("To-do 2 · 50%"), "{line:?}");
+        assert!(line.contains("perm Full Access"), "{line:?}");
+
+        app.sidebar_focus = crate::tui::app::SidebarFocus::Hidden;
+        let hidden = FooterProps::from_app(
+            &app,
+            None,
+            "ready",
+            palette::TEXT_MUTED,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(hidden.work.is_empty());
+    }
+
+    #[test]
+    fn permission_safety_chip_survives_long_toast_at_release_widths() {
+        let mut app = make_app();
+        app.mode = AppMode::Plan;
+        let props = FooterProps::from_app(
+            &app,
+            Some(super::FooterToast {
+                text:
+                    "Permissions is locked while a turn is running — press Esc to interrupt first"
+                        .to_string(),
+                color: palette::STATUS_WARNING,
+            }),
+            "working",
+            palette::WHALE_INFO,
+            Vec::<Span<'static>>::new(),
+            Vec::<Span<'static>>::new(),
+            Vec::<Span<'static>>::new(),
+            Vec::<Span<'static>>::new(),
+            Vec::<Span<'static>>::new(),
+        );
+
+        for width in [120, 100, 80] {
+            let line = render_at_width(props.clone(), width);
+            assert!(
+                line.contains("perm Read Only"),
+                "effective safety posture missing at {width} cols: {line:?}"
+            );
+            assert!(line.width() <= usize::from(width));
+        }
+    }
+
+    #[test]
+    fn ask_auto_and_full_access_render_at_release_widths() {
+        for (posture, expected) in [
+            (crate::tui::approval::ApprovalMode::Suggest, "perm Ask"),
+            (crate::tui::approval::ApprovalMode::Auto, "perm Auto-Review"),
+            (
+                crate::tui::approval::ApprovalMode::Bypass,
+                "perm Full Access",
+            ),
+        ] {
+            let mut app = make_app();
+            app.mode = AppMode::Operate;
+            app.approval_mode = posture;
+            let props = FooterProps::from_app(
+                &app,
+                Some(super::FooterToast {
+                    text:
+                        "A long runtime status must not displace the effective permission posture"
+                            .to_string(),
+                    color: palette::STATUS_WARNING,
+                }),
+                "working",
+                palette::WHALE_INFO,
+                Vec::<Span<'static>>::new(),
+                Vec::<Span<'static>>::new(),
+                Vec::<Span<'static>>::new(),
+                Vec::<Span<'static>>::new(),
+                Vec::<Span<'static>>::new(),
+            );
+            for width in [120, 100, 80] {
+                let line = render_at_width(props.clone(), width);
+                assert!(
+                    line.contains(expected),
+                    "{expected:?} missing at {width} cols: {line:?}"
+                );
+            }
+        }
+    }
+
     fn props_with_status(state: &str) -> FooterProps {
         let app = make_app();
-        FooterProps::from_app(
+        let mut props = FooterProps::from_app(
             &app,
             None,
             // Production state labels are `&'static str`; for tests we leak a
             // copy to match that lifetime.
             Box::leak(state.to_string().into_boxed_str()),
-            palette::DEEPSEEK_SKY,
+            palette::WHALE_INFO,
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
-            Vec::<Span<'static>>::new(),
-        )
+        );
+        props.mode_label = "";
+        props.permission.clear();
+        props
     }
 
-    /// Issue #88 — at the widest tier the footer shows mode · model · status
+    /// Issue #88 — at the widest tier the footer shows model · status
     /// without any truncation.
     #[test]
     fn footer_priority_drop_full_at_120_cols() {
         let props = props_with_status("working");
         let line = render_at_width(props, 120);
-        assert!(line.contains("agent"), "mode visible: {line:?}");
         assert!(
             line.contains("deepseek-v4-flash"),
             "model visible: {line:?}"
@@ -1234,32 +1460,25 @@ mod tests {
     fn footer_priority_drop_full_at_100_cols() {
         let props = props_with_status("working");
         let line = render_at_width(props, 100);
-        assert!(line.contains("agent"));
         assert!(line.contains("deepseek-v4-flash"));
         assert!(line.contains("working"));
     }
 
-    /// At 80 cols the short status label "working" still fits alongside mode +
-    /// model. The line never wraps mid-hint.
+    /// At 80 cols the short status label "working" still fits alongside model.
     #[test]
     fn footer_priority_drop_full_at_80_cols() {
         let props = props_with_status("working");
         let line = render_at_width(props, 80);
-        assert!(line.contains("agent"));
         assert!(line.contains("deepseek-v4-flash"));
         assert!(!line.contains("..."), "no mid-word truncation: {line:?}");
-        assert!(line.len() <= 80, "fits in 80 cols: {line:?}");
+        assert!(line.width() <= 80, "fits in 80 cols: {line:?}");
     }
 
-    /// Status drops before the model is truncated. With a longer status label
-    /// at 40 cols the status segment is dropped to keep mode + model intact.
+    /// Status drops before the model is truncated at narrow widths.
     #[test]
     fn footer_priority_drop_status_first_at_40_cols() {
         let props = props_with_status("refreshing context");
-        // "agent · deepseek-v4-flash · refreshing context" = 46 cols. At 40
-        // the status label drops, keeping mode + model verbatim.
-        let line = render_at_width(props, 40);
-        assert!(line.contains("agent"), "mode kept: {line:?}");
+        let line = render_at_width(props, 36);
         assert!(
             line.contains("deepseek-v4-flash"),
             "model kept verbatim: {line:?}"
@@ -1268,27 +1487,23 @@ mod tests {
             !line.contains("refreshing"),
             "status dropped before model truncated: {line:?}",
         );
-        assert!(line.len() <= 40, "fits in 40 cols: {line:?}");
+        assert!(line.width() <= 36, "fits in 36 cols: {line:?}");
     }
 
-    /// At 60 cols mode + model + a long status all just fit (49 cols), so the
-    /// whole line is preserved.
     #[test]
     fn footer_priority_drop_full_at_60_cols() {
         let props = props_with_status("working");
         let line = render_at_width(props, 60);
-        assert!(line.contains("agent"));
         assert!(line.contains("deepseek-v4-flash"));
         assert!(line.contains("working"));
     }
 
     /// Below 30 cols the model truncates with an ellipsis only after the
-    /// status label has already been dropped. Mode label always survives.
+    /// status label has already been dropped.
     #[test]
     fn footer_priority_drop_truncates_model_only_when_status_already_gone() {
         let props = props_with_status("working");
-        let line = render_at_width(props, 20);
-        assert!(line.starts_with("agent"), "mode stays at front: {line:?}");
+        let line = render_at_width(props, 16);
         assert!(
             line.contains("..."),
             "model truncated as last resort: {line:?}"
@@ -1298,18 +1513,20 @@ mod tests {
 
     fn props_with_status_and_cost(state: &str, cost: &str) -> FooterProps {
         let app = make_app();
-        FooterProps::from_app(
+        let mut props = FooterProps::from_app(
             &app,
             None,
             Box::leak(state.to_string().into_boxed_str()),
-            palette::DEEPSEEK_SKY,
-            Vec::<Span<'static>>::new(),
+            palette::WHALE_INFO,
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
             vec![Span::styled(cost.to_string(), Style::default())],
             Vec::<Span<'static>>::new(),
-        )
+        );
+        props.mode_label = "";
+        props.permission.clear();
+        props
     }
 
     #[test]
@@ -1319,23 +1536,23 @@ mod tests {
             "Cache: 75.0% hit | hit 36000 | miss 12000".to_string(),
             Style::default(),
         )];
-        let props = FooterProps::from_app(
+        let mut props = FooterProps::from_app(
             &app,
             None,
             "ready",
             palette::TEXT_MUTED,
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
-            Vec::<Span<'static>>::new(),
             long_cache,
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
         );
+        props.mode_label = "";
 
         let line = render_at_width(props, 40);
 
         assert!(
-            line.contains("agent"),
+            line.contains("deepseek-v4-flash"),
             "left status should survive: {line:?}"
         );
         assert!(
@@ -1352,23 +1569,23 @@ mod tests {
             "Cache: 75.0% hit".to_string(),
             Style::default(),
         )];
-        let props = FooterProps::from_app(
+        let mut props = FooterProps::from_app(
             &app,
             None,
             "ready",
             palette::TEXT_MUTED,
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
-            Vec::<Span<'static>>::new(),
             cache,
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
         );
+        props.mode_label = "";
 
         let line = render_at_width(props, 80);
 
         assert!(
-            line.contains("agent"),
+            line.contains("deepseek-v4-flash"),
             "left status should render: {line:?}"
         );
         assert!(
@@ -1379,29 +1596,21 @@ mod tests {
     }
 
     /// v0.6.6 redesign — cost lives on the LEFT, between model and status.
-    /// At wide widths the line reads `mode · model · cost · status`.
     #[test]
     fn footer_cost_renders_in_left_cluster_at_wide_widths() {
         let props = props_with_status_and_cost("working", "$0.42");
         let line = render_at_width(props, 120);
-        let mode_pos = line.find("agent").expect("mode visible");
         let model_pos = line.find("deepseek-v4-flash").expect("model visible");
         let cost_pos = line.find("$0.42").expect("cost visible on left");
         let status_pos = line.find("working").expect("status visible");
-        assert!(mode_pos < model_pos);
         assert!(model_pos < cost_pos, "cost must follow model: {line:?}");
         assert!(cost_pos < status_pos, "cost must precede status: {line:?}");
     }
 
-    /// Cost is preserved when status drops — cost is steady info, status is
-    /// a transient signal.
     #[test]
     fn footer_cost_outranks_status_when_space_tight() {
-        // "agent · deepseek-v4-flash · $0.42 · refreshing context" = 53 cols.
-        // At 47 the status drops but the cost survives (47 ≥ 36 mode+model+cost).
         let props = props_with_status_and_cost("refreshing context", "$0.42");
-        let line = render_at_width(props, 47);
-        assert!(line.contains("agent"));
+        let line = render_at_width(props, 40);
         assert!(line.contains("deepseek-v4-flash"));
         assert!(
             line.contains("$0.42"),
@@ -1427,7 +1636,6 @@ mod tests {
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
             Vec::<Span<'static>>::new(),
-            Vec::<Span<'static>>::new(),
         );
         let widget = FooterWidget::new(props);
 
@@ -1437,7 +1645,7 @@ mod tests {
 
         let rendered: String = (0..area.width).map(|x| buf[(x, 0)].symbol()).collect();
         assert!(rendered.contains("session saved"));
-        assert!(!rendered.contains("agent"));
+        assert!(!rendered.contains("act"));
         assert!(!rendered.contains("deepseek-v4-flash"));
     }
 

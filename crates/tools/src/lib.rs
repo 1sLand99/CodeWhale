@@ -10,6 +10,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
+mod outcome;
+mod prepared;
+mod resources;
+
+pub use outcome::{ToolExecutionOutcome, ToolTerminalStatus};
+pub use prepared::PreparedToolCall;
+pub use resources::{ResourceClaim, schedule_non_conflicting};
+
 tokio::task_local! {
     static TOOL_EXECUTION_LOCK_HELD: ();
 }
@@ -56,6 +64,8 @@ pub enum ToolError {
     ExecutionFailed { message: String },
     #[error("Failed to execute tool: operation timed out after {seconds}s")]
     Timeout { seconds: u64 },
+    #[error("Tool execution cancelled: {message}")]
+    Cancelled { message: String },
     #[error("Failed to locate tool: {message}")]
     NotAvailable { message: String },
     #[error("Failed to authorize tool execution: {message}")]
@@ -80,6 +90,13 @@ impl ToolError {
     #[must_use]
     pub fn execution_failed(msg: impl Into<String>) -> Self {
         Self::ExecutionFailed {
+            message: msg.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn cancelled(msg: impl Into<String>) -> Self {
+        Self::Cancelled {
             message: msg.into(),
         }
     }
@@ -140,7 +157,7 @@ impl ToolResult {
     /// Create a successful result from JSON.
     pub fn json<T: Serialize>(value: &T) -> std::result::Result<Self, serde_json::Error> {
         Ok(Self {
-            content: serde_json::to_string_pretty(value)?,
+            content: serde_json::to_string(value)?,
             success: true,
             metadata: None,
         })
@@ -201,12 +218,12 @@ pub fn optional_bool(input: &Value, field: &str, default: bool) -> bool {
     input.get(field).and_then(Value::as_bool).unwrap_or(default)
 }
 
-/// Specification that describes a tool available in the registry.
+/// Descriptor that describes a tool available in the registry.
 ///
 /// Contains the tool's name, its JSON input/output schemas, and
 /// execution constraints such as timeout and parallelism.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolSpec {
+pub struct ToolDescriptor {
     /// Unique name used to look up the tool.
     pub name: String,
     /// JSON Schema describing the tool's expected input parameters.
@@ -219,14 +236,14 @@ pub struct ToolSpec {
     pub timeout_ms: Option<u64>,
 }
 
-/// A [`ToolSpec`] together with its runtime configuration.
+/// A [`ToolDescriptor`] together with its runtime configuration.
 ///
-/// Wraps a `ToolSpec` and exposes the parallelism flag directly so the
+/// Wraps a `ToolDescriptor` and exposes the parallelism flag directly so the
 /// dispatcher can check it without digging into the inner spec.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConfiguredToolSpec {
-    /// The underlying tool specification.
-    pub spec: ToolSpec,
+pub struct ConfiguredToolDescriptor {
+    /// The underlying tool descriptor.
+    pub spec: ToolDescriptor,
     /// Whether this tool supports concurrent invocations.
     pub supports_parallel_tool_calls: bool,
 }
@@ -395,7 +412,7 @@ impl ToolCallRuntime {
 #[derive(Default)]
 pub struct ToolRegistry {
     handlers: HashMap<String, Arc<dyn ToolHandler>>,
-    specs: HashMap<String, ConfiguredToolSpec>,
+    specs: HashMap<String, ConfiguredToolDescriptor>,
     runtime: ToolCallRuntime,
 }
 
@@ -405,11 +422,11 @@ impl ToolRegistry {
     /// The tool's name is taken from `spec.name`. Returns an error if
     /// registration fails (currently infallible, but the `Result` is
     /// reserved for future validation).
-    pub fn register(&mut self, spec: ToolSpec, handler: Arc<dyn ToolHandler>) -> Result<()> {
+    pub fn register(&mut self, spec: ToolDescriptor, handler: Arc<dyn ToolHandler>) -> Result<()> {
         let name = spec.name.clone();
         self.specs.insert(
             name.clone(),
-            ConfiguredToolSpec {
+            ConfiguredToolDescriptor {
                 supports_parallel_tool_calls: spec.supports_parallel_tool_calls,
                 spec,
             },
@@ -419,7 +436,7 @@ impl ToolRegistry {
     }
 
     /// Return the configured specs for every registered tool.
-    pub fn list_specs(&self) -> Vec<ConfiguredToolSpec> {
+    pub fn list_specs(&self) -> Vec<ConfiguredToolDescriptor> {
         self.specs.values().cloned().collect()
     }
 
@@ -535,7 +552,9 @@ mod tests {
     fn tool_result_json_round_trips_content() {
         let result = ToolResult::json(&json!({"ok": true})).expect("json");
         assert!(result.success);
-        assert!(result.content.contains("\"ok\": true"));
+        let content: serde_json::Value =
+            serde_json::from_str(&result.content).expect("content is valid json");
+        assert_eq!(content, json!({"ok": true}));
     }
 
     #[test]

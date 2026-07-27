@@ -18,13 +18,23 @@ pub struct DiffFileSummary {
 
 pub fn render_diff(diff: &str, width: u16) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    let mut old_line: Option<usize> = None;
-    let mut new_line: Option<usize> = None;
     let summaries = summarize_diff(diff);
 
     if !summaries.is_empty() {
         lines.extend(render_diff_summary(&summaries, width));
     }
+    lines.extend(render_diff_body(diff, width));
+    lines
+}
+
+/// Render only the diff body. Callers that already own a semantic summary use
+/// this form so the bounded preview budget is spent on the actual red/green
+/// evidence instead of a second, generic summary.
+#[must_use]
+pub fn render_diff_body(diff: &str, width: u16) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let mut old_line: Option<usize> = None;
+    let mut new_line: Option<usize> = None;
 
     for raw in diff.lines() {
         if raw.starts_with("diff --git") || raw.starts_with("index ") {
@@ -268,13 +278,13 @@ fn parse_hunk_header(line: &str) -> Option<(usize, usize)> {
 
 fn render_header_line(line: &str, width: u16) -> Vec<Line<'static>> {
     let style = Style::default()
-        .fg(palette::DEEPSEEK_SKY)
+        .fg(palette::WHALE_INFO)
         .add_modifier(Modifier::BOLD);
     wrap_with_style(line, style, width)
 }
 
 fn render_hunk_header(line: &str, width: u16) -> Vec<Line<'static>> {
-    let style = Style::default().fg(palette::DEEPSEEK_BLUE);
+    let style = Style::default().fg(palette::WHALE_ACTION);
     wrap_with_style(line, style, width)
 }
 

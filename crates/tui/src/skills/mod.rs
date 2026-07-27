@@ -1,6 +1,13 @@
 //! Skill discovery and registry for local SKILL.md files.
 
+pub mod audit;
+/// Provider-free contract tests for the bundled starter pack (#4698).
+#[cfg(test)]
+mod catalog_matrix;
 pub mod install;
+pub mod mutation;
+mod package_digest;
+pub mod roots;
 mod system;
 // Re-exports kept for documentation parity and downstream consumers; the
 // binary itself imports directly from `skills::install`. `#[allow(...)]`
@@ -12,7 +19,16 @@ pub use install::{
     InstallSource, InstalledSkill, RegistryDocument, RegistryEntry, RegistryFetchResult,
     SkillSyncOutcome, SyncResult, UpdateResult, default_cache_skills_dir,
 };
-pub use system::{install_system_skills, is_bundled_skill_name};
+#[allow(unused_imports)]
+pub use roots::{
+    CompatibleHarness, SkillRootAccess, SkillRootCatalog, SkillRootDescriptor, SkillRootId,
+    SkillRootKind, SkillScope, classify_configured_skills_dir, safe_display_path,
+};
+pub use system::{
+    BundledSkillTier, bundled_skill_tier, install_system_skills, is_bundled_skill_name,
+};
+#[allow(unused_imports)]
+pub use system::{bundled_skill_body_sha256, is_exact_bundled_skill};
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,12 +39,13 @@ use crate::logging;
 
 const MAX_SKILL_DESCRIPTION_CHARS: usize = 280;
 const MAX_AVAILABLE_SKILLS_CHARS: usize = 12_000;
+const MAX_SKILL_NAME_CHARS: usize = 64;
 
 // === Defaults ===
 
 #[must_use]
 pub fn default_skills_dir() -> PathBuf {
-    dirs::home_dir().map_or_else(
+    crate::config::effective_home_dir().map_or_else(
         || PathBuf::from("/tmp/codewhale/skills"),
         |p| p.join(".codewhale").join("skills"),
     )
@@ -37,22 +54,124 @@ pub fn default_skills_dir() -> PathBuf {
 /// Global agentskills.io-compatible skills directory (`~/.agents/skills`).
 #[must_use]
 pub fn agents_global_skills_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|p| p.join(".agents").join("skills"))
+    crate::config::effective_home_dir().map(|p| p.join(".agents").join("skills"))
 }
 
 // === Types ===
+
+/// Session-time skill discovery scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillDiscoveryMode {
+    /// Preserve the existing broad compatibility scan across CodeWhale,
+    /// agentskills.io, Claude, OpenCode, Cursor, and legacy DeepSeek roots.
+    Compatible,
+    /// Scan only CodeWhale-owned roots. Callers that also pass an explicit
+    /// `skills_dir` still get that directory because it is user configuration.
+    CodeWhaleOnly,
+}
+
+impl SkillDiscoveryMode {
+    #[must_use]
+    pub fn from_codewhale_only(value: bool) -> Self {
+        if value {
+            Self::CodeWhaleOnly
+        } else {
+            Self::Compatible
+        }
+    }
+}
 
 /// Parsed representation of a SKILL.md definition.
 #[derive(Debug, Clone)]
 pub struct Skill {
     pub name: String,
+    /// Default (language-neutral, usually English) description.
     pub description: String,
+    /// Optional locale-specific descriptions, keyed by lowercased locale tag
+    /// (e.g. `zh`, `zh-hant`, `ja`). Populated from `description_<tag>:`
+    /// frontmatter keys so a skill author can ship a shorter, native-language
+    /// description for non-English sessions (saves prompt tokens; see #3354).
+    pub localized_descriptions: HashMap<String, String>,
+    /// Whether the skill may be selected from the model's catalogue or only
+    /// loaded after an explicit user request. Missing metadata preserves the
+    /// historical model-and-user behavior.
+    pub invocation: SkillInvocation,
+    /// Alternate names accepted by `load_skill`; aliases never become extra
+    /// prompt entries, so they do not inflate the catalogue or create a
+    /// second instruction surface.
+    pub aliases: Vec<String>,
     pub body: String,
     /// On-disk path to the `SKILL.md` this was loaded from. The directory
     /// name can differ from the frontmatter `name` for community installs
     /// or manually-placed skills, so callers must use this rather than
     /// reconstructing `<dir>/<name>/SKILL.md`.
     pub path: PathBuf,
+    pub source: SkillSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillInvocation {
+    ModelAndUser,
+    ExplicitOnly,
+}
+
+impl SkillInvocation {
+    fn from_frontmatter(value: Option<&str>) -> Self {
+        match value.map(str::trim).map(|value| value.to_ascii_lowercase()) {
+            Some(value) if value == "explicit-only" || value == "explicit_only" => {
+                Self::ExplicitOnly
+            }
+            _ => Self::ModelAndUser,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillSource {
+    Native,
+    Plugin {
+        plugin_id: String,
+        plugin_name: String,
+        authority: Box<crate::plugins::types::PluginAuthority>,
+    },
+}
+
+impl Skill {
+    /// Pick the best description for a session `locale_tag`, falling back to the
+    /// default `description` when no localized variant matches.
+    ///
+    /// Order: exact (lowercased) tag match, then the primary language subtag
+    /// (so `en-us` → `en`, `pt-br` → `pt`, `zh-cn` → `zh`), then default.
+    ///
+    /// Chinese is the one place where the primary-subtag fallback would be
+    /// *wrong*: Traditional and Simplified are written differently, so a
+    /// Traditional tag (`zh-hant`, or the Traditional regions `zh-tw` / `zh-hk`
+    /// / `zh-mo`) must NOT borrow a Simplified `description_zh`. Those match only
+    /// an exact `description_zh-hant`-style key, else the default. Simplified
+    /// tags (`zh`, `zh-hans`, `zh-cn`, …) still fold to `description_zh`.
+    #[must_use]
+    pub fn description_for_locale(&self, locale_tag: &str) -> &str {
+        if self.localized_descriptions.is_empty() {
+            return &self.description;
+        }
+        let normalized = locale_tag.trim().to_ascii_lowercase();
+        if let Some(desc) = self.localized_descriptions.get(&normalized) {
+            return desc;
+        }
+        if let Some((primary, _)) = normalized.split_once('-') {
+            // Don't let a Traditional-Chinese session fall back to a Simplified
+            // (`zh`) description — different written form, not just a region.
+            let traditional_chinese = primary == "zh"
+                && (normalized.contains("hant")
+                    || normalized.ends_with("-tw")
+                    || normalized.ends_with("-hk")
+                    || normalized.ends_with("-mo"));
+            if !traditional_chinese && let Some(desc) = self.localized_descriptions.get(primary) {
+                return desc;
+            }
+        }
+        &self.description
+    }
 }
 
 /// Collection of discovered skills.
@@ -169,7 +288,28 @@ impl SkillRegistry {
                             continue;
                         }
                         skill.path = skill_path.clone();
-                        registry.skills.push(skill);
+                        registry.normalize_skill_name(&mut skill, &skill_path);
+                        // Two sibling directories under the same root can
+                        // normalize to the same command name (e.g. `My Skill/`
+                        // and `my_skill/` both slugify to `my-skill`). Keep the
+                        // first (matching the cross-root merge in
+                        // `discover_from_directories`) and warn instead of
+                        // silently pushing an unreachable duplicate (#3919).
+                        let shadowed_by = registry
+                            .skills
+                            .iter()
+                            .find(|s| s.name == skill.name)
+                            .map(|s| s.path.clone());
+                        if let Some(existing_path) = shadowed_by {
+                            registry.push_warning(format!(
+                                "Skill `{}` at {} is shadowed by {}.",
+                                skill.name,
+                                skill.path.display(),
+                                existing_path.display()
+                            ));
+                        } else {
+                            registry.skills.push(skill);
+                        }
                         // This directory IS a skill. Don't descend further:
                         // any nested `SKILL.md` would be a fixture or
                         // example bundled with the parent skill, not a
@@ -218,7 +358,20 @@ impl SkillRegistry {
         self.warnings.push(warning);
     }
 
-    fn parse_skill(_path: &Path, content: &str) -> std::result::Result<Skill, String> {
+    fn normalize_skill_name(&mut self, skill: &mut Skill, skill_path: &Path) {
+        let normalized = normalize_skill_name_for_lookup(&skill.name);
+        if normalized != skill.name || !is_valid_skill_name(&skill.name) {
+            let original = skill.name.clone();
+            skill.name = normalized;
+            self.push_warning(format!(
+                "Skill name `{original}` in {} is not a safe command name; using `{}` instead.",
+                skill_path.display(),
+                skill.name
+            ));
+        }
+    }
+
+    pub(crate) fn parse_skill(_path: &Path, content: &str) -> std::result::Result<Skill, String> {
         let trimmed = content.trim_start();
 
         // Try to parse frontmatter block first. If absent, fall back to
@@ -374,13 +527,40 @@ impl SkillRegistry {
 
             let description = metadata.get("description").cloned().unwrap_or_default();
 
+            let invocation =
+                SkillInvocation::from_frontmatter(metadata.get("invocation").map(String::as_str));
+            let aliases = metadata
+                .get("aliases-for")
+                .into_iter()
+                .flat_map(|value| value.split([',', ' ', '\t']))
+                .map(str::trim)
+                .filter(|alias| !alias.is_empty())
+                .map(normalize_skill_name_for_lookup)
+                .filter(|alias| is_valid_skill_name(alias))
+                .collect();
+
+            // Collect `description_<tag>:` frontmatter keys (already lowercased
+            // above) into locale-specific descriptions, e.g. `description_zh`.
+            let localized_descriptions = metadata
+                .iter()
+                .filter_map(|(key, value)| {
+                    key.strip_prefix("description_")
+                        .filter(|tag| !tag.is_empty())
+                        .map(|tag| (tag.to_string(), value.clone()))
+                })
+                .collect();
+
             return Ok(Skill {
                 name,
                 description,
+                localized_descriptions,
+                invocation,
+                aliases,
                 body: body.trim().to_string(),
                 // Filled in by `discover` after parse succeeds; default to an
                 // empty path so direct constructors (e.g. tests) compile.
                 path: PathBuf::new(),
+                source: SkillSource::Native,
             });
         }
 
@@ -399,19 +579,77 @@ impl SkillRegistry {
         Ok(Skill {
             name,
             description: String::new(),
+            localized_descriptions: HashMap::new(),
+            invocation: SkillInvocation::ModelAndUser,
+            aliases: Vec::new(),
             body: content.trim().to_string(),
             path: PathBuf::new(),
+            source: SkillSource::Native,
         })
+    }
+
+    /// Parse one already-read Skill body while preserving the same name
+    /// normalization contract as filesystem discovery. Plugin discovery uses
+    /// this after checking the exact byte digest against its reviewed bundle
+    /// inventory, so parsing never has to reopen the mutable pathname.
+    pub(crate) fn parse_verified_content(
+        path: &Path,
+        content: &str,
+    ) -> std::result::Result<(Skill, Vec<String>), String> {
+        let mut registry = Self::default();
+        let mut skill = Self::parse_skill(path, content)?;
+        skill.path = path.to_path_buf();
+        registry.normalize_skill_name(&mut skill, path);
+        Ok((skill, registry.warnings))
     }
 
     /// Lookup a skill by name.
     pub fn get(&self, name: &str) -> Option<&Skill> {
-        self.skills.iter().find(|s| s.name == name)
+        let normalized = normalize_skill_name_for_lookup(name);
+        self.skills
+            .iter()
+            .find(|s| s.name == normalized)
+            .or_else(|| {
+                self.skills
+                    .iter()
+                    .find(|s| s.aliases.iter().any(|alias| alias == &normalized))
+            })
     }
 
     /// Return all loaded skills.
     pub fn list(&self) -> &[Skill] {
         &self.skills
+    }
+
+    /// Apply the shared exact-name activation state after filesystem/plugin
+    /// discovery. A qualified plugin Skill can be hidden independently, but
+    /// this never changes the plugin bundle's trust or MCP lifecycle.
+    #[must_use]
+    pub(crate) fn into_enabled(self) -> Self {
+        self.into_enabled_with_state(crate::skill_state::SkillStateStore::load_default())
+    }
+
+    #[must_use]
+    fn into_enabled_with_state(
+        mut self,
+        state: anyhow::Result<crate::skill_state::SkillStateStore>,
+    ) -> Self {
+        match state {
+            Ok(state) => self.skills.retain(|skill| state.is_enabled(&skill.name)),
+            Err(error) => {
+                let hidden_plugin_skills = self
+                    .skills
+                    .iter()
+                    .filter(|skill| matches!(skill.source, SkillSource::Plugin { .. }))
+                    .count();
+                self.skills
+                    .retain(|skill| matches!(skill.source, SkillSource::Native));
+                self.push_warning(format!(
+                    "Failed to read Skill activation state; native Skills remain available for recovery, but {hidden_plugin_skills} reviewed plugin Skill(s) were hidden fail-closed: {error}"
+                ));
+            }
+        }
+        self
     }
 
     /// Parse or I/O warnings encountered while discovering skills.
@@ -432,13 +670,75 @@ impl SkillRegistry {
     }
 }
 
+fn is_valid_skill_name(name: &str) -> bool {
+    let char_count = name.chars().count();
+    char_count > 0
+        && char_count <= MAX_SKILL_NAME_CHARS
+        && name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+}
+
+pub(crate) fn normalize_skill_name_for_lookup(name: &str) -> String {
+    if let Some((plugin, skill)) = name.trim().split_once(':')
+        && !plugin.is_empty()
+        && !skill.is_empty()
+        && !skill.contains(':')
+    {
+        return format!(
+            "{}:{}",
+            normalize_skill_name_segment(plugin),
+            normalize_skill_name_segment(skill)
+        );
+    }
+    normalize_skill_name_segment(name)
+}
+
+fn normalize_skill_name_segment(name: &str) -> String {
+    let mut out = String::new();
+    let mut pending_dash = false;
+
+    for ch in name.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            if pending_dash && !out.is_empty() && out.len() < MAX_SKILL_NAME_CHARS {
+                out.push('-');
+            }
+            pending_dash = false;
+            if out.len() < MAX_SKILL_NAME_CHARS {
+                out.push(ch.to_ascii_lowercase());
+            }
+        } else {
+            pending_dash = true;
+        }
+
+        if out.len() >= MAX_SKILL_NAME_CHARS {
+            break;
+        }
+    }
+
+    while out.ends_with('-') {
+        out.pop();
+    }
+
+    if out.is_empty() {
+        "skill".to_string()
+    } else {
+        out
+    }
+}
+
 /// Resolve every candidate skills directory for a workspace, in
 /// precedence order — most specific first. Used for session-time
 /// skill discovery so the model sees skills that originated in
 /// other AI-tool conventions installed in the same workspace
 /// (#432).
 ///
-/// Precedence (first match wins on name conflicts):
+/// Precedence is defined once in [`roots::SkillRootCatalog`] (first
+/// match wins on name conflicts):
 ///
 /// 1. `<workspace>/.agents/skills` — deepseek-native convention.
 /// 2. `<workspace>/skills` — flat, project-local.
@@ -451,48 +751,35 @@ impl SkillRegistry {
 /// 9. `~/.codewhale/skills` — CodeWhale global, primary install target.
 /// 10. `~/.deepseek/skills` — legacy DeepSeek global fallback.
 ///
+/// Compatible audit may also observe `.codex/skills`, but that root is
+/// never activated for runtime discovery in this catalog.
+///
 /// Only directories that exist on disk are returned — callers don't
 /// need to filter further. Returns an empty vec when nothing is
 /// installed (the system-prompt skills block is then suppressed).
 #[must_use]
+#[allow(dead_code)]
 pub fn skills_directories(workspace: &Path) -> Vec<PathBuf> {
-    let home = dirs::home_dir();
-    skills_directories_with_home(workspace, home.as_deref())
+    skills_directories_for_mode(workspace, SkillDiscoveryMode::Compatible)
 }
 
-fn skills_directories_with_home(workspace: &Path, home_dir: Option<&Path>) -> Vec<PathBuf> {
-    let mut candidates = vec![
-        workspace.join(".agents").join("skills"),
-        workspace.join("skills"),
-        workspace.join(".opencode").join("skills"),
-        workspace.join(".claude").join("skills"),
-        workspace.join(".cursor").join("skills"),
-        workspace.join(".codewhale").join("skills"),
-    ];
-    if let Some(home) = home_dir {
-        candidates.push(home.join(".agents").join("skills"));
-        candidates.push(home.join(".claude").join("skills"));
-        candidates.push(home.join(".codewhale").join("skills"));
-        candidates.push(home.join(".deepseek").join("skills"));
-    } else {
-        candidates.push(PathBuf::from("/tmp/codewhale/skills"));
-    }
-    existing_skill_dirs(candidates)
+#[must_use]
+pub fn skills_directories_for_mode(workspace: &Path, mode: SkillDiscoveryMode) -> Vec<PathBuf> {
+    let home = crate::config::effective_home_dir();
+    skills_directories_with_home_and_mode(workspace, home.as_deref(), mode)
 }
 
-fn existing_skill_dirs(candidates: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    for path in candidates {
-        let Ok(canonical_path) = fs::canonicalize(&path) else {
-            continue;
-        };
-        if canonical_path.is_dir() && seen.insert(canonical_path) {
-            out.push(path);
-        }
-    }
-    out
+fn skills_directories_with_home_and_mode(
+    workspace: &Path,
+    home_dir: Option<&Path>,
+    mode: SkillDiscoveryMode,
+) -> Vec<PathBuf> {
+    roots::skills_directories_with_home_and_mode(workspace, home_dir, mode)
 }
+
+pub(crate) use roots::codewhale_workspace_skills_dir;
+#[cfg(test)]
+pub(crate) use roots::existing_skill_dirs;
 
 /// Walk every candidate skills directory for a workspace and merge
 /// the discovered skills into a single registry. Name conflicts are
@@ -504,19 +791,24 @@ fn existing_skill_dirs(candidates: impl IntoIterator<Item = PathBuf>) -> Vec<Pat
 /// load.
 #[must_use]
 pub fn discover_in_workspace(workspace: &Path) -> SkillRegistry {
-    let mut merged = SkillRegistry::default();
-    for dir in skills_directories(workspace) {
-        let registry = SkillRegistry::discover(&dir);
-        for skill in registry.skills {
-            if !merged.skills.iter().any(|s| s.name == skill.name) {
-                merged.skills.push(skill);
-            }
-        }
-        for warning in registry.warnings {
-            merged.warnings.push(warning);
-        }
-    }
-    merged
+    discover_in_workspace_with_mode(workspace, SkillDiscoveryMode::Compatible)
+}
+
+#[must_use]
+pub fn discover_in_workspace_with_mode(
+    workspace: &Path,
+    mode: SkillDiscoveryMode,
+) -> SkillRegistry {
+    discover_in_workspace_with_mode_and_plugins(workspace, mode, None)
+}
+
+#[must_use]
+pub fn discover_in_workspace_with_mode_and_plugins(
+    workspace: &Path,
+    mode: SkillDiscoveryMode,
+    plugins: Option<&crate::plugins::PluginRegistry>,
+) -> SkillRegistry {
+    discover_from_directories_with_plugins(skills_directories_for_mode(workspace, mode), plugins)
 }
 
 /// Discover skills from the workspace search set plus the configured install
@@ -525,14 +817,48 @@ pub fn discover_in_workspace(workspace: &Path) -> SkillRegistry {
 /// outside that set so explicit configuration cannot be buried by large global
 /// libraries.
 #[must_use]
+#[allow(dead_code)]
 pub fn discover_for_workspace_and_dir(workspace: &Path, skills_dir: &Path) -> SkillRegistry {
-    let mut dirs = skills_directories(workspace);
+    discover_for_workspace_and_dir_with_mode(workspace, skills_dir, SkillDiscoveryMode::Compatible)
+}
+
+#[must_use]
+pub fn discover_for_workspace_and_dir_with_mode(
+    workspace: &Path,
+    skills_dir: &Path,
+    mode: SkillDiscoveryMode,
+) -> SkillRegistry {
+    discover_for_workspace_and_dir_with_mode_and_plugins(workspace, skills_dir, mode, None)
+}
+
+#[must_use]
+pub fn discover_for_workspace_and_dir_with_mode_and_plugins(
+    workspace: &Path,
+    skills_dir: &Path,
+    mode: SkillDiscoveryMode,
+    plugins: Option<&crate::plugins::PluginRegistry>,
+) -> SkillRegistry {
+    let dirs = skill_directories_for_workspace_and_dir(workspace, skills_dir, mode);
+    discover_from_directories_with_plugins(dirs, plugins)
+}
+
+#[must_use]
+pub fn skill_directories_for_workspace_and_dir(
+    workspace: &Path,
+    skills_dir: &Path,
+    mode: SkillDiscoveryMode,
+) -> Vec<PathBuf> {
+    let mut dirs = skills_directories_for_mode(workspace, mode);
     insert_configured_skills_dir(&mut dirs, workspace, skills_dir);
-    discover_from_directories(dirs)
+    dirs
 }
 
 fn insert_configured_skills_dir(dirs: &mut Vec<PathBuf>, workspace: &Path, skills_dir: &Path) {
-    if !skills_dir.is_dir() || dirs.iter().any(|p| paths_refer_to_same_dir(p, skills_dir)) {
+    if !skills_dir.is_dir()
+        || dirs
+            .iter()
+            .any(|p| roots::paths_refer_to_same_dir(p, skills_dir))
+    {
         return;
     }
 
@@ -547,22 +873,27 @@ fn insert_configured_skills_dir(dirs: &mut Vec<PathBuf>, workspace: &Path, skill
     dirs.insert(insert_at, skills_dir.to_path_buf());
 }
 
-fn paths_refer_to_same_dir(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
-    }
-    match (fs::canonicalize(left), fs::canonicalize(right)) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
-    }
+#[allow(dead_code)]
+pub(crate) fn discover_from_directories(dirs: impl IntoIterator<Item = PathBuf>) -> SkillRegistry {
+    discover_from_directories_with_plugins(dirs, None)
 }
 
-pub(crate) fn discover_from_directories(dirs: impl IntoIterator<Item = PathBuf>) -> SkillRegistry {
+pub(crate) fn discover_from_directories_with_plugins(
+    dirs: impl IntoIterator<Item = PathBuf>,
+    plugins: Option<&crate::plugins::PluginRegistry>,
+) -> SkillRegistry {
     let mut merged = SkillRegistry::default();
     for dir in dirs {
         let registry = SkillRegistry::discover(&dir);
         for skill in registry.skills {
-            if !merged.skills.iter().any(|s| s.name == skill.name) {
+            if let Some(existing) = merged.skills.iter().find(|s| s.name == skill.name) {
+                merged.push_warning(format!(
+                    "Skill `{}` at {} is shadowed by {}.",
+                    skill.name,
+                    skill.path.display(),
+                    existing.path.display()
+                ));
+            } else {
                 merged.skills.push(skill);
             }
         }
@@ -570,7 +901,79 @@ pub(crate) fn discover_from_directories(dirs: impl IntoIterator<Item = PathBuf>)
             merged.warnings.push(warning);
         }
     }
+    if let Some(plugins) = plugins {
+        merge_active_plugin_skills(&mut merged, plugins);
+    }
     merged
+}
+
+fn merge_active_plugin_skills(
+    registry: &mut SkillRegistry,
+    plugins: &crate::plugins::PluginRegistry,
+) {
+    let Some(state_path) = plugins.state_path().map(Path::to_path_buf) else {
+        return;
+    };
+    let plugins = plugins
+        .list()
+        .into_iter()
+        .filter_map(|plugin| {
+            plugin
+                .authority(state_path.clone(), plugins.workspace().to_path_buf())
+                .map(|authority| (plugin.clone(), authority))
+        })
+        .collect::<Vec<_>>();
+    merge_plugin_skills_from_plugins(registry, plugins);
+}
+
+fn merge_plugin_skills_from_plugins(
+    registry: &mut SkillRegistry,
+    plugins: impl IntoIterator<
+        Item = (
+            crate::plugins::types::LoadedPlugin,
+            crate::plugins::types::PluginAuthority,
+        ),
+    >,
+) {
+    for (plugin, authority) in plugins {
+        // Keep the adapter independently fail-closed for headless callers.
+        if !plugin.active()
+            || crate::plugins::registry::verify_plugin_authority(&authority).is_err()
+        {
+            continue;
+        }
+        let plugin_id = plugin.id.to_string();
+        let plugin_name = plugin.name().to_string();
+        for snapshot in plugin.skill_snapshots {
+            let qualified_name = format!("{plugin_name}:{}", snapshot.name);
+            if let Some(existing) = registry
+                .skills
+                .iter()
+                .find(|skill| skill.name == qualified_name)
+            {
+                registry.push_warning(format!(
+                    "Plugin skill `{qualified_name}` at {} is shadowed by {}.",
+                    snapshot.path.display(),
+                    existing.path.display()
+                ));
+                continue;
+            }
+            registry.skills.push(Skill {
+                name: qualified_name,
+                description: snapshot.description,
+                localized_descriptions: snapshot.localized_descriptions,
+                invocation: snapshot.invocation,
+                aliases: snapshot.aliases,
+                body: snapshot.body,
+                path: snapshot.path,
+                source: SkillSource::Plugin {
+                    plugin_id: plugin_id.clone(),
+                    plugin_name: plugin_name.clone(),
+                    authority: Box::new(authority.clone()),
+                },
+            });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -579,9 +982,37 @@ pub(crate) fn discover_for_workspace_and_dir_with_home(
     skills_dir: &Path,
     home_dir: Option<&Path>,
 ) -> SkillRegistry {
-    let mut dirs = skills_directories_with_home(workspace, home_dir);
+    discover_for_workspace_and_dir_with_home_and_mode(
+        workspace,
+        skills_dir,
+        home_dir,
+        SkillDiscoveryMode::Compatible,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn discover_for_workspace_and_dir_with_home_and_mode(
+    workspace: &Path,
+    skills_dir: &Path,
+    home_dir: Option<&Path>,
+    mode: SkillDiscoveryMode,
+) -> SkillRegistry {
+    discover_for_workspace_and_dir_with_home_and_mode_and_plugins(
+        workspace, skills_dir, home_dir, mode, None,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn discover_for_workspace_and_dir_with_home_and_mode_and_plugins(
+    workspace: &Path,
+    skills_dir: &Path,
+    home_dir: Option<&Path>,
+    mode: SkillDiscoveryMode,
+    plugins: Option<&crate::plugins::PluginRegistry>,
+) -> SkillRegistry {
+    let mut dirs = skills_directories_with_home_and_mode(workspace, home_dir, mode);
     insert_configured_skills_dir(&mut dirs, workspace, skills_dir);
-    discover_from_directories(dirs)
+    discover_from_directories_with_plugins(dirs, plugins)
 }
 
 /// Render the system-prompt skills block from every workspace
@@ -591,7 +1022,18 @@ pub(crate) fn discover_for_workspace_and_dir_with_home(
 #[must_use]
 pub fn render_available_skills_context_for_workspace(workspace: &Path) -> Option<String> {
     let registry = discover_in_workspace(workspace);
-    render_skills_block(&registry)
+    render_skills_block(&registry, "en", workspace)
+}
+
+#[must_use]
+pub fn render_available_skills_context_for_workspace_with_mode_and_plugins(
+    workspace: &Path,
+    mode: SkillDiscoveryMode,
+    locale: &str,
+    plugins: Option<&crate::plugins::PluginRegistry>,
+) -> Option<String> {
+    let registry = discover_in_workspace_with_mode_and_plugins(workspace, mode, plugins);
+    render_skills_block(&registry, locale, workspace)
 }
 
 /// Codex's progressive-disclosure contract: the model sees skill names,
@@ -605,7 +1047,7 @@ pub fn render_available_skills_context_for_workspace(workspace: &Path) -> Option
 #[must_use]
 fn render_available_skills_context(skills_dir: &Path) -> Option<String> {
     let registry = SkillRegistry::discover(skills_dir);
-    render_skills_block(&registry)
+    render_skills_block(&registry, "en", skills_dir)
 }
 
 /// Union variant: merge skills discovered in the `workspace` (cross-tool skill
@@ -615,11 +1057,109 @@ pub fn render_available_skills_context_for_workspace_and_dir(
     workspace: &Path,
     skills_dir: &Path,
 ) -> Option<String> {
-    let registry = discover_for_workspace_and_dir(workspace, skills_dir);
-    render_skills_block(&registry)
+    render_available_skills_context_for_workspace_and_dir_with_mode(
+        workspace,
+        skills_dir,
+        SkillDiscoveryMode::Compatible,
+        "en",
+    )
 }
 
-fn render_skills_block(registry: &SkillRegistry) -> Option<String> {
+#[must_use]
+pub fn render_available_skills_context_for_workspace_and_dir_with_mode(
+    workspace: &Path,
+    skills_dir: &Path,
+    mode: SkillDiscoveryMode,
+    locale: &str,
+) -> Option<String> {
+    let registry =
+        discover_for_workspace_and_dir_with_mode_and_plugins(workspace, skills_dir, mode, None)
+            .into_enabled();
+    render_skills_block(&registry, locale, workspace)
+}
+
+#[must_use]
+pub fn render_available_skills_context_for_workspace_and_dir_with_mode_and_plugins(
+    workspace: &Path,
+    skills_dir: &Path,
+    mode: SkillDiscoveryMode,
+    locale: &str,
+    plugins: Option<&crate::plugins::PluginRegistry>,
+) -> Option<String> {
+    let registry =
+        discover_for_workspace_and_dir_with_mode_and_plugins(workspace, skills_dir, mode, plugins)
+            .into_enabled();
+    render_skills_block(&registry, locale, workspace)
+}
+
+/// Replace absolute path prefixes in free-form text (skill load warnings)
+/// with privacy-safe stand-ins before the text enters the system-prompt
+/// prefix (#4632). Workspace paths become `.`, home-dir paths become `~`.
+fn sanitize_prompt_path_text(text: &str, workspace: &Path) -> String {
+    let mut out = text.to_string();
+    if let Some(ws) = workspace.to_str()
+        && !ws.is_empty()
+    {
+        out = out.replace(ws, ".");
+    }
+    if let Some(home) = crate::config::effective_home_dir()
+        && let Some(home_str) = home.to_str()
+        && !home_str.is_empty()
+    {
+        out = out.replace(home_str, "~");
+    }
+    // Environment variables are process-global, and concurrent embedders or
+    // tests may temporarily redirect HOME after discovery recorded a warning.
+    // Scrub conventional home roots by shape as a final privacy boundary.
+    for marker in ["/Users/", "/home/"] {
+        while let Some(start) = out.find(marker) {
+            let user_start = start + marker.len();
+            let user_len = out[user_start..]
+                .find(|ch: char| ch == '/' || ch.is_whitespace())
+                .unwrap_or(out.len() - user_start);
+            out.replace_range(start..user_start + user_len, "~");
+        }
+    }
+    // Environment variables are process-global, and concurrent embedders or
+    // tests may temporarily redirect HOME after discovery recorded a warning.
+    // Scrub conventional home roots by shape as a final privacy boundary.
+    for marker in ["/Users/", "/home/"] {
+        while let Some(start) = out.find(marker) {
+            let user_start = start + marker.len();
+            let user_len = out[user_start..]
+                .find(|ch: char| ch == '/' || ch.is_whitespace())
+                .unwrap_or(out.len() - user_start);
+            out.replace_range(start..user_start + user_len, "~");
+        }
+    }
+    out
+}
+
+/// Render a skill path without leaking private absolute paths into the
+/// system-prompt prefix (#4632): workspace skills become workspace-relative,
+/// home-dir skills become `~/…`, and anything else is reduced to its trailing
+/// components so the prefix stays free of user-identifying absolute paths.
+fn privacy_safe_skill_path(path: &Path, workspace: &Path) -> String {
+    if let Ok(rel) = path.strip_prefix(workspace) {
+        return rel.display().to_string();
+    }
+    if let Some(home) = crate::config::effective_home_dir()
+        && let Ok(rel) = path.strip_prefix(&home)
+    {
+        return format!("~/{}", rel.display());
+    }
+    match (path.parent().and_then(Path::file_name), path.file_name()) {
+        (Some(dir), Some(file)) => {
+            format!("…/{}/{}", dir.to_string_lossy(), file.to_string_lossy())
+        }
+        _ => path
+            .file_name()
+            .map(|file| file.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "SKILL.md".to_string()),
+    }
+}
+
+fn render_skills_block(registry: &SkillRegistry, locale: &str, workspace: &Path) -> Option<String> {
     if registry.is_empty() {
         return None;
     }
@@ -629,27 +1169,47 @@ fn render_skills_block(registry: &SkillRegistry) -> Option<String> {
     out.push_str(
         "A skill is a set of local instructions stored in a `SKILL.md` file. \
 Below is the list of skills available in this session. Each entry includes a \
-name, description, and file path so you can open the source for full \
-instructions when using a specific skill.\n\n",
+name, description, and source locator. Native skills expose a file path; \
+reviewed plugin snapshots must be opened with `load_skill`.\n\n",
     );
     out.push_str("### Available skills\n");
 
     let mut omitted = 0usize;
     for skill in registry.list() {
+        if skill.invocation == SkillInvocation::ExplicitOnly {
+            // Explicit-only skills remain loadable by their canonical name or
+            // alias, but must not be presented as model-selectable catalogue
+            // entries. This keeps opt-in power skills from becoming ambient
+            // instructions or consuming prompt budget.
+            continue;
+        }
+        // Native skills expose the real on-disk path captured at discovery.
+        // Plugin skills expose only their reviewed snapshot identity so the
+        // model cannot bypass the content-bound trust receipt via a mutable
+        // source path.
         // Use the real on-disk path captured at discovery — the directory
         // name can differ from the frontmatter `name` for community
         // installs, in which case `<dir>/<name>/SKILL.md` would not exist
-        // and the model would fail to open it.
-        let description = truncate_for_prompt(&skill.description, MAX_SKILL_DESCRIPTION_CHARS);
+        // and the model would fail to open it. Rendered privacy-safe
+        // (workspace-relative or ~/…) so the prompt prefix never embeds
+        // absolute user paths (#4632).
+        let display_path = privacy_safe_skill_path(&skill.path, workspace);
+        let description = truncate_for_prompt(
+            skill.description_for_locale(locale),
+            MAX_SKILL_DESCRIPTION_CHARS,
+        );
+        let source = match &skill.source {
+            SkillSource::Native => format!("file: {display_path}"),
+            SkillSource::Plugin {
+                plugin_id,
+                plugin_name,
+                ..
+            } => format!("reviewed plugin snapshot: {plugin_name} ({plugin_id}); use load_skill"),
+        };
         let line = if description.is_empty() {
-            format!("- {}: (file: {})\n", skill.name, skill.path.display())
+            format!("- {}: ({source})\n", skill.name)
         } else {
-            format!(
-                "- {}: {} (file: {})\n",
-                skill.name,
-                description,
-                skill.path.display()
-            )
+            format!("- {}: {} ({source})\n", skill.name, description)
         };
 
         if out.chars().count() + line.chars().count() > MAX_AVAILABLE_SKILLS_CHARS {
@@ -669,14 +1229,17 @@ instructions when using a specific skill.\n\n",
         out.push_str("\n### Skill load warnings\n");
         for warning in registry.warnings().iter().take(8) {
             out.push_str("- ");
-            out.push_str(&truncate_for_prompt(warning, MAX_SKILL_DESCRIPTION_CHARS));
+            out.push_str(&truncate_for_prompt(
+                &sanitize_prompt_path_text(warning, workspace),
+                MAX_SKILL_DESCRIPTION_CHARS,
+            ));
             out.push('\n');
         }
     }
 
     out.push_str(
         "\n### How to use skills\n\
-- Skill bodies live on disk at the listed paths. When a skill is relevant, open only that skill's `SKILL.md` and the specific companion files it references.\n\
+- Use `load_skill` to open any skill body by name. This is required for reviewed plugin snapshots and is the preferred path for native skills, including global skills outside the workspace. Direct file reads retain the normal workspace/trust boundary.\n\
 - Trigger rules: use a skill when the user names it (`$SkillName`, `/skill <name>`, or plain text) or the task clearly matches its description. Do not carry skills across turns unless re-mentioned.\n\
 - Missing/blocked: if a named skill is missing or cannot be read, say so briefly and continue with the best fallback.\n\
 - Safety: do not execute scripts from a community skill unless the user explicitly asks or the skill has been trusted for script use.\n",
@@ -710,6 +1273,17 @@ mod tests {
     }
 
     #[test]
+    fn prompt_warning_sanitizer_scrubs_stale_conventional_home_roots() {
+        let workspace = std::path::Path::new("/tmp/workspace");
+        let warning = "Skill at /Users/private-name/.agents/skills/a/SKILL.md is shadowed by /home/other/.skills/a/SKILL.md";
+        let sanitized = super::sanitize_prompt_path_text(warning, workspace);
+        assert_eq!(
+            sanitized,
+            "Skill at ~/.agents/skills/a/SKILL.md is shadowed by ~/.skills/a/SKILL.md"
+        );
+    }
+
+    #[test]
     fn render_available_skills_context_lists_paths_and_usage() {
         let tmpdir = TempDir::new().unwrap();
         create_skill_dir(
@@ -722,20 +1296,22 @@ mod tests {
             crate::skills::render_available_skills_context(&tmpdir.path().join("skills"))
                 .expect("skill context");
 
-        let expected_path = tmpdir
-            .path()
-            .join("skills")
-            .join("test-skill")
+        // #4632: paths render relative to the skills base dir (privacy-safe),
+        // so the assertion checks the workspace-relative form.
+        let expected_path = std::path::Path::new("test-skill")
             .join("SKILL.md")
             .display()
             .to_string();
 
         assert!(rendered.contains("## Skills"));
         assert!(rendered.contains("- test-skill: A test skill"));
+        assert!(rendered.contains("Use `load_skill` to open any skill body by name"));
+        assert!(rendered.contains("Direct file reads retain the normal workspace/trust boundary"));
         assert!(
             rendered.contains(&expected_path),
             "expected path {expected_path:?} not in rendered output"
         );
+        assert!(!rendered.contains(tmpdir.path().to_str().unwrap_or("/nonexistent")));
         assert!(rendered.contains("### How to use skills"));
     }
 
@@ -757,17 +1333,13 @@ mod tests {
             crate::skills::render_available_skills_context(&tmpdir.path().join("skills"))
                 .expect("skill context");
 
-        let real_path = tmpdir
-            .path()
-            .join("skills")
-            .join("weird-dir-name")
+        // #4632: rendered relative to the skills base dir; the regression
+        // intent (real dir name, not frontmatter name) is unchanged.
+        let real_path = std::path::Path::new("weird-dir-name")
             .join("SKILL.md")
             .display()
             .to_string();
-        let stale_path = tmpdir
-            .path()
-            .join("skills")
-            .join("friendly-name")
+        let stale_path = std::path::Path::new("friendly-name")
             .join("SKILL.md")
             .display()
             .to_string();
@@ -862,6 +1434,9 @@ mod tests {
         registry.skills.push(super::Skill {
             name: "workspace-priority".to_string(),
             description: "must survive truncation".to_string(),
+            localized_descriptions: std::collections::HashMap::new(),
+            invocation: super::SkillInvocation::ModelAndUser,
+            aliases: Vec::new(),
             body: "body".to_string(),
             path: tmpdir
                 .path()
@@ -869,6 +1444,7 @@ mod tests {
                 .join("skills")
                 .join("workspace-priority")
                 .join("SKILL.md"),
+            source: super::SkillSource::Native,
         });
 
         let big_desc = "y".repeat(super::MAX_SKILL_DESCRIPTION_CHARS - 20);
@@ -876,6 +1452,9 @@ mod tests {
             registry.skills.push(super::Skill {
                 name: format!("aaa-global-{i:03}"),
                 description: big_desc.clone(),
+                localized_descriptions: std::collections::HashMap::new(),
+                invocation: super::SkillInvocation::ModelAndUser,
+                aliases: Vec::new(),
                 body: "body".to_string(),
                 path: tmpdir
                     .path()
@@ -883,10 +1462,12 @@ mod tests {
                     .join("skills")
                     .join(format!("aaa-global-{i:03}"))
                     .join("SKILL.md"),
+                source: super::SkillSource::Native,
             });
         }
 
-        let rendered = super::render_skills_block(&registry).expect("skill context");
+        let rendered =
+            super::render_skills_block(&registry, "en", tmpdir.path()).expect("skill context");
         assert!(
             rendered.contains("workspace-priority"),
             "higher-precedence workspace skills must not be reordered behind globals:\n{rendered}"
@@ -894,6 +1475,192 @@ mod tests {
         assert!(
             rendered.contains("additional skills omitted from this prompt budget"),
             "fixture should exceed prompt budget"
+        );
+    }
+
+    // --- Localized skill descriptions (#3354) ------------------------------
+
+    #[test]
+    fn parse_skill_collects_localized_description_frontmatter() {
+        let content = "---\n\
+name: demo\n\
+description: A demo skill\n\
+description_zh: 一个演示技能\n\
+description_zh-Hant: 一個示範技能\n\
+---\n\
+body";
+        let skill = super::SkillRegistry::parse_skill(std::path::Path::new("SKILL.md"), content)
+            .expect("parse should succeed");
+        assert_eq!(skill.description, "A demo skill");
+        assert_eq!(
+            skill.localized_descriptions.get("zh").map(String::as_str),
+            Some("一个演示技能")
+        );
+        // Frontmatter keys are lowercased, so zh-Hant is stored as zh-hant.
+        assert_eq!(
+            skill
+                .localized_descriptions
+                .get("zh-hant")
+                .map(String::as_str),
+            Some("一個示範技能")
+        );
+    }
+
+    #[test]
+    fn parse_skill_exposes_invocation_and_alias_metadata() {
+        let content = "---\n\
+name: spreadsheets\n\
+description: Spreadsheet workflows\n\
+invocation: explicit-only\n\
+aliases-for: xlsx, spreadsheet\n\
+---\n\
+body";
+        let skill = super::SkillRegistry::parse_skill(std::path::Path::new("SKILL.md"), content)
+            .expect("parse should succeed");
+
+        assert_eq!(skill.invocation, super::SkillInvocation::ExplicitOnly);
+        assert_eq!(
+            skill.aliases,
+            vec!["xlsx".to_string(), "spreadsheet".to_string()]
+        );
+
+        let mut registry = super::SkillRegistry::default();
+        registry.skills.push(skill);
+        assert_eq!(
+            registry.get("spreadsheet").map(|s| s.name.as_str()),
+            Some("spreadsheets")
+        );
+        assert_eq!(
+            registry.get("xlsx").map(|s| s.name.as_str()),
+            Some("spreadsheets")
+        );
+
+        let rendered = super::render_skills_block(&registry, "en", std::path::Path::new("/"));
+        assert!(
+            rendered.is_some(),
+            "an explicit-only skill remains loadable"
+        );
+        assert!(
+            !rendered.unwrap_or_default().contains("spreadsheets"),
+            "explicit-only skills must not enter the model catalogue"
+        );
+    }
+
+    #[test]
+    fn missing_or_unknown_invocation_keeps_model_and_user_compatibility() {
+        for invocation in [None, Some("future-mode")] {
+            let invocation_line =
+                invocation.map_or(String::new(), |value| format!("invocation: {value}\n"));
+            let content = format!(
+                "---\nname: compatible\ndescription: compatible\n{invocation_line}---\nbody"
+            );
+            let skill =
+                super::SkillRegistry::parse_skill(std::path::Path::new("SKILL.md"), &content)
+                    .expect("parse should succeed");
+            assert_eq!(skill.invocation, super::SkillInvocation::ModelAndUser);
+        }
+    }
+
+    #[test]
+    fn description_for_locale_matches_exact_then_primary_then_falls_back() {
+        let mut localized = std::collections::HashMap::new();
+        localized.insert("zh".to_string(), "中文描述".to_string());
+        localized.insert("ja".to_string(), "日本語の説明".to_string());
+        let skill = super::Skill {
+            name: "demo".to_string(),
+            description: "English description".to_string(),
+            localized_descriptions: localized,
+            invocation: super::SkillInvocation::ModelAndUser,
+            aliases: Vec::new(),
+            body: String::new(),
+            path: std::path::PathBuf::new(),
+            source: super::SkillSource::Native,
+        };
+
+        assert_eq!(skill.description_for_locale("zh"), "中文描述"); // exact
+        assert_eq!(skill.description_for_locale("ZH"), "中文描述"); // case-insensitive
+        assert_eq!(skill.description_for_locale("zh-CN"), "中文描述"); // Simplified region → zh
+        assert_eq!(skill.description_for_locale("zh-Hans"), "中文描述"); // Simplified script → zh
+        assert_eq!(skill.description_for_locale("ja"), "日本語の説明");
+        assert_eq!(skill.description_for_locale("fr"), "English description"); // fallback
+        assert_eq!(skill.description_for_locale("en"), "English description");
+
+        // Traditional Chinese must NOT borrow the Simplified `zh` description:
+        // with no exact zh-hant key authored, it falls back to the default.
+        assert_eq!(
+            skill.description_for_locale("zh-Hant"),
+            "English description"
+        );
+        assert_eq!(skill.description_for_locale("zh-TW"), "English description");
+        assert_eq!(skill.description_for_locale("zh-HK"), "English description");
+    }
+
+    #[test]
+    fn description_for_locale_uses_exact_traditional_key_when_authored() {
+        let mut localized = std::collections::HashMap::new();
+        localized.insert("zh".to_string(), "简体描述".to_string());
+        localized.insert("zh-hant".to_string(), "繁體描述".to_string());
+        let skill = super::Skill {
+            name: "demo".to_string(),
+            description: "English".to_string(),
+            localized_descriptions: localized,
+            invocation: super::SkillInvocation::ModelAndUser,
+            aliases: Vec::new(),
+            body: String::new(),
+            path: std::path::PathBuf::new(),
+            source: super::SkillSource::Native,
+        };
+        // Exact Traditional key wins for a Traditional session.
+        assert_eq!(skill.description_for_locale("zh-Hant"), "繁體描述");
+        // Simplified session still gets the Simplified description.
+        assert_eq!(skill.description_for_locale("zh-Hans"), "简体描述");
+        assert_eq!(skill.description_for_locale("zh"), "简体描述");
+    }
+
+    #[test]
+    fn description_for_locale_uses_default_when_no_localized_variants() {
+        let skill = super::Skill {
+            name: "demo".to_string(),
+            description: "only english".to_string(),
+            localized_descriptions: std::collections::HashMap::new(),
+            invocation: super::SkillInvocation::ModelAndUser,
+            aliases: Vec::new(),
+            body: String::new(),
+            path: std::path::PathBuf::new(),
+            source: super::SkillSource::Native,
+        };
+        assert_eq!(skill.description_for_locale("zh"), "only english");
+    }
+
+    #[test]
+    fn render_skills_block_selects_description_by_locale() {
+        let mut registry = super::SkillRegistry::default();
+        let mut localized = std::collections::HashMap::new();
+        localized.insert("zh".to_string(), "压缩日志的技能".to_string());
+        registry.skills.push(super::Skill {
+            name: "compress".to_string(),
+            description: "Compress logs to save space".to_string(),
+            localized_descriptions: localized,
+            invocation: super::SkillInvocation::ModelAndUser,
+            aliases: Vec::new(),
+            body: "body".to_string(),
+            path: std::path::PathBuf::from("/skills/compress/SKILL.md"),
+            source: super::SkillSource::Native,
+        });
+
+        let zh = super::render_skills_block(&registry, "zh-Hans", std::path::Path::new("/"))
+            .expect("zh block");
+        assert!(
+            zh.contains("压缩日志的技能"),
+            "zh session should get the zh description:\n{zh}"
+        );
+        assert!(!zh.contains("Compress logs to save space"));
+
+        let en = super::render_skills_block(&registry, "en", std::path::Path::new("/"))
+            .expect("en block");
+        assert!(
+            en.contains("Compress logs to save space"),
+            "en session keeps default:\n{en}"
         );
     }
 
@@ -1044,6 +1811,47 @@ mod tests {
             "shared.path should be from .agents/skills, got {:?}",
             shared.path
         );
+        assert!(
+            registry
+                .warnings()
+                .iter()
+                .any(|warning| warning.contains("shared") && warning.contains("shadowed by")),
+            "duplicate shadowing should warn, got {:?}",
+            registry.warnings()
+        );
+    }
+
+    #[test]
+    fn same_root_slug_collision_warns_and_keeps_one() {
+        let tmpdir = TempDir::new().unwrap();
+        let root = tmpdir.path();
+        // Two sibling directories under one root whose frontmatter names
+        // slugify to the same command name ("my-skill"). Only one can be
+        // reachable by name; the other must warn rather than silently coexist
+        // as an unreachable duplicate (#3919 same-root gap).
+        write_skill(root, "My Skill", "first", "body");
+        write_skill(root, "my_skill", "second", "body");
+
+        let registry = super::SkillRegistry::discover(root);
+        let claimants = registry
+            .list()
+            .iter()
+            .filter(|s| s.name == "my-skill")
+            .count();
+        assert_eq!(
+            claimants,
+            1,
+            "exactly one skill should claim `my-skill`, got {:?}",
+            registry.list().iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+        assert!(
+            registry
+                .warnings()
+                .iter()
+                .any(|w| w.contains("my-skill") && w.contains("shadowed by")),
+            "same-root slug collision should warn, got {:?}",
+            registry.warnings()
+        );
     }
 
     #[test]
@@ -1094,9 +1902,44 @@ mod tests {
         .unwrap();
 
         let registry = super::SkillRegistry::discover(tmpdir.path());
-        let skill = registry.get("Plain Skill").expect("plain skill parsed");
+        let skill = registry.get("plain-skill").expect("plain skill parsed");
+        assert_eq!(skill.name, "plain-skill");
         assert_eq!(skill.description, "");
         assert!(skill.body.contains("Use this skill"));
+        assert!(
+            registry
+                .warnings()
+                .iter()
+                .any(|warning| warning.contains("using `plain-skill` instead")),
+            "expected slug warning, got {:?}",
+            registry.warnings()
+        );
+    }
+
+    #[test]
+    fn discover_slugifies_invalid_frontmatter_names_and_lookup_normalizes() {
+        let tmpdir = TempDir::new().unwrap();
+        let root = tmpdir.path().join("skills");
+        let skill_dir = root.join("my-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: My Skill\ndescription: spaced name\n---\nbody",
+        )
+        .unwrap();
+
+        let registry = super::SkillRegistry::discover(&root);
+        let skill = registry.get("  MY   skill  ").expect("normalized lookup");
+        assert_eq!(skill.name, "my-skill");
+        assert!(
+            registry
+                .warnings()
+                .iter()
+                .any(|warning| warning.contains("My Skill")
+                    && warning.contains("using `my-skill` instead")),
+            "expected invalid-name warning, got {:?}",
+            registry.warnings()
+        );
     }
 
     #[test]
@@ -1135,6 +1978,107 @@ mod tests {
         let rendered =
             super::render_available_skills_context_for_workspace(workspace).expect("non-empty");
         assert!(rendered.contains("from-claude"));
+    }
+
+    #[test]
+    fn codewhale_only_mode_ignores_cross_tool_skill_dirs() {
+        let tmpdir = TempDir::new().unwrap();
+        let workspace = tmpdir.path().join("workspace");
+        let home = tmpdir.path().join("home");
+        let configured_dir = home.join(".codewhale").join("skills");
+        std::fs::create_dir_all(&workspace).unwrap();
+        write_skill(
+            &workspace.join(".claude").join("skills"),
+            "from-claude",
+            "claude-style skill",
+            "body",
+        );
+        write_skill(
+            &workspace.join(".codewhale").join("skills"),
+            "from-codewhale",
+            "codewhale skill",
+            "body",
+        );
+        write_skill(
+            &home.join(".agents").join("skills"),
+            "from-agents",
+            "agents skill",
+            "body",
+        );
+        write_skill(
+            &configured_dir,
+            "configured-codewhale",
+            "configured skill",
+            "body",
+        );
+
+        let registry = super::discover_for_workspace_and_dir_with_home_and_mode(
+            &workspace,
+            &configured_dir,
+            Some(&home),
+            super::SkillDiscoveryMode::CodeWhaleOnly,
+        );
+        let names: Vec<&str> = registry.list().iter().map(|s| s.name.as_str()).collect();
+
+        assert!(names.contains(&"from-codewhale"));
+        assert!(names.contains(&"configured-codewhale"));
+        assert!(
+            !names.contains(&"from-claude") && !names.contains(&"from-agents"),
+            "CodeWhale-only mode must not import cross-tool skills: {names:?}"
+        );
+    }
+
+    #[test]
+    fn codewhale_only_mode_still_honors_explicit_configured_dir() {
+        let tmpdir = TempDir::new().unwrap();
+        let workspace = tmpdir.path().join("workspace");
+        let home = tmpdir.path().join("home");
+        let configured_dir = tmpdir.path().join("my-skills");
+        std::fs::create_dir_all(&workspace).unwrap();
+        write_skill(
+            &configured_dir,
+            "configured-skill",
+            "explicit configured skill",
+            "body",
+        );
+
+        let registry = super::discover_for_workspace_and_dir_with_home_and_mode(
+            &workspace,
+            &configured_dir,
+            Some(&home),
+            super::SkillDiscoveryMode::CodeWhaleOnly,
+        );
+        let names: Vec<&str> = registry.list().iter().map(|s| s.name.as_str()).collect();
+
+        assert_eq!(names, vec!["configured-skill"]);
+    }
+
+    #[test]
+    fn codewhale_only_mode_rejects_workspace_codewhale_symlink_escape() {
+        let tmpdir = TempDir::new().unwrap();
+        let workspace = tmpdir.path().join("workspace");
+        let home = tmpdir.path().join("home");
+        let escape_target = tmpdir.path().join("escape-target");
+        std::fs::create_dir_all(workspace.join(".codewhale")).unwrap();
+        write_skill(&escape_target, "escaped-skill", "escaped skill", "body");
+
+        let link_path = workspace.join(".codewhale").join("skills");
+        if let Err(err) = create_dir_symlink(&escape_target, &link_path) {
+            eprintln!("skipping symlink escape assertion: {err}");
+            return;
+        }
+
+        let registry = super::discover_for_workspace_and_dir_with_home_and_mode(
+            &workspace,
+            &tmpdir.path().join("missing-configured-skills"),
+            Some(&home),
+            super::SkillDiscoveryMode::CodeWhaleOnly,
+        );
+
+        assert!(
+            registry.get("escaped-skill").is_none(),
+            "CodeWhale-only mode must not follow workspace .codewhale/skills outside the workspace"
+        );
     }
 
     #[test]
@@ -1405,7 +2349,7 @@ mod tests {
             "body",
         );
         write_skill(
-            &home.join(".deepseek").join("skills"),
+            &home.join(".codewhale").join("skills"),
             "global-alpha",
             "Global alpha skill",
             "body",
@@ -1422,7 +2366,7 @@ mod tests {
         );
         assert!(
             names.contains(&"global-alpha"),
-            "global-alpha from ~/.deepseek/skills must be discovered: {names:?}",
+            "global-alpha from ~/.codewhale/skills must be discovered: {names:?}",
         );
     }
 
@@ -1660,6 +2604,91 @@ mod tests {
         assert_eq!(
             skill.description,
             "See also:   the config file   the env var"
+        );
+    }
+
+    #[test]
+    fn plugin_skills_are_qualified_and_denied_until_trusted_and_enabled() {
+        let tmp = TempDir::new().unwrap();
+        let plugin_root = tmp.path().join("plugins/demo");
+        std::fs::create_dir_all(plugin_root.join("skills/hello-world")).unwrap();
+        std::fs::write(
+            plugin_root.join("plugin.toml"),
+            "schema_version = 1\n[plugin]\nname = \"demo\"\nversion = \"1.0.0\"\n[skills]\npath = \"skills\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            plugin_root.join("skills/hello-world/SKILL.md"),
+            "---\nname: hello-world\ndescription: hello\n---\nbody\n",
+        )
+        .unwrap();
+        let config = crate::plugins::discovery::DiscoveryConfig {
+            workspace: tmp.path().join("workspace"),
+            user_plugins_dir: tmp.path().join("plugins"),
+            workspace_plugins_dir: tmp.path().join("workspace-plugins"),
+            builtin_plugin_dirs: Vec::new(),
+            state_path: tmp.path().join("plugin-state/state.json"),
+        };
+        let mut plugins = crate::plugins::discovery::discover_with_config(&config);
+
+        let mut registry = super::SkillRegistry::default();
+        super::merge_active_plugin_skills(&mut registry, &plugins);
+        assert!(registry.get("demo:hello-world").is_none());
+
+        plugins.trust("demo").unwrap();
+        super::merge_active_plugin_skills(&mut registry, &plugins);
+        assert!(registry.get("demo:hello-world").is_none());
+
+        plugins.enable("demo").unwrap();
+        super::merge_active_plugin_skills(&mut registry, &plugins);
+        let skill = registry
+            .get("Demo:Hello_World")
+            .expect("qualified lookup should normalize each namespace segment");
+        assert_eq!(skill.name, "demo:hello-world");
+        assert!(matches!(
+            skill.source,
+            super::SkillSource::Plugin { ref plugin_name, .. } if plugin_name == "demo"
+        ));
+        let rendered = super::render_skills_block(&registry, "en", tmp.path()).unwrap();
+        assert!(rendered.contains("reviewed plugin snapshot: demo"));
+        assert!(rendered.contains("use load_skill"));
+        assert!(
+            !rendered.contains(&plugin_root.display().to_string()),
+            "model prompt must not expose mutable plugin files after snapshot review"
+        );
+
+        let mut fail_closed_input = registry.clone();
+        fail_closed_input.skills.push(super::Skill {
+            name: "native-recovery".to_string(),
+            description: "native recovery skill".to_string(),
+            localized_descriptions: std::collections::HashMap::new(),
+            invocation: super::SkillInvocation::ModelAndUser,
+            aliases: Vec::new(),
+            body: "recovery".to_string(),
+            path: tmp.path().join("native/SKILL.md"),
+            source: super::SkillSource::Native,
+        });
+        let fail_closed = fail_closed_input.into_enabled_with_state(Err(anyhow::anyhow!(
+            "injected activation-state read failure"
+        )));
+        assert!(fail_closed.get("native-recovery").is_some());
+        assert!(
+            fail_closed.get("demo:hello-world").is_none(),
+            "reviewed plugin Skills must not fail open when activation state is unreadable"
+        );
+        assert!(
+            fail_closed
+                .warnings()
+                .iter()
+                .any(|warning| warning.contains("hidden fail-closed"))
+        );
+
+        std::fs::remove_file(config.state_path.with_file_name("state.json.lock")).unwrap();
+        let mut denied = super::SkillRegistry::default();
+        super::merge_active_plugin_skills(&mut denied, &plugins);
+        assert!(
+            denied.get("demo:hello-world").is_none(),
+            "a missing authority lock must remove plugin instructions from the prompt catalogue"
         );
     }
 }

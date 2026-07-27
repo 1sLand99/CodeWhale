@@ -3,12 +3,12 @@
 //! `/restore` (no arg) lists the 20 most recent snapshots so the user can
 //! see what's available. `/restore list [N]` lists more snapshots, capped
 //! at 100. `/restore <N>` restores the *N*th-most-recent snapshot, where
-//! `N=1` is the newest. In non-YOLO mode we refuse to mutate files unless
-//! the user has explicitly trusted the workspace (`/trust on` or YOLO) —
+//! `N=1` is the newest. Without trusted/full access we refuse to mutate files unless
+//! the user has explicitly trusted the workspace (`/trust on` or Full Access) —
 //! the user can always view the list, just not one-shot revert without a
 //! safety net.
 
-use super::CommandResult;
+use crate::commands::CommandResult;
 use crate::snapshot::{Snapshot, SnapshotRepo};
 use crate::tui::app::App;
 use chrono::TimeZone;
@@ -18,7 +18,7 @@ const MAX_LIST_LIMIT: usize = 100;
 const MAX_RESTORE_INDEX: usize = 1000;
 
 /// Entry point for `/restore [N|list [N]]`.
-pub fn restore(app: &mut App, arg: Option<&str>) -> CommandResult {
+fn restore(app: &mut App, arg: Option<&str>) -> CommandResult {
     let workspace = app.workspace.clone();
     let repo = match SnapshotRepo::open_or_init(&workspace) {
         Ok(r) => r,
@@ -83,14 +83,14 @@ pub fn restore(app: &mut App, arg: Option<&str>) -> CommandResult {
         ));
     }
 
-    // Non-YOLO sessions get a confirmation gate. We don't have a true
+    // Sessions without trusted/full access get a confirmation gate. We don't have a true
     // modal-confirmation path inside slash commands today, so the gate
-    // is "require trust mode" — `/trust on` or YOLO. Users in plain
+    // is "require trust mode" — `/trust on` or Full Access. Users in plain
     // Agent mode get a clear message explaining how to proceed.
     if !(app.yolo || app.trust_mode) {
         return CommandResult::message(format!(
             "Refusing to restore snapshot #{n} ('{}') outside trusted mode.\n\
-             Run `/trust on` or `/mode yolo` first, then re-run `/restore {n}`.",
+             Run `/trust on` or select Full Access with Shift+Tab, then re-run `/restore {n}`.",
             snapshots[n - 1].label,
         ));
     }
@@ -168,37 +168,46 @@ fn short_sha(sha: &str) -> &str {
     &sha[..sha.len().min(8)]
 }
 
+pub(in crate::commands) const COMMAND_INFO: crate::commands::traits::CommandInfo =
+    crate::commands::traits::CommandInfo {
+        name: "restore",
+        aliases: &[],
+        usage: "/restore [N|list [N]]",
+        description_id: crate::localization::MessageId::CmdRestoreDescription,
+    };
+
+pub(in crate::commands) struct RestoreCmd;
+
+impl crate::commands::traits::RegisterCommand for RestoreCmd {
+    fn info() -> &'static crate::commands::traits::CommandInfo {
+        &COMMAND_INFO
+    }
+
+    fn execute(
+        app: &mut crate::tui::app::App,
+        arg: Option<&str>,
+    ) -> crate::commands::CommandResult {
+        restore(app, arg)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::Config;
     use crate::test_support::lock_test_env;
     use crate::tui::app::TuiOptions;
-    use std::sync::MutexGuard;
     use tempfile::TempDir;
 
     fn make_app(tmp: &TempDir, yolo: bool) -> App {
         let workspace = tmp.path().to_path_buf();
         let options = TuiOptions {
-            model: "deepseek-v4-pro".to_string(),
-            workspace,
-            config_path: None,
-            config_profile: None,
-            allow_shell: false,
-            use_alt_screen: true,
-            use_mouse_capture: false,
-            use_bracketed_paste: true,
-            max_subagents: 1,
             skills_dir: tmp.path().join("skills"),
             memory_path: tmp.path().join("memory.md"),
             notes_path: tmp.path().join("notes.txt"),
             mcp_config_path: tmp.path().join("mcp.json"),
-            use_memory: false,
-            start_in_agent_mode: false,
-            skip_onboarding: true,
-            yolo,
-            resume_session_id: None,
-            initial_input: None,
+            yolo: yolo,
+            ..crate::test_support::test_tui_options(workspace)
         };
         App::new(options, &Config::default())
     }
@@ -208,7 +217,7 @@ mod tests {
     struct ScopedHome {
         prev: Option<std::ffi::OsString>,
         _home: TempDir,
-        _guard: MutexGuard<'static, ()>,
+        _guard: crate::test_support::TestEnvLock,
     }
     impl Drop for ScopedHome {
         fn drop(&mut self) {

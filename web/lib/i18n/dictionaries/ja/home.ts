@@ -1,0 +1,60 @@
+import type { HomeDict } from "../types";
+
+export const home: HomeDict = {
+  kicker: "データとコードの海",
+  heroTitleA: "深海へ潜り、",
+  heroTitleB: "あなたは潜らなくていい。",
+  heroIntro:
+    "Codewhale は、LLM のレバレッジを普通の人々に届けます。ターミナルでリポジトリを読み、ファイルを編集し、チェックを実行し、レシートを残します — コードを話せることを前提にしません。あなたのマシンで動きます。",
+  install: "インストール",
+  docs: "ドキュメント",
+  copy: "コピー",
+  copied: "コピーしました ✓",
+  latestRelease: "最新リリース {tag}",
+  releaseUnavailable: "リリース状態は利用できません",
+  currentSource: "現在のソース",
+  sourceCandidate: "ソース候補版",
+  providerRoutes: "{count} 件のプロバイダールート",
+  screenshotAlt:
+    "ローカル Ollama ルートを使う新しい Codewhale v{version} ターミナルセッション。空の Work バーなし",
+  figcaption: "v{version} {state} · ローカル Ollama ルート · Plan / Act / Operate",
+  publishedRelease: "公開リリース",
+  figcaptionSourceCandidate: "ソース候補",
+  proofHeading: "水中のターミナルシェル。モデル中立。ローカルファースト。",
+  proofBody:
+    "すでに使っているホスト型、ゲートウェイ、ローカルのモデルをそのまま使えます。Codewhale はあなたのマシンで動作し、モデルを製品ではなく選択可能なコンポーネントとして扱います。Plan / Act / Operate と明示的な権限ポスチャで、深い潜水もコントロールできます。",
+  workflowHeading: "タスクから検証済みの変更へ。",
+  workflow: [
+    ["検査", "リポジトリ、その指示、タスクを読みます。"],
+    ["実行", "明示的な承認境界内でファイルを編集します。"],
+    ["検証", "チェックを実行し、結果を確認します。"],
+    ["報告", "簡潔で永続的なレシートを残します。"],
+  ],
+  receiptAria: "作業レシートの例",
+  boundariesHeadingA: "あなたのモデル。",
+  boundariesHeadingB: "あなたの境界。",
+  boundariesBody:
+    "モデル、作業モード、権限ポスチャを明示的に選びます。不明なコストは不明なままにし、プレビュー機能はその旨を表示します。",
+  hostedGatewayLocal: "ホスト型、ゲートウェイ、ローカルのモデル",
+  planActOperateDesc: "読み取り専用の計画から自律実行まで",
+  askAutoReviewDesc: "作業に合う権限ポスチャを選択",
+  tuiExecWebDesc: "対話型およびヘッドレスのランタイム画面",
+  surfacesHeading: "作業が起きる場所でランタイムを使う。",
+  surfaces: [
+    ["TUI", "対話型ターミナル作業"],
+    ["codewhale exec", "スクリプトと CI"],
+    ["Web クライアント", "ループバック専用ブラウザクライアント"],
+    ["Runtime API + MCP", "ローカル統合"],
+    ["Fleet", "永続的なマルチエージェント作業"],
+  ],
+  runtimeLink: "ランタイム画面と安定性メモを見る →",
+  installBandHeading: "1 つのコマンドから始める。",
+  binaries: "バイナリ",
+  chinaMirrors: "中国ミラー",
+  installGuideLink: "インストールガイドを読む →",
+  communityHeading: "公開で開発",
+  communityBody:
+    "MIT ライセンス。ランタイム、プロバイダー、プラットフォーム、ドキュメント、テストにまたがるコントリビューターによって形作られています。",
+  communityLinksAria: "コミュニティリンク",
+  contribute: "貢献",
+};

@@ -5,7 +5,9 @@ const fs = require("fs/promises");
 const path = require("path");
 
 const {
-  allAssetNames,
+  allReleaseAssetNames,
+  BUNDLE_ASSET_NAMES,
+  BUNDLE_CHECKSUM_MANIFEST,
   CHECKSUM_MANIFEST,
   detectBinaryNames,
 } = require("../../npm/codewhale/scripts/artifacts");
@@ -28,7 +30,7 @@ async function main() {
   const buildDir = path.resolve(
     process.argv[3] || path.join("target", "release"),
   );
-  const { codewhale, tui } = detectBinaryNames();
+  const { codewhale, tui, codew } = detectBinaryNames();
   const isWindows = process.platform === "win32";
 
   const assets = [
@@ -37,14 +39,22 @@ async function main() {
       target: codewhale,
     },
     {
+      source: path.join(buildDir, isWindows ? "codew.exe" : "codew"),
+      target: codew,
+    },
+    {
       source: path.join(buildDir, isWindows ? "codewhale-tui.exe" : "codewhale-tui"),
       target: tui,
     },
   ];
 
   if (prepareAllAssets) {
-    for (const assetName of allAssetNames()) {
-      if (assetName === WINDOWS_LAUNCHER) {
+    for (const assetName of allReleaseAssetNames()) {
+      if (
+        assetName === WINDOWS_LAUNCHER ||
+        assetName === CHECKSUM_MANIFEST ||
+        assetName === BUNDLE_CHECKSUM_MANIFEST
+      ) {
         continue;
       }
       if (assets.some((asset) => asset.target === assetName)) {
@@ -53,7 +63,9 @@ async function main() {
       assets.push({
         source: assetName.startsWith("codewhale-tui")
           ? path.join(buildDir, isWindows ? "codewhale-tui.exe" : "codewhale-tui")
-          : path.join(buildDir, isWindows ? "codewhale.exe" : "codewhale"),
+          : assetName.startsWith("codew-")
+            ? path.join(buildDir, isWindows ? "codew.exe" : "codew")
+            : path.join(buildDir, isWindows ? "codewhale.exe" : "codewhale"),
         target: assetName,
       });
     }
@@ -74,7 +86,7 @@ async function main() {
       "where wt >nul 2>nul",
       "set NO_ANIMATIONS=1",
       'if "%ERRORLEVEL%"=="0" (',
-      '    wt --title CodeWhale cmd /k "%~dp0codewhale-windows-x64.exe"',
+      '    wt --title Codewhale cmd /k "%~dp0codewhale-windows-x64.exe"',
       ") else (",
       '    "%~dp0codewhale-windows-x64.exe"',
       ")",
@@ -87,11 +99,33 @@ async function main() {
     console.log(`Generated ${batPath}`);
   }
 
+  if (prepareAllAssets) {
+    const bundleManifestLines = [];
+    for (const assetName of BUNDLE_ASSET_NAMES) {
+      const assetPath = path.join(outputDir, assetName);
+      bundleManifestLines.push(`${await sha256(assetPath)}  ${assetName}`);
+    }
+    bundleManifestLines.sort();
+    const bundleManifestPath = path.join(outputDir, BUNDLE_CHECKSUM_MANIFEST);
+    await fs.writeFile(
+      bundleManifestPath,
+      `${bundleManifestLines.join("\n")}\n`,
+      "utf8",
+    );
+    manifestLines.push(
+      `${await sha256(bundleManifestPath)}  ${BUNDLE_CHECKSUM_MANIFEST}`,
+    );
+    console.log(`Wrote bundle checksum manifest ${bundleManifestPath}`);
+  }
+
   manifestLines.sort();
   const manifestPath = path.join(outputDir, CHECKSUM_MANIFEST);
   await fs.writeFile(manifestPath, `${manifestLines.join("\n")}\n`, "utf8");
 
-  console.log(`Prepared ${assets.length} assets in ${outputDir}`);
+  const preparedCount = prepareAllAssets
+    ? allReleaseAssetNames().length
+    : assets.length + 1;
+  console.log(`Prepared ${preparedCount} assets in ${outputDir}`);
   console.log(`Wrote checksum manifest ${manifestPath}`);
 }
 

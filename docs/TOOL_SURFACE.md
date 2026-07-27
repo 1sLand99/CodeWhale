@@ -1,391 +1,275 @@
 # Tool surface
 
-Why these specific tools, in this groupings, and how each one is meant to be
-chosen over the available shell equivalent. Companion to `crates/tui/src/prompts/agent.txt`.
+This document describes the current model-facing tool contract in the v0.9.1
+source candidate. The registry remains larger than the first-turn catalog so
+saved transcripts can replay and uncommon capabilities can be loaded on demand.
+The model should learn one canonical name for each common operation.
 
-## Design stance
+Implementation sources:
 
-- **Dedicated tools over `exec_shell` whenever the dedicated tool returns
-  structured output.** Bash escaping is error-prone and platform behavior
-  varies (GNU vs BSD `grep`, `rg` is not always installed). Structured
-  output also frees the model from re-parsing free-form text.
-- **`exec_shell` for everything else.** Build, test, format, lint, ad-hoc
-  commands, anything platform-specific. We don't try to wrap the long tail.
-- **Drop tools that don't beat their shell equivalent.** Two-tool aliases
-  for the same backing operation are a model trap — the LLM will alternate
-  between them and the cache hit rate suffers.
+- `crates/tui/src/core/engine/tool_catalog.rs` owns the eager/deferred catalog.
+- `crates/tui/src/tools/registry.rs` registers canonical tools and hidden aliases.
+- `crates/tui/src/tools/{file_tool,git_tool,run_tool,web_tool,shell}.rs` own the
+  canonical action schemas.
+- `docs/RUNTIME_SIMPLIFICATION_DESIGN.md` records the v0.9.1 cutover and receipt.
 
-## Current surface (v0.8.49)
+## Default-active contract
 
-### File operations
+The default-active policy contains exactly these ten names:
 
-| Tool | Niche |
-|---|---|
-| `read_file` | Read a UTF-8 file. PDFs auto-extracted via bundled pure-Rust extractor (no Poppler install required); `pages: "1-5"` slices large docs. |
-| `list_dir` | Structured, gitignore-aware listing. Preferred over `exec_shell("ls")`. |
-| `write_file` | Create or overwrite a file. |
-| `edit_file` | Search-and-replace inside a single file. Cheaper than a full rewrite. |
-| `apply_patch` | Apply a unified diff. The right tool for multi-hunk edits. |
-| `retrieve_tool_result` | Read summaries or slices of prior large tool outputs spilled to `~/.codewhale/tool_outputs/`; use `summary`, `head`, `tail`, `lines`, or `query` instead of replaying the whole result. |
-| `handle_read` | Read bounded projections from `var_handle` payloads held by live tool environments. This is the foundation for RLM sessions, sub-agent transcripts, and other large symbolic payloads. |
+1. `Bash`
+2. `File`
+3. `Git`
+4. `Run`
+5. `agent`
+6. `remember`
+7. `tasks`
+8. `update_plan`
+9. `work_update`
+10. `tool_search`
 
-### Search
+`remember` is registered only when the user enables the built-in memory path;
+once present, it stays eager so a model can capture a durable preference without
+first discovering the tool. A memory-disabled or Moraine-fallback runtime omits
+that registration and therefore exposes nine of the ten policy names.
+`tool_search` is synthetic rather than registry-backed and is always active.
 
-| Tool | Niche |
-|---|---|
-| `grep_files` | Regex search file contents within the workspace; structured matches + context lines. Pure-Rust (`regex` crate), no `rg`/`grep` shell-out. |
-| `file_search` | Fuzzy-match filenames (not contents). Use when you know roughly the name. |
-| `web_search` | DuckDuckGo by default with Bing fallback; Bing, Tavily, Bocha, Metaso, and Baidu are selectable in config. Ranked snippets + `ref_id` for citation. |
-| `fetch_url` | Direct HTTP GET on a known URL. Faster than `web_search` when the link is already known. HTML stripped to text by default. |
+The surface is action-based. A model calls one stable tool name and selects the
+operation through its `action` field instead of choosing among many synonymous
+single-purpose tools.
 
-### Shell
+### Core action tools
 
-Shell tools appear in the model-visible tool catalog only when shell access is
-enabled for the active session or profile. In Agent mode that usually means
-`allow_shell = true`; YOLO enables shell access automatically. Plan mode keeps
-shell execution off.
-
-| Tool | Niche |
-|---|---|
-| `exec_shell` | Run a shell command. Foreground runs are cancellable, but use them only for bounded commands; timeout kills the process and returns a background-rerun hint. |
-| `exec_shell_wait` | Poll a background task for incremental output. Canceling the turn stops waiting without killing the task. |
-| `exec_shell_interact` | Send stdin to a running background task and read incremental output. |
-| `exec_shell_cancel` | Cancel one running background shell task by id, or all running background shell tasks when explicitly requested. |
-| `task_shell_start` | Start a long-running command in the background and return immediately. Preferred over foreground shell for diagnostics, tests, searches, and servers that may run for minutes. |
-| `task_shell_wait` | Poll a background command. If `gate` is supplied after completion, record structured gate evidence on the active durable task. |
-
-When a foreground shell command times out, the process is not continued
-silently. The tool result tells the model to rerun long work with
-`task_shell_start` or `exec_shell` with `background = true`, then poll with
-`task_shell_wait` or `exec_shell_wait`.
-
-Interactive shell jobs are also visible through `/jobs`. The TUI job center is
-fed by the same shell manager as `exec_shell`/`task_shell_start`, and shows the
-command, cwd, elapsed time, status, output tail, process-local shell id, and
-linked durable task id when available. `/jobs show`, `/jobs poll`, `/jobs wait`,
-`/jobs stdin`, and `/jobs cancel` provide inspect, polling, stdin, and cancel
-controls for live jobs. Jobs are process-local; after restart, live process
-state is not reattached, and any remembered detached entries must be marked
-stale rather than presented as live processes.
-
-Shell permission policy is evaluated by `crates/execpolicy`. Deny prefixes are
-checked before trusted prefixes and block matching commands regardless of layer.
-Trusted prefixes only skip approval in modes that permit trust shortcuts. Typed
-ask records are currently a narrow foundation: when one matches under
-`AskForApproval::Never`, the command is rejected because the runtime cannot ask
-the user; existing allow/deny behavior is otherwise unchanged.
-
-### MCP manager and palette discovery
-
-MCP server configuration is surfaced in the TUI through `/mcp` and the
-`mcp_config_path` row in `/config`. `/mcp` shows the resolved config path,
-server enabled/disabled state, transport, command or URL, timeouts, connection
-errors, and discovered tools/resources/prompts. It supports narrow manager
-actions for init, add, enable, disable, remove, validate, and reload/reconnect.
-Config edits are written immediately, but the model-visible MCP tool pool is
-restart-required after edits.
-
-The command palette includes MCP entries grouped by server. Disabled and failed
-servers stay visible, and discovered tools/prompts use the runtime names shown
-to the model, such as `mcp_<server>_<tool>`.
-
-### Git / diagnostics / testing
-
-| Tool | Niche |
-|---|---|
-| `git_status` | Inspect repo status without running shell. |
-| `git_diff` | Inspect working-tree or staged diffs. |
-| `diagnostics` | Workspace, git, sandbox, and toolchain info in one call. |
-| `run_tests` | `cargo test` with optional args. |
-| `run_verifiers` | Run independent verifier gates in parallel across detected Rust, Node, Python, and Go projects, with optional custom `program` + `args` gates for other ecosystems. |
-
-### Task management and durable work
-
-| Tool | Niche |
-|---|---|
-| `update_plan` | Optional high-level strategy metadata for complex multi-phase work; keep `checklist_write` as the primary progress surface. |
-| `task_create` | Create/enqueue a durable background task through `TaskManager`. This is the real executable work object for long-running agent work. |
-| `task_list` | List durable tasks with status and linked runtime ids. |
-| `task_read` | Read durable task detail: thread/turn linkage, timeline, checklist, gates, artifacts, PR attempts, GitHub events. |
-| `task_cancel` | Cancel a queued or running durable task. Approval-required. |
-| `checklist_write` | Granular progress under the active thread/task. Checklist state is subordinate to the durable task. |
-| `checklist_add` / `checklist_update` / `checklist_list` | Single-item checklist operations. |
-| `note` | One-off important fact for later. |
-
-The legacy `todo_write`, `todo_add`, `todo_update`, and `todo_list` names are
-hidden compatibility aliases for saved transcript replay. They remain callable
-by exact name, but they are not part of the model-visible catalog; compatibility
-results include `_deprecation.use_instead = checklist_*` and
-`_deprecation.removed_in = 0.9.0`.
-
-`update_plan` accepts both the legacy shape (`explanation` plus `plan` steps)
-and a richer PlanArtifact shape for Plan mode review. The richer fields are
-optional and should be filled only when grounded in evidence: `title`,
-`objective`, `context_summary`, `sources_used`, `critical_files`,
-`constraints`, `recommended_approach`, `verification_plan`,
-`risks_and_unknowns`, and `handoff_packet`. The transcript card, Plan-mode
-confirmation prompt, `/relay`, and fork-state handoff all render the same
-artifact so a plan can be reviewed, accepted, revised, replayed, or delegated
-without losing its source context.
-
-Strategy metadata and checklist work are one Work surface. Treat
-`update_plan` as phase context and sequencing intent, while `checklist_*`
-remains the counted task ledger. When both exist, UI projections should group
-strategy around the checklist instead of showing two peer checklist/progress
-systems for the same run.
-
-### Verification gates and artifacts
-
-| Tool | Niche |
-|---|---|
-| `task_gate_run` | Run an approved verification command and attach structured evidence to the active durable task: command, cwd, exit code, duration, classification, summary, and log artifact. |
-
-Large logs and command outputs should be artifacts with compact summaries in the transcript. `task_gate_run` handles this automatically for active durable tasks.
-
-Sub-agent runs also expose a compact run receipt through `agent_eval`: `run_id`,
-`follow_up`, `takeover`, `artifacts`, `usage`, `verification`, and
-`worker_record`. Follow-up delivery receipts record whether an `agent_eval`
-message actually reached the child or why it did not. Usage is marked
-`unknown` until worker-level token accounting is available, and verification is
-`self_report_only` unless a separate gate or artifact proves the claim.
-
-### GitHub context and guarded writes
-
-| Tool | Niche |
-|---|---|
-| `github_issue_context` | Read-only issue context via `gh issue view`; large bodies become task artifacts when possible. |
-| `github_pr_context` | Read-only PR context via `gh pr view`; optional diff capture via `gh pr diff --patch`; large bodies/diffs become task artifacts when possible. |
-| `github_comment` | Approval-required issue/PR comment with structured evidence. |
-| `github_close_issue` | Approval-required issue closure. Requires non-empty acceptance criteria and evidence; refuses dirty worktrees unless explicitly allowed. Never use for PRs. |
-| `github_close_pr` | Approval-required PR closure. Requires the same structured evidence as issue closure and keeps PR wording in tool output/audit records. |
-
-### PR attempts
-
-| Tool | Niche |
-|---|---|
-| `pr_attempt_record` | Capture the current git diff as attempt metadata plus a patch artifact on a durable task. |
-| `pr_attempt_list` | List attempts recorded on a task. |
-| `pr_attempt_read` | Inspect one recorded attempt and its artifact reference. |
-| `pr_attempt_preflight` | Run `git apply --check` against an attempt patch. No worktree mutation. |
-
-### Automations
-
-| Tool | Niche |
-|---|---|
-| `automation_create` | Create a scheduled automation. Approval-required. |
-| `automation_list` / `automation_read` | Inspect durable automations and recent runs. |
-| `automation_update` | Update prompt, schedule, cwds, or status. Approval-required. |
-| `automation_pause` / `automation_resume` / `automation_delete` | Lifecycle controls. Approval-required. |
-| `automation_run` | Run an automation now; the run enqueues a normal durable task. Approval-required. |
-
-### Sub-agents
-
-v0.8.33 began moving large tool outputs toward symbolic handles: tools return
-small `var_handle` objects, and `handle_read` retrieves bounded slices, counts,
-or JSON projections from the backing environment. This keeps the parent
-transcript small while preserving a recovery path to the full payload.
-
-The active model-facing sub-agent surface is persistent and intentionally small:
-
-| Tool | Niche |
-|---|---|
-| `agent_open` | Open a named sub-agent session for independent work. Returns a session projection immediately so the parent can keep coordinating. |
-| `agent_eval` | Send follow-up input or fetch the current projection/transcript handle for an existing session. Nonblocking by default; pass `block:true` only for a deliberate wait. |
-| `agent_close` | Cancel or release a sub-agent session by name or id. |
-
-See `agent.txt` for the delegation protocol and
-[`SUBAGENTS.md`](SUBAGENTS.md) for the role taxonomy
-(`general` / `explore` / `plan` / `review` / `implementer` /
-`verifier` / `custom`).
-
-`agent_open` defaults to a fresh child conversation. Pass
-`fork_context: true` for continuation-style work or multi-perspective reviews
-that should inherit the parent's context. In fork mode, the runtime preserves
-the parent prefill/prompt prefix byte-identically where available so DeepSeek's
-prefix cache can be reused, then appends the child role instructions and task.
-
-### Recursive LM sessions
-
-RLM is now persistent as well:
-
-| Tool | Niche |
-|---|---|
-| `rlm_session_objects` | List compact cards for the active prompt, session metadata, transcript, latest user message, and per-message refs. |
-| `rlm_open` | Open a named Python REPL over a file, inline content, or URL. |
-| `rlm_eval` | Run bounded Python against that session, using deterministic code and in-REPL semantic helpers such as `sub_query_batch`. |
-| `rlm_configure` | Adjust output feedback, child-query timeout/depth, and session-sharing settings. |
-| `rlm_close` | Shut down the Python runtime and return final session stats. |
-
-`rlm_open` also accepts `session_object`, a stable ref returned by
-`rlm_session_objects`, such as `session://active/system_prompt`,
-`session://active/transcript`, or `session://active/messages/0`. This loads
-the selected object into the RLM REPL and returns only metadata to the parent
-transcript. Transcript objects keep thinking blocks and large tool results as
-compact metadata; inspect large payloads through returned `var_handle` values
-and `handle_read`, not by asking the parent transcript to paste the raw text.
-
-Large RLM outputs should come back as `var_handle`s. Use `handle_read` for
-bounded text slices, line ranges, counts, or JSONPath projections instead of
-replaying the full value into the parent transcript.
-
-Inside `rlm_eval`, the loaded source is available as `_context`; `_ctx` and
-`content` are also bound as compatibility aliases because agents naturally
-reach for them during Python analysis. The shorter `context` and `ctx` names
-are intentionally not bound so user variables can use them without colliding
-with the bootstrap.
-
-Child-call timeouts are session policy: use `rlm_configure` with
-`sub_query_timeout_secs` before running a large fan-out. The helpers
-`sub_query`, `sub_query_batch`, `sub_query_map`, and `sub_rlm` accept a
-`timeout_secs` keyword for compatibility with common agent guesses, but the
-effective timeout remains configured at the RLM session level.
-
-`finalize(value, confidence=...)` preserves JSON-serializable values. Strings
-become text handles; dicts, lists, numbers, booleans, and null become JSON
-handles that `handle_read` can project with JSONPath.
-
-### Session relay
-
-`/relay [focus]` asks the current agent to write `.deepseek/handoff.md` as a
-compact `# Session relay` artifact for the next thread. The filename remains
-for compatibility with existing prompt loading and older sessions; the visible
-mental model is relay / 接力.
-
-Aliases: `/batonpass`, `/接力`.
-
-Use it before a long break, compaction, or moving work to a fresh session. The
-relay should preserve the goal, current Work checklist item, changed files,
-decisions, verification state, and one concrete next action.
-Treat it as the deliberate counterpart to automatic compaction: both exist to
-preserve continuity for the next session or sub-agent, but `/relay` lets the
-current agent inspect live evidence and choose the durable handoff facts
-explicitly. When `update_plan` has a rich PlanArtifact, `/relay` includes that
-strategy metadata so manual relay, fork-state, and compacted continuity do not
-drift into separate stories.
-
-### Parallel fan-out: cost-class caps
-
-Two tools offer parallel fan-out with different concurrency limits that
-reflect very different cost classes:
-
-| Tool | What each child does | Wall-clock | Token cost | Cap |
-|---|---|---|---|---|
-| `agent_open` | Full sub-agent loop (planning, tool calls, multi-turn streaming, can open children) | minutes | thousands of tokens | 10 in flight by default (`[subagents].max_concurrent`, hard ceiling 20) |
-| `rlm_eval` helper `sub_query_batch` | One-shot non-streaming Chat Completions calls pinned to `deepseek-v4-flash` inside a live RLM session | seconds | ~hundreds of tokens | 16 per call |
-
-The caps appear in each tool's description and error messages so the model
-(and the user) can choose the right tool for the job. If one sub-agent is
-enough but you need parallel semantic lookups over the same loaded context,
-prefer `rlm_eval` with `sub_query_batch`; if each task needs its own
-tool-carrying agent loop, use `agent_open` and wait for running sessions to
-complete or cancel no-longer-needed running sessions with `agent_close`.
-
-## Removed legacy aliases and surfaces
-
-v0.8.33 removed the old model-facing sub-agent fan-out surface from active
-prompting and tool catalogs. Do not use these names in new active guidance:
-`agent_spawn`, `agent_wait`, `agent_result`, `agent_send_input`,
-`agent_assign`, `agent_resume`, `agent_list`, `spawn_agent`,
-`delegate_to_agent`, `send_input`, and `close_agent`.
-
-The old one-shot `rlm` model-facing tool is also replaced by persistent
-`rlm_open` / `rlm_eval` / `rlm_configure` / `rlm_close` sessions.
-
-v0.9.0 adds the following hidden-compat aliases (#2682, #2683):
-
-| Hidden alias | Canonical replacement | Status |
+| Tool | Actions | Purpose |
 |---|---|---|
-| `todo_write` | `checklist_write` | Hidden, returns `_deprecation` metadata |
-| `todo_add` | `checklist_add` | Hidden, returns `_deprecation` metadata |
-| `todo_update` | `checklist_update` | Hidden, returns `_deprecation` metadata |
-| `todo_list` | `checklist_list` | Hidden, returns `_deprecation` metadata |
-| `exec_wait` | `exec_shell_wait` | Hidden, callable for replay |
-| `exec_interact` | `exec_shell_interact` | Hidden, callable for replay |
+| `Bash` | `run`, `wait`, `interact`, `cancel` | Run bounded commands, continue background work, send input, and cancel processes. |
+| `File` | `read`, `list`, `search_name`, `search_content`, `write`, `edit`, `patch` | Read, find, and modify workspace files with structured, workspace-aware results. |
+| `Git` | `status`, `diff`, `log`, `show`, `blame` | Inspect repository state and history without parsing shell output. |
+| `Run` | `tests`, `verifiers` | Run project tests or independent verifier gates with structured results. |
 
-All hidden aliases remain registered and callable so saved transcripts can
-replay without teaching new sessions the deprecated spelling.
+`Bash` appears only when the active session/profile permits shell use. Plan
+keeps it unavailable. In Act and Operate, the active permission posture,
+sandbox, command policy, trusted paths, repository law, and managed policy still
+apply. Full Access removes ordinary approval prompts; it does not bypass hard
+safety or repository-policy holds.
 
-Historical compatibility results may include a `_deprecation` block shaped
-like this:
+`File` is capability-filtered by mode. Plan advertises its read-only actions;
+write/edit actions require Act or Operate, and `patch` also requires the
+apply-patch feature. The same read-before-edit, workspace, and policy checks used
+by the former spellings remain in force.
 
-```json
-{
-  "_deprecation": {
-    "this_tool": "spawn_agent",
-    "use_instead": "agent_open",
-    "removed_in": "0.8.33",
-    "message": "Tool 'spawn_agent' is deprecated; switch to 'agent_open'."
-  }
-}
-```
+### Coordination tools
 
-This is a legacy/compatibility note, not the active recommended surface.
-
-## Release smoke: verify the live names
-
-When validating a release, verify the model-visible registry names directly.
-Do not grep random handler function names; handler names are allowed to drift
-while the registry contract stays stable.
-
-Version smoke:
-
-```bash
-codewhale --version
-codewhale-tui --version
-```
-
-Tool-surface smoke:
-
-```bash
-rg -n '"handle_read"|"rlm_open"|"rlm_eval"|"rlm_configure"|"rlm_close"|"agent_open"|"agent_eval"|"agent_close"' crates/tui/src
-rg -n 'handle_read|rlm_open|rlm_eval|rlm_configure|rlm_close|agent_open|agent_eval|agent_close' docs crates/tui/src/prompts crates/tui/src/tools
-```
-
-The canonical live names (since v0.8.35, still current in v0.8.49):
-
-- `handle_read`
-- `rlm_open`, `rlm_eval`, `rlm_configure`, `rlm_close`
-- `agent_open`, `agent_eval`, `agent_close`
-
-The registry should not actively advertise the legacy one-shot names
-`agent_spawn`, `agent_wait`, `agent_result`, or the old foreground `rlm` tool
-outside legacy/removal notes. Historical changelog entries and compatibility
-code may still mention them.
-
-## Additional registered tools (v0.8.49)
-
-The category tables above cover the most commonly used tools. The full
-registry also includes these model-visible tools:
-
-| Tool | Niche |
+| Tool | Purpose |
 |---|---|
-| `web.run` | Browser-based web interaction (JavaScript-rendered pages, form filling) |
-| `multi_tool_use.parallel` | Execute multiple independent tools in a single turn |
-| `request_user_input` | Prompt the user for input mid-turn |
-| `git_show` / `git_log` / `git_blame` | Inspect commit details, history, and line authorship |
-| `load_skill` | Load a skill by id from the installed skill set |
-| `revert_turn` | Roll back the workspace to a pre-turn snapshot |
-| `pandoc_convert` | Convert between document formats via pandoc (gated by binary presence) |
-| `validate_data` | Validate JSON or TOML against a schema |
-| `code_execution` | Execute Python code in an isolated sandbox |
-| `review` | Code review with structured feedback |
-| `project_map` | Generate a structural map of the project workspace |
-| `remember` | Store a persistent fact in user memory (gated by `memory_enabled`) |
-| `image_analyze` | Vision-model image understanding (gated by `[vision_model]` config) |
-| `image_ocr` | Extract text from images via local OCR |
-| `finance` | Fetch market data and stock quotes |
+| `agent` | Dispatch one focused sub-agent run and return an id, compact receipt, and transcript handle. |
+| `remember` | Append one terse durable preference or convention when the user has enabled built-in memory. |
+| `tasks` | Create, list, read, cancel, gate, and inspect durable task work through one action family. |
+| `update_plan` | Publish optional high-level strategy, phases, constraints, verification, and handoff context. |
+| `work_update` | Replace the concrete To-do / Work progress projection for the active thread or durable task. |
+| `tool_search` | Discover and load a deferred tool only when the current turn needs it. |
 
-MCP tools, plugin-provided tools, and feature-gated tools may also be
-visible depending on runtime configuration. Use `codewhale tools list` or
-the TUI `/tools` palette to inspect the active catalog.
+`work_update` writes the **sole canonical Work ledger**. `update_plan` is
+conversational reasoning — strategy, constraints, and route notes that help a
+reader understand the approach. It is not a second Work surface, and plan-only
+state never becomes model-facing Work grounding.
 
-## Why we don't ship a single `bash` tool
+That distinction is enforced at the request boundary (#3983): the current To-do
+snapshot is rendered by one bounded renderer
+(`crates/tui/src/work_grounding.rs`) and appended to each parent turn-loop and
+sub-agent step request as a transient `<codewhale:work_state>` block. Forked
+sub-agents and `/relay` handoffs embed the byte-identical body. An empty To-do
+emits no block at all.
 
-Single-`bash` agents (Claude Code's design) are powerful but hand the model
-all the foot-guns of shell scripting: quoting, platform divergence,
-side-effects from misread cwd, `cd` not persisting between calls, etc. Our
-file tools are also significantly cheaper to render in the transcript
-(structured JSON-shaped output collapses better than `ls -la` walls of text).
+## Deferred and dynamic tools
 
-The model can always fall back to `exec_shell` when something is missing.
-The dedicated tools just take the common 80% off the shell escape-hatch.
+`Web` is a conditional, deferred action tool with `search`, `fetch`, and `wait`
+actions. It is discoverable through `tool_search` only when the active network
+policy and runtime backend permit it; it is not one of the ten default-active
+names.
+
+The durable `github`, `automation`, and `rlm` action families are also deferred
+by default. `rlm` owns `open`, `eval`, `configure`, and `close` actions for a
+persistent sandboxed Python session. Feature-gated native tools may be added to
+the active or deferred catalog only when their implementation and host
+dependencies are available.
+
+MCP tools are dynamic. Successfully connected servers register names such as
+`mcp_<server>_<tool>` from `~/.codewhale/mcp.json`; a failed or disabled server
+must not be presented as an available model tool.
+
+## Inspect the model-client request tool payload
+
+Run `/tools` after a model turn to inspect a bounded projection of the exact
+tool field in the latest prepared model-client request. `/tools json` emits the
+same evidence as bounded machine-readable JSON. Both formats open in a pager;
+they are not copied into transcript history. `/tool-studio` remains a human-
+command compatibility alias; it is not a model tool.
+
+The snapshot distinguishes an absent tool field from a present empty array. It
+reports the exact model-client tool JSON byte count and SHA-256 digest only when
+measurement fits the one-MiB inspection bound; larger payloads stay unavailable.
+Provider adapters may transform, sanitize, or omit those fields while building
+a provider-specific wire body, so `/tools` marks provider delivery and the wire
+payload unavailable. Capture and rendering are bounded: retained schemas,
+descriptions, caller lists, catalog rows, turn IDs, and payload measurement all
+carry explicit truncation, omission, or unavailable receipts. The snapshot stays
+in memory only for the current session and is replaced on each prepared request.
+
+Provider, model, approval, registry provenance, and runtime capability metadata
+are not fields in the request tool schema. `/tools` therefore reports them as
+unavailable instead of joining against mutable state or inferring values. Use
+the separate route and permission receipts for those facts.
+
+## Modes and permission postures
+
+Modes and permission postures are separate controls:
+
+- **Plan** is read-only. It exposes the read-only `File` projection and other
+  safe inspection capabilities, but no shell or file mutation.
+- **Act** is ordinary interactive execution.
+- **Operate** uses the same direct-tool authority as Act while preferring Fleet
+  workers for independent, parallel, isolated, background, or long-running work.
+- **Ask**, **Auto-Review**, and **Full Access** control approval behavior within
+  an action-capable mode. They never widen a Plan turn into write access.
+
+See `docs/MODES.md` for the full mode and posture contract.
+
+## Replay-only aliases
+
+Legacy single-purpose names stay registered so saved transcripts, sessions, and
+recorded automation replay without migration. They are hidden from the model
+catalog and from `tool_search`; new prompts and docs must use the canonical
+action tools.
+
+| Replay-only spellings | Canonical action |
+|---|---|
+| `exec_shell`, `exec_shell_wait`, `exec_wait`, `exec_shell_interact`, `exec_interact`, `exec_shell_cancel` | `Bash`: `run`, `wait`, `interact`, `cancel` |
+| `read_file`, `list_dir`, `grep_files`, `file_search`, `write_file`, `edit_file`, `apply_patch` | `File`: `read`, `list`, `search_content`, `search_name`, `write`, `edit`, `patch` |
+| `git_status`, `git_diff`, `git_log`, `git_show`, `git_blame` | `Git`: matching action |
+| `run_tests`, `run_verifiers` | `Run`: `tests`, `verifiers` |
+| `web_search`, `fetch_url`, `wait_for_dev_server` | `Web`: `search`, `fetch`, `wait` |
+| `task_*` | `tasks`: matching action |
+| `github_*` | `github`: matching action |
+| `automation_*` | `automation`: matching action |
+| `rlm_open`, `rlm_eval`, `rlm_configure`, `rlm_close` | `rlm`: `open`, `eval`, `configure`, `close` |
+| `checklist_*`, `todo_*` | `work_update` |
+
+Replay compatibility does not make an alias a supported spelling for new model
+calls. Alias execution must stay behaviorally equivalent to its canonical
+action and must not add the alias back to the advertised catalog.
+
+## Long-running work
+
+Use `Bash` with `action: "run"` for bounded commands. Set its background option
+for work that may outlive a normal foreground wait, then use `wait`, `interact`,
+or `cancel` against the returned process id. Live shell jobs are also visible in
+`/jobs`; process-local jobs must be marked stale after restart rather than shown
+as reattached processes.
+
+Use `tasks` when the work itself needs a durable lifecycle, structured gates,
+artifacts, replayable timelines, or a stable task id. Large tool results should
+remain behind bounded handles or artifacts instead of being copied wholesale
+into the parent transcript.
+
+## Parallel fan-out
+
+The sub-agent capacity source of truth is
+`crates/tui/src/config/subagent_limits.rs`:
+
+- default configured concurrency: **64**;
+- maximum configured concurrency: **128**;
+- maximum admitted running-plus-queued work: **1024**.
+
+These are capacity ceilings, not advice to dispatch every available slot. A
+manager should use the smallest useful fan-out, preserve a single owner for
+fan-in, and verify worker receipts before reporting combined completion.
+
+RLM child-query batching is a different, cheaper cost class. Its
+`sub_query_batch` helper accepts 1–16 one-shot children inside a live `rlm`
+session; it is not a substitute for tool-carrying `agent` workers.
+
+## Human inspection: `/tools` (`/tool-studio`)
+
+`/tools` renders a **read-only, bounded human projection** of the tool field of
+the request that was prepared for one `(turn, step)`. It is not a second
+registry and not an execution surface.
+
+**The seam.** The snapshot is built in `crates/tui/src/core/engine/turn_loop.rs`
+immediately after `MessageRequest` is constructed, from `request.tools` — the
+same value the model client is handed. The engine resolves the surrounding
+per-turn data once in `engine.rs` (`ToolSurfaceContext`: flattened registry
+facts, the MCP pool's own server attribution, the engine-injected catalog names,
+and the resolved model client's receipt) and passes it as plain data, so the
+per-step seam never re-locks the MCP pool or holds a tool object.
+
+**Turn and step identity.** The tool set can differ between steps of a turn, so
+each snapshot is stamped with turn id and step and each seam emits its own. The
+TUI keeps only the latest (`SessionState.last_tool_request_snapshot`). Before
+the first seam there is no snapshot and `/tools` says so rather than rebuilding
+a registry in the UI.
+
+Two kinds of fact are kept apart:
+
+- **Wire facts** come from the prepared request: name, description, schema,
+  `defer_loading` / `strict` / `allowed_callers` / `cache_control`, byte
+  accounting, and the catalog digest.
+- **Surface facts** come from the `ToolSurfaceContext`: provenance
+  (`builtin` / `plugin` / `mcp` / `synthetic` / `unknown`), MCP server identity,
+  declared capabilities, declared approval requirement, and model visibility.
+
+Contract:
+
+- **One digest.** `active_tool_catalog_sha256`
+  (`crates/tui/src/core/engine/preview.rs`) is the single definition of the
+  active-tool-catalog hash. The request manifest publishes it as
+  `ToolSurfaceFacts::active_tool_catalog_sha256` and `/tools` reports the same
+  value for the same prepared request; neither surface keeps a hash of its own.
+- **Nothing is guessed.** MCP server identity is shown only when the real pool
+  attributed that exact model tool name. `McpPool::mcp_model_tool_name` is the
+  single definition shared by the model catalog and the human attribution, and
+  an ambiguous name (two servers colliding on one model name) resolves to no
+  server. Synthetic provenance comes from
+  `default_synthetic_catalog_tool_names`, which is asserted against the engine's
+  own `is_synthetic_catalog_tool` predicate. A transmitted tool with no registry
+  entry reports `capabilities: unknown`, never "none".
+- **Provider availability follows the resolved client.** It comes from
+  `Engine::tool_surface_provider_receipt`, never from "a tool registry exists".
+  With no client the receipt is `unavailable` even when the registry is full.
+- **Unknown shrinks, it does not vanish.** `unavailable_for_this_request` always
+  contains `provider_wire_payload`: nothing on this path observes what the
+  provider adapter finally transmits. It additionally contains `provider` and
+  `model` without a resolved client, and `provenance` / `capabilities` /
+  `approval` when no surface context was captured.
+- **Absent stays distinct from empty.** A request with no tools field is not a
+  request with an empty tools array; an unresolved field is `unknown` with a
+  reason, not a default.
+- **Bounded.** Rendering is capped by tool count (32), name, description, schema
+  bytes, allowed-caller count, and a payload measurement bound, each with an
+  explicit truncation or omission receipt. Registered tools that this request
+  does *not* carry are reported as a bounded name list plus an exact count
+  rather than expanding the projection.
+- **Inert.** The snapshot lives beside the transcript, never in
+  `session.messages`, so it cannot enter a model request or perturb the
+  provider's prefix cache. It never executes a tool, never reads credentials,
+  never reorders the catalog, and is never registered as a model-callable tool.
+- **Delivery is never claimed.** The capture happens before connection setup, so
+  `delivery_status` stays `unknown`.
+
+## Release verification
+
+Do not infer the public surface from handler function names. Verify the model
+catalog and alias visibility at the exact candidate SHA:
+
+```bash
+python3 scripts/measure-runtime-contract.py
+cargo test -p codewhale-tui --bin codewhale-tui --locked canonical_runtime_tools_hide_legacy_aliases
+cargo test -p codewhale-tui --bin codewhale-tui --locked shell_alias_tools_hidden_from_model_catalog
+cargo test -p codewhale-tui --bin codewhale-tui --locked runtime_task_families_expose_canonical_tools_with_hidden_aliases
+```
+
+The provider-free full-policy receipt enables built-in memory and must report the
+ten default-active names listed above. A memory-disabled receipt truthfully omits
+`remember`. A separate repository-wide tool count may include deferred, dynamic,
+feature-gated, and replay-only registrations; it is not the number of tools
+placed in the first-turn model catalog.

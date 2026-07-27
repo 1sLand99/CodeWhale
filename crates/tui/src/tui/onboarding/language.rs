@@ -16,6 +16,9 @@ use crate::tui::app::App;
 /// Each entry is `(hotkey, settings_tag, native_name, english_label)`.
 /// `settings_tag` is what `Settings::set("locale", …)` accepts and what
 /// `localization::Locale` resolves on next read.
+///
+/// Hotkeys run `1..=9` then `a`, `b`, … so more than nine shipped locales
+/// stay single-keystroke selectable.
 pub const LANGUAGE_OPTIONS: &[(char, &str, &str, &str)] = &[
     ('1', "auto", "Auto-detect", "(LC_ALL / LANG)"),
     ('2', "en", "English", ""),
@@ -23,6 +26,21 @@ pub const LANGUAGE_OPTIONS: &[(char, &str, &str, &str)] = &[
     ('4', "zh-Hans", "简体中文", "(Simplified Chinese)"),
     ('5', "zh-Hant", "繁體中文", "(Traditional Chinese)"),
     ('6', "pt-BR", "Português (Brasil)", "(Brazilian Portuguese)"),
+    (
+        '7',
+        "es-419",
+        "Español (Latinoamérica)",
+        "(Latin American Spanish)",
+    ),
+    ('8', "vi", "Tiếng Việt", "(Vietnamese)"),
+    ('9', "ko", "한국어", "(Korean)"),
+    ('a', "ca", "Català", "(Catalan)"),
+    ('b', "de", "Deutsch", "(German)"),
+    ('c', "fr", "Français", "(French)"),
+    ('d', "id", "Bahasa Indonesia", "(Indonesian)"),
+    ('e', "hi", "हिन्दी", "(Hindi)"),
+    ('f', "ru", "Русский", "(Russian)"),
+    ('g', "uk", "Українська", "(Ukrainian)"),
 ];
 
 pub fn lines(app: &App) -> Vec<Line<'static>> {
@@ -33,7 +51,7 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
         Line::from(Span::styled(
             app.tr(MessageId::OnboardLanguageTitle).to_string(),
             Style::default()
-                .fg(palette::DEEPSEEK_SKY)
+                .fg(palette::WHALE_INFO)
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
@@ -46,9 +64,13 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
 
     for (hotkey, tag, native, english) in LANGUAGE_OPTIONS {
         let is_current = current == *tag;
-        let bullet = if is_current { "●" } else { "○" };
+        let bullet = if is_current {
+            crate::tui::glyphs::CURRENT
+        } else {
+            crate::tui::glyphs::AVAILABLE
+        };
         let bullet_color = if is_current {
-            palette::DEEPSEEK_BLUE
+            palette::WHALE_ACTION
         } else {
             palette::TEXT_MUTED
         };
@@ -81,4 +103,47 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
     )));
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::localization::Locale;
+
+    /// Every locale we ship translations for must be offered in the picker,
+    /// otherwise the footer advertises hotkeys that select nothing and users
+    /// can never reach a supported UI language (#3929).
+    #[test]
+    fn picker_offers_every_shipped_locale() {
+        let offered: Vec<&str> = LANGUAGE_OPTIONS.iter().map(|(_, tag, _, _)| *tag).collect();
+        assert!(
+            offered.contains(&"auto"),
+            "picker must keep the auto-detect entry"
+        );
+        for locale in Locale::shipped() {
+            let tag = locale.tag();
+            assert!(
+                offered.contains(&tag),
+                "shipped locale {tag} is not offered in the language picker"
+            );
+        }
+    }
+
+    /// Hotkeys must be the contiguous run `1..=9` followed by contiguous
+    /// lowercase letters `a`, `b`, … so the footer hint stays truthful and
+    /// `KeyCode::Char` lookups resolve for every option.
+    #[test]
+    fn picker_hotkeys_are_contiguous_digits_then_letters() {
+        for (idx, (hotkey, tag, _, _)) in LANGUAGE_OPTIONS.iter().enumerate() {
+            let expected = if idx < 9 {
+                char::from_digit((idx + 1) as u32, 10).expect("digit")
+            } else {
+                char::from_u32('a' as u32 + (idx - 9) as u32).expect("letter")
+            };
+            assert_eq!(
+                *hotkey, expected,
+                "option {tag} should use hotkey {expected}, not {hotkey}"
+            );
+        }
+    }
 }

@@ -1,7 +1,40 @@
 import type { Metadata } from "next";
+import { IBM_Plex_Sans, JetBrains_Mono, Noto_Serif_SC, Space_Grotesk } from "next/font/google";
 import { Nav } from "@/components/nav";
 import { Footer } from "@/components/footer";
 import { locales, type Locale } from "@/lib/i18n/config";
+import { buildPageMetadata } from "@/lib/page-meta";
+import "../globals.css";
+
+const display = Space_Grotesk({
+  subsets: ["latin", "vietnamese"],
+  weight: ["400", "500", "600", "700"],
+  variable: "--font-display",
+  display: "swap",
+});
+
+const body = IBM_Plex_Sans({
+  subsets: ["latin", "cyrillic", "vietnamese"],
+  weight: ["400", "500", "600"],
+  variable: "--font-body",
+  display: "swap",
+});
+
+const mono = JetBrains_Mono({
+  subsets: ["latin", "cyrillic"],
+  weight: ["400", "500", "600"],
+  variable: "--font-mono",
+  display: "swap",
+});
+
+// Noto Serif SC is heavy; load only what we need for decorative anchors.
+const cjk = Noto_Serif_SC({
+  subsets: ["latin"],
+  weight: ["400", "700"],
+  variable: "--font-cjk",
+  display: "swap",
+  preload: false,
+});
 
 export function generateStaticParams() {
   return locales.map((locale) => ({ locale }));
@@ -10,29 +43,16 @@ export function generateStaticParams() {
 export async function generateMetadata({ params }: { params: Promise<{ locale: string }> }): Promise<Metadata> {
   const { locale } = await params;
   const isZh = locale === "zh";
-  return {
-    title: isZh ? "CodeWhale · DeepSeek V4 智能体运行框架" : "CodeWhale · DeepSeek V4 Agent Harness",
+  return buildPageMetadata({
+    path: "/",
+    locale,
+    title: isZh
+      ? "Codewhale — 潜入数据与代码的深海，让你不必亲自下潜"
+      : "Codewhale — Dive into the deep of data and code so you don't have to.",
     description: isZh
-      ? "面向 DeepSeek V4 和开放模型的本地 Agent 运行框架：自我、冲突法、本地工具、证据与恢复。"
-      : "Local-first agent harness for DeepSeek V4 and open models, with operating identity, conflict law, local tools, evidence, and recovery.",
-    metadataBase: new URL("https://codewhale.net"),
-    openGraph: {
-      title: "CodeWhale",
-      description: isZh
-        ? "本地 Agent 运行框架，内置自我、冲突法、本地工具、证据与恢复。"
-        : "Local-first agent harness with operating identity, conflict law, local tools, evidence, and recovery.",
-      url: "https://codewhale.net",
-      siteName: "CodeWhale",
-      type: "website",
-    },
-    twitter: { card: "summary_large_image" },
-    alternates: {
-      languages: {
-        en: "/en",
-        zh: "/zh",
-      },
-    },
-  };
+      ? "数据与代码如海。Codewhale 是给你杠杆的终端智能体——读取、修改、验证，让普通人也能用 LLM 把东西做出来。运行在你自己的机器上；Rust 编写，MIT 许可。"
+      : "We are entering a world with an ocean of data and code. Codewhale dives into the deep so you don't have to — a terminal agent that gives ordinary people the leverage of LLMs to build things. Runs on your machine. Rust, MIT.",
+  });
 }
 
 export default async function LocaleLayout({
@@ -45,10 +65,24 @@ export default async function LocaleLayout({
   const { locale } = await params;
 
   return (
-    <>
-      <Nav locale={locale as Locale} />
-      <main>{children}</main>
-      <Footer locale={locale as Locale} />
-    </>
+    <html
+      lang={locale}
+      className={`${display.variable} ${body.variable} ${mono.variable} ${cjk.variable}`}
+      suppressHydrationWarning
+    >
+      <body>
+        {/* Apply the persisted docs theme before paint so there is no flash.
+            "auto" leaves data-theme unset and defers to prefers-color-scheme. */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              "(function(){try{var t=localStorage.getItem('cw-theme');if(t==='light'||t==='dark'){document.documentElement.setAttribute('data-theme',t);}}catch(e){}})();",
+          }}
+        />
+        <Nav locale={locale as Locale} />
+        <main>{children}</main>
+        <Footer locale={locale as Locale} />
+      </body>
+    </html>
   );
 }

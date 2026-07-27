@@ -5,7 +5,7 @@
 //! - Background process execution
 //! - Process output retrieval
 //! - Process termination
-//! - Sandbox support (macOS Seatbelt)
+//! - Sandbox support (macOS Seatbelt and opt-in Linux bubblewrap)
 //! - Streaming output (future)
 
 use anyhow::{Context, Result, anyhow};
@@ -37,6 +37,8 @@ use windows::core::PCWSTR;
 #[cfg(not(target_env = "ohos"))]
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
+mod output;
+
 use super::shell_output::{summarize_output, truncate_with_meta};
 use crate::child_env;
 use crate::sandbox::{
@@ -46,6 +48,42 @@ use crate::sandbox::{
     SandboxPolicy as ExecutionSandboxPolicy, // Rename to avoid conflict with spec::SandboxPolicy
     SandboxType,
 };
+use crate::tools::resource_admission::{
+    CommandExpense, HeavyCommandPermit, MemoryPressure, acquire_heavy_command_permit,
+    infer_command_expense,
+};
+use crate::work_graph::{
+    EvidenceKind, EvidenceRef, OperationIntent, OperationOwnerSnapshot, OwnerState,
+    SharedWorkRuntime,
+};
+use crate::worker_profile::ShellPolicy;
+use output::{tail_from_buffer, take_delta_from_buffer};
+
+fn validate_shell_working_dir(path: &Path, inherited_session_workspace: bool) -> Result<()> {
+    let metadata = std::fs::metadata(path).with_context(|| {
+        let source = if inherited_session_workspace {
+            "saved session workspace"
+        } else {
+            "requested working directory"
+        };
+        format!(
+            "{source} is unavailable: {}. Restore or remap that directory, resume/fork the session from an existing workspace, or pass an explicit `working_dir`/`cwd` to exec_shell",
+            path.display()
+        )
+    })?;
+    if !metadata.is_dir() {
+        let source = if inherited_session_workspace {
+            "saved session workspace"
+        } else {
+            "requested working directory"
+        };
+        return Err(anyhow!(
+            "{source} is not a directory: {}. Resume/fork from an existing workspace or pass an explicit `working_dir`/`cwd`",
+            path.display()
+        ));
+    }
+    Ok(())
+}
 
 /// Status of a shell process
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -59,10 +97,13 @@ pub enum ShellStatus {
 
 /// Result from a shell command execution
 #[derive(Debug, Clone, Serialize, Deserialize)]
+
 pub struct ShellResult {
     pub task_id: Option<String>,
     pub status: ShellStatus,
-    pub exit_code: Option<i32>,
+    /// Lossless process exit status. Windows exception/NTSTATUS values use
+    /// the full unsigned 32-bit range, so an i32 would corrupt them.
+    pub exit_code: Option<i64>,
     pub stdout: String,
     pub stderr: String,
     pub duration_ms: u64,
@@ -103,7 +144,7 @@ pub struct ShellJobSnapshot {
     pub command: String,
     pub cwd: PathBuf,
     pub status: ShellStatus,
-    pub exit_code: Option<i32>,
+    pub exit_code: Option<i64>,
     pub elapsed_ms: u64,
     pub stdout_tail: String,
     pub stderr_tail: String,
@@ -111,7 +152,37 @@ pub struct ShellJobSnapshot {
     pub stderr_len: usize,
     pub stdin_available: bool,
     pub stale: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_since_output_ms: Option<u64>,
     pub linked_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_agent_name: Option<String>,
+}
+
+/// Once-only completion event for a tracked background shell job.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShellCompletionEvent {
+    pub task_id: String,
+    pub command: String,
+    pub status: ShellStatus,
+    pub exit_code: Option<i64>,
+    pub duration_ms: u64,
+    pub stdout_tail: String,
+    pub stderr_tail: String,
+    pub linked_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_agent_name: Option<String>,
+}
+
+/// Optional owner attribution for background shell work.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShellJobOwner {
+    pub agent_id: String,
+    pub agent_name: String,
 }
 
 /// Full output view used by `/jobs show <id>`.
@@ -351,28 +422,55 @@ fn attach_windows_job(child: &Child, command: &str) -> Option<WindowsJob> {
     }
 }
 
+#[cfg(windows)]
+fn terminate_unregistered_process(child: &mut Child, job: Option<&WindowsJob>) {
+    let _ = terminate_windows_job(job, child);
+    let _ = child.wait();
+}
+
+#[cfg(not(windows))]
+fn terminate_unregistered_process(child: &mut Child) {
+    #[cfg(unix)]
+    let _ = kill_child_process_group(child);
+    #[cfg(not(unix))]
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ShellExitStatus {
-    code: Option<i32>,
+    code: Option<i64>,
     success: bool,
 }
 
 impl ShellExitStatus {
     fn from_std(status: std::process::ExitStatus) -> Self {
         Self {
-            code: status.code(),
+            code: status.code().map(std_exit_code_i64),
             success: status.success(),
         }
     }
 
     #[cfg(not(target_env = "ohos"))]
     fn from_pty(status: portable_pty::ExitStatus) -> Self {
-        let code = i32::try_from(status.exit_code()).unwrap_or(i32::MAX);
         Self {
-            code: Some(code),
+            code: Some(i64::from(status.exit_code())),
             success: status.success(),
         }
     }
+}
+
+#[cfg(windows)]
+fn std_exit_code_i64(code: i32) -> i64 {
+    // std exposes Windows DWORD process statuses through i32. Reinterpret
+    // negative values as their original unsigned bit pattern so codes such
+    // as 0xC0000005 survive JSON, persistence, and diagnostics unchanged.
+    i64::from(code as u32)
+}
+
+#[cfg(not(windows))]
+fn std_exit_code_i64(code: i32) -> i64 {
+    i64::from(code)
 }
 
 impl ShellChild {
@@ -454,6 +552,7 @@ fn spawn_reader_thread<R: Read + Send + 'static>(
 }
 
 const SYNC_READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+const STALE_NO_OUTPUT_AFTER: Duration = Duration::from_secs(60);
 
 fn spawn_sync_reader_thread<R: Read + Send + 'static>(
     mut reader: R,
@@ -478,30 +577,136 @@ pub struct BackgroundShell {
     pub command: String,
     pub working_dir: PathBuf,
     pub status: ShellStatus,
-    pub exit_code: Option<i32>,
+    pub exit_code: Option<i64>,
     pub started_at: Instant,
+    last_output_at: Instant,
+    last_observed_output_len: usize,
     pub sandbox_type: SandboxType,
     pub linked_task_id: Option<String>,
+    pub owner_agent: Option<ShellJobOwner>,
     stdout_buffer: Arc<Mutex<Vec<u8>>>,
     stderr_buffer: Option<Arc<Mutex<Vec<u8>>>>,
+    heavy_permit: Option<HeavyCommandPermit>,
     stdout_cursor: usize,
     stderr_cursor: usize,
+    completion_reported: bool,
     stdin: Option<StdinWriter>,
     child: Option<ShellChild>,
     #[cfg(windows)]
     windows_job: Option<WindowsJob>,
     stdout_thread: Option<std::thread::JoinHandle<()>>,
     stderr_thread: Option<std::thread::JoinHandle<()>>,
+    work_lifecycle: Option<ShellWorkLifecycle>,
+    lifecycle_seq: u64,
+    last_lifecycle_status: Option<ShellStatus>,
+    last_lifecycle_bytes: usize,
+}
+
+#[derive(Clone)]
+struct ShellWorkLifecycle {
+    work: SharedWorkRuntime,
+    session_id: String,
+}
+
+impl ShellWorkLifecycle {
+    fn register(&self, id: &str, command: &str) -> Result<()> {
+        self.work
+            .register_operation(
+                &self.session_id,
+                OperationIntent::new(
+                    format!("shell:{id}"),
+                    format!("Shell · {command}"),
+                    false,
+                    "exec_shell",
+                    id,
+                ),
+            )
+            .map(|_| ())
+            .map_err(anyhow::Error::msg)
+    }
+
+    fn observe(&self, id: &str, status: &ShellStatus, seq: u64, raw_bytes: usize) -> Result<()> {
+        let owner_state = match status {
+            ShellStatus::Running => OwnerState::Running,
+            ShellStatus::Completed => OwnerState::Completed,
+            ShellStatus::Failed | ShellStatus::TimedOut => OwnerState::Failed,
+            ShellStatus::Killed => OwnerState::Cancelled,
+        };
+        let raw_bytes = u64::try_from(raw_bytes).unwrap_or(u64::MAX);
+        let output = EvidenceRef::new(
+            EvidenceKind::Receipt {
+                owner: "shell".to_string(),
+            },
+            format!("shell:{id}:output"),
+            Some(raw_bytes),
+            false,
+        )
+        .map_err(|err| anyhow!(err.to_string()))?;
+        self.work
+            .reconcile_operation(
+                &self.session_id,
+                OperationOwnerSnapshot::new(
+                    format!("shell:{id}"),
+                    owner_state,
+                    seq,
+                    lifecycle_now_ms(),
+                )
+                .with_output(output),
+            )
+            .map(|_| ())
+            .map_err(anyhow::Error::msg)
+    }
+}
+
+struct ShellSpawnIntentGuard {
+    lifecycle: Option<ShellWorkLifecycle>,
+    id: String,
+    armed: bool,
+}
+
+struct ShellSpawnContext {
+    owner_agent: Option<ShellJobOwner>,
+    work_lifecycle: Option<ShellWorkLifecycle>,
+}
+
+impl ShellSpawnIntentGuard {
+    fn new(lifecycle: Option<ShellWorkLifecycle>, id: &str, command: &str) -> Result<Self> {
+        if let Some(lifecycle) = lifecycle.as_ref() {
+            lifecycle.register(id, command)?;
+        }
+        Ok(Self {
+            lifecycle,
+            id: id.to_string(),
+            armed: true,
+        })
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ShellSpawnIntentGuard {
+    fn drop(&mut self) {
+        if self.armed
+            && let Some(lifecycle) = self.lifecycle.as_ref()
+            && let Err(err) = lifecycle.observe(&self.id, &ShellStatus::Failed, 1, 0)
+        {
+            tracing::warn!(shell_id = %self.id, error = %err, "failed to record shell spawn failure");
+        }
+    }
 }
 
 impl BackgroundShell {
     /// Check if the process has completed and update status
     fn poll(&mut self) -> bool {
+        self.refresh_output_activity();
         if self.status != ShellStatus::Running {
+            self.publish_lifecycle_best_effort();
             return true;
         }
 
-        if let Some(ref mut child) = self.child {
+        let completed = if let Some(ref mut child) = self.child {
             match child.try_wait() {
                 Ok(Some(status)) => {
                     self.exit_code = status.code;
@@ -510,19 +715,68 @@ impl BackgroundShell {
                     } else {
                         ShellStatus::Failed
                     };
+                    self.heavy_permit.take();
                     self.collect_output();
                     true
                 }
                 Ok(None) => false, // Still running
                 Err(_) => {
                     self.status = ShellStatus::Failed;
+                    self.heavy_permit.take();
                     self.collect_output();
                     true
                 }
             }
         } else {
             true
+        };
+        self.publish_lifecycle_best_effort();
+        completed
+    }
+
+    fn publish_lifecycle(&mut self) -> Result<()> {
+        let bytes = self.observed_output_len();
+        if self.last_lifecycle_status.as_ref() == Some(&self.status)
+            && self.last_lifecycle_bytes == bytes
+        {
+            return Ok(());
         }
+        let next_seq = self.lifecycle_seq.saturating_add(1);
+        if let Some(lifecycle) = self.work_lifecycle.as_ref() {
+            lifecycle.observe(&self.id, &self.status, next_seq, bytes)?;
+        }
+        self.lifecycle_seq = next_seq;
+        self.last_lifecycle_status = Some(self.status.clone());
+        self.last_lifecycle_bytes = bytes;
+        Ok(())
+    }
+
+    fn publish_lifecycle_best_effort(&mut self) {
+        if let Err(err) = self.publish_lifecycle() {
+            tracing::warn!(shell_id = %self.id, error = %err, "failed to reconcile shell lifecycle");
+        }
+    }
+
+    fn refresh_output_activity(&mut self) {
+        let observed_len = self.observed_output_len();
+        if observed_len != self.last_observed_output_len {
+            self.last_observed_output_len = observed_len;
+            self.last_output_at = Instant::now();
+        }
+    }
+
+    fn observed_output_len(&self) -> usize {
+        let stdout_len = self
+            .stdout_buffer
+            .lock()
+            .map(|data| data.len())
+            .unwrap_or(0);
+        let stderr_len = self
+            .stderr_buffer
+            .as_ref()
+            .and_then(|buffer| buffer.lock().ok().map(|data| data.len()))
+            .unwrap_or(0);
+        stdout_len.saturating_add(stderr_len)
     }
 
     /// Collect output from the background threads
@@ -545,10 +799,10 @@ impl BackgroundShell {
         #[cfg(windows)]
         terminate_and_close_windows_job(self.windows_job.take());
         if let Some(handle) = self.stdout_thread.take() {
-            let _ = handle.join();
+            finish_background_reader(handle, &self.status);
         }
         if let Some(handle) = self.stderr_thread.take() {
-            let _ = handle.join();
+            finish_background_reader(handle, &self.status);
         }
         self.stdin = None;
         self.child = None;
@@ -610,6 +864,11 @@ impl BackgroundShell {
         let stdout_delta_len = stdout_delta.len();
         let stderr_delta_len = stderr_delta.len();
 
+        if stdout_delta_len > 0 || stderr_delta_len > 0 {
+            self.last_output_at = Instant::now();
+            self.last_observed_output_len = stdout_total.saturating_add(stderr_total);
+        }
+
         (
             String::from_utf8_lossy(&stdout_delta).to_string(),
             String::from_utf8_lossy(&stderr_delta).to_string(),
@@ -627,7 +886,9 @@ impl BackgroundShell {
         let (_, stderr_full, _, _) = self.full_output();
         SandboxManager::was_denied(
             self.sandbox_type,
-            self.exit_code.unwrap_or(-1),
+            self.exit_code
+                .and_then(|code| i32::try_from(code).ok())
+                .unwrap_or(-1),
             &stderr_full,
         )
     }
@@ -657,7 +918,9 @@ impl BackgroundShell {
             }
         }
         self.status = ShellStatus::Killed;
+        self.heavy_permit.take();
         self.collect_output();
+        self.publish_lifecycle_best_effort();
         Ok(())
     }
 
@@ -703,6 +966,11 @@ impl BackgroundShell {
             .as_ref()
             .map(|buf| tail_from_buffer(buf, 1200))
             .unwrap_or((0, String::new()));
+        let elapsed_since_output_ms = (self.status == ShellStatus::Running)
+            .then(|| u64::try_from(self.last_output_at.elapsed().as_millis()).unwrap_or(u64::MAX));
+        let stale = elapsed_since_output_ms.is_some_and(|elapsed| {
+            elapsed >= u64::try_from(STALE_NO_OUTPUT_AFTER.as_millis()).unwrap_or(u64::MAX)
+        });
         ShellJobSnapshot {
             id: self.id.clone(),
             job_id: self.id.clone(),
@@ -716,8 +984,33 @@ impl BackgroundShell {
             stdout_len,
             stderr_len,
             stdin_available: self.stdin.is_some() && self.status == ShellStatus::Running,
-            stale: false,
+            stale,
+            elapsed_since_output_ms,
             linked_task_id: self.linked_task_id.clone(),
+            owner_agent_id: self
+                .owner_agent
+                .as_ref()
+                .map(|owner| owner.agent_id.clone()),
+            owner_agent_name: self
+                .owner_agent
+                .as_ref()
+                .map(|owner| owner.agent_name.clone()),
+        }
+    }
+
+    fn completion_event(&self) -> ShellCompletionEvent {
+        let snapshot = self.job_snapshot();
+        ShellCompletionEvent {
+            task_id: snapshot.id,
+            command: snapshot.command,
+            status: snapshot.status,
+            exit_code: snapshot.exit_code,
+            duration_ms: snapshot.elapsed_ms,
+            stdout_tail: snapshot.stdout_tail,
+            stderr_tail: snapshot.stderr_tail,
+            linked_task_id: snapshot.linked_task_id,
+            owner_agent_id: snapshot.owner_agent_id,
+            owner_agent_name: snapshot.owner_agent_name,
         }
     }
 
@@ -729,6 +1022,23 @@ impl BackgroundShell {
             stderr,
         }
     }
+}
+
+fn finish_background_reader(handle: std::thread::JoinHandle<()>, status: &ShellStatus) {
+    // A killed Windows process can leave a pipe reader blocked even after its
+    // Job Object has been closed. Cancellation must return promptly instead of
+    // waiting for that reader to observe EOF. Other terminal states still join
+    // so their final output is collected before the shell is discarded.
+    #[cfg(windows)]
+    if *status == ShellStatus::Killed {
+        drop(handle);
+        return;
+    }
+
+    #[cfg(not(windows))]
+    let _ = status;
+
+    let _ = handle.join();
 }
 
 impl Drop for BackgroundShell {
@@ -818,11 +1128,16 @@ impl ShellManager {
 
     /// Enable or disable bubblewrap passthrough (#2184).
     ///
-    /// When enabled and `/usr/bin/bwrap` is present on Linux, exec_shell
+    /// When enabled and `/usr/bin/bwrap` is executable on Linux, exec_shell
     /// commands are routed through bubblewrap for filesystem isolation.
-    #[allow(dead_code)] // Wired from EngineConfig in follow-up PR
     pub fn set_prefer_bwrap(&mut self, prefer: bool) {
         self.sandbox_manager.set_prefer_bwrap(prefer);
+    }
+
+    /// Return the OS sandbox wrapper this shell manager is configured and able
+    /// to apply to commands.
+    pub fn configured_sandbox_type(&self) -> Option<SandboxType> {
+        self.sandbox_manager.configured_sandbox()
     }
 
     /// Request that the active foreground shell wait detach and leave its
@@ -925,10 +1240,68 @@ impl ShellManager {
         policy_override: Option<ExecutionSandboxPolicy>,
         extra_env: HashMap<String, String>,
     ) -> Result<ShellResult> {
+        self.execute_with_options_env_for_owner(
+            command,
+            working_dir,
+            timeout_ms,
+            background,
+            stdin_data,
+            tty,
+            policy_override,
+            extra_env,
+            None,
+        )
+    }
+
+    /// Same as `execute_with_options_env`, with optional background-job owner
+    /// attribution for sub-agent launched jobs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_with_options_env_for_owner(
+        &mut self,
+        command: &str,
+        working_dir: Option<&str>,
+        timeout_ms: u64,
+        background: bool,
+        stdin_data: Option<&str>,
+        tty: bool,
+        policy_override: Option<ExecutionSandboxPolicy>,
+        extra_env: HashMap<String, String>,
+        owner_agent: Option<ShellJobOwner>,
+    ) -> Result<ShellResult> {
+        self.execute_with_options_env_for_owner_and_work(
+            command,
+            working_dir,
+            timeout_ms,
+            background,
+            stdin_data,
+            tty,
+            policy_override,
+            extra_env,
+            owner_agent,
+            None,
+        )
+    }
+
+    /// Owner-aware execution with an optional Work Graph lifecycle sink.
+    #[allow(clippy::too_many_arguments)]
+    fn execute_with_options_env_for_owner_and_work(
+        &mut self,
+        command: &str,
+        working_dir: Option<&str>,
+        timeout_ms: u64,
+        background: bool,
+        stdin_data: Option<&str>,
+        tty: bool,
+        policy_override: Option<ExecutionSandboxPolicy>,
+        extra_env: HashMap<String, String>,
+        owner_agent: Option<ShellJobOwner>,
+        work_lifecycle: Option<ShellWorkLifecycle>,
+    ) -> Result<ShellResult> {
         // Log execution via ShellDispatcher when SHELL_DISPATCHER_LOG is set.
         crate::shell_dispatcher::ShellDispatcher::log_exec(command);
 
         let work_dir = working_dir.map_or_else(|| self.default_workspace.clone(), PathBuf::from);
+        validate_shell_working_dir(&work_dir, working_dir.is_none())?;
 
         // Clamp timeout to max 10 minutes (600000ms)
         let timeout_ms = timeout_ms.clamp(1000, 600_000);
@@ -943,7 +1316,18 @@ impl ShellManager {
         let exec_env = self.sandbox_manager.prepare(&spec);
 
         if background {
-            self.spawn_background_sandboxed(command, &work_dir, &exec_env, stdin_data, tty)
+            self.spawn_background_sandboxed(
+                command,
+                &work_dir,
+                &exec_env,
+                None,
+                stdin_data,
+                tty,
+                ShellSpawnContext {
+                    owner_agent,
+                    work_lifecycle,
+                },
+            )
         } else {
             if tty {
                 return Err(anyhow!(
@@ -994,6 +1378,7 @@ impl ShellManager {
         crate::shell_dispatcher::ShellDispatcher::log_exec(command);
 
         let work_dir = working_dir.map_or_else(|| self.default_workspace.clone(), PathBuf::from);
+        validate_shell_working_dir(&work_dir, working_dir.is_none())?;
 
         let timeout_ms = timeout_ms.clamp(1000, 600_000);
         let policy = policy_override.unwrap_or_else(|| self.sandbox_policy.clone());
@@ -1024,6 +1409,7 @@ impl ShellManager {
         let args = exec_env.args();
 
         let mut cmd = Command::new(program);
+        crate::utils::suppress_console_window(&mut cmd);
         push_shell_args(&mut cmd, program, args);
         cmd.current_dir(working_dir)
             .stdout(Stdio::piped())
@@ -1086,6 +1472,7 @@ impl ShellManager {
 
         // Wait with timeout
         if let Some(status) = child.wait_timeout(timeout)? {
+            let status = ShellExitStatus::from_std(status);
             #[cfg(unix)]
             let _ = kill_child_process_group(&mut child);
             #[cfg(windows)]
@@ -1094,7 +1481,10 @@ impl ShellManager {
             let stderr = recv_sync_reader_output(&stderr_rx);
             let stdout_str = String::from_utf8_lossy(&stdout).to_string();
             let stderr_str = String::from_utf8_lossy(&stderr).to_string();
-            let exit_code = status.code().unwrap_or(-1);
+            let exit_code = status
+                .code
+                .and_then(|code| i32::try_from(code).ok())
+                .unwrap_or(-1);
 
             // Check if sandbox denied the operation
             let sandbox_denied = SandboxManager::was_denied(sandbox_type, exit_code, &stderr_str);
@@ -1103,12 +1493,12 @@ impl ShellManager {
 
             Ok(ShellResult {
                 task_id: None,
-                status: if status.success() {
+                status: if status.success {
                     ShellStatus::Completed
                 } else {
                     ShellStatus::Failed
                 },
-                exit_code: status.code(),
+                exit_code: status.code,
                 stdout,
                 stderr,
                 duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -1145,7 +1535,9 @@ impl ShellManager {
             Ok(ShellResult {
                 task_id: None,
                 status: ShellStatus::TimedOut,
-                exit_code: status.and_then(|s| s.code()),
+                exit_code: status
+                    .map(ShellExitStatus::from_std)
+                    .and_then(|status| status.code),
                 stdout,
                 stderr,
                 duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -1182,6 +1574,7 @@ impl ShellManager {
         let args = exec_env.args();
 
         let mut cmd = Command::new(program);
+        crate::utils::suppress_console_window(&mut cmd);
         push_shell_args(&mut cmd, program, args);
         cmd.current_dir(working_dir)
             .stdin(Stdio::inherit())
@@ -1222,16 +1615,17 @@ impl ShellManager {
         let windows_job = attach_windows_job(&child, original_command);
 
         if let Some(status) = child.wait_timeout(timeout)? {
+            let status = ShellExitStatus::from_std(status);
             #[cfg(windows)]
             terminate_and_close_windows_job(windows_job);
             Ok(ShellResult {
                 task_id: None,
-                status: if status.success() {
+                status: if status.success {
                     ShellStatus::Completed
                 } else {
                     ShellStatus::Failed
                 },
-                exit_code: status.code(),
+                exit_code: status.code,
                 stdout: String::new(),
                 stderr: String::new(),
                 duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -1261,7 +1655,9 @@ impl ShellManager {
             Ok(ShellResult {
                 task_id: None,
                 status: ShellStatus::TimedOut,
-                exit_code: status.and_then(|s| s.code()),
+                exit_code: status
+                    .map(ShellExitStatus::from_std)
+                    .and_then(|status| status.code),
                 stdout: String::new(),
                 stderr: String::new(),
                 duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -1283,15 +1679,24 @@ impl ShellManager {
     }
 
     /// Spawn a background process (sandboxed).
+    #[allow(clippy::too_many_arguments)]
     fn spawn_background_sandboxed(
         &mut self,
         original_command: &str,
         working_dir: &std::path::Path,
         exec_env: &ExecEnv,
+        heavy_permit: Option<HeavyCommandPermit>,
         stdin_data: Option<&str>,
         tty: bool,
+        spawn_context: ShellSpawnContext,
     ) -> Result<ShellResult> {
+        let ShellSpawnContext {
+            owner_agent,
+            work_lifecycle,
+        } = spawn_context;
         let task_id = format!("shell_{}", &Uuid::new_v4().to_string()[..8]);
+        let mut spawn_guard =
+            ShellSpawnIntentGuard::new(work_lifecycle.clone(), &task_id, original_command)?;
         let started = Instant::now();
         let sandbox_type = exec_env.sandbox_type;
         let sandboxed = exec_env.is_sandboxed();
@@ -1340,21 +1745,29 @@ impl ShellManager {
                 cmd.cwd(working_dir);
                 child_env::apply_to_pty_command(&mut cmd, child_env::string_map_env(&exec_env.env));
 
-                let child = pair
+                let mut child = pair
                     .slave
                     .spawn_command(cmd)
                     .with_context(|| format!("Failed to spawn PTY command: {original_command}"))?;
                 drop(pair.slave);
 
-                let reader = pair
-                    .master
-                    .try_clone_reader()
-                    .context("Failed to clone PTY reader")?;
+                let reader = match pair.master.try_clone_reader() {
+                    Ok(reader) => reader,
+                    Err(err) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(err).context("Failed to clone PTY reader");
+                    }
+                };
+                let writer = match pair.master.take_writer() {
+                    Ok(writer) => writer,
+                    Err(err) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(err).context("Failed to take PTY writer");
+                    }
+                };
                 let stdout_thread = Some(spawn_reader_thread(reader, Arc::clone(&stdout_buffer)));
-                let writer = pair
-                    .master
-                    .take_writer()
-                    .context("Failed to take PTY writer")?;
 
                 (
                     ShellChild::Pty(child),
@@ -1365,6 +1778,7 @@ impl ShellManager {
             }
         } else {
             let mut cmd = Command::new(program);
+            crate::utils::suppress_console_window(&mut cmd);
             push_shell_args(&mut cmd, program, args);
             cmd.current_dir(working_dir)
                 .stdin(Stdio::piped())
@@ -1385,8 +1799,26 @@ impl ShellManager {
                 windows_job = attach_windows_job(&child, original_command);
             }
 
-            let stdout_handle = child.stdout.take().context("Failed to capture stdout")?;
-            let stderr_handle = child.stderr.take().context("Failed to capture stderr")?;
+            let stdout_handle = match child.stdout.take() {
+                Some(stdout) => stdout,
+                None => {
+                    #[cfg(windows)]
+                    terminate_unregistered_process(&mut child, windows_job.as_ref());
+                    #[cfg(not(windows))]
+                    terminate_unregistered_process(&mut child);
+                    return Err(anyhow!("Failed to capture stdout"));
+                }
+            };
+            let stderr_handle = match child.stderr.take() {
+                Some(stderr) => stderr,
+                None => {
+                    #[cfg(windows)]
+                    terminate_unregistered_process(&mut child, windows_job.as_ref());
+                    #[cfg(not(windows))]
+                    terminate_unregistered_process(&mut child);
+                    return Err(anyhow!("Failed to capture stderr"));
+                }
+            };
             let stdin_handle = child.stdin.take().map(StdinWriter::Pipe);
 
             let stdout_thread = Some(spawn_reader_thread(
@@ -1412,25 +1844,43 @@ impl ShellManager {
             status: ShellStatus::Running,
             exit_code: None,
             started_at: started,
+            last_output_at: started,
+            last_observed_output_len: 0,
             sandbox_type,
             linked_task_id: None,
+            owner_agent,
             stdout_buffer,
             stderr_buffer,
+            heavy_permit,
             stdout_cursor: 0,
             stderr_cursor: 0,
+            completion_reported: false,
             stdin,
             child: Some(child),
             #[cfg(windows)]
             windows_job,
             stdout_thread,
             stderr_thread,
+            work_lifecycle,
+            lifecycle_seq: 0,
+            last_lifecycle_status: None,
+            last_lifecycle_bytes: 0,
         };
 
-        if let Some(input) = stdin_data {
-            bg_shell.write_stdin(input, false)?;
+        if let Some(input) = stdin_data
+            && let Err(err) = bg_shell.write_stdin(input, false)
+        {
+            let _ = bg_shell.kill();
+            return Err(err);
+        }
+
+        if let Err(err) = bg_shell.publish_lifecycle() {
+            let _ = bg_shell.kill();
+            return Err(err);
         }
 
         self.processes.insert(task_id.clone(), bg_shell);
+        spawn_guard.disarm();
 
         Ok(ShellResult {
             task_id: Some(task_id),
@@ -1569,6 +2019,15 @@ impl ShellManager {
         })
     }
 
+    fn attach_heavy_permit(&mut self, task_id: &str, permit: HeavyCommandPermit) -> Result<()> {
+        let shell = self
+            .processes
+            .get_mut(task_id)
+            .ok_or_else(|| anyhow!("Task {task_id} not found"))?;
+        shell.heavy_permit = Some(permit);
+        Ok(())
+    }
+
     /// Kill a running background process
     pub fn kill(&mut self, task_id: &str) -> Result<ShellResult> {
         let shell = self
@@ -1654,6 +2113,57 @@ impl ShellManager {
         jobs
     }
 
+    /// Drain finished background shell jobs that have not yet been reported to
+    /// runtime status.
+    pub fn drain_finished_jobs(&mut self) -> Vec<ShellCompletionEvent> {
+        let mut events = Vec::new();
+        for shell in self.processes.values_mut() {
+            shell.poll();
+            if shell.status != ShellStatus::Running && !shell.completion_reported {
+                shell.completion_reported = true;
+                events.push(shell.completion_event());
+            }
+        }
+        events.sort_by(|a, b| a.task_id.cmp(&b.task_id));
+        events
+    }
+
+    /// Whether the next production turn may inject a shell completion event.
+    ///
+    /// This deliberately does not poll processes or flip
+    /// `completion_reported`: preview is read-only. A running job counts as
+    /// pending because it can finish before production drains completions; in
+    /// that race an exact request body cannot be proved without mutation.
+    pub fn may_have_undelivered_completion(&self) -> bool {
+        self.processes
+            .values()
+            .any(|shell| !shell.completion_reported)
+    }
+
+    /// Return agent owners whose tracked shell work is still running. The
+    /// engine uses this to keep a worker's heartbeat alive while its only
+    /// pending work is an explicitly tracked background shell task.
+    pub fn running_owner_agent_ids(&mut self) -> Vec<String> {
+        let mut owners = self
+            .processes
+            .values_mut()
+            .filter_map(|shell| {
+                shell.poll();
+                (shell.status == ShellStatus::Running)
+                    .then(|| {
+                        shell
+                            .owner_agent
+                            .as_ref()
+                            .map(|owner| owner.agent_id.clone())
+                    })
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        owners.sort();
+        owners.dedup();
+        owners
+    }
+
     /// Remember a restart-stale job so the UI can show it instead of hiding it.
     #[allow(dead_code)]
     pub fn remember_stale_job(
@@ -1680,7 +2190,10 @@ impl ShellManager {
                 stderr_len: 0,
                 stdin_available: false,
                 stale: true,
+                elapsed_since_output_ms: None,
                 linked_task_id,
+                owner_agent_id: None,
+                owner_agent_name: None,
             },
         );
     }
@@ -1696,54 +2209,6 @@ impl ShellManager {
             }
         });
     }
-}
-
-fn take_delta_from_buffer(buffer: &Arc<Mutex<Vec<u8>>>, cursor: &mut usize) -> (Vec<u8>, usize) {
-    let guard = buffer.lock().unwrap_or_else(|e| e.into_inner());
-    let total = guard.len();
-    let start = (*cursor).min(total);
-    // Clone only the unread portion (the delta), not the entire accumulated buffer.
-    // Long-running processes can produce megabytes of output; cloning the full
-    // buffer on every poll held the ShellManager mutex for O(total_bytes) time.
-    let delta = guard[start..].to_vec();
-    *cursor = total;
-    (delta, total)
-}
-
-/// Read only the tail of a byte buffer and return (total_len, tail_string).
-///
-/// Avoids cloning the full buffer when only a trailing excerpt is needed
-/// (e.g. for the job-panel display).  `max_tail_chars` is in Unicode scalar
-/// values; we read at most `max_tail_chars * 4` bytes from the end to account
-/// for multi-byte UTF-8 sequences.
-fn tail_from_buffer(buffer: &Arc<Mutex<Vec<u8>>>, max_tail_chars: usize) -> (usize, String) {
-    let guard = buffer.lock().unwrap_or_else(|e| e.into_inner());
-    let total = guard.len();
-    // Over-estimate byte count (4 bytes per char worst case for UTF-8).
-    let mut tail_start = total.saturating_sub(max_tail_chars.saturating_mul(4));
-    // Snap forward to the next valid UTF-8 codepoint boundary so we don't
-    // pass a slice beginning with continuation bytes (0x80–0xBF) to
-    // from_utf8_lossy, which would emit a leading U+FFFD replacement char.
-    while tail_start < total && (guard[tail_start] & 0xC0) == 0x80 {
-        tail_start += 1;
-    }
-    let tail_str = String::from_utf8_lossy(&guard[tail_start..]).into_owned();
-    (total, tail_text(&tail_str, max_tail_chars))
-}
-
-fn tail_text(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
-    }
-    let tail = text
-        .chars()
-        .rev()
-        .take(max_chars)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<String>();
-    format!("...{tail}")
 }
 
 fn job_status_rank(status: &ShellStatus, stale: bool) -> u8 {
@@ -1792,15 +2257,50 @@ shell sandbox). Workarounds: (1) run the Docker build from a regular terminal ou
 TUI, or (2) disable BuildKit with DOCKER_BUILDKIT=0 (only works if your Dockerfiles do not \
 use RUN --mount directives).";
 
+/// Human-readable exit status for a shell result: the numeric code when the
+/// process returned one, or "terminated by signal" when it did not (rather
+/// than leaking `Some(127)` / `None` Debug output to the user).
+fn exit_code_label(code: Option<i64>) -> String {
+    match (code, exit_code_hex(code)) {
+        (Some(code), Some(hex)) => format!("exit code {code} ({hex})"),
+        (Some(code), None) => format!("exit code {code}"),
+        (None, _) => "terminated by signal".to_string(),
+    }
+}
+
+fn exit_code_hex(code: Option<i64>) -> Option<String> {
+    code.filter(|code| *code > i64::from(i32::MAX) && *code <= i64::from(u32::MAX))
+        .map(|code| format!("0x{code:08X}"))
+}
+const PYTHON_BUILD_DEPENDENCY_HINT: &str = "Python build dependency missing: setuptools is not \
+available in the active environment. Install the declared build requirements first, for example \
+`python -m pip install -U pip setuptools wheel build`, then rerun the build command.";
+
 fn attach_cargo_failure_summary(
     metadata: &mut serde_json::Value,
     command: &str,
     result: &ShellResult,
 ) {
-    if let Some(summary) =
-        summarize_cargo_failure(command, &result.stdout, &result.stderr, result.exit_code)
-    {
+    if let Some(summary) = summarize_cargo_failure(
+        command,
+        &result.stdout,
+        &result.stderr,
+        result.exit_code.and_then(|code| i32::try_from(code).ok()),
+    ) {
         metadata["cargo_failure_summary"] = summary.to_metadata_value();
+    }
+}
+
+fn attach_python_build_dependency_hint(
+    metadata: &mut serde_json::Value,
+    hint: Option<&'static str>,
+) {
+    if let Some(hint) = hint {
+        metadata["python_build_dependency_hint"] = json!({
+            "kind": "missing_setuptools",
+            "hint": hint,
+            "recommended_first_step": "python -m pip install -U pip setuptools wheel build",
+        });
     }
 }
 
@@ -1817,6 +2317,58 @@ pub(crate) fn looks_like_macos_provenance_failure(result: &ShellResult) -> bool 
 fn macos_provenance_hint(result: &ShellResult) -> Option<&'static str> {
     if looks_like_macos_provenance_failure(result) {
         Some(MACOS_PROVENANCE_HINT)
+    } else {
+        None
+    }
+}
+
+fn python_build_dependency_hint(command: &str, result: &ShellResult) -> Option<&'static str> {
+    if matches!(result.status, ShellStatus::Completed) && result.exit_code == Some(0) {
+        return None;
+    }
+
+    let command = command.to_ascii_lowercase();
+    let combined = format!("{}\n{}", result.stdout, result.stderr).to_ascii_lowercase();
+    let mentions_missing_setuptools = [
+        "no module named 'setuptools'",
+        "no module named \"setuptools\"",
+        "setuptools is not available",
+        "cannot import 'setuptools",
+        "cannot import \"setuptools",
+        "missing dependencies",
+    ]
+    .iter()
+    .any(|needle| combined.contains(needle))
+        && combined.contains("setuptools");
+    if !mentions_missing_setuptools {
+        return None;
+    }
+
+    let pythonish_command = [
+        "python",
+        "pip",
+        "pytest",
+        "tox",
+        "nox",
+        "cython",
+        "setup.py",
+        "build_ext",
+    ]
+    .iter()
+    .any(|needle| command.contains(needle));
+    let pythonish_output = [
+        "setup.py",
+        "pyproject.toml",
+        "build_meta",
+        "build_ext",
+        "pep 517",
+        "cython",
+    ]
+    .iter()
+    .any(|needle| combined.contains(needle));
+
+    if pythonish_command || pythonish_output {
+        Some(PYTHON_BUILD_DEPENDENCY_HINT)
     } else {
         None
     }
@@ -1915,6 +2467,52 @@ fn shell_network_restricted_hint<'a>(
     }
 }
 
+fn shell_job_owner_from_context(context: &ToolContext) -> Option<ShellJobOwner> {
+    let agent_id = context
+        .owner_agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let agent_name = context
+        .owner_agent_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(agent_id);
+    Some(ShellJobOwner {
+        agent_id: agent_id.to_string(),
+        agent_name: agent_name.to_string(),
+    })
+}
+
+fn shell_work_lifecycle_from_context(context: &ToolContext) -> Option<ShellWorkLifecycle> {
+    context
+        .runtime
+        .work
+        .as_ref()
+        .map(|work| ShellWorkLifecycle {
+            work: work.clone(),
+            session_id: context.state_namespace.clone(),
+        })
+}
+
+fn lifecycle_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX)
+}
+
+fn attach_shell_owner_metadata(metadata: &mut serde_json::Value, context: &ToolContext) {
+    let Some(owner) = shell_job_owner_from_context(context) else {
+        return;
+    };
+    metadata["owner_agent_id"] = json!(owner.agent_id);
+    metadata["owner_agent_name"] = json!(owner.agent_name);
+}
+
 fn exec_shell_input_is_parallel_readonly(input: &serde_json::Value) -> bool {
     let Some(command) = input.get("command").and_then(serde_json::Value::as_str) else {
         return false;
@@ -1948,9 +2546,12 @@ fn exec_shell_input_starts_detached(input: &serde_json::Value) -> bool {
             || input.get("tty").and_then(serde_json::Value::as_bool) == Some(true))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_foreground_via_background(
     context: &ToolContext,
     command: &str,
+    heavy_permit: Option<HeavyCommandPermit>,
+    working_dir: Option<String>,
     timeout_ms: u64,
     stdin_data: Option<&str>,
     tty: bool,
@@ -1964,20 +2565,29 @@ async fn execute_foreground_via_background(
             .lock()
             .map_err(|_| anyhow!("shell manager lock poisoned"))?;
         manager.clear_foreground_background_request();
-        manager.execute_with_options_env(
+        manager.execute_with_options_env_for_owner_and_work(
             command,
-            None,
+            working_dir.as_deref(),
             timeout_ms,
             true,
             stdin_data,
             tty,
             policy_override,
             extra_env,
+            shell_job_owner_from_context(context),
+            shell_work_lifecycle_from_context(context),
         )?
     };
     let task_id = spawned
         .task_id
         .ok_or_else(|| anyhow!("foreground shell did not return a process id"))?;
+    if let Some(permit) = heavy_permit {
+        let mut manager = context
+            .shell_manager
+            .lock()
+            .map_err(|_| anyhow!("shell manager lock poisoned"))?;
+        manager.attach_heavy_permit(&task_id, permit)?;
+    }
 
     if stdin_data.is_some() {
         let mut manager = context
@@ -2030,26 +2640,59 @@ async fn execute_foreground_via_background(
     }
 }
 
-/// Tool for executing shell commands.
-pub struct ExecShellTool;
+/// Unified shell tool (#4625).
+///
+/// The model sees one tool: `Bash` with an `action` parameter
+/// (run | wait | interact | cancel). Legacy names (`exec_shell`,
+/// `exec_shell_wait`, etc.) stay registered as hidden compat aliases
+/// that force the action so saved transcripts replay correctly.
+pub struct BashTool {
+    name: &'static str,
+    forced_action: Option<&'static str>,
+}
+
+impl BashTool {
+    pub const fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            forced_action: None,
+        }
+    }
+
+    pub const fn alias(name: &'static str, action: &'static str) -> Self {
+        Self {
+            name,
+            forced_action: Some(action),
+        }
+    }
+}
 
 #[async_trait]
-impl ToolSpec for ExecShellTool {
+impl ToolSpec for BashTool {
     fn name(&self) -> &'static str {
-        "exec_shell"
+        self.name
+    }
+
+    fn model_visible(&self) -> bool {
+        self.name == "Bash"
     }
 
     fn description(&self) -> &'static str {
-        "Execute a shell command in the workspace directory. Foreground mode is for bounded commands; use background=true or task_shell_start for work expected to take >5 seconds, then poll/wait."
+        "Execute a shell command in the workspace. Action \"run\" (default) executes a command; \"wait\" polls a background task; \"interact\" sends stdin to a background task; \"cancel\" kills a background task. Foreground mode is for bounded commands; use background=true for work expected to take >5 seconds."
     }
 
     fn input_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["run", "wait", "interact", "cancel"],
+                    "description": "Action to perform (default: run)"
+                },
                 "command": {
                     "type": "string",
-                    "description": "The shell command to execute"
+                    "description": "The shell command to execute (action=run)"
                 },
                 "timeout_ms": {
                     "type": "integer",
@@ -2057,7 +2700,7 @@ impl ToolSpec for ExecShellTool {
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "Run in background and return task_id (default: false). Prefer task_shell_start or background=true for commands expected to take >5 seconds, including builds, test suites, servers, CI polling, sleep, or other long-running work; poll with exec_shell_wait or task_shell_wait."
+                    "description": "Run in background and return task_id (default: false). Prefer this for commands expected to take >5 seconds."
                 },
                 "interactive": {
                     "type": "boolean",
@@ -2065,7 +2708,7 @@ impl ToolSpec for ExecShellTool {
                 },
                 "stdin": {
                     "type": "string",
-                    "description": "Optional stdin data to send before waiting (non-interactive only)"
+                    "description": "Stdin data to send (action=run: before waiting; action=interact: to the background task)"
                 },
                 "cwd": {
                     "type": "string",
@@ -2077,10 +2720,25 @@ impl ToolSpec for ExecShellTool {
                 },
                 "combined_output": {
                     "type": "boolean",
-                    "description": "Capture stdout and stderr as one chronological PTY stream (default false). In foreground mode, waits for completion; in background mode, implies tty."
+                    "description": "Capture stdout and stderr as one chronological PTY stream (default false)"
+                },
+                "task_id": {
+                    "type": "string",
+                    "description": "Task ID for action=wait/interact/cancel"
+                },
+                "wait": {
+                    "type": "boolean",
+                    "description": "Block until task completes (action=wait, default: false)"
+                },
+                "close_stdin": {
+                    "type": "boolean",
+                    "description": "Close stdin after sending (action=interact)"
+                },
+                "all": {
+                    "type": "boolean",
+                    "description": "Cancel all running background tasks (action=cancel)"
                 }
-            },
-            "required": ["command"]
+            }
         })
     }
 
@@ -2121,7 +2779,32 @@ impl ToolSpec for ExecShellTool {
         input: serde_json::Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
+        let action = self.forced_action.unwrap_or_else(|| {
+            input
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("run")
+        });
+        match action {
+            "wait" => return self.execute_wait(&input, context).await,
+            "interact" => return self.execute_interact(&input, context).await,
+            "cancel" => return self.execute_cancel(&input, context).await,
+            _ => {}
+        }
         let command = required_str(&input, "command")?;
+        match context.shell_policy {
+            ShellPolicy::None => {
+                return Ok(ToolResult::error(
+                    "Shell tools are disabled by the active permission profile.",
+                ));
+            }
+            ShellPolicy::ReadOnly if !exec_shell_input_is_parallel_readonly(&input) => {
+                return Ok(ToolResult::error(
+                    "Shell command blocked by read-only shell policy. Use a non-mutating, non-background inspection command, or switch to Act mode (`/mode act`) for write-capable shell work.",
+                ));
+            }
+            ShellPolicy::ReadOnly | ShellPolicy::Full => {}
+        }
         let timeout_ms = optional_u64(&input, "timeout_ms", 120_000).min(600_000);
         let background = optional_bool(&input, "background", false);
         let interactive = optional_bool(&input, "interactive", false);
@@ -2186,7 +2869,7 @@ impl ToolSpec for ExecShellTool {
                     };
                     return Ok(ToolResult {
                         content: format!(
-                            "BLOCKED: This command was blocked for safety reasons.\n\nReasons: {reasons}{suggestions}"
+                            "BLOCKED: This command was blocked for safety reasons.\n\nReasons: {reasons}{suggestions}\n\nNote: allow_shell=true exposes shell tools, but it does not disable built-in shell safety validation."
                         ),
                         success: false,
                         metadata: Some(json!({
@@ -2214,7 +2897,10 @@ impl ToolSpec for ExecShellTool {
                 let resolved = context.resolve_path(dir)?;
                 Some(resolved.to_string_lossy().to_string())
             }
-            None => None,
+            // Default to the tool context's workspace (which reflects the
+            // child agent's worktree when `worktree: true` was used), not the
+            // shared ShellManager's parent-workspace default_workspace.
+            None => Some(context.workspace.display().to_string()),
         };
 
         // #456 — collect env from any configured `shell_env` hooks. Runs
@@ -2229,6 +2915,18 @@ impl ToolSpec for ExecShellTool {
         } else {
             std::collections::HashMap::new()
         };
+
+        let command_expense = infer_command_expense(command);
+        let heavy_permit = acquire_heavy_command_permit(command, context.cancel_token.as_ref())
+            .await
+            .map_err(|error| ToolError::execution_failed(error.to_string()))?;
+        let admission_wait_ms = heavy_permit
+            .as_ref()
+            .map(|permit| u64::try_from(permit.queued_for().as_millis()).unwrap_or(u64::MAX));
+        let admission_limit = heavy_permit.as_ref().map(HeavyCommandPermit::limit);
+        let admission_memory = heavy_permit
+            .as_ref()
+            .map(HeavyCommandPermit::memory_pressure);
 
         // Route through external sandbox backend when configured.
         if let Some(backend) = &context.sandbox_backend {
@@ -2262,7 +2960,7 @@ impl ToolSpec for ExecShellTool {
                         } else {
                             ShellStatus::Failed
                         },
-                        exit_code: Some(output.exit_code),
+                        exit_code: Some(i64::from(output.exit_code)),
                         stdout,
                         stderr,
                         duration_ms: u64::try_from(started.elapsed().as_millis())
@@ -2291,16 +2989,21 @@ impl ToolSpec for ExecShellTool {
             } else {
                 stdout_summary.clone()
             };
-            let output = if result.stdout.is_empty() && result.stderr.is_empty() {
+            let python_dependency_hint = python_build_dependency_hint(command, &result);
+            let mut output = if result.stdout.is_empty() && result.stderr.is_empty() {
                 "(no output)".to_string()
             } else if result.stderr.is_empty() {
                 result.stdout.clone()
             } else {
                 format!("{}\n\nSTDERR:\n{}", result.stdout, result.stderr)
             };
+            if let Some(hint) = python_dependency_hint {
+                output = format!("{hint}\n\n{output}");
+            }
 
             let mut metadata = json!({
                 "exit_code": result.exit_code,
+                "exit_code_hex": exit_code_hex(result.exit_code),
                 "status": format!("{:?}", result.status),
                 "duration_ms": result.duration_ms,
                 "sandboxed": true,
@@ -2320,8 +3023,16 @@ impl ToolSpec for ExecShellTool {
                 "interactive": false,
                 "canceled": false,
                 "sandbox_backend": "opensandbox",
+                "expense_class": match command_expense {
+                    CommandExpense::Heavy => "heavy",
+                    CommandExpense::Normal => "normal",
+                },
+                "resource_admission_wait_ms": admission_wait_ms,
+                "resource_admission_limit": admission_limit,
             });
+            attach_shell_owner_metadata(&mut metadata, context);
             attach_cargo_failure_summary(&mut metadata, command, &result);
+            attach_python_build_dependency_hint(&mut metadata, python_dependency_hint);
 
             return Ok(ToolResult {
                 content: output,
@@ -2330,24 +3041,48 @@ impl ToolSpec for ExecShellTool {
             });
         }
 
+        let mut lifecycle_warning = None;
         let result = if interactive {
             let mut manager = context
                 .shell_manager
                 .lock()
                 .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
-            manager.execute_interactive_with_policy_env(
+            let work_lifecycle = shell_work_lifecycle_from_context(context);
+            let task_id = format!("shell_{}", &Uuid::new_v4().to_string()[..8]);
+            let mut spawn_guard =
+                ShellSpawnIntentGuard::new(work_lifecycle.clone(), &task_id, command)
+                    .map_err(|err| ToolError::execution_failed(err.to_string()))?;
+            let result = manager.execute_interactive_with_policy_env(
                 command,
                 working_dir.as_deref(),
                 timeout_ms,
                 policy_override,
                 extra_env,
-            )
+            );
+            match result {
+                Ok(result) => {
+                    // The process result is authoritative once execution has
+                    // completed. Disarm before observing it so a graph-write
+                    // failure cannot relabel a successful command as Failed.
+                    spawn_guard.disarm();
+                    if let Some(lifecycle) = work_lifecycle.as_ref() {
+                        let raw_bytes = result.stdout_len.saturating_add(result.stderr_len);
+                        if let Err(err) = lifecycle.observe(&task_id, &result.status, 1, raw_bytes)
+                        {
+                            tracing::warn!(shell_id = %task_id, error = %err, "interactive shell completed but Work lifecycle reconciliation failed");
+                            lifecycle_warning = Some(err.to_string());
+                        }
+                    }
+                    Ok(result)
+                }
+                Err(err) => Err(err),
+            }
         } else if background {
             let mut manager = context
                 .shell_manager
                 .lock()
                 .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
-            manager.execute_with_options_env(
+            let result = manager.execute_with_options_env_for_owner_and_work(
                 command,
                 working_dir.as_deref(),
                 timeout_ms,
@@ -2356,11 +3091,23 @@ impl ToolSpec for ExecShellTool {
                 tty,
                 policy_override,
                 extra_env,
-            )
+                shell_job_owner_from_context(context),
+                shell_work_lifecycle_from_context(context),
+            );
+            if let (Ok(result), Some(permit)) = (&result, heavy_permit)
+                && let Some(task_id) = result.task_id.as_deref()
+            {
+                manager
+                    .attach_heavy_permit(task_id, permit)
+                    .map_err(|error| ToolError::execution_failed(error.to_string()))?;
+            }
+            result
         } else {
             execute_foreground_via_background(
                 context,
                 command,
+                heavy_permit,
+                working_dir,
                 timeout_ms,
                 stdin_data.as_deref(),
                 combined_output,
@@ -2399,6 +3146,7 @@ impl ToolSpec for ExecShellTool {
                 let network_restricted_hint =
                     shell_network_restricted_hint(context, command, &result).map(str::to_string);
                 let provenance_hint = macos_provenance_hint(&result);
+                let python_dependency_hint = python_build_dependency_hint(command, &result);
                 let mut output = if interactive {
                     format!(
                         "Interactive command completed (exit code: {:?})",
@@ -2415,10 +3163,12 @@ impl ToolSpec for ExecShellTool {
                 } else if result.status == ShellStatus::Running {
                     if backgrounded_foreground {
                         format!(
-                            "Command moved to background: {task_id_str}\n\nPoll with exec_shell_wait or cancel with exec_shell_cancel."
+                            "Foreground shell wait moved to /jobs: {task_id_str}\n\nReturns immediately; completion is delivered to the model as an internal runtime event and shown in task/status state. Keep working; call exec_shell_wait only if you need early output, final output, or wait=true at a true dependency."
                         )
                     } else {
-                        format!("Background task started: {task_id_str}")
+                        format!(
+                            "Background task started: {task_id_str}\n\nReturns immediately; completion is delivered to the model as an internal runtime event and shown in task/status state. Keep working; call exec_shell_wait only if you need early output, final output, or wait=true at a true dependency."
+                        )
                     }
                 } else if result.status == ShellStatus::Killed && was_cancelled {
                     format!(
@@ -2432,8 +3182,10 @@ impl ToolSpec for ExecShellTool {
                     )
                 } else {
                     format!(
-                        "Command failed (exit code: {:?})\n\nSTDOUT:\n{}\n\nSTDERR:\n{}",
-                        result.exit_code, result.stdout, result.stderr
+                        "Command failed ({})\n\nSTDOUT:\n{}\n\nSTDERR:\n{}",
+                        exit_code_label(result.exit_code),
+                        result.stdout,
+                        result.stderr
                     )
                 };
                 if let Some(hint) = network_restricted_hint.as_deref() {
@@ -2442,9 +3194,13 @@ impl ToolSpec for ExecShellTool {
                 if let Some(hint) = provenance_hint {
                     output = format!("{hint}\n\n{output}");
                 }
+                if let Some(hint) = python_dependency_hint {
+                    output = format!("{hint}\n\n{output}");
+                }
 
                 let mut metadata = json!({
                     "exit_code": result.exit_code,
+                    "exit_code_hex": exit_code_hex(result.exit_code),
                     "status": format!("{:?}", result.status),
                     "duration_ms": result.duration_ms,
                     "sandboxed": result.sandboxed,
@@ -2457,6 +3213,19 @@ impl ToolSpec for ExecShellTool {
                     "stderr_truncated": result.stderr_truncated,
                     "stdout_omitted": result.stdout_omitted,
                     "stderr_omitted": result.stderr_omitted,
+                    "lifecycle_warning": lifecycle_warning,
+                    "expense_class": match command_expense {
+                        CommandExpense::Heavy => "heavy",
+                        CommandExpense::Normal => "normal",
+                    },
+                    "resource_admission_wait_ms": admission_wait_ms,
+                    "resource_admission_limit": admission_limit,
+                    "resource_admission_memory": match admission_memory {
+                        Some(MemoryPressure::Critical) => "critical",
+                        Some(MemoryPressure::Constrained) => "constrained",
+                        Some(MemoryPressure::Nominal) | None => "nominal",
+                        Some(MemoryPressure::Unknown) => "unknown",
+                    },
                     "summary": summary,
                     "stdout_summary": stdout_summary,
                     "stderr_summary": stderr_summary,
@@ -2479,6 +3248,11 @@ impl ToolSpec for ExecShellTool {
                     }),
                 });
                 metadata["backgrounded"] = json!(background || backgrounded_foreground);
+                if background || backgrounded_foreground {
+                    metadata["auto_resume_on_completion"] = json!(true);
+                    metadata["completion_surface"] = json!("runtime_event_and_task_status");
+                    metadata["background_policy"] = json!("nonblocking");
+                }
                 if result.status == ShellStatus::TimedOut && !background && !interactive {
                     metadata["foreground_timeout_recovery"] = json!({
                         "process_killed": true,
@@ -2500,7 +3274,9 @@ impl ToolSpec for ExecShellTool {
                 if provenance_hint.is_some() {
                     metadata["macos_provenance_restricted"] = json!(true);
                 }
+                attach_shell_owner_metadata(&mut metadata, context);
                 attach_cargo_failure_summary(&mut metadata, command, &result);
+                attach_python_build_dependency_hint(&mut metadata, python_dependency_hint);
 
                 Ok(ToolResult {
                     content: output,
@@ -2514,23 +3290,189 @@ impl ToolSpec for ExecShellTool {
     }
 }
 
-pub struct ShellWaitTool {
-    name: &'static str,
-}
+/// Maximum deliberate dependency-barrier wait accepted by `exec_shell_wait`.
+pub(crate) const EXEC_SHELL_WAIT_MAX_TIMEOUT_MS: u64 = 600_000;
 
-impl ShellWaitTool {
-    pub const fn new(name: &'static str) -> Self {
-        Self { name }
+impl BashTool {
+    async fn execute_wait(
+        &self,
+        input: &serde_json::Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let task_id = required_task_id(input)?;
+        let wait = optional_bool(input, "wait", false);
+        let timeout_ms = optional_u64(input, "timeout_ms", 30_000);
+
+        let (delta, wait_canceled) = if wait {
+            wait_for_shell_delta_cancellable(context, task_id, timeout_ms).await?
+        } else {
+            let mut manager = context
+                .shell_manager
+                .lock()
+                .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
+            let delta = manager
+                .get_output_delta(task_id, false, timeout_ms)
+                .map_err(|err| ToolError::execution_failed(err.to_string()))?;
+            (delta, false)
+        };
+
+        let status = delta.result.status.clone();
+        let mut result = build_shell_delta_tool_result(delta, context);
+        if wait_canceled {
+            if matches!(status, ShellStatus::Running) {
+                result.content = format!(
+                    "Wait canceled; background shell task {task_id} is still running.\n\n{}",
+                    result.content
+                );
+            }
+            if let Some(metadata) = result.metadata.as_mut()
+                && let Some(object) = metadata.as_object_mut()
+            {
+                object.insert("wait_canceled".to_string(), json!(true));
+            }
+        }
+
+        Ok(result)
     }
-}
 
-pub struct ShellInteractTool {
-    name: &'static str,
-}
+    async fn execute_interact(
+        &self,
+        input: &serde_json::Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let task_id = required_task_id(input)?;
+        let close_stdin = optional_bool(input, "close_stdin", false);
+        let timeout_ms = optional_u64(input, "timeout_ms", 1_000);
+        let interaction_input = input
+            .get("input")
+            .or_else(|| input.get("stdin"))
+            .or_else(|| input.get("data"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
 
-impl ShellInteractTool {
-    pub const fn new(name: &'static str) -> Self {
-        Self { name }
+        {
+            let mut manager = context
+                .shell_manager
+                .lock()
+                .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
+            if !interaction_input.is_empty() || close_stdin {
+                manager
+                    .write_stdin(task_id, interaction_input, close_stdin)
+                    .map_err(|err| ToolError::execution_failed(err.to_string()))?;
+            }
+        }
+
+        let mut elapsed = 0u64;
+        loop {
+            if context
+                .cancel_token
+                .as_ref()
+                .is_some_and(|token| token.is_cancelled())
+            {
+                let mut manager = context
+                    .shell_manager
+                    .lock()
+                    .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
+                let delta = manager
+                    .get_output_delta(task_id, false, 0)
+                    .map_err(|err| ToolError::execution_failed(err.to_string()))?;
+                let mut result = build_shell_delta_tool_result(delta, context);
+                if let Some(metadata) = result.metadata.as_mut()
+                    && let Some(object) = metadata.as_object_mut()
+                {
+                    object.insert("wait_canceled".to_string(), json!(true));
+                }
+                return Ok(result);
+            }
+
+            let delta = {
+                let mut manager = context
+                    .shell_manager
+                    .lock()
+                    .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
+                manager
+                    .get_output_delta(task_id, false, 0)
+                    .map_err(|err| ToolError::execution_failed(err.to_string()))?
+            };
+
+            if !delta.result.stdout.is_empty()
+                || !delta.result.stderr.is_empty()
+                || delta.result.status != ShellStatus::Running
+                || elapsed >= timeout_ms
+            {
+                return Ok(build_shell_delta_tool_result(delta, context));
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            elapsed = elapsed.saturating_add(50);
+        }
+    }
+
+    async fn execute_cancel(
+        &self,
+        input: &serde_json::Value,
+        context: &ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let cancel_all = optional_bool(input, "all", false);
+        let mut manager = context
+            .shell_manager
+            .lock()
+            .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
+
+        if cancel_all {
+            let results = manager
+                .kill_running()
+                .map_err(|err| ToolError::execution_failed(err.to_string()))?;
+            if results.is_empty() {
+                return Ok(ToolResult {
+                    content: "No running background commands.".to_string(),
+                    success: true,
+                    metadata: Some(json!({
+                        "status": "Noop",
+                        "canceled": 0,
+                        "task_ids": [],
+                    })),
+                });
+            }
+
+            let task_ids = results
+                .iter()
+                .filter_map(|result| result.task_id.clone())
+                .collect::<Vec<_>>();
+            return Ok(ToolResult {
+                content: format!(
+                    "Canceled {} background command{}: {}",
+                    task_ids.len(),
+                    if task_ids.len() == 1 { "" } else { "s" },
+                    task_ids.join(", ")
+                ),
+                success: true,
+                metadata: Some(json!({
+                    "status": "Killed",
+                    "canceled": task_ids.len(),
+                    "task_ids": task_ids,
+                })),
+            });
+        }
+
+        let task_id = required_task_id(input)?;
+        let result = manager
+            .kill(task_id)
+            .map_err(|err| ToolError::execution_failed(err.to_string()))?;
+        let task_id = result
+            .task_id
+            .clone()
+            .unwrap_or_else(|| task_id.to_string());
+        Ok(ToolResult {
+            content: format!("Canceled background command: {task_id}"),
+            success: true,
+            metadata: Some(json!({
+                "status": format!("{:?}", result.status),
+                "task_id": task_id,
+                "exit_code": result.exit_code,
+                "duration_ms": result.duration_ms,
+            })),
+        })
     }
 }
 
@@ -2547,6 +3489,7 @@ fn build_shell_delta_tool_result(delta: ShellDeltaResult, context: &ToolContext)
     let network_restricted_hint =
         shell_network_restricted_hint(context, &delta.command, &result).map(str::to_string);
     let provenance_hint = macos_provenance_hint(&result);
+    let python_dependency_hint = python_build_dependency_hint(&delta.command, &result);
     let stdout_summary = summarize_output(&result.stdout);
     let stderr_summary = summarize_output(&result.stderr);
     let summary = if !stderr_summary.is_empty() {
@@ -2559,7 +3502,9 @@ fn build_shell_delta_tool_result(delta: ShellDeltaResult, context: &ToolContext)
         match result.status {
             ShellStatus::Running => "Background task running (no new output).".to_string(),
             ShellStatus::Completed => "(no new output)".to_string(),
-            ShellStatus::Failed => format!("Command failed (exit code: {:?})", result.exit_code),
+            ShellStatus::Failed => {
+                format!("Command failed ({})", exit_code_label(result.exit_code))
+            }
             ShellStatus::TimedOut => "Command timed out (no new output).".to_string(),
             ShellStatus::Killed => "Command killed (no new output).".to_string(),
         }
@@ -2574,9 +3519,13 @@ fn build_shell_delta_tool_result(delta: ShellDeltaResult, context: &ToolContext)
     if let Some(hint) = provenance_hint {
         output = format!("{hint}\n\n{output}");
     }
+    if let Some(hint) = python_dependency_hint {
+        output = format!("{hint}\n\n{output}");
+    }
 
     let mut metadata = json!({
         "exit_code": result.exit_code,
+        "exit_code_hex": exit_code_hex(result.exit_code),
         "status": format!("{:?}", result.status),
         "duration_ms": result.duration_ms,
         "sandboxed": result.sandboxed,
@@ -2597,7 +3546,9 @@ fn build_shell_delta_tool_result(delta: ShellDeltaResult, context: &ToolContext)
         "command": delta.command,
         "stream_delta": true,
     });
+    attach_shell_owner_metadata(&mut metadata, context);
     attach_cargo_failure_summary(&mut metadata, &delta.command, &result);
+    attach_python_build_dependency_hint(&mut metadata, python_dependency_hint);
 
     let mut tool_result = ToolResult {
         content: output,
@@ -2625,7 +3576,7 @@ async fn wait_for_shell_delta_cancellable(
     task_id: &str,
     timeout_ms: u64,
 ) -> Result<(ShellDeltaResult, bool), ToolError> {
-    let timeout_ms = timeout_ms.clamp(1000, 600_000);
+    let timeout_ms = timeout_ms.clamp(1000, EXEC_SHELL_WAIT_MAX_TIMEOUT_MS);
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     let mut stdout_accum = String::new();
     let mut stderr_accum = String::new();
@@ -2730,330 +3681,6 @@ fn shell_delta_with_accumulated_output(
         result,
         stdout_total_len,
         stderr_total_len,
-    }
-}
-
-pub struct ShellCancelTool;
-
-#[async_trait]
-impl ToolSpec for ShellCancelTool {
-    fn name(&self) -> &'static str {
-        "exec_shell_cancel"
-    }
-
-    fn description(&self) -> &'static str {
-        "Cancel a running background shell task by task_id, or cancel all running background shell tasks with all=true."
-    }
-
-    fn input_schema(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "task_id": {
-                    "type": "string",
-                    "description": "Task ID returned by exec_shell or task_shell_start"
-                },
-                "id": {
-                    "type": "string",
-                    "description": "Alias for task_id"
-                },
-                "all": {
-                    "type": "boolean",
-                    "description": "Cancel all currently running background shell tasks"
-                }
-            }
-        })
-    }
-
-    fn capabilities(&self) -> Vec<ToolCapability> {
-        vec![ToolCapability::RequiresApproval]
-    }
-
-    fn approval_requirement(&self) -> ApprovalRequirement {
-        ApprovalRequirement::Required
-    }
-
-    async fn execute(
-        &self,
-        input: serde_json::Value,
-        context: &ToolContext,
-    ) -> Result<ToolResult, ToolError> {
-        let cancel_all = optional_bool(&input, "all", false);
-        let mut manager = context
-            .shell_manager
-            .lock()
-            .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
-
-        if cancel_all {
-            let results = manager
-                .kill_running()
-                .map_err(|err| ToolError::execution_failed(err.to_string()))?;
-            if results.is_empty() {
-                return Ok(ToolResult {
-                    content: "No running background commands.".to_string(),
-                    success: true,
-                    metadata: Some(json!({
-                        "status": "Noop",
-                        "canceled": 0,
-                        "task_ids": [],
-                    })),
-                });
-            }
-
-            let task_ids = results
-                .iter()
-                .filter_map(|result| result.task_id.clone())
-                .collect::<Vec<_>>();
-            return Ok(ToolResult {
-                content: format!(
-                    "Canceled {} background command{}: {}",
-                    task_ids.len(),
-                    if task_ids.len() == 1 { "" } else { "s" },
-                    task_ids.join(", ")
-                ),
-                success: true,
-                metadata: Some(json!({
-                    "status": "Killed",
-                    "canceled": task_ids.len(),
-                    "task_ids": task_ids,
-                })),
-            });
-        }
-
-        let task_id = required_task_id(&input)?;
-        let result = manager
-            .kill(task_id)
-            .map_err(|err| ToolError::execution_failed(err.to_string()))?;
-        let task_id = result
-            .task_id
-            .clone()
-            .unwrap_or_else(|| task_id.to_string());
-        Ok(ToolResult {
-            content: format!("Canceled background command: {task_id}"),
-            success: true,
-            metadata: Some(json!({
-                "status": format!("{:?}", result.status),
-                "task_id": task_id,
-                "exit_code": result.exit_code,
-                "duration_ms": result.duration_ms,
-            })),
-        })
-    }
-}
-
-#[async_trait]
-impl ToolSpec for ShellWaitTool {
-    fn name(&self) -> &'static str {
-        self.name
-    }
-
-    fn model_visible(&self) -> bool {
-        // `exec_wait` is a legacy alias; only `exec_shell_wait` is model-visible.
-        self.name == "exec_shell_wait"
-    }
-
-    fn description(&self) -> &'static str {
-        "Wait for a background shell task and return incremental output. Turn cancellation stops waiting but leaves the background task running."
-    }
-
-    fn input_schema(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "task_id": {
-                    "type": "string",
-                    "description": "Task ID returned by exec_shell"
-                },
-                "timeout_ms": {
-                    "type": "integer",
-                    "description": "Timeout in milliseconds (default: 30000, max: 600000). Use a higher value for long-running builds, CI watchers, and interactive commands that are expected to keep producing output."
-                },
-                "wait": {
-                    "type": "boolean",
-                    "description": "Wait for completion before returning (default: true)"
-                }
-            },
-            "required": ["task_id"]
-        })
-    }
-
-    fn capabilities(&self) -> Vec<ToolCapability> {
-        vec![ToolCapability::ReadOnly]
-    }
-
-    fn approval_requirement(&self) -> ApprovalRequirement {
-        ApprovalRequirement::Auto
-    }
-
-    async fn execute(
-        &self,
-        input: serde_json::Value,
-        context: &ToolContext,
-    ) -> Result<ToolResult, ToolError> {
-        let task_id = required_task_id(&input)?;
-        let wait = optional_bool(&input, "wait", true);
-        let timeout_ms = optional_u64(&input, "timeout_ms", 30_000);
-
-        let (delta, wait_canceled) = if wait {
-            wait_for_shell_delta_cancellable(context, task_id, timeout_ms).await?
-        } else {
-            let mut manager = context
-                .shell_manager
-                .lock()
-                .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
-            let delta = manager
-                .get_output_delta(task_id, false, timeout_ms)
-                .map_err(|err| ToolError::execution_failed(err.to_string()))?;
-            (delta, false)
-        };
-
-        let status = delta.result.status.clone();
-        let mut result = build_shell_delta_tool_result(delta, context);
-        if wait_canceled {
-            if matches!(status, ShellStatus::Running) {
-                result.content = format!(
-                    "Wait canceled; background shell task {task_id} is still running.\n\n{}",
-                    result.content
-                );
-            }
-            if let Some(metadata) = result.metadata.as_mut()
-                && let Some(object) = metadata.as_object_mut()
-            {
-                object.insert("wait_canceled".to_string(), json!(true));
-            }
-        }
-
-        Ok(result)
-    }
-}
-
-#[async_trait]
-impl ToolSpec for ShellInteractTool {
-    fn name(&self) -> &'static str {
-        self.name
-    }
-
-    fn model_visible(&self) -> bool {
-        // `exec_interact` is a legacy alias; only `exec_shell_interact` is model-visible.
-        self.name == "exec_shell_interact"
-    }
-
-    fn description(&self) -> &'static str {
-        "Send input to a background shell task and return incremental output."
-    }
-
-    fn input_schema(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "task_id": {
-                    "type": "string",
-                    "description": "Task ID returned by exec_shell"
-                },
-                "input": {
-                    "type": "string",
-                    "description": "Input to send to the task's stdin"
-                },
-                "stdin": {
-                    "type": "string",
-                    "description": "Alias for input"
-                },
-                "data": {
-                    "type": "string",
-                    "description": "Alias for input"
-                },
-                "timeout_ms": {
-                    "type": "integer",
-                    "description": "Wait for output after sending input (default: 1000)"
-                },
-                "close_stdin": {
-                    "type": "boolean",
-                    "description": "Close stdin after sending input"
-                }
-            },
-            "required": ["task_id"]
-        })
-    }
-
-    fn capabilities(&self) -> Vec<ToolCapability> {
-        vec![ToolCapability::ExecutesCode]
-    }
-
-    fn approval_requirement(&self) -> ApprovalRequirement {
-        ApprovalRequirement::Auto
-    }
-
-    async fn execute(
-        &self,
-        input: serde_json::Value,
-        context: &ToolContext,
-    ) -> Result<ToolResult, ToolError> {
-        let task_id = required_task_id(&input)?;
-        let close_stdin = optional_bool(&input, "close_stdin", false);
-        let timeout_ms = optional_u64(&input, "timeout_ms", 1_000);
-        let interaction_input = input
-            .get("input")
-            .or_else(|| input.get("stdin"))
-            .or_else(|| input.get("data"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-
-        {
-            let mut manager = context
-                .shell_manager
-                .lock()
-                .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
-            if !interaction_input.is_empty() || close_stdin {
-                manager
-                    .write_stdin(task_id, interaction_input, close_stdin)
-                    .map_err(|err| ToolError::execution_failed(err.to_string()))?;
-            }
-        }
-
-        let mut elapsed = 0u64;
-        loop {
-            if context
-                .cancel_token
-                .as_ref()
-                .is_some_and(|token| token.is_cancelled())
-            {
-                let mut manager = context
-                    .shell_manager
-                    .lock()
-                    .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
-                let delta = manager
-                    .get_output_delta(task_id, false, 0)
-                    .map_err(|err| ToolError::execution_failed(err.to_string()))?;
-                let mut result = build_shell_delta_tool_result(delta, context);
-                if let Some(metadata) = result.metadata.as_mut()
-                    && let Some(object) = metadata.as_object_mut()
-                {
-                    object.insert("wait_canceled".to_string(), json!(true));
-                }
-                return Ok(result);
-            }
-
-            let delta = {
-                let mut manager = context
-                    .shell_manager
-                    .lock()
-                    .map_err(|_| ToolError::execution_failed("shell manager lock poisoned"))?;
-                manager
-                    .get_output_delta(task_id, false, 0)
-                    .map_err(|err| ToolError::execution_failed(err.to_string()))?
-            };
-
-            if !delta.result.stdout.is_empty()
-                || !delta.result.stderr.is_empty()
-                || delta.result.status != ShellStatus::Running
-                || elapsed >= timeout_ms
-            {
-                return Ok(build_shell_delta_tool_result(delta, context));
-            }
-
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            elapsed = elapsed.saturating_add(50);
-        }
     }
 }
 

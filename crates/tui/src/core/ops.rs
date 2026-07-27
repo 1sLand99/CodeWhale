@@ -4,23 +4,98 @@
 //! allowing the UI to remain responsive while the engine processes requests.
 
 use crate::compaction::CompactionConfig;
+use crate::config::ApiProvider;
 use crate::models::{Message, SystemPrompt};
+use crate::route_runtime::ResolvedRuntimeRoute;
 use crate::tools::goal::GoalStatus;
 use crate::tui::app::AppMode;
 use crate::tui::approval::ApprovalMode;
+use codewhale_protocol::runtime::DynamicToolSpec;
 use std::path::PathBuf;
 
 /// Prefix used for tool-call ids created by local composer shell shortcuts.
 pub const USER_SHELL_TOOL_ID_PREFIX: &str = "user_shell_";
 
-/// Operations that can be submitted to the engine.
+/// Snapshot of session state for saving to disk.
+/// Returned by `Op::GetSessionSnapshot` via a oneshot channel.
 #[derive(Debug, Clone)]
+pub struct SessionSnapshot {
+    pub messages: Vec<Message>,
+    pub total_tokens: u64,
+    pub model: String,
+    /// Generic provider kind retained for serialized compatibility.
+    pub model_provider: String,
+    /// Exact non-secret configured provider key.
+    pub model_provider_id: Option<String>,
+    pub workspace: PathBuf,
+    pub system_prompt: Option<SystemPrompt>,
+    pub mode: String,
+}
+
+/// Provider request runtime state surfaced by `/provider`.
+/// Returned by `Op::GetProviderRuntimeStatus` via a oneshot channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderRuntimeStatus {
+    pub provider: ApiProvider,
+    pub request_concurrency_limit: Option<usize>,
+    pub active_provider_requests: usize,
+}
+
+/// Result of rebuilding the engine-owned MCP pool in process.
+pub type McpReloadResult = Result<crate::mcp::McpManagerSnapshot, String>;
+
+/// Origin of text being introduced as a user-role turn.
+///
+/// Chat providers force several runtime/control-plane signals through
+/// `role = "user"` for compatibility, so role alone is not authority.
+#[allow(dead_code)] // Some origins are reserved for ingestion sites landing after the first gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserInputProvenance {
+    /// Text typed or submitted through the active UI/API input boundary.
+    ExternalUser,
+    /// Runtime-generated continuation, diagnostic, or tool feedback.
+    Runtime,
+    /// Completion/event text from a child worker or sub-agent handoff.
+    SubAgentHandoff,
+    /// Text restored from a saved/imported transcript.
+    ImportedTranscript,
+    /// Text recalled from memory or another persisted source.
+    MemoryRecall,
+    /// Assistant-authored text that is shaped like a user response.
+    AssistantGenerated,
+}
+
+impl UserInputProvenance {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ExternalUser => "external_user",
+            Self::Runtime => "runtime",
+            Self::SubAgentHandoff => "subagent_handoff",
+            Self::ImportedTranscript => "imported_transcript",
+            Self::MemoryRecall => "memory_recall",
+            Self::AssistantGenerated => "assistant_generated",
+        }
+    }
+
+    pub fn can_authorize_work(self) -> bool {
+        matches!(self, Self::ExternalUser)
+    }
+}
+
+/// Operations that can be submitted to the engine.
+#[derive(Debug)]
 pub enum Op {
     /// Send a message to the AI
     SendMessage {
         content: String,
         mode: AppMode,
-        model: String,
+        /// Exact, structurally resolved route authority for this turn. The
+        /// engine activates its client before mutating turn state; injected
+        /// engines may use their already-supplied client with the same receipt.
+        route: Box<ResolvedRuntimeRoute>,
+        /// Compaction policy derived from the same provider route. Carrying it
+        /// atomically avoids a model/limit mismatch before `SendMessage`.
+        compaction: Box<CompactionConfig>,
         goal_objective: Option<String>,
         goal_token_budget: Option<u32>,
         goal_status: GoalStatus,
@@ -41,10 +116,29 @@ pub enum Op {
         /// Tool restriction from custom slash command frontmatter.
         /// `None` means the current turn may use the normal tool set.
         allowed_tools: Option<Vec<String>>,
+        /// Runtime-supplied tools available only for this turn.
+        dynamic_tools: Vec<DynamicToolSpec>,
         /// Hook executor for control-plane hooks.
         /// `ToolCallBefore` hooks may deny a tool call with exit code 2.
         hook_executor: Option<std::sync::Arc<crate::hooks::HookExecutor>>,
         verbosity: Option<String>,
+        /// Structural input origin. This gates whether the turn may inherit
+        /// YOLO/auto-approval authority; user-shaped text is not enough.
+        provenance: UserInputProvenance,
+    },
+
+    /// Re-check and dispatch an interactive goal continuation when this
+    /// operation reaches the front of the engine queue. Keeping this distinct
+    /// from `SendMessage` prevents a queued `/goal pause` or `/goal clear`
+    /// from being overwritten by a stale synthetic Active snapshot.
+    ContinueGoal {
+        /// Runtime-supplied tools remain available across the synthetic turn
+        /// that continues the same logical goal run.
+        dynamic_tools: Vec<DynamicToolSpec>,
+        /// Opaque identity for an engine-owned synthetic continuation. Direct
+        /// callers use `None`; the engine uses `Some` to coalesce one token
+        /// across capacity-waiting, enqueued, and running-adjacent states.
+        engine_schedule_id: Option<u64>,
     },
 
     /// Execute a user-submitted composer shell command (`! <command>`) without
@@ -53,9 +147,20 @@ pub enum Op {
     RunShellCommand {
         command: String,
         mode: AppMode,
+        allow_shell: bool,
         trust_mode: bool,
         auto_approve: bool,
         approval_mode: ApprovalMode,
+    },
+
+    /// Set the runtime goal status without dispatching a model turn. Used by
+    /// `/goal pause`, `/goal resume`, `/goal clear`, etc. so the engine's
+    /// `SharedGoalState` learns the new status immediately and a queued
+    /// continuation doesn't overwrite it back to Active.
+    SetGoalStatus {
+        status: GoalStatus,
+        /// When `true`, clear the objective entirely (`/goal clear`).
+        clear: bool,
     },
 
     /// Cancel the current request
@@ -74,22 +179,67 @@ pub enum Op {
     #[allow(dead_code)]
     SpawnSubAgent { prompt: String },
 
+    /// Describe the exact request the next turn would send, without
+    /// sending it (`/preview-request`, #1004).
+    ///
+    /// Handled by the engine because only the engine can rebuild the current
+    /// tool catalog, MCP state, mode, gates, permission posture, and resolved
+    /// route. Pure inspection: it adds no message, no turn, and no tool call.
+    PreviewOutboundRequest {
+        inputs: Box<crate::core::engine::preview::PreviewRequestInputs>,
+        /// Render the manifest as JSON instead of the human-readable table.
+        json: bool,
+        /// Explicit disclosure of the base prompt only; effective system text
+        /// remains protected behind hashes.
+        base_prompt_only: bool,
+    },
+
     /// List current sub-agents and their status
     ListSubAgents,
 
+    /// Cancel a running sub-agent by id or session name.
+    CancelSubAgent { agent_id: String },
+
     /// Change the operating mode
     #[allow(dead_code)]
-    ChangeMode { mode: AppMode },
+    ChangeMode {
+        mode: AppMode,
+        allow_shell: bool,
+        trust_mode: bool,
+        auto_approve: bool,
+        approval_mode: ApprovalMode,
+    },
 
     /// Update the model being used and refresh stable prompt context.
     #[allow(dead_code)]
-    SetModel { model: String, mode: AppMode },
+    SetModel {
+        model: String,
+        mode: AppMode,
+        route_limits: Option<codewhale_config::route::RouteLimits>,
+    },
 
     /// Update auto-compaction settings
     SetCompaction { config: CompactionConfig },
 
     /// Update the SSE idle timeout used for subsequent streamed turns.
     SetStreamChunkTimeout { timeout_secs: u64 },
+
+    /// Update sub-agent runtime controls for subsequent turns.
+    SetSubagentRuntimeConfig {
+        enabled: bool,
+        max_subagents: usize,
+        launch_concurrency: usize,
+        max_spawn_depth: u32,
+        api_timeout_secs: u64,
+        heartbeat_timeout_secs: u64,
+    },
+
+    /// Replace the engine's merged Fleet roster after the setup wizard saves a
+    /// project or personal profile. Subsequent turns can use the new role
+    /// immediately instead of requiring an application restart.
+    SetFleetRoster {
+        roster: std::sync::Arc<crate::fleet::roster::FleetRoster>,
+    },
 
     /// Sync engine session state (used for resume/load)
     SyncSession {
@@ -99,10 +249,36 @@ pub enum Op {
         system_prompt_override: bool,
         model: String,
         workspace: PathBuf,
+        mode: AppMode,
     },
 
-    /// Run context compaction immediately.
-    CompactContext,
+    /// Run context compaction on one exact, structurally resolved provider
+    /// route with policy derived from that same descriptor.
+    CompactContext {
+        route: Box<ResolvedRuntimeRoute>,
+        compaction: Box<CompactionConfig>,
+    },
+
+    /// Get a snapshot of the current session state (messages, tokens, etc.)
+    /// for saving to disk. Returns the result via the oneshot sender so
+    /// the caller doesn't have to compete with the SSE event stream.
+    GetSessionSnapshot {
+        tx: std::sync::Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<SessionSnapshot>>>>,
+    },
+
+    /// Get active provider request concurrency state for readiness surfaces.
+    GetProviderRuntimeStatus {
+        tx: std::sync::Arc<
+            std::sync::Mutex<Option<tokio::sync::oneshot::Sender<ProviderRuntimeStatus>>>,
+        >,
+    },
+
+    /// Force the engine-owned MCP config/catalog to reload and reconnect.
+    /// The returned snapshot is taken from that same live pool.
+    ReloadMcp {
+        config_path: PathBuf,
+        tx: std::sync::Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<McpReloadResult>>>>,
+    },
 
     /// Run agent-driven context purging.
     PurgeContext,

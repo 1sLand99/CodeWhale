@@ -5,8 +5,7 @@ use std::path::Path;
 
 use super::CommandResult;
 use crate::compaction::estimate_input_tokens_conservative;
-use crate::config::provider_capability;
-use crate::tui::app::App;
+use crate::tui::app::{App, AppMode};
 use crate::utils::{display_path, estimate_message_chars};
 
 /// Show a compact runtime status report for the current TUI session.
@@ -22,7 +21,11 @@ fn format_status(app: &App) -> String {
     let _ = writeln!(out, "===================");
     let _ = writeln!(out);
     push_row(&mut out, "Version:", env!("CARGO_PKG_VERSION"));
-    push_row(&mut out, "Provider:", app.api_provider.as_str());
+    push_row(
+        &mut out,
+        "Provider:",
+        app.provider_identity_for_persistence(),
+    );
     push_row(
         &mut out,
         "Model:",
@@ -35,6 +38,7 @@ fn format_status(app: &App) -> String {
     push_row(&mut out, "Directory:", &display_path(&app.workspace));
     push_row(&mut out, "Mode:", app.mode.label());
     push_row(&mut out, "Permissions:", &permission_summary(app));
+    push_row(&mut out, "Safety:", safety_summary(app));
     push_row(&mut out, "Project docs:", &project_docs(&app.workspace));
     push_row(
         &mut out,
@@ -138,8 +142,18 @@ fn permission_summary(app: &App) -> String {
     };
     format!(
         "{trust}, approvals {}, {shell}",
-        app.approval_mode.label().to_ascii_lowercase()
+        app.approval_mode
+            .permission_chip_label()
+            .to_ascii_lowercase()
     )
+}
+
+fn safety_summary(app: &App) -> &'static str {
+    match app.mode {
+        AppMode::Plan => "sandbox read-only, network off",
+        AppMode::Agent | AppMode::Auto | AppMode::Operate => "sandbox workspace-write, network on",
+        AppMode::Yolo => "sandbox disabled, network unrestricted",
+    }
 }
 
 fn project_docs(workspace: &Path) -> String {
@@ -166,7 +180,11 @@ fn footer_items(app: &App) -> String {
 }
 
 fn context_usage(app: &App) -> (usize, u32, f64) {
-    let max = provider_capability(app.api_provider, &app.model).context_window;
+    let max = crate::route_budget::route_context_window_tokens(
+        app.api_provider,
+        app.effective_model_for_budget(),
+        app.active_route_limits,
+    );
     let estimated =
         estimate_input_tokens_conservative(&app.api_messages, app.system_prompt.as_ref());
     let total_chars = estimate_message_chars(&app.api_messages);
@@ -200,30 +218,13 @@ mod tests {
     use super::*;
     use crate::config::{ApiProvider, Config};
     use crate::models::{ContentBlock, Message};
-    use crate::tui::app::TuiOptions;
+    use crate::tui::app::{AppMode, TuiOptions};
     use crate::tui::history::HistoryCell;
 
     fn create_test_app(workspace: PathBuf) -> App {
         let options = TuiOptions {
-            model: "deepseek-v4-pro".to_string(),
-            workspace,
-            config_path: None,
-            config_profile: None,
-            allow_shell: false,
-            use_alt_screen: true,
-            use_mouse_capture: false,
-            use_bracketed_paste: true,
-            max_subagents: 1,
             skills_dir: PathBuf::from("/tmp/test-skills"),
-            memory_path: PathBuf::from("memory.md"),
-            notes_path: PathBuf::from("notes.txt"),
-            mcp_config_path: PathBuf::from("mcp.json"),
-            use_memory: false,
-            start_in_agent_mode: false,
-            skip_onboarding: true,
-            yolo: false,
-            resume_session_id: None,
-            initial_input: None,
+            ..crate::test_support::test_tui_options(workspace)
         };
         let mut app = App::new(options, &Config::default());
         app.api_provider = ApiProvider::Deepseek;
@@ -268,6 +269,41 @@ mod tests {
         assert!(msg.contains("Cache hit/miss:"));
         assert!(msg.contains("70 hit / 30 miss"));
         assert!(msg.contains("Use /statusline to configure footer items."));
+    }
+
+    #[test]
+    fn status_report_keeps_exact_named_custom_provider() {
+        let tmpdir = TempDir::new().expect("temp dir");
+        let mut app = create_test_app(tmpdir.path().to_path_buf());
+        app.set_provider_identity(ApiProvider::Custom, "lm-studio");
+
+        let msg = status(&mut app).message.expect("status message");
+
+        let provider_row = msg
+            .lines()
+            .find(|line| line.trim_start().starts_with("Provider:"))
+            .expect("provider row");
+        assert_eq!(provider_row.split_whitespace().last(), Some("lm-studio"));
+        assert_ne!(provider_row.split_whitespace().last(), Some("custom"));
+    }
+
+    #[test]
+    fn status_report_surfaces_effective_safety_policy() {
+        let tmpdir = TempDir::new().expect("temp dir");
+        let mut app = create_test_app(tmpdir.path().to_path_buf());
+
+        app.mode = AppMode::Agent;
+        let agent = format_status(&app);
+        assert!(agent.contains("Safety:"));
+        assert!(agent.contains("sandbox workspace-write, network on"));
+
+        app.mode = AppMode::Plan;
+        let plan = format_status(&app);
+        assert!(plan.contains("sandbox read-only, network off"));
+
+        app.mode = AppMode::Yolo;
+        let yolo = format_status(&app);
+        assert!(yolo.contains("sandbox disabled, network unrestricted"));
     }
 
     #[test]

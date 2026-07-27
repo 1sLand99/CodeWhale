@@ -1,99 +1,65 @@
 import Link from "next/link";
 import type { Locale } from "@/lib/i18n/config";
-import { Seal } from "./seal";
-import { Whale } from "./whale";
+import { getChrome } from "@/lib/i18n/dictionaries";
 import { LocaleSwitcher } from "./locale-switcher";
 import { MobileMenu } from "./mobile-menu";
+import { NavLinks } from "./nav-links";
+import { ThemeToggle } from "./theme-toggle";
+import { Whale } from "./whale";
 
 const EN_LINKS = [
-  { href: "/install", label: "Install", cn: "安装" },
-  { href: "/docs", label: "Docs", cn: "文档" },
-  { href: "/feed", label: "Activity", cn: "动态" },
-  { href: "/roadmap", label: "Roadmap", cn: "路线" },
-  { href: "/faq", label: "FAQ", cn: "问答" },
-  { href: "/contribute", label: "Contribute", cn: "参与" },
+  { href: "/en/docs", label: "Docs" },
+  { href: "/en/install", label: "Install" },
+  { href: "/en/community", label: "Community" },
+  { href: "/en/contribute", label: "Contribute" },
 ];
 
 const ZH_LINKS = [
-  { href: "/zh/install", label: "安装", cn: "" },
-  { href: "/zh/docs", label: "文档", cn: "" },
-  { href: "/zh/feed", label: "动态", cn: "" },
-  { href: "/zh/roadmap", label: "路线图", cn: "" },
-  { href: "/zh/faq", label: "常见问题", cn: "" },
-  { href: "/zh/contribute", label: "参与贡献", cn: "" },
+  { href: "/zh/docs", label: "文档" },
+  { href: "/zh/install", label: "安装" },
+  { href: "/zh/community", label: "社区" },
+  { href: "/zh/contribute", label: "贡献" },
 ];
 
 export function Nav({ locale = "en" }: { locale?: Locale }) {
   const isZh = locale === "zh";
-  const links = isZh ? ZH_LINKS : EN_LINKS;
+  // en/zh stay inline (copy-contract tests read them from this file); every
+  // other routed locale resolves its chrome from the dictionary layer with
+  // English as the fallback.
+  const chrome = getChrome(locale);
+  const links = isZh
+    ? ZH_LINKS
+    : locale === "en"
+      ? EN_LINKS
+      : [
+          { href: `/${locale}/docs`, label: chrome.navDocs },
+          { href: `/${locale}/install`, label: chrome.navInstall },
+          { href: `/${locale}/community`, label: chrome.navCommunity },
+          { href: `/${locale}/contribute`, label: chrome.navContribute },
+        ];
+  const homeHref = `/${locale}`;
+  const installCta = isZh ? "安装 →" : chrome.installCta;
 
   return (
-    <header className="hairline-b bg-paper/85 backdrop-blur sticky top-0 z-30">
-      {/* date / build strip */}
-      <div className="hairline-b">
-        <div className="mx-auto max-w-[1400px] px-6 py-1.5 flex items-center justify-between text-[0.66rem] font-mono uppercase tracking-[0.18em] text-ink-mute">
-          <div className="flex items-center gap-4">
-            <span>{isZh ? `第 ${new Date().toISOString().slice(0, 10)} 期` : `Edition ${new Date().toISOString().slice(0, 10)}`}</span>
-            <span className="hidden sm:inline">· {isZh ? new Date().toLocaleDateString("zh-CN", { weekday: "long", month: "long", day: "numeric" }) : new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}</span>
-          </div>
-          <div className="flex items-center gap-4">
-            <span className="hidden md:inline">codewhale.net</span>
-            <span className="inline-flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 bg-jade rounded-full inline-block animate-pulse" />
-              <span>{isZh ? "API · 在线" : "API · Online"}</span>
-            </span>
-          </div>
-        </div>
-      </div>
-
-      {/* main nav */}
-      <div className="mx-auto max-w-[1400px] px-4 sm:px-6 py-3 flex items-center justify-between gap-3 sm:gap-6">
-        <Link href={isZh ? "/zh" : "/"} className="flex items-center gap-3 group min-w-0">
-          <Seal char="深" size="md" />
-          <div className="leading-tight min-w-0">
-            <div className="font-display text-[1.2rem] sm:text-[1.35rem] font-semibold tracking-crisp flex items-center gap-2 truncate">
-              CodeWhale
-              <Whale size={20} className="text-indigo hidden sm:inline-block" />
-            </div>
-            <div className="font-cjk text-[0.65rem] sm:text-[0.7rem] text-ink-mute tracking-widest truncate">
-              {isZh ? "开源模型 · 终端智能体" : "open models · terminal agent"}
-            </div>
-          </div>
+    <header className="site-nav">
+      <div className="site-nav-inner">
+        <Link href={homeHref} className="site-wordmark" aria-label="Codewhale home">
+          <Whale size={31} className="text-current" />
+          <span>Codewhale</span>
         </Link>
 
-        <nav className="hidden md:flex items-center gap-7">
-          {links.map((l) => (
-            <Link key={l.href} href={l.href} className="nav-link group">
-              <span>{l.label}</span>
-              {!isZh && "cn" in l && l.cn && (
-                <span className="font-cjk text-[0.66rem] ml-1.5 text-ink-mute">{l.cn}</span>
-              )}
-            </Link>
-          ))}
-        </nav>
+        <NavLinks links={links} isZh={isZh} />
 
-        <div className="flex items-center gap-2 sm:gap-3">
+        <div className="site-nav-actions">
+          <ThemeToggle isZh={isZh} />
           <LocaleSwitcher current={locale} />
-          <Link
-            href="https://github.com/Hmbown/CodeWhale"
-            className="hidden sm:inline-flex items-center gap-2 px-3 py-1.5 hairline-t hairline-b hairline-l hairline-r font-mono text-[0.7rem] uppercase tracking-wider hover:bg-paper-deep transition-colors"
-          >
-            <span>★ GitHub</span>
-          </Link>
-          <Link
-            href={isZh ? "/zh/install" : "/install"}
-            className="hidden md:inline-flex items-center gap-2 px-3 py-1.5 bg-indigo text-paper font-mono text-[0.72rem] uppercase tracking-wider hover:bg-indigo-deep transition-colors"
-          >
-            {isZh ? "安装 →" : "Install →"}
+          <Link href="https://github.com/Hmbown/CodeWhale" className="site-github-link">
+            GitHub
           </Link>
           <MobileMenu
-            installHref={isZh ? "/zh/install" : "/install"}
-            installLabel={isZh ? "安装 →" : "Install →"}
-            links={links.map((l) => ({
-              href: l.href,
-              label: l.label,
-              cn: !isZh && "cn" in l ? l.cn : undefined,
-            }))}
+            installHref={`/${locale}/install`}
+            installLabel={installCta}
+            links={links}
           />
         </div>
       </div>

@@ -4,7 +4,7 @@ use crate::skills::{SkillRegistry, default_skills_dir};
 use crate::tui::app::{App, AppAction};
 use crate::tui::history::HistoryCell;
 
-use super::CommandResult;
+use crate::commands::CommandResult;
 
 fn warnings_suffix(registry: &SkillRegistry) -> String {
     if registry.warnings().is_empty() {
@@ -14,20 +14,20 @@ fn warnings_suffix(registry: &SkillRegistry) -> String {
     format!("\n\nWarnings:\n- {}", registry.warnings().join("\n- "))
 }
 
-pub fn review(app: &mut App, args: Option<&str>) -> CommandResult {
+fn review(app: &mut App, args: Option<&str>) -> CommandResult {
     let target = args.unwrap_or("").trim();
     if target.is_empty() {
         return CommandResult::error("Usage: /review <target>");
     }
 
     let skills_dir = app.skills_dir.clone();
-    let registry = SkillRegistry::discover(&skills_dir);
+    let registry = SkillRegistry::discover(&skills_dir).into_enabled();
     let mut warnings = warnings_suffix(&registry);
     let mut skill = registry.get("review").cloned();
 
     let global_dir = default_skills_dir();
     if skill.is_none() && global_dir != skills_dir {
-        let registry = SkillRegistry::discover(&global_dir);
+        let registry = SkillRegistry::discover(&global_dir).into_enabled();
         if warnings.is_empty() {
             warnings = warnings_suffix(&registry);
         } else if !registry.warnings().is_empty() {
@@ -58,8 +58,32 @@ pub fn review(app: &mut App, args: Option<&str>) -> CommandResult {
         content: format!("Activated skill: {}\n\n{}", skill.name, skill.description),
     });
     app.active_skill = Some(instruction);
+    app.active_skill_provenance = None;
 
     CommandResult::action(AppAction::SendMessage(target.to_string()))
+}
+
+pub(in crate::commands) const COMMAND_INFO: crate::commands::traits::CommandInfo =
+    crate::commands::traits::CommandInfo {
+        name: "review",
+        aliases: &["shencha"],
+        usage: "/review <target>",
+        description_id: crate::localization::MessageId::CmdReviewDescription,
+    };
+
+pub(in crate::commands) struct ReviewCmd;
+
+impl crate::commands::traits::RegisterCommand for ReviewCmd {
+    fn info() -> &'static crate::commands::traits::CommandInfo {
+        &COMMAND_INFO
+    }
+
+    fn execute(
+        app: &mut crate::tui::app::App,
+        arg: Option<&str>,
+    ) -> crate::commands::CommandResult {
+        review(app, arg)
+    }
 }
 
 #[cfg(test)]
@@ -71,25 +95,11 @@ mod tests {
 
     fn create_test_app_with_tmpdir(tmpdir: &TempDir) -> App {
         let options = TuiOptions {
-            model: "deepseek-v4-pro".to_string(),
-            workspace: tmpdir.path().to_path_buf(),
-            config_path: None,
-            config_profile: None,
-            allow_shell: false,
-            use_alt_screen: true,
-            use_mouse_capture: false,
-            use_bracketed_paste: true,
-            max_subagents: 1,
             skills_dir: tmpdir.path().join("skills"),
             memory_path: tmpdir.path().join("memory.md"),
             notes_path: tmpdir.path().join("notes.txt"),
             mcp_config_path: tmpdir.path().join("mcp.json"),
-            use_memory: false,
-            start_in_agent_mode: false,
-            skip_onboarding: true,
-            yolo: false,
-            resume_session_id: None,
-            initial_input: None,
+            ..crate::test_support::test_tui_options(tmpdir.path().to_path_buf())
         };
         App::new(options, &Config::default())
     }

@@ -1,4 +1,4 @@
-# Rebrand: DeepSeek TUI → CodeWhale
+# Rebrand: DeepSeek TUI → Codewhale
 
 Starting with **v0.8.41**, this project ships under a new name: `codewhale`.
 
@@ -30,7 +30,7 @@ codewhale
 
 Your existing `~/.deepseek/config.toml`, `~/.deepseek/sessions/`,
 `~/.deepseek/skills/`, `~/.deepseek/tasks/`, and `~/.deepseek/mcp.json` are
-not deleted. New CodeWhale installs prefer `~/.codewhale/`, and legacy
+not deleted. New Codewhale installs prefer `~/.codewhale/`, and legacy
 `~/.deepseek/` state remains a read fallback while you migrate. Existing
 `DEEPSEEK_*` environment variables continue to work.
 
@@ -42,14 +42,14 @@ not deleted. New CodeWhale installs prefer `~/.codewhale/`, and legacy
 | TUI runtime binary | `deepseek-tui` | `codewhale-tui` |
 | npm wrapper package | `deepseek-tui` | `codewhale` |
 | Crates.io crates | `deepseek-tui-cli` / `deepseek-tui` / `deepseek-*` | `codewhale-cli` / `codewhale-tui` / `codewhale-*` |
-| Release assets | `deepseek-<platform>` / `deepseek-tui-<platform>` | `codewhale-<platform>` / `codewhale-tui-<platform>` |
+| Release assets | `deepseek-<platform>` / `deepseek-tui-<platform>` | `codewhale-<platform>` / `codew-<platform>` / `codewhale-tui-<platform>` |
 | Checksum manifest | `deepseek-artifacts-sha256.txt` | `codewhale-artifacts-sha256.txt` |
 
 ## What changed for local state
 
 New installs write product-owned state under `~/.codewhale/`. Existing
 `~/.deepseek/` config, sessions, skills, tasks, MCP config, memory, and notes
-remain readable as legacy fallbacks while you migrate. CodeWhale never deletes
+remain readable as legacy fallbacks while you migrate. Codewhale never deletes
 the legacy directory automatically.
 
 ## What did NOT change
@@ -114,62 +114,127 @@ cargo install --path crates/cli --locked --force
 cargo install --path crates/tui --locked --force
 ```
 
+### Legacy `deepseek update`
+
+Current v0.8.x compatibility binaries recognize when they are running under a
+legacy `deepseek` or `deepseek-tui` filename. In that case, `deepseek update`
+or `deepseek-tui update` downloads the canonical Codewhale release assets and
+installs them beside the legacy binary as `codewhale` and `codewhale-tui` when
+the install directory is writable.
+
+If that update path cannot write to the install directory, use the npm, Cargo,
+Homebrew, or manual reinstall commands above. The legacy npm package
+`deepseek-tui` remains deprecated and is not republished; npm users should move
+to `npm install -g codewhale`.
+
 ### Homebrew
 
-The tap formula still installs through the legacy `deepseek-tui` name for
-existing Homebrew users. Keep using `brew upgrade deepseek-tui` only for that
-compatibility path. New installs should prefer npm, Cargo, Docker, or direct
-downloads until the formula and tap repo are renamed.
+**Current state (v0.9.x):** The tap formula still uses the legacy
+`deepseek-tui` name for compatibility. Existing users keep running
+`brew upgrade deepseek-tui`. The formula installs the same current-release
+`codewhale` / `codew` / `codewhale-tui` binaries.
+
+**Target state:** A `codewhale` formula in a renamed tap
+(`Hmbown/codewhale` or the existing `Hmbown/deepseek-tui` tap with an
+added `codewhale` formula alias). The legacy `deepseek-tui` formula
+remains installable as a compatibility-only alias.
+
+**Rollout steps:**
+
+1. **Audit the formula Ruby file** — confirm it already installs
+   `codewhale` / `codewhale-tui` binaries and only the formula *name* is
+   legacy.
+2. **Add a `codewhale` formula** to the tap that is identical to or
+   aliases the existing `deepseek-tui` formula.
+3. **Update website and docs** — show `brew install codewhale` as the
+   primary Homebrew path, mark `brew install deepseek-tui` as legacy
+   compatibility.
+4. **One release of overlap** — ship at least one release with both
+   `codewhale` and `deepseek-tui` formulas available so existing
+   crontabs/scripts can migrate.
+5. **Deprecation notice** — add a `caveat` in the legacy formula
+   directing users to `brew uninstall deepseek-tui && brew install codewhale`.
+6. **Eventually remove** the `deepseek-tui` formula after a deprecation
+   window (e.g., two minor releases).
+
+Until the formula rename ships, new installs should prefer npm, Cargo,
+Docker, or direct downloads.
 
 ### Manual / GitHub Releases
 
-`v0.8.41` through `v0.8.x` Releases attached both the canonical
-`codewhale-*` / `codewhale-tui-*` assets and compatibility-only
-`deepseek-*` / `deepseek-tui-*` shim assets. Starting in v0.9.0, Releases attach
-only the canonical `codewhale-*` / `codewhale-tui-*` assets and the canonical
-`codewhale-artifacts-sha256.txt` checksum manifest. Install or update through
-`codewhale` before moving to v0.9.0.
+`v0.8.41` through `v0.8.x` Releases attached the canonical `codewhale-*` /
+`codewhale-tui-*` assets (plus `codew-*` from v0.8.66 onward) and
+compatibility-only `deepseek-*` / `deepseek-tui-*` shim assets. Starting in
+v0.9.0, Releases attach only the canonical `codewhale-*` / `codew-*` /
+`codewhale-tui-*` assets and the `codewhale-artifacts-sha256.txt` checksum
+manifest. Install or update through `codewhale` before moving to v0.9.0.
 
 ### Sessions, skills, and manual workspaces
 
 Renaming the binary does not require starting over:
 
-- **Config**: on first launch, CodeWhale copies `~/.deepseek/config.toml` to
-  `~/.codewhale/config.toml` if the CodeWhale file does not already exist.
-  It never overwrites a newer CodeWhale config. You can inspect the active path
+- **Config**: on first launch, Codewhale copies `~/.deepseek/config.toml` to
+  `~/.codewhale/config.toml` if the Codewhale file does not already exist.
+  It never overwrites a newer Codewhale config. You can inspect the active path
   with `codewhale doctor`.
 - **Sessions and tasks**: managed state is read from `~/.codewhale/...` when
   present, with `~/.deepseek/...` used as the legacy fallback when only the old
   directory exists. Existing saved sessions still appear in `codewhale sessions`
   and the TUI resume picker.
-- **Skills**: CodeWhale discovers workspace skills first, then global skills,
+- **Skills**: Codewhale discovers workspace skills first, then global skills,
   including both `~/.codewhale/skills` and legacy `~/.deepseek/skills`. Existing
   skill directories with `SKILL.md` do not need to be rewritten.
 - **MCP config**: the default path is `~/.codewhale/mcp.json`. If that file is
-  absent, CodeWhale still reads legacy `~/.deepseek/mcp.json`. To use a custom
+  absent, Codewhale still reads legacy `~/.deepseek/mcp.json`. To use a custom
   MCP config file, set `mcp_config_path` in `config.toml` or
   `DEEPSEEK_MCP_CONFIG`.
 - **Manual binary installs**: keep the dispatcher and TUI binaries as siblings
-  on your `PATH`: `codewhale` plus `codewhale-tui`. On Windows, the recommended
-  user-local location is `%LOCALAPPDATA%\Programs\CodeWhale\bin`. On Unix-like
-  systems, any user-writable `PATH` directory is fine as long as both binaries
-  are present.
+  on your `PATH`: `codewhale`, `codew`, and `codewhale-tui`. On Windows, the
+  recommended user-local location is `%LOCALAPPDATA%\Programs\CodeWhale\bin`.
+  On Unix-like systems, any user-writable `PATH` directory is fine as long as
+  all three binaries are present.
 - **Specified work directories**: running `codewhale` from a project directory,
   or launching it with a specific workspace path, does not move project files.
-  CodeWhale reads `<workspace>/.codewhale/config.toml` first and falls back to
+  Codewhale reads `<workspace>/.codewhale/config.toml` first and falls back to
   legacy `<workspace>/.deepseek/config.toml` when the new path is absent.
 
-If both `~/.codewhale/...` and `~/.deepseek/...` copies exist, the CodeWhale
+If both `~/.codewhale/...` and `~/.deepseek/...` copies exist, the Codewhale
 path wins. Keep the legacy directory until you have confirmed `codewhale
 doctor`, `codewhale sessions`, and your expected skills all show the same state.
 
+### If sessions appear missing after an upgrade
+
+Run `codewhale doctor` before copying or deleting anything. Doctor compares
+top-level session JSON **filenames and filesystem metadata only** between
+`~/.deepseek/sessions/` and `~/.codewhale/sessions/`. It does not read chat
+contents, traverse `checkpoints/`, or modify either directory. The JSON form
+exposes the same result at `legacy_state.session_recovery`.
+
+If doctor lists recoverable filenames:
+
+1. Back up both session directories (if present) and close other Codewhale
+   processes.
+2. Run `codewhale sessions`. This invokes the existing additive migration,
+   which creates only missing destination files, never overwrites a file that
+   already exists under `~/.codewhale/sessions/`, skips checkpoint internals,
+   and leaves every legacy original in place.
+3. Rerun `codewhale doctor`, then confirm the sessions appear with `codewhale
+   sessions`. If any filenames remain listed, keep both backups and report the
+   listed source/destination filenames without sharing chat contents.
+
+An explicit `CODEWHALE_HOME` intentionally isolates that home and disables the
+ambient `~/.deepseek` fallback. Doctor will not inspect the ambient legacy home
+in that mode. To diagnose the default home without changing the isolated one,
+use a separate shell with `CODEWHALE_HOME` unset and rerun `codewhale doctor`.
+
 ## Why the name change
 
-CodeWhale is a shorter, terminal-friendlier handle for the same terminal
-coding agent and the longer-term product direction: a DeepSeek-first agentic
-terminal for open source and open-weight coding models. The project name,
+Codewhale is a shorter, terminal-friendlier handle for the same terminal
+coding agent and the longer-term product direction: an agentic terminal for
+open source and open-weight coding models, with DeepSeek — the provider the
+project started with — remaining first-class alongside every other provider. The project name,
 command names, package names, release assets, Docker image, and CNB mirror move
-to CodeWhale; the official DeepSeek provider, model IDs, env vars, and
+to Codewhale; the official DeepSeek provider, model IDs, env vars, and
 `~/.deepseek/` config surface remain first-class.
 
 ## Reporting issues with the rename

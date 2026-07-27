@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -20,25 +21,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Lifecycle status of a conversation thread.
-///
-/// Serialized as lowercase snake_case strings (e.g. `"running"`, `"archived"`).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ThreadStatus {
-    /// Thread is actively being worked on.
-    Running,
-    /// Thread exists but has no active work in progress.
-    Idle,
-    /// Thread has finished its task successfully.
-    Completed,
-    /// Thread encountered an unrecoverable error.
-    Failed,
-    /// Thread has been temporarily paused by the user.
-    Paused,
-    /// Thread has been archived and is hidden from default listings.
-    Archived,
-}
+// Re-export protocol's ThreadStatus so callers in the state crate and
+// external consumers (e.g. core) can reference a single canonical definition.
+pub use codewhale_protocol::ThreadStatus;
 
 /// Indicates how a session was initiated.
 ///
@@ -168,6 +153,8 @@ pub enum JobStateStatus {
     Queued,
     /// Job is currently executing.
     Running,
+    /// Job has been temporarily paused.
+    Paused,
     /// Job has finished successfully.
     Completed,
     /// Job has failed with an error.
@@ -230,6 +217,8 @@ pub struct ThreadGoalRecord {
     pub tokens_used: i64,
     /// Elapsed wall-clock work time in seconds.
     pub time_used_seconds: i64,
+    /// Durable continuation passes dispatched for this objective.
+    pub continuation_count: i64,
     /// Unix timestamp (seconds) when the goal was created.
     pub created_at: i64,
     /// Unix timestamp (seconds) when the goal was last updated.
@@ -262,6 +251,13 @@ struct SessionIndexEntry {
     rollout_path: Option<PathBuf>,
 }
 
+/// Rewrite the session index once the append-only log grows large enough that
+/// full-file scans become costly. Lookups already dedupe by thread id, so
+/// compaction keeps only the latest entry per thread.
+fn session_index_compact_line_threshold() -> usize {
+    if cfg!(test) { 5 } else { 5_000 }
+}
+
 /// Persistent storage for conversation threads, messages, checkpoints, and jobs.
 ///
 /// Backed by a SQLite database and an append-only JSONL session index file.
@@ -270,6 +266,10 @@ struct SessionIndexEntry {
 pub struct StateStore {
     db_path: PathBuf,
     session_index_path: PathBuf,
+    // Single long-lived connection shared by all clones. SQLite pragmas are
+    // per-connection, so opening once in `open` and applying them there keeps
+    // every operation consistent without re-opening the database per call.
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl StateStore {
@@ -289,12 +289,35 @@ impl StateStore {
                 format!("failed to create state directory {}", parent.display())
             })?;
         }
-        let store = Self {
+        let conn = Connection::open(&db_path)
+            .with_context(|| format!("failed to open state db {}", db_path.display()))?;
+        Self::configure_connection(&conn, &db_path)?;
+        Self::init_schema(&conn)?;
+        Ok(Self {
             db_path,
             session_index_path,
-        };
-        store.init_schema()?;
-        Ok(store)
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
+    /// Apply connection-level SQLite settings that must hold for every open.
+    ///
+    /// Enables WAL so readers and writers from concurrent CodeWhale processes
+    /// do not block each other as aggressively as the default rollback journal,
+    /// and sets a multi-second busy timeout so a second process retries on
+    /// `SQLITE_BUSY` instead of failing immediately (issue #4734).
+    fn configure_connection(conn: &Connection, db_path: &Path) -> Result<()> {
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .with_context(|| format!("failed to enable foreign keys for {}", db_path.display()))?;
+        // WAL is a persistent DB-level mode; applying it on every open is
+        // idempotent and keeps freshly created files on the right journal.
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .with_context(|| format!("failed to enable WAL for {}", db_path.display()))?;
+        // A few seconds covers brief writer contention between processes
+        // (e.g. TUI + app-server, or two CLI invocations sharing state.db).
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .with_context(|| format!("failed to set busy_timeout for {}", db_path.display()))?;
+        Ok(())
     }
 
     /// Returns the filesystem path of the underlying SQLite database.
@@ -302,13 +325,16 @@ impl StateStore {
         &self.db_path
     }
 
-    fn conn(&self) -> Result<Connection> {
-        Connection::open(&self.db_path)
-            .with_context(|| format!("failed to open state db {}", self.db_path.display()))
+    fn conn(&self) -> Result<MutexGuard<'_, Connection>> {
+        // Poisoning means a panic mid-operation; any open transaction was
+        // rolled back when it dropped, but surface the condition rather than
+        // silently continuing on a connection whose state we can't vouch for.
+        self.conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("state db connection mutex poisoned"))
     }
 
-    fn init_schema(&self) -> Result<()> {
-        let conn = self.conn()?;
+    fn init_schema(conn: &Connection) -> Result<()> {
         let mut user_version: u32 = conn.query_row("PRAGMA user_version;", [], |row| row.get(0))?;
         if user_version == 0 {
             conn.execute_batch(
@@ -547,6 +573,20 @@ impl StateStore {
                 "#,
             )
             .context("failed to initialize thread goal schema")?;
+            user_version = 3;
+        }
+        if user_version < 4 {
+            conn.execute_batch(
+                r#"
+                BEGIN;
+                ALTER TABLE thread_goals
+                    ADD COLUMN continuation_count INTEGER NOT NULL DEFAULT 0;
+
+                PRAGMA user_version = 4;
+                COMMIT;
+                "#,
+            )
+            .context("failed to initialize thread goal continuation schema")?;
         }
         Ok(())
     }
@@ -689,8 +729,12 @@ impl StateStore {
     pub fn mark_unarchived(&self, id: &str) -> Result<()> {
         let conn = self.conn()?;
         conn.execute(
-            "UPDATE threads SET archived = 0, archived_at = NULL WHERE id = ?1",
-            params![id],
+            "UPDATE threads SET archived = 0, archived_at = NULL, status = CASE WHEN status = ?2 THEN ?3 ELSE status END WHERE id = ?1",
+            params![
+                id,
+                thread_status_to_str(&ThreadStatus::Archived),
+                thread_status_to_str(&ThreadStatus::Idle),
+            ],
         )
         .context("failed to unarchive thread")?;
         Ok(())
@@ -752,8 +796,8 @@ impl StateStore {
             r#"
             INSERT INTO thread_goals (
                 thread_id, goal_id, objective, status, token_budget, tokens_used,
-                time_used_seconds, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                time_used_seconds, continuation_count, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             ON CONFLICT(thread_id) DO UPDATE SET
                 goal_id=excluded.goal_id,
                 objective=excluded.objective,
@@ -761,6 +805,7 @@ impl StateStore {
                 token_budget=excluded.token_budget,
                 tokens_used=excluded.tokens_used,
                 time_used_seconds=excluded.time_used_seconds,
+                continuation_count=excluded.continuation_count,
                 created_at=excluded.created_at,
                 updated_at=excluded.updated_at
             "#,
@@ -772,6 +817,7 @@ impl StateStore {
                 goal.token_budget,
                 goal.tokens_used,
                 goal.time_used_seconds,
+                goal.continuation_count,
                 goal.created_at,
                 goal.updated_at,
             ],
@@ -780,13 +826,89 @@ impl StateStore {
         Ok(())
     }
 
+    /// Accrue additional token and wall-clock usage onto a thread's persisted goal.
+    ///
+    /// This is the durable, additive accounting path for the persistent goal loop: it
+    /// increments `tokens_used` and `time_used_seconds` in a single atomic SQL `UPDATE`
+    /// (`col = col + ?`) so concurrent accruals do not race a read-modify-write. The
+    /// goal's `updated_at` is advanced to the larger of its current value and `now`,
+    /// keeping the timestamp monotonic even if a stale `now` is supplied.
+    ///
+    /// `token_delta` and `time_delta_seconds` are added on the database side; callers
+    /// should pass non-negative deltas (negative values are accepted and will decrement,
+    /// which is intentionally left to the caller's discretion).
+    ///
+    /// Returns the updated [`ThreadGoalRecord`], or `Ok(None)` if the thread has no
+    /// persisted goal. Unlike [`upsert_thread_goal`](Self::upsert_thread_goal) this never
+    /// creates a goal row; it only accumulates onto an existing one.
+    pub fn record_thread_goal_usage(
+        &self,
+        thread_id: &str,
+        token_delta: i64,
+        time_delta_seconds: i64,
+        now: i64,
+    ) -> Result<Option<ThreadGoalRecord>> {
+        let conn = self.conn()?;
+        let changed = conn
+            .execute(
+                r#"
+                UPDATE thread_goals
+                SET tokens_used = tokens_used + ?2,
+                    time_used_seconds = time_used_seconds + ?3,
+                    updated_at = MAX(updated_at, ?4)
+                WHERE thread_id = ?1
+                "#,
+                params![thread_id, token_delta, time_delta_seconds, now],
+            )
+            .context("failed to record thread goal usage")?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        Self::read_thread_goal(&conn, thread_id)
+    }
+
+    /// Increment the durable cross-turn continuation counter for a thread goal.
+    ///
+    /// The older TUI continuation guard is scoped to one engine turn. This
+    /// counter is intentionally persisted so a resumed goal loop can feed
+    /// `goal_loop::decide_continuation` with the true cross-turn count.
+    pub fn record_thread_goal_continuation(
+        &self,
+        thread_id: &str,
+        now: i64,
+    ) -> Result<Option<ThreadGoalRecord>> {
+        let conn = self.conn()?;
+        let changed = conn
+            .execute(
+                r#"
+                UPDATE thread_goals
+                SET continuation_count = continuation_count + 1,
+                    updated_at = MAX(updated_at, ?2)
+                WHERE thread_id = ?1
+                "#,
+                params![thread_id, now],
+            )
+            .context("failed to record thread goal continuation")?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        Self::read_thread_goal(&conn, thread_id)
+    }
+
     /// Retrieve the persisted goal for a thread.
     pub fn get_thread_goal(&self, thread_id: &str) -> Result<Option<ThreadGoalRecord>> {
         let conn = self.conn()?;
+        Self::read_thread_goal(&conn, thread_id)
+    }
+
+    /// Read a goal on an already-held connection. The `record_*` mutators call
+    /// this instead of [`Self::get_thread_goal`], which would re-lock the
+    /// connection mutex and self-deadlock.
+    fn read_thread_goal(conn: &Connection, thread_id: &str) -> Result<Option<ThreadGoalRecord>> {
         conn.query_row(
             r#"
             SELECT thread_id, goal_id, objective, status, token_budget, tokens_used,
-                   time_used_seconds, created_at, updated_at
+                   time_used_seconds, continuation_count, created_at, updated_at
             FROM thread_goals
             WHERE thread_id = ?1
             "#,
@@ -1089,7 +1211,7 @@ impl StateStore {
                 SELECT ?1, ?2, ?3, ?4, ?5, ?6
                 RETURNING id
             "#, params![thread_id, role, content, item_json, created_at, message_id], |row| row.get(0)
-        ).with_context(|| format!("failed to fork at message for thread {:?}", thread_id))?;
+        ).with_context(|| format!("failed to fork at message for thread {thread_id:?}"))?;
 
         tx.execute(
             r#"
@@ -1100,10 +1222,7 @@ impl StateStore {
             params![next_leaf_id, thread_id],
         )
         .with_context(|| {
-            format!(
-                "failed to update thread current leaf id for thread {:?}",
-                thread_id
-            )
+            format!("failed to update thread current leaf id for thread {thread_id:?}")
         })?;
 
         tx.commit()
@@ -1190,39 +1309,55 @@ impl StateStore {
                     "SELECT thread_id, checkpoint_id, state_json, created_at FROM checkpoints WHERE thread_id = ?1 AND checkpoint_id = ?2",
                     params![thread_id, checkpoint_id],
                     |row| {
-                        let state_json: String = row.get(2)?;
-                        let state = serde_json::from_str(&state_json).unwrap_or(Value::Null);
-                        Ok(CheckpointRecord {
-                            thread_id: row.get(0)?,
-                            checkpoint_id: row.get(1)?,
-                            state,
-                            created_at: row.get(3)?,
-                        })
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
                     },
                 )
                 .optional()
                 .with_context(|| {
                     format!("failed to load checkpoint {checkpoint_id} for thread {thread_id}")
                 })?;
-            return Ok(row);
+            if let Some((thread_id, checkpoint_id, state_json, created_at)) = row {
+                let state = parse_checkpoint_state(&state_json)?;
+                return Ok(Some(CheckpointRecord {
+                    thread_id,
+                    checkpoint_id,
+                    state,
+                    created_at,
+                }));
+            }
+            return Ok(None);
         }
 
-        conn.query_row(
-            "SELECT thread_id, checkpoint_id, state_json, created_at FROM checkpoints WHERE thread_id = ?1 ORDER BY created_at DESC LIMIT 1",
-            params![thread_id],
-            |row| {
-                let state_json: String = row.get(2)?;
-                let state = serde_json::from_str(&state_json).unwrap_or(Value::Null);
-                Ok(CheckpointRecord {
-                    thread_id: row.get(0)?,
-                    checkpoint_id: row.get(1)?,
-                    state,
-                    created_at: row.get(3)?,
-                })
-            },
-        )
-        .optional()
-        .with_context(|| format!("failed to load latest checkpoint for thread {thread_id}"))
+        let row = conn
+            .query_row(
+                "SELECT thread_id, checkpoint_id, state_json, created_at FROM checkpoints WHERE thread_id = ?1 ORDER BY created_at DESC LIMIT 1",
+                params![thread_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .with_context(|| format!("failed to load latest checkpoint for thread {thread_id}"))?;
+        if let Some((thread_id, checkpoint_id, state_json, created_at)) = row {
+            let state = parse_checkpoint_state(&state_json)?;
+            return Ok(Some(CheckpointRecord {
+                thread_id,
+                checkpoint_id,
+                state,
+                created_at,
+            }));
+        }
+        Ok(None)
     }
 
     /// List checkpoints for a thread, ordered by creation time (newest first).
@@ -1247,7 +1382,7 @@ impl StateStore {
         let mut out = Vec::new();
         while let Some(row) = rows.next().context("failed to iterate checkpoint rows")? {
             let state_json: String = row.get(2).context("failed to read checkpoint state json")?;
-            let state = serde_json::from_str(&state_json).unwrap_or(Value::Null);
+            let state = parse_checkpoint_state(&state_json)?;
             out.push(CheckpointRecord {
                 thread_id: row.get(0).context("failed to read checkpoint thread id")?,
                 checkpoint_id: row.get(1).context("failed to read checkpoint id")?,
@@ -1406,18 +1541,75 @@ impl StateStore {
         };
         let encoded =
             serde_json::to_string(&entry).context("failed to serialize session index entry")?;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.session_index_path)
-            .with_context(|| {
+        // Append and compaction share one lock. Compaction rewrites the file
+        // from a snapshot and renames over it, so an append landing between
+        // that snapshot and the rename would be discarded — silently, since
+        // the append already returned success to its caller.
+        self.with_session_index_lock(|| {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.session_index_path)
+                .with_context(|| {
+                    format!(
+                        "failed to open session index {}",
+                        self.session_index_path.display()
+                    )
+                })?;
+            writeln!(file, "{encoded}").context("failed to append session index entry")?;
+            // Durability: without this a crash mid-write can leave a torn
+            // final line. Reads tolerate one (see `session_index_map`), but
+            // not losing the entry beats recovering from having lost it.
+            file.sync_data()
+                .context("failed to flush session index entry")?;
+            drop(file);
+            self.compact_session_index_locked()
+        })
+    }
+
+    /// Run `operation` holding the exclusive session-index lock.
+    ///
+    /// The lock is an adjacent `.lock` file rather than the index itself, so
+    /// compaction's rename cannot pull the lock out from under a waiter. This
+    /// mirrors the discipline `codewhale-config` uses for `config.toml`.
+    fn with_session_index_lock<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+        if let Some(parent) = self.session_index_path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
                 format!(
-                    "failed to open session index {}",
-                    self.session_index_path.display()
+                    "failed to create session index directory {}",
+                    parent.display()
                 )
             })?;
-        writeln!(file, "{encoded}").context("failed to append session index entry")?;
-        Ok(())
+        }
+        let lock_path = self.session_index_path.with_extension("jsonl.lock");
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            // The file is only a lock handle; its contents are never read and
+            // truncating it would race other holders for no benefit.
+            .truncate(false)
+            .open(&lock_path)
+            .with_context(|| {
+                format!("failed to open session index lock {}", lock_path.display())
+            })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            lock_file
+                .set_permissions(fs::Permissions::from_mode(0o600))
+                .with_context(|| {
+                    format!(
+                        "failed to secure session index lock {}",
+                        lock_path.display()
+                    )
+                })?;
+        }
+        let mut lock = fd_lock::RwLock::new(lock_file);
+        let _guard = lock
+            .write()
+            .with_context(|| format!("failed to lock session index {}", lock_path.display()))?;
+        operation()
     }
 
     /// Find the display name for a thread by its ID, using the session index.
@@ -1464,6 +1656,96 @@ impl StateStore {
         Ok(matched.and_then(|entry| entry.rollout_path.clone()))
     }
 
+    /// Compact the session index. The caller must already hold the lock from
+    /// [`Self::with_session_index_lock`]: this reads a snapshot and renames a
+    /// rewritten file over the live one, and an append interleaved between
+    /// those two steps is lost.
+    fn compact_session_index_locked(&self) -> Result<()> {
+        if !self.session_index_path.exists() {
+            return Ok(());
+        }
+        let line_count = BufReader::new(
+            OpenOptions::new()
+                .read(true)
+                .open(&self.session_index_path)
+                .with_context(|| {
+                    format!(
+                        "failed to read session index {}",
+                        self.session_index_path.display()
+                    )
+                })?,
+        )
+        .lines()
+        .filter(|line| {
+            line.as_ref()
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+        })
+        .count();
+        if line_count <= session_index_compact_line_threshold() {
+            return Ok(());
+        }
+
+        let latest = self.session_index_map()?;
+        let compact_path = self.session_index_path.with_extension("jsonl.compact");
+        {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&compact_path)
+                .with_context(|| {
+                    format!(
+                        "failed to open compact session index {}",
+                        compact_path.display()
+                    )
+                })?;
+            for entry in latest.values() {
+                let encoded = serde_json::to_string(entry)
+                    .context("failed to serialize compact session index entry")?;
+                writeln!(file, "{encoded}")
+                    .context("failed to write compact session index entry")?;
+            }
+        }
+        // The snapshot is written but the live file is still the old one:
+        // this is the window an unsynchronized appender would write into and
+        // lose. Tests widen it deliberately to prove the lock closes it.
+        #[cfg(test)]
+        tests::compaction_midpoint(&self.session_index_path);
+        fs::rename(&compact_path, &self.session_index_path).with_context(|| {
+            format!(
+                "failed to replace session index {}",
+                self.session_index_path.display()
+            )
+        })?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn session_index_line_count(&self) -> Result<usize> {
+        if !self.session_index_path.exists() {
+            return Ok(0);
+        }
+        Ok(BufReader::new(
+            OpenOptions::new()
+                .read(true)
+                .open(&self.session_index_path)
+                .with_context(|| {
+                    format!(
+                        "failed to read session index {}",
+                        self.session_index_path.display()
+                    )
+                })?,
+        )
+        .lines()
+        .filter(|line| {
+            line.as_ref()
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+        })
+        .count())
+    }
+
     fn session_index_map(&self) -> Result<HashMap<String, SessionIndexEntry>> {
         if !self.session_index_path.exists() {
             return Ok(HashMap::new());
@@ -1484,15 +1766,38 @@ impl StateStore {
             if line.trim().is_empty() {
                 continue;
             }
-            let parsed: SessionIndexEntry =
-                serde_json::from_str(&line).context("failed to parse session index entry")?;
-            latest.insert(parsed.thread_id.clone(), parsed);
+            // Skip a line we can't parse instead of failing the whole read.
+            // An append that was interrupted mid-write leaves a torn final
+            // line; aborting here broke every thread-name lookup, and because
+            // compaction reads through this same function, the index could
+            // never repair itself either — the file stayed broken until
+            // someone deleted it by hand.
+            match serde_json::from_str::<SessionIndexEntry>(&line) {
+                Ok(parsed) => {
+                    latest.insert(parsed.thread_id.clone(), parsed);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "skipping unparseable session index entry in {}: {err}",
+                        self.session_index_path.display()
+                    );
+                }
+            }
         }
         Ok(latest)
     }
 }
 
 fn default_state_db_path() -> PathBuf {
+    // $CODEWHALE_HOME is a hard override of the base data directory
+    // (docs/CONFIGURATION.md): when set, the state DB lives under it and we do
+    // NOT fall back to the legacy ~/.deepseek path — silent fallback would
+    // defeat the isolation the override promises (CI, containers, multi-project,
+    // test harnesses). Legacy ~/.deepseek migration only applies to the default
+    // home location.
+    if let Some(overridden) = codewhale_home_override() {
+        return overridden.join("state.db");
+    }
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     // Prefer the CodeWhale directory, falling back to legacy DeepSeek path
     // so existing installs don't lose their session history.
@@ -1502,6 +1807,21 @@ fn default_state_db_path() -> PathBuf {
     } else {
         home.join(".deepseek").join("state.db")
     }
+}
+
+/// Resolve `$CODEWHALE_HOME` as a hard override of the data directory root.
+///
+/// Returns the path verbatim (the env var IS the home dir, matching
+/// `codewhale_home()` in config — `$CODEWHALE_HOME=/data/cw` means the home is
+/// `/data/cw`, not `/data/cw/.codewhale`). Returns `None` when unset/empty so
+/// callers can branch on "explicit override" vs "default home + legacy
+/// fallback." Mirrors config's helper without taking a dependency on it (state
+/// is a low-level leaf crate; config cannot be a dependency here without
+/// inverting the layering).
+fn codewhale_home_override() -> Option<PathBuf> {
+    std::env::var_os("CODEWHALE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 fn bool_to_i64(value: bool) -> i64 {
@@ -1559,10 +1879,15 @@ fn path_to_opt_string(path: Option<&Path>) -> Option<String> {
     path.map(|p| p.display().to_string())
 }
 
+fn parse_checkpoint_state(state_json: &str) -> Result<Value> {
+    serde_json::from_str(state_json).context("failed to parse checkpoint state json")
+}
+
 fn job_state_status_to_str(status: &JobStateStatus) -> &'static str {
     match status {
         JobStateStatus::Queued => "queued",
         JobStateStatus::Running => "running",
+        JobStateStatus::Paused => "paused",
         JobStateStatus::Completed => "completed",
         JobStateStatus::Failed => "failed",
         JobStateStatus::Cancelled => "cancelled",
@@ -1573,6 +1898,7 @@ fn job_state_status_from_str(value: &str) -> JobStateStatus {
     match value {
         "queued" => JobStateStatus::Queued,
         "running" => JobStateStatus::Running,
+        "paused" => JobStateStatus::Paused,
         "completed" => JobStateStatus::Completed,
         "failed" => JobStateStatus::Failed,
         "cancelled" => JobStateStatus::Cancelled,
@@ -1599,7 +1925,10 @@ fn thread_goal_status_from_str(value: &str) -> ThreadGoalStatus {
         "usage_limited" => ThreadGoalStatus::UsageLimited,
         "budget_limited" => ThreadGoalStatus::BudgetLimited,
         "complete" => ThreadGoalStatus::Complete,
-        _ => ThreadGoalStatus::Active,
+        // Fail closed: an unknown or corrupted persisted value must never
+        // resurrect a self-driving goal. The user can inspect and explicitly
+        // resume a paused goal after repairing or replacing the record.
+        _ => ThreadGoalStatus::Paused,
     }
 }
 
@@ -1644,15 +1973,19 @@ fn row_to_thread_goal(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadGoalRec
         token_budget: row.get(4)?,
         tokens_used: row.get(5)?,
         time_used_seconds: row.get(6)?,
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
+        continuation_count: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use serde_json::json;
+    use std::sync::{Arc, Barrier, Mutex};
+    use std::thread;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn temp_state_store(name: &str) -> StateStore {
         let suffix = SystemTime::now()
@@ -1703,9 +2036,18 @@ mod tests {
             token_budget: Some(123),
             tokens_used: 7,
             time_used_seconds: 11,
+            continuation_count: 0,
             created_at: 100,
             updated_at: 101,
         }
+    }
+
+    #[test]
+    fn unknown_persisted_goal_status_fails_closed() {
+        assert_eq!(
+            thread_goal_status_from_str("future_or_corrupt_status"),
+            ThreadGoalStatus::Paused
+        );
     }
 
     #[test]
@@ -1755,5 +2097,562 @@ mod tests {
             .upsert_thread_goal(&test_goal("missing-thread", "nope"))
             .expect_err("goal without a thread should fail");
         assert!(err.to_string().contains("thread missing-thread not found"));
+    }
+
+    #[test]
+    fn delete_thread_cascades_child_rows() {
+        let store = temp_state_store("thread-delete-cascade");
+        store
+            .upsert_thread(&test_thread("thread-1"))
+            .expect("upsert thread");
+        store
+            .append_message("thread-1", "user", "hello", None)
+            .expect("append message");
+        store
+            .save_checkpoint("thread-1", "checkpoint-1", &serde_json::json!({"ok": true}))
+            .expect("save checkpoint");
+        store
+            .persist_dynamic_tools(
+                "thread-1",
+                &[DynamicToolRecord {
+                    position: 0,
+                    name: "test_tool".to_string(),
+                    description: Some("test".to_string()),
+                    input_schema: serde_json::json!({"type": "object"}),
+                }],
+            )
+            .expect("persist dynamic tools");
+        store
+            .upsert_thread_goal(&test_goal("thread-1", "Ship v0.8.67"))
+            .expect("upsert goal");
+
+        store.delete_thread("thread-1").expect("delete thread");
+
+        let conn = store.conn().expect("conn");
+        for table in [
+            "messages",
+            "checkpoints",
+            "thread_dynamic_tools",
+            "thread_goals",
+        ] {
+            let sql = format!("SELECT COUNT(*) FROM {table} WHERE thread_id = ?1");
+            let count: i64 = conn
+                .query_row(&sql, params!["thread-1"], |row| row.get(0))
+                .expect("count child rows");
+            assert_eq!(count, 0, "{table} row survived thread deletion");
+        }
+    }
+
+    #[test]
+    fn state_store_reuses_one_connection_across_operations_and_clones() {
+        let store = temp_state_store("conn-reuse");
+        {
+            let conn = store.conn().expect("conn");
+            conn.execute_batch("CREATE TEMP TABLE conn_reuse_probe(id INTEGER);")
+                .expect("create temp table");
+        }
+        // TEMP tables are visible only on the connection that created them, so
+        // seeing the probe again — through a clone, after real operations ran —
+        // proves the store holds one long-lived connection instead of
+        // reopening the database (and reapplying pragmas) per call.
+        let clone = store.clone();
+        clone
+            .upsert_thread(&test_thread("thread-conn-reuse"))
+            .expect("upsert thread");
+        let conn = clone.conn().expect("conn");
+        let probe_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_temp_master WHERE name = 'conn_reuse_probe'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query temp master");
+        assert_eq!(
+            probe_count, 1,
+            "temp table not visible: a fresh connection was opened"
+        );
+        // The pragma applied once at open still governs the shared connection.
+        let foreign_keys: i64 = conn
+            .query_row("PRAGMA foreign_keys;", [], |row| row.get(0))
+            .expect("read foreign_keys pragma");
+        assert_eq!(foreign_keys, 1);
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode;", [], |row| row.get(0))
+            .expect("read journal_mode pragma");
+        assert_eq!(
+            journal_mode.to_ascii_lowercase(),
+            "wal",
+            "open should enable WAL for multi-process readers/writers"
+        );
+    }
+
+    /// Two independent connections (as two CodeWhale processes would open)
+    /// must be able to write concurrently without failing with SQLITE_BUSY
+    /// once WAL + busy_timeout are applied at open (#4734).
+    ///
+    /// Uses `upsert_job` so the test only stresses SQLite (not the session
+    /// index JSONL path, which is a separate single-process file).
+    #[test]
+    fn two_connections_can_write_concurrently_without_sqlite_busy() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "codewhale-state-concurrent-write-{}-{suffix}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("create temp state dir");
+        let db_path = dir.join("state.db");
+
+        // Create schema once so both writers share a real file.
+        let bootstrap = StateStore::open(Some(db_path.clone())).expect("bootstrap open");
+        {
+            let conn = bootstrap.conn().expect("bootstrap conn");
+            let journal_mode: String = conn
+                .query_row("PRAGMA journal_mode;", [], |row| row.get(0))
+                .expect("journal_mode");
+            assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        }
+        drop(bootstrap);
+
+        let path_a = db_path.clone();
+        let path_b = db_path.clone();
+        const WRITES_PER_CONN: usize = 50;
+
+        let handle_a = std::thread::spawn(move || {
+            let store = StateStore::open(Some(path_a)).expect("open store a");
+            for i in 0..WRITES_PER_CONN {
+                let job = JobStateRecord {
+                    id: format!("job-a-{i}"),
+                    name: format!("writer-a-{i}"),
+                    status: JobStateStatus::Running,
+                    progress: Some((i % 100) as u8),
+                    detail: Some("concurrent write a".to_string()),
+                    created_at: i as i64,
+                    updated_at: i as i64,
+                };
+                store.upsert_job(&job).unwrap_or_else(|err| {
+                    panic!("connection A write {i} failed (must not be SQLITE_BUSY): {err:#}");
+                });
+            }
+        });
+        let handle_b = std::thread::spawn(move || {
+            let store = StateStore::open(Some(path_b)).expect("open store b");
+            for i in 0..WRITES_PER_CONN {
+                let job = JobStateRecord {
+                    id: format!("job-b-{i}"),
+                    name: format!("writer-b-{i}"),
+                    status: JobStateStatus::Running,
+                    progress: Some((i % 100) as u8),
+                    detail: Some("concurrent write b".to_string()),
+                    created_at: i as i64,
+                    updated_at: i as i64,
+                };
+                store.upsert_job(&job).unwrap_or_else(|err| {
+                    panic!("connection B write {i} failed (must not be SQLITE_BUSY): {err:#}");
+                });
+            }
+        });
+
+        handle_a.join().expect("writer A panicked");
+        handle_b.join().expect("writer B panicked");
+
+        let store = StateStore::open(Some(db_path)).expect("reopen for verify");
+        let listed = store
+            .list_jobs(Some(WRITES_PER_CONN * 2))
+            .expect("list jobs");
+        assert_eq!(
+            listed.len(),
+            WRITES_PER_CONN * 2,
+            "both connections should have persisted all jobs"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn record_thread_goal_usage_accumulates_tokens_and_time() {
+        let store = temp_state_store("thread-goal-usage");
+        store
+            .upsert_thread(&test_thread("thread-1"))
+            .expect("upsert thread");
+
+        // Mirror the runtime, which creates goals with zeroed accounting.
+        let mut goal = test_goal("thread-1", "Ship the persistent goal loop");
+        goal.tokens_used = 0;
+        goal.time_used_seconds = 0;
+        goal.updated_at = 100;
+        store.upsert_thread_goal(&goal).expect("upsert goal");
+
+        // First accrual lands the deltas and advances updated_at.
+        let after_first = store
+            .record_thread_goal_usage("thread-1", 250, 12, 150)
+            .expect("record usage")
+            .expect("goal exists");
+        assert_eq!(after_first.tokens_used, 250);
+        assert_eq!(after_first.time_used_seconds, 12);
+        assert_eq!(after_first.updated_at, 150);
+        // Identity fields are preserved across accrual.
+        assert_eq!(after_first.goal_id, goal.goal_id);
+        assert_eq!(after_first.objective, goal.objective);
+        assert_eq!(after_first.status, goal.status);
+        assert_eq!(after_first.token_budget, goal.token_budget);
+        assert_eq!(after_first.created_at, goal.created_at);
+        assert_eq!(after_first.continuation_count, 0);
+
+        // Second accrual adds on top of the first (additive, not replacing).
+        let after_second = store
+            .record_thread_goal_usage("thread-1", 75, 8, 200)
+            .expect("record usage")
+            .expect("goal exists");
+        assert_eq!(after_second.tokens_used, 325);
+        assert_eq!(after_second.time_used_seconds, 20);
+        assert_eq!(after_second.updated_at, 200);
+
+        // A stale `now` must not move updated_at backwards.
+        let after_stale = store
+            .record_thread_goal_usage("thread-1", 5, 1, 1)
+            .expect("record usage")
+            .expect("goal exists");
+        assert_eq!(after_stale.tokens_used, 330);
+        assert_eq!(after_stale.time_used_seconds, 21);
+        assert_eq!(after_stale.updated_at, 200);
+
+        // Read back through the normal getter to confirm durability.
+        let persisted = store
+            .get_thread_goal("thread-1")
+            .expect("read goal")
+            .expect("goal exists");
+        assert_eq!(persisted.tokens_used, 330);
+        assert_eq!(persisted.time_used_seconds, 21);
+    }
+
+    #[test]
+    fn record_thread_goal_usage_returns_none_without_goal() {
+        let store = temp_state_store("thread-goal-usage-missing");
+        store
+            .upsert_thread(&test_thread("thread-1"))
+            .expect("upsert thread");
+        // Thread exists but has no goal row yet: accrual is a no-op, not an error,
+        // and must not create a goal.
+        let result = store
+            .record_thread_goal_usage("thread-1", 100, 5, 999)
+            .expect("record usage on goalless thread");
+        assert!(result.is_none());
+        assert!(
+            store
+                .get_thread_goal("thread-1")
+                .expect("read goal")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn record_thread_goal_continuation_accumulates_durably() {
+        let store = temp_state_store("thread-goal-continuation");
+        store
+            .upsert_thread(&test_thread("thread-1"))
+            .expect("upsert thread");
+
+        let mut goal = test_goal("thread-1", "Keep working across turns");
+        goal.updated_at = 100;
+        store.upsert_thread_goal(&goal).expect("upsert goal");
+
+        let after_first = store
+            .record_thread_goal_continuation("thread-1", 120)
+            .expect("record continuation")
+            .expect("goal exists");
+        assert_eq!(after_first.continuation_count, 1);
+        assert_eq!(after_first.tokens_used, goal.tokens_used);
+        assert_eq!(after_first.time_used_seconds, goal.time_used_seconds);
+        assert_eq!(after_first.updated_at, 120);
+
+        let after_second = store
+            .record_thread_goal_continuation("thread-1", 110)
+            .expect("record second continuation")
+            .expect("goal exists");
+        assert_eq!(after_second.continuation_count, 2);
+        assert_eq!(after_second.updated_at, 120);
+
+        let persisted = store
+            .get_thread_goal("thread-1")
+            .expect("read goal")
+            .expect("goal exists");
+        assert_eq!(persisted.continuation_count, 2);
+    }
+
+    // ── $CODEWHALE_HOME override tests ──────────────────────────────
+    //
+    // These touch a process-global env var, so they serialize against each
+    // other (and restore the prior value) to stay hermetic under parallel test
+    // runs — the same concern AGENTS.md flags for config_command_allow_shell_*.
+
+    static CODEWHALE_HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct CodeWhaleHomeGuard {
+        prior: Option<std::ffi::OsString>,
+    }
+    impl CodeWhaleHomeGuard {
+        fn set(value: &str) -> Self {
+            let prior = std::env::var_os("CODEWHALE_HOME");
+            // SAFETY: serialised by CODEWHALE_HOME_TEST_LOCK.
+            unsafe { std::env::set_var("CODEWHALE_HOME", value) };
+            Self { prior }
+        }
+        fn remove() -> Self {
+            let prior = std::env::var_os("CODEWHALE_HOME");
+            // SAFETY: serialised by CODEWHALE_HOME_TEST_LOCK.
+            unsafe { std::env::remove_var("CODEWHALE_HOME") };
+            Self { prior }
+        }
+    }
+    impl Drop for CodeWhaleHomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: serialised by CODEWHALE_HOME_TEST_LOCK.
+            unsafe {
+                match &self.prior {
+                    Some(value) => std::env::set_var("CODEWHALE_HOME", value),
+                    None => std::env::remove_var("CODEWHALE_HOME"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn codewhale_home_override_returns_the_env_value_verbatim() {
+        let _lock = CODEWHALE_HOME_TEST_LOCK.lock().unwrap();
+        let _g = CodeWhaleHomeGuard::set("/tmp/cw-isolated-state");
+        // The env var IS the home dir — no ".codewhale" appended. This matches
+        // codewhale_home() in config ($CODEWHALE_HOME=/x means home is /x).
+        assert_eq!(
+            codewhale_home_override().as_deref(),
+            Some(std::path::Path::new("/tmp/cw-isolated-state"))
+        );
+    }
+
+    #[test]
+    fn codewhale_home_override_none_when_unset() {
+        let _lock = CODEWHALE_HOME_TEST_LOCK.lock().unwrap();
+        let _g = CodeWhaleHomeGuard::remove();
+        assert!(codewhale_home_override().is_none());
+    }
+
+    #[test]
+    fn codewhale_home_override_none_when_empty() {
+        let _lock = CODEWHALE_HOME_TEST_LOCK.lock().unwrap();
+        let _g = CodeWhaleHomeGuard::set("   ");
+        // The helper filters empty values (after the OsString check). Note:
+        // var_os returns the raw "   ", and our filter only catches truly-empty,
+        // so this documents that whitespace-only is NOT treated as unset at the
+        // override layer (config's codewhale_home trims; we don't here — the
+        // branch is "was it set at all").
+        assert!(
+            codewhale_home_override().is_some(),
+            "non-empty (even whitespace) counts as set; trimming is the caller's job"
+        );
+    }
+
+    #[test]
+    fn default_state_db_path_uses_codewhale_home_when_set() {
+        let _lock = CODEWHALE_HOME_TEST_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "cw-home-state-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _g = CodeWhaleHomeGuard::set(dir.to_str().unwrap());
+        // Hard override: the DB is <CODEWHALE_HOME>/state.db, NOT
+        // <CODEWHALE_HOME>/.codewhale/state.db, and the legacy ~/.deepseek
+        // fallback is bypassed entirely.
+        assert_eq!(default_state_db_path(), dir.join("state.db"));
+    }
+
+    #[test]
+    fn load_checkpoint_propagates_invalid_state_json() {
+        let store = temp_state_store("checkpoint-parse-error");
+        store
+            .upsert_thread(&test_thread("thread-1"))
+            .expect("upsert thread");
+        store
+            .save_checkpoint("thread-1", "broken", &json!({"ok": true}))
+            .expect("save checkpoint");
+
+        {
+            let conn = store.conn().expect("conn");
+            conn.execute(
+                "UPDATE checkpoints SET state_json = ?1 WHERE thread_id = ?2 AND checkpoint_id = ?3",
+                params!["not-json", "thread-1", "broken"],
+            )
+            .expect("corrupt checkpoint");
+        }
+
+        let err = store
+            .load_checkpoint("thread-1", Some("broken"))
+            .expect_err("invalid checkpoint json should fail");
+        assert!(
+            err.to_string()
+                .contains("failed to parse checkpoint state json")
+        );
+    }
+
+    #[test]
+    fn session_index_compacts_after_threshold() {
+        let store = temp_state_store("session-index-compact");
+        for idx in 0..6 {
+            store
+                .append_thread_name("thread-1", Some(format!("name-{idx}")), idx, None)
+                .expect("append session index entry");
+        }
+
+        let line_count = store
+            .session_index_line_count()
+            .expect("count session index lines");
+        assert_eq!(line_count, 1);
+
+        let name = store
+            .find_thread_name_by_id("thread-1")
+            .expect("lookup thread name");
+        assert_eq!(name.as_deref(), Some("name-5"));
+    }
+
+    #[test]
+    fn session_index_read_skips_a_torn_line() {
+        // #4735: a crash mid-append leaves a truncated final line. Failing the
+        // whole read broke every thread-name lookup at once, and compaction
+        // reads through the same path, so the index could not repair itself.
+        let store = temp_state_store("session-index-torn");
+        store
+            .append_thread_name("thread-1", Some("first".to_string()), 1, None)
+            .expect("append first entry");
+
+        {
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&store.session_index_path)
+                .expect("open session index");
+            // A write cut off mid-JSON, exactly as a crash would leave it.
+            writeln!(file, "{{\"thread_id\":\"thread-2\",\"thread_na").expect("write torn line");
+        }
+
+        store
+            .append_thread_name("thread-3", Some("third".to_string()), 3, None)
+            .expect("append third entry");
+
+        assert_eq!(
+            store
+                .find_thread_name_by_id("thread-1")
+                .expect("lookup thread-1")
+                .as_deref(),
+            Some("first"),
+        );
+        assert_eq!(
+            store
+                .find_thread_name_by_id("thread-3")
+                .expect("lookup thread-3")
+                .as_deref(),
+            Some("third"),
+        );
+    }
+
+    /// Hook fired by compaction between writing the snapshot and renaming it
+    /// over the live index — the window a concurrent append can be lost in.
+    /// Only the store whose path a test registered is affected, so tests
+    /// running in parallel don't disturb each other.
+    type MidpointHook = Box<dyn Fn() + Send + Sync>;
+    static COMPACTION_MIDPOINT: Mutex<Option<(PathBuf, MidpointHook)>> = Mutex::new(None);
+
+    /// Fires at most once: the racing append compacts too, and a hook that
+    /// fired twice would re-enter the test's one-shot handshake.
+    pub(super) fn compaction_midpoint(index_path: &Path) {
+        let mut hook = COMPACTION_MIDPOINT.lock().expect("midpoint hook lock");
+        let registered_for_this_store = match hook.as_ref() {
+            Some((registered, _)) => registered == index_path,
+            None => return,
+        };
+        if !registered_for_this_store {
+            return;
+        }
+        let (_, callback) = hook.take().expect("presence checked above");
+        drop(hook);
+        callback();
+    }
+
+    #[test]
+    fn session_index_compaction_does_not_drop_a_concurrent_append() {
+        // #4736: compaction snapshots the file, rewrites it, and renames over
+        // the live one. An append landing between those two steps used to
+        // vanish — silently, since it had already returned success to its
+        // caller. The shared lock serializes the two.
+        //
+        // The race is real but narrow, so the test drives it deterministically:
+        // a hook at the compaction midpoint releases the appender and then
+        // waits. Without the lock the appender writes into the doomed file and
+        // the rename discards it; with the lock it blocks until compaction
+        // finishes, and its entry survives.
+        let store = Arc::new(temp_state_store("session-index-race"));
+        let threshold = session_index_compact_line_threshold();
+
+        // One line short of the threshold, so the next append compacts.
+        for idx in 0..threshold {
+            store
+                .append_thread_name(
+                    &format!("thread-{idx}"),
+                    Some(format!("name-{idx}")),
+                    1,
+                    None,
+                )
+                .expect("append filler entry");
+        }
+
+        let appender_released = Arc::new(Barrier::new(2));
+        {
+            let released = Arc::clone(&appender_released);
+            *COMPACTION_MIDPOINT.lock().expect("midpoint hook lock") = Some((
+                store.session_index_path.clone(),
+                Box::new(move || {
+                    released.wait();
+                    // Give the appender time to complete its write into the
+                    // window. Under the fix it is blocked on the lock instead.
+                    thread::sleep(Duration::from_millis(300));
+                }),
+            ));
+        }
+
+        let appender = {
+            let store = Arc::clone(&store);
+            let released = Arc::clone(&appender_released);
+            thread::spawn(move || {
+                released.wait();
+                store
+                    .append_thread_name("racer", Some("racer-name".to_string()), 2, None)
+                    .expect("append racing entry");
+            })
+        };
+
+        store
+            .append_thread_name("trigger", Some("trigger-name".to_string()), 1, None)
+            .expect("append entry that triggers compaction");
+        appender.join().expect("appender thread");
+        *COMPACTION_MIDPOINT.lock().expect("midpoint hook lock") = None;
+
+        assert_eq!(
+            store
+                .find_thread_name_by_id("racer")
+                .expect("lookup racer")
+                .as_deref(),
+            Some("racer-name"),
+            "append was dropped by a concurrent compaction",
+        );
+        assert_eq!(
+            store
+                .find_thread_name_by_id("trigger")
+                .expect("lookup trigger")
+                .as_deref(),
+            Some("trigger-name"),
+        );
     }
 }

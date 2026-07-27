@@ -1,6 +1,5 @@
-//! Runtime HTTP/SSE API for local CodeWhale automation.
+//! Runtime HTTP/SSE API for local Codewhale automation.
 
-use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::fs;
 use std::net::{SocketAddr, UdpSocket};
@@ -11,8 +10,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use async_stream::stream;
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{HeaderValue, Method, StatusCode, header};
-use axum::middleware::{self, Next};
+use axum::http::header;
+use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
+use axum::middleware;
 use axum::response::Html;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -20,62 +20,129 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use codewhale_protocol::runtime::{
-    RUNTIME_API_VERSION, RUNTIME_EVENT_ENVELOPE_SCHEMA_VERSION, RuntimeCapabilities,
-    RuntimeEventEnvelope, RuntimeExperimentalCapabilities,
+    DynamicToolCallResult, RUNTIME_API_VERSION, RUNTIME_EVENT_ENVELOPE_SCHEMA_VERSION,
+    RuntimeCapabilities, RuntimeEventEnvelope, RuntimeExperimentalCapabilities,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 
+#[cfg(test)]
 use crate::dependencies::ExternalTool;
 
 use crate::automation_manager::{
     AutomationManager, AutomationRecord, AutomationRunRecord, AutomationSchedulerConfig,
     CreateAutomationRequest, SharedAutomationManager, UpdateAutomationRequest, spawn_scheduler,
 };
-use crate::config::{Config, DEFAULT_TEXT_MODEL};
+use crate::config::{
+    ApiProvider, Config, DEFAULT_TEXT_MODEL, normalize_model_name_for_provider, validate_route,
+};
+use crate::fleet::executor::{FleetExecutor, configured_codewhale_binary};
 use crate::fleet::ledger::{FleetLedgerState, FleetTaskLedgerStatus};
-use crate::fleet::manager::{FleetManager, FleetStatusSnapshot, FleetWorkerInspection};
+use crate::fleet::manager::{
+    FleetManager, FleetStatusSnapshot, FleetWorkerInspection, FleetWorkerRuntimeProjection,
+};
 use crate::mcp::McpPool;
-use crate::models::{ContentBlock, Message};
+#[cfg(test)]
+pub(super) use crate::models::{ContentBlock, Message};
 use crate::runtime_threads::{
-    CompactThreadRequest, CreateThreadRequest, ExternalApprovalDecision, RuntimeThreadManager,
-    RuntimeThreadManagerConfig, RuntimeTurnStatus, SharedRuntimeThreadManager, StartTurnRequest,
-    SteerTurnRequest, ThreadDetail, ThreadListFilter, ThreadRecord, TurnItemKind,
-    TurnItemLifecycleStatus, TurnRecord, UpdateThreadRequest, UsageGroupBy,
+    CompactThreadRequest, CreateThreadRequest, ExternalApprovalDecision,
+    MAX_RUNTIME_EVENT_REPLAY_TAIL, RuntimeThreadManager, RuntimeThreadManagerConfig,
+    SharedRuntimeThreadManager, StartTurnRequest, SteerTurnRequest, ThreadDetail, ThreadListFilter,
+    ThreadRecord, TurnItemKind, TurnRecord, UpdateThreadRequest, UsageGroupBy,
 };
-use crate::session_manager::{
-    SavedSession, SessionManager, SessionMetadata, create_saved_session_with_id_and_mode,
-    default_sessions_dir,
-};
+#[cfg(test)]
+pub(super) use crate::runtime_threads::{RuntimeTurnStatus, TurnItemLifecycleStatus};
+use crate::session_manager::default_sessions_dir;
+#[cfg(test)]
+pub(super) use crate::session_manager::{SavedSession, SessionMetadata};
 use crate::skill_state::SkillStateStore;
 use crate::task_manager::{
     NewTaskRequest, SharedTaskManager, TaskManager, TaskManagerConfig, TaskRecord, TaskSummary,
 };
-use crate::tools::subagent::{AgentWorkerRecord, load_persisted_agent_worker_records};
+use crate::tools::subagent::{
+    AgentWorkerRecord, SharedSubAgentManager, load_persisted_agent_worker_records,
+    new_shared_subagent_manager_with_timeout,
+};
 use codewhale_protocol::fleet::{
     FleetArtifactKind, FleetRun, FleetRunId, FleetWorkerEventPayload, FleetWorkerStatus,
 };
 
+mod auth;
+mod sessions;
+mod web;
+mod workspace;
+#[cfg(test)]
+use self::auth::{ResolvedRuntimeAuth, token_from_cookie_header};
+use self::auth::{require_runtime_token, resolve_runtime_auth, runtime_auth_status_lines};
+use self::sessions::{
+    create_session_from_thread, delete_session, get_session, list_sessions, list_sessions_summary,
+    patch_session, resume_session_thread, save_current_session,
+};
+#[cfg(test)]
+use self::sessions::{messages_from_thread_detail, session_to_detail};
+#[cfg(test)]
+use self::workspace::collect_workspace_status;
+use self::workspace::{collect_workspace_git_metadata, workspace_status};
+
 #[derive(Clone)]
 pub struct RuntimeApiState {
-    config: Config,
+    config: Arc<parking_lot::RwLock<Config>>,
     workspace: PathBuf,
+    plugin_discovery: Arc<crate::plugins::PluginDiscoveryContext>,
     task_manager: SharedTaskManager,
     runtime_threads: SharedRuntimeThreadManager,
     cors_origins: Vec<String>,
     sessions_dir: PathBuf,
-    mcp_config_path: PathBuf,
+    /// Original `--config` path (if any) used to load the initial config.
+    /// Passed to `Config::load` on reload and to persistence helpers so
+    /// GUI-driven config changes target the same file the server was
+    /// started with, instead of falling back to the default discovery.
+    config_path: Option<PathBuf>,
+    /// Effective initial profile (`--profile` or `DEEPSEEK_PROFILE`).
+    /// Reload must retain this overlay so profile-scoped routes do not vanish.
+    config_profile: Option<String>,
     automations: SharedAutomationManager,
+    sub_agent_manager: SharedSubAgentManager,
     runtime_token: Option<String>,
     skill_state: Arc<Mutex<SkillStateStore>>,
     auth_required: bool,
     bind_host: String,
     bind_port: u16,
     mobile_enabled: bool,
+    web: Option<web::RuntimeWebState>,
+    /// Executable used by Runtime API-owned Fleet manager loops. Stored on
+    /// state so tests and embedded callers can provide a hermetic worker.
+    fleet_codewhale_binary: String,
+    /// Shared McpPool reused for explicit live MCP discovery. Passive API
+    /// calls do not initialize this pool so dashboards cannot accidentally
+    /// become a second stdio-process owner. The outer mutex guards only the
+    /// lazily-initialized slot; slow per-pool work (connect_all) runs under
+    /// the inner handle so it cannot block slot reads.
+    mcp_pool: Arc<Mutex<Option<Arc<Mutex<McpPool>>>>>,
+    #[cfg(test)]
+    compat_stream_test_hook: Option<tokio::sync::mpsc::UnboundedSender<CompatStreamTestPoint>>,
+}
+
+#[cfg(test)]
+enum CompatStreamTestPoint {
+    ThreadCreated {
+        thread_id: String,
+        resume: tokio::sync::oneshot::Sender<()>,
+    },
+    SubscribedBeforeReplay {
+        thread_id: String,
+        turn_id: String,
+        resume: tokio::sync::oneshot::Sender<()>,
+    },
+    ReplayLoaded {
+        thread_id: String,
+        turn_id: String,
+        resume: tokio::sync::oneshot::Sender<()>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -98,8 +165,18 @@ pub struct RuntimeApiOptions {
     pub insecure_no_auth: bool,
     /// Enables the built-in mobile control page at `/mobile`.
     pub mobile: bool,
+    /// Enables the embedded local browser client and opens it after binding.
+    /// Web mode is always loopback-only and uses a one-time bootstrap cookie
+    /// exchange rather than exposing the Runtime token to the browser URL.
+    pub web: bool,
     /// Show a QR code for the mobile URL in the terminal.
     pub show_qr: bool,
+    /// Original `--config` path used to load the initial config. When
+    /// `Some`, GUI-driven config reloads and persistence target this file
+    /// instead of the default discovery path.
+    pub config_path: Option<PathBuf>,
+    /// Effective profile used to load the server's initial Config.
+    pub config_profile: Option<String>,
 }
 
 impl Default for RuntimeApiOptions {
@@ -112,53 +189,12 @@ impl Default for RuntimeApiOptions {
             auth_token: None,
             insecure_no_auth: false,
             mobile: false,
+            web: false,
             show_qr: false,
+            config_path: None,
+            config_profile: None,
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ResolvedRuntimeAuth {
-    token: Option<String>,
-    generated: bool,
-}
-
-fn resolve_runtime_auth(
-    cli_token: Option<String>,
-    env_token: Option<String>,
-    insecure_no_auth: bool,
-) -> ResolvedRuntimeAuth {
-    if let Some(token) = first_nonblank_token(cli_token).or_else(|| first_nonblank_token(env_token))
-    {
-        return ResolvedRuntimeAuth {
-            token: Some(token),
-            generated: false,
-        };
-    }
-    if insecure_no_auth {
-        return ResolvedRuntimeAuth {
-            token: None,
-            generated: false,
-        };
-    }
-    ResolvedRuntimeAuth {
-        token: Some(generate_runtime_token()),
-        generated: true,
-    }
-}
-
-fn first_nonblank_token(token: Option<String>) -> Option<String> {
-    token
-        .map(|token| token.trim().to_string())
-        .filter(|token| !token.is_empty())
-}
-
-fn generate_runtime_token() -> String {
-    format!(
-        "cwrt_{}{}",
-        uuid::Uuid::new_v4().simple(),
-        uuid::Uuid::new_v4().simple()
-    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -180,55 +216,9 @@ struct HealthResponse {
 }
 
 #[derive(Debug, Serialize)]
-struct SessionsResponse {
-    sessions: Vec<SessionMetadata>,
-}
-
-#[derive(Debug, Serialize)]
-struct SessionDetailResponse {
-    metadata: SessionMetadata,
-    messages: Vec<serde_json::Value>,
-    system_prompt: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateSessionRequest {
-    thread_id: String,
-    title: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct CreateSessionResponse {
-    session_id: String,
-    thread_id: String,
-    message_count: usize,
-    title: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ResumeSessionRequest {
-    model: Option<String>,
-    mode: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct ResumeSessionResponse {
-    thread_id: String,
-    session_id: String,
-    message_count: usize,
-    summary: String,
-}
-
-#[derive(Debug, Serialize)]
 struct TasksResponse {
     tasks: Vec<TaskSummary>,
     counts: crate::task_manager::TaskCounts,
-}
-
-#[derive(Debug, Deserialize)]
-struct SessionsQuery {
-    limit: Option<usize>,
-    search: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -286,31 +276,16 @@ struct ThreadSummary {
 }
 
 #[derive(Debug, Serialize)]
-struct WorkspaceStatusResponse {
-    workspace: PathBuf,
-    git_repo: bool,
-    branch: Option<String>,
-    head: Option<String>,
-    dirty: bool,
-    staged: usize,
-    unstaged: usize,
-    untracked: usize,
-    ahead: Option<u32>,
-    behind: Option<u32>,
-}
-
-#[derive(Debug, Default)]
-struct WorkspaceGitMetadata {
-    branch: Option<String>,
-    head: Option<String>,
-    dirty: bool,
-}
-
-#[derive(Debug, Serialize)]
 struct SkillEntry {
     name: String,
     description: String,
-    path: PathBuf,
+    /// Native Skill locator. Reviewed plugin paths are deliberately omitted;
+    /// their bodies are available only through the authority-bound snapshot.
+    path: Option<PathBuf>,
+    source: String,
+    plugin_id: Option<String>,
+    plugin_generation: Option<u64>,
+    plugin_content_hash: Option<String>,
     enabled: bool,
     is_bundled: bool,
 }
@@ -395,10 +370,22 @@ fn default_runtime_capabilities() -> RuntimeCapabilities {
         turn_steer: true,
         turn_interrupt: true,
         event_replay: true,
-        external_tools: false,
+        external_tools: true,
         environments: false,
-        worker_runtime: false,
+        worker_runtime: true,
     }
+}
+
+fn runtime_api_sub_agent_manager(workspace: &FsPath, workers: usize) -> SharedSubAgentManager {
+    let max_agents = workers.max(1);
+    new_shared_subagent_manager_with_timeout(
+        workspace.to_path_buf(),
+        max_agents,
+        max_agents,
+        Duration::from_secs(crate::config::DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS),
+        max_agents,
+        None,
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -421,6 +408,8 @@ struct McpServersResponse {
 #[derive(Debug, Deserialize)]
 struct McpToolsQuery {
     server: Option<String>,
+    #[serde(default)]
+    connect: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -445,6 +434,7 @@ struct AutomationRunsQuery {
 #[derive(Debug, Deserialize)]
 struct ThreadEventsQuery {
     since_seq: Option<u64>,
+    replay_limit: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -457,10 +447,17 @@ struct StartTurnResponse {
 pub async fn run_http_server(
     config: Config,
     workspace: PathBuf,
+    plugin_discovery: Arc<crate::plugins::PluginDiscoveryContext>,
     options: RuntimeApiOptions,
 ) -> Result<()> {
     if options.port == 0 {
         bail!("Port must be > 0");
+    }
+    if options.web && options.host != "127.0.0.1" {
+        bail!("Codewhale web is loopback-only and must bind to 127.0.0.1");
+    }
+    if options.web && options.insecure_no_auth {
+        bail!("Codewhale web requires Runtime authentication; remove --insecure");
     }
 
     let task_cfg = TaskManagerConfig::from_runtime(
@@ -469,10 +466,11 @@ pub async fn run_http_server(
         config.default_text_model.clone(),
         Some(options.workers),
     );
-    let runtime_threads = Arc::new(RuntimeThreadManager::open(
+    let runtime_threads = Arc::new(RuntimeThreadManager::open_with_plugin_registry(
         config.clone(),
         workspace.clone(),
         RuntimeThreadManagerConfig::from_task_data_dir(task_cfg.data_dir.clone()),
+        plugin_discovery.registry_for_workspace(&workspace),
     )?);
     let task_manager =
         TaskManager::start_with_runtime_manager(task_cfg, config.clone(), runtime_threads.clone())
@@ -488,7 +486,7 @@ pub async fn run_http_server(
     );
 
     let sessions_dir = default_sessions_dir().unwrap_or_else(|_| {
-        dirs::home_dir()
+        crate::config::effective_home_dir()
             .map(|h| h.join(".deepseek").join("sessions"))
             .unwrap_or_else(|| PathBuf::from(".deepseek").join("sessions"))
     });
@@ -502,28 +500,41 @@ pub async fn run_http_server(
     );
     let runtime_token = resolved_auth.token.clone();
     let auth_enabled = runtime_token.is_some();
-    let skill_state = SkillStateStore::load_default().unwrap_or_else(|err| {
-        tracing::warn!(
-            "Failed to load skills_state.toml ({}); treating all skills as enabled",
-            err
-        );
-        SkillStateStore::default()
-    });
+    let (web, web_bootstrap) = if options.web {
+        runtime_token
+            .as_ref()
+            .context("Codewhale web requires a Runtime authentication token")?;
+        let (web, bootstrap) = web::RuntimeWebState::new();
+        (Some(web), Some(bootstrap))
+    } else {
+        (None, None)
+    };
+    let skill_state = SkillStateStore::load_default()
+        .context("load persistent Skill activation state for Runtime API")?;
+    let sub_agent_manager = runtime_api_sub_agent_manager(&workspace, options.workers);
     let state = RuntimeApiState {
-        config: config.clone(),
+        config: Arc::new(parking_lot::RwLock::new(config.clone())),
         workspace,
+        plugin_discovery,
         task_manager,
         runtime_threads,
         cors_origins: options.cors_origins.clone(),
         sessions_dir,
-        mcp_config_path: config.mcp_config_path(),
+        config_path: options.config_path.clone(),
+        config_profile: options.config_profile.clone(),
         automations,
+        sub_agent_manager,
         runtime_token: runtime_token.clone(),
         skill_state: Arc::new(Mutex::new(skill_state)),
         auth_required: auth_enabled,
         bind_host: options.host.clone(),
         bind_port: options.port,
         mobile_enabled: options.mobile,
+        web,
+        fleet_codewhale_binary: configured_codewhale_binary(),
+        mcp_pool: Arc::new(Mutex::new(None)),
+        #[cfg(test)]
+        compat_stream_test_hook: None,
     };
     let app = build_router(state);
 
@@ -534,27 +545,30 @@ pub async fn run_http_server(
         .await
         .with_context(|| format!("Failed to bind {addr}"))?;
 
-    println!("Runtime API listening on http://{addr}");
-    if resolved_auth.generated {
-        if let Some(token) = runtime_token.as_deref() {
-            println!("Runtime API auth: generated bearer token for this process.");
-            println!("  Authorization: Bearer {token}");
-            println!(
-                "  Set CODEWHALE_RUNTIME_TOKEN (or DEEPSEEK_RUNTIME_TOKEN as an alias) or pass --auth-token for a stable token."
-            );
-        }
-    } else if auth_enabled {
-        println!("Runtime API auth: bearer token required for /v1/* routes.");
-    } else {
-        println!("Runtime API auth: disabled by explicit insecure mode.");
+    let bound_addr = listener
+        .local_addr()
+        .context("Failed to read Runtime API listener address")?;
+    println!("Runtime API listening on http://{bound_addr}");
+    for line in runtime_auth_status_lines(&resolved_auth) {
+        println!("{line}");
     }
     if options.mobile {
         print_mobile_urls(
-            addr,
-            runtime_token.as_deref(),
+            bound_addr,
             auth_enabled,
+            resolved_auth.generated,
             options.show_qr,
         );
+    }
+    if let Some(bootstrap) = web_bootstrap {
+        println!("Codewhale web enabled at http://{bound_addr}/");
+        let bootstrap_url = web::bootstrap_url(bound_addr, &bootstrap);
+        if let Err(error) = crate::utils::open_url(&bootstrap_url) {
+            scheduler_cancel.cancel();
+            scheduler_handle.abort();
+            return Err(error)
+                .context("Failed to open the Codewhale web client in the default browser");
+        }
     }
     let is_loopback = options.host == "127.0.0.1" || options.host == "::1";
     if is_loopback {
@@ -576,9 +590,12 @@ pub async fn run_http_server(
             auth = auth_enabled,
         );
     }
-    let serve_result = axum::serve(listener, app)
-        .await
-        .map_err(|e| anyhow!("Runtime API server error: {e}"));
+    let serve_result = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .map_err(|e| anyhow!("Runtime API server error: {e}"));
     scheduler_cancel.cancel();
     scheduler_handle.abort();
     serve_result
@@ -588,9 +605,15 @@ pub fn build_router(state: RuntimeApiState) -> Router {
     let api_routes = Router::new()
         .route(
             "/v1/sessions",
-            get(list_sessions).post(create_session_from_thread),
+            get(list_sessions)
+                .post(create_session_from_thread)
+                .put(save_current_session),
         )
-        .route("/v1/sessions/{id}", get(get_session).delete(delete_session))
+        .route("/v1/sessions/summary", get(list_sessions_summary))
+        .route(
+            "/v1/sessions/{id}",
+            get(get_session).patch(patch_session).delete(delete_session),
+        )
         .route(
             "/v1/sessions/{id}/resume-thread",
             post(resume_session_thread),
@@ -632,6 +655,10 @@ pub fn build_router(state: RuntimeApiState) -> Router {
             "/v1/threads/{id}/turns/{turn_id}/interrupt",
             post(interrupt_thread_turn),
         )
+        .route(
+            "/v1/threads/{id}/turns/{turn_id}/tool-calls/{call_id}/result",
+            post(deliver_dynamic_tool_result),
+        )
         .route("/v1/threads/{id}/compact", post(compact_thread))
         .route("/v1/threads/{id}/events", get(stream_thread_events))
         .route("/v1/approvals/{approval_id}", post(decide_approval))
@@ -663,12 +690,24 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/v1/usage", get(get_usage))
         .route("/v1/snapshots", get(list_snapshots))
         .route("/v1/snapshots/{id}/restore", post(restore_snapshot))
+        .route("/v1/providers", get(list_providers))
+        .route("/v1/providers/{id}/models", get(list_provider_models))
+        .route("/v1/providers/{id}/switch", post(switch_provider))
+        .route("/v1/config", get(get_config).post(set_config))
+        .route("/v1/config/reload", post(reload_config))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_runtime_token,
         ));
 
     Router::new()
+        .route("/", get(web::web_page))
+        .route("/assets/codewhale-web.css", get(web::web_styles))
+        .route("/assets/codewhale-web.js", get(web::web_script))
+        .route(
+            "/__codewhale/bootstrap/{nonce}",
+            get(web::exchange_bootstrap),
+        )
         .route("/health", get(health))
         .route("/mobile", get(mobile_page))
         .route("/mobile/", get(mobile_page))
@@ -676,93 +715,6 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .merge(api_routes)
         .layer(cors_layer(&state.cors_origins))
         .with_state(state)
-}
-
-async fn require_runtime_token(
-    State(state): State<RuntimeApiState>,
-    req: Request,
-    next: Next,
-) -> Response {
-    let Some(expected) = state.runtime_token.as_deref() else {
-        return next.run(req).await;
-    };
-    let authorized = request_has_runtime_token(&req, expected);
-
-    if authorized {
-        next.run(req).await
-    } else {
-        runtime_token_required_response()
-    }
-}
-
-fn request_has_runtime_token(req: &Request, expected: &str) -> bool {
-    req.headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|raw| raw.strip_prefix("Bearer "))
-        .is_some_and(|token| token == expected)
-        || req
-            .headers()
-            .get("x-codewhale-runtime-token")
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|token| token == expected)
-        || req
-            .headers()
-            .get("x-deepseek-runtime-token")
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|token| token == expected)
-        || token_from_query(req.uri().query()).is_some_and(|token| token == expected)
-}
-
-fn runtime_token_required_response() -> Response {
-    (
-        StatusCode::UNAUTHORIZED,
-        Json(json!({
-            "error": {
-                "message": "runtime API bearer token required",
-                "status": StatusCode::UNAUTHORIZED.as_u16(),
-            }
-        })),
-    )
-        .into_response()
-}
-
-fn token_from_query(query: Option<&str>) -> Option<String> {
-    query.and_then(|query| {
-        query.split('&').find_map(|pair| {
-            let (key, value) = pair.split_once('=')?;
-            (key == "token")
-                .then(|| percent_decode_query_component(value))
-                .flatten()
-        })
-    })
-}
-
-fn percent_decode_query_component(value: &str) -> Option<String> {
-    let bytes = value.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'%' => {
-                let hi = *bytes.get(index + 1)?;
-                let lo = *bytes.get(index + 2)?;
-                let hi = (hi as char).to_digit(16)? as u8;
-                let lo = (lo as char).to_digit(16)? as u8;
-                decoded.push((hi << 4) | lo);
-                index += 3;
-            }
-            b'+' => {
-                decoded.push(b' ');
-                index += 1;
-            }
-            byte => {
-                decoded.push(byte);
-                index += 1;
-            }
-        }
-    }
-    String::from_utf8(decoded).ok()
 }
 
 async fn mobile_page(State(state): State<RuntimeApiState>, req: Request) -> Response {
@@ -773,43 +725,38 @@ async fn mobile_page(State(state): State<RuntimeApiState>, req: Request) -> Resp
         )
             .into_response();
     }
-    if let Some(expected) = state.runtime_token.as_deref()
-        && !request_has_runtime_token(&req, expected)
-    {
-        return runtime_token_required_response();
-    }
+    let _ = req;
     Html(MOBILE_HTML).into_response()
 }
 
-fn print_mobile_urls(addr: SocketAddr, token: Option<&str>, auth_enabled: bool, show_qr: bool) {
+fn print_mobile_urls(addr: SocketAddr, auth_enabled: bool, generated_auth: bool, show_qr: bool) {
     println!("Mobile control page enabled.");
-    let token_query = if auth_enabled {
-        token
-            .filter(|token| !token.trim().is_empty())
-            .map(|token| format!("?token={}", url_query_component(token)))
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
 
     let port = addr.port();
     let qr_url = if addr.ip().is_unspecified() {
-        println!("  Local: http://127.0.0.1:{port}/mobile{token_query}");
+        println!("  Local: http://127.0.0.1:{port}/mobile");
         if let Some(ip) = detect_lan_ip() {
-            let lan_url = format!("http://{ip}:{port}/mobile{token_query}");
+            let lan_url = format!("http://{ip}:{port}/mobile");
             println!("  LAN:   {lan_url}");
             lan_url
         } else {
-            println!(
-                "  LAN:   bind is 0.0.0.0; open http://<this-machine-ip>:{port}/mobile{token_query}"
-            );
-            format!("http://127.0.0.1:{port}/mobile{token_query}")
+            println!("  LAN:   bind is 0.0.0.0; open http://<this-machine-ip>:{port}/mobile");
+            format!("http://127.0.0.1:{port}/mobile")
         }
     } else {
-        let url = format!("http://{addr}/mobile{token_query}");
+        let url = format!("http://{addr}/mobile");
         println!("  URL:   {url}");
         url
     };
+    if auth_enabled {
+        if generated_auth {
+            println!(
+                "  Auth uses an unprinted generated token; restart with CODEWHALE_RUNTIME_TOKEN or --auth-token to sign in from another client."
+            );
+        } else {
+            println!("  Enter the configured runtime token in the page connection field.");
+        }
+    }
     println!("Mobile security: use only on a trusted LAN/VPN; this server does not provide TLS.");
 
     if show_qr {
@@ -825,6 +772,7 @@ fn print_mobile_urls(addr: SocketAddr, token: Option<&str>, auth_enabled: bool, 
     }
 }
 
+#[cfg(test)]
 fn url_query_component(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {
@@ -857,330 +805,6 @@ async fn health() -> Json<HealthResponse> {
     })
 }
 
-async fn list_sessions(
-    State(state): State<RuntimeApiState>,
-    Query(query): Query<SessionsQuery>,
-) -> Result<Json<SessionsResponse>, ApiError> {
-    let manager = SessionManager::new(state.sessions_dir.clone())
-        .map_err(|e| ApiError::internal(format!("Failed to open sessions dir: {e}")))?;
-    let mut sessions = if let Some(search) = query.search {
-        manager
-            .search_sessions(&search)
-            .map_err(|e| ApiError::internal(format!("Failed to search sessions: {e}")))?
-    } else {
-        manager
-            .list_sessions()
-            .map_err(|e| ApiError::internal(format!("Failed to list sessions: {e}")))?
-    };
-    let limit = query.limit.unwrap_or(50).clamp(1, 500);
-    sessions.truncate(limit);
-    Ok(Json(SessionsResponse { sessions }))
-}
-
-async fn get_session(
-    State(state): State<RuntimeApiState>,
-    Path(id): Path<String>,
-) -> Result<Json<SessionDetailResponse>, ApiError> {
-    let manager = SessionManager::new(state.sessions_dir.clone())
-        .map_err(|e| ApiError::internal(format!("Failed to open sessions dir: {e}")))?;
-    let session = manager
-        .load_session(&id)
-        .map_err(|e| map_session_err(&id, e, "read"))?;
-    Ok(Json(session_to_detail(session)))
-}
-
-async fn resume_session_thread(
-    State(state): State<RuntimeApiState>,
-    Path(id): Path<String>,
-    Json(req): Json<ResumeSessionRequest>,
-) -> Result<(StatusCode, Json<ResumeSessionResponse>), ApiError> {
-    let manager = SessionManager::new(state.sessions_dir.clone())
-        .map_err(|e| ApiError::internal(format!("Failed to open sessions dir: {e}")))?;
-    let session = manager
-        .load_session(&id)
-        .map_err(|e| map_session_err(&id, e, "read"))?;
-
-    let model = req.model.unwrap_or_else(|| session.metadata.model.clone());
-    let mode = req.mode.unwrap_or_else(|| {
-        session
-            .metadata
-            .mode
-            .clone()
-            .unwrap_or_else(|| "agent".to_string())
-    });
-
-    let thread = state
-        .runtime_threads
-        .create_thread(CreateThreadRequest {
-            model: Some(model),
-            workspace: Some(state.workspace.clone()),
-            mode: Some(mode),
-            allow_shell: None,
-            trust_mode: None,
-            auto_approve: None,
-            archived: false,
-            system_prompt: session.system_prompt.clone(),
-            task_id: None,
-            ..Default::default()
-        })
-        .await
-        .map_err(|e| ApiError::internal(format!("Failed to create thread: {e}")))?;
-
-    let msg_count = session.messages.len();
-    state
-        .runtime_threads
-        .seed_thread_from_messages(&thread.id, &session.messages)
-        .await
-        .map_err(|e| ApiError::internal(format!("Failed to seed thread history: {e}")))?;
-
-    let summary = format!(
-        "Resumed session '{}' ({} messages) into thread {}",
-        session.metadata.title, msg_count, thread.id
-    );
-
-    Ok((
-        StatusCode::CREATED,
-        Json(ResumeSessionResponse {
-            thread_id: thread.id,
-            session_id: id,
-            message_count: msg_count,
-            summary,
-        }),
-    ))
-}
-
-async fn create_session_from_thread(
-    State(state): State<RuntimeApiState>,
-    Json(req): Json<CreateSessionRequest>,
-) -> Result<(StatusCode, Json<CreateSessionResponse>), ApiError> {
-    let thread_id = req.thread_id.trim();
-    if thread_id.is_empty() {
-        return Err(ApiError::bad_request("thread_id is required"));
-    }
-
-    let detail = state
-        .runtime_threads
-        .get_thread_detail(thread_id)
-        .await
-        .map_err(map_thread_err)?;
-
-    if thread_detail_has_live_work(&detail) {
-        return Err(ApiError {
-            status: StatusCode::CONFLICT,
-            message: format!(
-                "Thread {thread_id} has a queued or active turn; wait for completion before saving as a session"
-            ),
-        });
-    }
-
-    let messages = messages_from_thread_detail(&detail);
-    if messages.is_empty() {
-        return Err(ApiError::bad_request(format!(
-            "Thread {thread_id} has no user or assistant messages to save"
-        )));
-    }
-
-    let manager = SessionManager::new(state.sessions_dir.clone())
-        .map_err(|e| ApiError::internal(format!("Failed to open sessions dir: {e}")))?;
-    let total_tokens = total_tokens_from_thread_detail(&detail);
-    let session_id = uuid::Uuid::new_v4().to_string();
-    let mut session = create_saved_session_with_id_and_mode(
-        session_id.clone(),
-        &messages,
-        &detail.thread.model,
-        &detail.thread.workspace,
-        total_tokens,
-        None,
-        Some(&detail.thread.mode),
-    );
-    session.system_prompt = detail.thread.system_prompt.clone();
-
-    if let Some(title) =
-        session_title_override(req.title.as_deref(), detail.thread.title.as_deref())
-    {
-        session.metadata.title = title;
-    }
-    let title = session.metadata.title.clone();
-    let message_count = session.metadata.message_count;
-
-    manager
-        .save_session(&session)
-        .map_err(|e| ApiError::internal(format!("Failed to save session: {e}")))?;
-
-    Ok((
-        StatusCode::CREATED,
-        Json(CreateSessionResponse {
-            session_id,
-            thread_id: detail.thread.id,
-            message_count,
-            title,
-        }),
-    ))
-}
-
-fn thread_detail_has_live_work(detail: &ThreadDetail) -> bool {
-    detail.turns.iter().any(|turn| {
-        matches!(
-            turn.status,
-            RuntimeTurnStatus::Queued | RuntimeTurnStatus::InProgress
-        )
-    }) || detail.items.iter().any(|item| {
-        matches!(
-            item.status,
-            TurnItemLifecycleStatus::Queued | TurnItemLifecycleStatus::InProgress
-        )
-    })
-}
-
-fn messages_from_thread_detail(detail: &ThreadDetail) -> Vec<Message> {
-    let items_by_id: HashMap<&str, _> = detail
-        .items
-        .iter()
-        .map(|item| (item.id.as_str(), item))
-        .collect();
-    let mut messages = Vec::new();
-
-    for turn in &detail.turns {
-        for item_id in &turn.item_ids {
-            let Some(item) = items_by_id.get(item_id.as_str()) else {
-                continue;
-            };
-            let role = match item.kind {
-                TurnItemKind::UserMessage => "user",
-                TurnItemKind::AgentMessage => "assistant",
-                _ => continue,
-            };
-            let Some(text) = item.detail.as_deref().map(str::trim) else {
-                continue;
-            };
-            if text.is_empty() {
-                continue;
-            }
-            messages.push(Message {
-                role: role.to_string(),
-                content: vec![ContentBlock::Text {
-                    text: text.to_string(),
-                    cache_control: None,
-                }],
-            });
-        }
-    }
-
-    messages
-}
-
-fn total_tokens_from_thread_detail(detail: &ThreadDetail) -> u64 {
-    detail
-        .turns
-        .iter()
-        .filter_map(|turn| turn.usage.as_ref())
-        .map(|usage| u64::from(usage.input_tokens) + u64::from(usage.output_tokens))
-        .sum()
-}
-
-fn session_title_override(requested: Option<&str>, thread_title: Option<&str>) -> Option<String> {
-    requested
-        .and_then(nonempty_title)
-        .or_else(|| thread_title.and_then(nonempty_title))
-}
-
-fn nonempty_title(title: &str) -> Option<String> {
-    let trimmed = title.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(truncate_text(trimmed, 50))
-    }
-}
-
-async fn delete_session(
-    State(state): State<RuntimeApiState>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, ApiError> {
-    let manager = SessionManager::new(state.sessions_dir.clone())
-        .map_err(|e| ApiError::internal(format!("Failed to open sessions dir: {e}")))?;
-    manager
-        .delete_session(&id)
-        .map_err(|e| map_session_err(&id, e, "delete"))?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-fn session_to_detail(session: SavedSession) -> SessionDetailResponse {
-    let messages: Vec<serde_json::Value> = session
-        .messages
-        .iter()
-        .map(|msg| {
-            let content_blocks: Vec<serde_json::Value> = msg
-                .content
-                .iter()
-                .map(|block| match block {
-                    crate::models::ContentBlock::Text { text, .. } => {
-                        json!({ "type": "text", "text": text })
-                    }
-                    crate::models::ContentBlock::Thinking { thinking, .. } => {
-                        json!({ "type": "thinking", "text": thinking })
-                    }
-                    crate::models::ContentBlock::ToolUse { id, name, input, caller } => {
-                        let mut obj =
-                            json!({ "type": "tool_use", "id": id, "name": name, "input": input });
-                        if let Some(caller) = caller {
-                            obj["caller"] = json!(caller);
-                        }
-                        obj
-                    }
-                    crate::models::ContentBlock::ToolResult { tool_use_id, content, is_error, content_blocks, .. } => {
-                        let mut obj = json!({ "type": "tool_result", "tool_use_id": tool_use_id });
-                        if let Some(cbs) = content_blocks {
-                            obj["content_blocks"] = json!(cbs);
-                            if !content.is_empty() {
-                                obj["content"] = json!(content);
-                            }
-                        } else {
-                            obj["content"] = json!(content);
-                        }
-                        if let Some(e) = is_error {
-                            obj["is_error"] = json!(e);
-                        }
-                        obj
-                    }
-                    crate::models::ContentBlock::ServerToolUse { id, name, input } => {
-                        json!({ "type": "tool_use", "id": id, "name": name, "input": input })
-                    }
-                    crate::models::ContentBlock::ToolSearchToolResult { tool_use_id, content } => {
-                        json!({ "type": "tool_result", "tool_use_id": tool_use_id, "content": content })
-                    }
-                    crate::models::ContentBlock::CodeExecutionToolResult { tool_use_id, content } => {
-                        json!({ "type": "tool_result", "tool_use_id": tool_use_id, "content": content })
-                    }
-                    crate::models::ContentBlock::ImageUrl { .. } => serde_json::Value::Null,
-                })
-                .collect();
-            json!({
-                "role": msg.role,
-                "content": content_blocks,
-            })
-        })
-        .collect();
-    SessionDetailResponse {
-        metadata: session.metadata,
-        messages,
-        system_prompt: session.system_prompt,
-    }
-}
-
-fn map_session_err(id: &str, err: std::io::Error, action: &str) -> ApiError {
-    match err.kind() {
-        std::io::ErrorKind::NotFound => ApiError::not_found(format!("Session '{id}' not found")),
-        std::io::ErrorKind::InvalidData => {
-            ApiError::bad_request(format!("Failed to parse session '{id}': {err}"))
-        }
-        std::io::ErrorKind::InvalidInput => {
-            ApiError::bad_request(format!("Invalid session id '{id}'"))
-        }
-        _ => ApiError::internal(format!("Failed to {action} session '{id}': {err}")),
-    }
-}
-
 async fn create_task(
     State(state): State<RuntimeApiState>,
     Json(mut req): Json<NewTaskRequest>,
@@ -1195,6 +819,7 @@ async fn create_task(
         req.model = Some(
             state
                 .config
+                .read()
                 .default_text_model
                 .clone()
                 .unwrap_or_else(|| DEFAULT_TEXT_MODEL.to_string()),
@@ -1212,15 +837,6 @@ async fn create_thread(
     State(state): State<RuntimeApiState>,
     Json(mut req): Json<CreateThreadRequest>,
 ) -> Result<(StatusCode, Json<ThreadRecord>), ApiError> {
-    if req.model.as_ref().is_none_or(|m| m.trim().is_empty()) {
-        req.model = Some(
-            state
-                .config
-                .default_text_model
-                .clone()
-                .unwrap_or_else(|| DEFAULT_TEXT_MODEL.to_string()),
-        );
-    }
     if req.workspace.is_none() {
         req.workspace = Some(state.workspace.clone());
     }
@@ -1344,12 +960,6 @@ async fn list_threads_summary(
     }
 
     Ok(Json(summaries))
-}
-
-async fn workspace_status(
-    State(state): State<RuntimeApiState>,
-) -> Result<Json<WorkspaceStatusResponse>, ApiError> {
-    Ok(Json(collect_workspace_status(&state.workspace)))
 }
 
 async fn list_agent_runs(
@@ -1481,14 +1091,41 @@ async fn restart_fleet_worker(
     Path(worker_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let manager = open_fleet_manager(&state)?;
-    let inspection = manager.restart_worker(&worker_id).map_err(|err| {
+    let report = manager.restart_worker(&worker_id).map_err(|err| {
         ApiError::bad_request(format!(
             "Failed to restart fleet worker '{worker_id}': {err}"
         ))
     })?;
+    let worker = fleet_worker_json(&report.inspection);
+    let run_id = report.run_id.clone();
+    let max_workers = report.max_workers;
+    let workspace = state.workspace.clone();
+    let codewhale_binary = state.fleet_codewhale_binary.clone();
+    tokio::spawn(async move {
+        let mut executor = FleetExecutor::new(&workspace);
+        if let Err(err) = manager
+            .run_to_completion(
+                &run_id,
+                max_workers,
+                &mut executor,
+                &codewhale_binary,
+                None,
+                Duration::from_millis(250),
+            )
+            .await
+        {
+            tracing::error!(
+                run_id = %run_id.0,
+                error = %err,
+                "Runtime API Fleet restart manager exited with an error"
+            );
+        }
+    });
     Ok(Json(json!({
         "action": "restart",
-        "worker": fleet_worker_json(&inspection),
+        "execution": "scheduled",
+        "run_id": report.run_id.0,
+        "worker": worker,
     })))
 }
 
@@ -1513,7 +1150,25 @@ async fn stop_fleet_run(
 }
 
 fn open_fleet_manager(state: &RuntimeApiState) -> Result<FleetManager, ApiError> {
+    let (exec_config, session_model, route_config) = {
+        let config = state.config.read();
+        let exec_config = config
+            .fleet
+            .as_ref()
+            .map(|fleet| fleet.exec.clone())
+            .unwrap_or_default();
+        // The active session route is the operator: workers without a
+        // task/profile model pin inherit the model the user picked in /model.
+        (exec_config, config.default_model(), config.clone())
+    };
     FleetManager::open(&state.workspace)
+        .map(|manager| {
+            manager
+                .with_exec_config(exec_config)
+                .with_sub_agent_manager(state.sub_agent_manager.clone())
+                .with_session_model(session_model)
+                .with_route_config(route_config)
+        })
         .map_err(|err| ApiError::internal(format!("Failed to open fleet manager: {err}")))
 }
 
@@ -1607,6 +1262,18 @@ fn fleet_worker_json(inspection: &FleetWorkerInspection) -> Value {
         "artifacts": inspection.artifacts.iter().map(fleet_artifact_json).collect::<Vec<_>>(),
         "last_error": inspection.last_error.clone(),
         "alert_state": inspection.alert_state.clone(),
+        "runtime_state": inspection.runtime_state.as_ref().map(fleet_worker_runtime_json),
+    })
+}
+
+fn fleet_worker_runtime_json(runtime: &FleetWorkerRuntimeProjection) -> Value {
+    json!({
+        "agent_status": runtime.agent_status.clone(),
+        "steps_taken": runtime.steps_taken,
+        "latest_message": runtime.latest_message.clone(),
+        "error": runtime.error.clone(),
+        "result_summary": runtime.result_summary.clone(),
+        "has_session": runtime.has_session,
     })
 }
 
@@ -1680,6 +1347,14 @@ fn fleet_event_label(payload: &FleetWorkerEventPayload) -> String {
             .as_ref()
             .map(|call_id| format!("running_tool tool={tool} call_id={call_id}"))
             .unwrap_or_else(|| format!("running_tool tool={tool}")),
+        FleetWorkerEventPayload::WorkflowEvent {
+            workflow_run_id,
+            event,
+        } => event
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .map(|kind| format!("workflow_event run_id={workflow_run_id} type={kind}"))
+            .unwrap_or_else(|| format!("workflow_event run_id={workflow_run_id}")),
         FleetWorkerEventPayload::Heartbeat { .. } => "heartbeat".to_string(),
         FleetWorkerEventPayload::Artifact(artifact) => {
             format!("artifact kind={}", artifact_kind_label(&artifact.kind))
@@ -1721,18 +1396,63 @@ fn fleet_event_label(payload: &FleetWorkerEventPayload) -> String {
 async fn list_skills(
     State(state): State<RuntimeApiState>,
 ) -> Result<Json<SkillsResponse>, ApiError> {
-    let skills_dir = resolve_skills_dir(&state.config, &state.workspace);
-    let (registry, directories) = discover_skills_for_runtime_api(&state.workspace, &skills_dir);
-    let skill_state = state.skill_state.lock().await;
+    let (skills_dir, mode) = {
+        let config = state.config.read();
+        let skills_dir = resolve_skills_dir(&config, &state.workspace);
+        let mode = crate::skills::SkillDiscoveryMode::from_codewhale_only(
+            config.skills_config().scan_codewhale_only(),
+        );
+        (skills_dir, mode)
+    };
+    let plugin_registry = state
+        .plugin_discovery
+        .registry_for_workspace(&state.workspace);
+    let (registry, directories) = discover_skills_for_runtime_api(
+        &state.workspace,
+        &skills_dir,
+        mode,
+        Some(plugin_registry.as_ref()),
+    );
+    let mut skill_state = state.skill_state.lock().await;
+    skill_state
+        .refresh()
+        .map_err(|error| ApiError::internal(format!("refresh skill state: {error}")))?;
     let skills = registry
         .list()
         .iter()
-        .map(|skill| SkillEntry {
-            name: skill.name.clone(),
-            description: skill.description.clone(),
-            path: skill.path.clone(),
-            enabled: skill_state.is_enabled(&skill.name),
-            is_bundled: skill_entry_is_bundled(skill, &skills_dir),
+        .map(|skill| {
+            let (path, source, plugin_id, plugin_generation, plugin_content_hash) =
+                match &skill.source {
+                    crate::skills::SkillSource::Native => (
+                        Some(skill.path.clone()),
+                        "native".to_string(),
+                        None,
+                        None,
+                        None,
+                    ),
+                    crate::skills::SkillSource::Plugin {
+                        plugin_id,
+                        plugin_name,
+                        authority,
+                    } => (
+                        None,
+                        format!("reviewed-plugin-snapshot:{plugin_name}"),
+                        Some(plugin_id.clone()),
+                        Some(authority.state_generation),
+                        Some(authority.content_hash.clone()),
+                    ),
+                };
+            SkillEntry {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+                path,
+                source,
+                plugin_id,
+                plugin_generation,
+                plugin_content_hash,
+                enabled: skill_state.is_enabled(&skill.name),
+                is_bundled: skill_entry_is_bundled(skill, &skills_dir),
+            }
         })
         .collect();
     Ok(Json(SkillsResponse {
@@ -1748,8 +1468,23 @@ async fn set_skill_enabled(
     Path(name): Path<String>,
     Json(req): Json<SetSkillEnabledRequest>,
 ) -> Result<Json<SetSkillEnabledResponse>, ApiError> {
-    let skills_dir = resolve_skills_dir(&state.config, &state.workspace);
-    let (registry, directories) = discover_skills_for_runtime_api(&state.workspace, &skills_dir);
+    let (skills_dir, mode) = {
+        let config = state.config.read();
+        let skills_dir = resolve_skills_dir(&config, &state.workspace);
+        let mode = crate::skills::SkillDiscoveryMode::from_codewhale_only(
+            config.skills_config().scan_codewhale_only(),
+        );
+        (skills_dir, mode)
+    };
+    let plugin_registry = state
+        .plugin_discovery
+        .registry_for_workspace(&state.workspace);
+    let (registry, directories) = discover_skills_for_runtime_api(
+        &state.workspace,
+        &skills_dir,
+        mode,
+        Some(plugin_registry.as_ref()),
+    );
     let exists = registry.list().iter().any(|skill| skill.name == name);
     if !exists {
         return Err(ApiError::not_found(format!(
@@ -1823,6 +1558,11 @@ async fn submit_user_input(
         .submit_user_input(&thread_id, &input_id, response)
         .await
         .map_err(map_thread_err)?;
+    if !delivered {
+        return Err(ApiError::not_found(format!(
+            "no pending user-input request with id '{input_id}'"
+        )));
+    }
     Ok(Json(SubmitUserInputResponse {
         ok: true,
         input_id,
@@ -1849,15 +1589,16 @@ async fn runtime_info(State(state): State<RuntimeApiState>) -> Json<RuntimeInfoR
 async fn list_mcp_servers(
     State(state): State<RuntimeApiState>,
 ) -> Result<Json<McpServersResponse>, ApiError> {
-    let config = crate::mcp::load_config_with_workspace(&state.mcp_config_path, &state.workspace)
-        .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
-    let mut pool = McpPool::new(config.clone());
-    let _errors = pool.connect_all().await;
-    let connected: HashSet<String> = pool
-        .connected_servers()
-        .into_iter()
-        .map(str::to_string)
-        .collect();
+    let mcp_config_path = state.config.read().mcp_config_path();
+    let plugin_registry = state
+        .plugin_discovery
+        .registry_for_workspace(&state.workspace);
+    let config = crate::mcp::load_config_with_workspace_and_plugins(
+        &mcp_config_path,
+        &state.workspace,
+        plugin_registry.as_ref(),
+    )
+    .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
 
     let mut servers = Vec::new();
     for (name, server_cfg) in config.servers {
@@ -1867,7 +1608,7 @@ async fn list_mcp_servers(
             required: server_cfg.required,
             command: server_cfg.command.clone(),
             url: server_cfg.url.clone(),
-            connected: connected.contains(&name),
+            connected: false,
             enabled_tools: server_cfg.enabled_tools.clone(),
             disabled_tools: server_cfg.disabled_tools.clone(),
         });
@@ -1881,10 +1622,40 @@ async fn list_mcp_tools(
     State(state): State<RuntimeApiState>,
     Query(query): Query<McpToolsQuery>,
 ) -> Result<Json<McpToolsResponse>, ApiError> {
-    let mut pool =
-        McpPool::from_config_path_with_workspace(&state.mcp_config_path, &state.workspace)
-            .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
-    let _errors = pool.connect_all().await;
+    // Double-checked init: hold the state-level slot mutex only long enough
+    // to grab (or lazily create) the pool handle. connect_all can stall on a
+    // slow MCP server and must not run under the slot lock.
+    let pool_handle = {
+        let mut pool_slot = state.mcp_pool.lock().await;
+        match pool_slot.as_ref() {
+            Some(pool) => Some(Arc::clone(pool)),
+            None if query.connect => {
+                let mcp_config_path = state.config.read().mcp_config_path();
+                let plugin_registry = state
+                    .plugin_discovery
+                    .registry_for_workspace(&state.workspace);
+                let new_pool = McpPool::from_config_path_with_workspace_and_plugins(
+                    &mcp_config_path,
+                    &state.workspace,
+                    plugin_registry,
+                )
+                .map_err(|e| ApiError::internal(format!("Failed to load MCP config: {e}")))?;
+                let handle = Arc::new(Mutex::new(new_pool));
+                pool_slot.replace(Arc::clone(&handle));
+                Some(handle)
+            }
+            None => None,
+        }
+    };
+
+    let Some(pool_handle) = pool_handle else {
+        return Ok(Json(McpToolsResponse { tools: Vec::new() }));
+    };
+
+    let mut pool = pool_handle.lock().await;
+    if query.connect {
+        let _errors = pool.connect_all().await;
+    }
 
     let mut tools = Vec::new();
     for (prefixed_name, tool) in pool.all_tools() {
@@ -1967,11 +1738,12 @@ async fn run_automation(
     State(state): State<RuntimeApiState>,
     Path(id): Path<String>,
 ) -> Result<Json<AutomationRunRecord>, ApiError> {
-    let manager = state.automations.lock().await;
-    let run = manager
-        .run_now(&id, &state.task_manager)
-        .await
-        .map_err(map_automation_err)?;
+    // run_now_shared drops the manager mutex across the task-manager await so
+    // other automation endpoints stay responsive behind a slow enqueue.
+    let run =
+        crate::automation_manager::run_now_shared(&state.automations, &id, &state.task_manager)
+            .await
+            .map_err(map_automation_err)?;
     Ok(Json(run))
 }
 
@@ -2332,6 +2104,30 @@ async fn interrupt_thread_turn(
     Ok(Json(turn))
 }
 
+async fn deliver_dynamic_tool_result(
+    State(state): State<RuntimeApiState>,
+    Path((id, turn_id, call_id)): Path<(String, String, String)>,
+    Json(result): Json<DynamicToolCallResult>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .runtime_threads
+        .get_thread(&id)
+        .await
+        .map_err(map_thread_err)?;
+    if state
+        .runtime_threads
+        .deliver_dynamic_tool_result(&id, &turn_id, &call_id, result)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+    {
+        Ok(StatusCode::ACCEPTED)
+    } else {
+        Err(ApiError::not_found(format!(
+            "No pending dynamic tool call '{call_id}'"
+        )))
+    }
+}
+
 async fn compact_thread(
     State(state): State<RuntimeApiState>,
     Path(id): Path<String>,
@@ -2378,12 +2174,12 @@ async fn cancel_task(
     State(state): State<RuntimeApiState>,
     Path(id): Path<String>,
 ) -> Result<Json<TaskRecord>, ApiError> {
-    let task = state
+    let cancellation = state
         .task_manager
         .cancel_task(&id)
         .await
         .map_err(map_task_err)?;
-    Ok(Json(task))
+    Ok(Json(cancellation.task))
 }
 
 async fn stream_thread_events(
@@ -2397,44 +2193,142 @@ async fn stream_thread_events(
         .await
         .map_err(map_thread_err)?;
 
-    let backlog = state
-        .runtime_threads
-        .events_since(&id, query.since_seq)
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-    let mut last_seq = query.since_seq.unwrap_or(0);
-    if let Some(last) = backlog.last() {
-        last_seq = last.seq;
+    // Subscribe before reading durable history. An event emitted while replay
+    // is loaded is then present in both places (and deduped below) or queued
+    // live, never in an uncovered handoff window.
+    let live = state.runtime_threads.subscribe_events();
+    if query
+        .replay_limit
+        .is_some_and(|limit| limit > MAX_RUNTIME_EVENT_REPLAY_TAIL)
+    {
+        return Err(ApiError::bad_request(format!(
+            "replay_limit cannot exceed {MAX_RUNTIME_EVENT_REPLAY_TAIL}"
+        )));
     }
+    let replay = state
+        .runtime_threads
+        .replay_events(&id, query.since_seq, query.replay_limit)
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
 
-    let mut live = state.runtime_threads.subscribe_events();
-    let thread_id = id.clone();
-    let stream = stream! {
-        for event in backlog {
-            let event_name = event.event.clone();
-            yield Ok(sse_json(&event_name, runtime_event_payload(event)));
-        }
-        loop {
-            let incoming = live.recv().await;
-            let Ok(event) = incoming else {
-                break;
-            };
-            if event.thread_id != thread_id {
-                continue;
-            }
-            if event.seq <= last_seq {
-                continue;
-            }
-            last_seq = event.seq;
-            let event_name = event.event.clone();
-            yield Ok(sse_json(&event_name, runtime_event_payload(event)));
-        }
-    };
+    let stream = replay_live_thread_events(
+        state.runtime_threads.clone(),
+        id,
+        replay.base_seq,
+        replay.batches,
+        live,
+    );
 
     Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keepalive"),
     ))
+}
+
+fn replay_live_thread_events(
+    runtime_threads: SharedRuntimeThreadManager,
+    thread_id: String,
+    mut last_seq: u64,
+    mut backlog: tokio::sync::mpsc::Receiver<
+        std::result::Result<Vec<crate::runtime_threads::RuntimeEventRecord>, String>,
+    >,
+    mut live: tokio::sync::broadcast::Receiver<crate::runtime_threads::RuntimeEventRecord>,
+) -> impl futures_util::Stream<Item = Result<SseEvent, Infallible>> {
+    stream! {
+        while let Some(batch) = backlog.recv().await {
+            let events = match batch {
+                Ok(events) => events,
+                Err(error) => {
+                    tracing::warn!(
+                        thread_id = %thread_id,
+                        last_seq,
+                        %error,
+                        "Failed to replay Runtime web event stream from durable history"
+                    );
+                    return;
+                }
+            };
+            for event in events {
+                if event.thread_id != thread_id || event.seq <= last_seq {
+                    continue;
+                }
+                let previous_seq = last_seq;
+                last_seq = event.seq;
+                let event_name = event.event.clone();
+                yield Ok(sse_json(
+                    &event_name,
+                    runtime_event_payload_with_previous(event, previous_seq),
+                ));
+            }
+        }
+
+        'live: loop {
+            match live.recv().await {
+                Ok(event) => {
+                    if event.thread_id != thread_id || event.seq <= last_seq {
+                        continue;
+                    }
+                    let previous_seq = last_seq;
+                    last_seq = event.seq;
+                    let event_name = event.event.clone();
+                    yield Ok(sse_json(
+                        &event_name,
+                        runtime_event_payload_with_previous(event, previous_seq),
+                    ));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    // Broadcast is only a wake-up path; durable history remains
+                    // authoritative. Catch up from the last delivered cursor so
+                    // receiver pressure cannot turn into a silent prompt loss.
+                    let mut recovered = match runtime_threads
+                        .replay_events(&thread_id, Some(last_seq), None)
+                        .await
+                    {
+                        Ok(replay) => replay.batches,
+                        Err(error) => {
+                            tracing::warn!(
+                                thread_id = %thread_id,
+                                last_seq,
+                                skipped,
+                                %error,
+                                "Failed to recover lagged Runtime web event stream from durable history"
+                            );
+                            break 'live;
+                        }
+                    };
+                    while let Some(batch) = recovered.recv().await {
+                        let events = match batch {
+                            Ok(events) => events,
+                            Err(error) => {
+                                tracing::warn!(
+                                    thread_id = %thread_id,
+                                    last_seq,
+                                    skipped,
+                                    %error,
+                                    "Failed to recover lagged Runtime web event stream from durable history"
+                                );
+                                break 'live;
+                            }
+                        };
+                        for event in events {
+                            if event.thread_id != thread_id || event.seq <= last_seq {
+                                continue;
+                            }
+                            let previous_seq = last_seq;
+                            last_seq = event.seq;
+                            let event_name = event.event.clone();
+                            yield Ok(sse_json(
+                                &event_name,
+                                runtime_event_payload_with_previous(event, previous_seq),
+                            ));
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    }
 }
 
 async fn stream_turn(
@@ -2448,6 +2342,7 @@ async fn stream_turn(
     let model = req.model.clone().unwrap_or_else(|| {
         state
             .config
+            .read()
             .default_text_model
             .clone()
             .unwrap_or_else(|| DEFAULT_TEXT_MODEL.to_string())
@@ -2457,7 +2352,7 @@ async fn stream_turn(
         .clone()
         .unwrap_or_else(|| state.workspace.clone());
     let mode = req.mode.clone().unwrap_or_else(|| "agent".to_string());
-    let allow_shell = req.allow_shell.unwrap_or(state.config.allow_shell());
+    let allow_shell = req.allow_shell.unwrap_or(state.config.read().allow_shell());
     let trust_mode = req.trust_mode.unwrap_or(false);
     let auto_approve = req.auto_approve.unwrap_or(false);
     let prompt = req.prompt;
@@ -2479,6 +2374,19 @@ async fn stream_turn(
         .await
         .map_err(|e| ApiError::internal(format!("Failed to create stream thread: {e}")))?;
 
+    #[cfg(test)]
+    if let Some(hook) = &state.compat_stream_test_hook {
+        let (resume, wait_for_resume) = tokio::sync::oneshot::channel();
+        hook.send(CompatStreamTestPoint::ThreadCreated {
+            thread_id: thread.id.clone(),
+            resume,
+        })
+        .map_err(|_| ApiError::internal("Compatibility stream test hook closed"))?;
+        wait_for_resume
+            .await
+            .map_err(|_| ApiError::internal("Compatibility stream test hook dropped resume"))?;
+    }
+
     let turn = state
         .runtime_threads
         .start_turn(
@@ -2497,15 +2405,49 @@ async fn stream_turn(
         .await
         .map_err(|e| ApiError::internal(format!("Failed to start stream turn: {e}")))?;
 
-    let backlog = state
-        .runtime_threads
-        .events_since(&thread.id, None)
-        .map_err(|e| ApiError::internal(format!("Failed to load stream backlog: {e}")))?;
+    // Subscribe before reading the durable replay. Events produced while the
+    // replay is loaded then exist in at least one source, and the sequence
+    // cursor below removes overlap without dropping the handoff edge.
     let mut live = state.runtime_threads.subscribe_events();
     let thread_id = thread.id.clone();
     let turn_id = turn.id.clone();
 
+    #[cfg(test)]
+    if let Some(hook) = &state.compat_stream_test_hook {
+        let (resume, wait_for_resume) = tokio::sync::oneshot::channel();
+        hook.send(CompatStreamTestPoint::SubscribedBeforeReplay {
+            thread_id: thread_id.clone(),
+            turn_id: turn_id.clone(),
+            resume,
+        })
+        .map_err(|_| ApiError::internal("Compatibility stream test hook closed"))?;
+        wait_for_resume
+            .await
+            .map_err(|_| ApiError::internal("Compatibility stream test hook dropped resume"))?;
+    }
+
+    let mut backlog = state
+        .runtime_threads
+        .replay_events(&thread.id, None, None)
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to load stream backlog: {e}")))?;
+
+    #[cfg(test)]
+    if let Some(hook) = &state.compat_stream_test_hook {
+        let (resume, wait_for_resume) = tokio::sync::oneshot::channel();
+        hook.send(CompatStreamTestPoint::ReplayLoaded {
+            thread_id: thread_id.clone(),
+            turn_id: turn_id.clone(),
+            resume,
+        })
+        .map_err(|_| ApiError::internal("Compatibility stream test hook closed"))?;
+        wait_for_resume
+            .await
+            .map_err(|_| ApiError::internal("Compatibility stream test hook dropped resume"))?;
+    }
+
     let stream = stream! {
+        let mut last_seq = 0;
         yield Ok(sse_json("turn.started", json!({
             "thread_id": thread.id,
             "turn_id": turn.id,
@@ -2514,43 +2456,149 @@ async fn stream_turn(
             "workspace": workspace,
         })));
 
-        for event in backlog {
-            if event.thread_id != thread_id || event.turn_id.as_deref() != Some(&turn_id) {
-                continue;
-            }
-            if let Some(mapped) = map_compat_stream_event(&event) {
-                yield Ok(mapped);
-            }
-            if event.event == "turn.completed" {
-                yield Ok(sse_json("done", json!({})));
-                return;
+        while let Some(batch) = backlog.batches.recv().await {
+            let events = match batch {
+                Ok(events) => events,
+                Err(error) => {
+                    tracing::warn!(
+                        thread_id = %thread_id,
+                        turn_id = %turn_id,
+                        %error,
+                        "Failed to replay compatibility stream from durable history"
+                    );
+                    yield Ok(sse_json("error", json!({
+                        "message": "failed to replay durable event stream",
+                    })));
+                    return;
+                }
+            };
+            for event in events {
+                let Some((mapped, terminal)) = take_compat_turn_event(
+                    &event,
+                    &thread_id,
+                    &turn_id,
+                    &mut last_seq,
+                ) else {
+                    continue;
+                };
+                if let Some(mapped) = mapped {
+                    yield Ok(mapped);
+                }
+                if terminal {
+                    yield Ok(sse_json("done", json!({})));
+                    return;
+                }
             }
         }
 
         loop {
-            let incoming = live.recv().await;
-            let Ok(event) = incoming else {
-                yield Ok(sse_json("error", json!({ "message": "event channel closed" })));
-                break;
-            };
-            if event.thread_id != thread_id || event.turn_id.as_deref() != Some(&turn_id) {
-                continue;
-            }
-            if let Some(mapped) = map_compat_stream_event(&event) {
-                yield Ok(mapped);
-            }
-            if event.event == "turn.completed" {
-                break;
+            match live.recv().await {
+                Ok(event) => {
+                    let Some((mapped, terminal)) = take_compat_turn_event(
+                        &event,
+                        &thread_id,
+                        &turn_id,
+                        &mut last_seq,
+                    ) else {
+                        continue;
+                    };
+                    if let Some(mapped) = mapped {
+                        yield Ok(mapped);
+                    }
+                    if terminal {
+                        yield Ok(sse_json("done", json!({})));
+                        return;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    let mut recovered = match state.runtime_threads
+                        .replay_events(&thread_id, Some(last_seq), None)
+                        .await
+                    {
+                        Ok(replay) => replay.batches,
+                        Err(error) => {
+                            tracing::warn!(
+                                thread_id = %thread_id,
+                                turn_id = %turn_id,
+                                last_seq,
+                                skipped,
+                                %error,
+                                "Failed to recover lagged compatibility stream from durable history"
+                            );
+                            yield Ok(sse_json("error", json!({
+                                "message": "failed to recover lagged event stream",
+                            })));
+                            return;
+                        }
+                    };
+                    while let Some(batch) = recovered.recv().await {
+                        let events = match batch {
+                            Ok(events) => events,
+                            Err(error) => {
+                                tracing::warn!(
+                                    thread_id = %thread_id,
+                                    turn_id = %turn_id,
+                                    last_seq,
+                                    skipped,
+                                    %error,
+                                    "Failed to recover lagged compatibility stream from durable history"
+                                );
+                                yield Ok(sse_json("error", json!({
+                                    "message": "failed to recover lagged event stream",
+                                })));
+                                return;
+                            }
+                        };
+                        for event in events {
+                            let Some((mapped, terminal)) = take_compat_turn_event(
+                                &event,
+                                &thread_id,
+                                &turn_id,
+                                &mut last_seq,
+                            ) else {
+                                continue;
+                            };
+                            if let Some(mapped) = mapped {
+                                yield Ok(mapped);
+                            }
+                            if terminal {
+                                yield Ok(sse_json("done", json!({})));
+                                return;
+                            }
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    yield Ok(sse_json("error", json!({ "message": "event channel closed" })));
+                    return;
+                }
             }
         }
-
-        yield Ok(sse_json("done", json!({})));
     };
 
     Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keepalive"),
+    ))
+}
+
+fn take_compat_turn_event(
+    event: &crate::runtime_threads::RuntimeEventRecord,
+    thread_id: &str,
+    turn_id: &str,
+    last_seq: &mut u64,
+) -> Option<(Option<SseEvent>, bool)> {
+    if event.thread_id != thread_id
+        || event.turn_id.as_deref() != Some(turn_id)
+        || event.seq <= *last_seq
+    {
+        return None;
+    }
+    *last_seq = event.seq;
+    Some((
+        map_compat_stream_event(event),
+        event.event == "turn.completed",
     ))
 }
 
@@ -2572,6 +2620,17 @@ fn runtime_event_payload(event: crate::runtime_threads::RuntimeEventRecord) -> s
         extra: Default::default(),
     };
     serde_json::to_value(envelope).expect("serialize runtime event envelope")
+}
+
+fn runtime_event_payload_with_previous(
+    event: crate::runtime_threads::RuntimeEventRecord,
+    previous_seq: u64,
+) -> serde_json::Value {
+    let mut payload = runtime_event_payload(event);
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("previous_seq".to_string(), json!(previous_seq));
+    }
+    payload
 }
 
 fn map_compat_stream_event(event: &crate::runtime_threads::RuntimeEventRecord) -> Option<SseEvent> {
@@ -2655,9 +2714,99 @@ fn map_compat_stream_event(event: &crate::runtime_threads::RuntimeEventRecord) -
                 None
             }
         }
-        "approval.required" => Some(sse_json("approval.required", payload.clone())),
-        "approval.decided" => Some(sse_json("approval.decided", payload.clone())),
-        "approval.timeout" => Some(sse_json("approval.timeout", payload.clone())),
+        "approval.required" => {
+            let approval_id = payload
+                .get("approval_id")
+                .or_else(|| payload.get("id"))?
+                .clone();
+            Some(sse_json(
+                "approval.required",
+                json!({
+                    "id": approval_id,
+                    "approval_id": approval_id,
+                    "thread_id": event.thread_id,
+                    "turn_id": event.turn_id,
+                    "tool_name": payload.get("tool_name"),
+                    "description": payload.get("description"),
+                    "intent_summary": payload.get("intent_summary"),
+                }),
+            ))
+        }
+        "approval.decided" => {
+            let approval_id = payload
+                .get("approval_id")
+                .or_else(|| payload.get("id"))?
+                .clone();
+            Some(sse_json(
+                "approval.decided",
+                json!({
+                    "id": approval_id,
+                    "approval_id": approval_id,
+                    "thread_id": event.thread_id,
+                    "turn_id": event.turn_id,
+                    "decision": payload.get("decision"),
+                    "remember": payload.get("remember"),
+                    "auto": payload.get("auto"),
+                    "timeout": payload.get("timeout"),
+                }),
+            ))
+        }
+        "approval.timeout" => {
+            let approval_id = payload
+                .get("approval_id")
+                .or_else(|| payload.get("id"))?
+                .clone();
+            Some(sse_json(
+                "approval.timeout",
+                json!({
+                    "id": approval_id,
+                    "approval_id": approval_id,
+                    "thread_id": event.thread_id,
+                    "turn_id": event.turn_id,
+                    "timeout_secs": payload.get("timeout_secs"),
+                }),
+            ))
+        }
+        "user_input.required" => {
+            let input_id = payload
+                .get("input_id")
+                .or_else(|| payload.get("id"))?
+                .clone();
+            let request = payload.get("request")?.clone();
+            Some(sse_json(
+                "user_input.required",
+                json!({
+                    "id": input_id,
+                    "input_id": input_id,
+                    "thread_id": event.thread_id,
+                    "turn_id": event.turn_id,
+                    "status": "required",
+                    "request": request,
+                }),
+            ))
+        }
+        "user_input.answered" | "user_input.canceled" => {
+            let input_id = payload
+                .get("input_id")
+                .or_else(|| payload.get("id"))?
+                .clone();
+            let status = if event.event == "user_input.answered" {
+                "submitted"
+            } else {
+                "canceled"
+            };
+            Some(sse_json(
+                &event.event,
+                json!({
+                    "id": input_id,
+                    "input_id": input_id,
+                    "thread_id": event.thread_id,
+                    "turn_id": event.turn_id,
+                    "status": status,
+                    "terminal": payload.get("terminal").and_then(Value::as_bool).unwrap_or(false),
+                }),
+            ))
+        }
         "sandbox.denied" => Some(sse_json("sandbox.denied", payload.clone())),
         "turn.completed" => {
             let usage = payload
@@ -2685,114 +2834,19 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
     format!("{truncated}...")
 }
 
-fn collect_workspace_status(workspace: &std::path::Path) -> WorkspaceStatusResponse {
-    let mut status = WorkspaceStatusResponse {
-        workspace: workspace.to_path_buf(),
-        git_repo: false,
-        branch: None,
-        head: None,
-        dirty: false,
-        staged: 0,
-        unstaged: 0,
-        untracked: 0,
-        ahead: None,
-        behind: None,
-    };
-
-    let Some(repo_check) = run_git(workspace, &["rev-parse", "--is-inside-work-tree"]) else {
-        return status;
-    };
-    if repo_check.trim() != "true" {
-        return status;
-    }
-
-    status.git_repo = true;
-    let metadata = collect_workspace_git_metadata(workspace);
-    status.branch = metadata.branch;
-    status.head = metadata.head;
-    status.dirty = metadata.dirty;
-
-    if let Some(porcelain) = run_git(workspace, &["status", "--porcelain=v1"]) {
-        for line in porcelain.lines() {
-            if line.starts_with("??") {
-                status.untracked += 1;
-                continue;
-            }
-            let chars: Vec<char> = line.chars().collect();
-            if chars.len() >= 2 {
-                if chars[0] != ' ' {
-                    status.staged += 1;
-                }
-                if chars[1] != ' ' {
-                    status.unstaged += 1;
-                }
-            }
-        }
-    }
-
-    if let Some(counts) = run_git(
-        workspace,
-        &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
-    ) {
-        let mut parts = counts.split_whitespace();
-        if let (Some(behind), Some(ahead)) = (parts.next(), parts.next()) {
-            status.behind = behind.parse::<u32>().ok();
-            status.ahead = ahead.parse::<u32>().ok();
-        }
-    }
-
-    status
-}
-
-fn collect_workspace_git_metadata(workspace: &std::path::Path) -> WorkspaceGitMetadata {
-    let Some(repo_check) = run_git(workspace, &["rev-parse", "--is-inside-work-tree"]) else {
-        return WorkspaceGitMetadata::default();
-    };
-    if repo_check.trim() != "true" {
-        return WorkspaceGitMetadata::default();
-    }
-
-    WorkspaceGitMetadata {
-        branch: current_git_branch(workspace),
-        head: current_git_head(workspace),
-        dirty: run_git(workspace, &["status", "--porcelain=v1"])
-            .is_some_and(|porcelain| !porcelain.trim().is_empty()),
-    }
-}
-
-fn run_git(workspace: &std::path::Path, args: &[&str]) -> Option<String> {
-    let output = crate::dependencies::Git::output(args, workspace).ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout).ok()
-}
-
-fn current_git_branch(workspace: &std::path::Path) -> Option<String> {
-    let repo_check = run_git(workspace, &["rev-parse", "--is-inside-work-tree"])?;
-    if repo_check.trim() != "true" {
-        return None;
-    }
-    let branch = run_git(workspace, &["rev-parse", "--abbrev-ref", "HEAD"])?;
-    let branch = branch.trim();
-    if branch.is_empty() {
-        return None;
-    }
-    if branch != "HEAD" {
-        return Some(branch.to_string());
-    }
-    let short_hash = run_git(workspace, &["rev-parse", "--short", "HEAD"])?;
-    let short_hash = short_hash.trim();
-    (!short_hash.is_empty()).then(|| format!("detached@{short_hash}"))
-}
-
-fn current_git_head(workspace: &std::path::Path) -> Option<String> {
-    let head = run_git(workspace, &["rev-parse", "--short", "HEAD"])?;
-    let head = head.trim();
-    (!head.is_empty()).then(|| head.to_string())
-}
-
 fn resolve_skills_dir(config: &Config, workspace: &std::path::Path) -> PathBuf {
+    if config.skills_config().scan_codewhale_only() {
+        if config.skills_dir.is_some() {
+            return config.skills_dir();
+        }
+        if let Some(codewhale_skills_dir) = crate::skills::codewhale_workspace_skills_dir(workspace)
+            && let Ok(canonical_skills) = fs::canonicalize(&codewhale_skills_dir)
+        {
+            return canonical_skills;
+        }
+        return config.skills_dir();
+    }
+
     // Canonicalize the workspace once so the symlink-containment check below
     // compares like-for-like. If the workspace can't be canonicalized at all
     // (e.g. it doesn't exist on disk yet) fall back to the configured global
@@ -2819,20 +2873,23 @@ fn resolve_skills_dir(config: &Config, workspace: &std::path::Path) -> PathBuf {
     config.skills_dir()
 }
 
-fn skills_search_directories(workspace: &FsPath, skills_dir: &FsPath) -> Vec<PathBuf> {
-    let mut directories = crate::skills::skills_directories(workspace);
-    if skills_dir.is_dir() && !directories.iter().any(|path| path == skills_dir) {
-        directories.push(skills_dir.to_path_buf());
-    }
-    directories
+fn skills_search_directories(
+    workspace: &FsPath,
+    skills_dir: &FsPath,
+    mode: crate::skills::SkillDiscoveryMode,
+) -> Vec<PathBuf> {
+    crate::skills::skill_directories_for_workspace_and_dir(workspace, skills_dir, mode)
 }
 
 fn discover_skills_for_runtime_api(
     workspace: &FsPath,
     skills_dir: &FsPath,
+    mode: crate::skills::SkillDiscoveryMode,
+    plugins: Option<&crate::plugins::PluginRegistry>,
 ) -> (crate::skills::SkillRegistry, Vec<PathBuf>) {
-    let directories = skills_search_directories(workspace, skills_dir);
-    let registry = crate::skills::discover_from_directories(directories.clone());
+    let directories = skills_search_directories(workspace, skills_dir, mode);
+    let registry =
+        crate::skills::discover_from_directories_with_plugins(directories.clone(), plugins);
     (registry, directories)
 }
 
@@ -2987,6 +3044,754 @@ fn snapshot_entries_for_workspace(
         .collect())
 }
 
+// ── Provider / Model catalog endpoints ──
+
+/// Entry in `GET /v1/providers`.
+///
+/// Exposes the static provider registry so the GUI can render a dynamic
+/// provider picker instead of hard-coding `deepseek` only. The `id` matches
+/// `ApiProvider::as_str()` and is the value the GUI should send back via
+/// `POST /v1/config { key: "provider", value: <id> }`.
+#[derive(Debug, Clone, Serialize)]
+struct ProviderEntry {
+    /// Stable identifier — matches `ApiProvider::as_str()` and the TOML
+    /// `provider = "<id>"` key. Use this as the canonical value when
+    /// persisting or comparing.
+    id: String,
+    /// Human-friendly name for picker UIs (e.g. "DeepSeek", "OpenAI").
+    display_name: String,
+    /// Default base URL for this provider ( informational; the live base URL
+    /// may be overridden in config.toml).
+    default_base_url: String,
+    /// Default model id for this provider, if any. Empty for pass-through
+    /// providers (Ollama / Custom) that expose no built-in catalog.
+    default_model: String,
+    /// Whether this provider exposes a built-in model list. When false, the
+    /// GUI should render a free-text input instead of calling
+    /// `/v1/providers/{id}/models`.
+    has_model_catalog: bool,
+    /// API key environment variable candidates, e.g. `["DEEPSEEK_API_KEY"]`.
+    /// The GUI may surface these in a tooltip when auth is missing.
+    env_vars: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProvidersResponse {
+    /// Currently active provider id (matches `GET /v1/config`'s `provider`).
+    current: String,
+    providers: Vec<ProviderEntry>,
+}
+
+/// Entry in `GET /v1/providers/{id}/models`.
+#[derive(Debug, Clone, Serialize)]
+struct ProviderModelEntry {
+    /// Canonical model id (suitable for `default_text_model` or
+    /// `POST /v1/threads/{id}` `model` field).
+    id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProviderModelsResponse {
+    provider: String,
+    models: Vec<ProviderModelEntry>,
+}
+
+fn push_unique_model(models: &mut Vec<String>, model: &str) {
+    let model = model.trim();
+    if !model.is_empty()
+        && !models
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(model))
+    {
+        models.push(model.to_string());
+    }
+}
+
+fn normalize_api_base_url(base_url: &str) -> String {
+    base_url.trim().trim_end_matches('/').to_ascii_lowercase()
+}
+
+fn provider_uses_custom_route_for_api(config: &Config, provider: ApiProvider) -> bool {
+    config
+        .provider_config_for(provider)
+        .and_then(|entry| entry.base_url.as_deref())
+        .is_some_and(|base_url| {
+            normalize_api_base_url(base_url) != normalize_api_base_url(provider.default_base_url())
+        })
+}
+
+fn provider_models_for_api(
+    config: &Config,
+    active_provider: ApiProvider,
+    provider: ApiProvider,
+) -> Vec<String> {
+    let mut models = Vec::new();
+    if let Some(model) = config
+        .provider_config_for(provider)
+        .and_then(|entry| entry.model.as_deref())
+    {
+        push_unique_model(&mut models, model);
+    }
+    if provider == active_provider {
+        let active_model = config.default_model();
+        if !active_model.trim().eq_ignore_ascii_case("auto") {
+            push_unique_model(&mut models, &active_model);
+        }
+        if config.model_ids_pass_through() {
+            return models;
+        }
+    }
+    if provider_uses_custom_route_for_api(config, provider) {
+        return models;
+    }
+    for model in crate::provider_lake::models_for_provider(config, active_provider, provider) {
+        push_unique_model(&mut models, &model);
+    }
+    models
+}
+
+fn provider_default_model_for_api(
+    config: &Config,
+    active_provider: ApiProvider,
+    provider: ApiProvider,
+) -> String {
+    if provider == active_provider {
+        return config.default_model();
+    }
+    provider_models_for_api(config, active_provider, provider)
+        .into_iter()
+        .next()
+        .unwrap_or_default()
+}
+
+async fn list_providers(
+    State(state): State<RuntimeApiState>,
+) -> Result<Json<ProvidersResponse>, ApiError> {
+    let config = state.config.read().clone();
+    let active_provider = config.api_provider();
+    let current = active_provider.as_str().to_string();
+    let mut providers = Vec::new();
+    for api_provider in ApiProvider::sorted_for_display() {
+        let default_model = provider_default_model_for_api(&config, active_provider, api_provider);
+        let has_model_catalog =
+            !crate::provider_lake::all_catalog_models_for_provider(api_provider).is_empty();
+        providers.push(ProviderEntry {
+            id: api_provider.as_str().to_string(),
+            display_name: api_provider.display_name().to_string(),
+            default_base_url: api_provider.default_base_url().to_string(),
+            default_model,
+            has_model_catalog,
+            env_vars: api_provider
+                .env_vars()
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
+        });
+    }
+    Ok(Json(ProvidersResponse { current, providers }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ListProviderModelsParams {
+    /// Optional filter: when provided, models whose id contains this
+    /// substring (case-insensitive) are returned. Currently informational —
+    /// the catalog is small enough to filter client-side.
+    #[serde(default)]
+    #[allow(dead_code)]
+    filter: Option<String>,
+}
+
+async fn list_provider_models(
+    State(state): State<RuntimeApiState>,
+    Path(id): Path<String>,
+    _params: Query<ListProviderModelsParams>,
+) -> Result<Json<ProviderModelsResponse>, ApiError> {
+    let config = state.config.read().clone();
+    let active_provider = config.api_provider();
+    let api_provider = ApiProvider::parse(&id)
+        .ok_or_else(|| ApiError::bad_request(format!("Unknown provider id '{id}'")))?;
+    // Reject requests for the legacy deepseek-cn alias that has no
+    // ProviderKind metadata — the GUI should use `deepseek` instead.
+    if api_provider == ApiProvider::DeepseekCN {
+        return Err(ApiError::bad_request(
+            "provider 'deepseek-cn' is a legacy alias; use 'deepseek' instead",
+        ));
+    }
+    let models = provider_models_for_api(&config, active_provider, api_provider)
+        .into_iter()
+        .map(|id| ProviderModelEntry { id: id.to_string() })
+        .collect();
+    Ok(Json(ProviderModelsResponse {
+        provider: api_provider.as_str().to_string(),
+        models,
+    }))
+}
+
+/// Request body for `POST /v1/providers/{id}/switch`.
+///
+/// Mirrors the TUI's `AppAction::SwitchProvider { provider, model }` payload
+/// (see `tui/ui.rs::switch_provider`). `model` is optional: when omitted,
+/// the runtime resolves the active model from `[providers.<id>].model` (or
+/// the provider's built-in default) and **does not** persist a `model` key,
+/// so the user's per-provider config is preserved. When provided, the model
+/// is normalized, persisted for the target provider, and (for DeepSeek
+/// providers) also pinned as `default_text_model`.
+#[derive(Debug, Deserialize, Default)]
+struct SwitchProviderRequest {
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// Response for `POST /v1/providers/{id}/switch`.
+#[derive(Debug, Serialize)]
+struct SwitchProviderResponse {
+    /// The provider id that was switched to (echoes the path).
+    provider: String,
+    /// The resolved active model after the switch. This is the model the
+    /// runtime will use for new turns — either the user-supplied override
+    /// or the value resolved from `[providers.<id>].model` / the
+    /// provider's built-in default. The GUI should display *this* value,
+    /// not `ProviderEntry.default_model`, to avoid showing the catalog
+    /// default when the user has configured a different model.
+    model: String,
+    /// Human-readable status message for logging/toasts.
+    message: String,
+    /// Whether the new provider + model were persisted to config.toml.
+    persisted: bool,
+}
+
+/// `POST /v1/providers/{id}/switch` — switch the active provider, optionally
+/// overriding the model.
+///
+/// This is the GUI-facing counterpart of the TUI's `/provider` slash command
+/// (`commands/groups/core/provider.rs`) and `AppAction::SwitchProvider`
+/// (`tui/ui.rs::switch_provider`). It exists so the GUI does not have to
+/// simulate the switch with multiple `POST /v1/config` calls + a reload,
+/// which historically led to two bugs:
+///
+/// 1. The GUI persisted `model = <catalog default>` even when the user
+///    clicked the picker without choosing a model, clobbering a user-set
+///    `[providers.<id>].model` (e.g. `glm-2` overwritten with
+///    `deepseek-v4-pro`).
+/// 2. The GUI then displayed the catalog default instead of the actually
+///    resolved model, because it never asked the backend what model was
+///    selected.
+///
+/// Persistence mirrors `switch_provider` (ui.rs:9390-9410):
+/// - `provider` is always persisted (root `provider` key).
+/// - `model` is persisted **only** when `model_override.is_some()`, via
+///   `persist_provider_model_key` (writes `[providers.<id>].model`, or the
+///   root `default_text_model` for DeepSeek). The `Settings` provider-model
+///   map is updated the same way, including the DeepSeek-specific
+///   `default_model` pin.
+/// - Config is reloaded from disk and synced to active engines via
+///   `runtime_threads.reload_config`, exactly like `POST /v1/config/reload`.
+async fn switch_provider(
+    State(state): State<RuntimeApiState>,
+    Path(id): Path<String>,
+    Json(req): Json<SwitchProviderRequest>,
+) -> Result<Json<SwitchProviderResponse>, ApiError> {
+    use crate::config_persistence;
+
+    let target = ApiProvider::parse(&id)
+        .ok_or_else(|| ApiError::bad_request(format!("Unknown provider id '{id}'")))?;
+    // Reject the legacy deepseek-cn alias — same guard as list_provider_models.
+    if target == ApiProvider::DeepseekCN {
+        return Err(ApiError::bad_request(
+            "provider 'deepseek-cn' is a legacy alias; use 'deepseek' instead",
+        ));
+    }
+
+    // Normalize the optional model override against the *target* provider.
+    // Mirrors `set_config`'s `model` branch, which validates against the
+    // active route — except here we validate against the target provider,
+    // because the active route is about to change.
+    let model_override: Option<String> = match req.model.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(raw) => Some(normalize_runtime_config_model(target, raw)?),
+    };
+
+    // Resolve the target provider identity *before* mutating config, so
+    // persistence uses the same key the TUI's switch_provider would.
+    let (provider_identity, _active_provider) = {
+        let config = state.config.read();
+        (config.provider_identity_for(target), config.api_provider())
+    };
+
+    // Persist `provider` (always) + `model` (only when explicitly given).
+    // This is the critical TUI-parity rule: a bare `/provider <id>` (no
+    // model arg) MUST NOT write a `model` key, otherwise the user's
+    // per-provider `[providers.<id>].model` config gets overwritten with
+    // whatever the runtime resolves as the default.
+    config_persistence::persist_root_string_key(
+        state.config_path.as_deref(),
+        "provider",
+        &provider_identity,
+    )
+    .map_err(|e| ApiError::internal(format!("Failed to persist provider: {e}")))?;
+
+    if let Some(ref model) = model_override {
+        config_persistence::persist_provider_model_key(
+            state.config_path.as_deref(),
+            target,
+            &provider_identity,
+            model,
+        )
+        .map_err(|e| ApiError::internal(format!("Failed to persist model: {e}")))?;
+
+        // Mirror the TUI's Settings update (ui.rs:9398-9406): record the
+        // provider→model mapping, and for DeepSeek also pin the global
+        // `default_model`. Failures here are non-fatal — the config.toml
+        // write above is the source of truth.
+        let _ = crate::settings::Settings::transact(|settings| {
+            settings.set_model_for_provider(target.as_str(), model);
+            if matches!(target, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
+                let _ = settings.set("default_model", model);
+            }
+            Ok(())
+        });
+    }
+
+    // Reload config from disk and sync to active engines. This matches
+    // `POST /v1/config/reload` exactly: load → validate thread routes →
+    // swap in the new config. A failure here means an active thread's
+    // route is invalid under the new provider — surface it so the GUI can
+    // tell the user to fix their config.
+    let reloaded = Config::load(state.config_path.clone(), state.config_profile.as_deref())
+        .map_err(|e| ApiError::internal(format!("Failed to reload config: {e}")))?;
+    state
+        .runtime_threads
+        .reload_config(reloaded.clone())
+        .await
+        .map_err(|err| ApiError::bad_request(format!("Config reload rejected: {err}")))?;
+    {
+        let mut config = state.config.write();
+        *config = reloaded;
+    }
+
+    // Read the resolved active model + provider from the freshly reloaded
+    // config. This is the value the GUI must display — NOT the catalog
+    // default and NOT the previously-active model.
+    let (active_provider, active_model) = {
+        let config = state.config.read();
+        (config.api_provider(), config.default_model())
+    };
+
+    let message = if model_override.is_some() {
+        format!(
+            "Provider switched to {} (model: {}).",
+            active_provider.as_str(),
+            active_model
+        )
+    } else {
+        format!(
+            "Provider switched to {} (model: {}, resolved from config).",
+            active_provider.as_str(),
+            active_model
+        )
+    };
+
+    Ok(Json(SwitchProviderResponse {
+        provider: active_provider.as_str().to_string(),
+        model: active_model,
+        message,
+        persisted: true,
+    }))
+}
+
+// ── Config endpoints ──
+
+/// GUI-relevant config snapshot returned by `GET /v1/config`.
+#[derive(Debug, Clone, Serialize)]
+struct GuiConfigResponse {
+    model: String,
+    provider: String,
+    approval_mode: String,
+    reasoning_effort: String,
+    auto_compact: bool,
+    cost_currency: String,
+    default_mode: String,
+    default_model: String,
+    base_url: String,
+    allow_shell: bool,
+    mcp_config_path: String,
+    subagents_enabled: bool,
+    subagents_max_depth: u32,
+    show_thinking: bool,
+    thinking_highlight: bool,
+    show_tool_details: bool,
+    inline_diffs: String,
+    locale: String,
+    max_history: usize,
+    prefer_external_pdftotext: bool,
+    workspace_follow_symlinks: bool,
+    calm_mode: bool,
+    sandbox_mode: String,
+    strict_tool_mode: bool,
+    memory_enabled: bool,
+    search_provider: String,
+    prompt_suggestion: bool,
+}
+
+/// Request body for `POST /v1/config` (set a single config key).
+#[derive(Debug, Deserialize)]
+struct SetConfigRequest {
+    key: String,
+    value: String,
+    #[serde(default)]
+    persist: bool,
+}
+
+/// Response for `POST /v1/config` (set a single config key).
+#[derive(Debug, Serialize)]
+struct SetConfigResponse {
+    key: String,
+    value: String,
+    message: String,
+    persisted: bool,
+    requires_reload: bool,
+}
+
+fn persist_runtime_tui_setting(key: &str, value: &str) -> Result<(), ApiError> {
+    // Validate against a throwaway copy first, so an invalid value is still a
+    // 400 rather than an internal error raised from inside the transaction.
+    let mut probe = crate::settings::Settings::load_persisted()
+        .map_err(|e| ApiError::internal(format!("Failed to load settings: {e}")))?;
+    probe
+        .set(key, value)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    // The write itself re-applies the key inside `Settings::transact`, so it
+    // cannot save the stale snapshot above over a concurrent writer's field.
+    crate::settings::Settings::transact(|settings| settings.set(key, value))
+        .map_err(|e| ApiError::internal(format!("Failed to save settings: {e}")))
+}
+
+/// Response for `POST /v1/config/reload`.
+#[derive(Debug, Serialize)]
+struct ReloadConfigResponse {
+    message: String,
+}
+
+async fn get_config(
+    State(state): State<RuntimeApiState>,
+) -> Result<Json<GuiConfigResponse>, ApiError> {
+    let config = state.config.read();
+    let settings = crate::settings::Settings::load_persisted().unwrap_or_default();
+    let mcp_config_path = config.mcp_config_path().display().to_string();
+
+    let model = config.default_model();
+
+    let provider = config.provider_identity_for(config.api_provider());
+
+    let approval_mode = config
+        .approval_policy
+        .as_deref()
+        .unwrap_or("suggest")
+        .to_string();
+    let reasoning_effort = config.reasoning_effort().unwrap_or("auto").to_string();
+    let cost_currency = settings.cost_currency.clone();
+    let default_mode = settings.default_mode.as_str().to_string();
+    // This field is the legacy root DeepSeek fallback, not the active
+    // provider model above. Keeping the two explicit prevents a Z.ai model
+    // update from silently rewriting a future DeepSeek route.
+    let default_model = config
+        .default_text_model
+        .clone()
+        .unwrap_or_else(|| DEFAULT_TEXT_MODEL.to_string());
+    let base_url = config.deepseek_base_url().to_string();
+
+    Ok(Json(GuiConfigResponse {
+        model,
+        provider,
+        approval_mode,
+        reasoning_effort,
+        auto_compact: settings.auto_compact,
+        cost_currency,
+        default_mode,
+        default_model,
+        base_url,
+        allow_shell: config.allow_shell(),
+        mcp_config_path,
+        subagents_enabled: config.subagents_enabled(),
+        subagents_max_depth: config.subagent_max_spawn_depth(),
+        show_thinking: settings.show_thinking,
+        thinking_highlight: settings.thinking_highlight,
+        show_tool_details: settings.show_tool_details,
+        inline_diffs: settings.inline_diffs.clone(),
+        locale: settings.locale.clone(),
+        max_history: settings.max_input_history,
+        prefer_external_pdftotext: settings.prefer_external_pdftotext,
+        workspace_follow_symlinks: settings.workspace_follow_symlinks,
+        calm_mode: settings.calm_mode,
+        sandbox_mode: config
+            .sandbox_mode
+            .clone()
+            .unwrap_or_else(|| "workspace-write".to_string()),
+        strict_tool_mode: config.strict_tool_mode.unwrap_or(false),
+        memory_enabled: config.memory_enabled(),
+        search_provider: config.search_provider().as_str().to_string(),
+        prompt_suggestion: config.prompt_suggestion_enabled(),
+    }))
+}
+
+async fn set_config(
+    State(state): State<RuntimeApiState>,
+    Json(req): Json<SetConfigRequest>,
+) -> Result<Json<SetConfigResponse>, ApiError> {
+    use crate::config_persistence;
+
+    let key = req.key.to_lowercase();
+    let mut value = req.value;
+    let persist = req.persist;
+
+    // Validate model keys even for dry-run requests. Model ids are provider
+    // owned; accepting a DeepSeek id while Z.ai is active creates a saved
+    // route that cannot execute after reload.
+    let active_route = {
+        let config = state.config.read();
+        let provider = config.api_provider();
+        (provider, config.provider_identity_for(provider))
+    };
+    match key.as_str() {
+        "model" => {
+            value = normalize_runtime_config_model(active_route.0, &value)?;
+        }
+        "default_model" => {
+            value = normalize_runtime_config_model(ApiProvider::Deepseek, &value)?;
+        }
+        _ => {}
+    }
+
+    // All persisted config keys require a reload to take effect in the
+    // runtime (including syncing to active engines). The caller should
+    // POST /v1/config/reload after persisting.
+    let requires_reload = persist;
+
+    // Handle persistence directly via config_persistence.
+    // The runtime's in-memory state is NOT mutated here; the caller
+    // should POST /v1/config/reload after persisting to apply changes.
+    if persist {
+        let config_path = state.config_path.as_deref();
+        let result: anyhow::Result<PathBuf> = match key.as_str() {
+            "model" => config_persistence::persist_provider_model_key(
+                config_path,
+                active_route.0,
+                &active_route.1,
+                &value,
+            ),
+            "default_model" => config_persistence::persist_root_string_key(
+                config_path,
+                "default_text_model",
+                &value,
+            ),
+            "reasoning_effort" => {
+                config_persistence::persist_root_string_key(config_path, "reasoning_effort", &value)
+            }
+            "approval_mode" | "approval_policy" => {
+                config_persistence::persist_root_string_key(config_path, "approval_policy", &value)
+            }
+            "base_url" => config_persistence::persist_root_string_key(
+                config_path,
+                "deepseek_base_url",
+                &value,
+            ),
+            "provider" => {
+                // Validate the provider id against the static registry so the
+                // GUI gets a clear error instead of silently persisting an
+                // unknown value that `Config::api_provider()` would later
+                // ignore (falling back to DeepSeek).
+                let parsed = ApiProvider::parse(&value).ok_or_else(|| {
+                    ApiError::bad_request(format!(
+                        "Unknown provider '{value}'. Call GET /v1/providers for the list of supported ids."
+                    ))
+                })?;
+                let result =
+                    config_persistence::persist_root_string_key(config_path, "provider", &value);
+                if result.is_ok() {
+                    // Keep the in-memory provider in step with the persisted
+                    // value so a following set_config(model) resolves the new
+                    // provider's table instead of clobbering the previous
+                    // provider's root default_text_model (#4658 follow-up).
+                    state.config.write().provider = Some(parsed.as_str().to_string());
+                }
+                result
+            }
+            "provider_url" | "provider_base_url" => {
+                let provider = state.config.read().api_provider();
+                config_persistence::persist_provider_base_url_key(config_path, provider, &value)
+            }
+            "cost_currency"
+            | "default_mode"
+            | "auto_compact"
+            | "show_thinking"
+            | "thinking_highlight"
+            | "show_tool_details"
+            | "inline_diffs"
+            | "calm_mode"
+            | "prefer_external_pdftotext"
+            | "workspace_follow_symlinks"
+            | "locale"
+            | "max_history" => {
+                persist_runtime_tui_setting(&key, &value)?;
+                return Ok(Json(SetConfigResponse {
+                    key,
+                    value,
+                    message: "Config persisted. Call /v1/config/reload to apply.".to_string(),
+                    persisted: true,
+                    requires_reload,
+                }));
+            }
+            "allow_shell" => {
+                let enabled = value.parse::<bool>().map_err(|_| {
+                    ApiError::bad_request(format!(
+                        "Invalid value '{value}' for allow_shell: expected 'true' or 'false'"
+                    ))
+                })?;
+                config_persistence::persist_root_bool_key(config_path, "allow_shell", enabled)
+            }
+            "mcp_config_path" => {
+                config_persistence::persist_root_string_key(config_path, "mcp_config_path", &value)
+            }
+            "subagents_enabled" => {
+                let enabled = value.parse::<bool>().map_err(|_| {
+                    ApiError::bad_request(format!(
+                        "Invalid value '{value}' for subagents_enabled: expected 'true' or 'false'"
+                    ))
+                })?;
+                config_persistence::persist_subagents_bool_key(config_path, "enabled", enabled)
+            }
+            "subagents_max_depth" => {
+                let raw = value.parse::<u64>().map_err(|_| {
+                    ApiError::bad_request(format!(
+                        "Invalid value '{value}' for subagents_max_depth: expected a non-negative integer"
+                    ))
+                })?;
+                let clamped = raw.min(u64::from(codewhale_config::MAX_SPAWN_DEPTH_CEILING));
+                config_persistence::persist_subagents_integer_key(config_path, "max_depth", clamped)
+            }
+            "sandbox_mode" => {
+                let normalized = match value.to_lowercase().as_str() {
+                    "none" | "off" | "disabled" => "none".to_string(),
+                    "opensandbox" | "external-sandbox" | "external" => "opensandbox".to_string(),
+                    "workspace-write" | "workspace_write" => "workspace-write".to_string(),
+                    "read-only" | "read_only" => "read-only".to_string(),
+                    "danger-full-access" | "danger_full_access" | "full" => {
+                        "danger-full-access".to_string()
+                    }
+                    "workspace" | "workspace-read-write" | "workspace_read_write" => {
+                        "workspace-write".to_string()
+                    }
+                    _ => {
+                        return Err(ApiError::bad_request(format!(
+                            "Invalid sandbox_mode '{value}'. Supported: none, read-only, workspace-write, danger-full-access, opensandbox"
+                        )));
+                    }
+                };
+                config_persistence::persist_root_string_key(
+                    config_path,
+                    "sandbox_mode",
+                    &normalized,
+                )
+            }
+            "strict_tool_mode" => {
+                let enabled = value.parse::<bool>().map_err(|_| {
+                    ApiError::bad_request(format!(
+                        "Invalid value '{value}' for strict_tool_mode: expected 'true' or 'false'"
+                    ))
+                })?;
+                config_persistence::persist_root_bool_key(config_path, "strict_tool_mode", enabled)
+            }
+            "memory_enabled" => {
+                let enabled = value.parse::<bool>().map_err(|_| {
+                    ApiError::bad_request(format!(
+                        "Invalid value '{value}' for memory_enabled: expected 'true' or 'false'"
+                    ))
+                })?;
+                config_persistence::persist_table_bool_key(
+                    config_path,
+                    "memory",
+                    "enabled",
+                    enabled,
+                )
+            }
+            "search_provider" => {
+                let normalized = value.to_lowercase();
+                config_persistence::persist_table_string_key(
+                    config_path,
+                    "search",
+                    "provider",
+                    &normalized,
+                )
+            }
+            "prompt_suggestion" => {
+                let enabled = value.parse::<bool>().map_err(|_| {
+                    ApiError::bad_request(format!(
+                        "Invalid value '{value}' for prompt_suggestion: expected 'true' or 'false'"
+                    ))
+                })?;
+                config_persistence::persist_root_bool_key(config_path, "prompt_suggestion", enabled)
+            }
+            _ => {
+                return Err(ApiError::bad_request(format!(
+                    "Unknown config key '{key}'. Supported keys: model, default_model, reasoning_effort, approval_mode, base_url, provider, provider_url, cost_currency, default_mode, auto_compact, allow_shell, mcp_config_path, show_thinking, thinking_highlight, show_tool_details, inline_diffs, locale, max_history, calm_mode, prefer_external_pdftotext, workspace_follow_symlinks, subagents_enabled, subagents_max_depth, sandbox_mode, strict_tool_mode, memory_enabled, search_provider, prompt_suggestion"
+                )));
+            }
+        };
+
+        if let Err(e) = result {
+            return Err(ApiError::internal(format!(
+                "Failed to persist config key '{key}': {e}"
+            )));
+        }
+    }
+
+    Ok(Json(SetConfigResponse {
+        key,
+        value,
+        message: if persist {
+            "Config persisted. Call /v1/config/reload to apply.".to_string()
+        } else {
+            "Config not persisted (add persist: true to save)".to_string()
+        },
+        persisted: persist,
+        requires_reload,
+    }))
+}
+
+fn normalize_runtime_config_model(provider: ApiProvider, value: &str) -> Result<String, ApiError> {
+    let value = value.trim();
+    validate_route(provider, value).map_err(ApiError::bad_request)?;
+    if value.eq_ignore_ascii_case("auto") {
+        return Ok("auto".to_string());
+    }
+    normalize_model_name_for_provider(provider, value).ok_or_else(|| {
+        ApiError::bad_request(format!(
+            "Invalid model '{value}' for provider '{}'.",
+            provider.as_str()
+        ))
+    })
+}
+
+async fn reload_config(
+    State(state): State<RuntimeApiState>,
+) -> Result<Json<ReloadConfigResponse>, ApiError> {
+    let reloaded = Config::load(state.config_path.clone(), state.config_profile.as_deref())
+        .map_err(|e| ApiError::internal(format!("Failed to reload config: {e}")))?;
+    state
+        .runtime_threads
+        .reload_config(reloaded.clone())
+        .await
+        .map_err(|err| ApiError::bad_request(format!("Config reload rejected: {err}")))?;
+    {
+        let mut config = state.config.write();
+        *config = reloaded;
+    }
+    Ok(Json(ReloadConfigResponse {
+        message: "Config reloaded from disk; new turns will resolve the updated provider routes"
+            .to_string(),
+    }))
+}
+
 const MOBILE_HTML: &str = include_str!("runtime_mobile.html");
 
 /// Built-in dev origins always allowed by the runtime API (whalescale#255).
@@ -3025,7 +3830,13 @@ fn cors_layer(extra_origins: &[String]) -> CorsLayer {
             Method::DELETE,
             Method::OPTIONS,
         ])
-        .allow_headers(Any)
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::ACCEPT,
+            HeaderName::from_static("x-codewhale-runtime-token"),
+            HeaderName::from_static("x-deepseek-runtime-token"),
+        ])
 }
 
 fn map_task_err(err: anyhow::Error) -> ApiError {
@@ -3050,7 +3861,10 @@ fn map_automation_err(err: anyhow::Error) -> ApiError {
 
 fn map_thread_err(err: anyhow::Error) -> ApiError {
     let message = err.to_string();
-    if message.contains("not found") {
+    let lower = message.to_ascii_lowercase();
+    if (lower.starts_with("thread '") && lower.ends_with("' not found"))
+        || lower.starts_with("thread not found:")
+    {
         ApiError::not_found(message)
     } else if message.contains("already has an active turn")
         || message.contains("No active turn")
@@ -3110,3271 +3924,4 @@ impl IntoResponse for ApiError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::events::{Event as EngineEvent, TurnOutcomeStatus};
-    use crate::core::ops::Op;
-    use crate::models::Usage;
-    use crate::runtime_threads::RuntimeEventRecord;
-    use crate::test_support::{EnvVarGuard, lock_test_env};
-    use anyhow::{Context, bail};
-    use futures_util::StreamExt;
-    use std::fs;
-    use std::sync::Arc;
-    use tokio::sync::{Mutex, mpsc, oneshot};
-    use tokio::time::sleep;
-    use uuid::Uuid;
-
-    struct MockExecutor;
-
-    #[async_trait::async_trait]
-    impl crate::task_manager::TaskExecutor for MockExecutor {
-        async fn execute(
-            &self,
-            _task: crate::task_manager::ExecutionTask,
-            events: mpsc::UnboundedSender<crate::task_manager::TaskExecutionEvent>,
-            cancel: tokio_util::sync::CancellationToken,
-        ) -> crate::task_manager::TaskExecutionResult {
-            let _ = events.send(crate::task_manager::TaskExecutionEvent::Status {
-                message: "started".to_string(),
-            });
-            sleep(Duration::from_millis(100)).await;
-            if cancel.is_cancelled() {
-                return crate::task_manager::TaskExecutionResult {
-                    status: crate::task_manager::TaskStatus::Canceled,
-                    result_text: None,
-                    error: None,
-                };
-            }
-            crate::task_manager::TaskExecutionResult {
-                status: crate::task_manager::TaskStatus::Completed,
-                result_text: Some("ok".to_string()),
-                error: None,
-            }
-        }
-    }
-
-    fn saved_session_with_blocks(blocks: Vec<crate::models::ContentBlock>) -> SavedSession {
-        SavedSession {
-            schema_version: 1,
-            metadata: SessionMetadata {
-                id: "session-1".to_string(),
-                title: "test session".to_string(),
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-                message_count: 1,
-                total_tokens: 0,
-                model: "test-model".to_string(),
-                workspace: PathBuf::from("."),
-                mode: None,
-                cost: Default::default(),
-                parent_session_id: None,
-                forked_from_message_count: None,
-                cumulative_turn_secs: 0,
-            },
-            messages: vec![crate::models::Message {
-                role: "assistant".to_string(),
-                content: blocks,
-            }],
-            system_prompt: None,
-            context_references: Vec::new(),
-            artifacts: Vec::new(),
-        }
-    }
-
-    fn run_test_git(workspace: &std::path::Path, args: &[&str]) -> Result<()> {
-        let output = crate::dependencies::Git::output(args, workspace)
-            .with_context(|| format!("git {args:?} failed to spawn"))?;
-        if !output.status.success() {
-            bail!(
-                "git {args:?} failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn workspace_status_reports_head_and_dirty_counts() -> Result<()> {
-        let tmp = tempfile::tempdir()?;
-        let repo = tmp.path().join("repo");
-        fs::create_dir_all(&repo)?;
-        run_test_git(&repo, &["init", "-b", "main"])?;
-        run_test_git(&repo, &["config", "core.autocrlf", "false"])?;
-        fs::write(repo.join("tracked.txt"), "clean\n")?;
-        run_test_git(&repo, &["add", "tracked.txt"])?;
-        run_test_git(
-            &repo,
-            &[
-                "-c",
-                "user.name=CodeWhale Test",
-                "-c",
-                "user.email=codewhale@example.invalid",
-                "commit",
-                "-m",
-                "init",
-            ],
-        )?;
-
-        let clean = collect_workspace_status(&repo);
-        assert!(clean.git_repo);
-        assert_eq!(clean.branch.as_deref(), Some("main"));
-        assert!(clean.head.as_deref().is_some_and(|head| !head.is_empty()));
-        assert!(!clean.dirty);
-
-        fs::write(repo.join("tracked.txt"), "dirty\n")?;
-        fs::write(repo.join("untracked.txt"), "new\n")?;
-
-        let dirty = collect_workspace_status(&repo);
-        assert!(dirty.dirty);
-        assert_eq!(dirty.unstaged, 1);
-        assert_eq!(dirty.untracked, 1);
-        Ok(())
-    }
-
-    #[test]
-    fn session_detail_tool_use_preserves_caller_metadata() {
-        let detail = session_to_detail(saved_session_with_blocks(vec![
-            crate::models::ContentBlock::ToolUse {
-                id: "tool-1".to_string(),
-                name: "task_shell_start".to_string(),
-                input: json!({ "cmd": "cargo test" }),
-                caller: Some(crate::models::ToolCaller {
-                    caller_type: "subagent".to_string(),
-                    tool_id: Some("parent-tool".to_string()),
-                }),
-            },
-        ]));
-
-        let block = &detail.messages[0]["content"][0];
-        assert_eq!(block["type"].as_str(), Some("tool_use"));
-        assert_eq!(block["caller"]["type"].as_str(), Some("subagent"));
-        assert_eq!(block["caller"]["tool_id"].as_str(), Some("parent-tool"));
-    }
-
-    #[test]
-    fn session_detail_tool_result_keeps_fallback_content_with_blocks() {
-        let detail = session_to_detail(saved_session_with_blocks(vec![
-            crate::models::ContentBlock::ToolResult {
-                tool_use_id: "tool-1".to_string(),
-                content: "fallback text".to_string(),
-                is_error: Some(false),
-                content_blocks: Some(vec![json!({
-                    "type": "text",
-                    "text": "structured text"
-                })]),
-            },
-        ]));
-
-        let block = &detail.messages[0]["content"][0];
-        assert_eq!(block["type"].as_str(), Some("tool_result"));
-        assert_eq!(block["content"].as_str(), Some("fallback text"));
-        assert_eq!(
-            block["content_blocks"][0]["text"].as_str(),
-            Some("structured text")
-        );
-        assert_eq!(block["is_error"].as_bool(), Some(false));
-    }
-
-    #[test]
-    fn runtime_auth_generates_token_by_default() {
-        let auth = resolve_runtime_auth(None, None, false);
-        assert!(auth.generated);
-        let token = auth.token.expect("generated token");
-        assert!(token.starts_with("cwrt_"));
-        assert!(token.len() > 32);
-    }
-
-    #[test]
-    fn runtime_auth_requires_explicit_insecure_for_no_token() {
-        let auth = resolve_runtime_auth(None, None, true);
-        assert_eq!(
-            auth,
-            ResolvedRuntimeAuth {
-                token: None,
-                generated: false,
-            }
-        );
-    }
-
-    #[test]
-    fn runtime_auth_prefers_cli_token_over_env_token() {
-        let auth = resolve_runtime_auth(
-            Some(" cli-token ".to_string()),
-            Some("env-token".to_string()),
-            false,
-        );
-        assert_eq!(
-            auth,
-            ResolvedRuntimeAuth {
-                token: Some("cli-token".to_string()),
-                generated: false,
-            }
-        );
-    }
-
-    #[test]
-    fn runtime_auth_ignores_blank_configured_tokens() {
-        let auth = resolve_runtime_auth(Some(" ".to_string()), Some("\t".to_string()), false);
-        assert!(auth.generated);
-        assert!(auth.token.is_some());
-    }
-
-    #[test]
-    fn url_query_component_percent_encodes_token() {
-        assert_eq!(
-            url_query_component("abc ABC+/?:=&%"),
-            "abc%20ABC%2B%2F%3F%3A%3D%26%25"
-        );
-    }
-
-    #[test]
-    fn token_from_query_decodes_percent_encoded_token() {
-        assert_eq!(
-            token_from_query(Some("since_seq=0&token=abc%20ABC%2B%2F%3F%3A%3D%26%25")),
-            Some("abc ABC+/?:=&%".to_string())
-        );
-        assert_eq!(token_from_query(Some("token=bad%ZZ")), None);
-    }
-
-    async fn spawn_test_server_with_root(
-        root: PathBuf,
-        sessions_dir: PathBuf,
-    ) -> Result<
-        Option<(
-            SocketAddr,
-            SharedRuntimeThreadManager,
-            tokio::task::JoinHandle<()>,
-        )>,
-    > {
-        spawn_test_server_with_root_and_token(root, sessions_dir, None).await
-    }
-
-    async fn spawn_test_server_with_root_and_token(
-        root: PathBuf,
-        sessions_dir: PathBuf,
-        runtime_token: Option<String>,
-    ) -> Result<
-        Option<(
-            SocketAddr,
-            SharedRuntimeThreadManager,
-            tokio::task::JoinHandle<()>,
-        )>,
-    > {
-        spawn_test_server_with_root_token_and_mobile(root, sessions_dir, runtime_token, false).await
-    }
-
-    async fn spawn_test_server_with_root_token_and_mobile(
-        root: PathBuf,
-        sessions_dir: PathBuf,
-        runtime_token: Option<String>,
-        mobile_enabled: bool,
-    ) -> Result<
-        Option<(
-            SocketAddr,
-            SharedRuntimeThreadManager,
-            tokio::task::JoinHandle<()>,
-        )>,
-    > {
-        spawn_test_server_with_root_token_mobile_workspace(
-            root,
-            sessions_dir,
-            runtime_token,
-            mobile_enabled,
-            PathBuf::from("."),
-        )
-        .await
-    }
-
-    async fn spawn_test_server_with_root_token_mobile_workspace(
-        root: PathBuf,
-        sessions_dir: PathBuf,
-        runtime_token: Option<String>,
-        mobile_enabled: bool,
-        workspace: PathBuf,
-    ) -> Result<
-        Option<(
-            SocketAddr,
-            SharedRuntimeThreadManager,
-            tokio::task::JoinHandle<()>,
-        )>,
-    > {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        fs::create_dir_all(&sessions_dir)?;
-        fs::create_dir_all(&workspace)?;
-        let manager = TaskManager::start_with_executor(
-            TaskManagerConfig {
-                data_dir: root.join("tasks"),
-                worker_count: 1,
-                default_workspace: workspace.clone(),
-                default_model: DEFAULT_TEXT_MODEL.to_string(),
-                default_mode: "agent".to_string(),
-                allow_shell: false,
-                trust_mode: false,
-                max_subagents: 2,
-            },
-            Arc::new(MockExecutor),
-        )
-        .await?;
-        let mut config = Config::default();
-        config.capacity = Some(crate::config::CapacityConfig {
-            enabled: Some(false),
-            low_risk_max: None,
-            medium_risk_max: None,
-            severe_min_slack: None,
-            severe_violation_ratio: None,
-            refresh_cooldown_turns: None,
-            replan_cooldown_turns: None,
-            max_replay_per_turn: None,
-            min_turns_before_guardrail: None,
-            profile_window: None,
-            deepseek_v3_2_chat_prior: None,
-            deepseek_v3_2_reasoner_prior: None,
-            deepseek_v4_pro_prior: None,
-            deepseek_v4_flash_prior: None,
-            fallback_default_prior: None,
-        });
-        let runtime_threads: SharedRuntimeThreadManager = Arc::new(RuntimeThreadManager::open(
-            config,
-            workspace.clone(),
-            RuntimeThreadManagerConfig::from_task_data_dir(root.join("runtime")),
-        )?);
-        runtime_threads.attach_task_manager(manager.clone());
-        let automations = Arc::new(Mutex::new(AutomationManager::open(
-            root.join("automations"),
-        )?));
-        runtime_threads.attach_automation_manager(automations.clone());
-
-        let auth_required = runtime_token.is_some();
-        let state = RuntimeApiState {
-            config: Config::default(),
-            workspace,
-            task_manager: manager,
-            runtime_threads: runtime_threads.clone(),
-            cors_origins: Vec::new(),
-            sessions_dir,
-            mcp_config_path: root.join("mcp.json"),
-            automations,
-            runtime_token,
-            skill_state: Arc::new(Mutex::new(
-                SkillStateStore::load_from(root.join("skills_state.toml")).unwrap_or_default(),
-            )),
-            auth_required,
-            bind_host: "127.0.0.1".to_string(),
-            bind_port: 0,
-            mobile_enabled,
-        };
-        let app = build_router(state);
-        let listener = match TcpListener::bind("127.0.0.1:0").await {
-            Ok(listener) => listener,
-            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return Ok(None),
-            Err(err) => return Err(err.into()),
-        };
-        let addr = listener.local_addr()?;
-        let handle = tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        Ok(Some((addr, runtime_threads, handle)))
-    }
-
-    async fn spawn_test_server() -> Result<
-        Option<(
-            SocketAddr,
-            SharedRuntimeThreadManager,
-            tokio::task::JoinHandle<()>,
-        )>,
-    > {
-        let root = std::env::temp_dir().join(format!("deepseek-runtime-api-{}", Uuid::new_v4()));
-        let sessions_dir = root.join("sessions");
-        spawn_test_server_with_root(root, sessions_dir).await
-    }
-
-    async fn read_first_sse_frame(resp: reqwest::Response) -> Result<String> {
-        let mut stream = resp.bytes_stream();
-        let mut buf = Vec::new();
-        loop {
-            let next = tokio::time::timeout(Duration::from_secs(2), stream.next())
-                .await
-                .context("timed out waiting for SSE frame")?
-                .context("SSE stream ended unexpectedly")??;
-            buf.extend_from_slice(&next);
-
-            let text = String::from_utf8_lossy(&buf);
-            if let Some(idx) = text.find("\n\n").or_else(|| text.find("\r\n\r\n")) {
-                return Ok(text[..idx].to_string());
-            }
-
-            if buf.len() > 64 * 1024 {
-                bail!("SSE frame exceeded 64KB without delimiter");
-            }
-        }
-    }
-
-    fn parse_sse_frame(frame: &str) -> Result<(String, serde_json::Value)> {
-        let mut event_name: Option<String> = None;
-        let mut data_lines = Vec::new();
-        for line in frame.lines() {
-            if let Some(rest) = line.strip_prefix("event:") {
-                event_name = Some(rest.trim().to_string());
-            } else if let Some(rest) = line.strip_prefix("data:") {
-                data_lines.push(rest.trim_start().to_string());
-            }
-        }
-        let event_name = event_name.context("missing SSE event field")?;
-        let payload = if data_lines.is_empty() {
-            json!({})
-        } else {
-            serde_json::from_str(&data_lines.join("\n"))
-                .with_context(|| format!("invalid SSE data payload: {}", data_lines.join("\n")))?
-        };
-        Ok((event_name, payload))
-    }
-
-    async fn wait_for_terminal_turn_status(
-        client: &reqwest::Client,
-        addr: SocketAddr,
-        thread_id: &str,
-        turn_id: &str,
-        timeout: Duration,
-    ) -> Result<String> {
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            let detail: serde_json::Value = client
-                .get(format!("http://{addr}/v1/threads/{thread_id}"))
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
-            let status = detail["turns"]
-                .as_array()
-                .and_then(|turns| turns.iter().find(|turn| turn["id"] == turn_id))
-                .and_then(|turn| turn.get("status"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            if matches!(
-                status.as_str(),
-                "completed" | "failed" | "interrupted" | "canceled"
-            ) {
-                return Ok(status);
-            }
-            if tokio::time::Instant::now() >= deadline {
-                bail!("timed out waiting for terminal turn status for {turn_id}");
-            }
-            sleep(Duration::from_millis(25)).await;
-        }
-    }
-
-    async fn wait_for_in_progress_item(
-        client: &reqwest::Client,
-        addr: SocketAddr,
-        thread_id: &str,
-        timeout: Duration,
-    ) -> Result<()> {
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            let detail: serde_json::Value = client
-                .get(format!("http://{addr}/v1/threads/{thread_id}"))
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await?;
-            if detail["items"]
-                .as_array()
-                .is_some_and(|items| items.iter().any(|item| item["status"] == "in_progress"))
-            {
-                return Ok(());
-            }
-            if tokio::time::Instant::now() >= deadline {
-                bail!("timed out waiting for in-progress item in thread {thread_id}");
-            }
-            sleep(Duration::from_millis(25)).await;
-        }
-    }
-
-    #[tokio::test]
-    async fn health_and_tasks_endpoints_work() -> Result<()> {
-        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-
-        let health: serde_json::Value = client
-            .get(format!("http://{addr}/health"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(health["status"], "ok");
-        assert_eq!(health["service"], "codewhale-runtime-api");
-
-        let created: serde_json::Value = client
-            .post(format!("http://{addr}/v1/tasks"))
-            .json(&json!({ "prompt": "hello task" }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let id = created["id"].as_str().expect("task id").to_string();
-
-        let listed: serde_json::Value = client
-            .get(format!("http://{addr}/v1/tasks"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert!(
-            listed["tasks"]
-                .as_array()
-                .is_some_and(|tasks| !tasks.is_empty())
-        );
-
-        let detail: serde_json::Value = client
-            .get(format!("http://{addr}/v1/tasks/{id}"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(detail["id"], id);
-
-        let _cancelled: serde_json::Value = client
-            .post(format!("http://{addr}/v1/tasks/{id}/cancel"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn runtime_token_guard_protects_v1_routes() -> Result<()> {
-        let root = std::env::temp_dir().join(format!("deepseek-runtime-api-{}", Uuid::new_v4()));
-        let sessions_dir = root.join("sessions");
-        let token = "local-test-token".to_string();
-        let Some((addr, _runtime_threads, handle)) =
-            spawn_test_server_with_root_and_token(root, sessions_dir, Some(token.clone())).await?
-        else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-
-        let health = client
-            .get(format!("http://{addr}/health"))
-            .send()
-            .await?
-            .error_for_status()?;
-        assert_eq!(health.status(), StatusCode::OK);
-
-        let unauthorized = client
-            .get(format!("http://{addr}/v1/threads/summary"))
-            .send()
-            .await?;
-        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
-
-        let bearer = client
-            .get(format!("http://{addr}/v1/threads/summary"))
-            .bearer_auth(&token)
-            .send()
-            .await?
-            .error_for_status()?;
-        assert_eq!(bearer.status(), StatusCode::OK);
-
-        let query_token = client
-            .get(format!("http://{addr}/v1/threads/summary?token={token}"))
-            .send()
-            .await?
-            .error_for_status()?;
-        assert_eq!(query_token.status(), StatusCode::OK);
-
-        let codewhale_header = client
-            .get(format!("http://{addr}/v1/threads/summary"))
-            .header("x-codewhale-runtime-token", &token)
-            .send()
-            .await?
-            .error_for_status()?;
-        assert_eq!(codewhale_header.status(), StatusCode::OK);
-
-        let deepseek_header = client
-            .get(format!("http://{addr}/v1/threads/summary"))
-            .header("x-deepseek-runtime-token", &token)
-            .send()
-            .await?
-            .error_for_status()?;
-        assert_eq!(deepseek_header.status(), StatusCode::OK);
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn thread_summary_includes_workspace_branch_metadata() -> Result<()> {
-        let tmp = tempfile::tempdir()?;
-        let root = tmp.path().join("runtime");
-        let sessions_dir = root.join("sessions");
-        let repo = tmp.path().join("repo");
-        fs::create_dir_all(&repo)?;
-        run_test_git(&repo, &["init", "-b", "feature/agent"])?;
-        run_test_git(&repo, &["config", "core.autocrlf", "false"])?;
-        fs::write(repo.join("README.md"), "branch visibility\n")?;
-        run_test_git(&repo, &["add", "README.md"])?;
-        run_test_git(
-            &repo,
-            &[
-                "-c",
-                "user.name=CodeWhale Test",
-                "-c",
-                "user.email=codewhale@example.invalid",
-                "commit",
-                "-m",
-                "init",
-            ],
-        )?;
-
-        let non_git = tmp.path().join("non-git");
-        fs::create_dir_all(&non_git)?;
-
-        let Some((addr, _runtime_threads, handle)) =
-            spawn_test_server_with_root(root, sessions_dir).await?
-        else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-
-        let git_thread: serde_json::Value = client
-            .post(format!("http://{addr}/v1/threads"))
-            .json(&json!({
-                "title": "Git workspace",
-                "workspace": repo,
-            }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let git_thread_id = git_thread["id"]
-            .as_str()
-            .context("missing git thread id")?
-            .to_string();
-        fs::write(
-            repo.join("dirty.txt"),
-            "worktree changed after thread spawn\n",
-        )?;
-
-        let plain_thread: serde_json::Value = client
-            .post(format!("http://{addr}/v1/threads"))
-            .json(&json!({
-                "title": "Plain workspace",
-                "workspace": non_git,
-            }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let plain_thread_id = plain_thread["id"]
-            .as_str()
-            .context("missing plain thread id")?
-            .to_string();
-
-        let summary: serde_json::Value = client
-            .get(format!("http://{addr}/v1/threads/summary?limit=100"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let summaries = summary.as_array().context("summary should be an array")?;
-        let git_summary = summaries
-            .iter()
-            .find(|item| item["id"] == git_thread_id)
-            .context("missing git workspace summary")?;
-        assert_eq!(git_summary["branch"], "feature/agent");
-        assert!(
-            git_summary["head"]
-                .as_str()
-                .is_some_and(|head| !head.is_empty())
-        );
-        assert_eq!(git_summary["dirty"], true);
-        assert_eq!(git_summary["workspace"], repo.to_string_lossy().as_ref());
-
-        let plain_summary = summaries
-            .iter()
-            .find(|item| item["id"] == plain_thread_id)
-            .context("missing plain workspace summary")?;
-        assert_eq!(plain_summary["branch"], serde_json::Value::Null);
-        assert_eq!(plain_summary["head"], serde_json::Value::Null);
-        assert_eq!(plain_summary["dirty"], false);
-        assert_eq!(
-            plain_summary["workspace"],
-            non_git.to_string_lossy().as_ref()
-        );
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn workspace_and_automation_endpoints_work() -> Result<()> {
-        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-
-        let workspace: serde_json::Value = client
-            .get(format!("http://{addr}/v1/workspace/status"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert!(workspace.get("workspace").is_some());
-
-        let created: serde_json::Value = client
-            .post(format!("http://{addr}/v1/automations"))
-            .json(&json!({
-                "name": "Smoke automation",
-                "prompt": "automation smoke test",
-                "rrule": "FREQ=HOURLY;INTERVAL=2",
-                "status": "active"
-            }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let automation_id = created["id"]
-            .as_str()
-            .context("missing automation id")?
-            .to_string();
-
-        let listed: serde_json::Value = client
-            .get(format!("http://{addr}/v1/automations"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert!(
-            listed
-                .as_array()
-                .is_some_and(|items| items.iter().any(|item| item["id"] == automation_id))
-        );
-
-        let run_now: serde_json::Value = client
-            .post(format!("http://{addr}/v1/automations/{automation_id}/run"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(run_now["automation_id"], automation_id);
-
-        let paused: serde_json::Value = client
-            .post(format!(
-                "http://{addr}/v1/automations/{automation_id}/pause"
-            ))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(paused["status"], "paused");
-
-        let resumed: serde_json::Value = client
-            .post(format!(
-                "http://{addr}/v1/automations/{automation_id}/resume"
-            ))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(resumed["status"], "active");
-
-        let updated: serde_json::Value = client
-            .patch(format!("http://{addr}/v1/automations/{automation_id}"))
-            .json(&json!({
-                "name": "Smoke automation edited",
-                "rrule": "FREQ=WEEKLY;BYDAY=MO,WE;BYHOUR=10;BYMINUTE=15"
-            }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(updated["name"], "Smoke automation edited");
-
-        let runs: serde_json::Value = client
-            .get(format!(
-                "http://{addr}/v1/automations/{automation_id}/runs?limit=5"
-            ))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert!(
-            runs.as_array().is_some_and(|items| !items.is_empty()),
-            "expected at least one run entry"
-        );
-
-        let _deleted: serde_json::Value = client
-            .delete(format!("http://{addr}/v1/automations/{automation_id}"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-
-        let missing_status = client
-            .get(format!("http://{addr}/v1/automations/{automation_id}"))
-            .send()
-            .await?
-            .status();
-        assert_eq!(missing_status, StatusCode::NOT_FOUND);
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn fleet_status_runtime_api_exposes_state_and_actions() -> Result<()> {
-        let root = std::env::temp_dir().join(format!("codewhale-fleet-api-{}", Uuid::new_v4()));
-        let workspace = root.join("workspace");
-        fs::create_dir_all(&workspace)?;
-        let manager = FleetManager::open(&workspace)?;
-        let task = codewhale_protocol::fleet::FleetTaskSpec {
-            id: "task-a".to_string(),
-            name: "Task A".to_string(),
-            description: None,
-            objective: Some("Inspect fleet status through Runtime API".to_string()),
-            instructions: "Stay running for inspection.".to_string(),
-            worker: Some(codewhale_protocol::fleet::FleetTaskWorkerProfile {
-                role: Some("status-reviewer".to_string()),
-                tool_profile: Some("read-only".to_string()),
-                tools: vec!["rg".to_string()],
-                capabilities: vec!["fleet".to_string()],
-            }),
-            workspace: None,
-            input_files: Vec::new(),
-            context: Vec::new(),
-            budget: None,
-            tags: Vec::new(),
-            expected_artifacts: vec![FleetArtifactKind::Log],
-            scorer: None,
-            retry_policy: None,
-            alert_policy: None,
-            timeout_seconds: None,
-            metadata: std::collections::BTreeMap::new(),
-        };
-        let report = manager.create_run(
-            crate::fleet::task_spec::FleetTaskSpecDocument {
-                name: Some("api smoke".to_string()),
-                labels: std::collections::BTreeMap::new(),
-                security_policy: None,
-                workers: Vec::new(),
-                tasks: vec![task],
-            },
-            1,
-        )?;
-        let worker_id = report.worker_ids[0].clone();
-        let sessions_dir = root.join("sessions");
-        let Some((addr, _runtime_threads, handle)) =
-            spawn_test_server_with_root_token_mobile_workspace(
-                root.clone(),
-                sessions_dir,
-                None,
-                false,
-                workspace,
-            )
-            .await?
-        else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-
-        let runs: serde_json::Value = client
-            .get(format!("http://{addr}/v1/fleet/runs"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(runs["status"]["running"], 1);
-        assert_eq!(runs["runs"][0]["id"], report.run_id.0);
-
-        let worker: serde_json::Value = client
-            .get(format!("http://{addr}/v1/fleet/workers/{worker_id}"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(
-            worker["objective"],
-            "Inspect fleet status through Runtime API"
-        );
-        assert_eq!(worker["role"], "status-reviewer");
-        assert_eq!(worker["host"], "local");
-        assert_eq!(worker["artifacts"][0]["kind"], "log");
-
-        let interrupted: serde_json::Value = client
-            .post(format!(
-                "http://{addr}/v1/fleet/workers/{worker_id}/interrupt"
-            ))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(interrupted["action"], "interrupt");
-        assert_eq!(interrupted["worker"]["last_error"], "cancelled by operator");
-
-        let restarted: serde_json::Value = client
-            .post(format!(
-                "http://{addr}/v1/fleet/workers/{worker_id}/restart"
-            ))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(restarted["action"], "restart");
-        assert_eq!(restarted["worker"]["status"], "busy");
-
-        let stopped: serde_json::Value = client
-            .post(format!(
-                "http://{addr}/v1/fleet/runs/{}/stop",
-                report.run_id.0
-            ))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(stopped["action"], "stop");
-        assert_eq!(stopped["stopped"], 1);
-        assert_eq!(stopped["status"]["cancelled"], 1);
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn agent_runs_runtime_api_exposes_persisted_worker_receipts() -> Result<()> {
-        use crate::tools::subagent::{
-            AgentRunArtifactRef, AgentRunFollowUpTarget, AgentRunTakeoverTarget, AgentRunUsage,
-            AgentRunVerificationSummary, AgentWorkerEvent, AgentWorkerRecord, AgentWorkerSpec,
-            AgentWorkerStatus, AgentWorkerToolProfile, SubAgentType,
-        };
-        use std::collections::VecDeque;
-
-        let root =
-            std::env::temp_dir().join(format!("codewhale-agent-runs-api-{}", Uuid::new_v4()));
-        let workspace = root.join("workspace");
-        fs::create_dir_all(workspace.join(".codewhale/state"))?;
-
-        let record = AgentWorkerRecord {
-            spec: AgentWorkerSpec {
-                worker_id: "agent_receipt".to_string(),
-                run_id: "run_receipt".to_string(),
-                parent_run_id: Some("parent_run".to_string()),
-                session_name: Some("receipt_lane".to_string()),
-                objective: "Verify run receipt projection".to_string(),
-                role: Some("verifier".to_string()),
-                agent_type: SubAgentType::Verifier,
-                model: "deepseek-v4-flash".to_string(),
-                workspace: workspace.clone(),
-                git_branch: Some("codex/v0.8.60".to_string()),
-                context_mode: "fresh".to_string(),
-                fork_context: false,
-                tool_profile: AgentWorkerToolProfile::Explicit(vec!["read_file".to_string()]),
-                max_steps: 4,
-                spawn_depth: 1,
-                max_spawn_depth: crate::tools::subagent::DEFAULT_MAX_SPAWN_DEPTH,
-            },
-            actor_kind: "subagent".to_string(),
-            parent_run_id: Some("parent_run".to_string()),
-            follow_up: AgentRunFollowUpTarget {
-                tool: "agent_eval".to_string(),
-                agent_id: "agent_receipt".to_string(),
-                session_name: Some("receipt_lane".to_string()),
-                accepted_statuses: vec![
-                    "running".to_string(),
-                    "interrupted_continuable".to_string(),
-                ],
-                latest_delivery: None,
-            },
-            takeover: AgentRunTakeoverTarget {
-                kind: "local_subagent_session".to_string(),
-                supported: true,
-                agent_id: "agent_receipt".to_string(),
-                session_name: Some("receipt_lane".to_string()),
-                instructions: "Use agent_eval with agent_id 'agent_receipt'.".to_string(),
-                unsupported_reason: None,
-            },
-            artifacts: vec![AgentRunArtifactRef {
-                kind: "transcript".to_string(),
-                name: "transcript_handle".to_string(),
-                target: "agent:agent_receipt".to_string(),
-                description: "Read with handle_read from a live projection.".to_string(),
-            }],
-            usage: AgentRunUsage {
-                status: "unknown".to_string(),
-                total_tokens: None,
-                note: "not reported".to_string(),
-            },
-            verification: AgentRunVerificationSummary {
-                status: "self_report_only".to_string(),
-                summary: "no verified receipt attached".to_string(),
-            },
-            status: AgentWorkerStatus::Completed,
-            created_at_ms: 1,
-            updated_at_ms: 2,
-            started_at_ms: Some(1),
-            completed_at_ms: Some(2),
-            latest_message: Some("completed".to_string()),
-            result_summary: Some("receipt complete".to_string()),
-            error: None,
-            steps_taken: 2,
-            events: VecDeque::from([AgentWorkerEvent {
-                seq: 1,
-                worker_id: "agent_receipt".to_string(),
-                status: AgentWorkerStatus::Completed,
-                timestamp_ms: 2,
-                message: Some("completed".to_string()),
-                step: Some(2),
-                tool_name: None,
-            }]),
-        };
-        let state_payload = json!({
-            "schema_version": 1,
-            "agents": [],
-            "workers": [record],
-        });
-        fs::write(
-            workspace.join(".codewhale/state/subagents.v1.json"),
-            serde_json::to_vec_pretty(&state_payload)?,
-        )?;
-
-        let sessions_dir = root.join("sessions");
-        let Some((addr, _runtime_threads, handle)) =
-            spawn_test_server_with_root_token_mobile_workspace(
-                root.clone(),
-                sessions_dir,
-                None,
-                false,
-                workspace,
-            )
-            .await?
-        else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-
-        let runs: serde_json::Value = client
-            .get(format!("http://{addr}/v1/agent-runs"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(runs["runs"][0]["spec"]["run_id"], "run_receipt");
-        assert_eq!(runs["runs"][0]["follow_up"]["tool"], "agent_eval");
-        assert_eq!(
-            runs["runs"][0]["verification"]["status"],
-            "self_report_only"
-        );
-
-        let run: serde_json::Value = client
-            .get(format!("http://{addr}/v1/agent-runs/run_receipt"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(run["spec"]["worker_id"], "agent_receipt");
-        assert_eq!(run["takeover"]["supported"], true);
-        assert_eq!(run["artifacts"][0]["kind"], "transcript");
-
-        let missing = client
-            .get(format!("http://{addr}/v1/agent-runs/missing"))
-            .send()
-            .await?
-            .status();
-        assert_eq!(missing, StatusCode::NOT_FOUND);
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn stream_requires_prompt() -> Result<()> {
-        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-
-        let resp = client
-            .post(format!("http://{addr}/v1/stream"))
-            .json(&json!({ "prompt": "" }))
-            .send()
-            .await?;
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn thread_endpoints_expose_lifecycle_contract() -> Result<()> {
-        let Some((addr, runtime_threads, handle)) = spawn_test_server().await? else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-
-        let created: serde_json::Value = client
-            .post(format!("http://{addr}/v1/threads"))
-            .json(&json!({}))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let thread_id = created["id"]
-            .as_str()
-            .context("missing thread id")?
-            .to_string();
-
-        let archived: serde_json::Value = client
-            .patch(format!("http://{addr}/v1/threads/{thread_id}"))
-            .json(&json!({ "archived": true }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(archived["id"], thread_id);
-        assert_eq!(archived["archived"], true);
-
-        let listed: serde_json::Value = client
-            .get(format!("http://{addr}/v1/threads"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert!(
-            listed
-                .as_array()
-                .is_some_and(|threads| threads.iter().all(|t| t["id"] != thread_id))
-        );
-
-        let listed_all: serde_json::Value = client
-            .get(format!(
-                "http://{addr}/v1/threads/summary?include_archived=true&limit=100"
-            ))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert!(
-            listed_all
-                .as_array()
-                .is_some_and(|threads| threads.iter().any(|t| t["id"] == thread_id))
-        );
-
-        let unarchived: serde_json::Value = client
-            .patch(format!("http://{addr}/v1/threads/{thread_id}"))
-            .json(&json!({ "archived": false }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(unarchived["archived"], false);
-
-        let invalid_patch = client
-            .patch(format!("http://{addr}/v1/threads/{thread_id}"))
-            .json(&json!({}))
-            .send()
-            .await?;
-        assert_eq!(invalid_patch.status(), StatusCode::BAD_REQUEST);
-
-        let missing_patch = client
-            .patch(format!("http://{addr}/v1/threads/thr_missing"))
-            .json(&json!({ "archived": true }))
-            .send()
-            .await?;
-        assert_eq!(missing_patch.status(), StatusCode::NOT_FOUND);
-
-        let detail: serde_json::Value = client
-            .get(format!("http://{addr}/v1/threads/{thread_id}"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(detail["thread"]["id"], thread_id);
-
-        let resumed: serde_json::Value = client
-            .post(format!("http://{addr}/v1/threads/{thread_id}/resume"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(resumed["id"], thread_id);
-
-        let forked: serde_json::Value = client
-            .post(format!("http://{addr}/v1/threads/{thread_id}/fork"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let forked_id = forked["id"].as_str().context("missing forked id")?;
-        assert_ne!(forked_id, thread_id);
-
-        // Install a mock engine so the turn completes without calling the real API.
-        // The mock handles both SendMessage and CompactContext ops so the
-        // compact endpoint tested later also works.
-        let harness = crate::core::engine::mock_engine_handle();
-        runtime_threads
-            .install_test_engine(&thread_id, harness.handle.clone())
-            .await?;
-        let mut rx_op = harness.rx_op;
-        let tx_event = harness.tx_event;
-        tokio::spawn(async move {
-            while let Some(op) = rx_op.recv().await {
-                match op {
-                    Op::SendMessage { .. } => {
-                        let _ = tx_event
-                            .send(EngineEvent::TurnStarted {
-                                turn_id: "mock_lifecycle".to_string(),
-                            })
-                            .await;
-                        let _ = tx_event
-                            .send(EngineEvent::MessageStarted { index: 0 })
-                            .await;
-                        let _ = tx_event
-                            .send(EngineEvent::MessageDelta {
-                                index: 0,
-                                content: "mock reply".to_string(),
-                            })
-                            .await;
-                        let _ = tx_event
-                            .send(EngineEvent::MessageComplete { index: 0 })
-                            .await;
-                        let _ = tx_event
-                            .send(EngineEvent::TurnComplete {
-                                usage: Usage {
-                                    input_tokens: 10,
-                                    output_tokens: 5,
-                                    ..Usage::default()
-                                },
-                                status: TurnOutcomeStatus::Completed,
-                                error: None,
-                                tool_catalog: None,
-                                base_url: None,
-                            })
-                            .await;
-                    }
-                    Op::CompactContext => {
-                        let _ = tx_event
-                            .send(EngineEvent::TurnComplete {
-                                usage: Usage {
-                                    input_tokens: 0,
-                                    output_tokens: 0,
-                                    ..Usage::default()
-                                },
-                                status: TurnOutcomeStatus::Completed,
-                                error: None,
-                                tool_catalog: None,
-                                base_url: None,
-                            })
-                            .await;
-                    }
-                    _ => {}
-                }
-            }
-        });
-
-        let turn_start: serde_json::Value = client
-            .post(format!("http://{addr}/v1/threads/{thread_id}/turns"))
-            .json(&json!({ "prompt": "thread endpoint test" }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let turn_id = turn_start["turn"]["id"]
-            .as_str()
-            .context("missing turn id")?
-            .to_string();
-
-        let _ = wait_for_terminal_turn_status(
-            &client,
-            addr,
-            &thread_id,
-            &turn_id,
-            Duration::from_secs(2),
-        )
-        .await?;
-
-        let steer_resp = client
-            .post(format!(
-                "http://{addr}/v1/threads/{thread_id}/turns/{turn_id}/steer"
-            ))
-            .json(&json!({ "prompt": "late steer" }))
-            .send()
-            .await?;
-        assert_eq!(steer_resp.status(), StatusCode::CONFLICT);
-
-        let interrupt_resp = client
-            .post(format!(
-                "http://{addr}/v1/threads/{thread_id}/turns/{turn_id}/interrupt"
-            ))
-            .send()
-            .await?;
-        assert_eq!(interrupt_resp.status(), StatusCode::CONFLICT);
-
-        let compact_start: serde_json::Value = client
-            .post(format!("http://{addr}/v1/threads/{thread_id}/compact"))
-            .json(&json!({ "reason": "test manual compact" }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(compact_start["thread"]["id"], thread_id);
-
-        let events_resp = client
-            .get(format!(
-                "http://{addr}/v1/threads/{thread_id}/events?since_seq=0"
-            ))
-            .send()
-            .await?
-            .error_for_status()?;
-        let content_type = events_resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default()
-            .to_string();
-        assert!(content_type.starts_with("text/event-stream"));
-        let chunk_text = read_first_sse_frame(events_resp).await?;
-        assert!(
-            chunk_text.contains("event:"),
-            "expected SSE event chunk, got: {chunk_text}"
-        );
-        let (event_name, payload) = parse_sse_frame(&chunk_text)?;
-        assert_eq!(event_name, "thread.started");
-        assert!(
-            event_name.starts_with("item.")
-                || event_name.starts_with("turn.")
-                || event_name.starts_with("thread.")
-                || event_name == "turn.completed"
-                || event_name == "turn.started"
-                || event_name == "thread.started",
-            "unexpected first event name: {event_name}"
-        );
-        assert_eq!(payload["event"], payload["kind"]);
-        assert!(payload.get("turn_id").is_some());
-        assert!(payload.get("item_id").is_some());
-        assert!(payload["turn_id"].is_null());
-        assert!(payload["item_id"].is_null());
-        assert_eq!(payload["thread_id"], thread_id);
-        assert!(
-            payload["schema_version"]
-                .as_u64()
-                .is_some_and(|version| version >= 1)
-        );
-        assert!(payload.get("seq").and_then(Value::as_u64).is_some());
-        assert!(payload["payload"].is_object() || payload["payload"].is_array());
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn events_endpoint_respects_since_seq_cursor() -> Result<()> {
-        let Some((addr, runtime_threads, handle)) = spawn_test_server().await? else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-
-        let created: serde_json::Value = client
-            .post(format!("http://{addr}/v1/threads"))
-            .json(&json!({}))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let thread_id = created["id"]
-            .as_str()
-            .context("missing thread id")?
-            .to_string();
-
-        // Install a mock engine so the turn completes without calling the real API.
-        let harness = crate::core::engine::mock_engine_handle();
-        runtime_threads
-            .install_test_engine(&thread_id, harness.handle.clone())
-            .await?;
-        let mut rx_op = harness.rx_op;
-        let tx_event = harness.tx_event;
-        tokio::spawn(async move {
-            if !matches!(rx_op.recv().await, Some(Op::SendMessage { .. })) {
-                return;
-            }
-            let _ = tx_event
-                .send(EngineEvent::TurnStarted {
-                    turn_id: "mock_cursor".to_string(),
-                })
-                .await;
-            let _ = tx_event
-                .send(EngineEvent::MessageStarted { index: 0 })
-                .await;
-            let _ = tx_event
-                .send(EngineEvent::MessageComplete { index: 0 })
-                .await;
-            let _ = tx_event
-                .send(EngineEvent::TurnComplete {
-                    usage: Usage {
-                        input_tokens: 5,
-                        output_tokens: 3,
-                        ..Usage::default()
-                    },
-                    status: TurnOutcomeStatus::Completed,
-                    error: None,
-                    tool_catalog: None,
-                    base_url: None,
-                })
-                .await;
-        });
-
-        let started: serde_json::Value = client
-            .post(format!("http://{addr}/v1/threads/{thread_id}/turns"))
-            .json(&json!({ "prompt": "cursor replay test" }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let turn_id = started["turn"]["id"]
-            .as_str()
-            .context("missing turn id")?
-            .to_string();
-
-        let _ = wait_for_terminal_turn_status(
-            &client,
-            addr,
-            &thread_id,
-            &turn_id,
-            Duration::from_secs(2),
-        )
-        .await?;
-
-        let resp_a = client
-            .get(format!(
-                "http://{addr}/v1/threads/{thread_id}/events?since_seq=0"
-            ))
-            .send()
-            .await?
-            .error_for_status()?;
-        let frame_a = read_first_sse_frame(resp_a).await?;
-        let (event_a, payload_a) = parse_sse_frame(&frame_a)?;
-        assert_eq!(event_a, "thread.started");
-        assert!(payload_a.get("turn_id").is_some());
-        assert!(payload_a.get("item_id").is_some());
-        assert!(payload_a["turn_id"].is_null());
-        assert!(payload_a["item_id"].is_null());
-        assert!(payload_a.get("schema_version").is_some());
-        assert_eq!(payload_a["event"], payload_a["kind"]);
-        assert_eq!(payload_a["thread_id"], thread_id);
-        let seq_a = payload_a
-            .get("seq")
-            .and_then(Value::as_u64)
-            .context("missing seq in first replay frame")?;
-
-        let resp_b = client
-            .get(format!(
-                "http://{addr}/v1/threads/{thread_id}/events?since_seq={seq_a}"
-            ))
-            .send()
-            .await?
-            .error_for_status()?;
-        let frame_b = read_first_sse_frame(resp_b).await?;
-        let (_event_b, payload_b) = parse_sse_frame(&frame_b)?;
-        assert!(payload_b.get("schema_version").is_some());
-        assert_eq!(payload_b["event"], payload_b["kind"]);
-        assert_eq!(payload_b["thread_id"], thread_id);
-        let seq_b = payload_b
-            .get("seq")
-            .and_then(Value::as_u64)
-            .context("missing seq in second replay frame")?;
-        assert!(
-            seq_b > seq_a,
-            "expected seq after cursor: {seq_b} <= {seq_a}"
-        );
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn steer_and_interrupt_endpoints_work_on_active_turn() -> Result<()> {
-        let Some((addr, runtime_threads, handle)) = spawn_test_server().await? else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-
-        let created: serde_json::Value = client
-            .post(format!("http://{addr}/v1/threads"))
-            .json(&json!({}))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let thread_id = created["id"]
-            .as_str()
-            .context("missing thread id")?
-            .to_string();
-
-        let harness = crate::core::engine::mock_engine_handle();
-        runtime_threads
-            .install_test_engine(&thread_id, harness.handle.clone())
-            .await?;
-        let mut rx_op = harness.rx_op;
-        let mut rx_steer = harness.rx_steer;
-        let tx_event = harness.tx_event;
-        let cancel_token = harness.cancel_token;
-        tokio::spawn(async move {
-            if !matches!(rx_op.recv().await, Some(Op::SendMessage { .. })) {
-                return;
-            }
-            let _ = tx_event
-                .send(EngineEvent::TurnStarted {
-                    turn_id: "engine_turn_api".to_string(),
-                })
-                .await;
-            let _ = tx_event
-                .send(EngineEvent::MessageStarted { index: 0 })
-                .await;
-            if let Some(steer_text) = rx_steer.recv().await {
-                let _ = tx_event
-                    .send(EngineEvent::MessageDelta {
-                        index: 0,
-                        content: format!("steer:{steer_text}"),
-                    })
-                    .await;
-            }
-            cancel_token.cancelled().await;
-            sleep(Duration::from_millis(60)).await;
-            let _ = tx_event
-                .send(EngineEvent::TurnComplete {
-                    usage: Usage {
-                        input_tokens: 2,
-                        output_tokens: 1,
-                        ..Usage::default()
-                    },
-                    status: TurnOutcomeStatus::Completed,
-                    error: None,
-                    tool_catalog: None,
-                    base_url: None,
-                })
-                .await;
-        });
-
-        let turn_start: serde_json::Value = client
-            .post(format!("http://{addr}/v1/threads/{thread_id}/turns"))
-            .json(&json!({ "prompt": "active controls" }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let turn_id = turn_start["turn"]["id"]
-            .as_str()
-            .context("missing turn id")?
-            .to_string();
-
-        let steer_resp: serde_json::Value = client
-            .post(format!(
-                "http://{addr}/v1/threads/{thread_id}/turns/{turn_id}/steer"
-            ))
-            .json(&json!({ "prompt": "please steer" }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(steer_resp["id"], turn_id);
-        assert_eq!(steer_resp["steer_count"], 1);
-
-        let interrupt_resp: serde_json::Value = client
-            .post(format!(
-                "http://{addr}/v1/threads/{thread_id}/turns/{turn_id}/interrupt"
-            ))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(interrupt_resp["id"], turn_id);
-
-        let terminal = wait_for_terminal_turn_status(
-            &client,
-            addr,
-            &thread_id,
-            &turn_id,
-            Duration::from_secs(3),
-        )
-        .await?;
-        assert_eq!(terminal, "interrupted");
-
-        let events = runtime_threads.events_since(&thread_id, None)?;
-        assert!(events.iter().any(|ev| ev.event == "turn.steered"));
-        assert!(
-            events
-                .iter()
-                .any(|ev| ev.event == "turn.interrupt_requested")
-        );
-        assert!(events.iter().any(|ev| {
-            ev.event == "turn.completed"
-                && ev
-                    .payload
-                    .get("turn")
-                    .and_then(|turn| turn.get("status"))
-                    .and_then(Value::as_str)
-                    == Some("interrupted")
-        }));
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn stream_compat_mapping_handles_expected_runtime_events() -> Result<()> {
-        let agent_delta = RuntimeEventRecord {
-            schema_version: 1,
-            seq: 1,
-            timestamp: chrono::Utc::now(),
-            thread_id: "thr_test".to_string(),
-            turn_id: Some("turn_test".to_string()),
-            item_id: Some("item_test".to_string()),
-            event: "item.delta".to_string(),
-            payload: json!({
-                "kind": "agent_message",
-                "delta": "hello",
-            }),
-        };
-        let mapped = map_compat_stream_event(&agent_delta).context("missing mapped SSE event")?;
-        let stream = async_stream::stream! {
-            yield Ok::<_, Infallible>(mapped);
-        };
-        let body =
-            axum::body::to_bytes(Sse::new(stream).into_response().into_body(), usize::MAX).await?;
-        let text = String::from_utf8_lossy(&body);
-        assert!(text.contains("event: message.delta"));
-        assert!(text.contains("\"content\":\"hello\""));
-
-        let tool_start = RuntimeEventRecord {
-            schema_version: 1,
-            seq: 2,
-            timestamp: chrono::Utc::now(),
-            thread_id: "thr_test".to_string(),
-            turn_id: Some("turn_test".to_string()),
-            item_id: Some("item_tool".to_string()),
-            event: "item.started".to_string(),
-            payload: json!({
-                "tool": { "id": "tool_1", "name": "exec_shell", "input": { "cmd": "pwd" } }
-            }),
-        };
-        let mapped = map_compat_stream_event(&tool_start).context("missing tool.started event")?;
-        let stream = async_stream::stream! {
-            yield Ok::<_, Infallible>(mapped);
-        };
-        let body =
-            axum::body::to_bytes(Sse::new(stream).into_response().into_body(), usize::MAX).await?;
-        let text = String::from_utf8_lossy(&body);
-        assert!(text.contains("event: tool.started"));
-
-        let tool_done = RuntimeEventRecord {
-            schema_version: 1,
-            seq: 3,
-            timestamp: chrono::Utc::now(),
-            thread_id: "thr_test".to_string(),
-            turn_id: Some("turn_test".to_string()),
-            item_id: Some("item_tool".to_string()),
-            event: "item.completed".to_string(),
-            payload: json!({
-                "item": {
-                    "id": "item_tool",
-                    "kind": "tool_call",
-                    "summary": "ok",
-                    "detail": "done"
-                }
-            }),
-        };
-        let mapped = map_compat_stream_event(&tool_done).context("missing tool.completed event")?;
-        let stream = async_stream::stream! {
-            yield Ok::<_, Infallible>(mapped);
-        };
-        let body =
-            axum::body::to_bytes(Sse::new(stream).into_response().into_body(), usize::MAX).await?;
-        let text = String::from_utf8_lossy(&body);
-        assert!(text.contains("event: tool.completed"));
-        assert!(text.contains("\"success\":true"));
-
-        let unknown = RuntimeEventRecord {
-            schema_version: 1,
-            seq: 4,
-            timestamp: chrono::Utc::now(),
-            thread_id: "thr_test".to_string(),
-            turn_id: Some("turn_test".to_string()),
-            item_id: None,
-            event: "item.delta".to_string(),
-            payload: json!({
-                "kind": "context_compaction",
-                "delta": "ignored",
-            }),
-        };
-        assert!(map_compat_stream_event(&unknown).is_none());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn stream_endpoint_remains_backward_compatible() -> Result<()> {
-        let Some((addr, runtime_threads, handle)) = spawn_test_server().await? else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-
-        // Create a thread and install a mock engine so /v1/stream doesn't call the real API.
-        let created: serde_json::Value = client
-            .post(format!("http://{addr}/v1/threads"))
-            .json(&json!({}))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let thread_id = created["id"]
-            .as_str()
-            .context("missing thread id")?
-            .to_string();
-
-        let harness = crate::core::engine::mock_engine_handle();
-        runtime_threads
-            .install_test_engine(&thread_id, harness.handle.clone())
-            .await?;
-        let mut rx_op = harness.rx_op;
-        let tx_event = harness.tx_event;
-        tokio::spawn(async move {
-            if !matches!(rx_op.recv().await, Some(Op::SendMessage { .. })) {
-                return;
-            }
-            let _ = tx_event
-                .send(EngineEvent::TurnStarted {
-                    turn_id: "mock_stream".to_string(),
-                })
-                .await;
-            let _ = tx_event
-                .send(EngineEvent::MessageStarted { index: 0 })
-                .await;
-            let _ = tx_event
-                .send(EngineEvent::MessageDelta {
-                    index: 0,
-                    content: "streamed".to_string(),
-                })
-                .await;
-            let _ = tx_event
-                .send(EngineEvent::MessageComplete { index: 0 })
-                .await;
-            let _ = tx_event
-                .send(EngineEvent::TurnComplete {
-                    usage: Usage {
-                        input_tokens: 4,
-                        output_tokens: 2,
-                        ..Usage::default()
-                    },
-                    status: TurnOutcomeStatus::Completed,
-                    error: None,
-                    tool_catalog: None,
-                    base_url: None,
-                })
-                .await;
-        });
-
-        // Start the turn and consume events via the SSE endpoint.
-        let turn_start: serde_json::Value = client
-            .post(format!("http://{addr}/v1/threads/{thread_id}/turns"))
-            .json(&json!({ "prompt": "compatibility stream" }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let turn_id = turn_start["turn"]["id"]
-            .as_str()
-            .context("missing turn id")?
-            .to_string();
-
-        let _ = wait_for_terminal_turn_status(
-            &client,
-            addr,
-            &thread_id,
-            &turn_id,
-            Duration::from_secs(2),
-        )
-        .await?;
-
-        // Verify that the persisted events include the expected turn lifecycle events.
-        let events = runtime_threads.events_since(&thread_id, None)?;
-        assert!(
-            events.iter().any(|ev| ev.event == "turn.started"),
-            "expected turn.started event"
-        );
-        assert!(
-            events.iter().any(|ev| ev.event == "turn.completed"),
-            "expected turn.completed event"
-        );
-
-        // Verify the SSE endpoint returns event-stream content type.
-        let events_resp = client
-            .get(format!(
-                "http://{addr}/v1/threads/{thread_id}/events?since_seq=0"
-            ))
-            .send()
-            .await?
-            .error_for_status()?;
-        let content_type = events_resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default()
-            .to_string();
-        assert!(content_type.starts_with("text/event-stream"));
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn session_get_returns_404_for_missing_id() -> Result<()> {
-        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-
-        let resp = client
-            .get(format!("http://{addr}/v1/sessions/nonexistent_id"))
-            .send()
-            .await?;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn session_endpoints_reject_invalid_id() -> Result<()> {
-        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-
-        let get_resp = client
-            .get(format!("http://{addr}/v1/sessions/invalid%20id"))
-            .send()
-            .await?;
-        assert_eq!(get_resp.status(), StatusCode::BAD_REQUEST);
-
-        let resume_resp = client
-            .post(format!(
-                "http://{addr}/v1/sessions/invalid%20id/resume-thread"
-            ))
-            .json(&json!({}))
-            .send()
-            .await?;
-        assert_eq!(resume_resp.status(), StatusCode::BAD_REQUEST);
-
-        let delete_resp = client
-            .delete(format!("http://{addr}/v1/sessions/invalid%20id"))
-            .send()
-            .await?;
-        assert_eq!(delete_resp.status(), StatusCode::BAD_REQUEST);
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn session_resume_thread_returns_404_for_missing_session() -> Result<()> {
-        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-
-        let resp = client
-            .post(format!(
-                "http://{addr}/v1/sessions/nonexistent_session/resume-thread"
-            ))
-            .json(&json!({}))
-            .send()
-            .await?;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn session_resume_thread_creates_thread_from_saved_session() -> Result<()> {
-        let root = std::env::temp_dir().join(format!("deepseek-session-resume-{}", Uuid::new_v4()));
-        let sessions_dir = root.join("sessions");
-        fs::create_dir_all(&sessions_dir)?;
-        let session = json!({
-            "schema_version": 1,
-            "metadata": {
-                "id": "sess_test_resume",
-                "title": "Test resume session",
-                "created_at": "2025-01-01T00:00:00Z",
-                "updated_at": "2025-01-01T00:10:00Z",
-                "message_count": 2,
-                "total_tokens": 100,
-                "model": "deepseek-v4-pro",
-                "workspace": "/tmp/test",
-                "mode": "agent"
-            },
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [{ "type": "text", "text": "Hello, world!" }]
-                },
-                {
-                    "role": "assistant",
-                    "content": [{ "type": "text", "text": "Hello! How can I help you?" }]
-                }
-            ],
-            "system_prompt": null
-        });
-        fs::write(
-            sessions_dir.join("sess_test_resume.json"),
-            serde_json::to_string_pretty(&session)?,
-        )?;
-
-        let Some((addr, _runtime_threads, handle)) =
-            spawn_test_server_with_root(root.clone(), sessions_dir.clone()).await?
-        else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-
-        let resp = client
-            .post(format!(
-                "http://{addr}/v1/sessions/sess_test_resume/resume-thread"
-            ))
-            .json(&json!({ "model": "deepseek-v4-pro" }))
-            .send()
-            .await?;
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let resumed: serde_json::Value = resp.json().await?;
-        assert_eq!(resumed["session_id"], "sess_test_resume");
-        assert_eq!(resumed["message_count"], 2);
-
-        let thread_id = resumed["thread_id"]
-            .as_str()
-            .context("missing resumed thread id")?;
-        let detail: serde_json::Value = client
-            .get(format!("http://{addr}/v1/threads/{thread_id}"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(detail["thread"]["id"], thread_id);
-        assert_eq!(detail["turns"].as_array().map_or(0, Vec::len), 1);
-        assert_eq!(detail["items"].as_array().map_or(0, Vec::len), 2);
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn session_create_from_completed_thread_saves_messages() -> Result<()> {
-        let root = std::env::temp_dir().join(format!("deepseek-thread-session-{}", Uuid::new_v4()));
-        let sessions_dir = root.join("sessions");
-        let Some((addr, runtime_threads, handle)) =
-            spawn_test_server_with_root(root.clone(), sessions_dir).await?
-        else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-
-        let created: serde_json::Value = client
-            .post(format!("http://{addr}/v1/threads"))
-            .json(&json!({
-                "model": "deepseek-v4-pro",
-                "mode": "plan",
-                "workspace": root.join("workspace")
-            }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let thread_id = created["id"]
-            .as_str()
-            .context("missing thread id")?
-            .to_string();
-
-        let patched: serde_json::Value = client
-            .patch(format!("http://{addr}/v1/threads/{thread_id}"))
-            .json(&json!({ "title": "Thread title fallback" }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(patched["title"], "Thread title fallback");
-
-        runtime_threads
-            .seed_thread_from_messages(
-                &thread_id,
-                &[
-                    Message {
-                        role: "user".to_string(),
-                        content: vec![ContentBlock::Text {
-                            text: "Please save this runtime thread".to_string(),
-                            cache_control: None,
-                        }],
-                    },
-                    Message {
-                        role: "assistant".to_string(),
-                        content: vec![ContentBlock::Text {
-                            text: "Saved replies should round-trip.".to_string(),
-                            cache_control: None,
-                        }],
-                    },
-                ],
-            )
-            .await?;
-
-        let resp = client
-            .post(format!("http://{addr}/v1/sessions"))
-            .json(&json!({ "thread_id": thread_id }))
-            .send()
-            .await?;
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let saved: serde_json::Value = resp.json().await?;
-        assert_eq!(saved["thread_id"], thread_id);
-        assert_eq!(saved["message_count"], 2);
-        assert_eq!(saved["title"], "Thread title fallback");
-        let session_id = saved["session_id"]
-            .as_str()
-            .context("missing session id")?
-            .to_string();
-
-        let detail: serde_json::Value = client
-            .get(format!("http://{addr}/v1/sessions/{session_id}"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(detail["metadata"]["title"], "Thread title fallback");
-        assert_eq!(detail["metadata"]["model"], "deepseek-v4-pro");
-        assert_eq!(detail["metadata"]["mode"], "plan");
-        assert_eq!(detail["metadata"]["message_count"], 2);
-        assert_eq!(detail["messages"][0]["role"], "user");
-        assert_eq!(
-            detail["messages"][0]["content"][0]["text"],
-            "Please save this runtime thread"
-        );
-        assert_eq!(detail["messages"][1]["role"], "assistant");
-
-        let manual_title: serde_json::Value = client
-            .post(format!("http://{addr}/v1/sessions"))
-            .json(&json!({
-                "thread_id": thread_id,
-                "title": "Manual saved title"
-            }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(manual_title["title"], "Manual saved title");
-        assert_ne!(manual_title["session_id"], session_id);
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn session_create_from_thread_returns_404_for_missing_thread() -> Result<()> {
-        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-
-        let resp = client
-            .post(format!("http://{addr}/v1/sessions"))
-            .json(&json!({ "thread_id": "thr_missing" }))
-            .send()
-            .await?;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-
-        handle.abort();
-        Ok(())
-    }
-
-    /// Create a thread over HTTP and seed it with one user/assistant turn.
-    /// Shared setup for the undo/patch-undo/retry endpoint tests.
-    async fn create_seeded_thread(
-        addr: &SocketAddr,
-        runtime_threads: &SharedRuntimeThreadManager,
-        root: &FsPath,
-        user_text: &str,
-    ) -> Result<String> {
-        let client = crate::tls::reqwest_client();
-        let created: serde_json::Value = client
-            .post(format!("http://{addr}/v1/threads"))
-            .json(&json!({
-                "model": "deepseek-v4-pro",
-                "mode": "agent",
-                "workspace": root.join("workspace")
-            }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let thread_id = created["id"]
-            .as_str()
-            .context("missing thread id")?
-            .to_string();
-
-        runtime_threads
-            .seed_thread_from_messages(
-                &thread_id,
-                &[
-                    Message {
-                        role: "user".to_string(),
-                        content: vec![ContentBlock::Text {
-                            text: user_text.to_string(),
-                            cache_control: None,
-                        }],
-                    },
-                    Message {
-                        role: "assistant".to_string(),
-                        content: vec![ContentBlock::Text {
-                            text: "Done — anything else?".to_string(),
-                            cache_control: None,
-                        }],
-                    },
-                ],
-            )
-            .await?;
-        Ok(thread_id)
-    }
-
-    #[tokio::test]
-    async fn undo_endpoint_forks_thread_and_returns_original_user_text() -> Result<()> {
-        let root = std::env::temp_dir().join(format!("deepseek-undo-endpoint-{}", Uuid::new_v4()));
-        let sessions_dir = root.join("sessions");
-        let Some((addr, runtime_threads, handle)) =
-            spawn_test_server_with_root(root.clone(), sessions_dir).await?
-        else {
-            return Ok(());
-        };
-        let thread_id =
-            create_seeded_thread(&addr, &runtime_threads, &root, "Please undo this turn").await?;
-        let client = crate::tls::reqwest_client();
-
-        let resp = client
-            .post(format!("http://{addr}/v1/threads/{thread_id}/undo"))
-            .json(&json!({}))
-            .send()
-            .await?;
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let undone: serde_json::Value = resp.json().await?;
-        assert_eq!(undone["original_user_text"], "Please undo this turn");
-        let forked_id = undone["thread"]["id"]
-            .as_str()
-            .context("missing forked thread id")?;
-        assert_ne!(forked_id, thread_id, "undo must fork, not mutate in place");
-
-        // The forked thread has the undone turn removed.
-        let detail: serde_json::Value = client
-            .get(format!("http://{addr}/v1/threads/{forked_id}"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(detail["turns"].as_array().map_or(usize::MAX, Vec::len), 0);
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn undo_endpoint_404s_for_missing_thread() -> Result<()> {
-        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-        let resp = client
-            .post(format!("http://{addr}/v1/threads/thr_missing/undo"))
-            .json(&json!({}))
-            .send()
-            .await?;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn patch_undo_endpoint_forks_and_reports_file_rollback_state() -> Result<()> {
-        let root =
-            std::env::temp_dir().join(format!("deepseek-patch-undo-endpoint-{}", Uuid::new_v4()));
-        let sessions_dir = root.join("sessions");
-        let Some((addr, runtime_threads, handle)) =
-            spawn_test_server_with_root(root.clone(), sessions_dir).await?
-        else {
-            return Ok(());
-        };
-        let thread_id =
-            create_seeded_thread(&addr, &runtime_threads, &root, "Roll back the patch").await?;
-        let client = crate::tls::reqwest_client();
-
-        let resp = client
-            .post(format!("http://{addr}/v1/threads/{thread_id}/patch-undo"))
-            .json(&json!({}))
-            .send()
-            .await?;
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let undone: serde_json::Value = resp.json().await?;
-        // The fresh workspace has no tool/pre-turn snapshots to roll back to,
-        // so the file-restore step reports failure while the conversation
-        // undo still forks the thread.
-        assert_eq!(undone["patch_result"]["files_restored"], false);
-        assert!(undone["patch_result"]["summary"].is_string());
-        assert_eq!(undone["original_user_text"], "Roll back the patch");
-        assert_ne!(undone["thread"]["id"].as_str(), Some(thread_id.as_str()));
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn retry_endpoint_reuses_dropped_user_text_to_start_a_turn() -> Result<()> {
-        let root = std::env::temp_dir().join(format!("deepseek-retry-endpoint-{}", Uuid::new_v4()));
-        let sessions_dir = root.join("sessions");
-        let Some((addr, runtime_threads, handle)) =
-            spawn_test_server_with_root(root.clone(), sessions_dir).await?
-        else {
-            return Ok(());
-        };
-        let thread_id =
-            create_seeded_thread(&addr, &runtime_threads, &root, "Retry this request").await?;
-        let client = crate::tls::reqwest_client();
-
-        let resp = client
-            .post(format!("http://{addr}/v1/threads/{thread_id}/retry"))
-            .json(&json!({}))
-            .send()
-            .await?;
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let retried: serde_json::Value = resp.json().await?;
-        let forked_id = retried["thread"]["id"]
-            .as_str()
-            .context("missing forked thread id")?;
-        assert_ne!(forked_id, thread_id);
-        assert_eq!(retried["turn"]["thread_id"], forked_id);
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[test]
-    fn restore_snapshot_endpoint_helper_restores_workspace_files() -> Result<()> {
-        let _lock = lock_test_env();
-        let root = tempfile::tempdir()?;
-        let home = root.path().join("home");
-        fs::create_dir_all(&home)?;
-        let _home = EnvVarGuard::set("HOME", &home);
-
-        let workspace = root.path().join("workspace");
-        fs::create_dir_all(&workspace)?;
-        let repo = crate::snapshot::SnapshotRepo::open_or_init(&workspace)?;
-        fs::write(workspace.join("a.txt"), "v1")?;
-        let snapshot_id = repo.snapshot("pre-turn:1")?;
-        fs::write(workspace.join("a.txt"), "v2")?;
-
-        restore_snapshot_for_workspace(&workspace, snapshot_id.as_str())
-            .expect("snapshot restore should succeed");
-        assert_eq!(fs::read_to_string(workspace.join("a.txt"))?, "v1");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn session_create_from_thread_rejects_active_turn() -> Result<()> {
-        let Some((addr, runtime_threads, handle)) = spawn_test_server().await? else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-
-        let created: serde_json::Value = client
-            .post(format!("http://{addr}/v1/threads"))
-            .json(&json!({}))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let thread_id = created["id"]
-            .as_str()
-            .context("missing thread id")?
-            .to_string();
-
-        let harness = crate::core::engine::mock_engine_handle();
-        runtime_threads
-            .install_test_engine(&thread_id, harness.handle.clone())
-            .await?;
-        let mut rx_op = harness.rx_op;
-        let tx_event = harness.tx_event;
-        let (active_tx, active_rx) = oneshot::channel();
-        let (finish_tx, finish_rx) = oneshot::channel();
-        tokio::spawn(async move {
-            if !matches!(rx_op.recv().await, Some(Op::SendMessage { .. })) {
-                return;
-            }
-            let _ = tx_event
-                .send(EngineEvent::TurnStarted {
-                    turn_id: "mock_active_session_save".to_string(),
-                })
-                .await;
-            let _ = tx_event
-                .send(EngineEvent::MessageStarted { index: 0 })
-                .await;
-            let _ = active_tx.send(());
-            let _ = finish_rx.await;
-            let _ = tx_event
-                .send(EngineEvent::MessageDelta {
-                    index: 0,
-                    content: "now complete".to_string(),
-                })
-                .await;
-            let _ = tx_event
-                .send(EngineEvent::MessageComplete { index: 0 })
-                .await;
-            let _ = tx_event
-                .send(EngineEvent::TurnComplete {
-                    usage: Usage {
-                        input_tokens: 2,
-                        output_tokens: 1,
-                        ..Usage::default()
-                    },
-                    status: TurnOutcomeStatus::Completed,
-                    error: None,
-                    tool_catalog: None,
-                    base_url: None,
-                })
-                .await;
-        });
-
-        let started: serde_json::Value = client
-            .post(format!("http://{addr}/v1/threads/{thread_id}/turns"))
-            .json(&json!({ "prompt": "save me while active" }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let turn_id = started["turn"]["id"]
-            .as_str()
-            .context("missing turn id")?
-            .to_string();
-        tokio::time::timeout(Duration::from_secs(2), active_rx)
-            .await
-            .context("timed out waiting for mock active turn")?
-            .context("mock active turn sender dropped")?;
-        wait_for_in_progress_item(&client, addr, &thread_id, Duration::from_secs(2)).await?;
-
-        let resp = client
-            .post(format!("http://{addr}/v1/sessions"))
-            .json(&json!({ "thread_id": thread_id }))
-            .send()
-            .await?;
-        assert_eq!(resp.status(), StatusCode::CONFLICT);
-        let body: serde_json::Value = resp.json().await?;
-        assert!(
-            body["error"]["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("queued or active turn"))
-        );
-
-        let _ = finish_tx.send(());
-        let terminal = wait_for_terminal_turn_status(
-            &client,
-            addr,
-            &thread_id,
-            &turn_id,
-            Duration::from_secs(2),
-        )
-        .await?;
-        assert_eq!(terminal, "completed");
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[test]
-    fn snapshots_endpoint_lists_workspace_snapshots() -> Result<()> {
-        let _lock = lock_test_env();
-        let root = tempfile::tempdir()?;
-        let home = root.path().join("home");
-        fs::create_dir_all(&home)?;
-        let _home = EnvVarGuard::set("HOME", &home);
-
-        let workspace = root.path().join("workspace");
-        fs::create_dir_all(&workspace)?;
-        let repo = crate::snapshot::SnapshotRepo::open_or_init(&workspace)?;
-        fs::write(workspace.join("a.txt"), "v1")?;
-        repo.snapshot("pre-turn:1")?;
-        fs::write(workspace.join("a.txt"), "v2")?;
-        repo.snapshot("post-turn:1")?;
-
-        let snapshots =
-            snapshot_entries_for_workspace(&workspace, SnapshotsQuery { limit: Some(1) })
-                .expect("snapshot listing should succeed");
-        assert_eq!(snapshots.len(), 1);
-        assert_eq!(snapshots[0].label, "post-turn:1");
-        assert!(snapshots[0].id.len() >= 8);
-        assert!(snapshots[0].timestamp > 0);
-
-        let bad_limit =
-            snapshot_entries_for_workspace(&workspace, SnapshotsQuery { limit: Some(101) })
-                .expect_err("limit above cap should fail");
-        assert_eq!(bad_limit.status, StatusCode::BAD_REQUEST);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn session_delete_returns_404_for_missing_id() -> Result<()> {
-        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-        let resp = client
-            .delete(format!("http://{addr}/v1/sessions/nonexistent-id"))
-            .send()
-            .await?;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-        handle.abort();
-        Ok(())
-    }
-
-    /// #561 / whalescale#255 — extra CORS origins from `RuntimeApiOptions`
-    /// are added on top of the built-in defaults and propagate through to the
-    /// `Access-Control-Allow-Origin` response header for preflight requests.
-    /// Built-in defaults must keep working unchanged.
-    #[tokio::test]
-    async fn cors_layer_appends_extra_origins_and_keeps_defaults() -> Result<()> {
-        // The cors_layer fn is the layer factory — exercise it through a
-        // Router with a single trivial route so we can issue OPTIONS preflights
-        // and observe the response headers.
-        let extra = vec!["http://localhost:5173".to_string()];
-        let layer = cors_layer(&extra);
-        let router: Router = Router::new()
-            .route("/probe", get(|| async { "ok" }))
-            .layer(layer);
-
-        let listener = match TcpListener::bind("127.0.0.1:0").await {
-            Ok(listener) => listener,
-            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return Ok(()),
-            Err(err) => return Err(err.into()),
-        };
-        let addr = listener.local_addr()?;
-        let handle = tokio::spawn(async move {
-            let _ = axum::serve(listener, router).await;
-        });
-
-        let client = crate::tls::reqwest_client();
-
-        // The user-supplied origin is allowed.
-        let resp = client
-            .request(reqwest::Method::OPTIONS, format!("http://{addr}/probe"))
-            .header("Origin", "http://localhost:5173")
-            .header("Access-Control-Request-Method", "GET")
-            .send()
-            .await?;
-        assert_eq!(
-            resp.headers()
-                .get("access-control-allow-origin")
-                .and_then(|v| v.to_str().ok()),
-            Some("http://localhost:5173")
-        );
-
-        // A built-in default origin still works.
-        let resp = client
-            .request(reqwest::Method::OPTIONS, format!("http://{addr}/probe"))
-            .header("Origin", "http://localhost:1420")
-            .header("Access-Control-Request-Method", "GET")
-            .send()
-            .await?;
-        assert_eq!(
-            resp.headers()
-                .get("access-control-allow-origin")
-                .and_then(|v| v.to_str().ok()),
-            Some("http://localhost:1420")
-        );
-
-        // An origin that's neither configured nor a default is rejected
-        // (CorsLayer omits the Allow-Origin header on mismatch).
-        let resp = client
-            .request(reqwest::Method::OPTIONS, format!("http://{addr}/probe"))
-            .header("Origin", "http://malicious.example")
-            .header("Access-Control-Request-Method", "GET")
-            .send()
-            .await?;
-        assert!(
-            resp.headers().get("access-control-allow-origin").is_none(),
-            "non-allowed origin must not be echoed back"
-        );
-
-        handle.abort();
-        Ok(())
-    }
-
-    /// #561 — invalid origins (non-ASCII, etc.) are skipped without aborting
-    /// the layer build.
-    #[test]
-    fn cors_layer_skips_invalid_origins() {
-        let extras = vec![
-            "http://valid.example".to_string(),
-            // Embedded NUL char makes `HeaderValue::from_str` fail.
-            "http://invalid.example\0".to_string(),
-            "  ".to_string(), // whitespace-only is dropped
-        ];
-        // Should not panic.
-        let _ = cors_layer(&extras);
-    }
-
-    /// #562 / whalescale#256 — `PATCH /v1/threads/{id}` accepts the new
-    /// fields (allow_shell, trust_mode, auto_approve, model, mode, title,
-    /// system_prompt). Each is independently optional; an empty string clears
-    /// `title` / `system_prompt` back to None.
-    #[tokio::test]
-    async fn patch_thread_accepts_extended_field_set() -> Result<()> {
-        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-
-        let created: serde_json::Value = client
-            .post(format!("http://{addr}/v1/threads"))
-            .json(&json!({
-                "model": "deepseek-v4-flash",
-                "mode": "agent"
-            }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let thread_id = created["id"]
-            .as_str()
-            .context("missing thread id")?
-            .to_string();
-
-        // Patch every new field at once.
-        let patched: serde_json::Value = client
-            .patch(format!("http://{addr}/v1/threads/{thread_id}"))
-            .json(&json!({
-                "allow_shell": true,
-                "trust_mode": true,
-                "auto_approve": true,
-                "model": "deepseek-v4-pro",
-                "mode": "yolo",
-                "title": "Whalescale UI test thread",
-                "system_prompt": "You are a useful assistant."
-            }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-
-        assert_eq!(patched["allow_shell"], true);
-        assert_eq!(patched["trust_mode"], true);
-        assert_eq!(patched["auto_approve"], true);
-        assert_eq!(patched["model"], "deepseek-v4-pro");
-        assert_eq!(patched["mode"], "yolo");
-        assert_eq!(patched["title"], "Whalescale UI test thread");
-        assert_eq!(patched["system_prompt"], "You are a useful assistant.");
-
-        // Empty string clears title back to None.
-        let cleared: serde_json::Value = client
-            .patch(format!("http://{addr}/v1/threads/{thread_id}"))
-            .json(&json!({ "title": "" }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert!(
-            cleared["title"].is_null() || !cleared.as_object().unwrap().contains_key("title"),
-            "empty title must serialize as None: {cleared:?}"
-        );
-
-        // Empty patch (no fields) is still rejected.
-        let empty = client
-            .patch(format!("http://{addr}/v1/threads/{thread_id}"))
-            .json(&json!({}))
-            .send()
-            .await?;
-        assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
-
-        // Empty model is rejected (validation).
-        let bad_model = client
-            .patch(format!("http://{addr}/v1/threads/{thread_id}"))
-            .json(&json!({ "model": "  " }))
-            .send()
-            .await?;
-        assert_eq!(bad_model.status(), StatusCode::BAD_REQUEST);
-
-        handle.abort();
-        Ok(())
-    }
-
-    /// #563 / whalescale#260 — `archived_only=true` returns archived-only
-    /// (no active threads), distinct from `include_archived=true` which
-    /// returns both.
-    #[tokio::test]
-    async fn list_threads_archived_only_filter_matches_only_archived() -> Result<()> {
-        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-
-        // Two threads — keep one active, archive the other.
-        let active: serde_json::Value = client
-            .post(format!("http://{addr}/v1/threads"))
-            .json(&json!({}))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let active_id = active["id"].as_str().unwrap().to_string();
-
-        let archived: serde_json::Value = client
-            .post(format!("http://{addr}/v1/threads"))
-            .json(&json!({}))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let archived_id = archived["id"].as_str().unwrap().to_string();
-
-        client
-            .patch(format!("http://{addr}/v1/threads/{archived_id}"))
-            .json(&json!({ "archived": true }))
-            .send()
-            .await?
-            .error_for_status()?;
-
-        // Default (active only) → only the unarchived one.
-        let active_list: serde_json::Value = client
-            .get(format!("http://{addr}/v1/threads"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let ids: Vec<&str> = active_list
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|t| t["id"].as_str())
-            .collect();
-        assert!(ids.contains(&active_id.as_str()));
-        assert!(!ids.contains(&archived_id.as_str()));
-
-        // archived_only=true → only the archived one.
-        let archived_list: serde_json::Value = client
-            .get(format!("http://{addr}/v1/threads?archived_only=true"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let ids: Vec<&str> = archived_list
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|t| t["id"].as_str())
-            .collect();
-        assert_eq!(ids, vec![archived_id.as_str()]);
-
-        // archived_only=true takes precedence over include_archived=true.
-        let archived_list: serde_json::Value = client
-            .get(format!(
-                "http://{addr}/v1/threads?include_archived=true&archived_only=true"
-            ))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let ids: Vec<&str> = archived_list
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|t| t["id"].as_str())
-            .collect();
-        assert_eq!(ids, vec![archived_id.as_str()]);
-
-        // Same filter works on the summary endpoint.
-        let summary: serde_json::Value = client
-            .get(format!(
-                "http://{addr}/v1/threads/summary?archived_only=true&limit=10"
-            ))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let summary_ids: Vec<&str> = summary
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|t| t["id"].as_str())
-            .collect();
-        assert_eq!(summary_ids, vec![archived_id.as_str()]);
-
-        handle.abort();
-        Ok(())
-    }
-
-    /// #564 / whalescale#261 — `GET /v1/usage` aggregates per-turn token +
-    /// cost data. With no threads the response is well-formed and totals are
-    /// zero with empty buckets (never a 404).
-    #[tokio::test]
-    async fn usage_endpoint_returns_empty_aggregation_for_fresh_store() -> Result<()> {
-        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-
-        let body: serde_json::Value = client
-            .get(format!("http://{addr}/v1/usage"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(body["group_by"], "day");
-        assert_eq!(body["totals"]["input_tokens"], 0);
-        assert_eq!(body["totals"]["output_tokens"], 0);
-        assert_eq!(body["totals"]["turns"], 0);
-        assert!(
-            body["buckets"].as_array().unwrap().is_empty(),
-            "buckets must be empty when no turns exist: {body}"
-        );
-
-        // group_by query options are validated.
-        let bad_group = client
-            .get(format!("http://{addr}/v1/usage?group_by=galaxy"))
-            .send()
-            .await?;
-        assert_eq!(bad_group.status(), StatusCode::BAD_REQUEST);
-
-        // Each accepted group_by value succeeds.
-        for gb in ["day", "model", "provider", "thread"] {
-            let resp = client
-                .get(format!("http://{addr}/v1/usage?group_by={gb}"))
-                .send()
-                .await?;
-            assert!(resp.status().is_success(), "group_by={gb} failed: {resp:?}");
-        }
-
-        // Bad ISO-8601 timestamp rejected.
-        let bad_since = client
-            .get(format!("http://{addr}/v1/usage?since=not-a-date"))
-            .send()
-            .await?;
-        assert_eq!(bad_since.status(), StatusCode::BAD_REQUEST);
-
-        // since > until rejected.
-        let inverted = client
-            .get(format!(
-                "http://{addr}/v1/usage?since=2030-01-02T00:00:00Z&until=2030-01-01T00:00:00Z"
-            ))
-            .send()
-            .await?;
-        assert_eq!(inverted.status(), StatusCode::BAD_REQUEST);
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn runtime_info_reports_bind_state() -> Result<()> {
-        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-        let info: serde_json::Value = client
-            .get(format!("http://{addr}/v1/runtime/info"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(info["service"], "codewhale-runtime-api");
-        assert_eq!(info["runtime_api_version"], "1.0");
-        assert_eq!(info["codewhale_version"], info["version"]);
-        assert_eq!(info["bind_host"], "127.0.0.1");
-        assert_eq!(info["auth_required"], false);
-        assert!(info["version"].is_string());
-        assert_eq!(info["transports"], json!(["http", "sse"]));
-        assert_eq!(info["capabilities"]["threads"], true);
-        assert_eq!(info["capabilities"]["external_tools"], false);
-        assert!(info["experimental"].is_object());
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn create_thread_accepts_dynamic_tools_and_environments() -> Result<()> {
-        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-
-        let created: serde_json::Value = client
-            .post(format!("http://{addr}/v1/threads"))
-            .json(&json!({
-                "model": "test-model",
-                "dynamic_tools": [
-                    {
-                        "namespace": "tau_bench",
-                        "name": "get_reservation",
-                        "description": "Look up a reservation.",
-                        "input_schema": { "type": "object" }
-                    }
-                ],
-                "environments": [
-                    { "environment_id": "local", "cwd": "/workspace" }
-                ]
-            }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert!(created["id"].is_string());
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn start_turn_accepts_dynamic_tools_and_environment_id() -> Result<()> {
-        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-
-        let created: serde_json::Value = client
-            .post(format!("http://{addr}/v1/threads"))
-            .json(&json!({ "model": "test-model" }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let thread_id = created["id"].as_str().context("missing thread id")?;
-
-        let started: serde_json::Value = client
-            .post(format!("http://{addr}/v1/threads/{thread_id}/turns"))
-            .json(&json!({
-                "prompt": "hello",
-                "dynamic_tools": [
-                    {
-                        "name": "simple_tool",
-                        "description": "A simple tool.",
-                        "input_schema": { "type": "object" }
-                    }
-                ],
-                "environment_id": "local"
-            }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        assert_eq!(started["turn"]["thread_id"], thread_id);
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn mobile_page_is_available_only_when_enabled() -> Result<()> {
-        let tmp = tempfile::tempdir()?;
-        let root = tmp.path().to_path_buf();
-        let sessions_dir = root.join("sessions");
-        let Some((addr, _runtime_threads, handle)) = spawn_test_server_with_root_token_and_mobile(
-            root.clone(),
-            sessions_dir.clone(),
-            None,
-            false,
-        )
-        .await?
-        else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-        let disabled = client.get(format!("http://{addr}/mobile")).send().await?;
-        assert_eq!(disabled.status(), StatusCode::NOT_FOUND);
-        handle.abort();
-
-        let Some((addr, _runtime_threads, handle)) =
-            spawn_test_server_with_root_token_and_mobile(root, sessions_dir, None, true).await?
-        else {
-            return Ok(());
-        };
-        let enabled = client
-            .get(format!("http://{addr}/mobile"))
-            .send()
-            .await?
-            .error_for_status()?;
-        let html = enabled.text().await?;
-        assert!(html.contains("CodeWhale Mobile"));
-        assert!(html.contains("/v1/approvals/"));
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn mobile_page_requires_runtime_token_when_auth_enabled() -> Result<()> {
-        let tmp = tempfile::tempdir()?;
-        let root = tmp.path().to_path_buf();
-        let sessions_dir = root.join("sessions");
-        let token = "abc ABC+/?:=&%".to_string();
-        let Some((addr, _runtime_threads, handle)) = spawn_test_server_with_root_token_and_mobile(
-            root,
-            sessions_dir,
-            Some(token.clone()),
-            true,
-        )
-        .await?
-        else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-
-        let unauthorized = client.get(format!("http://{addr}/mobile")).send().await?;
-        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
-
-        let encoded = url_query_component(&token);
-        let query = client
-            .get(format!("http://{addr}/mobile?token={encoded}"))
-            .send()
-            .await?
-            .error_for_status()?;
-        assert!(query.text().await?.contains("CodeWhale Mobile"));
-
-        let bearer = client
-            .get(format!("http://{addr}/mobile"))
-            .bearer_auth(&token)
-            .send()
-            .await?
-            .error_for_status()?;
-        assert!(bearer.text().await?.contains("CodeWhale Mobile"));
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn mobile_insecure_mode_allows_page_and_v1_routes_without_token() -> Result<()> {
-        let tmp = tempfile::tempdir()?;
-        let root = tmp.path().to_path_buf();
-        let sessions_dir = root.join("sessions");
-        let Some((addr, _runtime_threads, handle)) =
-            spawn_test_server_with_root_token_and_mobile(root, sessions_dir, None, true).await?
-        else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-
-        let page = client
-            .get(format!("http://{addr}/mobile"))
-            .send()
-            .await?
-            .error_for_status()?;
-        assert!(page.text().await?.contains("CodeWhale Mobile"));
-
-        let summary = client
-            .get(format!("http://{addr}/v1/threads/summary"))
-            .send()
-            .await?
-            .error_for_status()?;
-        assert_eq!(summary.status(), StatusCode::OK);
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn decide_approval_404s_when_nothing_pending() -> Result<()> {
-        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-        let resp = client
-            .post(format!("http://{addr}/v1/approvals/no_such_id"))
-            .json(&json!({ "decision": "allow" }))
-            .send()
-            .await?;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn decide_approval_400s_on_bad_decision() -> Result<()> {
-        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-        let resp = client
-            .post(format!("http://{addr}/v1/approvals/whatever"))
-            .json(&json!({ "decision": "yolo" }))
-            .send()
-            .await?;
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn decide_approval_delivers_to_runtime() -> Result<()> {
-        let Some((addr, runtime_threads, handle)) = spawn_test_server().await? else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-        let rx = runtime_threads.register_pending_approval_for_test("ext_id");
-
-        let resp = client
-            .post(format!("http://{addr}/v1/approvals/ext_id"))
-            .json(&json!({ "decision": "allow", "remember": false }))
-            .send()
-            .await?;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body: serde_json::Value = resp.json().await?;
-        assert_eq!(body["ok"], true);
-        assert_eq!(body["decision"], "allow");
-        assert_eq!(body["delivered"], true);
-
-        let received = tokio::time::timeout(Duration::from_secs(1), rx).await??;
-        assert_eq!(
-            received,
-            ExternalApprovalDecision::Allow { remember: false }
-        );
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn skills_endpoint_includes_enabled_field() -> Result<()> {
-        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-        let body: serde_json::Value = client
-            .get(format!("http://{addr}/v1/skills"))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        if let Some(skills) = body["skills"].as_array() {
-            for skill in skills {
-                assert!(skill.get("enabled").is_some());
-            }
-        }
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn skill_toggle_endpoint_404s_for_unknown_skill() -> Result<()> {
-        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
-            return Ok(());
-        };
-        let client = crate::tls::reqwest_client();
-        let resp = client
-            .post(format!("http://{addr}/v1/skills/no-such-skill"))
-            .json(&json!({ "enabled": false }))
-            .send()
-            .await?;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[test]
-    fn resolve_skills_dir_finds_workspace_local_agents_skills() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let workspace = tmp.path();
-        let local_skills = workspace.join(".agents").join("skills");
-        fs::create_dir_all(&local_skills).expect("create skills dir");
-
-        let config = Config::default();
-        let resolved = resolve_skills_dir(&config, workspace);
-
-        let expected = fs::canonicalize(&local_skills).expect("canonical local skills");
-        assert_eq!(resolved, expected);
-    }
-
-    #[test]
-    fn resolve_skills_dir_finds_workspace_local_skills_fallback() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let workspace = tmp.path();
-        let local_skills = workspace.join("skills");
-        fs::create_dir_all(&local_skills).expect("create skills dir");
-
-        let config = Config::default();
-        let resolved = resolve_skills_dir(&config, workspace);
-
-        let expected = fs::canonicalize(&local_skills).expect("canonical local skills");
-        assert_eq!(resolved, expected);
-    }
-
-    #[test]
-    fn skills_search_directories_includes_custom_skills_dir() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let workspace = tmp.path().join("workspace");
-        let custom_skills = tmp.path().join("custom-skills");
-        fs::create_dir_all(&workspace).expect("create workspace");
-        fs::create_dir_all(&custom_skills).expect("create custom skills");
-
-        let directories = skills_search_directories(&workspace, &custom_skills);
-
-        assert!(
-            directories.iter().any(|dir| dir == &custom_skills),
-            "custom skills_dir must be reported when discovery searches it"
-        );
-        let message = format_skill_search_paths(&directories);
-        assert!(message.contains("custom-skills"));
-    }
-
-    #[test]
-    fn skill_entry_is_bundled_requires_configured_bundle_path() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let bundled_skills_dir = tmp.path().join("bundled-skills");
-        let bundled_skill_path = bundled_skills_dir.join("delegate").join("SKILL.md");
-        let override_skill_path = tmp
-            .path()
-            .join("workspace")
-            .join(".agents")
-            .join("skills")
-            .join("delegate")
-            .join("SKILL.md");
-        fs::create_dir_all(bundled_skill_path.parent().expect("bundled parent"))
-            .expect("create bundled skill dir");
-        fs::create_dir_all(override_skill_path.parent().expect("override parent"))
-            .expect("create override skill dir");
-        fs::write(
-            &bundled_skill_path,
-            "---\nname: delegate\ndescription: bundled\n---\n",
-        )
-        .expect("write bundled skill");
-        fs::write(
-            &override_skill_path,
-            "---\nname: delegate\ndescription: override\n---\n",
-        )
-        .expect("write override skill");
-
-        let bundled_skill = crate::skills::Skill {
-            name: "delegate".to_string(),
-            description: String::new(),
-            body: String::new(),
-            path: bundled_skill_path,
-        };
-        let override_skill = crate::skills::Skill {
-            name: "delegate".to_string(),
-            description: String::new(),
-            body: String::new(),
-            path: override_skill_path,
-        };
-
-        assert!(skill_entry_is_bundled(&bundled_skill, &bundled_skills_dir));
-        assert!(!skill_entry_is_bundled(
-            &override_skill,
-            &bundled_skills_dir
-        ));
-    }
-
-    /// A `skills` symlink that points outside the workspace must NOT be
-    /// returned as the resolved skills directory. Containment check ensures
-    /// the canonicalized candidate stays under the canonicalized workspace
-    /// root, so a malicious or misconfigured symlink can't promote
-    /// `/etc` (or any other path) into the skills loader.
-    #[cfg(unix)]
-    #[test]
-    fn resolve_skills_dir_rejects_symlink_escaping_workspace() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let workspace_root = tmp.path().join("workspace");
-        let escape_target = tmp.path().join("escape_target");
-        fs::create_dir_all(&workspace_root).expect("create workspace");
-        fs::create_dir_all(&escape_target).expect("create escape target");
-
-        let dotagents = workspace_root.join(".agents");
-        fs::create_dir_all(&dotagents).expect("create .agents");
-        let bad_link = dotagents.join("skills");
-        std::os::unix::fs::symlink(&escape_target, &bad_link).expect("symlink");
-
-        let config = Config::default();
-        let resolved = resolve_skills_dir(&config, &workspace_root);
-
-        let canon_escape = fs::canonicalize(&escape_target).expect("canon escape");
-        assert_ne!(
-            resolved, canon_escape,
-            "symlink escaping workspace must not be resolved as skills dir"
-        );
-        assert_eq!(
-            resolved,
-            config.skills_dir(),
-            "with no valid in-workspace skills dir, resolution should fall back to config"
-        );
-    }
-}
+mod tests;

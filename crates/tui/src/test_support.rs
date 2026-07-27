@@ -1,22 +1,270 @@
 //! Shared test-only helpers.
 
 use std::ffi::{OsStr, OsString};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock, TryLockError};
+use std::thread::ThreadId;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Process-wide state root for unit tests that do not intentionally provide an
+/// explicit config/settings path.
+///
+/// The production fallback is the user's real home. That is useful at runtime
+/// and unsafe in a parallel test binary: an unguarded save can otherwise read
+/// or overwrite the developer's config. Tests that exercise path precedence
+/// still hold [`lock_test_env`] and provide explicit temporary environment
+/// values; every other test is confined here.
+pub(crate) fn isolated_test_state_root() -> &'static Path {
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+    ROOT.get_or_init(|| {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "codewhale-tui-test-state-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap_or_else(|error| {
+            panic!(
+                "failed to create isolated unit-test state root {}: {error}",
+                root.display()
+            )
+        });
+        root
+    })
+}
+
+/// Build a syntactically valid, non-secret JWT fixture without embedding a
+/// high-entropy token-shaped literal in Git history.
+pub(crate) fn future_test_jwt(label: &str) -> String {
+    use base64::Engine as _;
+
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"exp":9999999999}"#);
+    format!("test.{payload}.{label}")
+}
 
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn state_io_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Who currently counts as "inside" the process-wide env lock.
+///
+/// The owner is the thread holding [`TestEnvLock`]. `adopted` holds helper
+/// threads that owner explicitly enrolled with [`join_env_scope`] — see that
+/// function for why a *worker thread of the current test* must not be treated
+/// as a foreign reader.
+#[derive(Default)]
+struct EnvScope {
+    /// Bumped on every acquisition, so a ticket minted by an earlier test can
+    /// never enroll a thread into a later test's environment.
+    generation: u64,
+    owner: Option<ThreadId>,
+    adopted: Vec<ThreadId>,
+}
+
+fn env_scope() -> &'static Mutex<EnvScope> {
+    static SCOPE: OnceLock<Mutex<EnvScope>> = OnceLock::new();
+    SCOPE.get_or_init(|| Mutex::new(EnvScope::default()))
+}
+
+fn lock_env_scope() -> MutexGuard<'static, EnvScope> {
+    match env_scope().lock() {
+        Ok(scope) => scope,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn open_env_scope() {
+    let mut scope = lock_env_scope();
+    scope.generation = scope.generation.wrapping_add(1);
+    scope.owner = Some(std::thread::current().id());
+    scope.adopted.clear();
+}
+
+fn current_thread_owns_contended_env_lock() -> bool {
+    let scope = lock_env_scope();
+    let current = std::thread::current().id();
+    scope.owner == Some(current) || scope.adopted.contains(&current)
+}
+
+/// Proof that the calling thread owns a live [`lock_test_env`] scope, handed to
+/// a worker thread so it can join that scope with [`join_env_scope`].
+///
+/// Returns `None` when the caller is not the owner, so a ticket can never be
+/// minted on behalf of a test that did not seal the environment.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EnvScopeTicket {
+    generation: u64,
+}
+
+impl EnvScopeTicket {
+    /// Which sealed environment this ticket authorizes. Callers that gate real
+    /// disk writes on a live scope key their bookkeeping by this value, so a
+    /// straggler from generation N can never be mistaken for work belonging to
+    /// generation N+1.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+/// The generation of the env scope the *calling thread* is currently inside, as
+/// owner or as an [`join_env_scope`]-adopted worker; `None` when the thread is a
+/// foreign reader with no sealed environment of its own.
+///
+/// This is the authorization primitive for anything that must only touch disk on
+/// behalf of a test that actually sealed `HOME`. A process-global "writes are
+/// enabled" flag cannot answer that question: it is true for the whole time
+/// *some* test has sealed the environment, including for unrelated tests running
+/// in parallel that would then resolve — and write — that test's paths, or block
+/// on its env lock.
+pub(crate) fn current_env_scope_generation() -> Option<u64> {
+    let scope = lock_env_scope();
+    let current = std::thread::current().id();
+    if scope.owner == Some(current) || scope.adopted.contains(&current) {
+        Some(scope.generation)
+    } else {
+        None
+    }
+}
+
+pub(crate) fn env_scope_ticket() -> Option<EnvScopeTicket> {
+    let scope = lock_env_scope();
+    (scope.owner == Some(std::thread::current().id())).then_some(EnvScopeTicket {
+        generation: scope.generation,
+    })
+}
+
+/// Enroll the calling thread in the ticket's env scope for as long as the
+/// returned guard lives.
+///
+/// [`with_test_env_lock`] exists to stop a *foreign* test from resolving
+/// another test's temporary `HOME`. A helper thread doing work on behalf of the
+/// sealing test is not foreign: it must see that same temporary environment,
+/// and — decisively — it must not block on a mutex its own test holds for the
+/// whole test body. Blocking there is a lock-order inversion: the helper parks
+/// holding whatever lock it took first, and the test thread then parks waiting
+/// for that lock. Enrolling makes the barrier re-entrant for the helper, which
+/// is what makes the inversion impossible rather than merely unlikely.
+///
+/// Returns `None` (declining to enroll) when the scope has already closed or
+/// moved on, so a straggler thread from a finished test still gets the
+/// foreign-reader treatment.
+pub(crate) fn join_env_scope(ticket: Option<EnvScopeTicket>) -> Option<EnvScopeMembership> {
+    let ticket = ticket?;
+    let mut scope = lock_env_scope();
+    if scope.owner.is_none() || scope.generation != ticket.generation {
+        return None;
+    }
+    let thread = std::thread::current().id();
+    if !scope.adopted.contains(&thread) {
+        scope.adopted.push(thread);
+    }
+    Some(EnvScopeMembership {
+        generation: ticket.generation,
+        thread,
+    })
+}
+
+pub(crate) struct EnvScopeMembership {
+    generation: u64,
+    thread: ThreadId,
+}
+
+impl Drop for EnvScopeMembership {
+    fn drop(&mut self) {
+        let mut scope = lock_env_scope();
+        if scope.generation == self.generation {
+            scope.adopted.retain(|thread| *thread != self.thread);
+        }
+    }
+}
+
+/// Owned process-wide test-environment lock.
+///
+/// Clearing the owner before the underlying mutex unlocks keeps re-entrant
+/// reader detection exact; a stale thread id could otherwise let the previous
+/// owner bypass a newly acquired lock during its tiny owner-registration
+/// window. Closing the scope also evicts every adopted worker thread, so an
+/// enrollment cannot outlive the test that granted it.
+pub(crate) struct TestEnvLock {
+    _guard: MutexGuard<'static, ()>,
+}
+
+impl Drop for TestEnvLock {
+    fn drop(&mut self) {
+        let mut scope = lock_env_scope();
+        if scope.owner == Some(std::thread::current().id()) {
+            scope.owner = None;
+            scope.adopted.clear();
+        }
+    }
+}
+
 /// Acquire the process-wide env-var mutex.
 ///
 /// If a prior test panicked while holding the lock, recover the guard instead
 /// of cascading failures across unrelated tests.
-pub(crate) fn lock_test_env() -> MutexGuard<'static, ()> {
-    match env_lock().lock() {
+pub(crate) fn lock_test_env() -> TestEnvLock {
+    let guard = match env_lock().lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
+    };
+    open_env_scope();
+    TestEnvLock { _guard: guard }
+}
+
+/// Read process-global test environment while respecting [`lock_test_env`].
+///
+/// Config-path writers hold the mutex for their whole test. Production path
+/// resolution normally only reads the environment, but those reads still have
+/// to wait or they can resolve another test's temporary config and later write
+/// into it. The owner check makes the barrier re-entrant for a test that reads
+/// its own guarded override.
+pub(crate) fn with_test_env_lock<T>(read: impl FnOnce() -> T) -> T {
+    if current_thread_owns_contended_env_lock() {
+        return read();
     }
+
+    // Acquire through the owner-tracking guard so nested environment readers
+    // remain re-entrant. This matters for config loading: the outer override
+    // pass holds the barrier while helper functions read individual variables.
+    let _guard = lock_test_env();
+    read()
+}
+
+pub(crate) fn current_thread_holds_test_env_lock() -> bool {
+    match env_lock().try_lock() {
+        Ok(guard) => {
+            drop(guard);
+            false
+        }
+        Err(TryLockError::Poisoned(poisoned)) => {
+            drop(poisoned.into_inner());
+            false
+        }
+        Err(TryLockError::WouldBlock) => current_thread_owns_contended_env_lock(),
+    }
+}
+
+/// Serialize read/merge/write operations against the process-wide isolated
+/// test state root.
+///
+/// Path isolation protects the developer's files, but parallel tests still
+/// share the same temporary files. Settings persistence is a multi-step
+/// operation, so it needs this second barrier around the complete I/O
+/// transaction rather than only around path resolution.
+pub(crate) fn with_test_state_io_lock<T>(operation: impl FnOnce() -> T) -> T {
+    let _guard = match state_io_lock().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    operation()
 }
 
 /// Restore one environment variable when dropped.
@@ -30,6 +278,10 @@ pub(crate) struct EnvVarGuard {
 
 impl EnvVarGuard {
     pub(crate) fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
+        debug_assert!(
+            current_thread_holds_test_env_lock(),
+            "EnvVarGuard::set({key}) requires lock_test_env()"
+        );
         let previous = std::env::var_os(key);
         // SAFETY: callers hold the process-wide test env mutex.
         unsafe { std::env::set_var(key, value) };
@@ -37,6 +289,10 @@ impl EnvVarGuard {
     }
 
     pub(crate) fn remove(key: &'static str) -> Self {
+        debug_assert!(
+            current_thread_holds_test_env_lock(),
+            "EnvVarGuard::remove({key}) requires lock_test_env()"
+        );
         let previous = std::env::var_os(key);
         // SAFETY: callers hold the process-wide test env mutex.
         unsafe { std::env::remove_var(key) };
@@ -102,4 +358,265 @@ pub(crate) fn assert_byte_identical(label: &str, a: &str, b: &str) {
              ── side A (±32B) ──\n{a_ctx:?}\n── side B (±32B) ──\n{b_ctx:?}",
         );
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn unguarded_state_writes_use_isolated_test_root() {
+        const PROBE_ENV: &str = "CODEWHALE_TEST_STATE_ISOLATION_PROBE";
+        const RECEIPT_ENV: &str = "CODEWHALE_TEST_STATE_ISOLATION_RECEIPT";
+
+        if std::env::var_os(PROBE_ENV).is_some() {
+            let config_path =
+                crate::config_persistence::persist_root_bool_key(None, "allow_shell", true)
+                    .expect("write isolated config");
+            let direct_config_path =
+                crate::config::save_workspace_trust(Path::new("/tmp/codewhale-test-workspace"))
+                    .expect("write through direct default config path");
+            crate::settings::Settings::default()
+                .save()
+                .expect("write isolated settings");
+            let settings_path =
+                crate::settings::Settings::path().expect("resolve isolated settings");
+            let root = isolated_test_state_root();
+            assert!(config_path.starts_with(root), "{}", config_path.display());
+            assert!(
+                settings_path.starts_with(root),
+                "{}",
+                settings_path.display()
+            );
+            assert!(
+                direct_config_path.starts_with(root),
+                "{}",
+                direct_config_path.display()
+            );
+            let receipt = std::env::var_os(RECEIPT_ENV).expect("receipt path");
+            std::fs::write(
+                receipt,
+                format!(
+                    "{}\n{}\n{}\n{}\n",
+                    root.display(),
+                    config_path.display(),
+                    settings_path.display(),
+                    direct_config_path.display()
+                ),
+            )
+            .expect("write isolation receipt");
+            return;
+        }
+
+        let sentinel = tempfile::tempdir().expect("sentinel home");
+        let user_state = sentinel.path().join(".codewhale");
+        std::fs::create_dir_all(&user_state).expect("create sentinel state");
+        let config_path = user_state.join("config.toml");
+        let settings_path = user_state.join("settings.toml");
+        let config_sentinel = b"# developer config sentinel\n";
+        let settings_sentinel = b"# developer settings sentinel\n";
+        std::fs::write(&config_path, config_sentinel).expect("seed config");
+        std::fs::write(&settings_path, settings_sentinel).expect("seed settings");
+        let receipt_path = sentinel.path().join("receipt.txt");
+
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .arg("--exact")
+            .arg("test_support::tests::unguarded_state_writes_use_isolated_test_root")
+            .arg("--test-threads=1")
+            .env(PROBE_ENV, "1")
+            .env(RECEIPT_ENV, &receipt_path)
+            .env("HOME", sentinel.path())
+            .env("USERPROFILE", sentinel.path())
+            .env_remove("CODEWHALE_HOME")
+            .env_remove("CODEWHALE_CONFIG_PATH")
+            .env_remove("DEEPSEEK_CONFIG_PATH")
+            .output()
+            .expect("run isolated-state probe");
+        assert!(
+            output.status.success(),
+            "probe failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        assert_eq!(
+            std::fs::read(&config_path).expect("read config sentinel"),
+            config_sentinel
+        );
+        assert_eq!(
+            std::fs::read(&settings_path).expect("read settings sentinel"),
+            settings_sentinel
+        );
+
+        let receipt = std::fs::read_to_string(&receipt_path).expect("read isolation receipt");
+        let mut paths = receipt.lines().map(PathBuf::from);
+        let isolated_root = paths.next().expect("root receipt");
+        let written_config = paths.next().expect("config receipt");
+        let written_settings = paths.next().expect("settings receipt");
+        let direct_config = paths.next().expect("direct config receipt");
+        assert!(!isolated_root.starts_with(sentinel.path()));
+        assert!(written_config.starts_with(&isolated_root));
+        assert!(written_settings.starts_with(&isolated_root));
+        assert!(direct_config.starts_with(&isolated_root));
+        assert!(written_config.exists());
+        assert!(written_settings.exists());
+    }
+
+    #[test]
+    fn config_path_read_waits_for_foreign_env_redirect_to_restore() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
+        let redirected = std::env::temp_dir().join(format!(
+            "codewhale-config-path-read-barrier-{}",
+            std::process::id()
+        ));
+
+        let reader = {
+            let lock = lock_test_env();
+            let redirect = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &redirected);
+            let reader = std::thread::spawn(move || {
+                started_tx.send(()).expect("signal config path read start");
+                tx.send(crate::config_persistence::config_toml_path(None))
+                    .expect("send resolved config path");
+            });
+
+            started_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("reader reached config path resolution");
+            assert!(
+                rx.recv_timeout(Duration::from_millis(50)).is_err(),
+                "a foreign reader observed the temporary config redirect"
+            );
+            drop(redirect);
+            drop(lock);
+            reader
+        };
+
+        let resolved = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("reader resumed after the redirect was restored")
+            .expect("resolve config path");
+        reader.join().expect("reader thread");
+        assert_ne!(resolved, redirected);
+    }
+
+    #[test]
+    fn settings_save_waits_for_foreign_state_io_transaction() {
+        let (holder_ready_tx, holder_ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            with_test_state_io_lock(|| {
+                holder_ready_tx.send(()).expect("signal state lock held");
+                release_rx.recv().expect("release state lock");
+            });
+        });
+        holder_ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("holder acquired state I/O lock");
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (saved_tx, saved_rx) = mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            started_tx.send(()).expect("signal settings save start");
+            saved_tx
+                .send(crate::settings::Settings::default().save())
+                .expect("send settings save result");
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("writer reached settings save");
+        assert!(
+            saved_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+            "settings save did not wait for an in-flight state transaction"
+        );
+
+        release_tx.send(()).expect("release holder");
+        holder.join().expect("holder thread");
+        saved_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("settings save resumed")
+            .expect("settings save succeeded");
+        writer.join().expect("writer thread");
+    }
+}
+
+// ── Shared App/TuiOptions fixtures (#3923) ──────────────────────────────
+//
+// Before this module owned them, `create_test_app` was copy-pasted across 28
+// test modules, each spelling out the full `TuiOptions` literal — 87 literals
+// in all. The copies had drifted: different modules pinned different locales,
+// currencies, and onboarding flags without anyone having chosen that, which is
+// the non-hermeticity behind the intermittent `config_command_allow_shell_*`
+// failures. Adding a `TuiOptions` field meant editing up to 87 sites.
+//
+// Express intentional differences by mutating the returned value at the call
+// site, so the difference is visible as a deliberate line of test code rather
+// than hidden inside another near-identical literal.
+
+use std::path::{Path, PathBuf};
+
+/// Default `TuiOptions` for tests, pinned to the deepseek-v4-pro fixture route.
+pub(crate) fn test_tui_options(workspace: impl AsRef<Path>) -> crate::tui::app::TuiOptions {
+    let workspace = workspace.as_ref().to_path_buf();
+    crate::tui::app::TuiOptions {
+        model: "deepseek-v4-pro".to_string(),
+        workspace,
+        config_path: None,
+        config_profile: None,
+        allow_shell: false,
+        use_alt_screen: true,
+        use_mouse_capture: false,
+        use_bracketed_paste: true,
+        max_subagents: 1,
+        skills_dir: PathBuf::from("."),
+        memory_path: PathBuf::from("memory.md"),
+        notes_path: PathBuf::from("notes.txt"),
+        mcp_config_path: PathBuf::from("mcp.json"),
+        use_memory: false,
+        // Majority-of-fixtures defaults, measured across the 89 literals this
+        // helper replaced. Modules that need the other value say so explicitly.
+        start_in_agent_mode: false,
+        skip_onboarding: true,
+        yolo: false,
+        resume_session_id: None,
+        initial_input: None,
+        startup_notice: None,
+    }
+}
+
+/// Build an `App` whose observable state does not depend on the developer's
+/// machine.
+///
+/// `App::new` consults real persisted settings (provider/model maps,
+/// auto-model, route limits, locale, currency), so an un-pinned fixture
+/// computes against whatever the developer last configured. Every pin below
+/// exists because some test was observed to depend on it.
+pub(crate) fn test_app_with_options(options: crate::tui::app::TuiOptions) -> crate::tui::app::App {
+    let config = crate::config::Config::default();
+    let mut app = crate::tui::app::App::new(options, &config);
+
+    // Deterministic presentation regardless of host locale.
+    app.cost_currency = crate::pricing::CostCurrency::Usd;
+    app.ui_locale = crate::localization::Locale::En;
+    // Transcript tests must not depend on a concurrently swapped settings
+    // home. Tests for hidden reasoning opt out explicitly.
+    app.show_thinking = true;
+    // Pin the route identity: without this, a machine with customized
+    // settings computes context-window assertions against a different model
+    // than the requested deepseek-v4-pro.
+    app.set_provider_identity(crate::config::ApiProvider::Deepseek, "deepseek");
+    app.billing_presentation = crate::route_billing::BillingPresentation::Metered;
+    app.model = "deepseek-v4-pro".to_string();
+    app.auto_model = false;
+    app.last_effective_model = None;
+    app.active_route_limits = None;
+    app.active_context_window_override = None;
+    // Fixtures replace `app.workspace` freely. Do not retain `App::new`'s real
+    // process cwd as a second discovery root: parallel tests and a large
+    // developer checkout can otherwise consume the bounded mention index
+    // before the fixture workspace is scanned.
+    app.composer.mention_cwd = None;
+    app
 }

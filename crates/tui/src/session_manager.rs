@@ -7,17 +7,27 @@
 //! - Managing session lifecycle
 
 use crate::artifacts::ArtifactRecord;
+use crate::config::ApiProvider;
+use crate::model_routing::AutoRouteReceipt;
 use crate::models::{ContentBlock, Message, SystemPrompt};
+use crate::tools::plan::PlanSnapshot;
+use crate::tools::todo::TodoListSnapshot;
 use crate::tui::file_mention::ContextReference;
 use crate::utils::write_atomic;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs;
+use std::io;
 use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
 
 /// Maximum number of sessions to retain
 const MAX_SESSIONS: usize = 50;
+/// Maximum session title length, in `char`s. Matches the bound the session
+/// picker's rename prompt has always enforced.
+pub const MAX_SESSION_TITLE_CHARS: usize = 100;
+const WORK_GRAPH_IMPORT_ARCHIVE_DIR: &str = ".work-graph-import-archive";
 const CURRENT_SESSION_SCHEMA_VERSION: u32 = 1;
 const CURRENT_QUEUE_SCHEMA_VERSION: u32 = 1;
 
@@ -60,6 +70,8 @@ pub struct QueuedSessionMessage {
     pub display: String,
     #[serde(default)]
     pub skill_instruction: Option<String>,
+    #[serde(default)]
+    pub skill_provenance: Option<crate::plugins::types::PluginAuthority>,
 }
 
 /// Persisted queue state for recovery after restart/crash.
@@ -112,6 +124,14 @@ pub struct SessionMetadata {
     pub total_tokens: u64,
     /// Model used for the session
     pub model: String,
+    /// Provider used for the session model. Defaults for legacy saved sessions.
+    #[serde(default = "default_model_provider")]
+    pub model_provider: String,
+    /// Exact configured provider key. This is separate from `model_provider`
+    /// so old consumers can keep treating that field as the built-in provider
+    /// kind (`custom` for every named custom route).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider_id: Option<String>,
     /// Workspace directory
     pub workspace: PathBuf,
     /// Optional mode label (agent/plan/etc.)
@@ -132,10 +152,158 @@ pub struct SessionMetadata {
     /// (#2038).
     #[serde(default)]
     pub cumulative_turn_secs: u64,
+    /// Durable archive flag (#2934 / #4397). Archived sessions stay on disk
+    /// and stay loadable; they are hidden from the default browse surfaces
+    /// and are never chosen by auto-resume.
+    ///
+    /// This mirrors `ThreadRecord::archived` in [`crate::runtime_threads`] so
+    /// the TUI session surfaces and the Runtime API/web dashboard project the
+    /// same lifecycle field instead of two divergent notions of "put away".
+    /// Additive and `skip_serializing_if`-guarded: sessions written before
+    /// v0.9.2 load as `archived = false` and round-trip byte-identically
+    /// until the flag is actually set.
+    #[serde(default, skip_serializing_if = "is_not_archived")]
+    pub archived: bool,
+}
+
+fn is_not_archived(archived: &bool) -> bool {
+    !*archived
+}
+
+/// Sessions currently owned by an in-process interactive surface (the TUI).
+///
+/// A saved session is a file, and a running TUI holds the authoritative copy
+/// in memory: it autosaves the whole document from `App` state. That makes an
+/// out-of-band write to the *same* session unsafe — the next autosave would
+/// silently revert it. Rather than let that happen quietly, the owner claims
+/// the id here and any external writer is refused.
+///
+/// A static registry rather than a field on `RuntimeApiState` because the
+/// embedded Runtime API runs inside the TUI process; a standalone
+/// `codewhale web` has an empty registry and is therefore never blocked, which
+/// is exactly right — there is no TUI holding anything.
+static LIVE_SESSIONS: std::sync::OnceLock<std::sync::RwLock<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
+
+fn live_sessions() -> &'static std::sync::RwLock<std::collections::HashSet<String>> {
+    LIVE_SESSIONS.get_or_init(Default::default)
+}
+
+/// Who is asking to mutate a saved session.
+///
+/// This is an authority distinction, not a convenience one: the owner may
+/// write because it will update its in-memory copy in the same step; anyone
+/// else may not, because it cannot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionMutator {
+    /// The in-process surface that currently owns the session (the TUI). It
+    /// is responsible for updating its cached metadata atomically with the
+    /// write — see `App::apply_session_mutation`.
+    Owner,
+    /// Any other writer: the Runtime API, the web dashboard, a second
+    /// process. Refused while the session is claimed.
+    External,
+}
+
+/// Set the claimed session to exactly `session_id` (or nothing).
+///
+/// The TUI owns at most one session at a time, so switching sessions must
+/// release the previous claim in the same step — otherwise a `/new` would
+/// leave the old id permanently locked against the dashboard.
+pub fn set_live_session(session_id: Option<&str>) {
+    if let Ok(mut live) = live_sessions().write() {
+        live.clear();
+        if let Some(id) = session_id.map(str::trim).filter(|id| !id.is_empty()) {
+            live.insert(id.to_string());
+        }
+    }
+}
+
+/// Is this session currently owned by an in-process interactive surface?
+#[must_use]
+pub fn is_live_session(session_id: &str) -> bool {
+    live_sessions()
+        .read()
+        .is_ok_and(|live| live.contains(session_id))
+}
+
+/// The error an external writer gets when the session is live.
+///
+/// `ResourceBusy` so callers can map it to a typed conflict rather than
+/// pattern-matching on a message.
+fn live_session_conflict(session_id: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::ResourceBusy,
+        format!(
+            "session '{session_id}' is open in an interactive Codewhale session; \
+             change it there instead — an external write would be reverted by its next autosave"
+        ),
+    )
+}
+
+/// Which archive states a session listing includes.
+///
+/// Deliberately the same three-way shape as
+/// [`crate::runtime_threads::ThreadListFilter`] so `/v1/sessions` and
+/// `/v1/threads` answer the same `include_archived` / `archived_only` query
+/// pair with the same semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionListFilter {
+    /// Only `archived = false` sessions. The browse default.
+    #[default]
+    ActiveOnly,
+    /// Active and archived sessions, newest first.
+    IncludeArchived,
+    /// Only `archived = true` sessions.
+    ArchivedOnly,
+}
+
+impl SessionListFilter {
+    /// Resolve the `include_archived` / `archived_only` query pair the same
+    /// way the threads routes do.
+    #[must_use]
+    pub fn from_query(include_archived: Option<bool>, archived_only: Option<bool>) -> Self {
+        if archived_only.unwrap_or(false) {
+            Self::ArchivedOnly
+        } else if include_archived.unwrap_or(false) {
+            Self::IncludeArchived
+        } else {
+            Self::ActiveOnly
+        }
+    }
+
+    #[must_use]
+    pub fn admits(self, archived: bool) -> bool {
+        match self {
+            Self::ActiveOnly => !archived,
+            Self::IncludeArchived => true,
+            Self::ArchivedOnly => archived,
+        }
+    }
+}
+
+fn default_model_provider() -> String {
+    "deepseek".to_string()
+}
+
+impl SessionMetadata {
+    pub(crate) fn set_model_provider_route(&mut self, kind: &str, identity: Option<&str>) {
+        self.model_provider = kind.to_string();
+        self.model_provider_id = identity.map(str::to_string);
+    }
 }
 
 /// Cost and high-water-mark fields persisted with each session.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+///
+/// The coverage fields below are persisted **alongside** the money so a restored
+/// session can still say what its total covers. Without them a reload produced a
+/// dollar figure with no completeness information, which then rendered as "0 of 0
+/// turns priced" — a fabricated claim of a complete total. Sessions written
+/// before these fields existed deserialize them from `Default`, which is
+/// indistinguishable from that same false reading, so the load path detects the
+/// legacy shape explicitly (see [`Self::coverage_is_legacy_unknown`]) rather than
+/// trusting the defaults (#4318).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SessionCostSnapshot {
     /// Accumulated parent-turn session cost in USD.
     #[serde(default)]
@@ -156,17 +324,85 @@ pub struct SessionCostSnapshot {
     /// Max-ever displayed session+subagent cost in CNY.
     #[serde(default)]
     pub displayed_cost_high_water_cny: f64,
+    /// Turns whose route was money-metered and produced an authoritative price.
+    /// These are exactly the turns the persisted totals contain.
+    #[serde(default)]
+    pub priced_turns: u32,
+    /// Money-metered (or unknown-basis) turns that produced no authoritative
+    /// price, so their spend is missing from the persisted totals.
+    #[serde(default)]
+    pub unpriced_turns: u32,
+    /// CNY-specific coverage. USD-only routes are unpriced in CNY rather than
+    /// silently contributing a fabricated zero.
+    #[serde(default)]
+    pub cny_priced_turns: u32,
+    #[serde(default)]
+    pub cny_unpriced_turns: u32,
+    /// Stable reason labels for the unpriced turns.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub unpriced_reasons: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub cny_unpriced_reasons: BTreeSet<String>,
+    /// Token classes used on some route that carry no published price.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub unpriced_classes: BTreeSet<String>,
+    /// Provenance labels of the pricing rows the totals were built from.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub pricing_provenances: BTreeSet<String>,
+    /// Live-pricing downgrade receipts recorded while building the totals.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub live_pricing_defects: BTreeSet<String>,
+    /// Live rows that failed validation and had no usable bundled fallback.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub live_pricing_unusable_defects: BTreeSet<String>,
+    /// Redacted per-route receipts: provider, configured identity, wire model,
+    /// billing surface, endpoint fingerprint, billing mode, currency. Never a URL, a
+    /// credential, or a filesystem path.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub route_receipts: BTreeSet<String>,
+    /// Written by builds that track coverage, so a reader can tell "this session
+    /// genuinely had zero money-metered turns" apart from "this session predates
+    /// coverage tracking". Absent on legacy rows.
+    #[serde(default)]
+    pub coverage_recorded: bool,
 }
 
 impl SessionCostSnapshot {
     /// Session + subagent cost in USD.
     pub fn total_usd(&self) -> f64 {
-        self.session_cost_usd + self.subagent_cost_usd
+        crate::pricing::CostEstimate {
+            usd: self.session_cost_usd,
+            cny: 0.0,
+        }
+        .saturating_add(crate::pricing::CostEstimate {
+            usd: self.subagent_cost_usd,
+            cny: 0.0,
+        })
+        .usd
     }
 
     /// Session + subagent cost in CNY.
     pub fn total_cny(&self) -> f64 {
-        self.session_cost_cny + self.subagent_cost_cny
+        crate::pricing::CostEstimate {
+            usd: 0.0,
+            cny: self.session_cost_cny,
+        }
+        .saturating_add(crate::pricing::CostEstimate {
+            usd: 0.0,
+            cny: self.subagent_cost_cny,
+        })
+        .cny
+    }
+
+    /// Whether this snapshot's coverage state must be shown as unknown.
+    ///
+    /// True when the snapshot has no coverage evidence — the signature of a
+    /// session written before coverage was persisted. Reporting any such
+    /// session as "0 of 0 priced" would claim completeness without evidence,
+    /// including when the saved amount is zero.
+    #[must_use]
+    pub fn coverage_is_legacy_unknown(&self) -> bool {
+        !self.coverage_recorded
     }
 }
 
@@ -174,7 +410,7 @@ impl SessionMetadata {
     /// Copy cost fields from another metadata (used when forking a session).
     #[allow(dead_code)]
     pub fn copy_cost_from(&mut self, other: &SessionMetadata) {
-        self.cost = other.cost;
+        self.cost = other.cost.clone();
     }
 
     /// Record additive lineage metadata for a forked saved session.
@@ -182,6 +418,43 @@ impl SessionMetadata {
         self.parent_session_id = Some(parent.id.clone());
         self.forked_from_message_count = Some(parent.message_count);
     }
+}
+
+/// Durable Work-panel state. Optional on [`SavedSession`] so every session
+/// written before v0.8.68 remains loadable without migration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SessionWorkState {
+    /// Authoritative Work Graph. Optional so pre-Work-Graph sessions and old
+    /// binaries continue to exchange fully populated Plan/To-do views.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<crate::work_graph::WorkGraphSnapshot>,
+    #[serde(default, skip_serializing_if = "TodoListSnapshot::is_empty")]
+    pub todos: TodoListSnapshot,
+    #[serde(default, skip_serializing_if = "PlanSnapshot::is_empty")]
+    pub plan: PlanSnapshot,
+}
+
+impl SessionWorkState {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.graph
+            .as_ref()
+            .is_none_or(crate::work_graph::WorkGraphSnapshot::is_empty)
+            && self.todos.is_empty()
+            && self.plan.is_empty()
+    }
+}
+
+/// Latest concrete Auto route and the decision receipt that produced it.
+///
+/// This is additive, optional session metadata: sessions written before
+/// v0.9.1 deserialize with no receipt and keep their legacy restore behavior.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct SavedAutoRouteReceipt {
+    pub(crate) provider: ApiProvider,
+    pub(crate) provider_identity: String,
+    pub(crate) model: String,
+    pub(crate) receipt: AutoRouteReceipt,
 }
 
 /// A saved session containing full conversation history
@@ -204,6 +477,13 @@ pub struct SavedSession {
     /// Artifact contents are stored in the session-owned artifact directory.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<ArtifactRecord>,
+    /// To-do and plan state shown in the Work sidebar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_state: Option<SessionWorkState>,
+    /// Most recent accepted/completed Auto decision, when the saved model mode
+    /// is `auto`. Optional for backward-compatible session loads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) last_auto_route: Option<SavedAutoRouteReceipt>,
 }
 
 /// Manager for session persistence operations
@@ -213,8 +493,30 @@ pub struct SessionManager {
     sessions_dir: PathBuf,
 }
 
+/// Origin of a crash-recovery checkpoint file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckpointSource {
+    /// Per-session checkpoint file `checkpoints/<session_id>.json`.
+    Session(String),
+    /// Legacy single-slot checkpoint file `checkpoints/latest.json`.
+    Legacy,
+}
+
+/// A crash-recovery checkpoint file discovered on disk (metadata only —
+/// callers load the session content separately).
+#[derive(Debug, Clone)]
+pub struct CheckpointRef {
+    pub source: CheckpointSource,
+    pub path: PathBuf,
+    pub modified: std::time::SystemTime,
+}
+
+/// File names in `checkpoints/` that are never per-session checkpoints.
+const LEGACY_CHECKPOINT_FILE: &str = "latest.json";
+const OFFLINE_QUEUE_FILE: &str = "offline_queue.json";
+
 impl SessionManager {
-    fn validated_session_path(&self, id: &str) -> std::io::Result<PathBuf> {
+    fn validated_session_id<'a>(&self, id: &'a str) -> std::io::Result<&'a str> {
         let trimmed = id.trim();
         if trimmed.is_empty() {
             return Err(std::io::Error::new(
@@ -231,7 +533,31 @@ impl SessionManager {
                 format!("Invalid session id '{id}'"),
             ));
         }
+        Ok(trimmed)
+    }
+
+    fn validated_session_path(&self, id: &str) -> std::io::Result<PathBuf> {
+        let trimmed = self.validated_session_id(id)?;
         Ok(self.sessions_dir.join(format!("{trimmed}.json")))
+    }
+
+    fn checkpoints_dir(&self) -> PathBuf {
+        self.sessions_dir.join("checkpoints")
+    }
+
+    fn validated_checkpoint_path(&self, session_id: &str) -> std::io::Result<PathBuf> {
+        let trimmed = self.validated_session_id(session_id)?;
+        // Reserved file names inside `checkpoints/` must never collide with a
+        // per-session checkpoint file.
+        if format!("{trimmed}.json") == LEGACY_CHECKPOINT_FILE
+            || format!("{trimmed}.json") == OFFLINE_QUEUE_FILE
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Session id '{trimmed}' collides with a reserved checkpoint file"),
+            ));
+        }
+        Ok(self.checkpoints_dir().join(format!("{trimmed}.json")))
     }
 
     /// Create a new `SessionManager` with the specified sessions directory
@@ -256,6 +582,8 @@ impl SessionManager {
     pub fn save_session(&self, session: &SavedSession) -> std::io::Result<PathBuf> {
         let path = self.validated_session_path(&session.metadata.id)?;
 
+        self.archive_before_first_graph_write(session, &path)?;
+
         let content = serde_json::to_string_pretty(&session)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
@@ -269,23 +597,61 @@ impl SessionManager {
     }
 
     /// Save a crash-recovery checkpoint for in-flight turns.
+    ///
+    /// Checkpoints are keyed per session (`checkpoints/<session_id>.json`) so
+    /// concurrent sessions never overwrite each other's crash-recovery state.
     pub fn save_checkpoint(&self, session: &SavedSession) -> std::io::Result<PathBuf> {
-        let checkpoints = self.sessions_dir.join("checkpoints");
-        fs::create_dir_all(&checkpoints)?;
-        let path = checkpoints.join("latest.json");
+        let path = self.validated_checkpoint_path(&session.metadata.id)?;
+        let session_path = self.validated_session_path(&session.metadata.id)?;
+        self.archive_before_first_graph_write(session, &session_path)?;
+        fs::create_dir_all(self.checkpoints_dir())?;
         let content = serde_json::to_string_pretty(&session)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         write_atomic(&path, content.as_bytes())?;
         Ok(path)
     }
 
-    /// Load the most recent crash-recovery checkpoint if present.
-    pub fn load_checkpoint(&self) -> std::io::Result<Option<SavedSession>> {
-        let path = self.sessions_dir.join("checkpoints").join("latest.json");
+    /// Preserve the exact pre-import session once, before the first graph-
+    /// bearing session or checkpoint write can replace it.
+    fn archive_before_first_graph_write(
+        &self,
+        session: &SavedSession,
+        source: &Path,
+    ) -> std::io::Result<()> {
+        let writes_graph = session
+            .work_state
+            .as_ref()
+            .and_then(|state| state.graph.as_ref())
+            .is_some_and(|graph| !graph.is_empty());
+        if !writes_graph || !source.exists() {
+            return Ok(());
+        }
+        let bytes = fs::read(source)?;
+        let already_graph_backed = serde_json::from_slice::<SavedSession>(&bytes)
+            .ok()
+            .and_then(|saved| saved.work_state)
+            .and_then(|state| state.graph)
+            .is_some_and(|graph| !graph.is_empty());
+        if already_graph_backed {
+            return Ok(());
+        }
+        let archive_dir = self.sessions_dir.join(WORK_GRAPH_IMPORT_ARCHIVE_DIR);
+        fs::create_dir_all(&archive_dir)?;
+        let archive =
+            archive_dir.join(source.file_name().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "invalid session path")
+            })?);
+        if !archive.exists() {
+            write_atomic(&archive, &bytes)?;
+        }
+        Ok(())
+    }
+
+    fn read_checkpoint_file(&self, path: &Path) -> std::io::Result<Option<SavedSession>> {
         if !path.exists() {
             return Ok(None);
         }
-        let content = fs::read_to_string(&path)?;
+        let content = fs::read_to_string(path)?;
         let mut session: SavedSession = serde_json::from_str(&content)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         if session.schema_version > CURRENT_SESSION_SCHEMA_VERSION {
@@ -301,13 +667,100 @@ impl SessionManager {
         Ok(Some(session))
     }
 
-    /// Clear any crash-recovery checkpoint.
-    pub fn clear_checkpoint(&self) -> std::io::Result<()> {
-        let path = self.sessions_dir.join("checkpoints").join("latest.json");
+    /// Load a specific session's crash-recovery checkpoint if present.
+    pub fn load_session_checkpoint(
+        &self,
+        session_id: &str,
+    ) -> std::io::Result<Option<SavedSession>> {
+        let path = self.validated_checkpoint_path(session_id)?;
+        self.read_checkpoint_file(&path)
+    }
+
+    /// Load the legacy single-slot checkpoint (`checkpoints/latest.json`) if
+    /// present. Compatibility read only — this release no longer writes it.
+    pub fn load_legacy_checkpoint(&self) -> std::io::Result<Option<SavedSession>> {
+        let path = self.checkpoints_dir().join(LEGACY_CHECKPOINT_FILE);
+        self.read_checkpoint_file(&path)
+    }
+
+    /// Clear one session's crash-recovery checkpoint. Scoped: this can never
+    /// remove another session's checkpoint file or the legacy slot.
+    pub fn clear_session_checkpoint(&self, session_id: &str) -> std::io::Result<()> {
+        let path = self.validated_checkpoint_path(session_id)?;
         if path.exists() {
             fs::remove_file(path)?;
         }
         Ok(())
+    }
+
+    /// Remove the legacy single-slot checkpoint file.
+    pub fn clear_legacy_checkpoint(&self) -> std::io::Result<()> {
+        let path = self.checkpoints_dir().join(LEGACY_CHECKPOINT_FILE);
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+        Ok(())
+    }
+
+    /// Enumerate all crash-recovery checkpoint files (per-session files plus
+    /// the legacy single slot), sorted most recently modified first. Only
+    /// file metadata is read here; callers load content per candidate.
+    pub fn list_checkpoints(&self) -> std::io::Result<Vec<CheckpointRef>> {
+        let dir = self.checkpoints_dir();
+        let mut refs = Vec::new();
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(refs),
+            Err(err) => return Err(err),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() || path.extension().is_none_or(|ext| ext != "json") {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let source = if name == LEGACY_CHECKPOINT_FILE {
+                CheckpointSource::Legacy
+            } else if name == OFFLINE_QUEUE_FILE {
+                continue;
+            } else {
+                let session_id = name.trim_end_matches(".json").to_string();
+                if self.validated_checkpoint_path(&session_id).is_err() {
+                    continue;
+                }
+                CheckpointSource::Session(session_id)
+            };
+            let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
+                continue;
+            };
+            refs.push(CheckpointRef {
+                source,
+                path,
+                modified,
+            });
+        }
+        refs.sort_by_key(|r| std::cmp::Reverse(r.modified));
+        Ok(refs)
+    }
+
+    /// Migrate a session recovered from the legacy single-slot checkpoint to
+    /// a per-session checkpoint file. Never overwrites an existing
+    /// per-session file and leaves the legacy file in place (older binaries
+    /// still read it; the legacy writer is already gone). Returns whether a
+    /// file was written.
+    pub fn write_session_checkpoint_if_absent(
+        &self,
+        session: &SavedSession,
+    ) -> std::io::Result<bool> {
+        let path = self.validated_checkpoint_path(&session.metadata.id)?;
+        if path.exists() {
+            return Ok(false);
+        }
+        self.save_checkpoint(session)?;
+        Ok(true)
     }
 
     /// Save offline queue state (queued + draft messages).
@@ -382,6 +835,18 @@ impl SessionManager {
 
         session.system_prompt = strip_legacy_truncation_note(session.system_prompt);
 
+        let repair = crate::tool_history_repair::repair_tool_call_pairs(&mut session.messages);
+        if !repair.is_empty() {
+            session.metadata.message_count = session.messages.len();
+            tracing::warn!(
+                session_id = %session.metadata.id,
+                repaired_call_ids = ?repair.repaired_call_ids,
+                duplicate_result_ids = ?repair.duplicate_result_ids,
+                orphan_result_ids = ?repair.orphan_result_ids,
+                "repaired persisted tool call/result history"
+            );
+        }
+
         Ok(session)
     }
 
@@ -430,6 +895,89 @@ impl SessionManager {
         sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
 
         Ok(sessions)
+    }
+
+    /// Set the durable archive flag on a saved session and return the
+    /// resulting metadata.
+    ///
+    /// This is the single writer for the flag: the picker, the `/sessions`
+    /// command, and `PATCH /v1/sessions/{id}` all route through it so the TUI
+    /// and the web dashboard cannot drift into two archive notions. A no-op
+    /// call (already in the requested state) still returns the metadata and
+    /// does not rewrite the file.
+    pub fn set_session_archived(
+        &self,
+        id: &str,
+        archived: bool,
+        mutator: SessionMutator,
+    ) -> std::io::Result<SessionMetadata> {
+        if mutator == SessionMutator::External && is_live_session(id) {
+            return Err(live_session_conflict(id));
+        }
+        let mut session = self.load_session(id)?;
+        if session.metadata.archived == archived {
+            return Ok(session.metadata);
+        }
+        session.metadata.archived = archived;
+        self.save_session(&session)?;
+        Ok(session.metadata)
+    }
+
+    /// Re-read the durable lifecycle fields for `metadata` from disk.
+    ///
+    /// This is the autosave-survival guard. A TUI autosave rebuilds the whole
+    /// session document from in-memory `App` state; any lifecycle field it
+    /// carries from a stale cache would silently revert a rename or archive
+    /// that landed in between — including one applied by the picker earlier in
+    /// the same event loop, or by `/rename` while a snapshot was already
+    /// queued.
+    ///
+    /// So rather than trusting any cache, the writer re-reads the persisted
+    /// values immediately before writing. `title`, `archived`, `created_at`,
+    /// and fork lineage are *lifecycle* state owned by the file, not
+    /// conversation state owned by the running turn. Reading them back costs
+    /// one bounded metadata-prefix read.
+    ///
+    /// Returns `true` when an existing record was found and merged. A missing
+    /// record is not an error: the first save of a new session has nothing to
+    /// merge from.
+    pub fn merge_persisted_lifecycle(&self, metadata: &mut SessionMetadata) -> bool {
+        let Ok(path) = self.validated_session_path(&metadata.id) else {
+            return false;
+        };
+        let Ok(persisted) = Self::load_session_metadata(&path) else {
+            return false;
+        };
+        metadata.title = persisted.title;
+        metadata.archived = persisted.archived;
+        metadata.created_at = persisted.created_at;
+        metadata.parent_session_id = persisted.parent_session_id;
+        metadata.forked_from_message_count = persisted.forked_from_message_count;
+        true
+    }
+
+    /// Rename a saved session and return the resulting metadata.
+    ///
+    /// Titles are trimmed and bounded to [`MAX_SESSION_TITLE_CHARS`]
+    /// characters (counted in `char`s, not bytes, so a CJK or emoji title is
+    /// not truncated mid-scalar). Created-at and fork lineage are untouched.
+    pub fn rename_session(
+        &self,
+        id: &str,
+        title: &str,
+        mutator: SessionMutator,
+    ) -> std::io::Result<SessionMetadata> {
+        let title = normalize_session_title(title)?;
+        if mutator == SessionMutator::External && is_live_session(id) {
+            return Err(live_session_conflict(id));
+        }
+        let mut session = self.load_session(id)?;
+        if session.metadata.title == title {
+            return Ok(session.metadata);
+        }
+        session.metadata.title = title;
+        self.save_session(&session)?;
+        Ok(session.metadata)
     }
 
     /// Load only the metadata from a session file.
@@ -488,11 +1036,21 @@ impl SessionManager {
 
     /// Clean up old sessions to stay within `MAX_SESSIONS` limit.
     pub fn cleanup_old_sessions(&self) -> std::io::Result<()> {
+        self.cleanup_old_sessions_keeping(None)
+    }
+
+    /// As [`Self::cleanup_old_sessions`], but never deletes `keep` — the
+    /// session being resumed at boot. Without this, a background cleanup that
+    /// races session restore can prune the just-resumed session when 50+
+    /// newer records exist (its `updated_at` is not bumped until first save).
+    pub fn cleanup_old_sessions_keeping(&self, keep: Option<&str>) -> std::io::Result<()> {
         let sessions = self.list_sessions()?;
 
         if sessions.len() > MAX_SESSIONS {
-            // Delete oldest sessions
             for session in sessions.iter().skip(MAX_SESSIONS) {
+                if keep.is_some_and(|id| id == session.id) {
+                    continue;
+                }
                 let _ = self.delete_session(&session.id);
             }
         }
@@ -506,8 +1064,9 @@ impl SessionManager {
     /// on boot; today the user-facing entry point is the
     /// `/sessions prune <days>` slash command.
     ///
-    /// Crash-recovery safety: skips the running checkpoint
-    /// (`checkpoints/latest.json`) and any file under `checkpoints/`
+    /// Crash-recovery safety: skips the per-session checkpoint files
+    /// (`checkpoints/<session_id>.json`), the legacy single-slot
+    /// checkpoint (`checkpoints/latest.json`), and any file under `checkpoints/`
     /// — those are owned by the checkpoint subsystem and live with
     /// stricter durability rules. Only top-level `<session_id>.json`
     /// files are candidates.
@@ -520,11 +1079,26 @@ impl SessionManager {
         &self,
         max_age: std::time::Duration,
     ) -> std::io::Result<usize> {
+        self.prune_sessions_older_than_keeping(max_age, None)
+    }
+
+    /// As [`Self::prune_sessions_older_than`], but never deletes `keep` — the
+    /// active session. A just-resumed session's `updated_at` is stale until
+    /// its first post-resume save, so an age prune could otherwise delete the
+    /// live session out from under the TUI.
+    pub fn prune_sessions_older_than_keeping(
+        &self,
+        max_age: std::time::Duration,
+        keep: Option<&str>,
+    ) -> std::io::Result<usize> {
         let cutoff = Utc::now()
             - chrono::Duration::from_std(max_age).unwrap_or(chrono::Duration::days(365 * 10));
         let sessions = self.list_sessions()?;
         let mut pruned = 0usize;
         for session in sessions {
+            if keep.is_some_and(|id| id == session.id) {
+                continue;
+            }
             if session.updated_at < cutoff {
                 if let Err(err) = self.delete_session(&session.id) {
                     tracing::warn!(
@@ -542,13 +1116,18 @@ impl SessionManager {
     }
 
     /// Get the most recent session scoped to the current workspace.
+    ///
+    /// Archived sessions are skipped: archiving is the user saying "not this
+    /// one", and `--continue` / auto-resume must honour that rather than
+    /// dragging a put-away session back.
     pub fn get_latest_session_for_workspace(
         &self,
         workspace: &Path,
     ) -> std::io::Result<Option<SessionMetadata>> {
         let sessions = self.list_sessions()?;
         Ok(sessions.into_iter().find(|session| {
-            workspace_scope_matches(&session.workspace, workspace)
+            !session.archived
+                && workspace_scope_matches(&session.workspace, workspace)
                 && !is_empty_auto_created_session(session)
         }))
     }
@@ -563,6 +1142,28 @@ impl SessionManager {
             .filter(|s| s.title.to_lowercase().contains(&query_lower))
             .collect())
     }
+}
+
+/// Trim and bound a user-supplied session title.
+///
+/// Returns `InvalidInput` for an empty title or one longer than
+/// [`MAX_SESSION_TITLE_CHARS`] so every rename surface (picker, `/rename`,
+/// `PATCH /v1/sessions/{id}`) rejects the same inputs with the same reason.
+pub fn normalize_session_title(title: &str) -> std::io::Result<String> {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Session title cannot be empty",
+        ));
+    }
+    if trimmed.chars().count() > MAX_SESSION_TITLE_CHARS {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("Session title cannot exceed {MAX_SESSION_TITLE_CHARS} characters"),
+        ));
+    }
+    Ok(trimmed.to_string())
 }
 
 pub(crate) fn workspace_scope_matches(saved_workspace: &Path, current_workspace: &Path) -> bool {
@@ -595,8 +1196,9 @@ fn paths_equivalent(lhs: &Path, rhs: &Path) -> bool {
 fn find_git_root(path: &Path) -> Option<PathBuf> {
     let mut current = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     loop {
-        if is_git_metadata_entry(&current.join(".git")) {
-            return Some(current);
+        let git_entry = current.join(".git");
+        if git_entry.exists() {
+            return is_git_metadata_entry(&git_entry).then_some(current);
         }
         match current.parent() {
             Some(parent) if parent != current => current = parent.to_path_buf(),
@@ -618,10 +1220,92 @@ fn is_git_metadata_entry(path: &Path) -> bool {
 /// Resolve the default session directory path.
 ///
 /// v0.8.44: prefers `~/.codewhale/sessions`, falls back to
-/// `~/.deepseek/sessions` for existing installs.
+/// `~/.deepseek/sessions` for existing installs. Uses the write-path resolver
+/// so the first access relocates any legacy `~/.deepseek/sessions` into
+/// `~/.codewhale/sessions` when the primary directory is missing (#3240).
+/// If an older build already created an empty primary sessions directory, copy
+/// missing legacy entries into it without overwriting newer CodeWhale data.
 pub fn default_sessions_dir() -> std::io::Result<PathBuf> {
-    codewhale_config::resolve_state_dir("sessions")
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string()))
+    let dir = codewhale_config::ensure_state_dir("sessions")
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e.to_string()))?;
+    match merge_missing_legacy_session_entries(&dir) {
+        Ok(0) => {}
+        Ok(count) => {
+            tracing::info!(
+                target: "session::migration",
+                "Copied {count} missing legacy session entries into {}",
+                dir.display()
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                target: "session::migration",
+                "Could not copy legacy sessions into {}: {err}",
+                dir.display()
+            );
+        }
+    }
+    Ok(dir)
+}
+
+fn merge_missing_legacy_session_entries(primary: &Path) -> io::Result<usize> {
+    if codewhale_home_is_explicit() {
+        return Ok(0);
+    }
+
+    let legacy = codewhale_config::legacy_deepseek_home()
+        .map_err(|e| io::Error::new(io::ErrorKind::NotFound, e.to_string()))?
+        .join("sessions");
+    if !legacy.is_dir() || paths_equivalent(primary, &legacy) {
+        return Ok(0);
+    }
+
+    copy_missing_dir_entries(&legacy, primary)
+}
+
+fn codewhale_home_is_explicit() -> bool {
+    std::env::var("CODEWHALE_HOME")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn copy_missing_dir_entries(src: &Path, dst: &Path) -> io::Result<usize> {
+    fs::create_dir_all(dst)?;
+    let mut copied = 0;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let source = entry.path();
+        let target = dst.join(entry.file_name());
+
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            if entry.file_name() == std::ffi::OsStr::new("checkpoints") || target.exists() {
+                continue;
+            }
+            copied += copy_missing_dir_entries(&source, &target)?;
+        } else if file_type.is_file() {
+            copied += usize::from(copy_file_create_new(&source, &target)?);
+        }
+    }
+    Ok(copied)
+}
+
+fn copy_file_create_new(src: &Path, dst: &Path) -> io::Result<bool> {
+    let mut source = fs::File::open(src)?;
+    let mut target = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dst)
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(err) => return Err(err),
+    };
+    if let Err(err) = io::copy(&mut source, &mut target) {
+        let _ = fs::remove_file(dst);
+        return Err(err);
+    }
+    Ok(true)
 }
 
 /// Prune snapshots older than `max_age` for `workspace`.
@@ -719,17 +1403,22 @@ pub fn create_saved_session_with_id_and_mode(
             message_count: messages.len(),
             total_tokens,
             model: model.to_string(),
+            model_provider: default_model_provider(),
+            model_provider_id: None,
             workspace: workspace.to_path_buf(),
             mode: mode.map(str::to_string),
             cost: SessionCostSnapshot::default(),
             parent_session_id: None,
             forked_from_message_count: None,
             cumulative_turn_secs: 0,
+            archived: false,
         },
         messages: messages.to_vec(),
         system_prompt: system_prompt_to_string(system_prompt),
         context_references: Vec::new(),
         artifacts: Vec::new(),
+        work_state: None,
+        last_auto_route: None,
     }
 }
 
@@ -746,9 +1435,7 @@ pub fn update_session(
     session.metadata.updated_at = Utc::now();
     session.metadata.message_count = messages.len();
     session.metadata.total_tokens = total_tokens;
-    if system_prompt.is_some() {
-        session.system_prompt = system_prompt_to_string(system_prompt);
-    }
+    session.system_prompt = system_prompt_to_string(system_prompt);
     session
 }
 
@@ -959,11 +1646,11 @@ pub fn format_session_line(meta: &SessionMetadata) -> String {
     let age = format_age(&meta.updated_at);
     let updated = format_session_updated_at(&meta.updated_at, &age);
     let truncated_title = truncate_title(extract_title(&meta.title), 40);
-    let fork_label = meta
-        .parent_session_id
-        .as_deref()
-        .map(|parent| format!(" | fork {}", truncate_id(parent)))
-        .unwrap_or_default();
+    let fork_label = if meta.parent_session_id.is_some() {
+        " | fork"
+    } else {
+        ""
+    };
 
     format!(
         "{} | {} | {} msgs{} | {}",
@@ -1018,6 +1705,94 @@ mod tests {
         }
     }
 
+    /// Coverage state round-trips with the money it qualifies, and a session
+    /// written before coverage existed is detected as *unknown* rather than being
+    /// read as a complete total covering zero turns (#4318).
+    #[test]
+    fn cost_snapshot_round_trips_coverage_and_detects_legacy_unknown() {
+        // A pre-coverage row: real money, no coverage fields at all.
+        let legacy: SessionCostSnapshot = serde_json::from_value(serde_json::json!({
+            "session_cost_usd": 1.25,
+            "session_cost_cny": 0.0,
+            "subagent_cost_usd": 0.0,
+            "subagent_cost_cny": 0.0,
+            "displayed_cost_high_water_usd": 1.25,
+            "displayed_cost_high_water_cny": 0.0
+        }))
+        .expect("legacy cost snapshot stays readable");
+        assert_eq!(legacy.priced_turns, 0);
+        assert_eq!(legacy.unpriced_turns, 0);
+        assert!(!legacy.coverage_recorded);
+        assert!(
+            legacy.coverage_is_legacy_unknown(),
+            "a non-zero total with no coverage evidence must not read as complete"
+        );
+
+        // An all-zero pre-coverage session is still unknown: zero may mean no
+        // turns, all unpriced turns, or exact zero usage. Absence of evidence is
+        // never rewritten into a complete 0/0 claim.
+        let empty = SessionCostSnapshot::default();
+        assert!(empty.coverage_is_legacy_unknown());
+
+        // A coverage-aware writer that recorded zero money-metered turns is also
+        // not unknown — it positively knows the answer is zero.
+        let recorded_zero = SessionCostSnapshot {
+            session_cost_usd: 1.25,
+            coverage_recorded: true,
+            ..SessionCostSnapshot::default()
+        };
+        assert!(!recorded_zero.coverage_is_legacy_unknown());
+
+        // Full round-trip of every coverage field.
+        let full = SessionCostSnapshot {
+            session_cost_usd: 2.5,
+            session_cost_cny: 3.0,
+            subagent_cost_usd: 0.5,
+            subagent_cost_cny: 0.25,
+            displayed_cost_high_water_usd: 3.0,
+            displayed_cost_high_water_cny: 3.25,
+            priced_turns: 7,
+            unpriced_turns: 2,
+            cny_priced_turns: 1,
+            cny_unpriced_turns: 8,
+            unpriced_reasons: ["missing_class_price".to_string()].into(),
+            cny_unpriced_reasons: ["currency_not_published".to_string()].into(),
+            unpriced_classes: ["cache_write".to_string()].into(),
+            pricing_provenances: ["models_dev_bundled".to_string()].into(),
+            live_pricing_defects: ["live_pricing_stale".to_string()].into(),
+            live_pricing_unusable_defects: ["live_pricing_scope_mismatch".to_string()].into(),
+            route_receipts: ["provider=anthropic identity=- model=claude-haiku-4-5 \
+                 surface=first-party-payg endpoint_fp=abc123 currency=usd"
+                .to_string()]
+            .into(),
+            coverage_recorded: true,
+        };
+        let json = serde_json::to_string(&full).expect("serialize");
+        let back: SessionCostSnapshot = serde_json::from_str(&json).expect("round-trip");
+        assert_eq!(back.priced_turns, 7);
+        assert_eq!(back.unpriced_turns, 2);
+        assert_eq!(back.cny_priced_turns, 1);
+        assert_eq!(back.cny_unpriced_turns, 8);
+        assert_eq!(back.unpriced_reasons, full.unpriced_reasons);
+        assert_eq!(back.cny_unpriced_reasons, full.cny_unpriced_reasons);
+        assert_eq!(back.unpriced_classes, full.unpriced_classes);
+        assert_eq!(back.pricing_provenances, full.pricing_provenances);
+        assert_eq!(back.live_pricing_defects, full.live_pricing_defects);
+        assert_eq!(
+            back.live_pricing_unusable_defects,
+            full.live_pricing_unusable_defects
+        );
+        assert_eq!(back.route_receipts, full.route_receipts);
+        assert!(back.coverage_recorded);
+        assert!(!back.coverage_is_legacy_unknown());
+
+        // The persisted receipts carry no endpoint URL or credential.
+        let lower = json.to_lowercase();
+        for needle in ["http", "api_key", "authorization", "bearer", "sk-"] {
+            assert!(!lower.contains(needle), "{needle} leaked into {json}");
+        }
+    }
+
     fn write_session_record(
         manager: &SessionManager,
         id: &str,
@@ -1035,16 +1810,21 @@ mod tests {
                 message_count: 1,
                 total_tokens: 0,
                 model: "deepseek-v4-flash".to_string(),
+                model_provider: "deepseek".to_string(),
+                model_provider_id: None,
                 workspace: workspace.to_path_buf(),
                 mode: None,
                 cost: SessionCostSnapshot::default(),
                 parent_session_id: None,
                 forked_from_message_count: None,
                 cumulative_turn_secs: 0,
+                archived: false,
             },
             system_prompt: None,
             context_references: Vec::new(),
             artifacts: Vec::new(),
+            work_state: None,
+            last_auto_route: None,
         };
         manager.save_session(&session).expect("save");
     }
@@ -1066,16 +1846,21 @@ mod tests {
                 message_count: 0,
                 total_tokens: 0,
                 model: "deepseek-v4-pro".to_string(),
+                model_provider: "deepseek".to_string(),
+                model_provider_id: None,
                 workspace: workspace.to_path_buf(),
                 mode: Some("yolo".to_string()),
                 cost: SessionCostSnapshot::default(),
                 parent_session_id: None,
                 forked_from_message_count: None,
                 cumulative_turn_secs: 0,
+                archived: false,
             },
             system_prompt: None,
             context_references: Vec::new(),
             artifacts: Vec::new(),
+            work_state: None,
+            last_auto_route: None,
         };
         manager.save_session(&session).expect("save empty");
     }
@@ -1106,6 +1891,51 @@ mod tests {
         let loaded = manager.load_session(&session_id).expect("load");
         assert_eq!(loaded.metadata.id, session_id);
         assert_eq!(loaded.messages.len(), 2);
+    }
+
+    #[test]
+    fn load_session_repairs_dangling_tool_call_with_visible_receipt() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("new");
+        let messages = vec![Message {
+            role: "assistant".to_string(),
+            content: vec![ContentBlock::ToolUse {
+                id: "call-crashed".to_string(),
+                name: "read_file".to_string(),
+                input: serde_json::json!({"path": "README.md"}),
+                caller: None,
+            }],
+        }];
+        let session = create_saved_session(&messages, "test-model", tmp.path(), 0, None);
+        let session_id = session.metadata.id.clone();
+        manager.save_session(&session).expect("save");
+
+        let loaded = manager.load_session(&session_id).expect("load");
+
+        assert_eq!(loaded.metadata.message_count, loaded.messages.len());
+        assert!(loaded.messages.iter().any(|message| {
+            message.content.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error: Some(true),
+                        ..
+                    } if tool_use_id == "call-crashed" && content.contains("crashed_and_repaired")
+                )
+            })
+        }));
+        assert!(loaded.messages.iter().any(|message| {
+            message.role == "assistant"
+                && message.content.iter().any(|block| {
+                    matches!(
+                        block,
+                        ContentBlock::Text { text, .. }
+                            if text.contains("[tool_history_repair]")
+                    )
+                })
+        }));
     }
 
     #[test]
@@ -1294,6 +2124,99 @@ mod tests {
     }
 
     #[test]
+    fn default_manager_copies_legacy_sessions_when_primary_already_exists() {
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let _home = crate::test_support::EnvVarGuard::set("HOME", &home);
+        let _codewhale_home = crate::test_support::EnvVarGuard::remove("CODEWHALE_HOME");
+
+        let primary_sessions = home.join(".codewhale").join("sessions");
+        let legacy_sessions = home.join(".deepseek").join("sessions");
+        fs::create_dir_all(&primary_sessions).expect("primary sessions");
+        fs::create_dir_all(&legacy_sessions).expect("legacy sessions");
+        fs::create_dir_all(legacy_sessions.join("checkpoints")).expect("legacy checkpoints");
+        fs::write(
+            legacy_sessions.join("checkpoints").join("latest.json"),
+            "{}",
+        )
+        .expect("legacy checkpoint");
+
+        let mut legacy_session = create_saved_session(
+            &[make_test_message("user", "find my old session")],
+            "test-model",
+            tmp.path(),
+            100,
+            None,
+        );
+        legacy_session.metadata.id = "legacy-visible".to_string();
+        legacy_session.metadata.title = "session from legacy home".to_string();
+        fs::write(
+            legacy_sessions.join("legacy-visible.json"),
+            serde_json::to_string_pretty(&legacy_session).expect("serialize legacy session"),
+        )
+        .expect("write legacy session");
+
+        let manager = SessionManager::default_location().expect("default manager");
+        assert_eq!(manager.sessions_dir(), primary_sessions.as_path());
+        assert!(primary_sessions.join("legacy-visible.json").exists());
+        assert!(!primary_sessions.join("checkpoints").exists());
+        assert!(legacy_sessions.join("legacy-visible.json").exists());
+
+        let sessions = manager.list_sessions().expect("list");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "legacy-visible");
+    }
+
+    #[test]
+    fn legacy_session_copy_never_overwrites_primary_session() {
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let _home = crate::test_support::EnvVarGuard::set("HOME", &home);
+        let _codewhale_home = crate::test_support::EnvVarGuard::remove("CODEWHALE_HOME");
+
+        let primary_sessions = home.join(".codewhale").join("sessions");
+        let legacy_sessions = home.join(".deepseek").join("sessions");
+        fs::create_dir_all(&primary_sessions).expect("primary sessions");
+        fs::create_dir_all(&legacy_sessions).expect("legacy sessions");
+
+        let primary_path = primary_sessions.join("same-id.json");
+        fs::write(&primary_path, "primary data wins").expect("write primary session");
+        fs::write(
+            legacy_sessions.join("same-id.json"),
+            "legacy data must not overwrite",
+        )
+        .expect("write legacy session");
+
+        let dir = default_sessions_dir().expect("default session dir");
+        assert_eq!(dir, primary_sessions);
+        assert_eq!(
+            fs::read_to_string(primary_path).expect("read primary session"),
+            "primary data wins"
+        );
+    }
+
+    #[test]
+    fn explicit_codewhale_home_disables_legacy_session_copy() {
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let explicit_home = tmp.path().join("explicit-codewhale");
+        let _home = crate::test_support::EnvVarGuard::set("HOME", &home);
+        let _codewhale_home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &explicit_home);
+
+        let legacy_sessions = home.join(".deepseek").join("sessions");
+        fs::create_dir_all(&legacy_sessions).expect("legacy sessions");
+        fs::write(legacy_sessions.join("legacy-visible.json"), "{}").expect("write legacy session");
+
+        let dir = default_sessions_dir().expect("default session dir");
+        assert_eq!(dir, explicit_home.join("sessions"));
+        assert!(!dir.join("legacy-visible.json").exists());
+    }
+
+    #[test]
     fn latest_session_for_workspace_ignores_newer_other_directory() {
         let tmp = tempdir().expect("tempdir");
         let manager = SessionManager::new(tmp.path().join("sessions")).expect("new");
@@ -1301,6 +2224,7 @@ mod tests {
         let workspace_b = tmp.path().join("bb").join("bbb");
         fs::create_dir_all(&workspace_a).expect("mkdir workspace a");
         fs::create_dir_all(&workspace_b).expect("mkdir workspace b");
+        fs::create_dir_all(tmp.path().join(".git")).expect("mkdir invalid git boundary");
 
         write_session_record(
             &manager,
@@ -1618,21 +2542,215 @@ mod tests {
         let tmp = tempdir().expect("tempdir");
         let manager = SessionManager::new(tmp.path().join("sessions")).expect("new");
         let messages = vec![make_test_message("user", "checkpoint me")];
-        let session = create_saved_session(&messages, "test-model", tmp.path(), 12, None);
+        let mut session = create_saved_session(&messages, "test-model", tmp.path(), 12, None);
+        session.work_state = Some(SessionWorkState {
+            todos: crate::tools::todo::TodoListSnapshot {
+                items: vec![crate::tools::todo::TodoItem {
+                    id: 1,
+                    content: "verify checkpoint durability".to_string(),
+                    status: crate::tools::todo::TodoStatus::InProgress,
+                }],
+                completion_pct: 0,
+                in_progress_id: Some(1),
+            },
+            ..SessionWorkState::default()
+        });
 
-        manager.save_checkpoint(&session).expect("save checkpoint");
+        let path = manager.save_checkpoint(&session).expect("save checkpoint");
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some(format!("{}.json", session.metadata.id).as_str()),
+            "checkpoint file must be keyed by session id"
+        );
         let loaded = manager
-            .load_checkpoint()
+            .load_session_checkpoint(&session.metadata.id)
             .expect("load checkpoint")
             .expect("checkpoint exists");
         assert_eq!(loaded.metadata.id, session.metadata.id);
+        assert_eq!(loaded.messages, session.messages);
+        assert_eq!(
+            loaded.work_state, session.work_state,
+            "work state must survive the checkpoint round trip"
+        );
 
-        manager.clear_checkpoint().expect("clear checkpoint");
+        manager
+            .clear_session_checkpoint(&session.metadata.id)
+            .expect("clear checkpoint");
         assert!(
             manager
-                .load_checkpoint()
+                .load_session_checkpoint(&session.metadata.id)
                 .expect("load checkpoint")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn graph_backed_work_state_remains_readable_by_legacy_shape() {
+        #[derive(serde::Deserialize)]
+        struct LegacyWorkState {
+            #[serde(default)]
+            todos: crate::tools::todo::TodoListSnapshot,
+            #[serde(default)]
+            plan: crate::tools::plan::PlanSnapshot,
+        }
+
+        let fixture = include_bytes!("../tests/fixtures/work_graph_session_v1_reader.json");
+        let current: SavedSession = serde_json::from_slice(fixture).expect("current reader");
+        let state = current.work_state.expect("fixture Work state");
+        let legacy: LegacyWorkState = serde_json::from_value(
+            serde_json::from_slice::<serde_json::Value>(fixture)
+                .expect("fixture JSON")["work_state"]
+                .clone(),
+        )
+        .expect("v1 reader ignores graph");
+        assert_eq!(legacy.todos, state.todos);
+        assert_eq!(legacy.plan, state.plan);
+        let graph = state.graph.expect("fixture graph");
+        crate::work_graph::validate(&graph).expect("valid fixture graph");
+        assert_eq!(crate::work_graph::project_todos(&graph), state.todos);
+        assert_eq!(crate::work_graph::project_plan(&graph), state.plan);
+    }
+
+    #[test]
+    fn first_graph_write_archives_exact_legacy_session_once() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("new");
+        let mut session = create_saved_session(
+            &[make_test_message("user", "archive before import")],
+            "test-model",
+            tmp.path(),
+            0,
+            None,
+        );
+        let plan = crate::tools::plan::PlanSnapshot {
+            items: vec![crate::tools::plan::PlanItemArg {
+                step: "Import".to_string(),
+                status: crate::tools::plan::StepStatus::Pending,
+            }],
+            ..crate::tools::plan::PlanSnapshot::default()
+        };
+        let todos = crate::tools::todo::TodoListSnapshot::default();
+        session.work_state = Some(SessionWorkState {
+            graph: None,
+            todos: todos.clone(),
+            plan: plan.clone(),
+        });
+        let path = manager.save_session(&session).expect("save legacy session");
+        let legacy_bytes = fs::read(&path).expect("read legacy bytes");
+
+        let graph = crate::work_graph::import_legacy(&session.metadata.id, &plan, &todos)
+            .expect("import graph");
+        session.work_state = Some(SessionWorkState {
+            graph: Some(graph),
+            todos,
+            plan,
+        });
+        manager.save_session(&session).expect("first graph write");
+        let archive = manager
+            .sessions_dir
+            .join(WORK_GRAPH_IMPORT_ARCHIVE_DIR)
+            .join(path.file_name().expect("session filename"));
+        assert_eq!(fs::read(&archive).expect("archive exists"), legacy_bytes);
+
+        session.metadata.title = "later graph write".to_string();
+        manager.save_session(&session).expect("second graph write");
+        assert_eq!(
+            fs::read(&archive).expect("archive still exists"),
+            legacy_bytes,
+            "later graph writes must not replace the pre-import receipt"
+        );
+    }
+
+    #[test]
+    fn checkpoints_are_independent_per_session() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("new");
+        let first = create_saved_session(
+            &[make_test_message("user", "session one")],
+            "test-model",
+            tmp.path(),
+            0,
+            None,
+        );
+        let second = create_saved_session(
+            &[make_test_message("user", "session two")],
+            "test-model",
+            tmp.path(),
+            0,
+            None,
+        );
+
+        manager.save_checkpoint(&first).expect("save first");
+        manager.save_checkpoint(&second).expect("save second");
+        manager
+            .clear_session_checkpoint(&first.metadata.id)
+            .expect("clear first");
+
+        assert!(
+            manager
+                .load_session_checkpoint(&first.metadata.id)
+                .expect("load first")
+                .is_none(),
+            "clearing one session must remove only that session's file"
+        );
+        let survivor = manager
+            .load_session_checkpoint(&second.metadata.id)
+            .expect("load second")
+            .expect("second checkpoint survives");
+        assert_eq!(survivor.metadata.id, second.metadata.id);
+    }
+
+    #[test]
+    fn list_checkpoints_includes_legacy_slot_and_skips_offline_queue() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("new");
+        let session = create_saved_session(
+            &[make_test_message("user", "list me")],
+            "test-model",
+            tmp.path(),
+            0,
+            None,
+        );
+        manager.save_checkpoint(&session).expect("save checkpoint");
+        let checkpoints = tmp.path().join("sessions").join("checkpoints");
+        fs::write(checkpoints.join("latest.json"), "{}").expect("write legacy slot");
+        fs::write(checkpoints.join("offline_queue.json"), "{}").expect("write offline queue");
+
+        let refs = manager.list_checkpoints().expect("list checkpoints");
+        assert_eq!(refs.len(), 2, "offline queue must not be a candidate");
+        assert!(
+            refs.iter()
+                .any(|r| r.source == CheckpointSource::Session(session.metadata.id.clone()))
+        );
+        assert!(refs.iter().any(|r| r.source == CheckpointSource::Legacy));
+    }
+
+    #[test]
+    fn legacy_migration_never_overwrites_existing_per_session_checkpoint() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("new");
+        let mut session = create_saved_session(
+            &[make_test_message("user", "original")],
+            "test-model",
+            tmp.path(),
+            0,
+            None,
+        );
+        manager.save_checkpoint(&session).expect("save checkpoint");
+
+        session.messages = vec![make_test_message("user", "stale legacy copy")];
+        let written = manager
+            .write_session_checkpoint_if_absent(&session)
+            .expect("migration attempt");
+        assert!(!written, "migration must not overwrite an existing file");
+        let loaded = manager
+            .load_session_checkpoint(&session.metadata.id)
+            .expect("load")
+            .expect("checkpoint exists");
+        assert_eq!(
+            loaded.messages,
+            vec![make_test_message("user", "original")],
+            "existing per-session checkpoint content must be preserved"
         );
     }
 
@@ -1669,10 +2787,12 @@ mod tests {
             messages: vec![QueuedSessionMessage {
                 display: "queued message".to_string(),
                 skill_instruction: Some("Use skill".to_string()),
+                skill_provenance: None,
             }],
             draft: Some(QueuedSessionMessage {
                 display: "draft message".to_string(),
                 skill_instruction: None,
+                skill_provenance: None,
             }),
             ..OfflineQueueState::default()
         };
@@ -1713,6 +2833,7 @@ mod tests {
             messages: vec![QueuedSessionMessage {
                 display: "first parked".to_string(),
                 skill_instruction: None,
+                skill_provenance: None,
             }],
             ..OfflineQueueState::default()
         };
@@ -1813,7 +2934,16 @@ mod tests {
         )
         .expect("write checkpoint");
 
-        let err = manager.load_checkpoint().expect_err("should reject schema");
+        let err = manager
+            .load_legacy_checkpoint()
+            .expect_err("should reject schema");
+        assert!(err.to_string().contains("newer than supported"));
+
+        // The same guard applies to per-session checkpoint files.
+        fs::rename(&path, checkpoints.join("sid.json")).expect("rename to per-session file");
+        let err = manager
+            .load_session_checkpoint("sid")
+            .expect_err("should reject schema");
         assert!(err.to_string().contains("newer than supported"));
     }
 
@@ -1935,6 +3065,7 @@ mod tests {
 
         let session: SavedSession = serde_json::from_str(json).expect("legacy session loads");
         assert!(session.artifacts.is_empty());
+        assert!(session.last_auto_route.is_none());
         assert!(session.metadata.parent_session_id.is_none());
         assert!(session.metadata.forked_from_message_count.is_none());
     }
@@ -1972,7 +3103,9 @@ mod tests {
             Some(parent.metadata.id.as_str())
         );
         assert_eq!(loaded.metadata.forked_from_message_count, Some(2));
-        assert!(format_session_line(&loaded.metadata).contains("fork "));
+        let line = format_session_line(&loaded.metadata);
+        assert!(line.contains("fork"));
+        assert!(!line.contains(parent.metadata.id.as_str()));
     }
 
     #[test]

@@ -9,19 +9,79 @@ use windows::Win32::Foundation::{DUPLICATE_HANDLE_OPTIONS, DuplicateHandle, HAND
 #[cfg(windows)]
 use windows::Win32::System::Threading::GetCurrentProcess;
 
-// `env_lock` exists only to serialize Unix-only env-mutating tests.
-// Windows builds gate that test out, so the helper would be dead code
-// under `-Dwarnings` if the import + helper were unconditional.
-#[cfg(unix)]
+// `env_lock` serializes tests that mutate the process environment.
+#[cfg(any(unix, windows))]
 use std::sync::{Mutex, OnceLock};
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
 const BACKGROUND_COMPLETION_WAIT_MS: u64 = 30_000;
+
+#[test]
+fn deleted_saved_workspace_reports_path_and_recovery_before_spawn() {
+    let workspace = tempdir().expect("workspace");
+    let stale = workspace.path().join("deleted-session-workspace");
+    let mut manager = ShellManager::new(stale.clone());
+
+    let error = manager
+        .execute("echo should-not-run", None, 1_000, false)
+        .expect_err("missing saved workspace must fail before shell spawn");
+    let message = error.to_string();
+    assert!(message.contains("saved session workspace is unavailable"));
+    assert!(message.contains(&stale.display().to_string()));
+    assert!(message.contains("working_dir") || message.contains("cwd"));
+    assert!(message.contains("resume/fork"));
+}
+
+#[test]
+fn explicit_missing_working_dir_is_not_misreported_as_session_corruption() {
+    let workspace = tempdir().expect("workspace");
+    let missing = workspace.path().join("explicit-missing");
+    let mut manager = ShellManager::new(workspace.path().to_path_buf());
+
+    let error = manager
+        .execute("echo should-not-run", missing.to_str(), 1_000, false)
+        .expect_err("missing explicit cwd must fail before shell spawn");
+    let message = error.to_string();
+    assert!(message.contains("requested working directory is unavailable"));
+    assert!(message.contains(&missing.display().to_string()));
+    assert!(!message.contains("saved session workspace"));
+}
+
+#[cfg(not(target_env = "ohos"))]
+#[test]
+fn pty_exit_status_preserves_high_windows_code_losslessly() {
+    let raw = 0xC000_0005;
+    let status = ShellExitStatus::from_pty(portable_pty::ExitStatus::with_exit_code(raw));
+
+    assert!(!status.success);
+    assert_eq!(status.code, Some(i64::from(raw)));
+    assert_eq!(
+        exit_code_label(status.code),
+        "exit code 3221225477 (0xC0000005)"
+    );
+    assert_eq!(exit_code_hex(status.code).as_deref(), Some("0xC0000005"));
+}
+
+#[cfg(not(target_env = "ohos"))]
+#[test]
+fn ordinary_pty_exit_status_keeps_concise_label() {
+    let status = ShellExitStatus::from_pty(portable_pty::ExitStatus::with_exit_code(127));
+
+    assert_eq!(status.code, Some(127));
+    assert_eq!(exit_code_label(status.code), "exit code 127");
+    assert_eq!(exit_code_hex(status.code), None);
+}
+
+#[cfg(windows)]
+#[test]
+fn std_windows_exit_status_reinterprets_signed_dword() {
+    assert_eq!(std_exit_code_i64(0xC000_0005_u32 as i32), 0xC000_0005);
+}
 
 #[cfg(windows)]
 const JOB_OBJECT_QUERY_ACCESS: u32 = 0x0004;
@@ -134,6 +194,60 @@ fn failed_network_shell_result(stdout: &str, stderr: &str) -> ShellResult {
     }
 }
 
+#[cfg(unix)]
+const SHELL_DESCENDANT_HELPER_ENV: &str = "CODEWHALE_SHELL_DESCENDANT_HELPER";
+#[cfg(unix)]
+const SHELL_DESCENDANT_PID_FILE_ENV: &str = "CODEWHALE_SHELL_DESCENDANT_PID_FILE";
+
+#[cfg(unix)]
+#[test]
+fn shell_descendant_helper_process() {
+    if std::env::var(SHELL_DESCENDANT_HELPER_ENV).ok().as_deref() != Some("1") {
+        return;
+    }
+    let pid_file =
+        PathBuf::from(std::env::var(SHELL_DESCENDANT_PID_FILE_ENV).expect("descendant pid file"));
+    let child = Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn cheap descendant");
+    std::fs::write(pid_file, child.id().to_string()).expect("write descendant pid");
+    std::thread::sleep(Duration::from_secs(30));
+}
+
+#[cfg(unix)]
+fn wait_for_shell_pid_file(path: &Path) -> libc::pid_t {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(raw) = std::fs::read_to_string(path)
+            && let Ok(pid) = raw.trim().parse()
+        {
+            return pid;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "descendant pid file never appeared"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_shell_pid_exit(pid: libc::pid_t) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if unsafe { libc::kill(pid, 0) } != 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn wait_for_completed_shell(manager: &mut ShellManager, task_id: &str) -> ShellResult {
     let deadline = Instant::now() + Duration::from_millis(BACKGROUND_COMPLETION_WAIT_MS);
 
@@ -149,8 +263,71 @@ fn wait_for_completed_shell(manager: &mut ShellManager, task_id: &str) -> ShellR
 }
 
 #[test]
+fn shell_owner_registers_before_spawn_and_silent_work_stays_live() {
+    let work = crate::work_graph::new_shared_work_runtime(
+        crate::tools::todo::new_shared_todo_list(),
+        crate::tools::plan::new_shared_plan_state(),
+    );
+    let lifecycle = ShellWorkLifecycle {
+        work: work.clone(),
+        session_id: "shell-session".to_string(),
+    };
+
+    {
+        let _guard = ShellSpawnIntentGuard::new(
+            Some(lifecycle.clone()),
+            "shell_spawn_failure",
+            "missing-program",
+        )
+        .expect("register spawn intent");
+    }
+    lifecycle
+        .register("shell_silent", "sleep 30")
+        .expect("register silent shell");
+    lifecycle
+        .observe("shell_silent", &ShellStatus::Running, 1, 0)
+        .expect("live owner observation");
+    lifecycle
+        .observe("shell_silent", &ShellStatus::Running, 2, 512)
+        .expect("growing output observation");
+
+    let graph = work
+        .capture(Some("shell-session"))
+        .expect("capture")
+        .expect("graph")
+        .graph;
+    let operation = |external: &str| {
+        graph.nodes.iter().find(|node| {
+            node.binding
+                .as_ref()
+                .is_some_and(|binding| binding.external == external)
+        })
+    };
+    assert_eq!(
+        operation("shell:shell_spawn_failure").map(|node| node.state),
+        Some(crate::work_graph::NodeState::Failed),
+        "dropping an armed spawn guard must terminalize pre-spawn failure"
+    );
+    let silent = operation("shell:shell_silent").expect("silent shell operation");
+    assert_eq!(silent.state, crate::work_graph::NodeState::Active);
+    let observation = silent
+        .binding
+        .as_ref()
+        .and_then(|binding| binding.last_observation.as_ref())
+        .expect("last shell observation");
+    assert_eq!(observation.seq, 2);
+    assert_eq!(
+        observation
+            .output
+            .as_ref()
+            .and_then(crate::work_graph::EvidenceRef::raw_bytes),
+        Some(512)
+    );
+}
+
+#[test]
 fn exec_shell_parallel_flags_are_input_aware() {
-    let tool = ExecShellTool;
+    let tool = BashTool::new("Bash");
     let readonly = json!({"command": "git status -s"});
     assert!(tool.supports_parallel_for(&readonly));
     assert!(tool.is_read_only_for(&readonly));
@@ -168,10 +345,32 @@ fn exec_shell_parallel_flags_are_input_aware() {
     );
 
     for input in [
+        json!({"command": "fd -e rs ."}),
+        json!({"command": "fd -H --type f src"}),
+        json!({"command": "git grep TODO crates/tui/src/tools"}),
+        json!({"command": "bash -lc 'fd -e toml .'"}),
+        json!({"command": "bash -lc 'git grep TODO crates/tui/src/tools'"}),
+    ] {
+        assert!(tool.supports_parallel_for(&input), "{input:?}");
+        assert!(tool.is_read_only_for(&input), "{input:?}");
+        assert_eq!(
+            tool.approval_requirement_for(&input),
+            ApprovalRequirement::Auto,
+            "{input:?}"
+        );
+    }
+
+    for input in [
         json!({"command": "git status -s", "background": true}),
         json!({"command": "git status -s", "stdin": ""}),
         json!({"command": "cargo build"}),
         json!({"command": "bash -lc 'rg TODO crates | head'"}),
+        json!({"command": "fd -x ./pwn.sh"}),
+        json!({"command": "fd --exec ./pwn.sh"}),
+        json!({"command": "fd -uHtx ./pwn.sh"}),
+        json!({"command": "rg --pre /tmp/evil.sh needle ."}),
+        json!({"command": "git grep -O needle"}),
+        json!({"command": "git grep -nO needle"}),
     ] {
         assert!(!tool.supports_parallel_for(&input), "{input:?}");
         assert!(!tool.is_read_only_for(&input), "{input:?}");
@@ -198,6 +397,269 @@ fn exec_shell_parallel_flags_are_input_aware() {
         "background": true,
         "interactive": true
     })));
+}
+
+#[test]
+fn exec_shell_interact_requires_approval() {
+    let tool = BashTool::alias("exec_shell_interact", "interact");
+    assert_eq!(tool.approval_requirement(), ApprovalRequirement::Required);
+    assert!(
+        tool.capabilities()
+            .contains(&ToolCapability::RequiresApproval)
+    );
+}
+
+#[tokio::test]
+async fn read_only_shell_policy_blocks_non_readonly_commands() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    let tool = BashTool::new("Bash");
+
+    let result = tool
+        .execute(json!({"command": "cargo build"}), &ctx)
+        .await
+        .expect("execute");
+    assert!(!result.success);
+    assert!(result.content.contains("read-only shell policy"));
+
+    let result = tool
+        .execute(
+            json!({"command": "git status -s", "background": true}),
+            &ctx,
+        )
+        .await
+        .expect("execute");
+    assert!(!result.success);
+    assert!(result.content.contains("read-only shell policy"));
+}
+
+#[tokio::test]
+async fn read_only_shell_policy_allows_readonly_inspection() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+
+    let result = BashTool::new("Bash")
+        .execute(json!({"command": "pwd"}), &ctx)
+        .await
+        .expect("execute");
+
+    assert!(
+        result.success,
+        "unexpected shell failure: {}",
+        result.content
+    );
+    assert_eq!(
+        result
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("status"))
+            .and_then(Value::as_str),
+        Some("Completed")
+    );
+}
+
+#[tokio::test]
+async fn exec_shell_multiline_block_explains_allow_shell_boundary() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path());
+
+    let result = BashTool::new("Bash")
+        .execute(
+            json!({"command": "python3 -c \"print(1)\nprint(2)\""}),
+            &ctx,
+        )
+        .await
+        .expect("execute");
+
+    assert!(!result.success);
+    assert!(result.content.contains("Command contains multiple lines"));
+    assert!(
+        result
+            .content
+            .contains("allow_shell=true exposes shell tools"),
+        "{}",
+        result.content
+    );
+    assert!(
+        result
+            .content
+            .contains("Write multiline scripts to a file first"),
+        "{}",
+        result.content
+    );
+    assert!(
+        result.content.contains("task_shell_start"),
+        "{}",
+        result.content
+    );
+}
+
+#[test]
+fn exec_shell_wait_schema_defaults_to_nonblocking_snapshot() {
+    let schema = BashTool::alias("exec_shell_wait", "wait").input_schema();
+    assert!(schema["properties"]["wait"].is_object());
+    assert!(
+        BashTool::alias("exec_shell_wait", "wait")
+            .description()
+            .contains("wait")
+    );
+}
+
+#[tokio::test]
+async fn exec_shell_wait_without_wait_arg_returns_snapshot() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path());
+    let start_result = BashTool::new("Bash")
+        .execute(
+            json!({"command": sleep_command(2), "background": true}),
+            &ctx,
+        )
+        .await
+        .expect("start background");
+    let task_id = start_result
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("task_id"))
+        .and_then(Value::as_str)
+        .expect("task id")
+        .to_string();
+
+    let started = Instant::now();
+    let wait_result = BashTool::alias("exec_shell_wait", "wait")
+        .execute(json!({"task_id": task_id, "timeout_ms": 5_000}), &ctx)
+        .await
+        .expect("wait snapshot");
+
+    assert!(
+        started.elapsed() < Duration::from_millis(1_000),
+        "default wait path should return a snapshot instead of blocking"
+    );
+    assert_eq!(
+        wait_result
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("status"))
+            .and_then(Value::as_str),
+        Some("Running")
+    );
+}
+
+#[tokio::test]
+async fn background_start_advertises_task_status_completion() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path());
+    let result = BashTool::new("Bash")
+        .execute(
+            json!({"command": sleep_command(1), "background": true}),
+            &ctx,
+        )
+        .await
+        .expect("start background");
+
+    assert!(result.content.contains("completion is delivered"));
+    let metadata = result.metadata.as_ref().expect("metadata");
+    assert_eq!(
+        metadata
+            .get("auto_resume_on_completion")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        metadata.get("completion_surface").and_then(Value::as_str),
+        Some("runtime_event_and_task_status")
+    );
+    assert_eq!(
+        metadata.get("background_policy").and_then(Value::as_str),
+        Some("nonblocking")
+    );
+}
+
+#[tokio::test]
+async fn background_shell_job_carries_subagent_owner() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path()).with_owner_agent("agent_owner", "verifier");
+    let result = BashTool::new("Bash")
+        .execute(
+            json!({"command": sleep_command(2), "background": true}),
+            &ctx,
+        )
+        .await
+        .expect("start owned background shell");
+
+    let metadata = result.metadata.as_ref().expect("metadata");
+    assert_eq!(
+        metadata.get("owner_agent_id").and_then(Value::as_str),
+        Some("agent_owner")
+    );
+    assert_eq!(
+        metadata.get("owner_agent_name").and_then(Value::as_str),
+        Some("verifier")
+    );
+    let task_id = metadata
+        .get("task_id")
+        .and_then(Value::as_str)
+        .expect("task id")
+        .to_string();
+
+    {
+        let mut manager = ctx.shell_manager.lock().expect("shell manager");
+        let snapshot = manager
+            .list_jobs()
+            .into_iter()
+            .find(|job| job.id == task_id)
+            .expect("owned shell job snapshot");
+        assert_eq!(snapshot.owner_agent_id.as_deref(), Some("agent_owner"));
+        assert_eq!(snapshot.owner_agent_name.as_deref(), Some("verifier"));
+        let owners = manager.running_owner_agent_ids();
+        assert_eq!(owners, vec!["agent_owner".to_string()]);
+    }
+
+    BashTool::alias("exec_shell_cancel", "cancel")
+        .execute(json!({"task_id": task_id}), &ctx)
+        .await
+        .expect("cancel owned background shell");
+}
+
+#[tokio::test]
+async fn drain_finished_jobs_reports_once() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path());
+    let result = BashTool::new("Bash")
+        .execute(
+            json!({"command": echo_command("drain-finished-once"), "background": true}),
+            &ctx,
+        )
+        .await
+        .expect("start background");
+    let task_id = result
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("task_id"))
+        .and_then(Value::as_str)
+        .expect("task id")
+        .to_string();
+
+    let mut manager = ctx.shell_manager.lock().expect("shell manager");
+    assert!(manager.may_have_undelivered_completion());
+    assert!(
+        manager.may_have_undelivered_completion(),
+        "read-only detection must not consume the pending completion"
+    );
+    let completed = wait_for_completed_shell(&mut manager, &task_id);
+    assert_ne!(completed.status, ShellStatus::Running);
+    assert!(manager.may_have_undelivered_completion());
+
+    let first = manager.drain_finished_jobs();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].task_id, task_id);
+    assert_eq!(first[0].status, ShellStatus::Completed);
+    assert!(first[0].stdout_tail.contains("drain-finished-once"));
+
+    let second = manager.drain_finished_jobs();
+    assert!(second.is_empty(), "completion should be reported only once");
+    assert!(!manager.may_have_undelivered_completion());
 }
 
 #[test]
@@ -241,6 +703,58 @@ fn shell_execution_scrubs_parent_env_and_keeps_explicit_env() {
 
     assert_eq!(result.status, ShellStatus::Completed);
     assert_eq!(result.stdout, "unset\nexplicit-value\n");
+}
+
+#[test]
+#[cfg(windows)]
+fn shell_execution_preserves_custom_windows_sdk_root_env() {
+    let _guard = env_lock().lock().expect("env lock");
+    let previous_sdk = std::env::var_os("BIMRV_SDK_ROOT");
+    let previous_secret = std::env::var_os("MY_SECRET_ROOT");
+    unsafe {
+        std::env::set_var("BIMRV_SDK_ROOT", r"F:\Lib\BimRv27.5");
+        std::env::set_var("MY_SECRET_ROOT", r"F:\Secrets");
+    }
+
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+    let command = if crate::shell_dispatcher::global_dispatcher()
+        .kind()
+        .is_powershell()
+    {
+        r#"[Console]::WriteLine($env:BIMRV_SDK_ROOT); if ($null -eq $env:MY_SECRET_ROOT) { [Console]::WriteLine("secret-unset") } else { [Console]::WriteLine("secret-set") }"#
+            .to_string()
+    } else {
+        r#"echo %BIMRV_SDK_ROOT% & if defined MY_SECRET_ROOT (echo secret-set) else (echo secret-unset)"#
+            .to_string()
+    };
+
+    let result = manager
+        .execute(&command, None, 5000, false)
+        .expect("execute");
+
+    unsafe {
+        match previous_sdk {
+            Some(value) => std::env::set_var("BIMRV_SDK_ROOT", value),
+            None => std::env::remove_var("BIMRV_SDK_ROOT"),
+        }
+        match previous_secret {
+            Some(value) => std::env::set_var("MY_SECRET_ROOT", value),
+            None => std::env::remove_var("MY_SECRET_ROOT"),
+        }
+    }
+
+    assert_eq!(result.status, ShellStatus::Completed);
+    assert!(
+        result.stdout.contains(r"F:\Lib\BimRv27.5"),
+        "custom SDK root should reach exec_shell stdout: {:?}",
+        result
+    );
+    assert!(
+        result.stdout.contains("secret-unset"),
+        "secret-like env should stay scrubbed: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -421,6 +935,57 @@ fn test_job_list_poll_cancel_and_stale_snapshot() {
 }
 
 #[test]
+fn running_job_snapshot_marks_no_output_stale_after_threshold() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+
+    let started = manager
+        .execute(&sleep_command(5), None, 5000, true)
+        .expect("execute");
+    let task_id = started.task_id.expect("task id");
+
+    {
+        let shell = manager.processes.get_mut(&task_id).expect("live shell");
+        shell.last_output_at = Instant::now() - STALE_NO_OUTPUT_AFTER - Duration::from_millis(1);
+    }
+
+    let job = manager
+        .list_jobs()
+        .into_iter()
+        .find(|job| job.id == task_id)
+        .expect("running job");
+
+    assert_eq!(job.status, ShellStatus::Running);
+    assert!(job.stale, "silent running job should be marked stale");
+    assert!(
+        job.elapsed_since_output_ms
+            .is_some_and(|elapsed| elapsed >= STALE_NO_OUTPUT_AFTER.as_millis() as u64),
+        "elapsed no-output time should be exposed: {job:?}"
+    );
+}
+
+#[test]
+fn running_job_snapshot_keeps_recent_no_output_fresh() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+
+    let started = manager
+        .execute(&sleep_command(5), None, 5000, true)
+        .expect("execute");
+    let task_id = started.task_id.expect("task id");
+
+    let job = manager
+        .list_jobs()
+        .into_iter()
+        .find(|job| job.id == task_id)
+        .expect("running job");
+
+    assert_eq!(job.status, ShellStatus::Running);
+    assert!(!job.stale, "fresh running job should not start stale");
+    assert!(job.elapsed_since_output_ms.is_some());
+}
+
+#[test]
 fn test_job_cancel_updates_completion_state() {
     let tmp = tempdir().expect("tempdir");
     let mut manager = ShellManager::new(tmp.path().to_path_buf());
@@ -507,6 +1072,35 @@ fn shell_delta_result_surfaces_network_restricted_hint() {
             .and_then(Value::as_bool),
         Some(true)
     );
+}
+
+#[test]
+fn shell_delta_result_exposes_lossless_high_exit_code_and_hex() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path());
+    let mut result = failed_network_shell_result("", "");
+    result.exit_code = Some(0xC000_0005);
+
+    let tool_result = build_shell_delta_tool_result(
+        ShellDeltaResult {
+            command: "echo probe".to_string(),
+            result,
+            stdout_total_len: 0,
+            stderr_total_len: 0,
+        },
+        &ctx,
+    );
+
+    assert!(
+        tool_result
+            .content
+            .contains("exit code 3221225477 (0xC0000005)"),
+        "{}",
+        tool_result.content
+    );
+    let metadata = tool_result.metadata.expect("metadata");
+    assert_eq!(metadata["exit_code"], json!(3221225477_i64));
+    assert_eq!(metadata["exit_code_hex"], json!("0xC0000005"));
 }
 
 #[test]
@@ -601,6 +1195,58 @@ fn shell_delta_result_keeps_existing_summary_for_generic_cargo_failure() {
 }
 
 #[test]
+fn shell_delta_result_surfaces_python_build_dependency_hint() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path());
+    let result = ShellResult {
+        task_id: None,
+        status: ShellStatus::Failed,
+        exit_code: Some(1),
+        stdout: String::new(),
+        stderr: "running build_ext\nModuleNotFoundError: No module named 'setuptools'\n"
+            .to_string(),
+        duration_ms: 12,
+        stdout_len: 0,
+        stderr_len: 72,
+        stdout_omitted: 0,
+        stderr_omitted: 0,
+        stdout_truncated: false,
+        stderr_truncated: false,
+        sandboxed: false,
+        sandbox_type: None,
+        sandbox_denied: false,
+    };
+
+    let tool_result = build_shell_delta_tool_result(
+        ShellDeltaResult {
+            command: "python setup.py build_ext --inplace".to_string(),
+            result,
+            stdout_total_len: 0,
+            stderr_total_len: 72,
+        },
+        &ctx,
+    );
+
+    assert!(!tool_result.success);
+    assert!(
+        tool_result
+            .content
+            .starts_with("Python build dependency missing")
+    );
+    let metadata = tool_result.metadata.expect("metadata");
+    assert_eq!(
+        metadata["python_build_dependency_hint"]["kind"],
+        json!("missing_setuptools")
+    );
+    assert!(
+        metadata["python_build_dependency_hint"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("setuptools")
+    );
+}
+
+#[test]
 fn test_summarize_output_strips_truncation_note() {
     let long_output = "x".repeat(60_000);
     let (truncated, _meta) = truncate_with_meta(&long_output);
@@ -612,7 +1258,7 @@ fn test_summarize_output_strips_truncation_note() {
 async fn test_exec_shell_metadata_includes_summaries() {
     let tmp = tempdir().expect("tempdir");
     let ctx = ToolContext::new(tmp.path());
-    let tool = ExecShellTool;
+    let tool = BashTool::new("Bash");
 
     let result = tool
         .execute(json!({"command": echo_command("hello")}), &ctx)
@@ -636,7 +1282,7 @@ async fn test_exec_shell_metadata_includes_summaries() {
 async fn test_exec_shell_combined_output_uses_single_stream() {
     let tmp = tempdir().expect("tempdir");
     let ctx = ToolContext::new(tmp.path());
-    let tool = ExecShellTool;
+    let tool = BashTool::new("Bash");
     let command = "printf 'out\\n'; printf 'err\\n' >&2";
 
     let result = tool
@@ -658,7 +1304,7 @@ async fn test_exec_shell_combined_output_uses_single_stream() {
 async fn test_exec_shell_foreground_timeout_guides_background_rerun() {
     let tmp = tempdir().expect("tempdir");
     let ctx = ToolContext::new(tmp.path());
-    let tool = ExecShellTool;
+    let tool = BashTool::new("Bash");
 
     let result = tool
         .execute(
@@ -697,13 +1343,11 @@ async fn test_exec_shell_foreground_timeout_guides_background_rerun() {
 
 #[test]
 fn test_exec_shell_schema_guides_gt_five_second_work_to_background() {
-    let schema = ExecShellTool.input_schema();
+    let schema = BashTool::new("Bash").input_schema();
     let description = schema["properties"]["background"]["description"]
         .as_str()
         .expect("background description");
     assert!(description.contains(">5 seconds"), "{description}");
-    assert!(description.contains("task_shell_start"), "{description}");
-    assert!(description.contains("exec_shell_wait"), "{description}");
 }
 
 #[tokio::test]
@@ -714,7 +1358,7 @@ async fn test_exec_shell_foreground_cancel_kills_process() {
     let command = sleep_command(30);
 
     let task = tokio::spawn(async move {
-        ExecShellTool
+        BashTool::new("Bash")
             .execute(
                 json!({
                     "command": command,
@@ -750,7 +1394,7 @@ async fn test_exec_shell_foreground_can_move_to_background() {
     let task_ctx = ctx.clone();
 
     let task = tokio::spawn(async move {
-        ExecShellTool
+        BashTool::new("Bash")
             .execute(
                 json!({
                     "command": command,
@@ -774,8 +1418,14 @@ async fn test_exec_shell_foreground_can_move_to_background() {
         .expect("task should not panic");
 
     assert!(result.success);
-    assert!(result.content.contains("Command moved to background"));
-    assert!(result.content.contains("exec_shell_cancel"));
+    assert!(
+        result
+            .content
+            .contains("Foreground shell wait moved to /jobs")
+    );
+    // The detach message points the model at the wait tool for early output
+    // (the cancel-tool reference was reworded to `exec_shell_wait`).
+    assert!(result.content.contains("exec_shell_wait"));
 
     let meta = result.metadata.expect("metadata");
     assert_eq!(meta.get("status").and_then(Value::as_str), Some("Running"));
@@ -812,7 +1462,7 @@ async fn test_exec_shell_wait_cancel_leaves_background_process_running() {
     let task_ctx = ctx.clone();
 
     let task = tokio::spawn(async move {
-        ShellWaitTool::new("exec_shell_wait")
+        BashTool::alias("exec_shell_wait", "wait")
             .execute(
                 json!({
                     "task_id": wait_task_id,
@@ -861,7 +1511,7 @@ async fn test_completed_background_shell_releases_process_handles() {
         .expect("execute");
     let task_id = started.task_id.expect("task id");
 
-    let result = ShellWaitTool::new("exec_shell_wait")
+    let result = BashTool::alias("exec_shell_wait", "wait")
         .execute(
             json!({
                 "task_id": task_id.clone(),
@@ -886,6 +1536,44 @@ async fn test_completed_background_shell_releases_process_handles() {
     assert!(shell.stderr_thread.is_none());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn exec_shell_cancel_kills_descendant_process_group() {
+    let tmp = tempdir().expect("tempdir");
+    let pid_file = tmp.path().join("descendant.pid");
+    let test_binary = std::env::current_exe().expect("current test binary");
+    let command = format!(
+        "{} --exact {} --nocapture",
+        shell_words::quote(&test_binary.display().to_string()),
+        shell_words::quote("tools::shell::tests::shell_descendant_helper_process"),
+    );
+    let ctx = ToolContext::new(tmp.path());
+    let mut env = std::collections::HashMap::new();
+    env.insert(SHELL_DESCENDANT_HELPER_ENV.to_string(), "1".to_string());
+    env.insert(
+        SHELL_DESCENDANT_PID_FILE_ENV.to_string(),
+        pid_file.display().to_string(),
+    );
+    let started = ctx
+        .shell_manager
+        .lock()
+        .expect("shell manager")
+        .execute_with_options_env(&command, None, 60_000, true, None, false, None, env)
+        .expect("start descendant tree");
+    let task_id = started.task_id.expect("task id");
+    let descendant = wait_for_shell_pid_file(&pid_file);
+
+    let result = BashTool::alias("exec_shell_cancel", "cancel")
+        .execute(json!({"task_id": task_id}), &ctx)
+        .await
+        .expect("cancel process group");
+    assert!(result.success);
+    assert!(
+        wait_for_shell_pid_exit(descendant),
+        "descendant {descendant} survived shell process-group cancellation"
+    );
+}
+
 #[tokio::test]
 async fn test_exec_shell_cancel_tool_kills_background_process() {
     let tmp = tempdir().expect("tempdir");
@@ -898,7 +1586,7 @@ async fn test_exec_shell_cancel_tool_kills_background_process() {
         .expect("execute");
     let task_id = started.task_id.expect("task id");
 
-    let result = ShellCancelTool
+    let result = BashTool::alias("exec_shell_cancel", "cancel")
         .execute(json!({ "task_id": task_id }), &ctx)
         .await
         .expect("cancel");
@@ -937,7 +1625,7 @@ async fn test_exec_shell_cancel_tool_can_kill_all_running_processes() {
         .task_id
         .expect("second task id");
 
-    let result = ShellCancelTool
+    let result = BashTool::alias("exec_shell_cancel", "cancel")
         .execute(json!({ "all": true }), &ctx)
         .await
         .expect("cancel all");
@@ -1203,6 +1891,53 @@ fn windows_job_kill_on_close_releases_reader_threads_when_terminate_denied() {
     assert_eq!(done.status, ShellStatus::Completed);
 }
 
+#[cfg(windows)]
+#[test]
+fn killed_shell_does_not_wait_for_blocked_reader_threads() {
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let stdout_thread = std::thread::spawn(move || {
+        let _ = release_rx.recv();
+    });
+    let now = std::time::Instant::now();
+    let mut shell = BackgroundShell {
+        id: "killed-reader".to_string(),
+        command: "test".to_string(),
+        working_dir: std::path::PathBuf::from("."),
+        status: ShellStatus::Killed,
+        exit_code: None,
+        started_at: now,
+        last_output_at: now,
+        last_observed_output_len: 0,
+        sandbox_type: SandboxType::None,
+        linked_task_id: None,
+        owner_agent: None,
+        stdout_buffer: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        stderr_buffer: None,
+        heavy_permit: None,
+        stdout_cursor: 0,
+        stderr_cursor: 0,
+        completion_reported: false,
+        stdin: None,
+        child: None,
+        windows_job: None,
+        stdout_thread: Some(stdout_thread),
+        stderr_thread: None,
+        work_lifecycle: None,
+        lifecycle_seq: 0,
+        last_lifecycle_status: None,
+        last_lifecycle_bytes: 0,
+    };
+
+    let started = std::time::Instant::now();
+    shell.collect_output();
+
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "killed shell must not synchronously join a blocked reader"
+    );
+    release_tx.send(()).expect("release detached reader");
+}
+
 #[test]
 fn test_list_jobs_cleans_up_completed_old_processes() {
     let tmp = tempdir().expect("tempdir");
@@ -1239,40 +1974,27 @@ fn issue_1691_quoted_commit_message_round_trips() {
 
     let dispatcher = crate::shell_dispatcher::global_dispatcher();
     // The whole command (with quotes) is a single argv entry. The actual
-    // shell binary can vary by platform, but the payload itself must stay
-    // intact in one shell arg. We never split the command string ourselves.
+    // shell binary can vary by platform — and the dispatcher may wrap the
+    // payload (encoding prefix, exit-code capture) — but the payload itself
+    // must stay intact in ONE shell arg. We never split the command string
+    // ourselves. This single-line ASCII command never takes the PowerShell
+    // temp `-File` path, so the payload stays on the argv.
     assert_eq!(spec.program, dispatcher.kind().binary());
-    if dispatcher.kind().is_powershell() {
-        assert_eq!(
-            spec.args,
-            [
-                dispatcher.kind().command_flag().to_string(),
-                "-Command".to_string(),
-                format!("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; {cmd}")
-            ]
-        );
-    } else if matches!(dispatcher.kind(), crate::shell_dispatcher::ShellKind::Cmd) {
-        assert_eq!(
-            spec.args,
-            ["/C".to_string(), format!("chcp 65001 >NUL & {cmd}")]
-        );
-    } else {
-        assert_eq!(
-            spec.args,
-            [
-                dispatcher.kind().command_flag().to_string(),
-                cmd.to_string()
-            ]
-        );
-    }
-    assert_eq!(
-        spec.args.len(),
-        if dispatcher.kind().is_powershell() {
-            3
-        } else {
-            2
-        }
+    let carriers = spec
+        .args
+        .iter()
+        .filter(|arg| arg.contains(r#""feat: complete sub-pages""#))
+        .count();
+    assert_eq!(carriers, 1, "args: {:?}", spec.args);
+    assert!(
+        !spec
+            .args
+            .iter()
+            .any(|arg| arg == "feat:" || arg == "complete" || arg == "sub-pages\""),
+        "args: {:?}",
+        spec.args
     );
+    assert_eq!(spec.display_command(), cmd);
 
     let mut built = Command::new(&spec.program);
     push_shell_args(&mut built, &spec.program, &spec.args);
@@ -1281,4 +2003,48 @@ fn issue_1691_quoted_commit_message_round_trips() {
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
     assert_eq!(got, spec.args);
+}
+
+/// When no `cwd` is provided, the shell should run in `context.workspace`,
+/// not in the ShellManager's default_workspace. This ensures sub-agents in
+/// worktrees run commands in the worktree directory rather than the parent.
+///
+/// Without the `context.workspace` default (stashed): runs in sm_dir → FAILS
+/// With the `context.workspace` default (unstashed): runs in ctx_dir → PASSES
+#[tokio::test]
+async fn default_cwd_uses_context_workspace_not_shell_manager_default() {
+    let ctx_dir = tempdir().expect("ctx tempdir");
+    let sm_dir = tempdir().expect("sm tempdir");
+
+    // Create distinct dirs — write a marker in each so we can tell them apart.
+    std::fs::write(ctx_dir.path().join("I_AM_CTX_DIR"), "").unwrap();
+    std::fs::write(sm_dir.path().join("I_AM_SM_DIR"), "").unwrap();
+
+    // ToolContext whose workspace is ctx_dir...
+    let ctx = ToolContext::new(ctx_dir.path())
+        // ...but whose ShellManager's default_workspace is sm_dir.
+        .with_shell_manager(new_shared_shell_manager(sm_dir.path().to_path_buf()));
+
+    // Assert directory identity through marker files instead of comparing the
+    // shell's printed path. PowerShell and `canonicalize` can spell the same
+    // Windows path differently (for example, with a verbatim-path prefix).
+    let command = if cfg!(windows) {
+        "if (Test-Path -LiteralPath 'I_AM_CTX_DIR') { Write-Output 'context-workspace' } elseif (Test-Path -LiteralPath 'I_AM_SM_DIR') { Write-Output 'manager-workspace' } else { Write-Output 'missing-workspace' }"
+    } else {
+        "if [ -f I_AM_CTX_DIR ]; then printf 'context-workspace'; elif [ -f I_AM_SM_DIR ]; then printf 'manager-workspace'; else printf 'missing-workspace'; fi"
+    };
+    let result = BashTool::new("Bash")
+        .execute(json!({"command": command}), &ctx)
+        .await
+        .expect("shell execute");
+    assert!(result.success, "command failed: {:?}", result.content);
+
+    assert!(
+        result
+            .content
+            .lines()
+            .any(|line| line.trim() == "context-workspace"),
+        "expected context.workspace marker, but shell reported: {:?}",
+        result.content
+    );
 }

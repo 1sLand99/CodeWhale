@@ -5,12 +5,12 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use super::CommandResult;
+use crate::commands::CommandResult;
 
 const USAGE: &str = "/note <text> | /note add <text> | /note list | /note show <n> | /note edit <n> <text> | /note remove <n> | /note clear | /note path";
 
 /// Manage the persistent workspace notes file.
-pub fn note(app: &mut App, content: Option<&str>) -> CommandResult {
+fn note(app: &mut App, content: Option<&str>) -> CommandResult {
     let input = match content {
         Some(c) => c.trim(),
         None => {
@@ -266,6 +266,29 @@ fn parse_note_index(rest: Option<&str>, note_count: usize, usage: &str) -> Resul
     Ok(index - 1)
 }
 
+pub(in crate::commands) const COMMAND_INFO: crate::commands::traits::CommandInfo =
+    crate::commands::traits::CommandInfo {
+        name: "note",
+        aliases: &[],
+        usage: "/note [add|list|show|edit|remove|clear|path]",
+        description_id: crate::localization::MessageId::CmdNoteDescription,
+    };
+
+pub(in crate::commands) struct NoteCmd;
+
+impl crate::commands::traits::RegisterCommand for NoteCmd {
+    fn info() -> &'static crate::commands::traits::CommandInfo {
+        &COMMAND_INFO
+    }
+
+    fn execute(
+        app: &mut crate::tui::app::App,
+        arg: Option<&str>,
+    ) -> crate::commands::CommandResult {
+        note(app, arg)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,25 +299,11 @@ mod tests {
 
     fn create_test_app_with_tmpdir(tmpdir: &TempDir) -> App {
         let options = TuiOptions {
-            model: "deepseek-v4-pro".to_string(),
-            workspace: tmpdir.path().to_path_buf(),
-            config_path: None,
-            config_profile: None,
-            allow_shell: false,
-            use_alt_screen: true,
-            use_mouse_capture: false,
-            use_bracketed_paste: true,
-            max_subagents: 1,
             skills_dir: tmpdir.path().join("skills"),
             memory_path: tmpdir.path().join("memory.md"),
             notes_path: tmpdir.path().join("notes.txt"),
             mcp_config_path: tmpdir.path().join("mcp.json"),
-            use_memory: false,
-            start_in_agent_mode: false,
-            skip_onboarding: true,
-            yolo: false,
-            resume_session_id: None,
-            initial_input: None,
+            ..crate::test_support::test_tui_options(tmpdir.path().to_path_buf())
         };
         App::new(options, &Config::default())
     }

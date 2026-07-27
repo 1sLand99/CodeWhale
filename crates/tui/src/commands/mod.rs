@@ -7,9 +7,9 @@
 //! fall-through behaviour.
 
 mod groups;
-mod plugins;
 pub mod traits;
 pub mod user_commands;
+pub mod user_registry;
 
 use std::sync::OnceLock;
 
@@ -17,6 +17,8 @@ pub use traits::CommandInfo;
 
 // Long-standing public paths that predate the group layout.
 pub use groups::project::share;
+#[cfg(test)]
+pub(crate) use groups::session::rename_with_manager as rename_session_with_manager;
 
 // Voice capture plumbing shared with the hotbar and the UI event loop.
 pub use groups::core::voice;
@@ -85,7 +87,7 @@ static REGISTRY: OnceLock<traits::CommandRegistry> = OnceLock::new();
 
 fn build_registry() -> traits::CommandRegistry {
     let mut registry = traits::CommandRegistry::empty();
-    for group in groups::all_command_groups() {
+    for &group in groups::all_command_groups() {
         registry.register_group(group);
     }
     registry
@@ -105,7 +107,41 @@ pub fn get_command_info(name: &str) -> Option<&'static CommandInfo> {
 
 /// Execute a slash command
 pub fn execute(cmd: &str, app: &mut App) -> CommandResult {
+    // Keep the command's raw remainder available for commands whose payload is
+    // byte-sensitive. Most slash commands intentionally receive a normalized
+    // argument below; `/preview-request --prompt`, however, must describe the
+    // exact prompt the send path would receive, including trailing whitespace
+    // and newlines.
+    let dispatch_input = cmd.trim_start();
+    let command_token_end = dispatch_input
+        .find(char::is_whitespace)
+        .unwrap_or(dispatch_input.len());
+    let raw_remainder = &dispatch_input[command_token_end..];
     let trimmed = cmd.trim();
+
+    // `$skillname` is a backward-compatible alias for `/skill skillname`.
+    // Resolve it early so skills can be loaded with the `$` prefix.
+    if let Some(skill_input) = trimmed.strip_prefix('$') {
+        let skill_input = skill_input.trim_start();
+        if skill_input.is_empty() {
+            return CommandResult::error(
+                "Type a skill name after $. For example: $getting-started",
+            );
+        }
+        let parts: Vec<&str> = skill_input.splitn(2, char::is_whitespace).collect();
+        let skill_name = parts.first().copied().unwrap_or("");
+        let arg = parts
+            .get(1)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty());
+        if let Some(result) = groups::skills::run_skill_by_name(app, skill_name, arg) {
+            return result;
+        }
+        return CommandResult::error(format!(
+            "Unknown skill: ${skill_name}. Type /skills to see installed skills."
+        ));
+    }
+
     let parts: Vec<&str> = trimmed.splitn(2, char::is_whitespace).collect();
     let command = parts
         .first()
@@ -119,11 +155,14 @@ pub fn execute(cmd: &str, app: &mut App) -> CommandResult {
         .filter(|value| !value.is_empty());
 
     // Check user-defined commands FIRST so they can override built-ins.
-    if let Some(result) = user_commands::try_dispatch_user_command(app, trimmed) {
+    if let Some(result) = user_registry::try_dispatch(app, trimmed) {
         return result;
     }
 
-    // Compatibility aliases whose historical behavior also supplied an arg.
+    // Permanent backward-compatible mode aliases. They select a fixed mode
+    // rather than the canonical `/mode` behavior, so they still dispatch
+    // before registry lookup. Ordinary compatibility aliases belong in their
+    // command's `CommandInfo` metadata.
     match command.as_str() {
         "jihua" => {
             return groups::config::dispatch(app, "jihua", arg).unwrap_or_else(|| {
@@ -139,16 +178,25 @@ pub fn execute(cmd: &str, app: &mut App) -> CommandResult {
     }
 
     if let Some(command_object) = registry().get(command.as_str()) {
-        return command_object.execute(app, arg);
+        let command_arg = if command_object.info().name == "preview-request" {
+            Some(raw_remainder)
+        } else {
+            arg
+        };
+        return command_object.execute(app, command_arg);
     }
 
     match command.as_str() {
-        // Legacy command migrations (kept out of registry/autocomplete intentionally).
+        // Permanent legacy migration hints. These are deliberately excluded
+        // from registry/autocomplete and only appear when users type old names.
         "set" => CommandResult::error(
             "The /set command was retired. Use /config to edit settings and /settings to inspect current values.",
         ),
         "deepseek" => CommandResult::error(
             "The /deepseek command was renamed. Use /links (aliases: /dashboard, /api).",
+        ),
+        "doctor" => CommandResult::error(
+            "The /doctor command is a CLI diagnostic. Run `codewhale doctor` or `codewhale doctor --json`; use `/setup` in the TUI for readiness and verification.",
         ),
 
         _ => {
@@ -157,7 +205,10 @@ pub fn execute(cmd: &str, app: &mut App) -> CommandResult {
             if let Some(result) = groups::skills::run_skill_by_name(app, command.as_str(), arg) {
                 return result;
             }
-            let suggestions = suggest_command_names(command.as_str(), 3);
+            let suggestions =
+                user_registry::with_registry_for_workspace(Some(&app.workspace), |user_commands| {
+                    suggest_command_names(command.as_str(), 3, user_commands)
+                });
             if suggestions.is_empty() {
                 CommandResult::error(format!(
                     "Unknown command: /{command}. Type /help for available commands."
@@ -215,7 +266,42 @@ fn edit_distance(a: &str, b: &str) -> usize {
     previous[b_chars.len()]
 }
 
-fn suggest_command_names(input: &str, limit: usize) -> Vec<String> {
+fn best_suggestion_score<'a>(
+    query: &str,
+    candidates: impl IntoIterator<Item = &'a str>,
+) -> Option<(u8, usize)> {
+    let mut best: Option<(u8, usize)> = None;
+    for candidate in candidates {
+        let prefix_match = candidate.starts_with(query) || query.starts_with(candidate);
+        let contains_match = candidate.contains(query) || query.contains(candidate);
+        let distance = edit_distance(candidate, query);
+        let close_typo = distance <= 2;
+        if !(prefix_match || contains_match || close_typo) {
+            continue;
+        }
+
+        let rank = if prefix_match {
+            0
+        } else if contains_match {
+            1
+        } else {
+            2
+        };
+
+        match best {
+            Some((best_rank, best_distance))
+                if rank > best_rank || (rank == best_rank && distance >= best_distance) => {}
+            _ => best = Some((rank, distance)),
+        }
+    }
+    best
+}
+
+fn suggest_command_names(
+    input: &str,
+    limit: usize,
+    user_commands: &user_registry::UserCommandRegistry,
+) -> Vec<String> {
     let query = input.trim().to_ascii_lowercase();
     if query.is_empty() || limit == 0 {
         return Vec::new();
@@ -223,33 +309,34 @@ fn suggest_command_names(input: &str, limit: usize) -> Vec<String> {
 
     let mut scored: Vec<(u8, usize, String)> = Vec::new();
     for command in registry().infos() {
-        let mut best: Option<(u8, usize)> = None;
-        for candidate in std::iter::once(command.name).chain(command.aliases.iter().copied()) {
-            let prefix_match = candidate.starts_with(&query) || query.starts_with(candidate);
-            let contains_match = candidate.contains(&query) || query.contains(candidate);
-            let distance = edit_distance(candidate, &query);
-            let close_typo = distance <= 2;
-            if !(prefix_match || contains_match || close_typo) {
-                continue;
-            }
-
-            let rank = if prefix_match {
-                0
-            } else if contains_match {
-                1
-            } else {
-                2
-            };
-
-            match best {
-                Some((best_rank, best_distance))
-                    if rank > best_rank || (rank == best_rank && distance >= best_distance) => {}
-                _ => best = Some((rank, distance)),
-            }
+        // A user command can shadow a built-in canonical name or just one of
+        // its aliases. Score only the built-in spellings that still dispatch
+        // to the built-in so suggestions never advertise different behavior.
+        if user_commands.get(command.name).is_some() {
+            continue;
         }
-
-        if let Some((rank, distance)) = best {
+        let candidates = std::iter::once(command.name).chain(
+            command
+                .aliases
+                .iter()
+                .copied()
+                .filter(|alias| user_commands.get(alias).is_none()),
+        );
+        if let Some((rank, distance)) = best_suggestion_score(&query, candidates) {
             scored.push((rank, distance, command.name.to_string()));
+        }
+    }
+
+    for command in user_commands.iter().filter(|command| !command.hidden) {
+        let candidates = std::iter::once(command.name.as_str()).chain(
+            command.aliases.iter().map(String::as_str).filter(|alias| {
+                user_commands
+                    .get(alias)
+                    .is_some_and(|resolved| resolved.name == command.name)
+            }),
+        );
+        if let Some((rank, distance)) = best_suggestion_score(&query, candidates) {
+            scored.push((rank, distance, command.name.clone()));
         }
     }
 
@@ -275,32 +362,100 @@ mod tests {
     use crate::tui::app::{App, AppAction, SidebarFocus, TuiOptions};
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
-    use std::sync::MutexGuard;
     use tempfile::tempdir;
+
+    fn is_palette_safe_command_name(name: &str) -> bool {
+        let bytes = name.as_bytes();
+        !bytes.is_empty()
+            && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+            && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+            && bytes
+                .iter()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+            && !name.contains("--")
+    }
 
     fn create_test_app() -> App {
         let options = TuiOptions {
-            model: "deepseek-v4-pro".to_string(),
-            workspace: PathBuf::from("."),
-            config_path: None,
-            config_profile: None,
-            allow_shell: false,
-            use_alt_screen: true,
-            use_mouse_capture: false,
-            use_bracketed_paste: true,
-            max_subagents: 1,
-            skills_dir: PathBuf::from("."),
-            memory_path: PathBuf::from("memory.md"),
-            notes_path: PathBuf::from("notes.txt"),
-            mcp_config_path: PathBuf::from("mcp.json"),
-            use_memory: false,
-            start_in_agent_mode: false,
-            skip_onboarding: true,
-            yolo: false,
-            resume_session_id: None,
-            initial_input: None,
+            ..crate::test_support::test_tui_options(PathBuf::from("."))
         };
         App::new(options, &Config::default())
+    }
+
+    #[test]
+    fn user_registry_module_is_compiled() {
+        super::user_registry::reload(None);
+        let registry = super::user_registry::current_registry();
+        assert!(registry.is_valid());
+    }
+
+    #[test]
+    fn preview_request_dispatch_preserves_prompt_edge_bytes() {
+        let mut app = create_test_app();
+        let result = execute("/preview-request --prompt   lead\ntrail  ", &mut app);
+
+        assert!(!result.is_error, "{result:?}");
+        assert!(matches!(
+            result.action,
+            Some(AppAction::PreviewOutboundRequest {
+                json: false,
+                base_prompt_only: false,
+                hypothetical_prompt,
+            }) if hypothetical_prompt.as_deref() == Some("  lead\ntrail  ")
+        ));
+    }
+
+    #[test]
+    fn user_command_shadows_builtin_before_group_dispatch() {
+        let temp = tempdir().unwrap();
+        let commands_dir = temp.path().join(".codewhale").join("commands");
+        std::fs::create_dir_all(&commands_dir).unwrap();
+        std::fs::write(
+            commands_dir.join("help.md"),
+            "---\ndescription: User help\n---\nuser help $ARGUMENTS",
+        )
+        .unwrap();
+
+        let mut app = create_test_app();
+        app.workspace = temp.path().to_path_buf();
+        super::user_registry::reload(Some(temp.path()));
+
+        let result = execute("/help now", &mut app);
+        assert!(!result.is_error);
+        match result.action {
+            Some(AppAction::SendMessage(message)) => assert_eq!(message, "user help now"),
+            other => panic!("expected user command SendMessage action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn removed_user_command_reloads_and_falls_back_to_builtin() {
+        let temp = tempdir().unwrap();
+        let commands_dir = temp.path().join(".codewhale").join("commands");
+        std::fs::create_dir_all(&commands_dir).unwrap();
+        let command_path = commands_dir.join("help.md");
+        std::fs::write(&command_path, "user help").unwrap();
+
+        let mut app = create_test_app();
+        app.workspace = temp.path().to_path_buf();
+        super::user_registry::reload(Some(temp.path()));
+        assert!(matches!(
+            execute("/help config", &mut app).action,
+            Some(AppAction::SendMessage(_))
+        ));
+
+        std::fs::remove_file(command_path).unwrap();
+        super::user_registry::reload(Some(temp.path()));
+        let result = execute("/help config", &mut app);
+        assert!(!result.is_error);
+        assert!(
+            result
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("config")),
+            "built-in /help should handle the command"
+        );
+        assert!(result.action.is_none());
     }
 
     #[test]
@@ -339,6 +494,158 @@ mod tests {
     }
 
     #[test]
+    fn debt_compat_aliases_use_registry_discovery_and_help() {
+        let debt = get_command_info("debt").expect("debt command should be registered");
+        assert_eq!(debt.aliases, &["cleanup", "slop", "canzha"]);
+        assert_eq!(debt.description_id, MessageId::CmdDebtDescription);
+
+        for alias in ["slop", "canzha"] {
+            let resolved = get_command_info(alias)
+                .unwrap_or_else(|| panic!("/{alias} should resolve through the registry"));
+            assert_eq!(resolved.name, "debt");
+
+            let mut app = create_test_app();
+            let result = execute(&format!("/help {alias}"), &mut app);
+            assert!(!result.is_error, "/help {alias} returned {result:?}");
+            let message = result
+                .message
+                .unwrap_or_else(|| panic!("/help {alias} should return text"));
+            assert!(
+                message.starts_with("debt\n"),
+                "unexpected help: {message:?}"
+            );
+            assert!(
+                message.contains("cleanup, slop, canzha"),
+                "help should list every debt alias: {message:?}"
+            );
+        }
+
+        let user_commands = user_registry::UserCommandRegistry::new();
+        assert!(
+            suggest_command_names("slpo", 3, &user_commands)
+                .iter()
+                .any(|name| name == "debt"),
+            "typo suggestions should consider the /slop alias"
+        );
+    }
+
+    #[test]
+    fn debt_alias_help_and_suggestions_respect_user_command_shadows() {
+        let temp = tempdir().unwrap();
+        let commands_dir = temp.path().join(".codewhale").join("commands");
+        std::fs::create_dir_all(&commands_dir).unwrap();
+        std::fs::write(
+            commands_dir.join("slop.md"),
+            "---\ndescription: User slop workflow\nusage: /slop <task>\n---\ncustom slop $ARGUMENTS",
+        )
+        .unwrap();
+        std::fs::write(
+            commands_dir.join("review.md"),
+            "---\ndescription: User canzha workflow\nusage: /review <task>\nalias: canzha\n---\ncustom canzha $ARGUMENTS",
+        )
+        .unwrap();
+        std::fs::write(
+            commands_dir.join("alpha.md"),
+            "---\nalias: beta\n---\nalpha body",
+        )
+        .unwrap();
+        std::fs::write(commands_dir.join("beta.md"), "beta body").unwrap();
+
+        let mut app = create_test_app();
+        app.workspace = temp.path().to_path_buf();
+        user_registry::reload(Some(temp.path()));
+
+        for (input, expected) in [
+            ("/slop now", "custom slop now"),
+            ("/canzha later", "custom canzha later"),
+        ] {
+            let result = execute(input, &mut app);
+            assert!(!result.is_error, "{input} returned {result:?}");
+            assert!(matches!(
+                result.action,
+                Some(AppAction::SendMessage(ref message)) if message == expected
+            ));
+        }
+
+        for (topic, canonical, description, usage) in [
+            ("slop", "slop", "User slop workflow", "/slop <task>"),
+            ("canzha", "review", "User canzha workflow", "/review <task>"),
+        ] {
+            let result = execute(&format!("/help {topic}"), &mut app);
+            assert!(!result.is_error, "/help {topic} returned {result:?}");
+            let message = result.message.expect("user command help text");
+            assert!(
+                message.starts_with(&format!("{canonical}\n")),
+                "{message:?}"
+            );
+            assert!(message.contains(description), "{message:?}");
+            assert!(message.contains(usage), "{message:?}");
+            assert!(!message.starts_with("debt\n"), "{message:?}");
+        }
+
+        for (typo, expected) in [("/slpo", "/slop"), ("/canzh", "/review")] {
+            let result = execute(typo, &mut app);
+            assert!(result.is_error, "{typo} should remain unknown");
+            let message = result.message.expect("unknown-command suggestion");
+            assert!(message.contains(expected), "{message:?}");
+            assert!(!message.contains("/debt"), "{message:?}");
+        }
+
+        let debt_help = execute("/help debt", &mut app);
+        assert!(!debt_help.is_error);
+        let debt_message = debt_help
+            .message
+            .expect("canonical debt help should render");
+        assert!(debt_message.contains("cleanup"), "{debt_message:?}");
+        assert!(!debt_message.contains("slop"), "{debt_message:?}");
+        assert!(!debt_message.contains("canzha"), "{debt_message:?}");
+
+        let slop_typo = execute("/slpo", &mut app);
+        let slop_typo_message = slop_typo.message.expect("typo should return guidance");
+        assert!(!slop_typo_message.contains("/debt"), "{slop_typo_message}");
+
+        let canzha_typo = execute("/canzhaa", &mut app);
+        let canzha_typo_message = canzha_typo.message.expect("typo should return guidance");
+        assert!(
+            !canzha_typo_message.contains("/debt"),
+            "{canzha_typo_message}"
+        );
+
+        let debt_typo = execute("/detb", &mut app);
+        let debt_typo_message = debt_typo.message.expect("typo should return guidance");
+        assert!(debt_typo_message.contains("/debt"), "{debt_typo_message}");
+
+        let alpha_help = execute("/help alpha", &mut app);
+        assert!(!alpha_help.is_error);
+        let alpha_message = alpha_help.message.expect("alpha help text");
+        assert!(!alpha_message.contains("beta"), "{alpha_message}");
+
+        let beta_help = execute("/help beta", &mut app);
+        assert!(!beta_help.is_error);
+        assert!(
+            beta_help
+                .message
+                .expect("beta help text")
+                .starts_with("beta\n")
+        );
+    }
+
+    #[test]
+    fn transcript_command_is_discoverable_and_opens_live_overlay() {
+        let transcript = command_infos()
+            .into_iter()
+            .find(|cmd| cmd.name == "transcript")
+            .expect("transcript command should exist");
+        assert_eq!(transcript.usage, "/transcript");
+        assert!(transcript.show_in_empty_discovery());
+
+        let mut app = create_test_app();
+        let result = execute("/transcript", &mut app);
+        assert!(!result.is_error);
+        assert!(matches!(result.action, Some(AppAction::OpenLiveTranscript)));
+    }
+
+    #[test]
     fn hf_alias_dispatches_to_concepts_helper() {
         let mut app = create_test_app();
         let result = execute("/huggingface concepts", &mut app);
@@ -347,6 +654,17 @@ mod tests {
         assert!(message.contains("Hugging Face provider route"));
         assert!(message.contains("Hugging Face MCP"));
         assert!(message.contains("Hub workflows"));
+    }
+
+    #[test]
+    fn xai_device_auth_slash_command_starts_login() {
+        let mut app = create_test_app();
+        let result = execute("/auth xai-device", &mut app);
+        assert!(!result.is_error);
+        assert!(matches!(
+            result.action,
+            Some(AppAction::StartXaiDeviceLogin)
+        ));
     }
 
     #[test]
@@ -371,7 +689,7 @@ mod tests {
         let Some(AppAction::SendMessage(message)) = result.action else {
             panic!("expected SendMessage action");
         };
-        assert!(message.contains("agent_open"));
+        assert!(message.contains("`agent`"));
         assert!(message.contains("max_depth: 0"));
     }
 
@@ -394,9 +712,9 @@ mod tests {
                 critical_files: vec!["crates/tui/src/commands/mod.rs".to_string()],
                 constraints: vec!["Do not invent verification".to_string()],
                 verification_plan: Some("Check relay prompt assertions".to_string()),
-                handoff_packet: Some("Next thread should read the Work checklist".to_string()),
+                handoff_packet: Some("Next thread should read the To-do list".to_string()),
                 plan: vec![PlanItemArg {
-                    step: "keep checklist primary".to_string(),
+                    step: "keep To-do primary".to_string(),
                     status: StepStatus::InProgress,
                 }],
                 ..UpdatePlanArgs::default()
@@ -422,18 +740,109 @@ mod tests {
         assert!(message.contains("Requested relay focus: verify install"));
         assert!(message.contains("Goal objective: Unify the work surface"));
         assert!(message.contains("Goal token budget: 12000"));
-        assert!(message.contains("Work checklist (primary progress surface, 50% complete)"));
-        assert!(message.contains("#1 [completed] inspect workspace"));
-        assert!(message.contains("#2 [in_progress] patch relay command"));
-        assert!(message.contains("Optional strategy metadata from update_plan"));
+        // #3983: the relay artifact carries the same bounded canonical body a
+        // parent request and a forked agent see — byte for byte.
+        let expected_body = crate::work_grounding::canonical_todo_body(
+            &app.todos.try_lock().expect("todo lock").snapshot(),
+        )
+        .expect("canonical body");
+        assert_eq!(
+            expected_body,
+            "To-do (50% settled)\n- [x] #1 inspect workspace\n- [~] #2 patch relay command"
+        );
+        assert!(
+            message.contains(&expected_body),
+            "relay must embed the canonical To-do body: {message}"
+        );
+        assert!(
+            !message.contains(crate::work_grounding::WORK_STATE_OPEN_TAG),
+            "the transient request-tail wrapper must not be stored in relay history: {message}"
+        );
+        assert!(message.contains("Conversational strategy notes from update_plan"));
         assert!(message.contains("Objective: Keep relays grounded"));
         assert!(message.contains("Explanation: RLM-style strategy"));
         assert!(message.contains("Source: transcript context"));
         assert!(message.contains("Critical file: crates/tui/src/commands/mod.rs"));
         assert!(message.contains("Constraint: Do not invent verification"));
         assert!(message.contains("Verification plan: Check relay prompt assertions"));
-        assert!(message.contains("Handoff packet: Next thread should read the Work checklist"));
-        assert!(message.contains("[in_progress] keep checklist primary"));
+        assert!(message.contains("Handoff packet: Next thread should read the To-do list"));
+        assert!(message.contains("[in_progress] keep To-do primary"));
+        assert!(
+            !message.contains("Work checklist"),
+            "relay copy should use To-do vocabulary: {message}"
+        );
+    }
+
+    /// #3983: `update_plan` is conversational strategy, not a Work ledger. A
+    /// session with plan state and an empty To-do has *no* Work state, and the
+    /// relay artifact must not manufacture one.
+    #[test]
+    fn relay_does_not_present_plan_only_state_as_work_state() {
+        let mut app = create_test_app();
+        {
+            let mut plan = app.plan_state.try_lock().expect("plan lock");
+            plan.update(UpdatePlanArgs {
+                objective: Some("Ship the grounding seam".to_string()),
+                plan: vec![PlanItemArg {
+                    step: "draft the renderer".to_string(),
+                    status: StepStatus::InProgress,
+                }],
+                ..UpdatePlanArgs::default()
+            });
+        }
+
+        let result = execute("/relay", &mut app);
+        let Some(AppAction::SendMessage(message)) = result.action else {
+            panic!("expected SendMessage action");
+        };
+
+        assert!(
+            !message.contains("Current Work state"),
+            "plan-only state must not render as Work state: {message}"
+        );
+        assert!(
+            !message.contains("To-do ("),
+            "plan-only state must not synthesize a To-do ledger: {message}"
+        );
+        assert!(message.contains("Conversational strategy notes from update_plan"));
+    }
+
+    /// #3983: a graph-backed update is authoritative immediately, even before
+    /// the compatibility To-do projection is published to the UI.
+    #[tokio::test]
+    async fn relay_reads_same_turn_graph_backed_work_update() {
+        use crate::tools::spec::ToolSpec as _;
+
+        let mut app = create_test_app();
+        let work =
+            crate::work_graph::new_shared_work_runtime(app.todos.clone(), app.plan_state.clone());
+        app.runtime_services.work = Some(work.clone());
+
+        let mut context = crate::tools::spec::ToolContext::new(app.workspace.clone());
+        context.runtime.work = Some(work);
+        crate::tools::todo::TodoWriteTool::work_update(app.todos.clone())
+            .execute(
+                serde_json::json!({
+                    "todos": [{"content": "relay the staged graph", "status": "in_progress"}]
+                }),
+                &context,
+            )
+            .await
+            .expect("graph-backed work_update");
+
+        assert!(
+            app.todos.lock().await.snapshot().is_empty(),
+            "precondition: legacy projection has not published yet"
+        );
+
+        let result = execute("/relay", &mut app);
+        let Some(AppAction::SendMessage(message)) = result.action else {
+            panic!("expected SendMessage action");
+        };
+        assert!(
+            message.contains("[~] #1 relay the staged graph"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -455,6 +864,10 @@ mod tests {
         assert!(message.contains("Requested relay focus: next hand"));
     }
 
+    /// AT-008: No built-in command name or alias is registered twice,
+    /// and no built-in alias collides with another command's canonical name.
+    /// This test iterates every command from `command_infos()` (all 9 groups)
+    /// and asserts uniqueness across the full set of names and aliases.
     #[test]
     fn command_registry_has_unique_names_and_aliases() {
         let mut names = std::collections::BTreeSet::new();
@@ -478,6 +891,123 @@ mod tests {
         }
     }
 
+    /// AT-009: Command ownership contract — top-level `commands/mod.rs` only
+    /// registers groups (`groups::all_command_groups()`), each group owns its
+    /// `commands()` list, and every command has valid metadata.
+    ///
+    /// Config and debug groups are documented permanent exceptions: they keep
+    /// group-local `CommandInfo` statics and `dispatch()` in `mod.rs` rather
+    /// than extracting every command into a focused module. This is accepted
+    /// final structure per FEAT-008 §3.2.
+    ///
+    /// Enforcement strategy:
+    /// - Exactly 9 source-verified groups (from `groups/mod.rs`)
+    /// - Each group owns its commands() list
+    /// - Config and debug exceptions verified within their specific groups by
+    ///   identifying the group through its first command ("config" and "tokens")
+    /// - Not circular: the group-iterated command count is a consistency check;
+    ///   the primary enforcement is exact group count + per-group non-empty + valid metadata
+    #[test]
+    fn command_ownership_contract_is_enforced() {
+        let groups = groups::all_command_groups();
+
+        // AT-009 primary: exactly 9 groups matching groups/mod.rs
+        assert_eq!(
+            groups.len(),
+            9,
+            "expected exactly 9 command groups (core, session, config, debug, \
+             project, skills, memory, plugins, utility), got {}",
+            groups.len()
+        );
+
+        let mut total_commands = 0;
+        let mut has_config = false;
+        let mut has_debug = false;
+        for &group in groups {
+            let commands = group.commands();
+            assert!(
+                !commands.is_empty(),
+                "each group must have at least one command"
+            );
+            for cmd in commands {
+                let info = cmd.info();
+                assert!(!info.name.is_empty(), "command name must not be empty");
+                assert!(
+                    is_palette_safe_command_name(info.name),
+                    "/{} command names must be lowercase ASCII kebab-case",
+                    info.name
+                );
+                let usage_prefix = format!("/{}", info.name);
+                assert!(
+                    info.usage.starts_with(&usage_prefix),
+                    "/{} usage must start with /{{name}}, got {:?}",
+                    info.name,
+                    info.usage
+                );
+            }
+            total_commands += commands.len();
+
+            // Identify config and debug groups by their command content to
+            // verify permanent-exception counts within the correct group.
+            if commands.iter().any(|c| c.info().name == "config") {
+                has_config = true;
+                assert_eq!(
+                    commands.len(),
+                    12,
+                    "config group (group-local metadata exception) expected \
+                     exactly 12 commands, got {}",
+                    commands.len()
+                );
+            }
+            if commands.iter().any(|c| c.info().name == "tokens") {
+                has_debug = true;
+                assert_eq!(
+                    commands.len(),
+                    13,
+                    "debug group (group-local metadata exception) expected \
+                     exactly 13 commands, got {}",
+                    commands.len()
+                );
+            }
+        }
+
+        // Config and debug groups must be found and verified by content identity
+        assert!(
+            has_config,
+            "config group not found (expected first command: /config)"
+        );
+        assert!(
+            has_debug,
+            "debug group not found (expected first command: /tokens)"
+        );
+
+        // Consistency: group-iterated command count must match registry
+        assert_eq!(
+            total_commands,
+            command_infos().len(),
+            "group-iterated command count must match registry infos count"
+        );
+    }
+
+    #[test]
+    fn command_groups_are_cached_once() {
+        let first_groups = groups::all_command_groups();
+        let second_groups = groups::all_command_groups();
+        assert!(
+            std::ptr::eq(first_groups.as_ptr(), second_groups.as_ptr()),
+            "command group list should be cached"
+        );
+
+        for &group in first_groups {
+            let first_commands = group.commands();
+            let second_commands = group.commands();
+            assert!(
+                std::ptr::eq(first_commands.as_ptr(), second_commands.as_ptr()),
+                "command list should be cached per group"
+            );
+        }
+    }
+
     #[test]
     fn command_registry_metadata_is_complete_and_palette_safe() {
         for command in command_infos() {
@@ -489,11 +1019,8 @@ mod tests {
                 command.name
             );
             assert!(
-                command
-                    .name
-                    .chars()
-                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit()),
-                "/{} command names must stay lowercase ASCII",
+                is_palette_safe_command_name(command.name),
+                "/{} command names must stay lowercase ASCII kebab-case",
                 command.name
             );
 
@@ -511,6 +1038,26 @@ mod tests {
                 "/{} must have non-empty English help text",
                 command.name
             );
+            // #3913: descriptions must not restate the usage field — the
+            // palette and /help already append `usage` when arguments exist.
+            assert!(
+                !description.contains(command.usage),
+                "/{} description embeds its usage string {:?}: {description:?}",
+                command.name,
+                command.usage
+            );
+            assert!(
+                !description.contains(&format!("/{}", command.name)),
+                "/{} description embeds slash-command syntax that usage already covers: {description:?}",
+                command.name
+            );
+            for banned_prefix in ["Toolbox:", "Reference:"] {
+                assert!(
+                    !description.starts_with(banned_prefix),
+                    "/{} description should not start with {banned_prefix:?}: {description:?}",
+                    command.name
+                );
+            }
 
             let palette_command = command.palette_command();
             assert!(
@@ -552,6 +1099,25 @@ mod tests {
                     !alias.chars().any(|ch| ch.is_ascii_uppercase()),
                     "/{} alias /{alias} must not contain uppercase ASCII",
                     command.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn command_discovery_tier_lists_use_canonical_registered_names() {
+        for (tier_name, names) in [
+            ("advanced", traits::ADVANCED_DISCOVERY_COMMANDS),
+            ("compatibility", traits::COMPATIBILITY_DISCOVERY_COMMANDS),
+        ] {
+            for &name in names {
+                let info = registry()
+                    .get_info(name)
+                    .unwrap_or_else(|| panic!("{tier_name} discovery entry {name:?} must resolve"));
+                assert_eq!(
+                    info.name, name,
+                    "{tier_name} discovery entry {name:?} must be canonical, not an alias for /{}",
+                    info.name
                 );
             }
         }
@@ -714,7 +1280,8 @@ mod tests {
     #[test]
     fn execute_sidebar_toggles_visibility() {
         let mut app = create_test_app();
-        app.set_sidebar_focus(SidebarFocus::Auto);
+        app.set_sidebar_focus(SidebarFocus::Pinned);
+        app.last_sidebar_host_width = Some(120);
 
         let result = execute("/sidebar", &mut app);
         assert!(!result.is_error);
@@ -724,7 +1291,7 @@ mod tests {
 
         let result = execute("/sidebar", &mut app);
         assert!(!result.is_error);
-        assert_eq!(app.sidebar_focus, SidebarFocus::Auto);
+        assert_eq!(app.sidebar_focus, SidebarFocus::Pinned);
         assert!(app.status_message.is_none());
         assert_eq!(result.message.as_deref(), Some("Sidebar is visible"));
     }
@@ -732,11 +1299,20 @@ mod tests {
     #[test]
     fn execute_sidebar_accepts_explicit_focus_targets() {
         let mut app = create_test_app();
+        app.last_sidebar_host_width = Some(120);
 
         let result = execute("/sidebar tasks", &mut app);
         assert!(!result.is_error);
         assert_eq!(app.sidebar_focus, SidebarFocus::Tasks);
         assert!(app.status_message.is_none());
+
+        let result = execute("/sidebar activity", &mut app);
+        assert!(!result.is_error);
+        assert_eq!(
+            app.sidebar_focus,
+            SidebarFocus::Tasks,
+            "activity is the user-facing alias for the Activity panel"
+        );
 
         let result = execute("/sidebar off", &mut app);
         assert!(!result.is_error);
@@ -755,7 +1331,7 @@ mod tests {
 
         let result = execute("/sidebar on", &mut app);
         assert!(!result.is_error);
-        assert_eq!(app.sidebar_focus, SidebarFocus::Auto);
+        assert_eq!(app.sidebar_focus, SidebarFocus::Pinned);
         assert!(app.status_message.is_none());
     }
 
@@ -779,6 +1355,12 @@ mod tests {
         for cmd in ["/links", "/dashboard", "/api", "/lianjie"] {
             let result = execute(cmd, &mut app);
             let msg = result.message.expect("links commands should return text");
+            assert!(msg.contains("https://codewhale.net/en/docs"));
+            assert!(msg.contains("https://codewhale.net/en/community"));
+            assert!(msg.contains("https://github.com/Hmbown/CodeWhale"));
+            assert!(msg.contains("https://app.codewhale.net"));
+            assert!(msg.contains("separate sign-in"));
+            assert!(msg.contains("not connected to the current local session"));
             assert!(msg.contains("https://platform.deepseek.com"));
             assert!(result.action.is_none());
         }
@@ -820,7 +1402,7 @@ mod tests {
 
     struct ConfigPathGuard {
         previous: Option<OsString>,
-        _lock: MutexGuard<'static, ()>,
+        _lock: crate::test_support::TestEnvLock,
     }
 
     impl ConfigPathGuard {
@@ -852,7 +1434,7 @@ mod tests {
     }
 
     /// Build an App scoped to an isolated tempdir so dispatch-side-effects
-    /// (e.g. `/init` writing AGENTS.md, `/export` writing chat transcripts,
+    /// (e.g. `/init` writing AGENTS.md, explicit `/export <path>` writes, or
     /// `/logout` clearing credentials) don't pollute the repo working tree or
     /// the developer's real config when the smoke tests run.
     fn create_isolated_test_app() -> (App, tempfile::TempDir, ConfigPathGuard) {
@@ -862,25 +1444,12 @@ mod tests {
         std::fs::create_dir_all(config_path.parent().expect("config parent")).expect("config dir");
         let guard = ConfigPathGuard::new(&config_path);
         let options = TuiOptions {
-            model: "deepseek-v4-pro".to_string(),
-            workspace: workspace.clone(),
             config_path: Some(config_path),
-            config_profile: None,
-            allow_shell: false,
-            use_alt_screen: true,
-            use_mouse_capture: false,
-            use_bracketed_paste: true,
-            max_subagents: 1,
             skills_dir: workspace.join("skills"),
             memory_path: workspace.join("memory.md"),
             notes_path: workspace.join("notes.txt"),
             mcp_config_path: workspace.join("mcp.json"),
-            use_memory: false,
-            start_in_agent_mode: false,
-            skip_onboarding: true,
-            yolo: false,
-            resume_session_id: None,
-            initial_input: None,
+            ..crate::test_support::test_tui_options(workspace.clone())
         };
         let app = App::new(options, &Config::default());
         (app, tmpdir, guard)
@@ -894,10 +1463,9 @@ mod tests {
     /// command, see it autocomplete, and then get an unhelpful "did you
     /// mean" suggestion. Also catches panics in handlers because the test
     /// runner unwinds the panic and reports the offending command.
-    /// `/save` and `/export` default their output paths to `cwd`-relative
-    /// filenames when no arg is supplied, which would scribble files into
-    /// `crates/tui/` when CI runs from there. Pass an explicit tempdir-
-    /// relative path for those two so the dispatch test stays sandboxed.
+    /// `/save` still defaults its output path, while `/export` accepts a legacy
+    /// direct file path. Pass explicit tempdir paths so this smoke test covers
+    /// both file handlers without touching the developer's clipboard.
     fn invocation_for(command_name: &str, alias_or_name: &str, tmpdir: &std::path::Path) -> String {
         match command_name {
             "save" => format!("/{alias_or_name} {}", tmpdir.join("session.json").display()),
@@ -979,10 +1547,8 @@ mod tests {
         assert_eq!(app.hunt.token_budget, Some(100));
 
         let (mut app, _tmpdir, _guard) = create_isolated_test_app();
-        let skills = execute("/skills", &mut app)
-            .message
-            .expect("/skills should return text");
-        assert!(skills.contains("Skills location:"));
+        let result = execute("/skills", &mut app);
+        assert!(matches!(result.action, Some(AppAction::OpenSkillsManager)));
 
         let mut app = create_test_app();
         let result = execute("/task list", &mut app);
@@ -1108,5 +1674,123 @@ mod tests {
             .expect("unknown command should return an error message");
         assert!(msg.contains("Unknown command: /zzzzzz"));
         assert!(msg.contains("Type /help for available commands."));
+    }
+
+    #[test]
+    fn dollar_skill_prefix_with_no_name_shows_usage() {
+        let mut app = create_test_app();
+        let result = execute("$", &mut app);
+        assert!(result.is_error);
+        let msg = result.message.expect("should return error message");
+        assert!(msg.contains("Type a skill name after $"));
+    }
+
+    #[test]
+    fn dollar_skill_prefix_unknown_skill_reports_unknown_skill() {
+        let mut app = create_test_app();
+        let result = execute("$definitely-not-a-real-skill-12345", &mut app);
+        assert!(result.is_error);
+        let msg = result.message.expect("should return error message");
+        assert!(msg.contains("Unknown skill: $definitely-not-a-real-skill-12345"));
+        assert!(msg.contains("/skills"));
+    }
+
+    #[test]
+    fn dollar_skill_prefix_does_not_break_existing_slash_dispatch() {
+        let mut app = create_test_app();
+        let result = execute("/help", &mut app);
+        assert!(!result.is_error);
+    }
+
+    fn write_test_skill(root: &Path, name: &str) {
+        let skill_dir = root.join("skills").join(name);
+        std::fs::create_dir_all(&skill_dir).expect("skill directory");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!(
+                "---\nname: {name}\ndescription: Test {name} skill\n---\nFollow the test instructions."
+            ),
+        )
+        .expect("skill fixture");
+    }
+
+    #[test]
+    fn task_bearing_skill_invocations_send_the_task_on_the_activated_turn() {
+        for invocation in ["$foo do X", "/foo do X", "/skill foo do X"] {
+            let (mut app, tmpdir, _guard) = create_isolated_test_app();
+            write_test_skill(tmpdir.path(), "foo");
+
+            let result = execute(invocation, &mut app);
+
+            assert!(!result.is_error, "{invocation}: {result:?}");
+            assert!(
+                result
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("Skill 'foo' activated")),
+                "{invocation}: {result:?}"
+            );
+            assert!(
+                matches!(result.action, Some(AppAction::SendMessage(ref task)) if task == "do X"),
+                "{invocation}: {result:?}"
+            );
+            assert!(
+                app.active_skill
+                    .as_deref()
+                    .is_some_and(|instruction| instruction.contains("# Skill: foo")),
+                "{invocation} did not arm foo for the dispatched task"
+            );
+        }
+    }
+
+    #[test]
+    fn bare_dollar_skill_still_arms_the_next_message() {
+        let (mut app, tmpdir, _guard) = create_isolated_test_app();
+        write_test_skill(tmpdir.path(), "foo");
+
+        let result = execute("$foo", &mut app);
+
+        assert!(!result.is_error, "{result:?}");
+        assert!(result.action.is_none());
+        assert!(
+            app.active_skill
+                .as_deref()
+                .is_some_and(|instruction| instruction.contains("# Skill: foo"))
+        );
+    }
+
+    #[test]
+    fn shorthand_can_invoke_a_skill_named_install_without_stealing_management_commands() {
+        for invocation in ["$install do X", "/install do X"] {
+            let (mut app, tmpdir, _guard) = create_isolated_test_app();
+            write_test_skill(tmpdir.path(), "install");
+
+            let result = execute(invocation, &mut app);
+
+            assert!(!result.is_error, "{invocation}: {result:?}");
+            assert!(
+                matches!(result.action, Some(AppAction::SendMessage(ref task)) if task == "do X"),
+                "{invocation}: {result:?}"
+            );
+            assert!(
+                app.active_skill
+                    .as_deref()
+                    .is_some_and(|instruction| instruction.contains("# Skill: install")),
+                "{invocation} did not activate the install skill"
+            );
+        }
+
+        let (mut app, tmpdir, _guard) = create_isolated_test_app();
+        write_test_skill(tmpdir.path(), "install");
+        let result = execute("/skill install", &mut app);
+        assert!(result.is_error, "management subcommand should show usage");
+        assert!(
+            result
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("/skill install"))
+        );
+        assert!(result.action.is_none());
+        assert!(app.active_skill.is_none());
     }
 }

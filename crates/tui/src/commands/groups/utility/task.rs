@@ -1,10 +1,31 @@
 //! Task commands: add/list/show/cancel
 
+use crate::commands::traits::{CommandInfo, RegisterCommand};
+use crate::localization::MessageId;
 use crate::tui::app::{App, AppAction};
 
-use super::CommandResult;
+use crate::commands::CommandResult;
 
-pub fn task(_app: &mut App, args: Option<&str>) -> CommandResult {
+pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
+    name: "task",
+    aliases: &["tasks"],
+    usage: "/task [add <prompt>|list|digest|show <id>|cancel <id>]",
+    description_id: MessageId::CmdTaskDescription,
+};
+
+pub(in crate::commands) struct TaskCmd;
+
+impl RegisterCommand for TaskCmd {
+    fn info() -> &'static CommandInfo {
+        &COMMAND_INFO
+    }
+
+    fn execute(app: &mut App, arg: Option<&str>) -> CommandResult {
+        task(app, arg)
+    }
+}
+
+fn task(app: &mut App, args: Option<&str>) -> CommandResult {
     let raw = args.unwrap_or("").trim();
     if raw.is_empty() || raw.eq_ignore_ascii_case("list") {
         return CommandResult::action(AppAction::TaskList);
@@ -24,6 +45,19 @@ pub fn task(_app: &mut App, args: Option<&str>) -> CommandResult {
             })
         }
         "list" => CommandResult::action(AppAction::TaskList),
+        "digest" => {
+            let Some(work) = app.runtime_services.work.as_ref() else {
+                return CommandResult::message("No active operations or to-do items.");
+            };
+            match work.capture(app.current_session_id.as_deref()) {
+                Ok(snapshot) => CommandResult::message(crate::work_graph::format_operation_digest(
+                    snapshot.as_ref(),
+                )),
+                Err(error) => CommandResult::error(format!(
+                    "Operation digest is temporarily unavailable: {error}"
+                )),
+            }
+        }
         "show" => {
             let Some(id) = remainder else {
                 return CommandResult::error("Usage: /task show <id>");
@@ -36,7 +70,7 @@ pub fn task(_app: &mut App, args: Option<&str>) -> CommandResult {
             };
             CommandResult::action(AppAction::TaskCancel { id: id.to_string() })
         }
-        _ => CommandResult::error("Usage: /task [add <prompt>|list|show <id>|cancel <id>]"),
+        _ => CommandResult::error("Usage: /task [add <prompt>|list|digest|show <id>|cancel <id>]"),
     }
 }
 
@@ -50,25 +84,9 @@ mod tests {
     fn app() -> App {
         App::new(
             TuiOptions {
-                model: "deepseek-v4-pro".to_string(),
-                workspace: PathBuf::from("."),
-                config_path: None,
-                config_profile: None,
-                allow_shell: false,
                 use_alt_screen: false,
-                use_mouse_capture: false,
-                use_bracketed_paste: true,
                 max_subagents: 2,
-                skills_dir: PathBuf::from("."),
-                memory_path: PathBuf::from("memory.md"),
-                notes_path: PathBuf::from("notes.txt"),
-                mcp_config_path: PathBuf::from("mcp.json"),
-                use_memory: false,
-                start_in_agent_mode: false,
-                skip_onboarding: true,
-                yolo: false,
-                resume_session_id: None,
-                initial_input: None,
+                ..crate::test_support::test_tui_options(PathBuf::from("."))
             },
             &Config::default(),
         )
@@ -95,6 +113,17 @@ mod tests {
         let mut app = app();
         let result = task(&mut app, Some("add"));
         assert!(result.message.is_some());
+        assert!(result.action.is_none());
+    }
+
+    #[test]
+    fn digest_uses_canonical_work_runtime_without_another_state_store() {
+        let mut app = app();
+        let result = task(&mut app, Some("digest"));
+        assert_eq!(
+            result.message.as_deref(),
+            Some("No active operations or to-do items.")
+        );
         assert!(result.action.is_none());
     }
 }

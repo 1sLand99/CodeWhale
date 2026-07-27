@@ -20,7 +20,7 @@
 # Uses prebuilt release binaries instead of a Rust build.
 set -euo pipefail
 
-RELEASE_TAG="${RELEASE_TAG:-v0.8.57}"
+RELEASE_TAG="${RELEASE_TAG:-v0.9.2}"
 REPO_URL="${REPO_URL:-https://github.com/Hmbown/CodeWhale.git}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 SECRETS_FILE="${SECRETS_FILE:-/tmp/cw-secrets.env}"
@@ -146,7 +146,7 @@ for _ in $(seq 1 20); do
   curl -fsS --max-time 2 http://127.0.0.1:7878/health >/dev/null 2>&1 && break
   sleep 1
 done
-curl -fsS http://127.0.0.1:7878/health; echo
+curl -fsS --max-time 3 http://127.0.0.1:7878/health; echo
 systemctl start codewhale-telegram-bridge
 sleep 3
 CODEWHALE_BRIDGE=telegram bash /tmp/codewhale/scripts/tencent-lighthouse/doctor.sh

@@ -26,15 +26,10 @@ const CONTEXT_SIGNAL_WIDTH: usize = 4;
 /// what long-time users remember.
 const STATUS_INDICATOR_FRAME_MS: u128 = 420;
 
-/// Whale-cycle frames: 🐳 builds up dots, then surfaces as 🐋. Restored from
-/// the original `deepseek_squiggle` in v0.8.30 (removed by commit
-/// `1a04659a9` "smoother TUI streaming"). The breaching whale is the
-/// punchline at the midpoint of each cycle.
-const STATUS_INDICATOR_WHALE_FRAMES: &[&str] = &[
-    "🐳", "🐳.", "🐳..", "🐳...", "🐳..", "🐳.", "🐋", "🐋.", "🐋..", "🐋...", "🐋..", "🐋.",
-];
-
+/// Frames retained only for the explicitly selected classic treatment.
 /// Geometric replacement frames shipped between v0.8.x and v0.8.29.
+/// Every frame is one cell wide so the provider/model label never shifts
+/// while the animation advances.
 const STATUS_INDICATOR_DOT_FRAMES: &[&str] = &["◍", "◉", "◌", "◌", "◉", "◍"];
 
 /// Resolve the current status-indicator frame to render in the header
@@ -44,9 +39,12 @@ const STATUS_INDICATOR_DOT_FRAMES: &[&str] = &["◍", "◉", "◌", "◌", "◉"
 /// chip is *visible* but not animating — it's a chip, not a spinner. As
 /// soon as a turn starts, the elapsed time keys the cycle.
 ///
-/// `mode` accepts the canonical names `"whale"`, `"dots"`, `"off"` (any
-/// other value is treated as `"whale"` to mirror
-/// `StatusIndicatorValue::from(&str)`). `"off"` returns `None` so the
+/// `mode` accepts the canonical names `"cw"`, `"dots"`, `"off"`. The whale
+/// emoji chip is retired from the header (2026-07-23 product decision): the
+/// whale lives in the terminal window title and the idle water, never
+/// beside the model/mode chips. Legacy `"whale"` values (still present in
+/// persisted settings) normalize to the typographic `cw` mark; unknown
+/// values fall back to `"cw"` as well. `"off"` returns `None` so the
 /// caller can hide the chip outright.
 #[must_use]
 pub fn header_status_indicator_frame(
@@ -56,8 +54,10 @@ pub fn header_status_indicator_frame(
     let frames: &[&str] = match mode.trim().to_ascii_lowercase().as_str() {
         "off" | "none" | "hidden" | "false" => return None,
         "dots" | "dot" => STATUS_INDICATOR_DOT_FRAMES,
-        // "whale" + aliases + unknown → whale (intentional default).
-        _ => STATUS_INDICATOR_WHALE_FRAMES,
+        // Canonical mark, legacy whale opt-ins, and unknown values all land
+        // on the static typographic mark so the header never reintroduces
+        // an emoji chip beside the model/mode cluster.
+        _ => return Some("cw"),
     };
     let elapsed_ms = turn_started_at
         .map(|t| t.elapsed().as_millis())
@@ -71,7 +71,6 @@ pub struct HeaderData<'a> {
     pub model: &'a str,
     pub workspace_name: &'a str,
     pub mode: AppMode,
-    pub is_streaming: bool,
     pub background: ratatui::style::Color,
     /// Total tokens used in this session (cumulative, for display).
     pub total_tokens: u32,
@@ -96,6 +95,9 @@ pub struct HeaderData<'a> {
     /// so the widget itself stays a pure pre-built render. `None` hides the
     /// chip entirely (e.g., `status_indicator = "off"`).
     pub status_indicator_frame: Option<&'static str>,
+    /// Live sub-agent count for the header chrome. `0` hides the chip.
+    /// Drill-in is the Agents sidebar / SubAgents modal — not a transcript shelf.
+    pub running_agents: usize,
 }
 
 impl<'a> HeaderData<'a> {
@@ -105,14 +107,13 @@ impl<'a> HeaderData<'a> {
         mode: AppMode,
         model: &'a str,
         workspace_name: &'a str,
-        is_streaming: bool,
+        _is_streaming: bool,
         background: ratatui::style::Color,
     ) -> Self {
         Self {
             model,
             workspace_name,
             mode,
-            is_streaming,
             background,
             total_tokens: 0,
             context_window: None,
@@ -120,8 +121,16 @@ impl<'a> HeaderData<'a> {
             last_prompt_tokens: None,
             reasoning_effort_label: None,
             provider_label: None,
-            status_indicator_frame: None,
+            status_indicator_frame: Some("cw"),
+            running_agents: 0,
         }
+    }
+
+    /// Live concurrent sub-agent count (`2 agents`). Hidden when zero.
+    #[must_use]
+    pub fn with_running_agents(mut self, count: usize) -> Self {
+        self.running_agents = count;
+        self
     }
 
     /// Attach a short reasoning-effort label for the header chip.
@@ -178,17 +187,17 @@ impl<'a> HeaderWidget<'a> {
 
     fn mode_color(mode: AppMode) -> Color {
         match mode {
-            AppMode::Agent => palette::MODE_AGENT,
-            AppMode::Yolo => palette::MODE_YOLO,
+            AppMode::Agent | AppMode::Auto | AppMode::Yolo => palette::MODE_AGENT,
             AppMode::Plan => palette::MODE_PLAN,
+            AppMode::Operate => palette::MODE_OPERATE,
         }
     }
 
     fn mode_name(mode: AppMode) -> &'static str {
         match mode {
-            AppMode::Agent => "Agent",
-            AppMode::Yolo => "Yolo",
+            AppMode::Agent | AppMode::Auto | AppMode::Yolo => "Act",
             AppMode::Plan => "Plan",
+            AppMode::Operate => "Operate",
         }
     }
 
@@ -239,7 +248,7 @@ impl<'a> HeaderWidget<'a> {
         } else if percent >= CONTEXT_WARNING_THRESHOLD_PERCENT {
             palette::STATUS_WARNING
         } else {
-            palette::DEEPSEEK_SKY
+            palette::WHALE_INFO
         }
     }
 
@@ -285,14 +294,18 @@ impl<'a> HeaderWidget<'a> {
         let Some(frame) = self.data.status_indicator_frame else {
             return Vec::new();
         };
-        // Color matches the rest of the live-status cluster (sky), keeping
-        // the chip visually grouped with `● Live` and the effort label.
+        let color = if frame == "cw" {
+            palette::WHALE_HUMAN
+        } else {
+            palette::WHALE_INFO
+        };
         vec![Span::styled(
             frame.to_string(),
-            Style::default().fg(palette::DEEPSEEK_SKY),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
         )]
     }
 
+    #[allow(dead_code)]
     fn provider_chip_spans(&self) -> Vec<Span<'static>> {
         let Some(label) = self.data.provider_label else {
             return Vec::new();
@@ -304,11 +317,12 @@ impl<'a> HeaderWidget<'a> {
         vec![Span::styled(
             trimmed.to_string(),
             Style::default()
-                .fg(palette::DEEPSEEK_SKY)
+                .fg(palette::WHALE_INFO)
                 .add_modifier(Modifier::BOLD),
         )]
     }
 
+    #[allow(dead_code)]
     fn effort_chip_spans(&self, include_prefix: bool) -> Vec<Span<'static>> {
         let Some(label) = self.data.reasoning_effort_label else {
             return Vec::new();
@@ -321,7 +335,7 @@ impl<'a> HeaderWidget<'a> {
         let color = if is_off {
             palette::TEXT_HINT
         } else {
-            palette::DEEPSEEK_SKY
+            palette::WHALE_INFO
         };
         let body = if !include_prefix {
             trimmed.to_string()
@@ -338,59 +352,10 @@ impl<'a> HeaderWidget<'a> {
 
     fn status_variant(
         &self,
-        show_stream_label: bool,
+        _show_stream_label: bool,
         show_percent: bool,
         show_signal: bool,
     ) -> Vec<Span<'static>> {
-        let mut spans = Vec::new();
-
-        let provider_spans = self.provider_chip_spans();
-        let has_provider = !provider_spans.is_empty();
-        if has_provider {
-            spans.extend(provider_spans);
-        }
-
-        // Status indicator chip (whale 🐳/🐋 or dots ◌/◉ depending on
-        // `status_indicator` setting). Sits immediately before the effort
-        // chip so the layout reads e.g. `🐳..  ◆ max` — the chip cluster
-        // users associate with "where the whale used to be."
-        let indicator_spans = self.status_indicator_spans();
-        let has_indicator = !indicator_spans.is_empty();
-        if has_indicator {
-            if has_provider {
-                spans.push(Span::raw("  "));
-            }
-            spans.extend(indicator_spans);
-        }
-
-        let effort_spans = self.effort_chip_spans(true);
-        let has_effort = !effort_spans.is_empty();
-        if has_effort {
-            if has_provider || has_indicator {
-                spans.push(Span::raw("  "));
-            }
-            spans.extend(effort_spans);
-        }
-
-        if self.data.is_streaming {
-            if has_effort || has_provider {
-                spans.push(Span::raw("  "));
-            }
-            spans.push(Span::styled(
-                "●",
-                Style::default()
-                    .fg(palette::DEEPSEEK_SKY)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            if show_stream_label {
-                spans.push(Span::raw(" "));
-                spans.push(Span::styled(
-                    "Live",
-                    Style::default().fg(palette::TEXT_SOFT),
-                ));
-            }
-        }
-
         let context_spans = if show_signal {
             self.context_signal_spans(show_percent)
         } else if show_percent {
@@ -399,13 +364,9 @@ impl<'a> HeaderWidget<'a> {
             Vec::new()
         };
         if !context_spans.is_empty() {
-            if !spans.is_empty() {
-                spans.push(Span::raw("  "));
-            }
-            spans.extend(context_spans);
+            return context_spans;
         }
-
-        spans
+        Vec::new()
     }
 
     /// Compile-time version tag (`v0.8.29`, …). Rendered in the header's
@@ -457,6 +418,7 @@ impl<'a> HeaderWidget<'a> {
             .unwrap_or_default()
     }
 
+    #[allow(dead_code)]
     fn metadata_spans(&self, max_width: usize) -> Vec<Span<'static>> {
         let workspace = self.data.workspace_name.trim();
         let model = self.data.model.trim();
@@ -529,39 +491,104 @@ impl<'a> HeaderWidget<'a> {
             return Vec::new();
         }
 
-        let mode_label = Self::mode_name(self.data.mode);
+        let mode_label = Self::mode_name(self.data.mode).to_ascii_lowercase();
         let mode_style = Style::default()
             .fg(Self::mode_color(self.data.mode))
             .add_modifier(Modifier::BOLD);
+        let mut spans = self.status_indicator_spans();
+        let used = Self::span_width(&spans);
 
-        if max_width < mode_label.width() {
-            let fallback = self
-                .data
-                .mode
-                .label()
-                .chars()
-                .next()
-                .unwrap_or('?')
-                .to_string();
-            return vec![Span::styled(fallback, mode_style)];
-        }
-
-        let mut spans = vec![Span::styled(mode_label.to_string(), mode_style)];
-        let metadata_width = max_width
-            .saturating_sub(mode_label.width())
-            .saturating_sub(2);
-        let metadata = if metadata_width >= 4 {
-            self.metadata_spans(metadata_width)
+        let provider = self.data.provider_label.unwrap_or("").trim();
+        let model = self.data.model.trim();
+        let route = if provider.is_empty() {
+            model.to_string()
         } else {
-            Vec::new()
+            format!("{provider}:{model}")
+        };
+        let effort = self.data.reasoning_effort_label.unwrap_or("").trim();
+        let mode_width = 3 + mode_label.width();
+        let full_effort_width = 3 + effort.width();
+        let compact_effort = Self::compact_effort_label(effort);
+        let compact_effort_width = 3 + compact_effort.width();
+        let effort = if effort.is_empty() {
+            String::new()
+        } else if used + mode_width + full_effort_width <= max_width {
+            effort.to_string()
+        } else if used + mode_width + compact_effort_width <= max_width {
+            compact_effort.to_string()
+        } else {
+            String::new()
+        };
+        // Reserve mode + effort before granting any width to the route. A
+        // long provider/model identity may truncate, but it cannot silently
+        // evict the requested/effective effort receipt.
+        let fixed_width = mode_width + usize::from(!effort.is_empty()) * (3 + effort.width());
+        let status_route_gap = usize::from(used > 0);
+        let route_budget = max_width.saturating_sub(used + fixed_width + status_route_gap);
+        let route = if route_budget >= 4 {
+            Self::truncate_to_width(&route, route_budget)
+        } else {
+            String::new()
         };
 
-        if !metadata.is_empty() {
-            spans.push(Span::raw("  "));
-            spans.extend(metadata);
+        if !spans.is_empty() && !route.is_empty() {
+            spans.push(Span::raw(" "));
         }
-
+        if !route.is_empty() {
+            spans.push(Span::styled(route, Style::default().fg(palette::TEXT_HINT)));
+        }
+        if Self::span_width(&spans) + 3 + mode_label.width() <= max_width {
+            spans.push(Span::styled(" · ", Style::default().fg(palette::TEXT_DIM)));
+            spans.push(Span::styled(mode_label, mode_style));
+        }
+        if !effort.is_empty() && Self::span_width(&spans) + 3 + effort.width() <= max_width {
+            spans.push(Span::styled(" · ", Style::default().fg(palette::TEXT_DIM)));
+            spans.push(Span::styled(
+                effort.to_string(),
+                Style::default().fg(palette::WHALE_INFO),
+            ));
+        }
+        // Sub-agent count: high-signal when workers are live; sits after
+        // route/mode so the left zone still names "where am I" first.
+        if self.data.running_agents > 0 {
+            let agents = if self.data.running_agents == 1 {
+                "1 agent".to_string()
+            } else {
+                format!("{} agents", self.data.running_agents)
+            };
+            if Self::span_width(&spans) + 3 + agents.width() <= max_width {
+                spans.push(Span::styled(" · ", Style::default().fg(palette::TEXT_DIM)));
+                spans.push(Span::styled(
+                    agents,
+                    Style::default()
+                        .fg(palette::WHALE_LIVE)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+        }
         spans
+    }
+
+    fn compact_effort_label(label: &str) -> &'static str {
+        let effective = label
+            .rsplit_once('→')
+            .map_or(label, |(_, effective)| effective);
+        let effective = effective
+            .rsplit_once(':')
+            .map_or(effective, |(_, effective)| effective)
+            .trim()
+            .to_ascii_lowercase();
+        match effective.as_str() {
+            "off" => "o",
+            "low" => "l",
+            "med" | "medium" => "m",
+            "high" => "h",
+            "max" | "maximum" | "xhigh" => "x",
+            "auto" => "a",
+            "thinking enabled; granularity unavailable" => "on?",
+            "effective unavailable" => "?",
+            _ => "·",
+        }
     }
 }
 
@@ -603,6 +630,7 @@ mod tests {
     use crate::palette;
     use crate::tui::app::AppMode;
     use ratatui::{buffer::Buffer, layout::Rect};
+    use unicode_width::UnicodeWidthStr;
 
     fn render_header(data: HeaderData<'_>, width: u16) -> String {
         let widget = HeaderWidget::new(data);
@@ -613,6 +641,14 @@ mod tests {
         (0..width).map(|x| buf[(x, 0)].symbol()).collect::<String>()
     }
 
+    fn render_left(data: HeaderData<'_>, width: usize) -> String {
+        HeaderWidget::new(data)
+            .left_spans(width)
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
     #[test]
     fn wide_header_shows_plain_mode_and_single_metadata_cluster() {
         let rendered = render_header(
@@ -621,13 +657,15 @@ mod tests {
                 "deepseek-v4-pro",
                 "codewhale-tui",
                 false,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
             ),
             72,
         );
 
-        assert!(rendered.contains("Agent"));
-        assert!(rendered.contains("codewhale-tui"));
+        // Wave 7: the Agent mode chip reads "Act". Default brand is the
+        // typographic `cw` mark; the whale lives in the window title.
+        assert!(rendered.contains("cw"));
+        assert!(rendered.contains("act"));
         assert!(rendered.contains("deepseek-v4-pro"));
         assert!(!rendered.contains("Plan"));
         assert!(!rendered.contains("Yolo"));
@@ -644,7 +682,7 @@ mod tests {
                 "deepseek-v4-pro",
                 "codewhale-tui",
                 false,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
             ),
             120,
         );
@@ -656,16 +694,17 @@ mod tests {
     }
 
     #[test]
-    fn narrow_header_drops_version_chip_before_dropping_mode() {
+    fn narrow_header_keeps_brand_and_context_after_dropping_version_and_mode() {
         // Very tight width budget — the version is among the first
-        // chips to disappear; the mode label must still render.
+        // chips to disappear. At this width the live brand and context receipt
+        // are the two surviving signals.
         let rendered = render_header(
             HeaderData::new(
                 AppMode::Yolo,
                 "deepseek-v4-pro",
                 "codewhale-tui",
                 true,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
             )
             .with_usage(1_000, Some(128_000), 0.0, Some(2_000)),
             12,
@@ -675,10 +714,8 @@ mod tests {
             !rendered.contains(&version),
             "version chip should drop under width pressure: {rendered:?}",
         );
-        assert!(
-            rendered.contains("Yolo") || rendered.contains('Y'),
-            "mode label must survive: {rendered:?}",
-        );
+        assert!(rendered.contains("cw"), "brand must survive: {rendered:?}");
+        assert!(rendered.contains('%'), "context must survive: {rendered:?}");
     }
 
     #[test]
@@ -689,13 +726,13 @@ mod tests {
                 "deepseek-v4-pro",
                 "workspace",
                 true,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
             )
             .with_usage(42_000, Some(128_000), 0.0, Some(48_000)),
             72,
         );
 
-        assert!(rendered.contains("Live"));
+        assert!(!rendered.contains("Live"));
         assert!(rendered.contains("38%"));
         assert!(rendered.contains("▰"));
     }
@@ -703,7 +740,7 @@ mod tests {
     #[test]
     fn narrow_header_keeps_context_percent_visible() {
         let rendered = render_header(
-            HeaderData::new(AppMode::Agent, "", "", true, palette::DEEPSEEK_INK).with_usage(
+            HeaderData::new(AppMode::Agent, "", "", true, palette::WHALE_BG).with_usage(
                 0,
                 Some(128_000),
                 0.0,
@@ -716,22 +753,24 @@ mod tests {
     }
 
     #[test]
-    fn narrow_header_falls_back_to_mode_without_rendering_all_modes() {
+    fn narrow_header_keeps_brand_without_rendering_modes() {
+        // At width 6 the typographic brand and context meter survive; mode
+        // chips are the first expendable signal under pressure.
         let rendered = render_header(
             HeaderData::new(
                 AppMode::Yolo,
                 "deepseek-v4-flash",
                 "repo",
                 true,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
             )
             .with_usage(1_000, Some(10_000), 0.0, Some(4_000)),
-            8,
+            6,
         );
 
-        assert!(rendered.trim_start().starts_with('Y'));
+        assert!(rendered.trim_start().starts_with("cw"));
         assert!(!rendered.contains("Plan"));
-        assert!(!rendered.contains("Agent"));
+        assert!(!rendered.contains("Operate"));
     }
 
     #[test]
@@ -742,7 +781,7 @@ mod tests {
                 "deepseek-v4-flash",
                 "repo",
                 false,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
             ),
             48,
         );
@@ -759,7 +798,7 @@ mod tests {
                 "deepseek-v4-flash",
                 "repo",
                 false,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
             )
             .with_usage(1_000, Some(128_000), 0.0, Some(320_000)),
             48,
@@ -777,7 +816,7 @@ mod tests {
                 "deepseek-ai/deepseek-v4-flash",
                 "codewhale-tui",
                 false,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
             )
             .with_provider(Some("NIM")),
             72,
@@ -796,7 +835,7 @@ mod tests {
                 "deepseek-v4-pro",
                 "codewhale-tui",
                 false,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
             ),
             72,
         );
@@ -805,28 +844,30 @@ mod tests {
     }
 
     #[test]
-    fn whale_indicator_idle_frame_is_first_whale_glyph() {
-        // No active turn = no animation, just the calm 🐳 glyph sitting
-        // next to the effort chip.
-        let frame = super::header_status_indicator_frame(None, "whale");
-        assert_eq!(frame, Some("🐳"));
+    fn legacy_whale_indicator_settings_normalize_to_the_cw_mark() {
+        // The whale emoji chip is retired from the header (2026-07-23):
+        // persisted `status_indicator = "whale"` opt-ins render the static
+        // typographic mark instead, idle or mid-turn.
+        for legacy in ["whale", "🐳", "🐋"] {
+            assert_eq!(
+                super::header_status_indicator_frame(None, legacy),
+                Some("cw"),
+                "legacy mode {legacy:?} must normalize to the cw mark"
+            );
+            assert_eq!(
+                super::header_status_indicator_frame(Some(std::time::Instant::now()), legacy),
+                Some("cw"),
+                "legacy mode {legacy:?} must stay static mid-turn"
+            );
+        }
     }
 
     #[test]
-    fn whale_indicator_advances_through_frames_then_breaches() {
-        use std::thread::sleep;
-        use std::time::Duration;
-        let start = std::time::Instant::now();
-        // Frame 0 immediately.
+    fn cw_indicator_is_static_and_typographic() {
+        assert_eq!(super::header_status_indicator_frame(None, "cw"), Some("cw"));
         assert_eq!(
-            super::header_status_indicator_frame(Some(start), "whale"),
-            Some("🐳")
-        );
-        // After ~420ms one tick has elapsed → frame 1.
-        sleep(Duration::from_millis(430));
-        assert_eq!(
-            super::header_status_indicator_frame(Some(start), "whale"),
-            Some("🐳.")
+            super::header_status_indicator_frame(Some(std::time::Instant::now()), "cw"),
+            Some("cw")
         );
     }
 
@@ -846,11 +887,54 @@ mod tests {
     }
 
     #[test]
-    fn unknown_indicator_mode_defaults_to_whale() {
-        // We'd rather restore the whale on a typo than silently hide the
-        // chip — matches `StatusIndicatorValue::from(&str)`.
+    fn unknown_indicator_mode_defaults_to_cw() {
         let frame = super::header_status_indicator_frame(None, "wahel-typo");
-        assert_eq!(frame, Some("🐳"));
+        assert_eq!(frame, Some("cw"));
+    }
+
+    #[test]
+    fn indicator_frames_keep_a_stable_width_within_each_mode() {
+        use unicode_width::UnicodeWidthStr;
+
+        // Animation must never shift the provider/model label: all frames of
+        // an animated mode share one cell width, and the static mark is
+        // rendered verbatim.
+        for frame in super::STATUS_INDICATOR_DOT_FRAMES {
+            let spans = HeaderWidget::new(
+                HeaderData::new(
+                    AppMode::Agent,
+                    "model",
+                    "workspace",
+                    true,
+                    palette::WHALE_BG,
+                )
+                .with_status_indicator(Some(frame)),
+            )
+            .status_indicator_spans();
+            assert_eq!(
+                spans[0].content.as_ref().width(),
+                1,
+                "dot frame {frame:?} shifted the header"
+            );
+        }
+        let spans = HeaderWidget::new(
+            HeaderData::new(
+                AppMode::Agent,
+                "model",
+                "workspace",
+                true,
+                palette::WHALE_BG,
+            )
+            .with_status_indicator(Some("cw")),
+        )
+        .status_indicator_spans();
+        assert_eq!(spans[0].content.as_ref(), "cw");
+    }
+
+    #[test]
+    fn whale_glyphs_have_narrow_ascii_fallbacks() {
+        assert_eq!(crate::tui::glyphs::ascii_fallback("🐳"), Some("w"));
+        assert_eq!(crate::tui::glyphs::ascii_fallback("🐋"), Some("w"));
     }
 
     #[test]
@@ -861,7 +945,7 @@ mod tests {
                 "deepseek-v4-pro",
                 "codewhale-tui",
                 false,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
             )
             .with_reasoning_effort(Some("max"))
             .with_status_indicator(Some("🐳")),
@@ -885,6 +969,137 @@ mod tests {
     }
 
     #[test]
+    fn route_truncation_reserves_requested_effective_effort() {
+        let rendered = render_left(
+            HeaderData::new(
+                AppMode::Agent,
+                "a-very-long-model-route-that-must-truncate",
+                "codewhale-tui",
+                false,
+                palette::WHALE_BG,
+            )
+            .with_provider(Some("xiaomi-mimo"))
+            .with_reasoning_effort(Some("low→high"))
+            .with_status_indicator(Some("cw")),
+            28,
+        );
+
+        assert!(rendered.contains("low→high"), "{rendered:?}");
+        assert!(rendered.contains("act"), "{rendered:?}");
+        assert!(rendered.width() <= 28, "{rendered:?}");
+    }
+
+    #[test]
+    fn compact_header_keeps_unknown_reasoning_granularity_visible() {
+        let rendered = render_left(
+            HeaderData::new(
+                AppMode::Agent,
+                "GLM-5-Turbo",
+                "codewhale-tui",
+                false,
+                palette::WHALE_BG,
+            )
+            .with_provider(Some("zai"))
+            .with_reasoning_effort(Some("max→thinking enabled; granularity unavailable"))
+            .with_status_indicator(Some("cw")),
+            20,
+        );
+
+        assert!(rendered.contains("on?"), "{rendered:?}");
+        assert!(rendered.width() <= 20, "{rendered:?}");
+    }
+
+    #[test]
+    fn compact_header_keeps_unavailable_effective_reasoning_visible() {
+        let rendered = render_left(
+            HeaderData::new(
+                AppMode::Agent,
+                "GLM-5.2",
+                "codewhale-tui",
+                false,
+                palette::WHALE_BG,
+            )
+            .with_provider(Some("zai"))
+            .with_reasoning_effort(Some("max→effective unavailable"))
+            .with_status_indicator(Some("cw")),
+            18,
+        );
+
+        assert!(rendered.contains('?'), "{rendered:?}");
+        assert!(rendered.width() <= 18, "{rendered:?}");
+    }
+
+    #[test]
+    fn narrow_header_uses_one_glyph_effective_effort() {
+        let rendered = render_left(
+            HeaderData::new(
+                AppMode::Agent,
+                "a-very-long-model-route",
+                "codewhale-tui",
+                false,
+                palette::WHALE_BG,
+            )
+            .with_reasoning_effort(Some("low→high"))
+            .with_status_indicator(Some("cw")),
+            14,
+        );
+
+        assert!(!rendered.contains("low→high"), "{rendered:?}");
+        assert!(rendered.ends_with(" · h"), "{rendered:?}");
+        assert!(rendered.width() <= 14, "{rendered:?}");
+    }
+
+    #[test]
+    fn cw_indicator_keeps_the_human_brand_lane_distinct_from_live_frames() {
+        let cw = HeaderWidget::new(
+            HeaderData::new(
+                AppMode::Agent,
+                "deepseek-v4-pro",
+                "codewhale-tui",
+                false,
+                palette::WHALE_BG,
+            )
+            .with_status_indicator(Some("cw")),
+        )
+        .status_indicator_spans();
+        let live = HeaderWidget::new(
+            HeaderData::new(
+                AppMode::Agent,
+                "deepseek-v4-pro",
+                "codewhale-tui",
+                false,
+                palette::WHALE_BG,
+            )
+            .with_status_indicator(Some("··")),
+        )
+        .status_indicator_spans();
+
+        assert_eq!(cw[0].style.fg, Some(palette::WHALE_HUMAN));
+        assert_eq!(live[0].style.fg, Some(palette::WHALE_INFO));
+        assert_ne!(cw[0].style.fg, live[0].style.fg);
+    }
+
+    #[test]
+    fn header_shows_running_agent_count() {
+        let rendered = render_left(
+            HeaderData::new(AppMode::Agent, "glm-5.1", "CW", true, palette::WHALE_BG)
+                .with_status_indicator(Some("cw"))
+                .with_running_agents(2),
+            80,
+        );
+        assert!(
+            rendered.contains("2 agents"),
+            "live agent count belongs in header chrome: {rendered:?}"
+        );
+        let empty = render_left(
+            HeaderData::new(AppMode::Agent, "glm-5.1", "CW", false, palette::WHALE_BG)
+                .with_running_agents(0),
+            80,
+        );
+        assert!(!empty.contains("agent"), "{empty:?}");
+    }
+
+    #[test]
     fn header_hides_whale_chip_when_status_indicator_off() {
         let rendered = render_header(
             HeaderData::new(
@@ -892,7 +1107,7 @@ mod tests {
                 "deepseek-v4-pro",
                 "codewhale-tui",
                 false,
-                palette::DEEPSEEK_INK,
+                palette::WHALE_BG,
             )
             .with_reasoning_effort(Some("max"))
             .with_status_indicator(None),

@@ -1,42 +1,49 @@
-# Sub-Agents
+# Fleet Workers and Sub-Agent Compatibility
 
-Sub-agents are the user-facing vocabulary for nested worker assignments: a
-parent opens a focused role (`explore`, `review`, `implementer`, `verifier`,
-...) and gets back an `agent_id` plus session name while the worker runs.
+Fleet roles are the user-facing vocabulary for delegated work: a parent
+launches a focused `worker`, `scout`, `planner`, `reviewer`, `builder`,
+`verifier`, or `consultant` through `agent` and gets back an `agent_id` plus transcript handle
+while the worker runs. The internal runtime type is `FleetRole` (formerly
+`SubAgentType`); the older role spellings (`general`, `explore`, `plan`,
+`review`, `implementer`, `oracle`, …) remain accepted only as a persisted/deserialize
+compatibility adapter during v0.9.x. New prompts and config should use Fleet
+names.
 
 Architecturally, sub-agents should not be a second execution substrate. The
 durable primitive is the fleet-backed worker run described in
 [`AGENT_RUNTIME.md`](AGENT_RUNTIME.md): retries, terminal status, receipts,
-artifact refs, inspection, and restart behavior belong there. `agent_open`
-stays as the familiar nested-agent launcher, but detached work should converge
-on the same lifecycle as Agent Fleet.
+artifact refs, inspection, and restart behavior belong there. The
+model-facing launcher is the single `agent` tool and detached work should
+converge on the same lifecycle as Agent Fleet.
 
-The current `agent_open` implementation is a compatibility path while that
-cutover completes. It can still be useful for short in-session delegation, but
-if a child fails once on a transient provider timeout while an equivalent fleet
-worker would retry from the ledger, that is a runtime unification gap. For work
-that must survive provider hiccups, process restarts, sleep, or remote
-execution, prefer Fleet or a WhaleFlow-backed fleet run.
+The current `agent` implementation delegates to the durable sub-agent runtime
+while that cutover completes. It can still be useful for short in-session
+delegation. Transient provider header/stream/time-out failures are retried with
+backoff inside the child runtime before the worker is marked interrupted; if the
+retry budget is exhausted, Codewhale preserves a checkpoint and returns a
+continuation handle instead of leaving the parent to infer what happened. For
+work that must survive process restarts, sleep, or remote execution, prefer
+Fleet or a Workflow-backed fleet run.
 
-Sub-agents inherit the parent's tool registry by default. `agent_open` launches
-them as detached background work: cancelling the parent turn stops the parent
-wait/eval path, but it does not kill already-opened child sessions. Use
-`agent_close` to cancel a running child explicitly.
+Sub-agents inherit the parent's tool registry by default, but child agents are
+leaf workers: they do not receive `agent` or nested lifecycle tools. `agent`
+launches detached background work: cancelling the parent turn stops the parent
+wait path, but it does not kill already-opened child runs.
 
 This doc covers the role taxonomy and current compatibility controls. The active
-orchestration surface is
-`agent_open`, `agent_eval`, and `agent_close`; see `prompts/base.md`
-"Sub-Agent Strategy" and the in-line tool descriptions.
+orchestration surface is `agent`; see the sub-agent guidance in
+`crates/tui/src/prompts/text.rs` (`AGENT_MODE`) and the in-line
+tool description.
 
 ## Role taxonomy
 
-The `type` field on `agent_open` selects a system-prompt posture for the child
+The `type` field on `agent` selects a Fleet posture for the child
 (`agent_type` is accepted as a compatibility alias). Each role is a distinct
 stance toward the work — not just a different label.
 
 ## Maintainer posture
 
-Sub-agents help CodeWhale move faster, but the parent agent still owns the
+Sub-agents help Codewhale move faster, but the parent agent still owns the
 maintainer decision. Use children to gather evidence, review patches, and run
 verification while keeping the community posture in
 [`AGENT_ETHOS.md`](AGENT_ETHOS.md): issues are open intake, PR gates are
@@ -49,23 +56,24 @@ stewardship.
 
 | Role          | Stance                                 | Writes? | Shell posture | Typical use                                  |
 |---------------|----------------------------------------|---------|---------------|----------------------------------------------|
-| `general`     | flexible; do whatever the parent says  | yes     | yes           | the default; multi-step tasks                |
-| `explore`     | read-only; map the relevant code fast  | no      | read-only     | "find every call site of `Foo`"              |
-| `plan`        | analyse and produce a strategy         | minimal | minimal       | "design the migration; don't execute"        |
-| `review`      | read-and-grade with severity scores    | no      | read-only     | "audit this PR for bugs"                     |
-| `implementer` | land a specific change with min edit   | yes     | yes           | "rewrite `bar.rs::Foo::bar` to do X"         |
+| `worker`      | flexible; do whatever the parent says  | yes     | yes           | the default; multi-step tasks                |
+| `scout`       | read-only; map the relevant code fast  | no      | read-only     | "find every call site of `Foo`"              |
+| `planner`     | analyse and produce a strategy         | minimal | minimal       | "design the migration; don't execute"        |
+| `reviewer`    | read-and-grade with severity scores    | no      | read-only     | "audit this PR for bugs"                     |
+| `builder`     | land a specific change with min edit   | yes     | yes           | "rewrite `bar.rs::Foo::bar` to do X"         |
 | `verifier`    | run tests / validation, report outcome | no      | test-focused  | "run cargo test --workspace, report"         |
+| `consultant`  | short-lived, high-reasoning counsel     | no      | none          | "what are we missing in this design?"        |
 | `custom`      | explicit narrow tool allowlist         | depends | depends       | locked-down dispatch with hand-picked tools  |
 
 Each role's full system prompt lives in
 `crates/tui/src/tools/subagent/mod.rs` (search for
-`*_AGENT_PROMPT`). The prompt prefix loads automatically when the
+`*_AGENT_INTRO`). The prompt prefix loads automatically when the
 child agent boots; the parent's assignment prompt becomes the first
 turn's user message.
 
 ## Context forking
 
-`agent_open` starts fresh by default: the child gets its role prompt plus the
+`agent` starts fresh by default: the child gets its role prompt plus the
 task you pass. Use `fork_context: true` when the child should continue from
 the parent's current request prefix instead. In fork mode the runtime keeps the
 parent prefill/prompt prefix byte-identical where available, appends a
@@ -77,35 +85,154 @@ Use fresh sessions for independent exploration. Use forked sessions when the
 task depends on decisions, files, todos, or plan state already in the parent
 transcript.
 
+Forked state renders concrete Work progress from the To-do ledger — the sole
+canonical Work surface, written by `work_update`. The child's
+`<codewhale:fork_state>` block carries the same bounded body
+(`crates/tui/src/work_grounding.rs`) that the parent's own requests carry, so a
+fork continues from the parent's real progress position rather than a
+paraphrase. That Work section is resolved when the spawn happens, so a
+`work_update` earlier in the same parent turn is included.
+
+Each agent then grounds on **its own** ledger: every sub-agent request carries
+the same transient `<codewhale:work_state>` tail rendered from that agent's
+private To-do list (#4810), refreshed after the agent's own `work_update`. It is
+request-scoped — never stored in the child transcript or its system prefix — so
+a worker can never read or write a parent's or sibling's **private transient
+tail**. A deliberately forked child still receives the bounded immutable parent
+ledger snapshot described above as part of its fork context; it cannot mutate
+that snapshot or keep reading later parent changes.
+
+That same private ledger is what the child's in-transcript card shows. A
+delegate card renders a bounded projection of **its own** agent's To-do — the
+settled/total count, the in-progress item always included, up to three rows, and an
+explicit `… +N more` when the bound elides the rest — built by
+`card_todo_projection` from the same snapshot, priority order, and sanitizer the
+model-facing body uses. A card only ever consumes an envelope whose `agent_id`
+matches it, so a parent's list never appears under a child and no sibling's list
+appears under another. An agent that has stated no work shows no To-do rows at
+all rather than a placeholder task, and a terminal card keeps the last snapshot
+its agent actually published. Fanout cards stay a dot grid and do not show child
+To-do: with many workers behind one card there is no truthful place to hang a
+single ledger. A child To-do appears only when the runtime already represents
+that child as its own delegate card.
+
+The durable task/Fleet ledger still owns lifecycle state. Use
+`update_plan` only for conversational strategy that helps a parent or later
+worker understand the approach; it is not a second Work ledger and never
+becomes Work grounding on its own.
+
+## Worktree isolation
+
+For parallel edit lanes, launch the child with `worktree: true`. Codewhale
+creates a fresh git worktree and branch for that child, runs the child from the
+isolated checkout, and reports the resulting workspace/branch in the returned
+session projection and worker record. By default the branch is
+`codex/agent-<name>-<id>` and the checkout lives beside the parent repo under
+`.codewhale-worktrees/`, so the parent checkout stays clean.
+
+Isolation is not write authority. A prompt-only worker starts read-only.
+A writer also declares `write_authority: "workspace_write"` or
+`"worktree_write"` and at least one normalized repo-relative `write_roots`,
+`exact_files`, or `coordination_contracts` value. Active overlapping shared
+claims fail before mutation; a real isolated worktree may proceed in parallel.
+
+Optional fields:
+
+- `worktree_branch`: exact branch to create.
+- `worktree_base`: git ref to branch from; defaults to `HEAD`.
+- `worktree_path`: exact checkout path. Relative paths stay under the default
+  sibling `.codewhale-worktrees/` root.
+
+Do not combine `cwd` with `worktree`; `cwd` remains the manual escape hatch for
+an already-created directory inside the parent workspace.
+
+## Delegation briefs
+
+The parent should pass a compact brief instead of a loose paragraph. Use the
+structured `dependencies` and `acceptance` arrays for bounded prerequisite facts
+and observable checks; keep the focused objective in `prompt`. Do not copy raw
+parent reasoning or an unbounded transcript.
+
+```
+QUESTION:
+SCOPE:
+ALREADY_KNOWN:
+EFFORT: quick | medium | thorough
+STOP_CONDITION:
+OUTPUT: VERDICT, EVIDENCE, GAPS, NEXT
+```
+
+`scout` briefs default to quick, read-only investigation. About 3-5 tool calls
+is enough for quick exploration: orient, search, read the decisive lines, and
+return. Do not repeat `ALREADY_KNOWN` work unless evidence contradicts it. Review
+and verifier briefs can spend more calls, but should stop after decisive
+evidence. Builder and repair-style briefs should use checkpoints before
+scope expansion or after repeated failures rather than a tiny call cap.
+
+Good delegation prompt examples:
+
+```text
+QUESTION: Does PR #3124 introduce release-risk behavior around provider routing?
+SCOPE: PR #3124 diff, linked issue, provider routing tests, docs/PROVIDERS.md.
+ALREADY_KNOWN: Branch is hunter/0.8.62-glm-subagents; workspace version stays 0.8.61.
+EFFORT: medium
+STOP_CONDITION: Return once you have either one BLOCKER/MAJOR issue or enough evidence for no MAJOR+ issues.
+OUTPUT: VERDICT, EVIDENCE with file:line refs or PR refs, GAPS, NEXT.
+```
+
+```text
+QUESTION: Where is the child-agent prompt assembled?
+SCOPE: crates/tui/src/prompts*, crates/tui/src/tools/subagent/*.
+ALREADY_KNOWN: The model-facing launcher is only `agent`; do not look for removed lifecycle tools.
+EFFORT: quick
+STOP_CONDITION: Stop after identifying the prompt source files and the function that wraps assignment text.
+OUTPUT: VERDICT, EVIDENCE, GAPS, NEXT.
+```
+
+```text
+QUESTION: Is the focused prompt/subagent test filter valid, and what fails if not?
+SCOPE: cargo test -p codewhale-tui --bin codewhale-tui --locked prompt; subagent filter if needed.
+ALREADY_KNOWN: Do not fix failures; capture exact command, exit code, and first relevant assertion.
+EFFORT: medium
+STOP_CONDITION: Stop after one clean PASS or one reproducible failing assertion with command evidence.
+OUTPUT: VERDICT, EVIDENCE, GAPS, NEXT.
+```
+
 ### When to pick which role
 
-- **`general`** — when the task is "do this whole thing", not "go
+- **`worker`** — when the task is "do this whole thing", not "go
   look", "design", or "verify". This is the right default; reach for
   a more specific role only when the posture matters.
-- **`explore`** — when the parent needs evidence before deciding what
-  to do next. Explorers are cheap and fast; open 2–3 in parallel
+- **`scout`** — when the parent needs evidence before deciding what
+  to do next. Scouts are cheap and fast; open 2–3 in parallel
   for independent regions.
   They should orient first: confirm the project root, read relevant
   `AGENTS.md`/`README.md` guidance in unfamiliar trees, search only the
   likely scope, and return `path:line-range` evidence instead of a narrative
-  tour. The role name to use is `explore` or `explorer`.
-- **`plan`** — when the parent has an objective but no executable
-  decomposition. Planners write artifacts (`update_plan` rows,
-  `checklist_write` entries) but don't carry them out.
-- **`review`** — when there's already a change and the parent wants
+  tour. The role name to use is `scout`.
+- **`planner`** — when the parent has an objective but no executable
+  decomposition. Planners write artifacts (`work_update` items for the ledger,
+  `update_plan` notes for strategy) but don't carry them out.
+- **`reviewer`** — when there's already a change and the parent wants
   it graded. Reviewers don't patch — they describe the fix in the
-  finding so the parent can dispatch an Implementer if the verdict
+  finding so the parent can dispatch a builder if the verdict
   is "fix it".
-- **`implementer`** — when the change is already specified and just
-  needs to land. Implementers stay tightly scoped: minimum edit, no
+- **`builder`** — when the change is already specified and just
+  needs to land. Builders stay tightly scoped: minimum edit, no
   drive-by refactoring, run a quick verification before handing back.
 - **`verifier`** — when the parent needs an authoritative pass/fail
   on the test suite or other validation. Verifiers don't fix
   failures; they capture the failing assertion + stack and put fix
   candidates under RISKS.
+- **`consultant`** — when the operator wants a high-leverage second opinion
+  before cheaper execution continues. Consultants read enough to ground a
+  recommendation, but cannot write or run shell commands. `oracle` and
+  `advisor` remain accepted only when loading older requests or persisted
+  records; new prompts, receipts, and UI use `consultant`.
 - **`custom`** — only when the parent needs to constrain the tool
   set explicitly. Pass the allowlist via the `allowed_tools` field
-  on `agent_open`.
+  on legacy/internal sub-agent records; the model-facing `agent` tool keeps the
+  public schema intentionally small.
 
 ### Aliases
 
@@ -113,13 +240,13 @@ The model can spell each role multiple ways:
 
 | Canonical     | Aliases                                                          |
 |---------------|------------------------------------------------------------------|
-| `general`     | `worker`, `default`, `general-purpose`                           |
-| `explore`     | `explorer`, `exploration`                                        |
-| `plan`        | `planning`, `planner`, `awaiter`                                 |
-| `review`      | `reviewer`, `code-review`, `code_review`                         |
-| `implementer` | `implement`, `implementation`, `builder`                         |
+| `worker`      | `general`, `default`, `general-purpose`                          |
+| `scout`       | `explore`, `explorer`, `exploration`                             |
+| `planner`     | `plan`, `planning`, `awaiter`                                    |
+| `reviewer`    | `review`, `code-review`, `code_review`                           |
+| `builder`     | `implementer`, `implement`, `implementation`                     |
 | `verifier`    | `verify`, `verification`, `validator`, `tester`                  |
-| `tool_agent`  | `tool-agent`, `toolagent`, `executor`, `execution`, `fin`        |
+| `consultant`  | `oracle`, `advisor` (compatibility input only)                    |
 | `custom`      | (none; explicit `allowed_tools` array required)                  |
 
 All matching is case-insensitive. Unknown values produce a typed
@@ -128,17 +255,85 @@ the next turn.
 
 ## Concurrency cap
 
-The current compatibility dispatcher caps concurrent sub-agents at 10 by default
-(configurable via `[subagents].max_concurrent` in `~/.codewhale/config.toml`,
-hard ceiling 20). When the parent hits the cap, `agent_open` returns
-an error with the cap value; the parent should use `agent_eval` to wait for a
-running agent to complete, or `agent_close` to cancel a running agent, before
-retrying.
+Up to **64** sub-agents run concurrently by default (`DEFAULT_MAX_SUBAGENTS`),
+configurable via `[subagents].max_concurrent` in `~/.codewhale/config.toml` up to
+the hard ceiling of **128** (`MAX_SUBAGENTS`). The session admits a bounded
+queue of up to **200** running plus queued sub-agents by default, so a turn can
+request broad fan-out and let the manager drain it without creating an
+unbounded population.
 
-The cap counts only **running** agents — completed / failed /
-cancelled records persist for inspection but don't occupy a slot.
-Agents that lost their `task_handle` (e.g. across a process
-restart) also don't count against the cap.
+By default every admitted child may start immediately — there is no artificial
+throttle. If you want gentler fan-out, lower `[subagents].launch_concurrency`
+(how many direct children start at once); children beyond that limit **queue**
+for a launch slot rather than bursting. `launch_concurrency` defaults to the
+resolved `max_subagents` cap. (The pre-v0.8.61 `interactive_max_launch` key is
+still accepted as a deprecated alias; the new key wins when both are set.)
+
+High-fanout Workflows can tune that bounded population with `[subagents]
+max_admitted` (aliases: `max_total`, `admission_limit`). That total ceiling
+counts both **running** and **queued** agents, while `launch_concurrency` keeps
+instantaneous execution bounded. Completed / failed / cancelled records persist
+for inspection but don't occupy an admission slot. Agents that lost their
+`task_handle` (e.g. across a process restart) also don't count against the cap.
+
+Provider profiles let one config stay aggressive for direct API routes while
+keeping subscription or aggregator routes gentle. Every key under
+`[subagents.providers.<provider>]` inherits from `[subagents]` when omitted.
+Provider keys accept canonical names such as `deepseek`, `zai`, `openrouter`,
+and aliases such as `glm` for Z.ai:
+
+```toml
+[subagents]
+# Global fallback for providers without a profile.
+max_concurrent = 20
+launch_concurrency = 20
+max_admitted = 200
+max_depth = 6
+token_budget = 100000
+
+[subagents.providers.deepseek]
+# Direct API key with room to fan out.
+max_concurrent = 20
+launch_concurrency = 20
+max_admitted = 200
+
+[subagents.providers.glm]
+# Z.ai / GLM subscription-style route: keep pressure tight.
+max_concurrent = 4
+launch_concurrency = 3
+max_admitted = 12
+max_depth = 2
+api_timeout_secs = 180
+heartbeat_timeout_secs = 240
+
+[subagents.providers.openrouter]
+max_concurrent = 5
+launch_concurrency = 3
+max_admitted = 20
+
+[subagents.providers.anthropic]
+max_concurrent = 3
+launch_concurrency = 2
+max_admitted = 12
+```
+
+Use `/config subagents status` to see both the global values and the active
+provider's resolved fanout, depth, and timeout profile.
+
+## Token budget governor
+
+Set `[subagents].token_budget` to give each root `agent` run an aggregate
+token ceiling shared by that child and all of its descendants. A child can also
+start a new scoped budget with the model-facing `agent` tool's
+`token_budget` field (the `max_tokens` alias is accepted for Workflow-shaped
+callers). When no budget is configured or supplied, behavior is unchanged.
+
+Provider-reported input and output tokens are folded into the worker record as
+each child model call completes. The persisted `usage` object shows the
+worker's own totals plus aggregate `budget_spent_tokens` and
+`budget_remaining_tokens` for the shared scope. Once the shared scope is
+exhausted, further descendant spawns are rejected with an actionable message
+instead of opening more agents into a spent pool.
 
 ## Per-role models (#3018)
 
@@ -149,16 +344,20 @@ are case-insensitive):
 ```toml
 [subagents]
 default_model  = "deepseek-v4-flash"   # fallback for every role
-worker_model   = "deepseek-v4-pro"     # worker / general
-explorer_model = "deepseek-v4-flash"   # explorer / explore
-awaiter_model  = "deepseek-v4-flash"   # awaiter / plan
-review_model   = "deepseek-v4-pro"     # review
+worker_model   = "deepseek-v4-pro"     # worker
+scout_model    = "deepseek-v4-flash"   # scout
+planner_model  = "deepseek-v4-flash"   # planner
+reviewer_model = "deepseek-v4-pro"     # reviewer
 custom_model   = "deepseek-v4-pro"     # custom
 
 [subagents.models]
-# Free-form role → model map; any role alias accepted by agent_open works.
-implementation = "deepseek-v4-pro"
+# Free-form role → model map; any role alias accepted by agent works.
+builder = "deepseek-v4-pro"
 ```
+
+The v0.9.x convenience keys `explorer_model`, `awaiter_model`, and
+`review_model` remain accepted as deprecated aliases so existing config files
+do not break.
 
 Model ids may be **any model the active provider accepts** — validation is
 provider-aware and happens at spawn time, not load time. On the official
@@ -174,15 +373,58 @@ model = "kimi-k2.7-code"
 worker_model = "kimi-k2.6"
 ```
 
-Spawn-time `model` arguments on `agent_open` are validated the same way; an
-invalid id on the official DeepSeek API fails the spawn with the accepted-id
-list instead of an opaque provider 400.
+Model ids are validated the same way when applied to a child route; an invalid
+id on the official DeepSeek API fails the spawn with the accepted-id list
+instead of an opaque provider 400.
 
 With `/model auto`, sub-agent routing is provider-aware too: providers with a
 known big/cheap pair (DeepSeek, and the hosted DeepSeek routes on NVIDIA NIM,
 OpenRouter, Novita, SiliconFlow, SGLang, vLLM) route between that pair;
 providers without a known cheap tier (e.g. Ollama, Moonshot) skip the
 network router and keep children on the session model.
+
+## Per-profile provider routes (#3965)
+
+`[subagents.models]` changes the child model within the active provider. To pin
+a child to a different provider, use a Fleet/AgentProfile and pass it to the
+model-facing `agent` tool with `profile`. The profile's explicit `provider` +
+`model` fields win over the parent session route; omitting `provider` preserves
+the existing inherit behavior.
+
+Example: keep the parent session on DeepSeek, but run a formatter child on a
+local LM Studio OpenAI-compatible endpoint:
+
+```toml
+# ~/.codewhale/config.toml or workspace config
+provider = "deepseek"
+
+[providers.deepseek]
+api_key = "YOUR_DEEPSEEK_KEY"
+
+[providers.lm-studio]
+kind = "openai-compatible"
+base_url = "http://127.0.0.1:1234/v1"
+api_key = "lm-studio"
+model = "qwen-2.5-7b"
+```
+
+```toml
+# .codewhale/agents/local-formatter.toml
+id = "local-formatter"
+role_hint = "formatter"
+provider = "lm-studio"
+model = "qwen-2.5-7b"
+reasoning_effort = "off"
+
+[instructions]
+text = "Use small, local edits. Keep formatting changes mechanical."
+```
+
+Then call `agent(profile: "local-formatter", prompt: "...")`. In-process
+children build a client for `lm-studio`; Fleet workers forward
+`--provider lm-studio` to `codewhale exec`, which resolves the same
+`[providers.lm-studio]` table. Unknown or unconfigured provider ids fail the
+spawn rather than silently falling back to the parent provider.
 
 ## Per-step API timeout (#1806, #1808)
 
@@ -191,7 +433,7 @@ per-step timeout so a single stuck request can't pin the parent's
 completion wakeup channel indefinitely. The default is `120` seconds,
 which matches the legacy hardcoded value. Long-thinking children that
 legitimately exceed that, for example heavy plan or review work behind
-`agent_open`, can extend the timeout in `~/.codewhale/config.toml`:
+`agent`, can extend the timeout in `~/.codewhale/config.toml`:
 
 ```toml
 [subagents]
@@ -205,8 +447,8 @@ Values are clamped to `1..=1800`. `0` and `unset` keep the legacy
 
 Running agents also track manager-visible progress. If a child stops emitting
 progress for the heartbeat window, the manager auto-cancels it, releases its
-sub-agent slot, and keeps the cancelled record inspectable via `agent_eval` /
-`agent_list`. The default is 5 minutes:
+sub-agent slot, and keeps the cancelled record inspectable through the returned
+transcript handle and persisted worker record. The default is 5 minutes:
 
 ```toml
 [subagents]
@@ -236,9 +478,9 @@ Each `SubAgentManager` instance assigns itself a fresh `session_boot_id` on
 construction. Every new session stamps the agent with that id; the workspace
 state file records it for restart recovery.
 
-`agent_eval` and the sidebar/status projections focus on current-session
-agents by default. Prior-session agents that are not still running are treated
-as archived records so the model does not mistake stale work for live work.
+Sidebar/status projections focus on current-session agents by default.
+Prior-session agents that are not still running are treated as archived records
+so the model does not mistake stale work for live work.
 
 Records that loaded from a pre-#405 persisted state file (no
 `session_boot_id` field) classify as prior-session because the
@@ -253,26 +495,22 @@ ledger: it stores `run_id`, objective, role/model,
 workspace/branch, lifecycle events, artifact refs, follow-up target, takeover
 target, usage provenance, and verification provenance.
 
-`agent_eval` returns these fields at the top level of the session projection and
-inside `worker_record`. It is nonblocking by default: use it to poll status or
-deliver follow-up input while the parent keeps coordinating. Pass `block:true`
-only when deliberately waiting for a terminal child result. A running or
-continuable interrupted child should be continued through the returned
-`follow_up` target (`agent_eval` with the same agent id or session name). A
-local takeover should use the returned `takeover` instructions; unsupported
-future cases must say why instead of leaving the operator to guess.
+`agent` returns a session projection with these fields at the top level and
+inside `worker_record`. The normal parent contract is not polling: keep working
+and consume the completion event when the child finishes. If audit detail is
+needed, inspect the returned `transcript_handle` with `handle_read`.
 
-Follow-up delivery is explicit. If a message was delivered, the worker record
-stores a bounded preview and timestamp. If the child had already terminated,
-`agent_eval` still returns the projection and transcript handle, but records the
-undelivered follow-up reason so queued instructions do not disappear into UI
-state.
+Legacy follow-up delivery is retained only for old transcripts and internal
+recovery. If a message was delivered, the worker record stores a bounded preview
+and timestamp. New model-facing flows should open a replacement `agent` when a
+child's assignment no longer fits.
 
 Artifacts are symbolic refs. Use `handle_read` on the returned
 `transcript_handle` for transcript details, and treat `result_summary` as a
 child self-report unless `verification.status` points to a separate gate or
-receipt. `usage.status` is `unknown` until sub-agent token accounting is wired
-into the worker ledger.
+receipt. `usage.status` is `unknown` until provider usage is reported; then it
+switches to `reported`, or `budget_exhausted` when a configured shared token
+budget has no remaining tokens.
 
 ## Output contract
 
@@ -287,16 +525,16 @@ RISKS:      what could go wrong / what the parent should double-check
 BLOCKERS:   what stopped you; "None." if you finished cleanly
 ```
 
-The exact format lives in `crates/tui/src/prompts/subagent_output_format.md`.
+The exact format lives in `crates/tui/src/prompts/text.rs` (`SUBAGENT_OUTPUT_FORMAT`).
 The parent reads `EVIDENCE` as a working set for the next turn, so
-explorers and reviewers should be precise here.
+scouts and reviewers should be precise here.
 
 ## Memory and the `remember` tool (#489)
 
 Sub-agents inherit the parent's memory file when memory is enabled
 (`[memory] enabled = true` or `DEEPSEEK_MEMORY=on`). They can
 append durable notes via the `remember` tool — handy for an
-explorer that discovers a project convention worth carrying across
+scout that discovers a project convention worth carrying across
 sessions, or a verifier that learns "this test is flaky".
 
 Memory writes are scoped to the user's own `memory.md` file; they
@@ -308,6 +546,11 @@ don't go through the standard write-approval flow.
 - Persisted state: `<workspace>/.codewhale/state/subagents.v1.json`. Schema
   version `1` (forward-compatible — new optional fields use
   `#[serde(default)]`).
+- Worker records are pruned by time: completed / failed / cancelled /
+  interrupted records are evicted after the same retention window used for
+  finished agents (default 1h, `COMPLETED_AGENT_RETENTION`). Running /
+  starting / waiting records are preserved. The hard cap of 256 records
+  remains as a safety bound (#4217).
 - `SubAgentRuntime::background_runtime()` starts from `child_runtime()` but
   replaces the turn-scoped child token with a fresh cancellation token, so
   parent turn cancellation does not stop detached background sessions.

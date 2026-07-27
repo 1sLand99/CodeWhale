@@ -1,11 +1,31 @@
 //! Queue commands: queue list/edit/drop/clear
 
+use crate::commands::traits::{CommandInfo, RegisterCommand};
 use crate::localization::{Locale, MessageId, tr};
 use crate::tui::app::App;
 
 use super::CommandResult;
 
 const PREVIEW_LIMIT: usize = 120;
+
+pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
+    name: "queue",
+    aliases: &["queued"],
+    usage: "/queue [list|send <n>|edit <n>|drop <n>|clear]",
+    description_id: MessageId::CmdQueueDescription,
+};
+
+pub(in crate::commands) struct QueueCmd;
+
+impl RegisterCommand for QueueCmd {
+    fn info() -> &'static CommandInfo {
+        &COMMAND_INFO
+    }
+
+    fn execute(app: &mut App, arg: Option<&str>) -> CommandResult {
+        queue(app, arg)
+    }
+}
 
 pub fn queue(app: &mut App, args: Option<&str>) -> CommandResult {
     let locale = app.ui_locale;
@@ -144,25 +164,11 @@ mod tests {
 
     fn create_test_app_with_tmpdir(tmpdir: &TempDir) -> App {
         let options = TuiOptions {
-            model: "deepseek-v4-pro".to_string(),
-            workspace: tmpdir.path().to_path_buf(),
-            config_path: None,
-            config_profile: None,
-            allow_shell: false,
-            use_alt_screen: true,
-            use_mouse_capture: false,
-            use_bracketed_paste: true,
-            max_subagents: 1,
             skills_dir: tmpdir.path().join("skills"),
             memory_path: tmpdir.path().join("memory.md"),
             notes_path: tmpdir.path().join("notes.txt"),
             mcp_config_path: tmpdir.path().join("mcp.json"),
-            use_memory: false,
-            start_in_agent_mode: false,
-            skip_onboarding: true,
-            yolo: false,
-            resume_session_id: None,
-            initial_input: None,
+            ..crate::test_support::test_tui_options(tmpdir.path().to_path_buf())
         };
         App::new(options, &Config::default())
     }
@@ -175,7 +181,7 @@ mod tests {
         let result = queue(&mut app, None);
         assert!(result.message.is_some());
         let msg = result.message.unwrap();
-        assert!(msg.contains(tr(app.ui_locale, MessageId::CmdQueueNoMessages)));
+        assert!(msg.contains(&*tr(app.ui_locale, MessageId::CmdQueueNoMessages)));
     }
 
     #[test]
@@ -208,7 +214,7 @@ mod tests {
         assert!(result.message.is_some());
         let msg = result.message.unwrap();
         assert!(
-            msg.contains(tr(Locale::En, MessageId::CmdQueueMissingIndex)),
+            msg.contains(&*tr(Locale::En, MessageId::CmdQueueMissingIndex)),
             "msg={msg:?}"
         );
     }
@@ -222,7 +228,7 @@ mod tests {
         assert!(result.message.is_some());
         let msg = result.message.unwrap();
         assert!(
-            msg.contains(tr(Locale::En, MessageId::CmdQueueIndexPositive)),
+            msg.contains(&*tr(Locale::En, MessageId::CmdQueueIndexPositive)),
             "msg={msg:?}"
         );
     }
@@ -236,7 +242,7 @@ mod tests {
         assert!(result.message.is_some());
         let msg = result.message.unwrap();
         assert!(
-            msg.contains(tr(Locale::En, MessageId::CmdQueueNotFound)),
+            msg.contains(&*tr(Locale::En, MessageId::CmdQueueNotFound)),
             "msg={msg:?}"
         );
     }
@@ -257,7 +263,7 @@ mod tests {
         assert!(result.message.is_some());
         let msg = result.message.unwrap();
         assert!(
-            msg.contains(tr(Locale::En, MessageId::CmdQueueAlreadyEditing)),
+            msg.contains(&*tr(Locale::En, MessageId::CmdQueueAlreadyEditing)),
             "msg={msg:?}"
         );
     }
@@ -307,7 +313,7 @@ mod tests {
         assert!(result.message.is_some());
         let msg = result.message.unwrap();
         assert!(
-            msg.contains(tr(Locale::En, MessageId::CmdQueueCleared)),
+            msg.contains(&*tr(Locale::En, MessageId::CmdQueueCleared)),
             "msg={msg:?}"
         );
         assert!(app.queued_messages.is_empty());
@@ -322,7 +328,7 @@ mod tests {
         assert!(result.message.is_some());
         let msg = result.message.unwrap();
         assert!(
-            msg.contains(tr(Locale::En, MessageId::CmdQueueAlreadyEmpty)),
+            msg.contains(&*tr(Locale::En, MessageId::CmdQueueAlreadyEmpty)),
             "msg={msg:?}"
         );
     }

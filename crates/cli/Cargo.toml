@@ -2,6 +2,7 @@
 name = "codewhale-cli"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Agentic terminal facade for open-source and open-weight coding models"
@@ -19,14 +20,16 @@ path = "src/bin/codew_legacy_shim.rs"
 anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
-codewhale-agent = { path = "../agent", version = "0.8.60" }
-codewhale-app-server = { path = "../app-server", version = "0.8.60" }
-codewhale-config = { path = "../config", version = "0.8.60" }
-codewhale-execpolicy = { path = "../execpolicy", version = "0.8.60" }
-codewhale-mcp = { path = "../mcp", version = "0.8.60" }
-codewhale-release = { path = "../release", version = "0.8.60" }
-codewhale-secrets = { path = "../secrets", version = "0.8.60" }
-codewhale-state = { path = "../state", version = "0.8.60" }
+codewhale-agent = { path = "../agent", version = "0.9.2" }
+codewhale-app-server = { path = "../app-server", version = "0.9.2" }
+codewhale-config = { path = "../config", version = "0.9.2" }
+codewhale-lane = { path = "../lane", version = "0.9.2" }
+codewhale-workflow = { path = "../workflow", version = "0.9.2" }
+codewhale-execpolicy = { path = "../execpolicy", version = "0.9.2" }
+codewhale-mcp = { path = "../mcp", version = "0.9.2" }
+codewhale-release = { path = "../release", version = "0.9.2" }
+codewhale-secrets = { path = "../secrets", version = "0.9.2" }
+codewhale-state = { path = "../state", version = "0.9.2" }
 chrono.workspace = true
 dirs.workspace = true
 serde.workspace = true
@@ -35,8 +38,23 @@ reqwest = { workspace = true, features = ["blocking"] }
 rustls.workspace = true
 semver.workspace = true
 tokio.workspace = true
+mimalloc.workspace = true
 sha2.workspace = true
-tempfile = "3.27"
+tempfile.workspace = true
 tracing.workspace = true
+
+[build-dependencies]
+codewhale-build-support = { path = "../build-support", version = "0.9.2" }
+
+# Parent-death cleanup for delegated server children (#3259): on Linux the
+# dispatcher sets PR_SET_PDEATHSIG so the child is signalled if the dispatcher
+# dies uncatchably; on Windows it assigns the child to a kill-on-job-close Job
+# Object. Also used in main.rs to reset SIGPIPE to SIG_DFL on any Unix target
+# (#4030), so libc must be available across all Unix, not just Linux.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [dev-dependencies]

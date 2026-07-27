@@ -9,15 +9,41 @@
 //! so the agent loop's mailbox API is reviewable on its own.
 
 use anyhow::Result;
+use tokio::sync::mpsc;
 
 use super::approval::{ApprovalDecision, UserInputDecision};
 use super::{CancelReason, EngineHandle, Op, UserInputResponse};
 
 impl EngineHandle {
+    /// True when the caller must preflight a concrete provider client before
+    /// committing UI/runtime turn state. Test and embedding handles with an
+    /// injected model client return false because that client owns model I/O.
+    #[must_use]
+    pub(crate) fn client_preflight_required(&self) -> bool {
+        self.client_preflight_required
+    }
+
     /// Send an operation to the engine
     pub async fn send(&self, op: Op) -> Result<()> {
         self.tx_op.send(op).await?;
         Ok(())
+    }
+
+    /// Try to send an operation without blocking.
+    ///
+    /// Returns `Err` if the channel is full or closed.  Use this for
+    /// non-critical, refresh-type ops (e.g. `Op::ListSubAgents`) that can
+    /// safely be dropped and re-requested on the next drain cycle.
+    pub fn try_send(&self, op: Op) -> Result<()> {
+        self.tx_op.try_send(op)?;
+        Ok(())
+    }
+
+    /// Reserve capacity for a runtime steer before it mutates durable state.
+    /// The owned permit lets the caller persist and dispatch synchronously,
+    /// without a cancellation point between those two operations.
+    pub(crate) async fn reserve_steer(&self) -> Result<mpsc::OwnedPermit<String>> {
+        Ok(self.tx_steer.clone().reserve_owned().await?)
     }
 
     /// Cancel the current request (user-initiated path — keeps the
@@ -127,5 +153,41 @@ impl EngineHandle {
     pub async fn steer(&self, content: impl Into<String>) -> Result<()> {
         self.tx_steer.send(content.into()).await?;
         Ok(())
+    }
+
+    /// Request a snapshot of the current session state.
+    /// Returns the snapshot directly via a oneshot channel, avoiding
+    /// competition with the SSE event stream on the mpsc receiver.
+    pub async fn get_session_snapshot(&self) -> Result<crate::core::ops::SessionSnapshot> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let tx = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
+        self.send(Op::GetSessionSnapshot { tx }).await?;
+        rx.await
+            .map_err(|_| anyhow::anyhow!("Engine dropped session snapshot oneshot"))
+    }
+
+    /// Request active provider request concurrency state.
+    pub async fn get_provider_runtime_status(
+        &self,
+    ) -> Result<crate::core::ops::ProviderRuntimeStatus> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let tx = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
+        self.send(Op::GetProviderRuntimeStatus { tx }).await?;
+        rx.await
+            .map_err(|_| anyhow::anyhow!("Engine dropped provider runtime status oneshot"))
+    }
+
+    /// Force the engine-owned MCP pool to reload and reconnect, returning a
+    /// snapshot from the exact live pool that supplies the next model turn.
+    pub async fn reload_mcp(
+        &self,
+        config_path: std::path::PathBuf,
+    ) -> Result<crate::mcp::McpManagerSnapshot> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let tx = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
+        self.send(Op::ReloadMcp { config_path, tx }).await?;
+        rx.await
+            .map_err(|_| anyhow::anyhow!("Engine dropped MCP reload oneshot"))?
+            .map_err(anyhow::Error::msg)
     }
 }

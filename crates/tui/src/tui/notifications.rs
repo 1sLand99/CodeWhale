@@ -10,6 +10,11 @@
 //! When `method = "auto"`, the resolver picks the best method for the
 //! current terminal; Windows falls back to `Bel`, which is routed through
 //! `MessageBeep(MB_OK)` for an audible default notification sound.
+//!
+//! Every mechanism is fed a [`NotificationPayload`] — a typed, bounded,
+//! redaction-aware value — rather than a free-form `String` (#4834). See
+//! [`crate::tui::notification_payload`] for the per-kind disclosure
+//! policy.
 
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Diagnostics::Debug::MessageBeep;
@@ -18,10 +23,12 @@ use windows::Win32::UI::WindowsAndMessaging::MESSAGEBOX_STYLE;
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicU8;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
+
+pub use super::notification_payload::NotificationPayload;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::ffi::OsStrExt;
@@ -41,7 +48,22 @@ pub enum Method {
     Osc9,
     /// Plain BEL character: `\x07`
     Bel,
-    /// osascript
+    /// macOS Notification Center via `osascript`.
+    ///
+    /// Only reachable through [`Method::Auto`], and only on the macOS
+    /// terminals that expose no notification escape of their own (Apple
+    /// Terminal, the VS Code and JetBrains embedded terminals, plain tmux
+    /// without `LC_TERMINAL`). iTerm2, WezTerm, Ghostty, and kitty are
+    /// matched earlier in [`resolve_method`] and never get here.
+    ///
+    /// Known limitation (#4834): `display notification` is a Standard
+    /// Additions command, so the banner is attributed to the *bundled*
+    /// host process. `/usr/bin/osascript` is unbundled, so macOS credits
+    /// `com.apple.ScriptEditor2` — which is what supplies the Script
+    /// Editor icon and owns the System Settings → Notifications entry
+    /// (alert style, previews, Do Not Disturb). `display notification`
+    /// takes no icon parameter; fixing the attribution requires shipping
+    /// a real `.app` bundle, not a change in this file.
     MacOS,
     /// Kitty notification protocol (OSC 99) with ST terminator.
     /// Uses `ESC ] 99 ; params ST` — no audible beep, unlike BEL.
@@ -173,14 +195,14 @@ fn build_escape(method: Method, in_tmux: bool, msg: &str) -> Vec<u8> {
     }
 }
 
-/// Emit a turn-complete notification to `sink` if the elapsed time meets or
-/// exceeds `threshold`, and `method` is not `Off`.
+/// Emit a notification to `sink` if the elapsed time meets or exceeds
+/// `threshold`, and `method` is not `Off`.
 ///
 /// This variant takes a `W: Write` sink for testability.
 pub fn notify_done_to<W: Write>(
     method: Method,
     in_tmux: bool,
-    msg: &str,
+    payload: &NotificationPayload,
     threshold: Duration,
     elapsed: Duration,
     sink: &mut W,
@@ -194,14 +216,32 @@ pub fn notify_done_to<W: Write>(
         other => other,
     };
 
+    // "I get no notifications" and "the wrong app posted it" (#4834) are
+    // both diagnosed by knowing which kind resolved to which mechanism.
+    tracing::debug!(
+        kind = ?payload.kind(),
+        method = ?effective,
+        in_tmux,
+        "emitting desktop notification"
+    );
+
+    // Opt-in event-sound policy (#4817). A no-op unless
+    // `[notifications.event_sound].enabled = true`; errors are swallowed
+    // like every other best-effort terminal write in this module.
+    crate::tui::sound_policy::handle_notification_kind_to(
+        payload.kind(),
+        crate::tui::sound_policy::epoch_millis_now(),
+        sink,
+    );
+
     // macOS Notification Center: handled via osascript, not terminal escapes.
     #[cfg(target_os = "macos")]
     if Method::MacOS == effective {
-        macos_display_notification(msg);
+        macos_display_notification(payload);
         return;
     }
 
-    let bytes = build_escape(effective, in_tmux, msg);
+    let bytes = build_escape(effective, in_tmux, &payload.render_inline());
     if bytes.is_empty() {
         return;
     }
@@ -218,7 +258,7 @@ pub fn notify_done_to<W: Write>(
     }
 }
 
-/// Emit a turn-complete notification to **stdout** if `elapsed >= threshold`.
+/// Emit a notification to **stdout** if `elapsed >= threshold`.
 ///
 /// With `method = Auto`, selects the best protocol for the current terminal
 /// (OSC 9, Kitty OSC 99, Ghostty OSC 777, or Bel). The unknown-terminal
@@ -230,11 +270,18 @@ pub fn notify_done_to<W: Write>(
 pub fn notify_done(
     method: Method,
     in_tmux: bool,
-    msg: &str,
+    payload: &NotificationPayload,
     threshold: Duration,
     elapsed: Duration,
 ) {
-    notify_done_to(method, in_tmux, msg, threshold, elapsed, &mut io::stdout());
+    notify_done_to(
+        method,
+        in_tmux,
+        payload,
+        threshold,
+        elapsed,
+        &mut io::stdout(),
+    );
 }
 
 /// Set the terminal taskbar progress state via OSC 9 ; 4.
@@ -248,12 +295,41 @@ pub fn notify_done(
 ///
 /// Other terminals (iTerm2, WezTerm) ignore the sequence silently.
 /// Best-effort — write failures are ignored.
+/// Build the OSC 9;4 taskbar-progress sequence. Split from the write so the
+/// bytes can be asserted without depending on whether the test runner owns a
+/// terminal.
+#[must_use]
+fn taskbar_progress_sequence(state: u8, progress: Option<u8>) -> String {
+    match progress {
+        Some(pct) => format!("\x1b]9;4;{state};{pct}\x07"),
+        None => format!("\x1b]9;4;{state}\x07"),
+    }
+}
+
+/// Build the OSC 0 window-title sequence. Split from the write for the same
+/// reason as [`taskbar_progress_sequence`].
+#[must_use]
+fn terminal_title_sequence(title: &str) -> String {
+    format!("\x1b]0;{title}\x07")
+}
+
+/// Whether raw terminal control sequences may be written to stdout.
+///
+/// OSC 9;4 (taskbar progress) and OSC 0 (window title) are *control* bytes,
+/// not content. A terminal that understands them renders nothing visible; a
+/// pipe, a file, or a CI log renders them literally, so `cargo test` output
+/// and redirected sessions pick up stray `]9;4;1]0;` noise. Gate on stdout
+/// actually being a TTY — there is no one to control otherwise.
+fn stdout_accepts_control_sequences() -> bool {
+    use std::io::IsTerminal;
+    io::stdout().is_terminal()
+}
+
 pub fn set_taskbar_progress(state: u8, progress: Option<u8>) {
-    let seq = if let Some(pct) = progress {
-        format!("\x1b]9;4;{state};{pct}\x07")
-    } else {
-        format!("\x1b]9;4;{state}\x07")
-    };
+    if !stdout_accepts_control_sequences() {
+        return;
+    }
+    let seq = taskbar_progress_sequence(state, progress);
     let mut stdout = io::stdout();
     let _ = stdout.write_all(seq.as_bytes());
     let _ = stdout.flush();
@@ -269,77 +345,191 @@ pub fn clear_taskbar_progress() {
     set_taskbar_progress(0, None);
 }
 
-/// Animation frame characters for the terminal title.
-/// Uses the DeepSeek whale emoji (🐳 spouting, 🐋 resting) to match the
-/// existing header status indicator in the TUI.
-const TITLE_FRAMES: &[&str] = &["🐳", "🐋", "🐳", "🐋"];
-const TITLE_ANIMATION_INTERVAL: Duration = Duration::from_millis(800);
-
-/// Shared flag controlling the title animation loop. Set to `true` by
+/// Shared flag controlling the title activity marker. Set to `true` by
 /// `start_title_animation()`, cleared by `stop_title_animation()`.
 static TITLE_ANIMATION_RUNNING: AtomicBool = AtomicBool::new(false);
+/// Focus reporting starts enabled before the event loop begins, so treating
+/// the terminal as focused is the safe default: never flood window chrome
+/// unless the terminal has explicitly reported `FocusLost` or motion is on.
+static TERMINAL_FOCUSED: AtomicBool = AtomicBool::new(true);
+/// When false, the title keeps a static whale + state (reduced motion /
+/// status animation off) instead of cycling frames.
+static TITLE_MOTION_ENABLED: AtomicBool = AtomicBool::new(true);
+/// Invalidates a previous animation worker when a new turn starts or ends.
+static TITLE_ANIMATION_GENERATION: AtomicU64 = AtomicU64::new(0);
+static TITLE_ANIMATION_BASE: OnceLock<Mutex<String>> = OnceLock::new();
+static TITLE_ACTIVITY_VERB: OnceLock<Mutex<String>> = OnceLock::new();
+/// Whale frames restored from #1871 (`cd357de0c`). Cycle slowly so the
+/// terminal title communicates life without competing with in-app spinners.
+const TITLE_FRAME_HOLD: Duration = Duration::from_millis(800);
+const TITLE_WHALE_FRAMES: &[&str] = &["🐳", "🐋", "🐳", "🐋"];
+
+fn title_animation_base() -> &'static Mutex<String> {
+    TITLE_ANIMATION_BASE.get_or_init(|| Mutex::new("Codewhale".to_string()))
+}
+
+fn title_activity_verb() -> &'static Mutex<String> {
+    TITLE_ACTIVITY_VERB.get_or_init(|| Mutex::new("working…".to_string()))
+}
+
+/// Configure whether the title whale cycles frames.
+///
+/// Call once at startup (and whenever motion settings change). Reduced motion
+/// and `status_indicator = "off"` both freeze the title to a single whale.
+pub fn set_title_motion_enabled(enabled: bool) {
+    TITLE_MOTION_ENABLED.store(enabled, Ordering::SeqCst);
+}
+
+/// Update the truthful activity verb shown next to the title whale
+/// (`working…`, `reasoning…`, `using tool…`, `verifying…`, `waiting on you…`).
+pub fn set_title_activity_verb(verb: &str) {
+    let verb = verb.trim();
+    if verb.is_empty() {
+        return;
+    }
+    if let Ok(mut slot) = title_activity_verb().lock() {
+        if slot.as_str() == verb {
+            return;
+        }
+        verb.clone_into(&mut *slot);
+    }
+    if !TITLE_ANIMATION_RUNNING.load(Ordering::SeqCst) {
+        return;
+    }
+    let base = title_animation_base()
+        .lock()
+        .map_or_else(|_| "Codewhale".to_string(), |base| base.clone());
+    set_terminal_title(&title_activity_label(
+        &base,
+        Duration::ZERO,
+        TERMINAL_FOCUSED.load(Ordering::SeqCst),
+        TITLE_MOTION_ENABLED.load(Ordering::SeqCst),
+    ));
+}
+
+#[must_use]
+fn title_activity_label(base: &str, elapsed: Duration, focused: bool, motion: bool) -> String {
+    let verb = title_activity_verb()
+        .lock()
+        .map_or_else(|_| "working…".to_string(), |v| v.clone());
+    let body = if verb.is_empty() {
+        base.to_string()
+    } else {
+        verb
+    };
+    // Static title when motion is off or the window is focused: one whale +
+    // state, no competing spinner in the focused app chrome.
+    if !motion || focused {
+        return format!("🐳 {body}");
+    }
+    let frame = TITLE_WHALE_FRAMES
+        [(elapsed.as_millis() / TITLE_FRAME_HOLD.as_millis()) as usize % TITLE_WHALE_FRAMES.len()];
+    format!("{frame} {body}")
+}
 
 /// Write OSC 0 (set window title) sequence.
 fn set_terminal_title(title: &str) {
-    let seq = format!("\x1b]0;{title}\x07");
+    if !stdout_accepts_control_sequences() {
+        return;
+    }
+    let seq = terminal_title_sequence(title);
     let mut stdout = io::stdout();
     let _ = stdout.write_all(seq.as_bytes());
     let _ = stdout.flush();
 }
 
-/// Tracks whether the ✅ completion marker was set, so
+/// Tracks whether the completion marker was set, so
 /// `reset_title_on_interaction()` can skip redundant writes.
 static COMPLETION_MARKER_SHOWN: AtomicBool = AtomicBool::new(false);
 
-/// Start an animated terminal title spinner.
+/// Mark the terminal title as active with the animated whale + state verb.
 ///
-/// Cycles the terminal title between 🐳→🐋 every 800ms while processing,
-/// matching the whale status indicator in the TUI header, so alt-tabbed
-/// users can see activity.
-///
-/// The animation runs in a background tokio task that checks
-/// `TITLE_ANIMATION_RUNNING`. Each call restarts the animation with the
-/// given `original` base title — safe to call on every turn start.
+/// While focused (or under reduced motion), the title stays a static whale
+/// with the current verb. After `FocusLost` with motion enabled, the whale
+/// frames cycle so alt-tabbed sessions still communicate progress.
 pub fn start_title_animation(original: &str) {
-    // Signal any existing animation loop to exit, then start fresh.
+    if let Ok(mut base) = title_animation_base().lock() {
+        original.clone_into(&mut base);
+    }
+    if let Ok(mut verb) = title_activity_verb().lock()
+        && verb.is_empty()
+    {
+        "working…".clone_into(&mut *verb);
+    }
+    COMPLETION_MARKER_SHOWN.store(false, Ordering::SeqCst);
     TITLE_ANIMATION_RUNNING.store(true, Ordering::SeqCst);
+    let generation = TITLE_ANIMATION_GENERATION
+        .fetch_add(1, Ordering::SeqCst)
+        .saturating_add(1);
+    let focused = TERMINAL_FOCUSED.load(Ordering::SeqCst);
+    let motion = TITLE_MOTION_ENABLED.load(Ordering::SeqCst);
+    set_terminal_title(&title_activity_label(
+        original,
+        Duration::ZERO,
+        focused,
+        motion,
+    ));
+
     let base = original.to_string();
-    tokio::spawn(async move {
-        let mut frame = 0usize;
-        while TITLE_ANIMATION_RUNNING.load(Ordering::SeqCst) {
-            // Yield once per frame so a racing stop_title_animation()
-            // can observe the cleared flag and apply the completion
-            // marker before the next frame write. Without this yield
-            // the background task could overwrite the ✅ marker with
-            // the next whale frame.
-            tokio::task::yield_now().await;
-            if !TITLE_ANIMATION_RUNNING.load(Ordering::SeqCst) {
+    std::thread::spawn(move || {
+        let started_at = std::time::Instant::now();
+        loop {
+            std::thread::sleep(TITLE_FRAME_HOLD);
+            if !TITLE_ANIMATION_RUNNING.load(Ordering::SeqCst)
+                || TITLE_ANIMATION_GENERATION.load(Ordering::SeqCst) != generation
+            {
                 break;
             }
-            let spinner = TITLE_FRAMES[frame % TITLE_FRAMES.len()];
-            set_terminal_title(&format!("{spinner} {base}"));
-            frame += 1;
-            tokio::time::sleep(TITLE_ANIMATION_INTERVAL).await;
+            let motion = TITLE_MOTION_ENABLED.load(Ordering::SeqCst);
+            // Only advance frames when unfocused + motion is on. Focused
+            // windows keep the static whale so the title is not a second
+            // spinner competing with in-app activity chrome.
+            if motion && !TERMINAL_FOCUSED.load(Ordering::SeqCst) {
+                set_terminal_title(&title_activity_label(
+                    &base,
+                    started_at.elapsed(),
+                    false,
+                    true,
+                ));
+            }
         }
-        // Don't restore title here — stop_title_animation() handles
-        // what to show on completion (e.g. ✅ marker).
     });
+}
+
+/// Update the focus gate used by the title activity signal.
+///
+/// Focus gain immediately restores the steady whale + verb. Focus loss emits
+/// the first animation frame immediately, then the worker advances it at the
+/// debounced whale cadence.
+pub fn set_terminal_focused(focused: bool) {
+    TERMINAL_FOCUSED.store(focused, Ordering::SeqCst);
+    if !TITLE_ANIMATION_RUNNING.load(Ordering::SeqCst) {
+        return;
+    }
+    let base = title_animation_base()
+        .lock()
+        .map_or_else(|_| "Codewhale".to_string(), |base| base.clone());
+    let motion = TITLE_MOTION_ENABLED.load(Ordering::SeqCst);
+    set_terminal_title(&title_activity_label(
+        &base,
+        Duration::ZERO,
+        focused,
+        motion,
+    ));
 }
 
 /// Stop the title animation and show a completion marker.
 ///
-/// Sets the title to `✅ <base>` so alt-tabbed users see at a glance
-/// that processing finished. The marker is overwritten on the next turn
-/// by [`start_title_animation`].
+/// Sets the title to `✓ done` so alt-tabbed users see at a glance that
+/// processing finished. The marker is overwritten on the next turn by
+/// [`start_title_animation`].
 pub fn stop_title_animation() {
     TITLE_ANIMATION_RUNNING.store(false, Ordering::SeqCst);
-    COMPLETION_MARKER_SHOWN.store(false, Ordering::SeqCst);
-    // Show ✅ marker only for beep mode. Bell mode already has its own
-    // terminal-level visual indicator (flash/icon).
-    let mode = COMPLETION_SOUND_MODE.load(Ordering::SeqCst);
-    if mode == 1 {
-        set_terminal_title("✅ CodeWhale");
-    }
+    TITLE_ANIMATION_GENERATION.fetch_add(1, Ordering::SeqCst);
+    // Always show the completion marker so quiet-sound modes still communicate
+    // finish state in the window title; interaction clears it.
+    COMPLETION_MARKER_SHOWN.store(true, Ordering::SeqCst);
+    set_terminal_title("✓ done");
     play_completion_sound();
 }
 
@@ -349,17 +539,18 @@ pub fn stop_title_animation() {
 /// without presenting them as completed work.
 pub fn stop_title_animation_quietly() {
     TITLE_ANIMATION_RUNNING.store(false, Ordering::SeqCst);
+    TITLE_ANIMATION_GENERATION.fetch_add(1, Ordering::SeqCst);
     COMPLETION_MARKER_SHOWN.store(false, Ordering::SeqCst);
-    set_terminal_title("CodeWhale");
+    set_terminal_title("Codewhale");
 }
 
-/// Clear the ✅ completion marker from the title when the user interacts.
+/// Clear the completion marker from the title when the user interacts.
 ///
 /// Call this on every user input event (key press, mouse click) so the
 /// marker doesn't persist once the user is back at the terminal.
 pub fn reset_title_on_interaction() {
     if COMPLETION_MARKER_SHOWN.swap(false, Ordering::SeqCst) {
-        set_terminal_title("CodeWhale");
+        set_terminal_title("Codewhale");
     }
 }
 
@@ -480,14 +671,15 @@ fn completion_sound_state_for_tests() -> (crate::config::CompletionSound, Option
 /// Runs on a dedicated background thread so the caller is not blocked.
 ///
 /// The notification includes:
-/// - **Title**: "CodeWhale"
-/// - **Subtitle**: First line of `msg` (when the message contains a newline,
-///   e.g. the localized completion status from a completed turn)
-/// - **Body**: Remaining lines of `msg`, if any
+/// - **Title**: "Codewhale"
+/// - **Subtitle**: [`NotificationPayload::headline`] (≤ 80 chars)
+/// - **Body**: [`NotificationPayload::body`] (≤ 322 chars: a ≤ 120-char
+///   detail, a separator, and a ≤ 200-char preview)
 /// - **Sound**: Default macOS notification sound
 ///
-/// The message body is capped at 200 **characters** (not bytes) to keep the
-/// bubble readable while correctly handling multi-byte text.
+/// Both fields arrive already sanitized, redacted, and character-bounded
+/// by [`NotificationPayload`]; this function does not re-derive them from
+/// free-form text (#4834).
 ///
 /// **Security**: The message is passed to `osascript` as a command-line
 /// argument via `ARGV`, never embedded inline in the AppleScript source.
@@ -497,13 +689,18 @@ fn completion_sound_state_for_tests() -> (crate::config::CompletionSound, Option
 /// evaluated as raw AppleScript code — a code-injection vector for
 /// AI-generated notification text. Passing via `ARGV` avoids this
 /// entirely because the message is never parsed as AppleScript syntax.
+/// Keep it that way.
+///
+/// **Attribution**: the banner is posted on behalf of `osascript`, which
+/// is unbundled, so macOS attributes it to `com.apple.ScriptEditor2`. See
+/// [`Method::MacOS`] — that is not fixable from here.
 ///
 /// This is best-effort: if `osascript` is not available (e.g. headless SSH
 /// session) the error is logged via `tracing::warn!` instead of silently
 /// swallowed.
 #[cfg(target_os = "macos")]
-fn macos_display_notification(msg: &str) {
-    let message = msg.to_string();
+fn macos_display_notification(payload: &NotificationPayload) {
+    let (subtitle, body) = macos_notification_parts(payload);
 
     // Spawn on a background thread so we don't block the caller.
     // osascript itself is fast (~50 ms), but spawning a subprocess
@@ -517,7 +714,6 @@ fn macos_display_notification(msg: &str) {
             // string literals, so `\"` would terminate the string at
             // the `"` and leave a dangling `\`. Passing the message as
             // a command-line argument avoids any injection risk.
-            let (subtitle, body) = macos_notification_parts(&message);
             let args = [
                 "-e".to_string(),
                 "on run argv".to_string(),
@@ -526,7 +722,7 @@ fn macos_display_notification(msg: &str) {
                 "-e".to_string(),
                 "set theSubtitle to item 2 of argv".to_string(),
                 "-e".to_string(),
-                "display notification theBody with title \"CodeWhale\" subtitle theSubtitle sound name \"default\"".to_string(),
+                "display notification theBody with title \"Codewhale\" subtitle theSubtitle sound name \"default\"".to_string(),
                 "-e".to_string(),
                 "end run".to_string(),
                 "--".to_string(),
@@ -550,99 +746,12 @@ fn macos_display_notification(msg: &str) {
         });
 }
 
+/// Split a payload into the `(subtitle, body)` pair `display notification`
+/// wants. Both halves are already bounded and redacted by the payload
+/// constructors, so this is a projection, not a sanitizer.
 #[cfg(target_os = "macos")]
-fn macos_notification_parts(msg: &str) -> (String, String) {
-    const SUBTITLE_MAX_CHARS: usize = 80;
-    const BODY_MAX_CHARS: usize = 200;
-
-    let sanitized = super::ui::sanitize_stream_chunk(msg);
-    let lines: Vec<&str> = sanitized
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect();
-
-    if lines.is_empty() {
-        return ("CodeWhale".to_string(), String::new());
-    }
-
-    let subtitle = truncate_notification_text(lines[0], SUBTITLE_MAX_CHARS);
-    let body = truncate_notification_text(&lines[1..].join("\n"), BODY_MAX_CHARS);
-    (subtitle, body)
-}
-
-#[cfg(target_os = "macos")]
-fn truncate_notification_text(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
-    }
-    let take = max_chars.saturating_sub(3);
-    let mut out = text.chars().take(take).collect::<String>();
-    out.push_str("...");
-    out
-}
-
-/// Return a human-readable duration string, capped at two units so
-/// it stays compact in headers and notifications.
-///
-/// Examples:
-/// * `"45s"`, `"1m"`, `"1m 12s"`
-/// * `"1h"`, `"3h 12m"` (#447 — was previously `"192m"` form)
-/// * `"1d"`, `"2d 5h"` (#447 — multi-day sessions)
-/// * `"1w"`, `"3w 2d"` (#447 — long-running automations)
-///
-/// The output drops the secondary unit when it's zero, so `"1h"`
-/// rather than `"1h 0m"`. Sub-minute precision is dropped at the
-/// hour mark and above; the goal is "is this a couple of hours or
-/// a couple of days," not stopwatch accuracy.
-#[must_use]
-pub fn humanize_duration(d: Duration) -> String {
-    const MINUTE: u64 = 60;
-    const HOUR: u64 = 60 * MINUTE;
-    const DAY: u64 = 24 * HOUR;
-    const WEEK: u64 = 7 * DAY;
-
-    let total = d.as_secs();
-    if total == 0 {
-        return "0s".to_string();
-    }
-    if total >= WEEK {
-        let w = total / WEEK;
-        let days = (total % WEEK) / DAY;
-        return if days == 0 {
-            format!("{w}w")
-        } else {
-            format!("{w}w {days}d")
-        };
-    }
-    if total >= DAY {
-        let days = total / DAY;
-        let h = (total % DAY) / HOUR;
-        return if h == 0 {
-            format!("{days}d")
-        } else {
-            format!("{days}d {h}h")
-        };
-    }
-    if total >= HOUR {
-        let h = total / HOUR;
-        let m = (total % HOUR) / MINUTE;
-        return if m == 0 {
-            format!("{h}h")
-        } else {
-            format!("{h}h {m}m")
-        };
-    }
-    if total >= MINUTE {
-        let m = total / MINUTE;
-        let s = total % MINUTE;
-        return if s == 0 {
-            format!("{m}m")
-        } else {
-            format!("{m}m {s}s")
-        };
-    }
-    format!("{total}s")
+fn macos_notification_parts(payload: &NotificationPayload) -> (String, String) {
+    (payload.headline().to_string(), payload.body())
 }
 
 // ── Per-turn notification composition ────────────────────────────────
@@ -651,8 +760,9 @@ pub fn humanize_duration(d: Duration) -> String {
 // *what message* to put in the body. The low-level dispatcher is
 // `notify_done`; everything in this block sits in front of it.
 
-use crate::localization::Locale;
+use crate::localization::{Locale, MessageId, tr};
 use crate::models::{ContentBlock, Message};
+use crate::tools::subagent::SubAgentStatus;
 use crate::tui::app::App;
 
 /// Resolve the effective notification method/threshold/include-summary tuple
@@ -667,6 +777,13 @@ pub fn settings(config: &crate::config::Config) -> Option<(Method, Duration, boo
     let notif = config.notifications_config();
     // Initialize completion sound mode from config.
     set_completion_sound(notif.completion_sound, notif.sound_file);
+    // Initialize the opt-in event-sound policy (#4817) from the sibling
+    // `[notifications.event_sound]` table. `completion_sound` active means
+    // the policy defers `turn-complete` to that channel (no double ding).
+    crate::tui::sound_policy::configure(crate::tui::sound_policy::EventSoundPolicy::from_config(
+        &notif.event_sound,
+        notif.completion_sound != crate::config::CompletionSound::Off,
+    ));
     let method = match notif.method {
         crate::config::NotificationMethod::Auto => Method::Auto,
         crate::config::NotificationMethod::Osc9 => Method::Osc9,
@@ -696,64 +813,63 @@ pub fn settings(config: &crate::config::Config) -> Option<(Method, Duration, boo
     ))
 }
 
-/// Build the notification body for a completed turn. Prefers the live
+/// Build the notification payload for a completed turn. Prefers the live
 /// streaming text the user just saw; falls back to the latest assistant
 /// message in `api_messages` if streaming text is empty (for example, the
 /// turn finished entirely through tool output). When `include_summary` is
-/// true, an elapsed/cost line is appended.
-pub fn completed_turn_message(
+/// true, an elapsed/cost suffix is appended to the headline.
+///
+/// The assistant text becomes the payload's *preview*, which means it is
+/// redacted and capped at 200 characters before it can reach the OS.
+pub fn completed_turn_payload(
     app: &App,
     current_streaming_text: &str,
     include_summary: bool,
     turn_elapsed: Duration,
     turn_cost: Option<crate::pricing::CostEstimate>,
-) -> String {
-    let mut msg = completion_status(
-        notification_turn_complete(app.ui_locale),
+) -> NotificationPayload {
+    let headline = completion_status(
+        &tr(app.ui_locale, MessageId::NotificationTurnComplete),
         include_summary,
         turn_elapsed,
         turn_cost.map(|cost| crate::pricing::format_cost_estimate(cost, app.cost_currency)),
     );
 
-    if let Some(preview) =
-        text_summary(current_streaming_text).or_else(|| latest_assistant_text(&app.api_messages))
-    {
-        msg.push('\n');
-        msg.push_str(&preview);
-    }
+    let preview =
+        text_summary(current_streaming_text).or_else(|| latest_assistant_text(&app.api_messages));
 
-    msg
+    NotificationPayload::turn_complete(&headline).with_preview(preview.as_deref())
 }
 
-/// Compose a notification body for a sub-agent completion. Falls back
-/// to a generic "sub-agent X complete" if no human-readable line can
-/// be teased out of the child's transcript.
-pub fn subagent_completion_message(
+/// Compose a notification payload for a terminal sub-agent outcome. The
+/// agent id is always the detail line; the child's first human-readable
+/// summary line, when there is one, becomes the (redacted, bounded)
+/// preview. The headline reflects the actual status so a Stop/failed
+/// worker is never announced as successfully complete (#4408).
+pub fn subagent_terminal_payload(
     locale: Locale,
     id: &str,
     result: &str,
+    status: &SubAgentStatus,
     include_summary: bool,
     elapsed: Duration,
-) -> String {
+) -> NotificationPayload {
     let result_line = result
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty() && !line.starts_with("<codewhale:subagent.done>"));
-    let mut msg = completion_status(
-        notification_subagent_complete(locale),
-        include_summary,
-        elapsed,
-        None,
-    );
-    let detail = result_line
-        .and_then(text_summary)
-        .map(|summary| format!("{id}: {summary}"))
-        .unwrap_or_else(|| id.to_string());
+    let label = match status {
+        SubAgentStatus::Completed => MessageId::NotificationSubagentComplete,
+        SubAgentStatus::Failed(_) => MessageId::NotificationSubagentFailed,
+        SubAgentStatus::Interrupted(_) => MessageId::NotificationSubagentInterrupted,
+        SubAgentStatus::Cancelled => MessageId::NotificationSubagentCancelled,
+        SubAgentStatus::BudgetExhausted => MessageId::NotificationSubagentBudgetExhausted,
+        SubAgentStatus::Running => MessageId::NotificationSubagentComplete,
+    };
+    let headline = completion_status(&tr(locale, label), include_summary, elapsed, None);
+    let preview = result_line.and_then(text_summary);
 
-    msg.push('\n');
-    msg.push_str(&detail);
-
-    msg
+    NotificationPayload::subagent_terminal(&headline, id).with_preview(preview.as_deref())
 }
 
 fn completion_status(
@@ -766,34 +882,10 @@ fn completion_status(
         return label.to_string();
     }
 
-    let human = humanize_duration(elapsed);
+    let human = crate::elapsed::format_elapsed_secs(elapsed.as_secs());
     match cost {
         Some(cost) => format!("{label} ({human}, {cost})"),
         None => format!("{label} ({human})"),
-    }
-}
-
-fn notification_turn_complete(locale: Locale) -> &'static str {
-    match locale {
-        Locale::En => "Turn complete",
-        Locale::Ja => "ターン完了",
-        Locale::ZhHans => "本轮已完成",
-        Locale::ZhHant => "本輪已完成",
-        Locale::PtBr => "Turno concluído",
-        Locale::Es419 => "Turno completado",
-        Locale::Vi => "Lượt hoàn tất",
-    }
-}
-
-fn notification_subagent_complete(locale: Locale) -> &'static str {
-    match locale {
-        Locale::En => "Sub-agent complete",
-        Locale::Ja => "サブエージェント完了",
-        Locale::ZhHans => "子代理已完成",
-        Locale::ZhHant => "子代理已完成",
-        Locale::PtBr => "Subagente concluído",
-        Locale::Es419 => "Subagente completado",
-        Locale::Vi => "Sub-agent hoàn tất",
     }
 }
 
@@ -860,6 +952,35 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn title_whale_is_static_when_focused_or_motion_disabled() {
+        if let Ok(mut verb) = title_activity_verb().lock() {
+            "working…".clone_into(&mut *verb);
+        }
+        assert_eq!(
+            title_activity_label("Codewhale", Duration::ZERO, true, true),
+            "🐳 working…"
+        );
+        assert_eq!(
+            title_activity_label("Codewhale", Duration::ZERO, false, false),
+            "🐳 working…"
+        );
+        assert_eq!(
+            title_activity_label("Codewhale", Duration::ZERO, false, true),
+            "🐳 working…"
+        );
+        assert_eq!(
+            title_activity_label("Codewhale", Duration::from_millis(800), false, true),
+            "🐋 working…"
+        );
+    }
+
+    #[test]
+    fn title_whale_frames_are_the_restored_emoji_pair() {
+        assert_eq!(TITLE_WHALE_FRAMES, &["🐳", "🐋", "🐳", "🐋"]);
+        assert_eq!(TITLE_FRAME_HOLD, Duration::from_millis(800));
+    }
+
     /// Serialise tests that mutate process-global environment or notification
     /// sound state while the test harness runs them in parallel threads.
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -869,6 +990,8 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Escape-protocol tests care about the bytes, not the composition
+    /// policy, so they go through the least-privileged constructor.
     fn capture(
         method: Method,
         in_tmux: bool,
@@ -880,7 +1003,7 @@ mod tests {
         notify_done_to(
             method,
             in_tmux,
-            msg,
+            &NotificationPayload::input_needed(msg),
             Duration::from_secs(threshold_secs),
             Duration::from_secs(elapsed_secs),
             &mut buf,
@@ -904,6 +1027,23 @@ mod tests {
     fn off_mode_emits_nothing() {
         let out = capture(Method::Off, false, "ignored", 0, 9999);
         assert!(out.is_empty());
+    }
+
+    /// #4847 follow-up: OSC 9;4 and OSC 0 are *control* bytes, not content.
+    /// A terminal renders nothing visible; a pipe, a file, or a CI log renders
+    /// them literally — which is why `cargo test` output carried stray
+    /// `]9;4;1]0;` noise. The write is now gated on stdout being a TTY; these
+    /// assertions pin the bytes themselves so the gate cannot be "fixed" by
+    /// quietly changing what gets emitted.
+    #[test]
+    fn control_sequences_have_the_exact_documented_bytes() {
+        assert_eq!(taskbar_progress_sequence(1, None), "\x1b]9;4;1\x07");
+        assert_eq!(taskbar_progress_sequence(1, Some(42)), "\x1b]9;4;1;42\x07");
+        assert_eq!(taskbar_progress_sequence(0, None), "\x1b]9;4;0\x07");
+        assert_eq!(
+            terminal_title_sequence("🐳 working…"),
+            "\x1b]0;🐳 working…\x07"
+        );
     }
 
     #[test]
@@ -953,26 +1093,55 @@ mod tests {
         assert!(!out.is_empty());
     }
 
+    /// The subtitle is the localized status headline and the body is
+    /// everything else. Previously this was re-derived by splitting a
+    /// free-form string on its first newline; now it is a projection of
+    /// the typed payload, so the split cannot drift from what the
+    /// composer intended (#4834).
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_notification_keeps_localized_status_as_subtitle() {
-        let (subtitle, body) = macos_notification_parts("ターン完了 (1m 5s)\n完了しました。");
+        let payload = NotificationPayload::turn_complete("ターン完了 (1m 5s)")
+            .with_preview(Some("完了しました。"));
+
+        let (subtitle, body) = macos_notification_parts(&payload);
 
         assert_eq!(subtitle, "ターン完了 (1m 5s)");
         assert_eq!(body, "完了しました。");
     }
 
+    /// The preview is capped at `PREVIEW_MAX_CHARS` *inclusive* of the
+    /// ellipsis, so the string handed to `osascript` never exceeds the
+    /// declared bound.
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_notification_truncates_body_after_status_line() {
-        let msg = format!("Turn complete\n{}", "assistant preview ".repeat(40));
+    fn macos_notification_truncates_preview() {
+        let payload = NotificationPayload::turn_complete("Turn complete")
+            .with_preview(Some(&"assistant preview ".repeat(40)));
 
-        let (subtitle, body) = macos_notification_parts(&msg);
+        let (subtitle, body) = macos_notification_parts(&payload);
 
         assert_eq!(subtitle, "Turn complete");
         assert!(body.starts_with("assistant preview"));
         assert!(body.ends_with("..."));
-        assert_eq!(body.chars().count(), 200);
+        assert_eq!(
+            body.chars().count(),
+            super::super::notification_payload::PREVIEW_MAX_CHARS
+        );
+    }
+
+    /// #4834: an approval banner is the one place a raw shell command
+    /// used to reach Notification Center. Pin the macOS projection, not
+    /// just the payload, so a future refactor of either half is caught.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_approval_notification_never_carries_the_command() {
+        let payload = NotificationPayload::approval_needed("Approval needed", "bash");
+
+        let (subtitle, body) = macos_notification_parts(&payload);
+
+        assert_eq!(subtitle, "Approval needed");
+        assert_eq!(body, "bash");
     }
 
     #[test]
@@ -1278,55 +1447,6 @@ mod tests {
             }
         }
         assert_eq!(resolved, Method::Bel);
-    }
-
-    #[test]
-    fn humanize_duration_seconds_and_minutes() {
-        assert_eq!(humanize_duration(Duration::from_secs(0)), "0s");
-        assert_eq!(humanize_duration(Duration::from_secs(45)), "45s");
-        assert_eq!(humanize_duration(Duration::from_secs(60)), "1m");
-        assert_eq!(humanize_duration(Duration::from_secs(72)), "1m 12s");
-        // 59m 59s — still under the hour boundary.
-        assert_eq!(humanize_duration(Duration::from_secs(3599)), "59m 59s");
-    }
-
-    #[test]
-    fn humanize_duration_promotes_to_hours_at_one_hour() {
-        // 3661s = 1h 1m 1s — under the new format the seconds fall
-        // off; we keep just the top two units at the hour mark.
-        assert_eq!(humanize_duration(Duration::from_secs(3661)), "1h 1m");
-        assert_eq!(humanize_duration(Duration::from_secs(3600)), "1h");
-        assert_eq!(humanize_duration(Duration::from_secs(7200)), "2h");
-        assert_eq!(humanize_duration(Duration::from_secs(7320)), "2h 2m");
-        // 3h 12m — the previous "192m 30s" case that motivated #447.
-        assert_eq!(humanize_duration(Duration::from_secs(11_550)), "3h 12m");
-    }
-
-    #[test]
-    fn humanize_duration_handles_multi_day_sessions() {
-        // Exactly one day.
-        assert_eq!(humanize_duration(Duration::from_secs(86_400)), "1d");
-        // 1d 1h.
-        assert_eq!(humanize_duration(Duration::from_secs(90_000)), "1d 1h");
-        // 2d 5h — the two-tier rule drops minutes/seconds.
-        assert_eq!(
-            humanize_duration(Duration::from_secs(2 * 86_400 + 5 * 3600 + 17 * 60)),
-            "2d 5h"
-        );
-    }
-
-    #[test]
-    fn humanize_duration_promotes_to_weeks_after_seven_days() {
-        assert_eq!(humanize_duration(Duration::from_secs(604_800)), "1w");
-        assert_eq!(
-            humanize_duration(Duration::from_secs(604_800 + 86_400)),
-            "1w 1d"
-        );
-        // 3w 2d — long-running automation case.
-        assert_eq!(
-            humanize_duration(Duration::from_secs(3 * 604_800 + 2 * 86_400 + 17 * 3600)),
-            "3w 2d"
-        );
     }
 
     #[test]

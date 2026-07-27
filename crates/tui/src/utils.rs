@@ -9,6 +9,77 @@ use crate::models::{ContentBlock, Message};
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use serde_json::Value;
+use std::io;
+
+/// A writer that counts bytes written without storing them.
+pub(crate) struct CountingWriter {
+    count: usize,
+}
+
+impl CountingWriter {
+    pub(crate) fn new() -> Self {
+        Self { count: 0 }
+    }
+
+    pub(crate) fn count(&self) -> usize {
+        self.count
+    }
+}
+
+impl io::Write for CountingWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.count += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+const LOG_FINGERPRINT_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const LOG_FINGERPRINT_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// Return a stable, non-reversible log label for an identifier.
+///
+/// This is meant for correlation in diagnostics where the raw value may be a
+/// session token, remote protocol session id, or other bearer-like handle.
+#[must_use]
+pub fn redacted_identifier_for_log(identifier: &str) -> String {
+    if identifier.is_empty() {
+        return "<redacted:empty>".to_string();
+    }
+
+    let mut hash = LOG_FINGERPRINT_OFFSET_BASIS;
+    for byte in identifier.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(LOG_FINGERPRINT_PRIME);
+    }
+    hash ^= identifier.len() as u64;
+    hash = hash.wrapping_mul(LOG_FINGERPRINT_PRIME);
+
+    format!("<redacted:{hash:016x}>")
+}
+
+#[cfg(windows)]
+pub(crate) fn suppress_console_window(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+pub(crate) fn suppress_console_window(_cmd: &mut Command) {}
+
+#[cfg(windows)]
+pub(crate) fn suppress_tokio_console_window(cmd: &mut tokio::process::Command) {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+pub(crate) fn suppress_tokio_console_window(_cmd: &mut tokio::process::Command) {}
 
 // === Project Mapping Helpers ===
 
@@ -111,17 +182,17 @@ pub fn summarize_project(root: &Path) -> String {
 /// directory still precedes its children because `"src" < "src/lib.rs"`)
 /// while making the rendered output byte-stable across runs.
 #[must_use]
-pub fn project_tree(root: &Path, max_depth: usize) -> String {
+pub fn project_tree(root: &Path, max_depth: usize, follow_symlinks: bool) -> String {
     let mut entries: Vec<(PathBuf, bool)> = Vec::new();
 
     let mut builder = WalkBuilder::new(root);
     builder
         .hidden(false)
-        .follow_links(false)
+        .follow_links(follow_symlinks)
         .max_depth(Some(max_depth + 1));
 
     for entry in builder.build().flatten() {
-        if entry.file_type().is_some_and(|ft| ft.is_symlink()) {
+        if entry.file_type().is_some_and(|ft| ft.is_symlink()) && !follow_symlinks {
             continue;
         }
         let depth = entry.depth();
@@ -157,7 +228,23 @@ pub fn project_tree(root: &Path, max_depth: usize) -> String {
 
 // === Filesystem Helpers ===
 
+/// Permission policy for atomic writes.
+///
+/// - [`AtomicWritePermissions::Private`]: keep tempfile's owner-only defaults
+///   (used for CodeWhale internal persistence such as session/history/trust).
+/// - [`AtomicWritePermissions::Workspace`]: match ordinary workspace file
+///   semantics — new files request mode `0666` (kernel applies umask); existing
+///   files retain ordinary `rwx` bits (not setuid/setgid/sticky).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AtomicWritePermissions {
+    Private,
+    Workspace,
+}
+
 /// Atomically write `contents` to `path` using a temporary file + fsync + rename.
+///
+/// Uses a **private** permission policy (Unix tempfile default `0600`). Prefer
+/// [`write_atomic_workspace`] for user workspace source/config files.
 ///
 /// 1. Creates a `NamedTempFile` in the same directory as `path` (same filesystem).
 /// 2. Writes `contents` to the temp file.
@@ -173,17 +260,122 @@ pub fn project_tree(root: &Path, max_depth: usize) -> String {
 /// Returns `io::Error` if the parent directory cannot be determined, the temp
 /// file cannot be created, the write fails, or the rename fails.
 pub fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    write_atomic_with_permissions(path, contents, AtomicWritePermissions::Private)
+}
+
+/// Atomically write `contents` to a **user workspace** path.
+///
+/// On Unix:
+/// - New files request creation mode `0666`; the OS applies the process umask
+///   (same candidate mode as ordinary `std::fs::write`).
+/// - Existing files keep ordinary permission bits (`mode & 0o777`), including
+///   executable bits. setuid/setgid/sticky are intentionally not restored.
+///
+/// On Windows this matches [`write_atomic`] (no POSIX mode simulation).
+///
+/// # Errors
+/// Same failure modes as [`write_atomic`].
+pub fn write_atomic_workspace(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    write_atomic_with_permissions(path, contents, AtomicWritePermissions::Workspace)
+}
+
+fn write_atomic_with_permissions(
+    path: &Path,
+    contents: &[u8],
+    #[cfg_attr(not(unix), allow(unused_variables))] permission_policy: AtomicWritePermissions,
+) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("path has no parent directory: {}", path.display()),
         )
     })?;
+
+    // Capture ordinary rwx bits before replacement. Use symlink_metadata so we
+    // do not follow links: an inaccessible or dangling symlink target must not
+    // abort the write — rename still replaces the directory entry, matching
+    // the pre-#4606 private write_atomic behavior. Symlink entries themselves
+    // are treated as "no mode to preserve" (new ordinary file after rename);
+    // only regular-file modes are restored. Mask with 0o777 so setuid/setgid/
+    // sticky are never restored after rewriting content.
+    #[cfg(unix)]
+    let existing_workspace_mode = if permission_policy == AtomicWritePermissions::Workspace {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => None,
+            Ok(metadata) => {
+                use std::os::unix::fs::PermissionsExt;
+                Some(metadata.permissions().mode() & 0o777)
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => return Err(err),
+        }
+    } else {
+        None
+    };
+
     // Use parent directory so the rename is on the same filesystem.
-    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    #[cfg(unix)]
+    let mut builder = tempfile::Builder::new();
+    #[cfg(not(unix))]
+    let builder = tempfile::Builder::new();
+
+    // New workspace files should behave like ordinary files opened with
+    // creation mode 0666. The kernel applies the inherited process umask.
+    // Do NOT chmod after create: set_permissions bypasses umask.
+    #[cfg(unix)]
+    if permission_policy == AtomicWritePermissions::Workspace && existing_workspace_mode.is_none() {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(fs::Permissions::from_mode(0o666));
+    }
+
+    let mut tmp = builder.tempfile_in(parent)?;
     std::io::Write::write_all(&mut tmp, contents)?;
+
+    // Atomic replacement creates a new inode. Restore ordinary access /
+    // executable bits of an existing workspace file before persisting.
+    #[cfg(unix)]
+    if let Some(mode) = existing_workspace_mode {
+        use std::os::unix::fs::PermissionsExt;
+        tmp.as_file()
+            .set_permissions(fs::Permissions::from_mode(mode))?;
+    }
+
     tmp.as_file().sync_all()?;
+    #[cfg(windows)]
+    {
+        // Windows can briefly deny replacement while Defender, indexing, or a
+        // concurrent reader still holds the destination without delete sharing.
+        // Keep the already-synced tempfile and retry only the transient Win32
+        // sharing/lock failures; permanent permission errors still surface.
+        const MAX_PERSIST_ATTEMPTS: usize = 6;
+        let mut pending = tmp;
+        for attempt in 0..MAX_PERSIST_ATTEMPTS {
+            match pending.persist(path) {
+                Ok(_) => break,
+                Err(err) => {
+                    let retryable = err.error.kind() == std::io::ErrorKind::PermissionDenied
+                        || matches!(err.error.raw_os_error(), Some(5 | 32 | 33));
+                    if !retryable || attempt + 1 == MAX_PERSIST_ATTEMPTS {
+                        return Err(err.error);
+                    }
+                    pending = err.file;
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        10u64.saturating_mul(1u64 << attempt),
+                    ));
+                }
+            }
+        }
+    }
+    #[cfg(not(windows))]
     tmp.persist(path)?;
+    // Fsync the parent directory so the rename (the new directory entry) is
+    // itself durable — otherwise a power loss right after the rename can lose
+    // it even though the file data was synced, silently dropping a
+    // crash-recovery checkpoint. Best-effort: not all platforms permit
+    // opening a directory for sync, so a failure here is not fatal.
+    if let Ok(dir) = std::fs::File::open(parent) {
+        let _ = dir.sync_all();
+    }
     Ok(())
 }
 
@@ -213,7 +405,7 @@ pub fn flush_and_sync(writer: &mut std::io::BufWriter<std::fs::File>) -> std::io
 ///
 /// Dispatches to the platform-appropriate opener:
 /// - macOS: `open`
-/// - Linux: `xdg-open`
+/// - Linux / BSD: `xdg-open`
 /// - Windows: `cmd /C start ""`
 /// - Other: returns an error.
 ///
@@ -242,7 +434,13 @@ fn browser_open_command(url: &str) -> Result<Command> {
         Ok(command)
     }
 
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(any(
+        all(target_os = "linux", not(target_env = "ohos")),
+        target_os = "netbsd",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
     {
         let mut command = Command::new("xdg-open");
         command.arg(url);
@@ -259,7 +457,11 @@ fn browser_open_command(url: &str) -> Result<Command> {
     #[cfg(not(any(
         target_os = "macos",
         all(target_os = "linux", not(target_env = "ohos")),
-        target_os = "windows"
+        target_os = "windows",
+        target_os = "netbsd",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
     )))]
     Err(anyhow::anyhow!(
         "browser opening is unsupported on this platform"
@@ -334,7 +536,7 @@ fn write_panic_dump(
     location: &std::panic::Location<'_>,
     message: &str,
 ) -> std::io::Result<()> {
-    let home = dirs::home_dir().ok_or_else(|| {
+    let home = crate::config::effective_home_dir().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "home directory not found")
     })?;
     // Prefer .codewhale, fall back to .deepseek
@@ -460,11 +662,11 @@ pub fn url_encode(input: &str) -> String {
 /// resolve correctly across processes.
 #[must_use]
 pub fn display_path(path: &Path) -> String {
-    display_path_with_home(path, dirs::home_dir().as_deref())
+    display_path_with_home(path, crate::config::effective_home_dir().as_deref())
 }
 
 /// Like [`display_path`] but takes an explicit home directory instead of
-/// reading `$HOME` / `dirs::home_dir()`.  Used in tests and anywhere the
+/// reading `$HOME` / `crate::config::effective_home_dir()`.  Used in tests and anywhere the
 /// caller already has the home path available.
 ///
 /// The home-relative suffix is rejoined with the platform separator
@@ -499,7 +701,11 @@ pub fn estimate_message_chars(messages: &[Message]) -> usize {
             match block {
                 ContentBlock::Text { text, .. } => total += text.len(),
                 ContentBlock::Thinking { thinking, .. } => total += thinking.len(),
-                ContentBlock::ToolUse { input, .. } => total += input.to_string().len(),
+                ContentBlock::ToolUse { input, .. } => {
+                    let mut cw = CountingWriter::new();
+                    let _ = serde_json::to_writer(&mut cw, input);
+                    total += cw.count();
+                }
                 ContentBlock::ToolResult { content, .. } => total += content.len(),
                 ContentBlock::ServerToolUse { .. }
                 | ContentBlock::ToolSearchToolResult { .. }
@@ -519,11 +725,28 @@ pub fn estimate_message_chars(messages: &[Message]) -> usize {
 // without additional platform scaffolding.
 #[cfg(test)]
 mod tests {
-    use super::display_path_with_home;
+    use super::{display_path_with_home, redacted_identifier_for_log};
     use std::path::PathBuf;
 
     fn home(s: &str) -> Option<PathBuf> {
         Some(PathBuf::from(s))
+    }
+
+    #[test]
+    fn redacted_identifier_for_log_hides_value_and_stays_stable() {
+        let identifier = "session-secret-1234567890";
+        let redacted = redacted_identifier_for_log(identifier);
+
+        assert!(redacted.starts_with("<redacted:"));
+        assert!(redacted.ends_with('>'));
+        assert!(!redacted.contains(identifier));
+        assert_eq!(redacted, redacted_identifier_for_log(identifier));
+        assert_ne!(redacted, redacted_identifier_for_log("another-session"));
+    }
+
+    #[test]
+    fn redacted_identifier_for_log_marks_empty_values() {
+        assert_eq!(redacted_identifier_for_log(""), "<redacted:empty>");
     }
 
     #[test]
@@ -611,6 +834,33 @@ mod atomic_write_tests {
         assert_eq!(read, "new content");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn write_atomic_retries_windows_replace_contention() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join("contended.json");
+        fs::write(&path, b"old content").expect("write old");
+
+        // FILE_SHARE_READ | FILE_SHARE_WRITE deliberately omits
+        // FILE_SHARE_DELETE, reproducing the short-lived handle contention
+        // that makes MoveFileExW report access denied during replacement.
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x1 | 0x2)
+            .open(&path)
+            .expect("hold destination without delete sharing");
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(held);
+        });
+
+        write_atomic(&path, b"new content").expect("retry contended atomic replacement");
+        release.join().expect("release destination handle");
+        assert_eq!(fs::read(&path).expect("read replacement"), b"new content");
+    }
+
     #[test]
     fn write_atomic_no_temp_left_behind_on_success() {
         let tmp = tempdir().expect("tempdir");
@@ -629,6 +879,192 @@ mod atomic_write_tests {
             tmp_files.is_empty(),
             "temp files left behind: {tmp_files:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_workspace_new_file_matches_standard_creation_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().expect("tempdir");
+        let control = dir.path().join("control.txt");
+        let actual = dir.path().join("actual.txt");
+
+        fs::write(&control, b"control").expect("write control");
+        write_atomic_workspace(&actual, b"actual").expect("atomic workspace write");
+
+        let control_mode = fs::metadata(&control)
+            .expect("control metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        let actual_mode = fs::metadata(&actual)
+            .expect("actual metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(actual_mode, control_mode);
+        assert_eq!(fs::read(&actual).expect("read"), b"actual");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_workspace_preserves_existing_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("shared.txt");
+        fs::write(&path, b"before").expect("initial write");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o664))
+            .expect("set shared permissions");
+
+        write_atomic_workspace(&path, b"after").expect("atomic workspace write");
+
+        let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o664);
+        assert_eq!(fs::read(&path).expect("read"), b"after");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_workspace_preserves_executable_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("script.sh");
+        fs::write(&path, b"#!/bin/sh\nexit 0\n").expect("initial write");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+            .expect("set executable permissions");
+
+        write_atomic_workspace(&path, b"#!/bin/sh\nexit 1\n").expect("atomic workspace write");
+
+        let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755);
+        assert_eq!(fs::read(&path).expect("read"), b"#!/bin/sh\nexit 1\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_workspace_does_not_restore_special_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("special.sh");
+        fs::write(&path, b"#!/bin/sh\n").expect("initial write");
+        // Request sticky + setgid + rwxr-xr-x. Filesystems may clear some
+        // special bits; we only assert that after rewrite we never keep
+        // bits outside the ordinary 0o777 mask.
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o6755));
+        let before = fs::metadata(&path)
+            .expect("metadata before")
+            .permissions()
+            .mode();
+        let expected_ordinary = before & 0o777;
+
+        write_atomic_workspace(&path, b"#!/bin/sh\necho rewritten\n")
+            .expect("atomic workspace write");
+
+        let after = fs::metadata(&path)
+            .expect("metadata after")
+            .permissions()
+            .mode();
+        assert_eq!(after & 0o777, expected_ordinary);
+        // `PermissionsExt::mode()` also contains the regular-file type bit on
+        // macOS/BSD. Check only the Unix special permission bits rather than
+        // treating every non-rwx bit as a restored permission.
+        assert_eq!(after & 0o7000, 0, "special bits must not be restored");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_workspace_replaces_symlink_without_following_target() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = tempdir().expect("tempdir");
+        let target = dir.path().join("target.txt");
+        let link = dir.path().join("link.txt");
+        fs::write(&target, b"target-body").expect("write target");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600))
+            .expect("lock down target mode");
+        symlink(&target, &link).expect("create symlink");
+
+        write_atomic_workspace(&link, b"replaced-link")
+            .expect("workspace write must replace symlink directory entry");
+
+        let link_meta = fs::symlink_metadata(&link).expect("link metadata");
+        assert!(
+            link_meta.file_type().is_file() && !link_meta.file_type().is_symlink(),
+            "rename should replace the symlink with a regular file"
+        );
+        assert_eq!(fs::read(&link).expect("read link path"), b"replaced-link");
+        // Target inode must remain untouched (old private write_atomic semantics).
+        assert_eq!(fs::read(&target).expect("read target"), b"target-body");
+        assert_eq!(
+            fs::metadata(&target)
+                .expect("target metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_workspace_replaces_symlink_when_target_is_unreadable() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = tempdir().expect("tempdir");
+        let secret_dir = dir.path().join("secret");
+        fs::create_dir(&secret_dir).expect("create secret dir");
+        let secret_file = secret_dir.join("hidden.txt");
+        fs::write(&secret_file, b"hidden").expect("write hidden");
+        // Remove search permission so following the symlink fails with EACCES,
+        // while lstat on the symlink itself still succeeds.
+        fs::set_permissions(&secret_dir, fs::Permissions::from_mode(0o000))
+            .expect("lock secret dir");
+
+        let link = dir.path().join("to-hidden.txt");
+        symlink(&secret_file, &link).expect("symlink to hidden file");
+
+        // Following metadata must fail; workspace write must still succeed.
+        assert!(
+            fs::metadata(&link).is_err(),
+            "precondition: following the symlink must fail"
+        );
+
+        let result = write_atomic_workspace(&link, b"new-content");
+
+        // Restore dir perms so tempdir cleanup can remove nested files.
+        let _ = fs::set_permissions(&secret_dir, fs::Permissions::from_mode(0o700));
+
+        result.expect("workspace write must not abort when symlink target is unreadable");
+        let link_meta = fs::symlink_metadata(&link).expect("link metadata");
+        assert!(link_meta.file_type().is_file() && !link_meta.file_type().is_symlink());
+        assert_eq!(fs::read(&link).expect("read"), b"new-content");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_private_new_file_does_not_gain_group_or_other_access() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("private.json");
+
+        write_atomic(&path, b"{}").expect("private atomic write");
+
+        let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode & 0o077, 0);
+    }
+
+    #[test]
+    fn write_atomic_workspace_writes_content() {
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join("workspace.txt");
+        write_atomic_workspace(&path, b"workspace").expect("write_atomic_workspace");
+        assert_eq!(fs::read(&path).expect("read"), b"workspace");
     }
 
     #[test]
@@ -656,7 +1092,7 @@ mod spawn_supervised_tests {
     /// A spawned task that panics does not propagate the panic to the
     /// parent task — `spawn_supervised` catches it. Verified in isolation
     /// from the on-disk crash-dump path so the test is portable across
-    /// macOS / Linux / Windows (where `dirs::home_dir()` reads
+    /// macOS / Linux / Windows (where `crate::config::effective_home_dir()` reads
     /// `USERPROFILE`, not `HOME`, so env-mutation tricks don't redirect
     /// the dump on Windows).
     #[tokio::test]
@@ -707,7 +1143,7 @@ mod spawn_supervised_tests {
 
     /// `write_panic_dump_to` writes a properly-formatted crash log into
     /// the supplied directory. Tested separately from `spawn_supervised`
-    /// because env-mutation redirection of `dirs::home_dir()` doesn't
+    /// because env-mutation redirection of `crate::config::effective_home_dir()` doesn't
     /// work on Windows.
     #[test]
     fn write_panic_dump_writes_named_log() {
@@ -756,7 +1192,7 @@ mod project_mapping_tests {
         fs::write(root.join("apple.txt"), "a").expect("write apple");
         fs::write(root.join("mango.txt"), "m").expect("write mango");
 
-        let tree = project_tree(root, 1);
+        let tree = project_tree(root, 1, false);
         let lines: Vec<&str> = tree.lines().collect();
         let apple_pos = lines
             .iter()
@@ -786,7 +1222,7 @@ mod project_mapping_tests {
         fs::write(src.join("lib.rs"), "lib").expect("write lib");
         fs::write(src.join("main.rs"), "main").expect("write main");
 
-        let tree = project_tree(root, 2);
+        let tree = project_tree(root, 2, false);
         let src_pos = tree.find("DIR: src").expect("src dir line");
         let lib_pos = tree.find("FILE: lib.rs").expect("lib file line");
         let main_pos = tree.find("FILE: main.rs").expect("main file line");
@@ -802,7 +1238,7 @@ mod project_mapping_tests {
         fs::write(root.join("z.txt"), "z").expect("write");
         fs::write(root.join("a.txt"), "a").expect("write");
 
-        assert_eq!(project_tree(root, 1), project_tree(root, 1));
+        assert_eq!(project_tree(root, 1, false), project_tree(root, 1, false));
     }
 
     #[test]
@@ -818,7 +1254,7 @@ mod project_mapping_tests {
         std::os::unix::fs::symlink(&outside_file, root.join("Cargo.toml")).expect("symlink");
 
         assert_eq!(summarize_project(&root), "Unknown project type");
-        assert!(!project_tree(&root, 1).contains("Cargo.toml"));
+        assert!(!project_tree(&root, 1, false).contains("Cargo.toml"));
     }
 
     #[test]
@@ -865,6 +1301,16 @@ mod project_mapping_tests {
                     .collect::<Vec<_>>(),
                 vec!["https://example.com"]
             );
+        }
+
+        #[cfg(any(
+            target_os = "netbsd",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "dragonfly"
+        ))]
+        {
+            assert_eq!(command.get_program(), "xdg-open");
         }
 
         #[cfg(all(target_os = "linux", not(target_env = "ohos")))]

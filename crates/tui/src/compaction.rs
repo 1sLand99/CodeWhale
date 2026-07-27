@@ -8,9 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use crate::client::DeepSeekClient;
 use crate::config::DEFAULT_TEXT_MODEL;
-use crate::llm_client::LlmClient;
+use crate::core::model_client::ModelClient;
 use crate::logging;
 use crate::models::{
     CacheControl, ContentBlock, Message, MessageRequest, SystemBlock, SystemPrompt,
@@ -23,45 +22,118 @@ use crate::models::{
 /// to a token-only trigger. The
 /// `message_threshold` field was removed: its only purpose was to fire
 /// compaction on long sessions of small messages, which is exactly the
-/// case where rewriting the V4 prefix cache is least valuable. Token
+/// case where rewriting the prefix cache is least valuable. Token
 /// budget is the right signal; message count was a 128K-era heuristic.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompactionConfig {
     pub enabled: bool,
     pub token_threshold: usize,
     pub model: String,
+    /// Route-effective context window. `None` preserves compatibility for
+    /// callers that have not resolved a provider route yet.
+    pub effective_context_window: Option<u32>,
     pub cache_summary: bool,
+    /// Optional user-supplied focus for a manual `/compact <focus>`: injected
+    /// into the successor-brief prompt so the summary weights what the user
+    /// said matters. `None` for automatic compaction.
+    pub focus: Option<String>,
+    /// Typed live runtime state for post-compact rehydrate (workers, shells,
+    /// approvals, mode/permission). Canonical To-do state is appended fresh at
+    /// the request tail instead of being frozen into the stable prefix.
+    /// Host-owned snapshot; pure format lives in [`format_live_state_reminder`].
+    pub live_state: Option<CompactionLiveState>,
+    /// Runtime turn that owns provider calls made by this compaction pass.
+    /// `None` for the foreground TUI. This is accounting provenance only and
+    /// is never included in a provider request.
+    pub runtime_cost_owner: Option<String>,
+}
+
+/// Host-captured live state injected after compaction so the successor agent
+/// does not reconstruct workers/mode from prose alone (compactionidea P1).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CompactionLiveState {
+    pub mode: Option<String>,
+    pub permission_posture: Option<String>,
+    /// Running background shell commands (id + command).
+    pub background_shells: Vec<String>,
+    /// Running sub-agents / fleet workers (id + role + objective).
+    pub running_workers: Vec<String>,
+    /// Open approval prompts still awaiting the user.
+    pub open_approvals: Vec<String>,
+}
+
+impl CompactionLiveState {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.mode.is_none()
+            && self.permission_posture.is_none()
+            && self.background_shells.is_empty()
+            && self.running_workers.is_empty()
+            && self.open_approvals.is_empty()
+    }
 }
 
 impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
-            // ON BY DEFAULT since v0.8.6 (#402 P0 survivability) — but the
-            // engine-level `auto_compact` setting was flipped OFF in v0.8.11
-            // (#665) so this default is mostly a fallback for code paths
-            // that build a `CompactionConfig` without going through
-            // `compaction_threshold_for_model_and_effort`. Real per-model
-            // values are still derived through that helper.
+            // ON BY DEFAULT since v0.8.6 (#402 P0 survivability). v0.8.64
+            // resolves the user-facing default through the active model's
+            // known context window, while explicit `auto_compact = false`
+            // remains the opt-out. This fallback covers code paths that build
+            // a `CompactionConfig` directly; real per-model values are still
+            // derived through the threshold helpers.
             enabled: true,
             // v0.8.11: 50K was a 128K-era leftover that biased every
-            // unconfigured caller toward "compact almost immediately on V4."
-            // Bumped to 800K (80% of V4's 1M window) so the dead-code
+            // unconfigured caller toward "compact almost immediately on large-context routes."
+            // Bumped to 800K (80% of a 1M window) so the fallback
             // default matches the hard automatic compaction guardrail. This
             // is intentionally later than the model-visible 60% "suggest
-            // /compact during sustained work" guidance; automatic replacement
-            // compaction rewrites the cacheable prefix and remains opt-in.
+            // /compact during sustained work" guidance so automatic
+            // replacement compaction stays a late continuity guardrail.
             // Real call sites override this via
             // `compaction_threshold_for_model_and_effort`.
             token_threshold: 800_000,
             model: DEFAULT_TEXT_MODEL.to_string(),
+            effective_context_window: None,
             cache_summary: true,
+            focus: None,
+            live_state: None,
+            runtime_cost_owner: None,
         }
     }
 }
 
+/// Minimum non-whitespace characters for a usable successor summary.
+/// Below this (or missing required section headings), treat as degenerate and
+/// retry once rather than shipping amnesia (compactionidea failure ladder).
+const MIN_SUMMARY_SEED_CHARS: usize = 80;
+const DEGENERATE_SUMMARY_REQUIRED_MARKERS: &[&str] =
+    &["Primary request", "Pending tasks", "Current work"];
+
+/// Failure kind for compaction LLM calls (deterministic vs transient).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactionFailureKind {
+    /// Same payload will fail again — do not sleep/retry unchanged.
+    Deterministic,
+    /// May resolve on retry (network, rate limit, timeout).
+    Transient,
+    /// Context overflow — rebuild a smaller summary input before retry.
+    ContextOverflow,
+}
+
+impl CompactionFailureKind {
+    #[must_use]
+    pub fn is_transient(self) -> bool {
+        matches!(self, Self::Transient)
+    }
+
+    #[must_use]
+    pub fn allows_input_ladder(self) -> bool {
+        matches!(self, Self::ContextOverflow)
+    }
+}
+
 pub const KEEP_RECENT_MESSAGES: usize = 4;
-#[allow(dead_code)]
-pub const HARD_COMPACT_KEEP_RECENT: usize = 8;
 const RECENT_WORKING_SET_WINDOW: usize = 12;
 const MAX_WORKING_SET_PATHS: usize = 24;
 const MIN_SUMMARIZE_MESSAGES: usize = 6;
@@ -76,9 +148,21 @@ const LARGE_CONTEXT_SUMMARY_INPUT_MAX_CHARS: usize = 120_000;
 const LARGE_CONTEXT_SUMMARY_INPUT_HEAD_CHARS: usize = 72_000;
 const LARGE_CONTEXT_SUMMARY_INPUT_TAIL_CHARS: usize = 36_000;
 const TOOL_PRUNE_STOP_CHECK_BYTES: usize = 16 * 1024;
+const RETAINED_TOOL_RESULT_MAX_CHARS: usize = 64 * 1024;
+const RETAINED_THINKING_MAX_CHARS: usize = 16 * 1024;
 const LARGE_CONTEXT_SUMMARY_MAX_TOKENS: u32 = 2_048;
 const LARGE_CONTEXT_WINDOW_TOKENS: u32 = 500_000;
 const CACHE_ALIGNED_SUMMARY_CONTEXT_BUDGET_PERCENT: usize = 85;
+
+// File types whose contents are useful working-set context after compaction.
+// Keep this structural table separate from the path-extraction regex so new
+// source languages do not require another large regex alternation.
+const WORKING_SET_EXTENSIONS: &[&str] = &[
+    "rs", "toml", "md", "json", "yaml", "yml", "txt", "py", "pyi", "ipynb", "js", "jsx", "ts",
+    "tsx", "mjs", "cjs", "go", "java", "kt", "kts", "c", "h", "cc", "cpp", "hpp", "cs", "rb",
+    "php", "swift", "m", "mm", "scala", "sh", "bash", "zsh", "ps1", "sql", "proto", "tf", "vue",
+    "svelte", "dart", "lua", "r", "jl", "ex", "exs", "erl", "hs", "zig",
+];
 
 #[derive(Debug, Clone, Copy)]
 struct SummaryInputLimits {
@@ -91,9 +175,13 @@ struct SummaryInputLimits {
     word_limit: usize,
 }
 
-fn summary_input_limits_for_model(model: &str) -> SummaryInputLimits {
-    let is_large_context =
-        context_window_for_model(model).is_some_and(|window| window >= LARGE_CONTEXT_WINDOW_TOKENS);
+fn summary_input_limits_for_model(
+    model: &str,
+    effective_context_window: Option<u32>,
+) -> SummaryInputLimits {
+    let is_large_context = effective_context_window
+        .or_else(|| context_window_for_model(model))
+        .is_some_and(|window| window >= LARGE_CONTEXT_WINDOW_TOKENS);
     if is_large_context {
         SummaryInputLimits {
             text_snippet_chars: LARGE_CONTEXT_SUMMARY_TEXT_SNIPPET_CHARS,
@@ -123,29 +211,6 @@ pub struct CompactionPlan {
     pub summarize_indices: Vec<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub struct HardCompactionConfig {
-    pub enabled: bool,
-    pub keep_recent: usize,
-}
-
-impl Default for HardCompactionConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            keep_recent: HARD_COMPACT_KEEP_RECENT,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub struct HardCompactionPlan {
-    pub summarize_indices: Vec<usize>,
-    pub preserved_indices: Vec<usize>,
-}
-
 fn path_regex() -> &'static Regex {
     static PATH_RE: OnceLock<Regex> = OnceLock::new();
     PATH_RE.get_or_init(|| {
@@ -165,7 +230,7 @@ fn path_regex() -> &'static Regex {
             (?P<path>
                 (?:[A-Za-z0-9._-]+/)+
                 [A-Za-z0-9._-]+
-                \.(?:rs|toml|md|json|ya?ml|txt|lock)
+                \.[A-Za-z0-9]+
             )
         ",
         )
@@ -227,6 +292,38 @@ fn looks_repo_relative(path: &str) -> bool {
         || path.starts_with("crates/")
         || path.starts_with(".github/")
         || (path.contains('/') && path.rsplit('.').next().is_some())
+}
+
+fn is_working_set_path(path: &str) -> bool {
+    // Do not spend the fixed working-set budget on dependencies or build
+    // output, even when those trees contain source-looking file names.
+    if path.split('/').any(|component| {
+        matches!(
+            component,
+            "node_modules" | "target" | "vendor" | "dist" | "build"
+        )
+    }) {
+        return false;
+    }
+
+    let file_name = path.rsplit('/').next().unwrap_or(path);
+    if file_name.ends_with(".min.js") || file_name.ends_with(".min.css") {
+        return false;
+    }
+    // Cargo.lock is an existing explicitly recognized project anchor. Other
+    // lockfiles are dependency snapshots rather than edited source context.
+    if file_name == "Cargo.lock" {
+        return true;
+    }
+    if file_name.ends_with(".lock") {
+        return false;
+    }
+
+    let Some(extension) = file_name.rsplit('.').next() else {
+        return false;
+    };
+    let extension = extension.to_ascii_lowercase();
+    WORKING_SET_EXTENSIONS.contains(&extension.as_str())
 }
 
 fn extract_paths_from_text(text: &str, workspace: Option<&Path>) -> Vec<String> {
@@ -340,6 +437,9 @@ fn derive_working_set_paths(
 
     for idx in seeds {
         for candidate in extract_paths_from_message(&messages[idx], workspace) {
+            if !is_working_set_path(&candidate) {
+                continue;
+            }
             if seen.insert(candidate.clone()) {
                 paths.push(candidate);
                 if paths.len() >= MAX_WORKING_SET_PATHS {
@@ -351,6 +451,9 @@ fn derive_working_set_paths(
 
     for msg in messages.iter().rev().take(RECENT_WORKING_SET_WINDOW) {
         for candidate in extract_paths_from_message(msg, workspace) {
+            if !is_working_set_path(&candidate) {
+                continue;
+            }
             if seen.insert(candidate.clone()) {
                 paths.push(candidate);
                 if paths.len() >= MAX_WORKING_SET_PATHS {
@@ -422,7 +525,9 @@ pub fn plan_compaction(
     let mut working_set_paths = derive_working_set_paths(messages, workspace, seed_indices);
     if let Some(paths) = external_working_set_paths {
         for path in paths {
-            if let Some(normalized) = normalize_path_candidate(path, workspace) {
+            if let Some(normalized) = normalize_path_candidate(path, workspace)
+                && is_working_set_path(&normalized)
+            {
                 let _ = working_set_paths.insert(normalized);
             }
         }
@@ -476,31 +581,6 @@ pub fn plan_compaction(
 }
 
 #[allow(dead_code)]
-pub fn plan_hard_compaction(
-    messages: &[Message],
-    workspace: Option<&Path>,
-    keep_recent: usize,
-) -> Option<HardCompactionPlan> {
-    if keep_recent == 0 || messages.len() < keep_recent.saturating_add(MIN_SUMMARIZE_MESSAGES) {
-        return None;
-    }
-
-    let soft_plan = plan_compaction(messages, workspace, keep_recent, None, None);
-    if soft_plan.summarize_indices.len() < MIN_SUMMARIZE_MESSAGES {
-        return None;
-    }
-
-    let summarized: BTreeSet<_> = soft_plan.summarize_indices.iter().copied().collect();
-    let preserved_indices = (0..messages.len())
-        .filter(|idx| !summarized.contains(idx))
-        .collect();
-
-    Some(HardCompactionPlan {
-        summarize_indices: soft_plan.summarize_indices,
-        preserved_indices,
-    })
-}
-
 fn enforce_tool_call_pairs(messages: &[Message], pinned_indices: &mut BTreeSet<usize>) {
     if pinned_indices.is_empty() {
         return;
@@ -613,13 +693,24 @@ fn estimate_tokens_for_message(message: &Message, include_thinking: bool) -> usi
                 .map(|s| s.len() / 4)
                 .unwrap_or(100),
             ContentBlock::ToolResult { content, .. } => content.len() / 4,
+            // An inline image is real input the model pays for; estimating it
+            // at 0 undercounts the budget and risks overflow in image-heavy
+            // sessions. Use a conservative flat per-image estimate (vision
+            // tiles are typically ~1k tokens); erring high compacts slightly
+            // early rather than overflowing.
+            ContentBlock::ImageUrl { .. } => IMAGE_TOKEN_ESTIMATE,
             ContentBlock::ServerToolUse { .. }
             | ContentBlock::ToolSearchToolResult { .. }
-            | ContentBlock::CodeExecutionToolResult { .. }
-            | ContentBlock::ImageUrl { .. } => 0,
+            | ContentBlock::CodeExecutionToolResult { .. } => 0,
         })
         .sum::<usize>()
 }
+
+/// Conservative flat token estimate for an inline image (`ContentBlock::ImageUrl`).
+/// Vision models bill images by resized tile count; ~1k tokens is a safe
+/// mid-range estimate that keeps the compaction trigger from under-reading an
+/// image-heavy session.
+const IMAGE_TOKEN_ESTIMATE: usize = 1000;
 
 pub fn estimate_tokens(messages: &[Message]) -> usize {
     // Rough estimate: ~4 chars per token. DeepSeek thinking-mode rule: any
@@ -703,7 +794,7 @@ pub fn should_compact(
 
     // Token-only trigger (v0.8.11): the prior message-count branch was a
     // 128K-era heuristic that fired compaction on long chats of small
-    // messages — exactly the case where rewriting the V4 prefix cache is
+    // messages — exactly the case where rewriting the prefix cache is
     // most wasteful. Token budget is the only signal that maps to actual
     // model context pressure.
     if effective_token_threshold == 0 {
@@ -891,6 +982,62 @@ where
     bytes_saved
 }
 
+fn truncate_retained_block(label: &str, content: &mut String, max_chars: usize) -> bool {
+    let char_count = content.chars().count();
+    if char_count <= max_chars {
+        return false;
+    }
+
+    let snippet_budget = max_chars.saturating_sub(256).max(1024);
+    let head_chars = snippet_budget / 2;
+    let tail_chars_budget = snippet_budget.saturating_sub(head_chars);
+    let head = truncate_chars(content, head_chars).to_string();
+    let tail = tail_chars(content, tail_chars_budget);
+    *content =
+        format!("[{label} retained-history truncated from {char_count} chars]\n{head}\n…\n{tail}");
+    true
+}
+
+// A match guard cannot mutably borrow `content`; keeping the mutation inside
+// the arm updates both retained representations together without indirection.
+#[allow(clippy::collapsible_match)]
+fn sanitize_retained_messages(mut messages: Vec<Message>) -> Vec<Message> {
+    for message in &mut messages {
+        for block in &mut message.content {
+            match block {
+                ContentBlock::ToolResult {
+                    content,
+                    content_blocks,
+                    ..
+                } => {
+                    if truncate_retained_block(
+                        "tool result",
+                        content,
+                        RETAINED_TOOL_RESULT_MAX_CHARS,
+                    ) {
+                        *content_blocks = None;
+                    }
+                }
+                // Signed thinking must stay byte-for-byte valid for providers that
+                // verify replay signatures. Unsigned thinking is local memory pressure
+                // and can be capped once compaction has summarized the old turn.
+                ContentBlock::Thinking {
+                    thinking,
+                    signature,
+                } if signature.is_none() => {
+                    truncate_retained_block(
+                        "thinking block",
+                        thinking,
+                        RETAINED_THINKING_MAX_CHARS,
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    messages
+}
+
 /// Result of a compaction operation with metadata.
 #[derive(Debug)]
 pub struct CompactionResult {
@@ -898,24 +1045,42 @@ pub struct CompactionResult {
     pub messages: Vec<Message>,
     /// Summary system prompt
     pub summary_prompt: Option<SystemPrompt>,
-    /// Messages that were removed from the active window
-    #[allow(dead_code)]
-    pub removed_messages: Vec<Message>,
     /// Number of retries used before success
     pub retries_used: u32,
 }
 
-/// Check if an error is transient and worth retrying. Categories that map to
-/// transient retry: Network, RateLimit, Timeout. Anything else (auth, parse,
-/// invalid request, etc.) is permanent and propagates.
-fn is_transient_error(e: &anyhow::Error) -> bool {
-    let category = crate::error_taxonomy::classify_error_message(&e.to_string());
-    matches!(
-        category,
+/// Classify a compaction LLM failure for the retry / input-ladder policy.
+fn classify_compaction_failure(e: &anyhow::Error) -> CompactionFailureKind {
+    let text = e.to_string();
+    if is_context_window_error_message(&text) {
+        return CompactionFailureKind::ContextOverflow;
+    }
+    let category = crate::error_taxonomy::classify_error_message(&text);
+    match category {
         crate::error_taxonomy::ErrorCategory::Network
-            | crate::error_taxonomy::ErrorCategory::RateLimit
-            | crate::error_taxonomy::ErrorCategory::Timeout
-    )
+        | crate::error_taxonomy::ErrorCategory::RateLimit
+        | crate::error_taxonomy::ErrorCategory::Timeout => CompactionFailureKind::Transient,
+        _ => CompactionFailureKind::Deterministic,
+    }
+}
+
+/// Check if an error is transient and worth retrying. Categories that map to
+/// transient retry: Network, RateLimit, Timeout. Context overflow is *not*
+/// transient — it needs a smaller input (ladder), not the same payload.
+fn is_transient_error(e: &anyhow::Error) -> bool {
+    classify_compaction_failure(e).is_transient()
+}
+
+fn is_context_window_error_message(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("too long for this model")
+        || lower.contains("prompt is too long")
+        || lower.contains("maximum prompt length")
+        || lower.contains("maximum context length")
+        || lower.contains("context_length_exceeded")
+        || lower.contains("context window")
+        || (lower.contains("context")
+            && (lower.contains("token") || lower.contains("too long") || lower.contains("maximum")))
 }
 
 /// Compact messages with retry and backoff for transient errors.
@@ -929,7 +1094,7 @@ fn is_transient_error(e: &anyhow::Error) -> bool {
 /// - Never corrupts the original messages (returns error instead)
 /// - Only retries on transient errors (network, rate limit, etc.)
 pub async fn compact_messages_safe(
-    client: &DeepSeekClient,
+    client: &dyn ModelClient,
     messages: &[Message],
     config: &CompactionConfig,
     workspace: Option<&Path>,
@@ -989,9 +1154,8 @@ pub async fn compact_messages_safe(
         ));
         if was_over_threshold && now_under_threshold {
             return Ok(CompactionResult {
-                messages: pruned_messages,
+                messages: sanitize_retained_messages(pruned_messages),
                 summary_prompt: None,
-                removed_messages: Vec::new(),
                 retries_used: 0,
             });
         }
@@ -1020,10 +1184,10 @@ pub async fn compact_messages_safe(
         .await
         {
             Ok((msgs, prompt, removed)) => {
+                drop(removed);
                 return Ok(CompactionResult {
-                    messages: msgs,
+                    messages: sanitize_retained_messages(msgs),
                     summary_prompt: prompt,
-                    removed_messages: removed,
                     retries_used: attempt,
                 });
             }
@@ -1086,7 +1250,7 @@ fn anchor_summary_section(workspace: Option<&Path>) -> String {
 }
 
 pub async fn compact_messages(
-    client: &DeepSeekClient,
+    client: &dyn ModelClient,
     messages: &[Message],
     config: &CompactionConfig,
     workspace: Option<&Path>,
@@ -1114,13 +1278,31 @@ pub async fn compact_messages(
         .map(|&idx| messages[idx].clone())
         .collect();
 
-    // Create a summary of the unpinned portion of the conversation
-    let summary = create_summary(client, &to_summarize, &config.model).await?;
+    // Create a summary of the unpinned portion of the conversation.
+    // Failure ladder: on context overflow, retry with a smaller input rung;
+    // on degenerate output, resample once before shipping amnesia.
+    let summary = create_summary_with_ladder(
+        client,
+        &to_summarize,
+        &config.model,
+        config.effective_context_window,
+        config.focus.as_deref(),
+        config.runtime_cost_owner.as_deref(),
+    )
+    .await?;
 
     // Extract workflow context (files touched, tasks in progress, etc.)
     let workflow_context = extract_workflow_context(&to_summarize, workspace);
+    drop(to_summarize);
 
     let anchors_section = anchor_summary_section(workspace);
+    let project_instructions = project_instructions_section(workspace);
+    let live_reminder = config
+        .live_state
+        .as_ref()
+        .map(format_live_state_reminder)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default();
 
     // Build new message list with enhanced summary as system block
     let summary_block = SystemBlock {
@@ -1133,9 +1315,12 @@ pub async fn compact_messages(
              ## 🔍 Workflow Context\n\n\
              {workflow_context}\n\n\
              ---\n\n\
+             {live_reminder}\
+             {project_instructions}\
              ## 💡 What to Do Next\n\n\
              You have just resumed from a context compaction. The conversation above was summarized to save space. \
-             Review the summary and workflow context, then continue helping the user with their task. \
+             Review the summary, live state, and project instructions, then continue the same task. \
+             Prefer exact paths and commands from the summary over re-discovery. \
              If you need more details about the summarized portion, ask the user to clarify.\n\n\
              ---\n\n\
              Pinned messages follow:"
@@ -1156,35 +1341,186 @@ pub async fn compact_messages(
         .collect();
 
     Ok((
-        pinned_messages,
+        sanitize_retained_messages(pinned_messages),
         Some(SystemPrompt::Blocks(vec![summary_block])),
-        to_summarize,
+        Vec::new(),
     ))
 }
 
-async fn create_summary(
-    client: &DeepSeekClient,
+/// Summary input ladder rungs: full → lossy-formatted → extreme-truncate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SummaryInputRung {
+    Full,
+    Lossy,
+    Extreme,
+}
+
+async fn create_summary_with_ladder(
+    client: &dyn ModelClient,
     messages: &[Message],
     model: &str,
+    effective_context_window: Option<u32>,
+    focus: Option<&str>,
+    runtime_cost_owner: Option<&str>,
 ) -> Result<String> {
-    let limits = summary_input_limits_for_model(model);
-    let used_cache_aligned = should_use_cache_aligned_summary(model, messages);
+    let rungs = [
+        SummaryInputRung::Full,
+        SummaryInputRung::Lossy,
+        SummaryInputRung::Extreme,
+    ];
+    let mut last_err: Option<anyhow::Error> = None;
+
+    for (idx, rung) in rungs.iter().enumerate() {
+        match create_summary(
+            client,
+            messages,
+            model,
+            effective_context_window,
+            focus,
+            runtime_cost_owner,
+            *rung,
+        )
+        .await
+        {
+            Ok(summary) if is_degenerate_summary(&summary) => {
+                logging::warn(format!(
+                    "Compaction summary rung {rung:?} produced degenerate output \
+                     ({} chars); retrying next ladder rung",
+                    summary.chars().count()
+                ));
+                // Degenerate is not a hard error: try next rung, or if last, return
+                // the best effort only when non-empty after a second full retry.
+                if idx + 1 < rungs.len() {
+                    last_err = Some(anyhow::anyhow!(
+                        "degenerate compaction summary ({} chars)",
+                        summary.chars().count()
+                    ));
+                    continue;
+                }
+                // Final rung still degenerate: one explicit resample of Extreme.
+                match create_summary(
+                    client,
+                    messages,
+                    model,
+                    effective_context_window,
+                    focus,
+                    runtime_cost_owner,
+                    SummaryInputRung::Extreme,
+                )
+                .await
+                {
+                    Ok(retry) if !is_degenerate_summary(&retry) => return Ok(retry),
+                    Ok(retry) if !retry.trim().is_empty() => {
+                        logging::warn(
+                            "Compaction summary still thin after ladder; shipping best effort",
+                        );
+                        return Ok(retry);
+                    }
+                    Ok(_) => {
+                        return Err(anyhow::anyhow!(
+                            "compaction summary empty after failure ladder"
+                        ));
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+            Ok(summary) => return Ok(summary),
+            Err(err) => {
+                let kind = classify_compaction_failure(&err);
+                if kind.allows_input_ladder() && idx + 1 < rungs.len() {
+                    logging::warn(format!(
+                        "Compaction summary rung {rung:?} hit context overflow ({err}); \
+                         retrying smaller input ladder rung"
+                    ));
+                    last_err = Some(err);
+                    continue;
+                }
+                if kind.is_transient() && idx + 1 < rungs.len() {
+                    last_err = Some(err);
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("compaction summary ladder exhausted")))
+}
+
+/// True when the model returned an empty or useless successor brief.
+fn is_degenerate_summary(summary: &str) -> bool {
+    let trimmed = summary.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let seed_chars = trimmed.chars().filter(|c| !c.is_whitespace()).count();
+    if seed_chars < MIN_SUMMARY_SEED_CHARS {
+        return true;
+    }
+    // Structured brief must land at least one load-bearing section heading.
+    // Free-form walls of text that omit every marker still count as amnesia.
+    let lower = trimmed.to_ascii_lowercase();
+    !DEGENERATE_SUMMARY_REQUIRED_MARKERS
+        .iter()
+        .any(|marker| lower.contains(&marker.to_ascii_lowercase()))
+}
+
+async fn create_summary(
+    client: &dyn ModelClient,
+    messages: &[Message],
+    model: &str,
+    effective_context_window: Option<u32>,
+    focus: Option<&str>,
+    runtime_cost_owner: Option<&str>,
+    rung: SummaryInputRung,
+) -> Result<String> {
+    let mut limits = summary_input_limits_for_model(model, effective_context_window);
+    match rung {
+        SummaryInputRung::Full => {}
+        SummaryInputRung::Lossy => {
+            limits.input_max_chars /= 2;
+            limits.input_head_chars /= 2;
+            limits.input_tail_chars /= 2;
+            limits.text_snippet_chars /= 2;
+            limits.tool_result_snippet_chars /= 2;
+        }
+        SummaryInputRung::Extreme => {
+            limits.input_max_chars = (limits.input_max_chars / 4).max(4_000);
+            limits.input_head_chars = (limits.input_head_chars / 4).max(2_000);
+            limits.input_tail_chars = (limits.input_tail_chars / 4).max(1_500);
+            limits.text_snippet_chars = (limits.text_snippet_chars / 4).max(200);
+            limits.tool_result_snippet_chars = (limits.tool_result_snippet_chars / 4).max(120);
+        }
+    }
+
+    // Cache-aligned only on the Full rung; smaller rungs always use formatted.
+    let used_cache_aligned = matches!(rung, SummaryInputRung::Full)
+        && should_use_cache_aligned_summary(model, effective_context_window, messages);
     let request = if used_cache_aligned {
-        build_cache_aligned_summary_request(model, messages, limits)
+        build_cache_aligned_summary_request(model, messages, limits, focus)
     } else {
-        build_formatted_summary_request(model, messages, limits)
+        build_formatted_summary_request(model, messages, limits, focus)
     };
 
+    let cost_scope = crate::cost_status::scope_token();
+    let mut cost_route = client.effective_route_envelope(model, chrono::Utc::now());
     let mut telemetry_cache_aligned = used_cache_aligned;
     let response = match client.create_message(request).await {
         Ok(response) => response,
-        Err(err) if used_cache_aligned && is_context_window_error(&err) => {
+        // The cache-aligned request replays a non-contiguous message
+        // subsequence (pinned messages removed from the middle), which can
+        // exceed the window OR violate strict role-ordering (a non-transient
+        // InvalidInput). Fall back to the bounded formatted summary on ANY
+        // cache-aligned failure rather than aborting compaction entirely and
+        // letting context keep growing.
+        Err(err) if used_cache_aligned => {
             logging::warn(format!(
-                "Cache-aligned compaction summary exceeded the model context window ({err}); \
-                 retrying with bounded formatted summary input"
+                "Cache-aligned compaction summary failed ({err}); retrying with \
+                 bounded formatted summary input"
             ));
             telemetry_cache_aligned = false;
-            let fallback_request = build_formatted_summary_request(model, messages, limits);
+            let fallback_request = build_formatted_summary_request(model, messages, limits, focus);
+            cost_route = client.effective_route_envelope(model, chrono::Utc::now());
             client.create_message(fallback_request).await?
         }
         Err(err) => return Err(err),
@@ -1192,10 +1528,23 @@ async fn create_summary(
     // Compaction summary calls are billed by DeepSeek; route the
     // tokens through the side-channel so the dashboard total
     // matches the website (#526).
-    crate::cost_status::report(&response.model, &response.usage);
+    crate::cost_status::report_effective_route_for_runtime(
+        cost_scope,
+        runtime_cost_owner,
+        &format!(
+            "compaction:dispatch:{}:response:{}",
+            cost_route
+                .dispatched_at
+                .timestamp_nanos_opt()
+                .unwrap_or_default(),
+            response.id
+        ),
+        &cost_route,
+        &response.usage,
+    );
 
     // #584: emit one debug-level event per summary call so the
-    // V4 cache-aligned win is observable post-deploy without
+    // cache-aligned win is observable post-deploy without
     // adding UI surface. The event is emitted with
     // `target = "compaction"`, so the filter is
     // `RUST_LOG=compaction=debug` (the module-path form
@@ -1217,6 +1566,80 @@ async fn create_summary(
     Ok(summary)
 }
 
+/// Format a typed post-compact system-reminder from real runtime state.
+pub fn format_live_state_reminder(state: &CompactionLiveState) -> String {
+    if state.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "## 🔄 Live State (post-compact rehydrate)\n\n\
+         These facts come from the live runtime, not the summary model. Trust them over prose guesses.\n\n",
+    );
+    if let Some(mode) = state.mode.as_deref() {
+        let _ = writeln!(out, "- Mode: `{mode}`");
+    }
+    if let Some(posture) = state.permission_posture.as_deref() {
+        let _ = writeln!(out, "- Permission posture: `{posture}`");
+    }
+    if !state.background_shells.is_empty() {
+        out.push_str("\n### Running background shells\n");
+        for line in &state.background_shells {
+            let _ = writeln!(out, "- {line}");
+        }
+    }
+    if !state.running_workers.is_empty() {
+        out.push_str("\n### Running workers / sub-agents\n");
+        for line in &state.running_workers {
+            let _ = writeln!(out, "- {line}");
+        }
+    }
+    if !state.open_approvals.is_empty() {
+        out.push_str("\n### Open approvals\n");
+        for line in &state.open_approvals {
+            let _ = writeln!(out, "- {line}");
+        }
+    }
+    out.push_str("\n---\n\n");
+    out
+}
+
+/// Re-inject project instructions (AGENTS.md / CLAUDE.md) **verbatim** after
+/// compaction so they do not depend on the summarizer (compactionidea P1).
+fn project_instructions_section(workspace: Option<&Path>) -> String {
+    let Some(ws) = workspace else {
+        return String::new();
+    };
+    // Same precedence as project_context: AGENTS.md first, then CLAUDE.md.
+    const CANDIDATES: &[&str] = &["AGENTS.md", "CLAUDE.md", "Claude.md"];
+    for name in CANDIDATES {
+        let path = ws.join(name);
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Bound size so a huge AGENTS file cannot blow the post-compact budget.
+        const MAX_CHARS: usize = 12_000;
+        let body = if trimmed.chars().count() > MAX_CHARS {
+            let head: String = trimmed.chars().take(MAX_CHARS).collect();
+            format!("{head}\n\n[… project instructions truncated for compaction budget …]")
+        } else {
+            trimmed.to_string()
+        };
+        return format!(
+            "## 📜 Project instructions (verbatim rehydrate)\n\n\
+             <project_instructions source=\"{name}\">\n{body}\n</project_instructions>\n\n\
+             ---\n\n"
+        );
+    }
+    String::new()
+}
+
+// Retained for tests; production compaction now falls back on any
+// cache-aligned summary failure, not only context-window errors.
+#[cfg(test)]
 fn is_context_window_error(e: &anyhow::Error) -> bool {
     let text = e.to_string();
     if crate::error_taxonomy::classify_error_message(&text)
@@ -1281,7 +1704,7 @@ fn log_summary_cache_telemetry(used_cache_aligned: bool, usage: &crate::models::
 /// gates hold:
 ///
 /// 1. The model has a known large context window
-///    (≥ `LARGE_CONTEXT_WINDOW_TOKENS`, currently V4-scale).
+///    (≥ `LARGE_CONTEXT_WINDOW_TOKENS`).
 /// 2. Replaying the message prefix plus a ~512-token instruction
 ///    still fits within `CACHE_ALIGNED_SUMMARY_CONTEXT_BUDGET_PERCENT`
 ///    of that budget.
@@ -1293,7 +1716,7 @@ fn log_summary_cache_telemetry(used_cache_aligned: bool, usage: &crate::models::
 /// - **Cache-aligned** replays the original `messages` verbatim
 ///   with `system: None` and appends the summary instruction as
 ///   the final `user` turn. The model sees the conversation as if
-///   it were its own history. This is what lets the V4 prefix cache
+///   it were its own history. This is what lets the provider prefix cache
 ///   hit on the bulk of the request (#572).
 /// - **Fallback** reformats the conversation into a flat
 ///   `User:/Assistant:` transcript inside a single `user` message
@@ -1301,7 +1724,7 @@ fn log_summary_cache_telemetry(used_cache_aligned: bool, usage: &crate::models::
 ///   conversation summaries." system prompt. The model sees a
 ///   transcript of someone else's conversation.
 ///
-/// The empirical bar is that V4 produces equivalent summaries
+/// The empirical bar is that large-context models produce equivalent summaries
 /// either way; the post-#572 review noted this fork is worth
 /// documenting but not yet worth unifying. The fallback's
 /// external-transcript framing is also more conservative for the
@@ -1314,8 +1737,12 @@ fn log_summary_cache_telemetry(used_cache_aligned: bool, usage: &crate::models::
 /// `create_summary` emits a `tracing::debug!` event under
 /// `target = "compaction"` after each call so the path choice and
 /// cache-hit rate are observable post-deploy without UI surface.
-fn should_use_cache_aligned_summary(model: &str, messages: &[Message]) -> bool {
-    let Some(window) = context_window_for_model(model) else {
+fn should_use_cache_aligned_summary(
+    model: &str,
+    effective_context_window: Option<u32>,
+    messages: &[Message],
+) -> bool {
+    let Some(window) = effective_context_window.or_else(|| context_window_for_model(model)) else {
         return false;
     };
     if window < LARGE_CONTEXT_WINDOW_TOKENS {
@@ -1329,26 +1756,50 @@ fn should_use_cache_aligned_summary(model: &str, messages: &[Message]) -> bool {
     estimate_tokens(messages).saturating_add(summary_prompt_tokens) <= budget
 }
 
-fn summary_instruction(word_limit: usize) -> String {
-    format!(
-        "Summarize the conversation above in a concise but comprehensive way. \
-         Preserve key information, decisions made, exact file paths, commands, \
-         errors, and tool-result facts needed to continue the work. \
-         Tool outputs may be abbreviated only when they are repetitive. \
-         Keep it under {word_limit} words."
-    )
+/// Structured successor brief (2026-07-23 compaction cutover): the summary
+/// is written for the agent that resumes after compaction, in nine fixed
+/// sections, instead of a free-form "concise but comprehensive" paragraph.
+/// An optional user focus from `/compact <focus>` is appended verbatim.
+fn summary_instruction(word_limit: usize, focus: Option<&str>) -> String {
+    let mut instruction = format!(
+        "Produce a successor briefing for the agent that will continue this session after \
+         compaction. Structure it with exactly these numbered sections (write \"None\" when a \
+         section is empty):\n\
+         1. Primary request and intent — what the user is ultimately asking for, in their terms.\n\
+         2. Key technical concepts — systems, APIs, and domain facts the successor must know.\n\
+         3. Files and code sections — exact paths, with the important identifiers or snippets per file.\n\
+         4. Errors and fixes — each error hit, its cause, and how (or whether) it was fixed.\n\
+         5. Problem solving — approaches tried, decisions made, and why alternatives were rejected.\n\
+         6. User messages — every non-tool user instruction, condensed but none omitted.\n\
+         7. Pending tasks — work explicitly requested but not yet done.\n\
+         8. Current work — precisely what was in flight when compaction hit.\n\
+         9. Next step — only if one is directly implied; ground it in a short verbatim quote from \
+         the most recent work.\n\
+         If the conversation already contains an earlier compaction summary, treat it as \
+         authoritative for the history it covers and carry its facts forward. Preserve exact \
+         file paths, commands, and tool-result facts; abbreviate tool outputs only when they \
+         are repetitive. Do not call tools. Keep the whole briefing under {word_limit} words."
+    );
+    if let Some(focus) = focus.map(str::trim).filter(|focus| !focus.is_empty()) {
+        let _ = write!(
+            instruction,
+            "\n\nThe user asked this compaction to focus on: {focus}"
+        );
+    }
+    instruction
 }
 
 fn build_cache_aligned_summary_request(
     model: &str,
     messages: &[Message],
     limits: SummaryInputLimits,
+    focus: Option<&str>,
 ) -> MessageRequest {
     let mut request_messages = messages.to_vec();
     request_messages.push(Message {
         role: "user".to_string(),
         content: vec![ContentBlock::Text {
-            text: summary_instruction(limits.word_limit),
+            text: summary_instruction(limits.word_limit, focus),
             cache_control: None,
         }],
     });
@@ -1373,6 +1824,7 @@ fn build_formatted_summary_request(
     model: &str,
     messages: &[Message],
     limits: SummaryInputLimits,
+    focus: Option<&str>,
 ) -> MessageRequest {
     // Format messages for summarization
     let mut conversation_text = String::new();
@@ -1424,7 +1876,7 @@ fn build_formatted_summary_request(
             content: vec![ContentBlock::Text {
                 text: format!(
                     "{}\n\n---\n\n{conversation_text}",
-                    summary_instruction(limits.word_limit)
+                    summary_instruction(limits.word_limit, focus)
                 ),
                 cache_control: None,
             }],
@@ -1586,6 +2038,24 @@ pub fn merge_system_prompts(
 
 #[cfg(test)]
 mod tests {
+    use crate::models::{ImageUrlContent, Message};
+
+    #[test]
+    fn inline_image_estimates_nonzero_tokens() {
+        let msg = Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::ImageUrl {
+                image_url: ImageUrlContent {
+                    url: "data:image/png;base64,AAAA".to_string(),
+                },
+            }],
+        };
+        assert!(
+            estimate_tokens_for_message(&msg, false) >= IMAGE_TOKEN_ESTIMATE,
+            "an inline image must not estimate to 0 tokens"
+        );
+    }
+
     use super::*;
     use serde_json::json;
 
@@ -1810,12 +2280,27 @@ mod tests {
 
     #[test]
     fn summary_limits_expand_for_v4_context() {
-        let legacy = summary_input_limits_for_model("deepseek-v3.2-128k");
-        let v4 = summary_input_limits_for_model("deepseek-v4-pro");
+        let legacy = summary_input_limits_for_model("deepseek-v3.2-128k", None);
+        let v4 = summary_input_limits_for_model("deepseek-v4-pro", None);
 
         assert!(v4.input_max_chars > legacy.input_max_chars);
         assert!(v4.tool_result_snippet_chars > legacy.tool_result_snippet_chars);
         assert!(v4.max_tokens > legacy.max_tokens);
+    }
+
+    #[test]
+    fn route_effective_window_bounds_same_id_oauth_summary() {
+        let api = summary_input_limits_for_model("gpt-5.5", None);
+        let oauth = summary_input_limits_for_model("gpt-5.5", Some(272_000));
+        let messages = vec![msg("user", "summarize this route")];
+
+        assert!(api.input_max_chars > oauth.input_max_chars);
+        assert!(should_use_cache_aligned_summary("gpt-5.5", None, &messages));
+        assert!(!should_use_cache_aligned_summary(
+            "gpt-5.5",
+            Some(272_000),
+            &messages
+        ));
     }
 
     #[test]
@@ -1824,10 +2309,12 @@ mod tests {
 
         assert!(should_use_cache_aligned_summary(
             "deepseek-v4-flash",
+            None,
             &messages
         ));
         assert!(!should_use_cache_aligned_summary(
             "deepseek-v3.2-128k",
+            None,
             &messages
         ));
     }
@@ -1879,6 +2366,106 @@ mod tests {
     }
 
     #[test]
+    fn live_state_reminder_formats_typed_runtime_facts() {
+        let state = CompactionLiveState {
+            mode: Some("operate".into()),
+            permission_posture: Some("Ask".into()),
+            background_shells: vec!["`sh_1`: `cargo test -p foo`".into()],
+            running_workers: vec!["`agent_a` (role: implementer) — fix flaky".into()],
+            open_approvals: vec!["shell: git push".into()],
+        };
+        let text = format_live_state_reminder(&state);
+        assert!(text.contains("Live State"));
+        assert!(text.contains("operate"));
+        assert!(text.contains("Ask"));
+        assert!(text.contains("cargo test"));
+        assert!(text.contains("agent_a"));
+        assert!(text.contains("git push"));
+        assert!(format_live_state_reminder(&CompactionLiveState::default()).is_empty());
+    }
+
+    #[test]
+    fn project_instructions_section_reinjects_agents_md_verbatim() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("AGENTS.md"),
+            "# Project rules\n\nNever force-push main.\n",
+        )
+        .unwrap();
+        let section = project_instructions_section(Some(tmp.path()));
+        assert!(section.contains("Project instructions"));
+        assert!(section.contains("<project_instructions source=\"AGENTS.md\">"));
+        assert!(section.contains("Never force-push main."));
+        assert!(project_instructions_section(None).is_empty());
+    }
+
+    #[test]
+    fn degenerate_summary_detects_empty_short_and_unstructured() {
+        assert!(is_degenerate_summary(""));
+        assert!(is_degenerate_summary("   ok   "));
+        assert!(is_degenerate_summary(
+            "This is a long enough free-form paragraph that has many characters but no section \
+             headings at all so the successor cannot recover open items or in-flight edits \
+             from structure alone."
+        ));
+        assert!(!is_degenerate_summary(
+            "1. Primary request and intent — fix the flaky test in auth.\n\
+             2. Key technical concepts — tokio, race on mutex.\n\
+             7. Pending tasks — re-run cargo test -p auth.\n\
+             8. Current work — editing crates/auth/src/lib.rs.\n\
+             More padding so non-whitespace length clears the seed floor for the ladder."
+        ));
+    }
+
+    #[test]
+    fn classify_compaction_failure_splits_overflow_transient_and_deterministic() {
+        let overflow = anyhow::anyhow!("prompt is too long for this model's context window");
+        assert_eq!(
+            classify_compaction_failure(&overflow),
+            CompactionFailureKind::ContextOverflow
+        );
+        let network = anyhow::anyhow!("connection timed out contacting api");
+        // Taxonomy may map timeout/network; if not, still not overflow.
+        let kind = classify_compaction_failure(&network);
+        assert_ne!(kind, CompactionFailureKind::ContextOverflow);
+        let auth = anyhow::anyhow!("401 unauthorized: invalid api key");
+        assert_eq!(
+            classify_compaction_failure(&auth),
+            CompactionFailureKind::Deterministic
+        );
+    }
+
+    #[test]
+    fn summary_instruction_is_a_structured_successor_brief_with_optional_focus() {
+        let brief = summary_instruction(500, None);
+        for section in [
+            "1. Primary request and intent",
+            "2. Key technical concepts",
+            "3. Files and code sections",
+            "4. Errors and fixes",
+            "5. Problem solving",
+            "6. User messages",
+            "7. Pending tasks",
+            "8. Current work",
+            "9. Next step",
+        ] {
+            assert!(
+                brief.contains(section),
+                "missing section {section:?}: {brief}"
+            );
+        }
+        assert!(brief.contains("under 500 words"), "{brief}");
+        assert!(brief.contains("Do not call tools"), "{brief}");
+        assert!(brief.contains("earlier compaction summary"), "{brief}");
+        assert!(!brief.contains("focus on:"), "{brief}");
+
+        let focused = summary_instruction(500, Some("  the auth refactor  "));
+        assert!(focused.contains("focus on: the auth refactor"), "{focused}");
+        let blank = summary_instruction(500, Some("   "));
+        assert!(!blank.contains("focus on:"), "{blank}");
+    }
+
+    #[test]
     fn formatted_summary_request_bounds_large_input() {
         let messages = (0..90)
             .map(|idx| {
@@ -1888,9 +2475,9 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let limits = summary_input_limits_for_model("deepseek-v4-pro");
+        let limits = summary_input_limits_for_model("deepseek-v4-pro", None);
 
-        let request = build_formatted_summary_request("deepseek-v4-pro", &messages, limits);
+        let request = build_formatted_summary_request("deepseek-v4-pro", &messages, limits, None);
 
         assert_eq!(request.messages.len(), 1);
         let ContentBlock::Text { text, .. } = &request.messages[0].content[0] else {
@@ -1906,8 +2493,9 @@ mod tests {
             msg("user", "Please edit crates/tui/src/compaction.rs"),
             msg("assistant", "I will inspect the file."),
         ];
-        let limits = summary_input_limits_for_model("deepseek-v4-pro");
-        let request = build_cache_aligned_summary_request("deepseek-v4-pro", &messages, limits);
+        let limits = summary_input_limits_for_model("deepseek-v4-pro", None);
+        let request =
+            build_cache_aligned_summary_request("deepseek-v4-pro", &messages, limits, None);
 
         assert_eq!(request.system, None);
         assert_eq!(&request.messages[..messages.len()], &messages[..]);
@@ -1916,7 +2504,7 @@ mod tests {
         assert_eq!(last.role, "user");
         assert!(matches!(
             &last.content[..],
-            [ContentBlock::Text { text, .. }] if text.contains("conversation above")
+            [ContentBlock::Text { text, .. }] if text.contains("successor briefing")
         ));
     }
 
@@ -2035,7 +2623,7 @@ mod tests {
     }
 
     /// v0.8.11: message-count is no longer a compaction trigger. Long
-    /// chats of small messages stay uncompacted because rewriting the V4
+    /// chats of small messages stay uncompacted because rewriting the
     /// prefix cache for a tiny budget reclaim is net-negative. Only token
     /// pressure (and the explicit `/compact` slash command) trigger
     /// compaction.
@@ -2124,6 +2712,114 @@ mod tests {
     }
 
     #[test]
+    fn plan_compaction_pins_edited_python_typescript_and_go_paths() {
+        let messages = vec![
+            msg("user", "start working"),
+            Message {
+                role: "assistant".to_string(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "py-edit".to_string(),
+                    name: "write_file".to_string(),
+                    input: json!({"path": "src/worker.py"}),
+                    caller: None,
+                }],
+            },
+            Message {
+                role: "user".to_string(),
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "py-edit".to_string(),
+                    content: "wrote src/worker.py".to_string(),
+                    is_error: None,
+                    content_blocks: None,
+                }],
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "ts-edit".to_string(),
+                    name: "write_file".to_string(),
+                    input: json!({"path": "web/app.tsx"}),
+                    caller: None,
+                }],
+            },
+            Message {
+                role: "user".to_string(),
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "ts-edit".to_string(),
+                    content: "wrote web/app.tsx".to_string(),
+                    is_error: None,
+                    content_blocks: None,
+                }],
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "go-edit".to_string(),
+                    name: "write_file".to_string(),
+                    input: json!({"path": "cmd/server/main.go"}),
+                    caller: None,
+                }],
+            },
+            Message {
+                role: "user".to_string(),
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "go-edit".to_string(),
+                    content: "wrote cmd/server/main.go".to_string(),
+                    is_error: None,
+                    content_blocks: None,
+                }],
+            },
+            msg("user", "continue with the next task"),
+        ];
+
+        let plan = plan_compaction(&messages, None, 1, None, None);
+        for idx in [1, 2, 3, 4, 5, 6] {
+            assert!(
+                plan.pinned_indices.contains(&idx),
+                "edited source message {idx} should be pinned"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_compaction_excludes_dependency_build_lock_and_minified_paths() {
+        let messages = vec![
+            msg("user", "start working"),
+            Message {
+                role: "assistant".to_string(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "junk-1".to_string(),
+                    name: "write_file".to_string(),
+                    input: json!({"path": "node_modules/pkg/index.js"}),
+                    caller: None,
+                }],
+            },
+            Message {
+                role: "user".to_string(),
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "junk-1".to_string(),
+                    content: "wrote node_modules/pkg/index.js".to_string(),
+                    is_error: None,
+                    content_blocks: None,
+                }],
+            },
+            msg("assistant", "target/debug/generated.rs"),
+            msg("assistant", "dist/app.min.js"),
+            msg("assistant", "package-lock.json"),
+            msg("assistant", "workspace.lock"),
+            msg("user", "continue with the next task"),
+        ];
+
+        let plan = plan_compaction(&messages, None, 1, None, None);
+        for idx in 1..7 {
+            assert!(
+                !plan.pinned_indices.contains(&idx),
+                "junk path message {idx} should not be newly pinned"
+            );
+        }
+    }
+
+    #[test]
     fn plan_compaction_pins_tool_calls_for_tool_results() {
         let messages = vec![
             msg("user", "noise"),
@@ -2150,80 +2846,6 @@ mod tests {
         let plan = plan_compaction(&messages, None, 1, None, None);
         assert!(plan.pinned_indices.contains(&2));
         assert!(plan.pinned_indices.contains(&1));
-    }
-
-    #[test]
-    fn plan_hard_compaction_returns_none_when_too_few_messages() {
-        let messages = vec![
-            msg("user", "hello"),
-            msg("assistant", "hi"),
-            msg("user", "how are you"),
-            msg("assistant", "good"),
-        ];
-
-        assert!(plan_hard_compaction(&messages, None, HARD_COMPACT_KEEP_RECENT).is_none());
-    }
-
-    #[test]
-    fn plan_hard_compaction_preserves_recent_tail() {
-        let messages: Vec<Message> = (0..20)
-            .map(|i| {
-                msg(
-                    if i % 2 == 0 { "user" } else { "assistant" },
-                    &format!("message {i}"),
-                )
-            })
-            .collect();
-
-        let plan =
-            plan_hard_compaction(&messages, None, HARD_COMPACT_KEEP_RECENT).expect("hard plan");
-
-        let expected_recent: Vec<usize> = (20 - HARD_COMPACT_KEEP_RECENT..20).collect();
-        for idx in expected_recent {
-            assert!(plan.preserved_indices.contains(&idx));
-            assert!(!plan.summarize_indices.contains(&idx));
-        }
-        assert_eq!(plan.summarize_indices, (0..12).collect::<Vec<_>>());
-    }
-
-    #[test]
-    fn plan_hard_compaction_keeps_tool_pairs_across_tail_boundary() {
-        let mut messages: Vec<Message> = (0..8)
-            .map(|i| msg("user", &format!("summarizable noise {i}")))
-            .collect();
-        messages.push(Message {
-            role: "assistant".to_string(),
-            content: vec![ContentBlock::ToolUse {
-                id: "tail-call".to_string(),
-                name: "read_file".to_string(),
-                input: json!({"path": "crates/tui/src/compaction.rs"}),
-                caller: None,
-            }],
-        });
-        messages.push(Message {
-            role: "user".to_string(),
-            content: vec![ContentBlock::ToolResult {
-                tool_use_id: "tail-call".to_string(),
-                content: "file contents".to_string(),
-                is_error: None,
-                content_blocks: None,
-            }],
-        });
-
-        let plan = plan_hard_compaction(&messages, None, 1).expect("hard plan");
-
-        assert!(plan.preserved_indices.contains(&8));
-        assert!(plan.preserved_indices.contains(&9));
-        assert!(!plan.summarize_indices.contains(&8));
-        assert!(!plan.summarize_indices.contains(&9));
-    }
-
-    #[test]
-    fn hard_compaction_config_defaults_to_disabled() {
-        let config = HardCompactionConfig::default();
-
-        assert!(!config.enabled);
-        assert_eq!(config.keep_recent, HARD_COMPACT_KEEP_RECENT);
     }
 
     #[test]
@@ -2850,13 +3472,11 @@ mod tests {
         let result = CompactionResult {
             messages: vec![],
             summary_prompt: None,
-            removed_messages: vec![],
             retries_used: 2,
         };
 
         assert_eq!(result.retries_used, 2);
         assert!(result.messages.is_empty());
-        assert!(result.removed_messages.is_empty());
     }
 
     #[test]

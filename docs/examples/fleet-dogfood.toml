@@ -18,10 +18,9 @@
 #   codewhale fleet inspect <worker-id-from-status>
 #   codewhale fleet logs <worker-id-from-status>
 #
-# NOTE: wiring the manager run loop to drive FleetExecutor for real workers is
-# the in-progress cutover; until then the manual run path uses the local
-# simulation harness. The automated smoke above already proves the real
-# exec-subprocess -> ledger-event path.
+# NOTE: this manual run path now drives real `codewhale exec` workers through
+# the FleetExecutor. Use `--once` when you only want to enqueue/lease once and
+# inspect state manually instead of keeping the manager loop attached.
 
 name = "dogfood smoke"
 labels = { milestone = "v0.8.60", class = "smoke" }

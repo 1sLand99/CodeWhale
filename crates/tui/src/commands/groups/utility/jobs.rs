@@ -1,10 +1,31 @@
 //! Shell job-center commands.
 
+use crate::commands::traits::{CommandInfo, RegisterCommand};
+use crate::localization::MessageId;
 use crate::tui::app::{App, AppAction, ShellJobAction};
 
-use super::CommandResult;
+use crate::commands::CommandResult;
 
-pub fn jobs(_app: &mut App, args: Option<&str>) -> CommandResult {
+pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
+    name: "jobs",
+    aliases: &["job", "zuoye"],
+    usage: "/jobs [list|show <id>|poll <id>|wait <id>|stdin <id> <input>|cancel <id>]",
+    description_id: MessageId::CmdJobsDescription,
+};
+
+pub(in crate::commands) struct JobsCmd;
+
+impl RegisterCommand for JobsCmd {
+    fn info() -> &'static CommandInfo {
+        &COMMAND_INFO
+    }
+
+    fn execute(app: &mut App, arg: Option<&str>) -> CommandResult {
+        jobs(app, arg)
+    }
+}
+
+fn jobs(_app: &mut App, args: Option<&str>) -> CommandResult {
     let raw = args.unwrap_or("").trim();
     if raw.is_empty() || raw.eq_ignore_ascii_case("list") {
         return CommandResult::action(AppAction::ShellJob(ShellJobAction::List));
@@ -73,25 +94,9 @@ mod tests {
     fn app() -> App {
         App::new(
             TuiOptions {
-                model: "deepseek-v4-pro".to_string(),
-                workspace: PathBuf::from("."),
-                config_path: None,
-                config_profile: None,
-                allow_shell: false,
                 use_alt_screen: false,
-                use_mouse_capture: false,
-                use_bracketed_paste: true,
                 max_subagents: 2,
-                skills_dir: PathBuf::from("."),
-                memory_path: PathBuf::from("memory.md"),
-                notes_path: PathBuf::from("notes.txt"),
-                mcp_config_path: PathBuf::from("mcp.json"),
-                use_memory: false,
-                start_in_agent_mode: false,
-                skip_onboarding: true,
-                yolo: false,
-                resume_session_id: None,
-                initial_input: None,
+                ..crate::test_support::test_tui_options(PathBuf::from("."))
             },
             &Config::default(),
         )

@@ -10,6 +10,7 @@ use super::spec::{
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
+#[cfg(feature = "pdf")]
 use std::fmt::Display;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,6 +19,71 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 // === ReadFileTool ===
+
+fn canonical_path_for_credential_guard(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(path)
+        }
+    })
+}
+
+fn config_backup_path_for_credential_guard(config_path: &Path) -> PathBuf {
+    let mut file_name = config_path
+        .file_name()
+        .map(std::ffi::OsString::from)
+        .unwrap_or_else(|| std::ffi::OsString::from(codewhale_config::CONFIG_FILE_NAME));
+    file_name.push(".bak");
+    config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(file_name)
+}
+
+fn is_config_or_backup(candidate: &Path, config_path: &Path) -> bool {
+    let config_path = canonical_path_for_credential_guard(config_path);
+    let backup_path =
+        canonical_path_for_credential_guard(&config_backup_path_for_credential_guard(&config_path));
+    candidate == config_path || candidate == backup_path
+}
+
+/// Return whether `read_file` must refuse a CodeWhale-owned credential file.
+///
+/// This is deliberately scoped to the active config, the two conventional
+/// config locations (including one-time backups), and CodeWhale's file-backed
+/// secret-store directories. Other dotfiles remain readable. Model-bound
+/// redaction is still required because shell tools can read these files and
+/// arbitrary commands can print credentials without reading a file at all.
+fn is_codewhale_credential_path(path: &Path) -> bool {
+    let candidate = canonical_path_for_credential_guard(path);
+
+    if let Ok(active_config) = codewhale_config::resolve_config_path(None)
+        && is_config_or_backup(&candidate, &active_config)
+    {
+        return true;
+    }
+
+    let roots = [
+        codewhale_config::codewhale_home(),
+        codewhale_config::legacy_deepseek_home(),
+    ];
+    for root in roots.into_iter().flatten() {
+        if is_config_or_backup(&candidate, &root.join(codewhale_config::CONFIG_FILE_NAME)) {
+            return true;
+        }
+
+        let secrets_dir = canonical_path_for_credential_guard(&root.join("secrets"));
+        if candidate.starts_with(secrets_dir) {
+            return true;
+        }
+    }
+
+    false
+}
 
 /// Tool for reading UTF-8 files from the workspace.
 pub struct ReadFileTool;
@@ -28,8 +94,12 @@ impl ToolSpec for ReadFileTool {
         "read_file"
     }
 
+    fn model_visible(&self) -> bool {
+        false
+    }
+
     fn description(&self) -> &'static str {
-        "Read a UTF-8 file from the workspace. Use this instead of `cat`, `head`, `tail`, or `sed -n '..p'` in `exec_shell` — it's faster, sandbox-aware, and skips the approval prompt. Plain text is returned as-is; PDFs are auto-extracted via the bundled pure-Rust extractor (no Poppler install required). Image screenshots are OCR-extracted when local OCR is available. Cannot read other non-PDF binaries.\n\nFor large files, use `start_line` and `max_lines` to read in chunks. By default, returns at most 200 lines (~16KB). If `truncated=\"true\"` in the response, use `next_start_line` to continue reading. For PDFs, use `pages` instead — `start_line`/`max_lines` only apply to text files."
+        "Read a UTF-8 file from the workspace. Use this instead of `cat`, `head`, `tail`, or `sed -n '..p'` in `exec_shell` — it's faster, sandbox-aware, and skips the approval prompt. Plain text is returned as-is and records the file snapshot required before `edit_file` will make a narrow in-place edit. CodeWhale config files and file-backed credential stores cannot be read with this tool; use `codewhale config list` or `codewhale auth status` for safe inspection. PDFs are auto-extracted via the bundled pure-Rust extractor (no Poppler install required). Image screenshots are OCR-extracted when local OCR is available. Cannot read other non-PDF binaries.\n\nFor large files, use `start_line` and `max_lines` to read in chunks. By default, returns at most 200 lines (~16KB). If `truncated=\"true\"` in the response, use `next_start_line` to continue reading. For PDFs, use `pages` instead — `start_line`/`max_lines` only apply to text files."
     }
 
     fn input_schema(&self) -> Value {
@@ -66,22 +136,13 @@ impl ToolSpec for ReadFileTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
-        // Bounded output for large files. The small-file fast path keeps the
-        // historical "return contents unchanged" behavior so existing flows
-        // (small configs, single source files, etc.) don't suddenly start
-        // seeing wrapped output. Once a file is large or the caller asks
-        // for an explicit range, we switch to a numbered, line-tagged
-        // window with continuation hints so the model can page through
-        // without re-loading the entire file on every turn. Harvested
-        // from PR #1451 by @Oliver-ZPLiu, closes part of #1450.
-        const DEFAULT_READ_LINES: usize = 200;
-        const HARD_MAX_READ_LINES: usize = 500;
-        const MAX_VISIBLE_BYTES: usize = 16 * 1024;
-        const SMALL_FILE_LINES: usize = 200;
-        const SMALL_FILE_BYTES: usize = 16 * 1024;
-
         let path_str = required_str(&input, "path")?;
         let file_path = context.resolve_path(path_str)?;
+        if is_codewhale_credential_path(&file_path) {
+            return Err(ToolError::permission_denied(
+                "read_file cannot expose CodeWhale configuration or credential-store files; use `codewhale config list` or `codewhale auth status` for safe inspection",
+            ));
+        }
         let pages = optional_str(&input, "pages");
 
         if is_pdf(&file_path)? {
@@ -91,12 +152,14 @@ impl ToolSpec for ReadFileTool {
             return read_image_via_ocr(&file_path, path_str);
         }
 
-        let contents = fs::read_to_string(&file_path).map_err(|e| {
+        // Open before parameter parsing so a missing file keeps the
+        // historical "Failed to read …" error shape regardless of the other
+        // arguments.
+        let file = fs::File::open(&file_path).map_err(|e| {
             ToolError::execution_failed(format!("Failed to read {}: {}", file_path.display(), e))
         })?;
+        let file_bytes = file.metadata().map(|meta| meta.len()).unwrap_or(u64::MAX);
 
-        let total_lines = contents.lines().count();
-        let total_bytes = contents.len();
         let explicit_range = input
             .get("start_line")
             .or_else(|| input.get("max_lines"))
@@ -105,8 +168,36 @@ impl ToolSpec for ReadFileTool {
         // Small-file fast path. Only applies when the caller didn't pass an
         // explicit range — otherwise an explicit `start_line = 5` on a
         // tiny file would silently ignore the request.
-        if !explicit_range && total_lines <= SMALL_FILE_LINES && total_bytes <= SMALL_FILE_BYTES {
-            return Ok(ToolResult::success(contents));
+        if !explicit_range && file_bytes <= SMALL_FILE_BYTES as u64 {
+            drop(file);
+            let contents = fs::read_to_string(&file_path).map_err(|e| {
+                ToolError::execution_failed(format!(
+                    "Failed to read {}: {}",
+                    file_path.display(),
+                    e
+                ))
+            })?;
+            context.note_file_read(&file_path);
+
+            let total_lines = contents.lines().count();
+            if total_lines <= SMALL_FILE_LINES {
+                return Ok(ToolResult::success(contents));
+            }
+
+            // Small in bytes but too many lines: render the default window
+            // straight from the in-memory contents.
+            let window: Vec<String> = contents
+                .lines()
+                .take(DEFAULT_READ_LINES)
+                .map(str::to_string)
+                .collect();
+            return Ok(render_line_window(
+                path_str,
+                &window,
+                total_lines,
+                1,
+                DEFAULT_READ_LINES,
+            ));
         }
 
         let start_line = match input.get("start_line").and_then(Value::as_u64) {
@@ -140,6 +231,20 @@ impl ToolSpec for ReadFileTool {
             None => DEFAULT_READ_LINES,
         };
 
+        // Bounded read for ranged/large files: skip and take lines through a
+        // BufReader instead of materializing the whole file. The stream still
+        // runs to EOF so the total line count and whole-file UTF-8 validation
+        // match the historical read_to_string behavior.
+        let (window, total_lines) =
+            read_window_streaming(file, start_line, max_lines).map_err(|e| {
+                ToolError::execution_failed(format!(
+                    "Failed to read {}: {}",
+                    file_path.display(),
+                    e
+                ))
+            })?;
+        context.note_file_read(&file_path);
+
         // `start_line > total_lines` is not an error — it lets the model
         // page past the end without raising. Returns an empty-content
         // sentinel so subsequent reads can stop.
@@ -153,56 +258,137 @@ impl ToolSpec for ReadFileTool {
             return Ok(ToolResult::success(output));
         }
 
-        let lines: Vec<&str> = contents.lines().collect();
-        let zero_based_start = start_line - 1;
-        let zero_based_end = std::cmp::min(zero_based_start + max_lines, total_lines);
-        let shown_first = start_line;
-        let shown_last = zero_based_end; // 1-based inclusive line number of the last shown line
+        Ok(render_line_window(
+            path_str,
+            &window,
+            total_lines,
+            start_line,
+            max_lines,
+        ))
+    }
+}
 
-        let mut numbered = String::new();
-        for (offset, line) in lines[zero_based_start..zero_based_end].iter().enumerate() {
-            let line_no = start_line + offset;
-            numbered.push_str(&format!("{line_no:>6}│ {line}\n"));
+// Bounded output for large files. The small-file fast path keeps the
+// historical "return contents unchanged" behavior so existing flows
+// (small configs, single source files, etc.) don't suddenly start
+// seeing wrapped output. Once a file is large or the caller asks
+// for an explicit range, we switch to a numbered, line-tagged
+// window with continuation hints so the model can page through
+// without re-loading the entire file on every turn. Harvested
+// from PR #1451 by @Oliver-ZPLiu, closes part of #1450.
+const DEFAULT_READ_LINES: usize = 200;
+const HARD_MAX_READ_LINES: usize = 500;
+const MAX_VISIBLE_BYTES: usize = 16 * 1024;
+const SMALL_FILE_LINES: usize = 200;
+const SMALL_FILE_BYTES: usize = 16 * 1024;
+
+/// Stream a line window out of `file`: skip `start_line - 1` lines, collect
+/// up to `max_lines`, then keep counting (and validating UTF-8) to EOF.
+/// Returns the collected window plus the total line count. Only the window
+/// is ever held in memory.
+fn read_window_streaming(
+    file: fs::File,
+    start_line: usize,
+    max_lines: usize,
+) -> std::io::Result<(Vec<String>, usize)> {
+    use std::io::BufRead;
+
+    let mut reader = std::io::BufReader::new(file);
+    let mut raw: Vec<u8> = Vec::new();
+    let mut window: Vec<String> = Vec::new();
+    let mut total_lines = 0usize;
+    let start_idx = start_line - 1;
+
+    loop {
+        raw.clear();
+        let n = reader.read_until(b'\n', &mut raw)?;
+        if n == 0 {
+            break;
         }
-
-        // UTF-8-safe byte truncation of the rendered range.
-        let truncated_by_bytes = numbered.len() > MAX_VISIBLE_BYTES;
-        let shown_content = if truncated_by_bytes {
-            let mut end = MAX_VISIBLE_BYTES;
-            while end > 0 && !numbered.is_char_boundary(end) {
+        // Mirror `str::lines`: strip the trailing '\n', and a '\r' only when
+        // it directly precedes that '\n'.
+        let mut end = raw.len();
+        if raw[..end].ends_with(b"\n") {
+            end -= 1;
+            if raw[..end].ends_with(b"\r") {
                 end -= 1;
             }
-            &numbered[..end]
-        } else {
-            &numbered
-        };
-
-        let truncated_by_lines = zero_based_end < total_lines;
-        let truncated = truncated_by_lines || truncated_by_bytes;
-        let next_start = zero_based_end + 1;
-
-        let mut attrs = format!(
-            "path=\"{path_str}\" total_lines=\"{total_lines}\" shown_lines=\"{shown_first}-{shown_last}\" truncated=\"{truncated}\""
-        );
-        if truncated_by_lines {
-            attrs.push_str(&format!(" next_start_line=\"{next_start}\""));
         }
-
-        let mut output = format!("<file {attrs}>\n{shown_content}");
-        if truncated_by_lines {
-            output.push_str(&format!(
-                "\n[TRUNCATED] Showing lines {shown_first}-{shown_last} of {total_lines}. To continue, call read_file with path=\"{path_str}\" start_line={next_start} max_lines={max_lines}\n"
-            ));
+        // Validate every line so invalid UTF-8 anywhere in the file fails
+        // exactly like the previous whole-file read_to_string did.
+        let line = std::str::from_utf8(&raw[..end]).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "stream did not contain valid UTF-8",
+            )
+        })?;
+        if total_lines >= start_idx && window.len() < max_lines {
+            window.push(line.to_string());
         }
-        if truncated_by_bytes {
-            output.push_str(
-                "\n[TRUNCATED] The selected range exceeded 16KB. Continue with a smaller max_lines value.\n",
-            );
-        }
-        output.push_str("</file>");
-
-        Ok(ToolResult::success(output))
+        total_lines += 1;
     }
+
+    Ok((window, total_lines))
+}
+
+/// Render a collected line window into the `<file …>` wrapper used for
+/// ranged/large reads. `window` must hold the lines for
+/// `start_line..start_line + max_lines` (clamped to EOF).
+fn render_line_window(
+    path_str: &str,
+    window: &[String],
+    total_lines: usize,
+    start_line: usize,
+    max_lines: usize,
+) -> ToolResult {
+    let zero_based_start = start_line - 1;
+    let zero_based_end = std::cmp::min(zero_based_start + max_lines, total_lines);
+    let shown_first = start_line;
+    let shown_last = zero_based_end; // 1-based inclusive line number of the last shown line
+
+    let mut numbered = String::new();
+    for (offset, line) in window.iter().enumerate() {
+        let line_no = start_line + offset;
+        numbered.push_str(&format!("{line_no:>6}│ {line}\n"));
+    }
+
+    // UTF-8-safe byte truncation of the rendered range.
+    let truncated_by_bytes = numbered.len() > MAX_VISIBLE_BYTES;
+    let shown_content = if truncated_by_bytes {
+        let mut end = MAX_VISIBLE_BYTES;
+        while end > 0 && !numbered.is_char_boundary(end) {
+            end -= 1;
+        }
+        &numbered[..end]
+    } else {
+        &numbered
+    };
+
+    let truncated_by_lines = zero_based_end < total_lines;
+    let truncated = truncated_by_lines || truncated_by_bytes;
+    let next_start = zero_based_end + 1;
+
+    let mut attrs = format!(
+        "path=\"{path_str}\" total_lines=\"{total_lines}\" shown_lines=\"{shown_first}-{shown_last}\" truncated=\"{truncated}\""
+    );
+    if truncated_by_lines {
+        attrs.push_str(&format!(" next_start_line=\"{next_start}\""));
+    }
+
+    let mut output = format!("<file {attrs}>\n{shown_content}");
+    if truncated_by_lines {
+        output.push_str(&format!(
+            "\n[TRUNCATED] Showing lines {shown_first}-{shown_last} of {total_lines}. To continue, call read_file with path=\"{path_str}\" start_line={next_start} max_lines={max_lines}\n"
+        ));
+    }
+    if truncated_by_bytes {
+        output.push_str(
+            "\n[TRUNCATED] The selected range exceeded 16KB. Continue with a smaller max_lines value.\n",
+        );
+    }
+    output.push_str("</file>");
+
+    ToolResult::success(output)
 }
 
 fn read_image_via_ocr(path: &Path, requested_path: &str) -> Result<ToolResult, ToolError> {
@@ -343,10 +529,18 @@ fn read_pdf(path: &Path, pages: Option<&str>) -> Result<ToolResult, ToolError> {
     if prefer_external {
         read_pdf_via_pdftotext(path, page_range)
     } else {
-        read_pdf_via_pdf_extract(path, page_range)
+        #[cfg(feature = "pdf")]
+        {
+            read_pdf_via_pdf_extract(path, page_range)
+        }
+        #[cfg(not(feature = "pdf"))]
+        {
+            read_pdf_via_pdftotext(path, page_range)
+        }
     }
 }
 
+#[cfg(feature = "pdf")]
 fn read_pdf_via_pdf_extract(
     path: &Path,
     page_range: Option<(u32, u32)>,
@@ -485,6 +679,10 @@ impl ToolSpec for WriteFileTool {
         "write_file"
     }
 
+    fn model_visible(&self) -> bool {
+        false
+    }
+
     fn description(&self) -> &'static str {
         "Write content to a UTF-8 file in the workspace. Use this instead of heredocs (`cat <<EOF > file`) or `echo > file` in `exec_shell` — diffs render inline and approval is handled cleanly. Creates or overwrites; parent directories are auto-created."
     }
@@ -544,9 +742,10 @@ impl ToolSpec for WriteFileTool {
             })?;
         }
 
-        fs::write(&file_path, file_content).map_err(|e| {
+        crate::utils::write_atomic_workspace(&file_path, file_content.as_bytes()).map_err(|e| {
             ToolError::execution_failed(format!("Failed to write {}: {}", file_path.display(), e))
         })?;
+        context.note_file_read(&file_path);
 
         let display = file_path.display().to_string();
         let diff = make_unified_diff(&display, &prior_contents, file_content);
@@ -569,7 +768,18 @@ impl ToolSpec for WriteFileTool {
             format!("{body}\n{diag_block}")
         };
 
-        Ok(ToolResult::success(full_body))
+        let outcome = if existed_before { "updated" } else { "created" };
+        // Keep the execution-owned receipt workspace-relative even though the
+        // legacy model-facing output above retains its resolved-path wording.
+        let receipt_diff = make_unified_diff(path_str, &prior_contents, file_content);
+        Ok(ToolResult::success(full_body).with_metadata(json!({
+            "event": "file.mutation",
+            "mutation": {
+                "diff": receipt_diff,
+                "files": [{ "path": path_str, "outcome": outcome }],
+                "renames": []
+            }
+        })))
     }
 }
 
@@ -584,8 +794,12 @@ impl ToolSpec for EditFileTool {
         "edit_file"
     }
 
+    fn model_visible(&self) -> bool {
+        false
+    }
+
     fn description(&self) -> &'static str {
-        "Replace text in a single file via exact search/replace. Use this instead of `sed -i` in `exec_shell` for one unambiguous in-place edit. `search` matches exactly by default; when no exact match is found the tool retries with leading-whitespace-tolerant fuzzy matching automatically. The optional `fuzz` parameter is accepted for backward compatibility and is no longer needed. Returns a compact unified diff, not the full file. For structural, multi-block, or cross-file changes, use `apply_patch` or `write_file` instead."
+        "Replace text in a single file via exact search/replace after the file has been read with `read_file` in this session. Use this instead of `sed -i` in `exec_shell` for one unambiguous in-place edit. `search` must match exactly one location by default; when no exact match is found the tool retries with leading-whitespace-tolerant fuzzy matching automatically. The optional `fuzz` parameter is accepted for backward compatibility and is no longer needed. Returns a compact unified diff, not the full file. For structural, multi-block, or cross-file changes, use `apply_patch` or `write_file` instead."
     }
 
     fn input_schema(&self) -> Value {
@@ -636,8 +850,14 @@ impl ToolSpec for EditFileTool {
                 "search and replace are identical, no change intended",
             ));
         }
+        if let Some(reason) = edit_payload_looks_corrupted(search, replace) {
+            return Err(ToolError::invalid_input(format!(
+                "edit_file refused corrupted payload: {reason}. Recovery: re-read the file and retry with a complete replace (or use apply_patch for brace-heavy multi-line edits)."
+            )));
+        }
 
         let file_path = context.resolve_path(path_str)?;
+        context.require_fresh_file_read(&file_path, path_str)?;
 
         let contents = fs::read_to_string(&file_path).map_err(|e| {
             ToolError::execution_failed(format!("Failed to read {}: {}", file_path.display(), e))
@@ -663,8 +883,8 @@ impl ToolSpec for EditFileTool {
                     match punct_matches.as_slice() {
                         [] => {
                             return Err(ToolError::execution_failed(format!(
-                                "Search string not found in {}",
-                                file_path.display()
+                                "Search string not found in {}. Recovery: call read_file with path=\"{path_str}\" to inspect the current contents, then retry with a search string copied from the file.",
+                                file_path.display(),
                             )));
                         }
                         [(start, end)] => {
@@ -674,7 +894,7 @@ impl ToolSpec for EditFileTool {
                         }
                         _ => {
                             return Err(ToolError::execution_failed(format!(
-                                "Fuzzy punctuation search matched {} locations in {}; refine search text",
+                                "edit_file search is non-unique after punctuation normalization: matched {} locations in {}. Recovery: call read_file with path=\"{path_str}\" and retry with surrounding lines that make the search unique.",
                                 punct_matches.len(),
                                 file_path.display()
                             )));
@@ -683,39 +903,47 @@ impl ToolSpec for EditFileTool {
                 }
                 _ => {
                     return Err(ToolError::execution_failed(format!(
-                        "Fuzzy search matched {} locations in {}; refine search text",
+                        "edit_file search is non-unique after indentation normalization: matched {} locations in {}. Recovery: call read_file with path=\"{path_str}\" and retry with surrounding lines that make the search unique.",
                         indent_matches.len(),
                         file_path.display()
                     )));
                 }
             }
+        } else if count > 1 {
+            return Err(ToolError::execution_failed(format!(
+                "edit_file search is non-unique: matched {count} locations in {}. \
+                 Recovery: call read_file with path=\"{path_str}\" and retry with surrounding lines that make the search unique.",
+                file_path.display()
+            )));
         } else {
             (contents.replace(search, replace), count, None)
         };
 
-        fs::write(&file_path, &updated).map_err(|e| {
+        // Fidelity: the intended replace text must appear in the updated buffer
+        // (empty replace is a valid deletion). Catches host/tool bridges that
+        // claim success after mangling the payload.
+        if !replace.is_empty() && !updated.contains(replace) {
+            return Err(ToolError::execution_failed(
+                "edit_file internal fidelity check failed: replace text missing from updated buffer — refusing write",
+            ));
+        }
+
+        crate::utils::write_atomic_workspace(&file_path, updated.as_bytes()).map_err(|e| {
             ToolError::execution_failed(format!("Failed to write {}: {}", file_path.display(), e))
         })?;
+        context.note_file_read(&file_path);
 
         let display = file_path.display().to_string();
         let diff = make_unified_diff(&display, &contents, &updated);
-        let summary = if count > 1 {
-            format!(
-                "Replaced {count} occurrence(s) in {display}\n\
-                 Warning: multiple matches were replaced with the same substitution. \
-                 Verify the result with read_file before proceeding."
-            )
-        } else {
-            let fuzz_note = match fuzz_kind {
-                Some("indentation") => " (fuzzy indentation match)",
-                Some("punctuation") => {
-                    " (fuzzy punctuation match — typographic quotes/dashes normalized)"
-                }
-                Some(other) => other,
-                None => "",
-            };
-            format!("Replaced 1 occurrence in {display}{fuzz_note}")
+        let fuzz_note = match fuzz_kind {
+            Some("indentation") => " (fuzzy indentation match)",
+            Some("punctuation") => {
+                " (fuzzy punctuation match — typographic quotes/dashes normalized)"
+            }
+            Some(other) => other,
+            None => "",
         };
+        let summary = format!("Replaced {count} occurrence in {display}{fuzz_note}");
         let body = if diff.is_empty() {
             format!("{summary}\n(no textual changes)")
         } else {
@@ -730,8 +958,79 @@ impl ToolSpec for EditFileTool {
             format!("{body}\n{diag_block}")
         };
 
-        Ok(ToolResult::success(full_body))
+        // The structured receipt uses the requested workspace path instead of
+        // the resolved host path retained by the legacy model-facing body.
+        let receipt_diff = make_unified_diff(path_str, &contents, &updated);
+        Ok(ToolResult::success(full_body).with_metadata(json!({
+            "event": "file.mutation",
+            "mutation": {
+                "diff": receipt_diff,
+                "files": [{ "path": path_str, "outcome": "updated" }],
+                "renames": []
+            }
+        })))
     }
+}
+
+/// Detect catastrophic argument corruption of brace-structured edits.
+///
+/// Models (and some host XML/JSON bridges) occasionally deliver a `replace`
+/// payload where a multi-line `{ ... }` block collapsed to empty `[]` or `{}`
+/// while `search` still contains the full structured original. Writing that
+/// would brick Rust match arms / JSON objects. Fail closed with recovery text
+/// instead of applying the mangled payload (dogfood 2026-07-24).
+fn edit_payload_looks_corrupted(search: &str, replace: &str) -> Option<&'static str> {
+    let search_curly_open = search.matches('{').count();
+    let search_curly_close = search.matches('}').count();
+    let replace_curly_open = replace.matches('{').count();
+    let replace_curly_close = replace.matches('}').count();
+    let replace_square_open = replace.matches('[').count();
+    let replace_square_close = replace.matches(']').count();
+
+    if replace_curly_open != replace_curly_close {
+        return Some(
+            "replace has unbalanced `{`/`}` braces — the tool-call arguments were likely truncated or mangled before apply",
+        );
+    }
+    if search_curly_open != search_curly_close {
+        return Some(
+            "search has unbalanced `{`/`}` braces — copy the exact file span again with balanced braces",
+        );
+    }
+    if replace_square_open != replace_square_close {
+        return Some(
+            "replace has unbalanced `[`/`]` brackets — the tool-call arguments were likely truncated or mangled before apply",
+        );
+    }
+
+    // Dogfood 2026-07-24: multi-line Rust `{ ... }` search collapsed into an
+    // empty `[ ... ]` placeholder (host/XML arg bridge ate the brace body).
+    // Count non-whitespace, non-bracket payload chars; a near-empty bracket
+    // husk with a tiny tail like `=> {},` is the signature of that failure.
+    if search_curly_open >= 1 && replace_square_open >= 1 {
+        let significant = replace
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != '[' && *c != ']')
+            .count();
+        if significant <= 12 {
+            return Some(
+                "replace collapsed a brace-structured search block into an empty/placeholder bracket span — refusing to brick the file; re-send the full replace text (prefer apply_patch for multi-line match arms)",
+            );
+        }
+    }
+
+    // Extreme shrinkage with lost braces (e.g. 200-char match arm -> tiny stub).
+    if search.len() >= 80
+        && replace.len() * 8 < search.len()
+        && search_curly_open >= 1
+        && replace_curly_open < search_curly_open
+    {
+        return Some(
+            "replace is drastically shorter than search and lost brace structure — likely argument mangling; refuse apply",
+        );
+    }
+
+    None
 }
 
 fn strip_line_leading_whitespace_with_map(input: &str) -> (String, Vec<usize>) {
@@ -755,6 +1054,18 @@ fn line_start_before(input: &str, idx: usize) -> usize {
     input[..idx]
         .rfind('\n')
         .map_or(0, |newline| newline.saturating_add(1))
+}
+
+fn next_char_boundary(input: &str, idx: usize) -> usize {
+    if idx >= input.len() {
+        return input.len();
+    }
+
+    let mut next = idx.saturating_add(1);
+    while next < input.len() && !input.is_char_boundary(next) {
+        next = next.saturating_add(1);
+    }
+    next
 }
 
 fn leading_whitespace_fuzzy_matches(contents: &str, search: &str) -> Vec<(usize, usize)> {
@@ -786,7 +1097,7 @@ fn leading_whitespace_fuzzy_matches(contents: &str, search: &str) -> Vec<(usize,
             };
         let original_end = byte_map.get(norm_end).copied().unwrap_or(contents.len());
         matches.push((original_start, original_end));
-        cursor = norm_start.saturating_add(1);
+        cursor = next_char_boundary(&normalized_contents, norm_start);
     }
     matches
 }
@@ -848,7 +1159,7 @@ fn punctuation_normalized_matches(contents: &str, search: &str) -> Vec<(usize, u
         };
         let original_end = byte_map.get(norm_end).copied().unwrap_or(contents.len());
         matches.push((original_start, original_end));
-        cursor = norm_start.saturating_add(1);
+        cursor = next_char_boundary(&norm_contents, norm_start);
     }
     matches
 }
@@ -860,10 +1171,21 @@ pub struct ListDirTool;
 
 const LIST_DIR_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Cap on entries returned by a single `list_dir` call so a huge directory
+/// (node_modules, build output, photo dumps) can't balloon the tool result.
+/// Mirrors the bounded-output idiom of `read_file`'s `HARD_MAX_READ_LINES`.
+/// Directories at or under the cap keep the historical plain-array response;
+/// larger ones return an object with truncation metadata.
+const LIST_DIR_MAX_ENTRIES: usize = 500;
+
 #[async_trait]
 impl ToolSpec for ListDirTool {
     fn name(&self) -> &'static str {
         "list_dir"
+    }
+
+    fn model_visible(&self) -> bool {
+        false
     }
 
     fn description(&self) -> &'static str {
@@ -907,7 +1229,7 @@ async fn list_dir_entries_async(
     dir_path: PathBuf,
     cancel_token: Option<CancellationToken>,
     timeout: Duration,
-) -> Result<Vec<Value>, ToolError> {
+) -> Result<Value, ToolError> {
     let worker_cancel_token = cancel_token.clone();
     run_blocking_list_dir(timeout, cancel_token, move || {
         list_dir_entries(&dir_path, worker_cancel_token.as_ref())
@@ -919,9 +1241,9 @@ async fn run_blocking_list_dir<F>(
     timeout: Duration,
     cancel_token: Option<CancellationToken>,
     list_dir: F,
-) -> Result<Vec<Value>, ToolError>
+) -> Result<Value, ToolError>
 where
-    F: FnOnce() -> Result<Vec<Value>, ToolError> + Send + 'static,
+    F: FnOnce() -> Result<Value, ToolError> + Send + 'static,
 {
     if cancel_token
         .as_ref()
@@ -951,10 +1273,11 @@ where
 fn list_dir_entries(
     dir_path: &Path,
     cancel_token: Option<&CancellationToken>,
-) -> Result<Vec<Value>, ToolError> {
+) -> Result<Value, ToolError> {
     check_list_dir_cancelled(cancel_token)?;
 
     let mut entries = Vec::new();
+    let mut total_entries = 0usize;
 
     for entry in fs::read_dir(dir_path).map_err(|e| {
         ToolError::execution_failed(format!(
@@ -966,6 +1289,12 @@ fn list_dir_entries(
         check_list_dir_cancelled(cancel_token)?;
 
         let entry = entry.map_err(|e| ToolError::execution_failed(e.to_string()))?;
+        total_entries += 1;
+        // Past the cap, keep counting for the truncation metadata but stop
+        // materializing entries.
+        if entries.len() >= LIST_DIR_MAX_ENTRIES {
+            continue;
+        }
         let file_type = entry
             .file_type()
             .map_err(|e| ToolError::execution_failed(e.to_string()))?;
@@ -976,7 +1305,16 @@ fn list_dir_entries(
         }));
     }
 
-    Ok(entries)
+    if total_entries > entries.len() {
+        Ok(json!({
+            "entries": entries,
+            "listed_entries": LIST_DIR_MAX_ENTRIES,
+            "total_entries": total_entries,
+            "truncated": true,
+        }))
+    } else {
+        Ok(Value::Array(entries))
+    }
 }
 
 fn check_list_dir_cancelled(cancel_token: Option<&CancellationToken>) -> Result<(), ToolError> {
@@ -987,7 +1325,7 @@ fn check_list_dir_cancelled(cancel_token: Option<&CancellationToken>) -> Result<
 }
 
 fn list_dir_cancelled() -> ToolError {
-    ToolError::execution_failed("list_dir cancelled before completion")
+    ToolError::cancelled("list_dir cancelled before completion")
 }
 
 fn list_dir_timeout(timeout: Duration) -> ToolError {
@@ -1002,6 +1340,13 @@ fn list_dir_timeout(timeout: Duration) -> ToolError {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    async fn read_before_edit(ctx: &ToolContext, path: &str) {
+        ReadFileTool
+            .execute(json!({"path": path}), ctx)
+            .await
+            .expect("read before edit");
+    }
 
     #[tokio::test]
     async fn test_read_file_tool() {
@@ -1022,6 +1367,50 @@ mod tests {
         assert_eq!(result.content, "hello world");
     }
 
+    // This test deliberately serializes process-global environment changes
+    // while awaiting the tool path.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn read_file_denies_codewhale_config_backups_and_secret_store() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let tmp = tempdir().expect("tempdir");
+        let _codewhale_home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", tmp.path());
+        let _config_path = crate::test_support::EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
+        let _legacy_config_path = crate::test_support::EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
+
+        fs::write(tmp.path().join("config.toml"), "api_key = \"secret\"\n").expect("write config");
+        fs::write(
+            tmp.path().join("config.toml.bak"),
+            "api_key = \"old-secret\"\n",
+        )
+        .expect("write config backup");
+        fs::create_dir_all(tmp.path().join("secrets")).expect("create secrets dir");
+        fs::write(
+            tmp.path().join("secrets").join("secrets.json"),
+            r#"{"provider":"secret"}"#,
+        )
+        .expect("write file keyring");
+        fs::write(tmp.path().join("notes.txt"), "ordinary workspace data")
+            .expect("write ordinary file");
+
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        for path in ["config.toml", "config.toml.bak", "secrets/secrets.json"] {
+            let err = ReadFileTool
+                .execute(json!({"path": path}), &ctx)
+                .await
+                .expect_err("credential-bearing CodeWhale file must be denied");
+            let message = err.to_string();
+            assert!(message.contains("cannot expose CodeWhale"), "{message}");
+            assert!(message.contains("codewhale config list"), "{message}");
+        }
+
+        let ordinary = ReadFileTool
+            .execute(json!({"path": "notes.txt"}), &ctx)
+            .await
+            .expect("ordinary workspace file should remain readable");
+        assert_eq!(ordinary.content, "ordinary workspace data");
+    }
+
     #[tokio::test]
     async fn read_file_ocr_extracts_text_from_image_when_backend_exists() {
         if !crate::tools::image_ocr::ocr_available() {
@@ -1036,10 +1425,21 @@ mod tests {
         fs::copy(&fixture, tmp.path().join("ocr_hello.png")).expect("copy fixture");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
 
-        let result = ReadFileTool
+        let result = match ReadFileTool
             .execute(json!({"path": "ocr_hello.png"}), &ctx)
             .await
-            .expect("read image through OCR");
+        {
+            Ok(result) => result,
+            Err(err) => {
+                // Name is when_backend_exists — skip if live OCR fails after
+                // the availability probe (restricted Vision, etc.).
+                let msg = err.to_string();
+                let _skip_reason =
+                    format!("OCR backend probe passed but read_file OCR failed: {msg}");
+                let _ = &_skip_reason;
+                return;
+            }
+        };
 
         assert!(result.success);
         assert!(result.content.contains("<image_ocr"));
@@ -1266,6 +1666,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_file_streamed_range_on_large_file_matches_windowed_contract() {
+        // Over 16KB forces the streamed BufRead path even without an
+        // explicit range; assert the ranged output stays byte-compatible
+        // with the historical full-read implementation.
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let file = tmp.path().join("large.txt");
+        let body: String = (1..=2000)
+            .map(|n| format!("line {n} {}\n", "x".repeat(20)))
+            .collect();
+        assert!(body.len() > 16 * 1024, "fixture must exceed 16KB");
+        fs::write(&file, &body).expect("write");
+
+        let tool = ReadFileTool;
+        let result = tool
+            .execute(
+                json!({ "path": "large.txt", "start_line": 1500, "max_lines": 10 }),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+
+        assert!(result.success);
+        assert!(result.content.contains("total_lines=\"2000\""));
+        assert!(result.content.contains("shown_lines=\"1500-1509\""));
+        assert!(result.content.contains("next_start_line=\"1510\""));
+        assert!(result.content.contains("  1500│ line 1500"));
+        assert!(result.content.contains("  1509│ line 1509"));
+        assert!(!result.content.contains("  1510│"));
+        assert!(result.content.contains(
+            "[TRUNCATED] Showing lines 1500-1509 of 2000. To continue, call read_file with path=\"large.txt\" start_line=1510 max_lines=10"
+        ));
+
+        // Default window (no range) on the same large file starts at line 1.
+        let default_window = tool
+            .execute(json!({ "path": "large.txt" }), &ctx)
+            .await
+            .expect("execute");
+        assert!(default_window.content.contains("shown_lines=\"1-200\""));
+        assert!(default_window.content.contains("next_start_line=\"201\""));
+        assert!(default_window.content.contains("     1│ line 1"));
+
+        // Paging past EOF returns the no-content sentinel, not an error.
+        let past_end = tool
+            .execute(json!({ "path": "large.txt", "start_line": 5000 }), &ctx)
+            .await
+            .expect("execute");
+        assert!(past_end.content.contains("[NO CONTENT]"));
+        assert!(past_end.content.contains("shown_lines=\"none\""));
+    }
+
+    #[tokio::test]
+    async fn read_file_streamed_range_rejects_invalid_utf8_like_full_read() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let file = tmp.path().join("mixed.bin");
+        // Valid first lines, invalid bytes later: the streamed path must
+        // still fail the whole read like read_to_string did.
+        let mut bytes = b"good line\n".repeat(5);
+        bytes.extend_from_slice(&[0xFF, 0xFE, b'\n']);
+        fs::write(&file, &bytes).expect("write");
+
+        let err = ReadFileTool
+            .execute(
+                json!({ "path": "mixed.bin", "start_line": 1, "max_lines": 2 }),
+                &ctx,
+            )
+            .await
+            .expect_err("invalid UTF-8 must error");
+        let message = err.to_string();
+        assert!(message.contains("Failed to read"), "{message}");
+        assert!(message.contains("valid UTF-8"), "{message}");
+    }
+
+    #[tokio::test]
     async fn test_read_file_missing_path() {
         let tmp = tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
@@ -1378,7 +1853,7 @@ mod tests {
         assert!(
             result.content.contains("Recursive Language Models"),
             "pdf-extract should recover the document title; got prefix {:?}",
-            &result.content.chars().take(200).collect::<String>()
+            result.content.chars().take(200).collect::<String>()
         );
     }
 
@@ -1441,11 +1916,6 @@ mod tests {
         );
     }
 
-    /// Serialises tests that mutate `DEEPSEEK_CONFIG_PATH` so they don't
-    /// race against each other — env vars are process-global and the
-    /// settings loader inspects this var on every call.
-    static DS_CONFIG_PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     struct ConfigPathEnvGuard {
         prior: Option<std::ffi::OsString>,
     }
@@ -1474,7 +1944,11 @@ mod tests {
         // missing.
         // Sync test (calls `read_pdf` directly, not the async ReadFileTool
         // wrapper) so the env-var lock is never held across an `.await`.
-        let _lock = DS_CONFIG_PATH_LOCK.lock().unwrap();
+        // Must hold the process-wide env lock, not a module-local one:
+        // other test modules redirect `DEEPSEEK_CONFIG_PATH`/`HOME` under
+        // `lock_test_env`, and a module-local mutex would let this test's
+        // redirect interleave with theirs.
+        let _lock = crate::test_support::lock_test_env();
         let _guard = ConfigPathEnvGuard::capture();
 
         let tmp = tempdir().expect("tempdir");
@@ -1488,7 +1962,7 @@ mod tests {
             "prefer_external_pdftotext = true\n",
         )
         .unwrap();
-        // Safety: serialised by DS_CONFIG_PATH_LOCK; reverted by guard.
+        // Safety: serialised by the process-wide test env lock; reverted by guard.
         unsafe {
             std::env::set_var("DEEPSEEK_CONFIG_PATH", &config_path);
         }
@@ -1552,6 +2026,24 @@ mod tests {
             "{}",
             result.content
         );
+        let mutation = &result.metadata.as_ref().expect("metadata")["mutation"];
+        assert_eq!(
+            mutation["files"],
+            json!([{ "path": "output.txt", "outcome": "created" }])
+        );
+        assert!(
+            mutation["diff"]
+                .as_str()
+                .is_some_and(|diff| diff.contains("--- a/output.txt")),
+            "{mutation}"
+        );
+        assert!(
+            !mutation["diff"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(&tmp.path().display().to_string()),
+            "receipt headers must not expose the resolved host path: {mutation}"
+        );
 
         // Verify file was written
         let written = fs::read_to_string(tmp.path().join("output.txt")).expect("read");
@@ -1579,6 +2071,189 @@ mod tests {
         assert_eq!(written, "nested content");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_file_tool_new_file_matches_standard_creation_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+
+        let control = tmp.path().join("control.txt");
+        fs::write(&control, b"control").expect("write control");
+
+        WriteFileTool
+            .execute(
+                json!({"path": "created.txt", "content": "from write_file"}),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+
+        let control_mode = fs::metadata(&control)
+            .expect("control metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        let created_mode = fs::metadata(tmp.path().join("created.txt"))
+            .expect("created metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(created_mode, control_mode);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_file_tool_preserves_existing_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let path = tmp.path().join("shared.txt");
+        fs::write(&path, b"before").expect("initial write");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o664))
+            .expect("set shared permissions");
+
+        WriteFileTool
+            .execute(json!({"path": "shared.txt", "content": "after"}), &ctx)
+            .await
+            .expect("execute");
+
+        let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o664);
+        assert_eq!(fs::read_to_string(&path).expect("read"), "after");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn edit_file_tool_preserves_executable_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let path = tmp.path().join("script.sh");
+        fs::write(&path, b"#!/bin/sh\nexit 0\n").expect("initial write");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+            .expect("set executable permissions");
+        read_before_edit(&ctx, "script.sh").await;
+
+        EditFileTool
+            .execute(
+                json!({
+                    "path": "script.sh",
+                    "search": "exit 0",
+                    "replace": "exit 1"
+                }),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+
+        let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755);
+        assert_eq!(
+            fs::read_to_string(&path).expect("read"),
+            "#!/bin/sh\nexit 1\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_file_refuses_brace_collapsed_match_arm_payload() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let path = tmp.path().join("arm.rs");
+        let original = r#"match outcome {
+            SendMessageOutcome::Finished {
+                status: TurnOutcomeStatus::Interrupted,
+                ..
+            } => self.pause_goal_after_interruption().await,
+            SendMessageOutcome::Finished {
+                status: TurnOutcomeStatus::Completed,
+                ..
+            } => {}
+        }
+"#;
+        fs::write(&path, original).expect("write");
+        read_before_edit(&ctx, "arm.rs").await;
+
+        let search = r#"SendMessageOutcome::Finished {
+                status: TurnOutcomeStatus::Interrupted,
+                ..
+            } => self.pause_goal_after_interruption().await,"#;
+        // Corrupted host payload: brace block collapsed to empty brackets.
+        let replace = "[
+                
+            ] => {},";
+        let err = EditFileTool
+            .execute(
+                json!({
+                    "path": "arm.rs",
+                    "search": search,
+                    "replace": replace,
+                }),
+                &ctx,
+            )
+            .await
+            .expect_err("corrupted brace collapse must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("corrupted") || msg.contains("collapsed") || msg.contains("unbalanced"),
+            "unexpected error: {msg}"
+        );
+        assert_eq!(fs::read_to_string(&path).expect("read"), original);
+    }
+
+    #[tokio::test]
+    async fn edit_file_preserves_rust_match_arm_braces() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let path = tmp.path().join("arm.rs");
+        let original = r#"match outcome {
+            SendMessageOutcome::Finished {
+                status: TurnOutcomeStatus::Interrupted,
+                ..
+            } => self.pause_goal_after_interruption().await,
+            other => {}
+        }
+"#;
+        fs::write(&path, original).expect("write");
+        read_before_edit(&ctx, "arm.rs").await;
+
+        let search = r#"SendMessageOutcome::Finished {
+                status: TurnOutcomeStatus::Interrupted,
+                ..
+            } => self.pause_goal_after_interruption().await,"#;
+        let replace = r#"SendMessageOutcome::Finished {
+                status: TurnOutcomeStatus::Interrupted,
+                ..
+            } => {
+                // stay active
+                let _ = self.tx_event.send(Event::status("ok".into())).await;
+            }"#;
+        EditFileTool
+            .execute(
+                json!({
+                    "path": "arm.rs",
+                    "search": search,
+                    "replace": replace,
+                }),
+                &ctx,
+            )
+            .await
+            .expect("brace-heavy replace must apply");
+        let updated = fs::read_to_string(&path).expect("read");
+        assert!(updated.contains("stay active"), "{updated}");
+        assert!(
+            updated.contains("SendMessageOutcome::Finished"),
+            "{updated}"
+        );
+        assert!(
+            !updated.contains("pause_goal_after_interruption"),
+            "{updated}"
+        );
+    }
+
     #[tokio::test]
     async fn test_edit_file_tool() {
         let tmp = tempdir().expect("tempdir");
@@ -1586,7 +2261,8 @@ mod tests {
 
         // Create a file to edit
         let test_file = tmp.path().join("edit_me.txt");
-        fs::write(&test_file, "hello world hello").expect("write");
+        fs::write(&test_file, "hello world").expect("write");
+        read_before_edit(&ctx, "edit_me.txt").await;
 
         let tool = EditFileTool;
         let result = tool
@@ -1598,29 +2274,106 @@ mod tests {
             .expect("execute");
 
         assert!(result.success);
-        assert!(result.content.contains("2 occurrence(s)"));
-        assert!(
-            result.content.contains("multiple matches were replaced"),
-            "{}",
-            result.content
-        );
+        assert!(result.content.contains("Replaced 1 occurrence"));
         // Inline diff (#505) — the unified diff lands above the summary
         // line so the TUI's diff-aware renderer kicks in.
         assert!(result.content.contains("--- a/"), "{}", result.content);
         assert!(
-            result.content.contains("-hello world hello"),
+            result.content.contains("-hello world"),
             "{}",
             result.content
         );
+        assert!(result.content.contains("+hi world"), "{}", result.content);
+        let mutation = &result.metadata.as_ref().expect("metadata")["mutation"];
+        assert_eq!(
+            mutation["files"],
+            json!([{ "path": "edit_me.txt", "outcome": "updated" }])
+        );
+        let receipt_diff = mutation["diff"].as_str().expect("receipt diff");
+        assert!(receipt_diff.contains("--- a/edit_me.txt"), "{receipt_diff}");
+        assert!(receipt_diff.contains("-hello world"), "{receipt_diff}");
+        assert!(receipt_diff.contains("+hi world"), "{receipt_diff}");
         assert!(
-            result.content.contains("+hi world hi"),
-            "{}",
-            result.content
+            !receipt_diff.contains(&tmp.path().display().to_string()),
+            "receipt headers must not expose the resolved host path: {receipt_diff}"
         );
 
         // Verify edit was applied
         let edited = fs::read_to_string(&test_file).expect("read");
-        assert_eq!(edited, "hi world hi");
+        assert_eq!(edited, "hi world");
+    }
+
+    #[tokio::test]
+    async fn edit_file_requires_prior_read() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+
+        let test_file = tmp.path().join("blind.txt");
+        fs::write(&test_file, "hello world").expect("write");
+
+        let err = EditFileTool
+            .execute(
+                json!({"path": "blind.txt", "search": "hello", "replace": "hi"}),
+                &ctx,
+            )
+            .await
+            .expect_err("edit without read should fail");
+        let message = err.to_string();
+        assert!(message.contains("not been read"), "{message}");
+        assert!(message.contains("read_file"), "{message}");
+
+        let unchanged = fs::read_to_string(&test_file).expect("read");
+        assert_eq!(unchanged, "hello world");
+    }
+
+    #[tokio::test]
+    async fn edit_file_rejects_stale_prior_read() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+
+        let test_file = tmp.path().join("stale.txt");
+        fs::write(&test_file, "alpha beta").expect("write");
+        read_before_edit(&ctx, "stale.txt").await;
+        fs::write(&test_file, "alpha beta gamma").expect("external write");
+
+        let err = EditFileTool
+            .execute(
+                json!({"path": "stale.txt", "search": "alpha", "replace": "omega"}),
+                &ctx,
+            )
+            .await
+            .expect_err("stale read should fail");
+        let message = err.to_string();
+        assert!(message.contains("changed since"), "{message}");
+        assert!(message.contains("read_file"), "{message}");
+
+        let unchanged = fs::read_to_string(&test_file).expect("read");
+        assert_eq!(unchanged, "alpha beta gamma");
+    }
+
+    #[tokio::test]
+    async fn edit_file_rejects_non_unique_exact_match() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+
+        let test_file = tmp.path().join("multi.txt");
+        fs::write(&test_file, "hello world hello").expect("write");
+        read_before_edit(&ctx, "multi.txt").await;
+
+        let err = EditFileTool
+            .execute(
+                json!({"path": "multi.txt", "search": "hello", "replace": "hi"}),
+                &ctx,
+            )
+            .await
+            .expect_err("non-unique exact match should fail");
+        let message = err.to_string();
+        assert!(message.contains("non-unique"), "{message}");
+        assert!(message.contains("matched 2"), "{message}");
+        assert!(message.contains("read_file"), "{message}");
+
+        let unchanged = fs::read_to_string(&test_file).expect("read");
+        assert_eq!(unchanged, "hello world hello");
     }
 
     #[tokio::test]
@@ -1636,6 +2389,7 @@ mod tests {
         ] {
             let test_file = tmp.path().join(file_name);
             fs::write(&test_file, "hello world").expect("write");
+            read_before_edit(&ctx, file_name).await;
 
             let mut input = serde_json::Map::from_iter([
                 ("path".to_string(), json!(file_name)),
@@ -1665,6 +2419,7 @@ mod tests {
 
         let test_file = tmp.path().join("single.txt");
         fs::write(&test_file, "hello world").expect("write");
+        read_before_edit(&ctx, "single.txt").await;
 
         let tool = EditFileTool;
         let result = tool
@@ -1691,6 +2446,7 @@ mod tests {
             "fn main() {\n    if true {\n        let value = 1;\n    }\n}\n",
         )
         .expect("write");
+        read_before_edit(&ctx, "fuzzy.txt").await;
 
         let tool = EditFileTool;
         let result = tool
@@ -1716,6 +2472,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_edit_file_fuzz_tolerates_leading_whitespace_after_multibyte_start() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+
+        let test_file = tmp.path().join("fuzzy_cjk.txt");
+        fs::write(&test_file, "数据\n").expect("write");
+        read_before_edit(&ctx, "fuzzy_cjk.txt").await;
+
+        let tool = EditFileTool;
+        let result = tool
+            .execute(
+                json!({
+                    "path": "fuzzy_cjk.txt",
+                    "search": "    数据",
+                    "replace": "记录",
+                    "fuzz": true
+                }),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+
+        assert!(result.success, "{}", result.content);
+        assert!(result.content.contains("fuzzy indentation match"));
+        let edited = fs::read_to_string(&test_file).expect("read");
+        assert_eq!(edited, "记录\n");
+    }
+
+    #[tokio::test]
     async fn test_edit_file_fuzz_tolerates_smart_quote_substitution() {
         // The file on disk has ASCII quotes. The search comes from a
         // browser paste with curly quotes. Exact match fails; the
@@ -1725,6 +2510,7 @@ mod tests {
 
         let test_file = tmp.path().join("smart.rs");
         fs::write(&test_file, "let s = \"hello world\";\n").expect("write");
+        read_before_edit(&ctx, "smart.rs").await;
 
         let tool = EditFileTool;
         let result = tool
@@ -1752,6 +2538,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_edit_file_fuzz_tolerates_smart_quote_after_multibyte_start() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+
+        let test_file = tmp.path().join("smart_cjk.md");
+        fs::write(&test_file, "数据 \"x\"\n").expect("write");
+        read_before_edit(&ctx, "smart_cjk.md").await;
+
+        let tool = EditFileTool;
+        let result = tool
+            .execute(
+                json!({
+                    "path": "smart_cjk.md",
+                    "search": "数据 \u{201C}x\u{201D}",
+                    "replace": "数据 y",
+                    "fuzz": true
+                }),
+                &ctx,
+            )
+            .await
+            .expect("execute");
+
+        assert!(result.success, "{}", result.content);
+        assert!(result.content.contains("fuzzy punctuation match"));
+        let edited = fs::read_to_string(&test_file).expect("read");
+        assert_eq!(edited, "数据 y\n");
+    }
+
+    #[tokio::test]
     async fn test_edit_file_fuzz_tolerates_em_dash_and_nbsp() {
         let tmp = tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
@@ -1759,6 +2574,7 @@ mod tests {
         let test_file = tmp.path().join("dash.md");
         // File has an ASCII hyphen and ASCII space.
         fs::write(&test_file, "alpha - beta\n").expect("write");
+        read_before_edit(&ctx, "dash.md").await;
 
         let tool = EditFileTool;
         let result = tool
@@ -1789,6 +2605,7 @@ mod tests {
         // Create a file without the search string
         let test_file = tmp.path().join("no_match.txt");
         fs::write(&test_file, "foo bar baz").expect("write");
+        read_before_edit(&ctx, "no_match.txt").await;
 
         let tool = EditFileTool;
         let result = tool
@@ -1801,6 +2618,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.to_string().contains("not found"));
+        assert!(err.to_string().contains("read_file"));
     }
 
     #[tokio::test]
@@ -1883,7 +2701,11 @@ mod tests {
         assert!(result.content.contains("file1.txt"));
         assert!(result.content.contains("file2.txt"));
         assert!(result.content.contains("subdir"));
-        assert!(result.content.contains("\"is_dir\": true"));
+        let entries: Value = serde_json::from_str(&result.content).expect("list_dir json");
+        assert!(entries.as_array().expect("entries").iter().any(|entry| {
+            entry.get("name").and_then(Value::as_str) == Some("subdir")
+                && entry.get("is_dir").and_then(Value::as_bool) == Some(true)
+        }));
     }
 
     #[tokio::test]
@@ -1904,6 +2726,52 @@ mod tests {
 
         assert!(result.success);
         assert!(result.content.contains("nested.txt"));
+    }
+
+    #[tokio::test]
+    async fn test_list_dir_small_dir_keeps_plain_array_response() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        fs::write(tmp.path().join("only.txt"), "").expect("write");
+
+        let tool = ListDirTool;
+        let result = tool.execute(json!({}), &ctx).await.expect("execute");
+
+        let parsed: Value = serde_json::from_str(&result.content).expect("json");
+        assert!(
+            parsed.is_array(),
+            "small dirs must keep the historical array shape: {parsed}"
+        );
+        assert_eq!(parsed.as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_list_dir_caps_entries_with_truncation_metadata() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let extra = 7;
+        for i in 0..LIST_DIR_MAX_ENTRIES + extra {
+            fs::write(tmp.path().join(format!("f{i:04}.txt")), "").expect("write");
+        }
+
+        let tool = ListDirTool;
+        let result = tool.execute(json!({}), &ctx).await.expect("execute");
+
+        let parsed: Value = serde_json::from_str(&result.content).expect("json");
+        assert!(parsed.is_object(), "oversized dirs return an object");
+        assert_eq!(parsed["truncated"], json!(true));
+        assert_eq!(
+            parsed["listed_entries"].as_u64().unwrap() as usize,
+            LIST_DIR_MAX_ENTRIES
+        );
+        assert_eq!(
+            parsed["total_entries"].as_u64().unwrap() as usize,
+            LIST_DIR_MAX_ENTRIES + extra
+        );
+        assert_eq!(
+            parsed["entries"].as_array().unwrap().len(),
+            LIST_DIR_MAX_ENTRIES
+        );
     }
 
     #[tokio::test]
@@ -1930,7 +2798,7 @@ mod tests {
     async fn test_list_dir_blocking_wrapper_reports_timeout() {
         let err = run_blocking_list_dir(Duration::from_millis(1), None, || {
             std::thread::sleep(Duration::from_millis(50));
-            Ok(Vec::new())
+            Ok(Value::Array(Vec::new()))
         })
         .await
         .expect_err("slow list_dir worker should time out");

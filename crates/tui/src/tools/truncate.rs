@@ -5,15 +5,14 @@
 //!
 //! 1. The transcript / tool-cell renders a bounded preview so the UI
 //!    stays scannable.
-//! 2. The full original output is preserved on disk so the model can
-//!    `read_file` it back if it later needs the elided tail, and so
-//!    the user can open it in `$EDITOR`.
+//! 2. The full router input is preserved under its origin session so bounded
+//!    retrieval and the raw-detail pager can inspect it without leaking a
+//!    process-global filesystem path.
 //!
-//! This module owns the disk side. Files land in
-//! `~/.codewhale/tool_outputs/<sanitised-id>.txt`. The id is the tool
-//! call id the engine assigns; we sanitise it conservatively (ASCII
-//! alphanumeric + `-`/`_`) so a hostile id can't escape the directory
-//! via `..` or absolute-path tricks.
+//! The default adaptive path writes immutable artifacts under
+//! `~/.codewhale/sessions/<session>/artifacts/`. The historical
+//! `~/.codewhale/tool_outputs/<sanitised-id>.txt` directory remains only for
+//! classic-routing compatibility, protected by a digest-bound origin sidecar.
 //!
 //! Boot prune drops files whose mtime is older than [`SPILLOVER_MAX_AGE`]
 //! (7 days). Prune failures are logged and never fatal — the user
@@ -28,25 +27,36 @@
 //! * Boot prune in `main.rs` deletes files older than
 //!   [`SPILLOVER_MAX_AGE`].
 //!
-//! UI-side rendering of the inline `full output: <path>` annotation
-//! is owned by `tui/history.rs::render_spillover_annotation`. The
-//! tool-details pager opens the spillover file when the user
-//! presses `Alt+V` (or plain `v` with empty composer) on a spilled
-//! tool cell.
+//! UI-side rendering is owned by `tui/history.rs::render_spillover_annotation`;
+//! it exposes a path-free receipt and the tool-details shortcut opens the
+//! session artifact.
 
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::tools::spec::ToolResult;
 
-// `Path` is only referenced from helpers gated to test builds.
-#[cfg(test)]
-use std::path::Path;
-
 /// Name of the spillover directory under the CodeWhale home.
 pub const SPILLOVER_DIR_NAME: &str = "tool_outputs";
+
+const LEGACY_SPILLOVER_OWNER_SCHEMA_VERSION: u32 = 1;
+
+/// Session proof for compatibility payloads kept in the historical global
+/// `tool_outputs/` directory.
+///
+/// The payload remains in its legacy location so classic-routing rollback and
+/// existing detail pagers keep working, but model retrieval is authorized only
+/// when this sidecar names the active origin session and still matches the
+/// immutable bytes being returned.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub(crate) struct LegacySpilloverOwnership {
+    pub schema_version: u32,
+    pub origin_session: String,
+    pub digest: String,
+    pub size_bytes: u64,
+}
 
 /// Default threshold above which a tool result is a candidate for
 /// spillover. Mirrors the `MAX_MEMORY_SIZE` ceiling we use elsewhere
@@ -81,7 +91,7 @@ pub fn spillover_root() -> Option<PathBuf> {
         return Some(root);
     }
 
-    let home = dirs::home_dir()?;
+    let home = crate::config::effective_home_dir()?;
     let primary = home.join(".codewhale").join(SPILLOVER_DIR_NAME);
     let legacy = home.join(".deepseek").join(SPILLOVER_DIR_NAME);
     if primary.exists() || !legacy.exists() {
@@ -109,12 +119,70 @@ pub fn spillover_path(id: &str) -> Option<PathBuf> {
     Some(spillover_root()?.join(format!("{sanitised}.txt")))
 }
 
+#[must_use]
+pub(crate) fn legacy_spillover_ownership_path(payload_path: &Path) -> PathBuf {
+    payload_path.with_extension("owner.json")
+}
+
+/// Publish the proof needed to retrieve a legacy-global spillover safely.
+///
+/// Payload publication happens first. If this atomic sidecar write fails, the
+/// payload is deliberately left unowned and therefore inaccessible through
+/// `retrieve_tool_result`; callers must not advertise a retrieval hint.
+pub(crate) fn publish_legacy_spillover_ownership(
+    payload_path: &Path,
+    session_id: &str,
+    bytes: &[u8],
+) -> io::Result<PathBuf> {
+    if session_id.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "legacy spillover ownership requires a session id",
+        ));
+    }
+    let ownership = LegacySpilloverOwnership {
+        schema_version: LEGACY_SPILLOVER_OWNER_SCHEMA_VERSION,
+        origin_session: session_id.to_string(),
+        digest: crate::hashing::sha256_hex(bytes),
+        size_bytes: bytes.len().try_into().unwrap_or(u64::MAX),
+    };
+    let sidecar = legacy_spillover_ownership_path(payload_path);
+    let encoded = serde_json::to_vec_pretty(&ownership)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    crate::utils::write_atomic(&sidecar, &encoded)?;
+    Ok(sidecar)
+}
+
+pub(crate) fn read_legacy_spillover_ownership(
+    payload_path: &Path,
+) -> io::Result<LegacySpilloverOwnership> {
+    let sidecar = legacy_spillover_ownership_path(payload_path);
+    if std::fs::symlink_metadata(&sidecar)?
+        .file_type()
+        .is_symlink()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "legacy spillover ownership sidecar must not be a symlink",
+        ));
+    }
+    let ownership = serde_json::from_slice::<LegacySpilloverOwnership>(&std::fs::read(sidecar)?)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if ownership.schema_version != LEGACY_SPILLOVER_OWNER_SCHEMA_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unsupported legacy spillover ownership schema",
+        ));
+    }
+    Ok(ownership)
+}
+
 /// Resolve the spillover-file path for a SHA256 content hash. Separate
-/// namespace (`sha_<hex>.txt`) from the tool-call-id files so the two
-/// reference systems (engine-side spillover + wire-side dedup) can
-/// co-exist in one directory without collisions. `sha` must be the
-/// raw 64-char lowercase hex digest — case-insensitive matching is
-/// done by the caller.
+/// namespace (`sha_<hex>.txt`) from the tool-call-id files so legacy
+/// SHA-addressed evidence can be recognized without colliding with
+/// tool-call references. Retrieval still requires matching ownership
+/// metadata. `sha` must be the raw 64-char lowercase hex digest —
+/// case-insensitive matching is done by the caller.
 #[must_use]
 pub fn sha_spillover_path(sha: &str) -> Option<PathBuf> {
     let sha = sha.trim().to_ascii_lowercase();
@@ -134,11 +202,8 @@ pub fn is_valid_sha256(s: &str) -> bool {
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
-/// Write content to the SHA-addressed spillover file. Idempotent —
-/// the same hash always maps to the same path, and the file's bytes
-/// are a function of the hash. Skips the write if the file already
-/// exists (which is the common case for the wire dedup, since the
-/// second sighting writes the same content that the first did).
+/// Write a legacy SHA-addressed spillover fixture for ownership tests.
+#[cfg(test)]
 pub fn write_sha_spillover(sha: &str, content: &str) -> io::Result<PathBuf> {
     let path = sha_spillover_path(sha).ok_or_else(|| {
         io::Error::new(
@@ -259,6 +324,17 @@ pub fn maybe_spillover(
 /// the per-turn context budget. The full output is preserved on
 /// disk; the model can `read_file` it back if it needs the tail.
 pub const SPILLOVER_HEAD_BYTES: usize = 32 * 1024;
+/// Inline tail retained alongside the head so compiler summaries and final
+/// test failures are not systematically hidden by truncation.
+pub const SPILLOVER_TAIL_BYTES: usize = 8 * 1024;
+
+fn retained_tail(content: &str, max_bytes: usize) -> &str {
+    let floor = content.len().saturating_sub(max_bytes);
+    let start = (floor..=content.len())
+        .find(|&index| content.is_char_boundary(index))
+        .unwrap_or(content.len());
+    &content[start..]
+}
 
 /// Apply spillover to a tool result in place. If the result's
 /// content exceeds [`SPILLOVER_THRESHOLD_BYTES`], writes the full
@@ -283,13 +359,11 @@ pub fn apply_spillover(result: &mut ToolResult, tool_id: &str) -> Option<PathBuf
     apply_spillover_inner(result, tool_id, None)
 }
 
-/// Apply spillover and emit a session-scoped artifact reference.
+/// Apply adaptive routing and publish session-scoped exact evidence.
 ///
-/// The home-level `tool_outputs/<tool-id>.txt` file is still written
-/// so `retrieve_tool_result ref=<tool-id>` keeps working during the
-/// transition. The canonical artifact content is also written under
-/// `~/.codewhale/sessions/<session-id>/artifacts/`, and the inline tool result
-/// becomes a fixed-format artifact reference block.
+/// The default path writes one immutable payload under the origin session and
+/// replaces non-inline content with a calm, bounded receipt. The legacy dual
+/// spillover behavior is reachable only through the classic rollback switch.
 pub fn apply_spillover_with_artifact(
     result: &mut ToolResult,
     tool_id: &str,
@@ -306,6 +380,7 @@ pub fn apply_spillover_with_artifact(
     )
 }
 
+#[derive(Clone, Copy)]
 struct ArtifactSpilloverContext<'a> {
     tool_name: &'a str,
     session_id: &'a str,
@@ -316,6 +391,11 @@ fn apply_spillover_inner(
     tool_id: &str,
     artifact_context: Option<ArtifactSpilloverContext<'_>>,
 ) -> Option<PathBuf> {
+    if !crate::tools::large_output_router::classic_output_routing_enabled()
+        && let Some(context) = artifact_context
+    {
+        return apply_adaptive_evidence_inner(result, tool_id, context);
+    }
     if !result.success {
         return None;
     }
@@ -343,7 +423,28 @@ fn apply_spillover_inner(
         }
     };
     let (head, path) = outcome;
+    let tail = retained_tail(&original_content, SPILLOVER_TAIL_BYTES);
+    let digest = crate::hashing::sha256_hex(original_content.as_bytes());
     let path_str = path.display().to_string();
+
+    let legacy_owner_published = artifact_context.is_some_and(|context| {
+        match publish_legacy_spillover_ownership(
+            &path,
+            context.session_id,
+            original_content.as_bytes(),
+        ) {
+            Ok(_) => true,
+            Err(err) => {
+                tracing::warn!(
+                    target: "spillover",
+                    ?err,
+                    tool_id,
+                    "legacy spillover ownership publication failed"
+                );
+                false
+            }
+        }
+    });
 
     let mut artifact_path = None;
     if let Some(context) = artifact_context {
@@ -362,7 +463,12 @@ fn apply_spillover_inner(
                     &original_content,
                 );
                 let transcript_ref = crate::artifacts::TranscriptArtifactRef::from(&record);
-                result.content = crate::artifacts::render_transcript_artifact_ref(&transcript_ref);
+                let reference = crate::artifacts::render_transcript_artifact_ref(&transcript_ref);
+                result.content = format!(
+                    "{reference}\n\n[retained head: {} bytes]\n{head}\n\n[retained tail: {} bytes]\n{tail}",
+                    head.len(),
+                    tail.len(),
+                );
                 artifact_path = Some((absolute_path, relative_path, record));
             }
             Err(err) => {
@@ -377,16 +483,25 @@ fn apply_spillover_inner(
     }
 
     if artifact_path.is_none() {
+        let retrieval = if legacy_owner_published {
+            format!(
+                "Use `retrieve_tool_result ref={tool_id} mode=tail` or \
+                 `retrieve_tool_result ref={tool_id} mode=query query=<text>` \
+                 to inspect the retained evidence."
+            )
+        } else {
+            "Exact retrieval is unavailable because session ownership could not be recorded."
+                .to_string()
+        };
         let footer = format!(
-            "\n\n[Output truncated: {head_kib} KiB of {total_kib} KiB shown. \
-             Full output saved to {path_str}. Use \
-             `retrieve_tool_result ref={tool_id} mode=tail` or \
-             `retrieve_tool_result ref={tool_id} mode=query query=<text>` \
-             if you need the elided output.]",
+            "\n\n[Output truncated: {head_kib} KiB of {total_kib} KiB shown. {retrieval}]",
             head_kib = head.len() / 1024,
             total_kib = total / 1024,
         );
-        result.content = format!("{head}{footer}");
+        result.content = format!(
+            "{head}\n\n[retained tail: {} bytes]\n{tail}{footer}",
+            tail.len()
+        );
     }
 
     let metadata = result.metadata.get_or_insert_with(|| serde_json::json!({}));
@@ -480,9 +595,197 @@ fn apply_spillover_inner(
             }
         }
     }
+    if let Some(obj) = result
+        .metadata
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        obj.insert("truncated".into(), serde_json::Value::Bool(true));
+        obj.insert(
+            "content_digest".into(),
+            serde_json::Value::String(format!("sha256:{digest}")),
+        );
+        obj.insert(
+            "original_byte_count".into(),
+            serde_json::Value::Number(serde_json::Number::from(total as u64)),
+        );
+        obj.insert(
+            "retained_head_bytes".into(),
+            serde_json::Value::Number(serde_json::Number::from(head.len() as u64)),
+        );
+        obj.insert(
+            "retained_tail_bytes".into(),
+            serde_json::Value::Number(serde_json::Number::from(tail.len() as u64)),
+        );
+    }
     artifact_path
         .map(|(absolute_path, _, _)| absolute_path)
         .or(Some(path))
+}
+
+fn apply_adaptive_evidence_inner(
+    result: &mut ToolResult,
+    tool_id: &str,
+    context: ArtifactSpilloverContext<'_>,
+) -> Option<PathBuf> {
+    use crate::tools::large_output_router::{
+        DEFAULT_LARGE_OUTPUT_THRESHOLD_TOKENS, EVIDENCE_RETENTION_SECS, EvidenceArtifact,
+        EvidenceRetentionState, EvidenceRouting, estimate_tokens, publish_evidence_metadata,
+        unix_millis_now,
+    };
+
+    let estimated_tokens = estimate_tokens(&result.content);
+    let threshold = result
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("evidence_threshold_tokens"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(DEFAULT_LARGE_OUTPUT_THRESHOLD_TOKENS);
+    let routing = result
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("evidence_routing"))
+        .cloned()
+        .and_then(|value| serde_json::from_value::<EvidenceRouting>(value).ok())
+        .unwrap_or_else(|| EvidenceRouting::from_token_estimate(estimated_tokens, threshold));
+    if routing == EvidenceRouting::Inline {
+        return None;
+    }
+
+    let original = result.content.clone();
+    let artifact_id = crate::artifacts::artifact_id_for_tool_call(tool_id);
+    let relative_path = crate::artifacts::session_artifact_relative_path(&artifact_id);
+    let digest = crate::hashing::sha256_hex(original.as_bytes());
+    let now_ms = unix_millis_now();
+    let proposed_artifact = EvidenceArtifact {
+        handle: artifact_id.clone(),
+        digest: digest.clone(),
+        size_bytes: original.len().try_into().unwrap_or(u64::MAX),
+        content_type: if serde_json::from_str::<serde_json::Value>(&original).is_ok() {
+            "application/json".to_string()
+        } else {
+            "text/plain".to_string()
+        },
+        tool_name: context.tool_name.to_string(),
+        call_id: tool_id.to_string(),
+        origin_session: context.session_id.to_string(),
+        generation: 1,
+        redacted: false,
+        encoding: "utf-8".to_string(),
+        retention_state: EvidenceRetentionState::Live,
+        created_at_unix_ms: now_ms,
+        retain_until_unix_ms: now_ms.saturating_add(EVIDENCE_RETENTION_SECS * 1_000),
+        storage_path: relative_path.clone(),
+    };
+    let artifact = match crate::tools::large_output_router::read_evidence_metadata(
+        context.session_id,
+        &artifact_id,
+    ) {
+        Ok(existing)
+            if existing.digest == proposed_artifact.digest
+                && existing.size_bytes == proposed_artifact.size_bytes
+                && existing.call_id == proposed_artifact.call_id
+                && existing.origin_session == proposed_artifact.origin_session =>
+        {
+            existing
+        }
+        Ok(_) => {
+            tracing::warn!(target: "evidence", tool_id, "adaptive evidence replay conflicts with immutable metadata");
+            return None;
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            if let Err(err) = publish_evidence_metadata(context.session_id, &proposed_artifact) {
+                tracing::warn!(target: "evidence", ?err, tool_id, "adaptive evidence metadata publication failed");
+                return None;
+            }
+            proposed_artifact
+        }
+        Err(err) => {
+            tracing::warn!(target: "evidence", ?err, tool_id, "adaptive evidence metadata validation failed");
+            return None;
+        }
+    };
+
+    // Seal the ownership/integrity record before publishing predictable
+    // `art_<call>.txt` bytes. If metadata publication fails, no payload exists
+    // for a guessed handle to retrieve without the generation, redaction,
+    // retention, size, and digest checks above. A metadata-only interruption
+    // is safe: the handle is never advertised and a retry can idempotently
+    // publish the matching bytes.
+    let (absolute_path, relative_path) = match crate::artifacts::write_session_artifact_immutable(
+        context.session_id,
+        &artifact_id,
+        original.as_bytes(),
+    ) {
+        Ok(paths) => paths,
+        Err(err) => {
+            tracing::warn!(target: "evidence", ?err, tool_id, "adaptive evidence content publication failed");
+            return None;
+        }
+    };
+
+    let record = crate::artifacts::record_tool_output_artifact(
+        context.session_id,
+        tool_id,
+        context.tool_name,
+        relative_path.clone(),
+        &original,
+    );
+    let head_limit = if routing == EvidenceRouting::Hybrid {
+        8 * 1024
+    } else {
+        2 * 1024
+    };
+    let tail_limit = if routing == EvidenceRouting::Hybrid {
+        2 * 1024
+    } else {
+        512
+    };
+    let head_end = (0..=head_limit.min(original.len()))
+        .rev()
+        .find(|index| original.is_char_boundary(*index))
+        .unwrap_or(0);
+    let tail = retained_tail(&original, tail_limit);
+    result.content = format!(
+        "[Exact evidence retained · {} · inspect with `retrieve_tool_result ref={}`]\n\n{}\n\n[final excerpt]\n{}",
+        crate::artifacts::format_byte_size(original.len().try_into().unwrap_or(u64::MAX)),
+        artifact_id,
+        &original[..head_end],
+        tail,
+    );
+    let metadata = result.metadata.get_or_insert_with(|| serde_json::json!({}));
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "spillover_path".into(),
+            absolute_path.display().to_string().into(),
+        );
+        object.insert("artifact_id".into(), artifact_id.into());
+        object.insert("artifact_session_id".into(), context.session_id.into());
+        object.insert(
+            "artifact_relative_path".into(),
+            crate::artifacts::format_artifact_relative_path(&relative_path).into(),
+        );
+        object.insert("artifact_byte_size".into(), artifact.size_bytes.into());
+        object.insert("artifact_digest".into(), digest.into());
+        object.insert("artifact_generation".into(), artifact.generation.into());
+        object.insert("artifact_encoding".into(), artifact.encoding.into());
+        object.insert("artifact_retention_state".into(), "live".into());
+        object.insert("evidence_available".into(), true.into());
+        object.insert("truncated".into(), true.into());
+        object.insert("original_byte_count".into(), artifact.size_bytes.into());
+        object.insert("retained_head_bytes".into(), head_end.into());
+        object.insert("retained_tail_bytes".into(), tail.len().into());
+        object.insert(
+            "artifact_preview".into(),
+            original.chars().take(200).collect::<String>().into(),
+        );
+        object.insert(
+            "artifact_record".into(),
+            serde_json::to_value(record).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    Some(absolute_path)
 }
 
 /// Sanitise a tool call id for use as a filename. Keeps ASCII
@@ -798,7 +1101,12 @@ mod tests {
                 "footer missing: {}",
                 &result.content[result.content.len().saturating_sub(200)..]
             );
-            assert!(result.content.contains("retrieve_tool_result ref=call-big"));
+            assert!(
+                result
+                    .content
+                    .contains("Exact retrieval is unavailable because session ownership")
+            );
+            assert!(!result.content.contains("retrieve_tool_result"));
 
             // Full bytes are on disk at the returned path.
             assert!(path.exists(), "spillover file missing: {path:?}");
@@ -812,6 +1120,15 @@ mod tests {
                 .and_then(serde_json::Value::as_str)
                 .expect("spillover_path key present");
             assert_eq!(stamped, path.display().to_string());
+            assert_eq!(metadata["truncated"], true);
+            assert_eq!(metadata["original_byte_count"], 200 * 1024);
+            assert_eq!(metadata["retained_head_bytes"], SPILLOVER_HEAD_BYTES);
+            assert_eq!(metadata["retained_tail_bytes"], SPILLOVER_TAIL_BYTES);
+            assert!(
+                metadata["content_digest"]
+                    .as_str()
+                    .is_some_and(|digest| digest.starts_with("sha256:"))
+            );
         });
     }
 
@@ -836,21 +1153,23 @@ mod tests {
             assert_eq!(path, session_artifact);
             assert_eq!(fs::read_to_string(&session_artifact).unwrap(), big);
             assert!(
-                tmp.path()
+                !tmp.path()
                     .join(".codewhale/tool_outputs/call-big.txt")
                     .exists(),
-                "home-level spillover file should remain during transition"
+                "adaptive evidence stores one exact origin-session copy"
             );
-
-            assert!(result.content.starts_with("[artifact: exec_shell]"));
-            assert!(result.content.contains("id:           art_call-big"));
-            assert!(result.content.contains("tool_call_id: call-big"));
+            assert!(result.content.starts_with("[Exact evidence retained"));
             assert!(
                 result
                     .content
-                    .contains("path:         artifacts/art_call-big.txt")
+                    .contains("retrieve_tool_result ref=art_call-big")
             );
-            assert!(!result.content.contains("Output truncated:"));
+            assert!(!result.content.contains("artifacts/art_call-big.txt"));
+            assert!(
+                session_artifact
+                    .with_file_name("art_call-big.evidence.json")
+                    .exists()
+            );
 
             let metadata = result.metadata.expect("metadata stamped");
             assert_eq!(
@@ -870,6 +1189,157 @@ mod tests {
                     .get("artifact_session_id")
                     .and_then(serde_json::Value::as_str),
                 Some("session-123")
+            );
+            assert_eq!(metadata["original_byte_count"], big.len());
+            assert!(metadata["retained_head_bytes"].as_u64().unwrap_or(0) <= 2 * 1024);
+            assert!(metadata["retained_tail_bytes"].as_u64().unwrap_or(0) <= 512);
+        });
+    }
+
+    #[test]
+    fn adaptive_evidence_keeps_success_and_failure_exact_distinct_and_out_of_context() {
+        let _g = setup();
+        let tmp = tempdir().unwrap();
+        with_test_home(tmp.path(), || {
+            let sentinel = "DEEP_RAW_SENTINEL";
+            let success_raw = format!(
+                "{}{}{}",
+                "head\n".repeat(2_000),
+                sentinel,
+                "tail\n".repeat(2_000)
+            );
+            let failure_raw = format!("{}{}", "failure\n".repeat(3_000), "FAILURE_END");
+            let mut success = ToolResult::success(success_raw.clone());
+            let mut failure = ToolResult::error(failure_raw.clone());
+
+            let success_path = apply_spillover_with_artifact(
+                &mut success,
+                "call-success",
+                "exec_shell",
+                "session-a",
+            )
+            .expect("success evidence");
+            let failure_path = apply_spillover_with_artifact(
+                &mut failure,
+                "call-failure",
+                "mcp_fixture",
+                "session-a",
+            )
+            .expect("failure evidence");
+
+            assert_ne!(success_path, failure_path);
+            assert_eq!(
+                std::fs::read(&success_path).unwrap(),
+                success_raw.as_bytes()
+            );
+            assert_eq!(
+                std::fs::read(&failure_path).unwrap(),
+                failure_raw.as_bytes()
+            );
+            assert!(!success.content.contains(sentinel));
+            assert!(success.content.len() < 4 * 1024);
+            let success_meta = success.metadata.as_ref().unwrap();
+            let failure_meta = failure.metadata.as_ref().unwrap();
+            assert_ne!(
+                success_meta["artifact_digest"],
+                failure_meta["artifact_digest"]
+            );
+            assert_eq!(success_meta["artifact_session_id"], "session-a");
+            assert_eq!(failure_meta["artifact_session_id"], "session-a");
+
+            let mut replay = ToolResult::success(success_raw);
+            let replay_path = apply_spillover_with_artifact(
+                &mut replay,
+                "call-success",
+                "exec_shell",
+                "session-a",
+            )
+            .expect("idempotent replay");
+            assert_eq!(replay_path, success_path);
+        });
+    }
+
+    #[test]
+    fn adaptive_evidence_publication_failure_emits_no_handle_or_details_hint() {
+        let _g = setup();
+        let tmp = tempdir().unwrap();
+        with_test_home(tmp.path(), || {
+            let session_dir = tmp
+                .path()
+                .join(".codewhale")
+                .join("sessions")
+                .join("session-blocked");
+            std::fs::create_dir_all(&session_dir).unwrap();
+            std::fs::write(session_dir.join("artifacts"), b"block artifact directory").unwrap();
+
+            let raw = format!(
+                "{}{}{}",
+                "publication failure head\n".repeat(1_500),
+                "DEEP_FAILURE_SENTINEL",
+                "publication failure tail\n".repeat(1_500),
+            );
+            let mut result = ToolResult::error(raw.clone());
+            let path = apply_spillover_with_artifact(
+                &mut result,
+                "call-failed-publish",
+                "mcp_fixture",
+                "session-blocked",
+            );
+
+            assert!(path.is_none());
+            assert_eq!(result.content, raw);
+            assert!(!result.content.contains("Exact evidence retained"));
+            assert!(!result.content.contains("retrieve_tool_result"));
+            assert!(
+                result
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("evidence_available"))
+                    .is_none()
+            );
+            assert!(
+                !session_dir
+                    .join("artifacts/art_call-failed-publish.txt")
+                    .exists()
+            );
+        });
+    }
+
+    #[test]
+    fn adaptive_evidence_metadata_atomic_failure_leaves_payload_unadvertised() {
+        let _g = setup();
+        let tmp = tempdir().unwrap();
+        with_test_home(tmp.path(), || {
+            let artifact_dir = tmp
+                .path()
+                .join(".codewhale")
+                .join("sessions")
+                .join("session-metadata-blocked")
+                .join("artifacts");
+            std::fs::create_dir_all(artifact_dir.join("art_call-failed-metadata.evidence.json"))
+                .unwrap();
+
+            let raw = format!(
+                "{}{}{}",
+                "metadata failure head\n".repeat(1_500),
+                "DEEP_METADATA_FAILURE_SENTINEL",
+                "metadata failure tail\n".repeat(1_500),
+            );
+            let mut result = ToolResult::success(raw.clone());
+            let path = apply_spillover_with_artifact(
+                &mut result,
+                "call-failed-metadata",
+                "exec_shell",
+                "session-metadata-blocked",
+            );
+
+            assert!(path.is_none());
+            assert_eq!(result.content, raw);
+            assert!(!result.content.contains("Exact evidence retained"));
+            assert!(!result.content.contains("retrieve_tool_result"));
+            assert!(
+                !artifact_dir.join("art_call-failed-metadata.txt").exists(),
+                "metadata failure must leave no payload behind a guessable handle"
             );
         });
     }

@@ -8,9 +8,12 @@ converge on one durable runtime. In product language, a user may still "open a
 sub-agent"; in architecture language, durable nested work should be a
 fleet-backed worker with a role.
 
-Use Fleet rather than the compatibility `agent_open` path whenever the work
+Use Fleet rather than short-lived `agent` fanout whenever the work
 needs retry, sleep/restart survival, remote execution, receipts, or a ledgered
 audit trail. The initial CLI surface is:
+
+For a guided start-to-monitor walkthrough that combines Fleet task specs with
+Workflow authoring, see [Fleet + Workflow Tutorial](FLEET_WORKFLOW_TUTORIAL.md).
 
 ```sh
 codewhale fleet init
@@ -21,35 +24,323 @@ codewhale fleet logs <worker-id>
 codewhale fleet artifacts <worker-id>
 codewhale fleet interrupt <worker-id>
 codewhale fleet restart <worker-id>
+codewhale fleet resume <run-id>
 codewhale fleet stop --all
 ```
+
+`codewhale fleet resume <run-id>` is the restart-recovery verb: it replays the
+ledger, reconciles any in-flight lease whose worker stopped heartbeating
+(retrying within the task's budget, else failing and escalating per the alert
+policy), and prints the post-resume status. It launches no new work and is
+idempotent, so it is safe to run after a manager exit, laptop sleep, or runtime
+restart.
 
 Fleet state is stored under the workspace in `.codewhale/fleet.jsonl`. Worker
 logs and adapter logs are stored under `.codewhale/fleet/` and
 `.codewhale/fleet-host/`.
 
-## Naming: Modes, WhaleFlow, Fleet, and Swarm
+### Interactive and persistent status
 
-These names describe different layers, not competing systems. Agent, Plan, and
-YOLO stay the permission/work modes. WhaleFlow is an orchestration overlay that
-can run on top of those modes when the task needs a continuous workflow.
+`/fleet status` and `codewhale fleet status` are the **same** command on two
+surfaces. Both read the durable `.codewhale/fleet.jsonl` ledger for the
+workspace, through one shared control-plane contract, and both report the same
+verb id (`fleet.status`), read-vs-write authority, persistence scope, and
+receipt. When the workspace has no ledger they say so with a typed reason
+(`no_fleet_ledger`) instead of rendering an empty-looking "all clear" — and
+neither creates the ledger as a side effect of reading it.
 
-- **WhaleFlow** is the repeatable workflow plan and user-facing orchestration
+The current interactive session's sub-agents are a **different set**, and now
+have their own name:
+
+- `/fleet workers` (or `/subagents`, or `n`) shows sub-agents attached to the
+  current TUI session. It does not read the persistent ledger.
+- `/fleet list|status|interrupt|resume` and `codewhale fleet
+  list|status|interrupt|resume` act on the durable ledger.
+- `codewhale fleet restart <worker-id>` is CLI-only: it re-leases the task and
+  then drives the manager loop to completion. `/fleet restart` does not
+  silently do a smaller thing — it reports `surface_not_supported` and names
+  the CLI command.
+
+Before v0.9.2, `/fleet status` showed session sub-agents. That reading is gone;
+`/fleet workers` replaces it.
+
+The contract behind this — descriptors, availability reasons, exact-identity
+targets, receipts, typed unknowns, and bounds — is documented in
+[`docs/COMMAND_CONTROL_PLANE.md`](COMMAND_CONTROL_PLANE.md).
+
+## Authoring agent profiles (`/fleet setup`)
+
+`/fleet setup` (also `/fleet setup edit` / `new`) opens an in-TUI wizard for
+authoring a reusable agent-team profile. Bare `/fleet` and the
+`roster`/`roles`/`profiles`/`party` aliases open the roster (the saved profiles).
+`/fleet workers` opens the current-session worker view; `/subagents` is a
+compatibility shortcut for that view. For durable run history, use
+`/fleet status` or the shell command `codewhale fleet status` described above —
+they are the same command.
+
+The wizard is progressive: you make one focused choice at a time — a **role**,
+then a **model** (`inherit`, or a concrete model from *any configured
+provider*, not only the one the parent session is currently using), then a
+**thinking tier** (`inherit`, `off`, `low`, `medium`, `high`, `max`, or `auto`)
+— and then review the full posture (route, thinking, permissions, tools,
+scope, and review policy) before doing anything. On Review, press **`s`** to
+choose where the profile lives:
+
+- **Project** (default) writes `.codewhale/agents/<role>.toml` and can travel
+  with this repository.
+- **Personal** writes `$CODEWHALE_HOME/agents/<role>.toml` and is available in
+  every repository on this machine. A project profile with the same id still
+  overrides the personal profile for that project.
+
+Profile scope controls where a role definition is reusable; it does not widen
+the authority of a running operation. To coordinate several nearby
+repositories, start Codewhale from their shared parent directory so that parent
+is the workspace. Explicit trusted external paths or Full Access can still
+change what tools may reach; workers inherit the active trust and permission
+posture, never the profile's storage scope.
+
+Picking a concrete model pins its provider explicitly: the saved profile records both
+`model` and `provider` fields, so the route it names doesn't depend on
+whichever provider happens to be active when the profile is later loaded.
+Pressing **Enter** ("start") on the review step previews the exact starter
+profile TOML inline on that same screen; nothing is written until you save it.
+The `provider` field may be a built-in provider id such as `openrouter` or a
+user-named OpenAI-compatible provider configured under `[providers.<name>]`
+such as `lm-studio`; the launch path preserves that id and fails closed if the
+provider is not configured.
+
+When a provider is configured, the review step also offers model-assisted
+drafting behind an explicit preview-before-save gate:
+
+- Press **`m`** to have your first configured model draft the profile. The
+  draft arrives sanitized and bounded — permissions stay at the **fleet floor**
+  (no shell, no trust, approval required) regardless of what the model
+  proposes.
+- **Drafting is not saving.** The exact rendered TOML preview renders
+  inline on the review step (not in a separate scrollable viewer), so nothing
+  is saved until you press **`g`** or **Enter** to save (or press `m` again
+  to redraft). Saving writes the profile to the project or personal scope
+  shown in the preview.
+
+## Naming: Modes, Workflow, and Fleet
+
+These names describe different layers, not competing systems. Plan and Act are
+the everyday work modes. Operate accepts ordinary messages and keeps the
+parent's normal tool surface under the same approval, sandbox, shell, ask-rule,
+and repository protections as Act. It prefers background Fleet workers for
+independent, parallel, isolated, or long-running work, but does not require a
+worker for every executable step. Workflow is an optional orchestration overlay
+for work that needs ordering, gates, shared budgets, replay, or deterministic
+fan-in.
+
+The short public vocabulary is:
+
+- **Fleet** = who does the work: the configured workers, roles, models, hosts,
+  and trust boundaries.
+- **Workflow** = what order the work follows: phases, gates, budgets, replay,
+  and fan-in.
+- **Lane** = one running Workflow instance and its live progress.
+- **Runtime** = where and how a Lane executes: local or remote process,
+  provider route, sandbox, and API boundary.
+
+- **Workflow** is the repeatable plan and user-facing orchestration
   overlay: a script/IR that decides which phases and agents run next, keeps
   intermediate results out of the main conversation, and can be inspected or
-  rerun. A WhaleFlow run should have a visible progress view and a clear active
+  rerun. A Workflow run should have a visible progress view and a clear active
   header state instead of feeling like a hidden background task.
-- **Fleet** is the execution substrate: headless workers, local/SSH hosts,
-  trust policy, leases, heartbeats, logs, receipts, and status APIs.
-- **Swarm** is the high-fanout behavior inside WhaleFlow. It should compile into
-  a WhaleFlow-backed fleet run instead of reviving the old `agent_swarm` tool
-  surface.
+- **Fleet** is the durable sub-agent configuration and execution substrate:
+  slots, profiles, per-slot models, tool posture, local/SSH hosts, trust
+  policy, leases, heartbeats, logs, receipts, and status APIs.
+- **High fan-out** is a behavior of a Workflow run, not a separate system:
+  when a phase needs many workers at once, Workflow dispatches them as a
+  Fleet-backed run (durable workers, receipts, goal re-dispatch) rather than
+  reviving prompt-only sub-agent fanout.
+- **Fan-in is explicit:** when the user needs one combined result, an owner
+  aggregates, verifies, and synthesizes the worker receipts. Independent tasks
+  may finish separately; dispatch is never presented as completion.
 
-UI guidance: keep the main transcript calm. A WhaleFlow run should appear as a
+UI guidance: keep the main transcript calm. A Workflow run should appear as a
 compact progress card plus Work/Agents sidebar rows with phase names, worker
 counts, receipts, and nested indentation for child workers. Use the whale mark
 sparingly as an active header/status signal; avoid repeating emoji-heavy rows
 for every worker.
+
+## Exact Fleets and the Reasoning Router
+
+An exact Fleet freezes the provider, model, reasoning policy, and permission
+ceiling of every worker before a Workflow starts. Save it as
+`fleets/<name>.toml` in the workspace or under `$CODEWHALE_HOME`. Models cannot
+replace those assignments at runtime:
+
+```toml
+name = "release"
+schema = "exact"
+schema_revision = 1
+reasoning_router = "luna-low"
+
+[[members]]
+id = "implementer"
+role = "builder"
+provider = "zai"
+model = "glm-5.2"
+reasoning = "auto"
+permissions = "read_write"
+
+[[members]]
+id = "advice"
+role = "consultant"
+provider = "openai"
+model = "gpt-5.6"
+reasoning = "high"
+permissions = "read_only"
+```
+
+The optional Reasoning Router is a reusable service, not a Fleet member. Save
+one profile at `routers/<name>.toml` in either search root and reference it from
+any number of Fleets:
+
+```toml
+name = "luna-low"
+schema = "reasoning_router"
+schema_revision = 1
+provider = "openai"
+model = "gpt-5.6-luna"
+call_reasoning = "low"
+```
+
+At runtime it may choose only the reasoning tier for an already-frozen worker
+route. It cannot change the worker, provider, model, role, tools, or permissions.
+The Router call itself is capped at `off` or `low`; more expensive values are
+rejected. A manually selected worker reasoning tier makes no Router call. Route
+and reasoning receipts name the worker model and, when used, the Router's exact
+provider/model so the operator can see which model did which job. If the same
+bare Router or Fleet name exists in both roots, qualify it as
+`workspace/<name>` or `codewhale_home/<name>` instead of relying on shadowing.
+
+Each member's `permissions` preset is a **ceiling**, never a grant: it is
+intersected with the live session posture, so a `read_write` member inside a
+read-only session runs read-only. The intersection becomes the child's real tool
+envelope — `permissions = "none"` leaves it with no tools at all, and a member
+without a network tool loses every web, fetch, browse, `web.run`, and MCP
+surface rather than merely being refused at call time. A member that cannot
+write loses the mutating file tools, and — when it kept `shell = "full"` so it
+can run checks — the raw shell as well, keeping the bounded verification tools
+(`run_tests`, `run_verifiers`) it exists for: an arbitrary shell command mutates
+a workspace just as surely as `write_file`, so leaving it would make
+`write = false` untrue. That verification surface is bounded only in its
+*default* form, so the unbounded arguments go with the shell: a write-denied
+member may run the built-in gates, but not `run_verifiers` with an explicit
+`commands` array or `run_tests` with a raw `args` string, both of which spawn
+operator-supplied programs and are the raw shell by another name.
+
+Two of these denials are narrower than a tool name, because two tools reach past
+their name. `rlm` loads a `url` by calling the fetch tool *inside the process*,
+under its own name, and `rlm`'s `eval` action runs Python against a live kernel
+— sockets and filesystem both. So the family is denied **per action**, not
+wholesale:
+
+- **No network tool** removes `rlm_open` and `rlm_eval`, by the legacy alias and
+  by the `rlm {action: ...}` spelling alike. This is deliberately narrower than
+  the capability it protects: `rlm_open` picks its source from *input fields*
+  (`file_path`, `content`, `url`, `session_object`), not from the action name,
+  and the action-policy seam resolves names rather than field shapes — it cannot
+  prove a source is local before the tool runs. Rather than leave a URL-shaped
+  hole, a network-denied member loses RLM loading entirely, **including the
+  purely local `file_path` form**, and keeps only the bounded metadata actions
+  (`session_objects`, `configure`, `close`).
+- **No write** removes `rlm_eval` only. Loading a large local file into a kernel
+  and reading it is analysis, not mutation, so the rest of the family stays.
+
+Beyond those names, a network-denied member is refused at call time whenever any
+tool is handed a URL-bearing field (`url`, `urls`, `endpoint`, `target`, …)
+holding an `http`/`https`/`ws`/`wss`/`ftp` address. A URL appearing in file
+*content* or a search pattern is data, not a destination, and is untouched.
+
+A member's `role` picks the worker
+posture (and system prompt) when that role already fits inside the ceiling —
+`reviewer`, `verifier`, `consultant`, `planner` — and a domain-specific role
+such as `auditor` falls back to the narrowest posture the ceiling allows. Tasks
+cannot override any of it: `model`, `model_strength`, `thinking`,
+`subagent_type`, `allowed_tools`, and `write_authority` are rejected on an exact
+Fleet rather than silently ignored.
+
+Reasoning receipts record the requested tier *and* the tier the provider was
+actually asked for. Those differ whenever a route cannot express the requested
+one — CodeWhale's route normalizer sends `high` for a requested `low` on most
+routes, and Z.AI's GLM routes express only thinking on/off — so the receipt
+reports the real request rather than the label that was selected. The value a
+call actually carries is spelled by that route's own normalizer, not by the tier
+label: an OpenAI Codex route is asked for `xhigh`, not `max`, and cannot be
+asked for `off` at all.
+
+A receipt also keeps a member's **semantic role** and its **permission posture**
+apart. `member_role` is what the operator named and what gates key on;
+`posture_role` (present only when it differs) is the built-in tool surface the
+clamped ceiling permits — so a member named `auditor` running under the `scout`
+posture is displayed as `auditor` and enforced as `scout`, and neither fact is
+substituted for the other.
+
+A Workflow start fails closed on anything decidable locally: an unresolvable
+provider or model, a missing credential, a client that cannot be built for a
+member's route, or an `auto` member with no usable Reasoning Router. Per-task
+validation that the spawn boundary would refuse anyway — notably a write-capable
+member with no declared `write_roots`/`exact_files`/`coordination_contracts` —
+is checked before the Router is called, so an invalid task never spends a
+routing request. If a spawn fails *after* a Router decision, the receipt is
+still recorded: the tokens were spent, and any cross-provider disclosure already
+happened.
+
+## Manager-owned Workflow fan-in
+
+When parallel work must return one combined answer, use a manager-owned
+Workflow instead of a flat `agent` fan-out:
+
+1. **Cast one manager** (operator or workflow orchestrator).
+2. **Fan out** child tasks through `workflow` (`task()`, `parallel()`,
+   `pipeline()`, `phase()`) or a single manager session that owns the children.
+3. **Wait** for child receipts or completion events.
+4. **Aggregate and verify** load-bearing claims before treating them as facts.
+5. **Synthesize** one result the operator can depend on.
+
+Raw `agent` fan-out is appropriate only for independent, fire-and-forget work
+where no single fan-in result is required. If results must be merged, compared,
+or verified, route through `workflow` so the manager owns fan-in.
+
+## Workflow on Fleet
+
+The intended high-capability path is agent-authored. When the main agent
+decides a task needs more durable coordination than turn-by-turn sub-agent
+calls, it drafts a Workflow script/IR, presents the run plan according to the
+active permission mode, and the runtime compiles it into typed Fleet work.
+
+Fleet remains the sub-agent config surface. It owns slot count, role profiles,
+saved route pins or inheritance, tool posture, launch concurrency, and the ledger.
+Workflow owns only the orchestration plan: branch, sequence, loop, expand,
+review, and reduce decisions. The workflow script must not get direct shell,
+filesystem, network, provider-secret, cancellation, or TUI authority; workers
+perform real work as `codewhale exec` processes.
+
+Default Workflow-to-Fleet validation is intentionally bounded:
+
+- 100 total worker agents per workflow run;
+- 5 recursive Fleet rings;
+- bounded loops only (`max_iterations` required);
+- bounded dynamic expansion only (`max_children` plus a template required).
+
+These are population limits, not a demand to launch everything at once. A
+100-agent workflow should still drain through the configured Fleet worker pool.
+Recommended model layouts, such as a DeepSeek Pro orchestrator with Flash
+workers in the first ring and cheaper workers farther out, are presets only.
+Every slot can inherit the active model or carry an explicit model override.
+Inheritance is literal: the model you select in `/model` is the **operator**
+(the pinned first row in `/fleet roster`), and any worker whose task spec and
+roster profile pin no model runs on that session model. Task-level `model` and
+profile `model` overrides still win; route receipts record which source
+applied (`task.model`, `agent_profile.model`, or `run.model`).
+
+The setup UI should render this as an expanding grid: an orchestrator plus a
+small number of visible sub-agent slots, with Right/Enter drilling into a slot's
+next recursive ring rather than trying to show the whole tree at once.
 
 ## Task Spec
 
@@ -69,7 +360,7 @@ for every worker.
 }
 ```
 
-Workers are optional. If omitted, CodeWhale creates local worker slots up to
+Workers are optional. If omitted, Codewhale creates local worker slots up to
 `--max-workers`.
 
 Task specs are typed in Rust and keep verification data separate from worker
@@ -303,7 +594,7 @@ Choose one typed action:
 Safe Slack or PagerDuty draft:
 
 ```text
-CodeWhale fleet needs attention
+Codewhale fleet needs attention
 Run: <run-id>
 Worker: <worker-id>
 Task: <task-id or unknown>
@@ -361,10 +652,10 @@ Example SSH worker spec:
 Defaults are intentionally conservative:
 
 - no hosted control plane or cloud provisioning is enabled;
-- SSH requires an explicit host, working directory, and CodeWhale binary path;
+- SSH requires an explicit host, working directory, and Codewhale binary path;
 - secret-like environment names such as `TOKEN`, `SECRET`, `PASSWORD`,
   `API_KEY`, and `PRIVATE_KEY` are rejected from adapter allowlists;
-- secrets should remain in CodeWhale config providers or remote host config,
+- secrets should remain in Codewhale config providers or remote host config,
   not in task instructions, argv, or fleet logs.
 
 ## Security and Trust Boundaries
@@ -502,7 +793,7 @@ max_trust_level = "operator"
 [fleet.exec]
 # Recursion depth shares ONE axis with standalone sub-agents — a fleet worker
 # IS a headless sub-agent. 0 blocks child agents (the root worker still runs);
-# 3 is the default and the ceiling, affording at least three nested levels.
+# 3 is the default; explicit config clamps to the shared safety ceiling.
 max_spawn_depth = 3
 ```
 

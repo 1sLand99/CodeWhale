@@ -2,10 +2,31 @@
 
 use std::path::{Path, PathBuf};
 
-use super::CommandResult;
+use crate::commands::CommandResult;
+use crate::commands::traits::{CommandInfo, RegisterCommand};
+use crate::localization::MessageId;
 use crate::tui::app::App;
 
-pub fn attach(app: &mut App, arg: Option<&str>) -> CommandResult {
+pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
+    name: "attach",
+    aliases: &["image", "media", "fujian"],
+    usage: "/attach <path>",
+    description_id: MessageId::CmdAttachDescription,
+};
+
+pub(in crate::commands) struct AttachCmd;
+
+impl RegisterCommand for AttachCmd {
+    fn info() -> &'static CommandInfo {
+        &COMMAND_INFO
+    }
+
+    fn execute(app: &mut App, arg: Option<&str>) -> CommandResult {
+        attach(app, arg)
+    }
+}
+
+fn attach(app: &mut App, arg: Option<&str>) -> CommandResult {
     let Some(raw_path) = arg.map(str::trim).filter(|value| !value.is_empty()) else {
         return CommandResult::error("Usage: /attach <image-or-video-path>");
     };
@@ -70,25 +91,12 @@ mod tests {
     fn app_with_workspace(tmpdir: &TempDir) -> App {
         App::new(
             TuiOptions {
-                model: "deepseek-v4-pro".to_string(),
-                workspace: tmpdir.path().to_path_buf(),
-                config_path: None,
-                config_profile: None,
-                allow_shell: false,
                 use_alt_screen: false,
-                use_mouse_capture: false,
-                use_bracketed_paste: true,
-                max_subagents: 1,
                 skills_dir: tmpdir.path().join("skills"),
                 memory_path: tmpdir.path().join("memory.md"),
                 notes_path: tmpdir.path().join("notes.txt"),
                 mcp_config_path: tmpdir.path().join("mcp.json"),
-                use_memory: false,
-                start_in_agent_mode: false,
-                skip_onboarding: true,
-                yolo: false,
-                resume_session_id: None,
-                initial_input: None,
+                ..crate::test_support::test_tui_options(tmpdir.path().to_path_buf())
             },
             &Config::default(),
         )

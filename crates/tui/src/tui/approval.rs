@@ -7,16 +7,17 @@
 //!
 //! ## v0.6.7: Codex-style takeover with stakes-based variants (#129)
 //!
-//! The modal now renders as a full-screen takeover (calm centered card
-//! against the transcript area) and routes each request to one of two
+//! The modal renders as a compact bottom-anchored approval card that preserves
+//! transcript context and routes each request to one of two
 //! stakes-based variants:
 //!
 //! - **Benign** (`RiskLevel::Benign`) — read-only ops, MCP discovery,
 //!   query-only network. A single `Enter` / `1` / `y` approves once;
 //!   `2` / `a` approves for the session.
-//! - **Destructive** (`RiskLevel::Destructive`) — file writes, shell,
-//!   patches, MCP actions, unclassified tools, and any "fetch arbitrary
-//!   content" surface. The takeover keeps the destructive badge and
+//! - **Destructive** (`RiskLevel::Destructive`) — file writes, shell
+//!   commands that are not proven read-only, patches, MCP actions,
+//!   unclassified tools, and any "fetch arbitrary content" surface.
+//!   The approval card keeps the destructive badge and
 //!   impact summary visible, then lets `Enter` commit the highlighted
 //!   option or `y` / `a` / `d` commit directly.
 //!
@@ -26,20 +27,36 @@
 //! happen *before* the view is constructed (see `tui/ui.rs`); this
 //! module always assumes the user is being asked.
 
-use crate::localization::Locale;
+use crate::localization::{Locale, MessageId, tr};
 use crate::sandbox::SandboxPolicy;
+use crate::tools::apply_patch::{NormalizedApplyPatchInput, normalize_apply_patch_input};
+use crate::tools::canonical_action::canonical_action_alias;
 use crate::tui::views::{ModalKind, ModalView, ViewAction, ViewEvent};
 use crate::tui::widgets::{ApprovalWidget, ElevationWidget, Renderable};
-use crossterm::event::{KeyCode, KeyEvent};
+use codewhale_config::ToolAskRule;
+use codewhale_execpolicy::PermissionAction;
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
 use serde_json::Value;
+use std::borrow::Cow;
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+pub mod policy;
+
+pub use policy::{
+    ApprovalStakes, RiskLevel, ToolCategory, classify_risk, classify_stakes,
+    get_tool_category_for_call,
+};
 
 /// Determines when tool executions require user approval
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ApprovalMode {
-    /// Auto-approve all tools (YOLO mode / --yolo flag)
+    /// Automatically review risky tool calls before deciding whether to ask.
     Auto,
+    /// Bypass approvals entirely (YOLO mode / --yolo flag).
+    Bypass,
     /// Suggest approval for non-safe tools (non-YOLO modes)
     #[default]
     Suggest,
@@ -48,9 +65,13 @@ pub enum ApprovalMode {
 }
 
 impl ApprovalMode {
+    /// Shift+Tab permission cycle order (#0.8.68 M2).
+    pub const PERMISSION_CYCLE: [Self; 3] = [Self::Suggest, Self::Auto, Self::Bypass];
+
     pub fn label(self) -> &'static str {
         match self {
             ApprovalMode::Auto => "AUTO",
+            ApprovalMode::Bypass => "BYPASS",
             ApprovalMode::Suggest => "SUGGEST",
             ApprovalMode::Never => "NEVER",
         }
@@ -58,10 +79,32 @@ impl ApprovalMode {
 
     pub fn from_config_value(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "auto" => Some(ApprovalMode::Auto),
-            "suggest" | "suggested" | "on-request" | "untrusted" => Some(ApprovalMode::Suggest),
+            "auto" | "auto-review" | "auto_review" => Some(ApprovalMode::Auto),
+            "bypass" | "yolo" | "dontask" | "dont_ask" | "bypass-permissions"
+            | "bypasspermissions" | "full-access" | "full" => Some(ApprovalMode::Bypass),
+            "suggest" | "suggested" | "on-request" | "untrusted" | "ask" => {
+                Some(ApprovalMode::Suggest)
+            }
             "never" | "deny" | "denied" => Some(ApprovalMode::Never),
             _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn cycle_permission_next(self) -> Self {
+        let Some(index) = Self::PERMISSION_CYCLE.iter().position(|mode| *mode == self) else {
+            return Self::Suggest;
+        };
+        Self::PERMISSION_CYCLE[(index + 1) % Self::PERMISSION_CYCLE.len()]
+    }
+
+    #[must_use]
+    pub fn permission_chip_label(self) -> &'static str {
+        match self {
+            Self::Suggest => "Ask",
+            Self::Auto => "Auto-Review",
+            Self::Bypass => "Full Access",
+            Self::Never => "Never",
         }
     }
 }
@@ -79,39 +122,6 @@ pub enum ReviewDecision {
     Abort,
 }
 
-/// Categorizes tools by cost/risk level
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolCategory {
-    /// Free, read-only operations (`list_dir`, `read_file`, todo_*)
-    Safe,
-    /// File modifications (`write_file`, `edit_file`)
-    FileWrite,
-    /// Shell execution (`exec_shell`)
-    Shell,
-    /// Network-oriented built-in tools
-    Network,
-    /// Read-only MCP discovery and resource access
-    McpRead,
-    /// MCP actions that may change remote state
-    McpAction,
-    /// Unknown or unclassified tool surface
-    Unknown,
-}
-
-/// Stakes-based variant for the takeover modal.
-///
-/// `RiskLevel::Benign` lets a single keystroke commit the approval.
-/// `RiskLevel::Destructive` keeps stronger warning copy and styling
-/// around approvals that can touch files, shell, or remote state.
-///
-/// Routing rules live in [`classify_risk`] — when in doubt, route to
-/// `Destructive`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RiskLevel {
-    Benign,
-    Destructive,
-}
-
 /// Request for user approval of a tool execution
 #[derive(Debug, Clone)]
 pub struct ApprovalRequest {
@@ -123,7 +133,7 @@ pub struct ApprovalRequest {
     pub description: String,
     /// Tool category
     pub category: ToolCategory,
-    /// Stakes-based routing for the takeover modal
+    /// Stakes-based routing for the compact approval card
     pub risk: RiskLevel,
     /// Derived impact summary for the approval prompt
     pub impacts: Vec<String>,
@@ -138,6 +148,10 @@ pub struct ApprovalRequest {
     /// Displayed in the approval view so users understand *why* the change
     /// is being made before reviewing *what* will change.
     pub intent_summary: Option<String>,
+    /// Ask-only persistent rules that can be saved with the approval.
+    pub persistent_ask_rules: Vec<ToolAskRule>,
+    /// Exact repo-scoped allow rules available for safe approval requests.
+    pub persistent_allow_rules: Vec<ToolAskRule>,
 }
 
 /// Key approval details rendered prominently in the approval card.
@@ -150,7 +164,52 @@ pub struct ApprovalDetail {
     pub shell_lines: Option<Vec<String>>,
 }
 
+/// Human-readable preview of rules an approval action would append.
+///
+/// This is intentionally derived from the already validated persistent-rule
+/// candidates; the approval UI must not re-parse tool inputs such as patches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionRuleSavePreview {
+    pub action: PermissionAction,
+    pub rule_count: usize,
+    pub entries: Vec<String>,
+    pub omitted: usize,
+}
+
+impl PermissionRuleSavePreview {
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let action = match self.action {
+            PermissionAction::Allow => "allow",
+            PermissionAction::Ask => "ask",
+            PermissionAction::Deny => "deny",
+        };
+        let noun = if self.rule_count == 1 {
+            "rule"
+        } else {
+            "rules"
+        };
+        format!("{} {action} {noun}", self.rule_count)
+    }
+}
+
+const ASK_RULE_SAVE_PREVIEW_MAX_ENTRIES: usize = 4;
+
 impl ApprovalRequest {
+    /// Mechanical repo-law asks are a distinct authority boundary, not an
+    /// ordinary risk prompt. The engine stamps this stable prefix when a
+    /// `.codewhale/constitution.json` ask rule forces review.
+    #[must_use]
+    pub fn is_repo_law_prompt(&self) -> bool {
+        description_is_repo_law_prompt(&self.description)
+    }
+
+    /// Presentation stakes for this request (see [`ApprovalStakes`]).
+    #[must_use]
+    pub fn stakes(&self) -> ApprovalStakes {
+        classify_stakes(&self.tool_name, self.category, self.risk, &self.params)
+    }
+
     #[cfg(test)]
     pub fn new(
         id: &str,
@@ -159,7 +218,15 @@ impl ApprovalRequest {
         params: &Value,
         approval_key: &str,
     ) -> Self {
-        Self::new_with_intent(id, tool_name, description, params, approval_key, None)
+        Self::new_with_intent(
+            id,
+            tool_name,
+            description,
+            params,
+            approval_key,
+            None,
+            Path::new("/workspace"),
+        )
     }
 
     pub fn new_with_intent(
@@ -169,11 +236,28 @@ impl ApprovalRequest {
         params: &Value,
         approval_key: &str,
         intent_summary: Option<&str>,
+        workspace: &Path,
     ) -> Self {
-        let category = get_tool_category(tool_name);
+        let semantic_tool_name = canonical_action_alias(tool_name, params);
+        let category = get_tool_category_for_call(tool_name, params);
         let risk = classify_risk(tool_name, category, params);
         let approval_grouping_key =
             crate::tools::approval_cache::build_approval_grouping_key(tool_name, params).0;
+        let persistent_ask_rules =
+            build_persistent_ask_rules(semantic_tool_name, params, workspace);
+        let persistent_allow_rules = if classify_stakes(tool_name, category, risk, params)
+            == ApprovalStakes::Critical
+            || description_is_repo_law_prompt(description)
+        {
+            Vec::new()
+        } else {
+            build_persistent_allow_rules(
+                semantic_tool_name,
+                params,
+                workspace,
+                &persistent_ask_rules,
+            )
+        };
 
         Self {
             id: id.to_string(),
@@ -181,7 +265,7 @@ impl ApprovalRequest {
             description: description.to_string(),
             category,
             risk,
-            impacts: build_impact_summary(tool_name, category, params),
+            impacts: build_impact_summary(semantic_tool_name, category, params),
             params: params.clone(),
             approval_key: approval_key.to_string(),
             approval_grouping_key,
@@ -193,6 +277,8 @@ impl ApprovalRequest {
                     Some(summary.to_string())
                 }
             }),
+            persistent_ask_rules,
+            persistent_allow_rules,
         }
     }
 
@@ -205,111 +291,269 @@ impl ApprovalRequest {
     pub fn description_for_locale(&self, locale: Locale) -> String {
         match locale {
             Locale::ZhHans => localized_description_zh_hans(self.category),
+            _ if self.category == ToolCategory::Shell => {
+                "Review the Bash command before it runs.".to_string()
+            }
             _ => self.description.clone(),
         }
     }
 
     pub fn impacts_for_locale(&self, locale: Locale) -> Vec<String> {
+        let semantic_tool_name = canonical_action_alias(&self.tool_name, &self.params);
         match locale {
             Locale::ZhHans => {
-                build_impact_summary_zh_hans(&self.tool_name, self.category, &self.params)
+                build_impact_summary_zh_hans(semantic_tool_name, self.category, &self.params)
             }
             _ => self.impacts.clone(),
         }
     }
 
+    #[must_use]
+    pub fn can_save_ask_rule(&self) -> bool {
+        !self.persistent_ask_rules.is_empty()
+    }
+
+    #[must_use]
+    pub fn can_save_allow_rule(&self) -> bool {
+        !self.persistent_allow_rules.is_empty()
+            && self.stakes() != ApprovalStakes::Critical
+            && !self.is_repo_law_prompt()
+    }
+
+    #[must_use]
+    pub fn ask_rule_save_preview(&self) -> Option<PermissionRuleSavePreview> {
+        build_permission_rule_save_preview(
+            &self.persistent_ask_rules,
+            ASK_RULE_SAVE_PREVIEW_MAX_ENTRIES,
+        )
+    }
+
+    #[must_use]
+    pub fn allow_rule_save_preview(&self) -> Option<PermissionRuleSavePreview> {
+        self.can_save_allow_rule().then(|| {
+            build_permission_rule_save_preview(
+                &self.persistent_allow_rules,
+                ASK_RULE_SAVE_PREVIEW_MAX_ENTRIES,
+            )
+            .expect("eligible allow rules are non-empty")
+        })
+    }
+
+    #[must_use]
+    #[cfg(test)]
+    pub fn ask_rule_preview(&self) -> Option<String> {
+        if self.persistent_ask_rules.is_empty() {
+            return None;
+        }
+        let permissions = codewhale_config::PermissionsToml {
+            rules: self.persistent_ask_rules.clone(),
+        };
+        toml::to_string_pretty(&permissions).ok()
+    }
+
     /// Extract the most important params for the approval card.
     #[must_use]
     pub fn prominent_detail_items(&self, locale: Locale) -> Vec<ApprovalDetail> {
-        build_prominent_details(self.category, &self.params)
+        let semantic_tool_name = canonical_action_alias(&self.tool_name, &self.params);
+        build_prominent_details(semantic_tool_name, self.category, &self.params)
             .into_iter()
             .map(|mut detail| {
+                let is_preview = detail.label == "Preview";
                 detail.label = localize_detail_label(&detail.label, locale).to_string();
+                if is_preview && let Some(lines) = detail.shell_lines.as_mut() {
+                    for line in lines.iter_mut() {
+                        *line = localize_preview_shell_line(semantic_tool_name, line, locale)
+                            .to_string();
+                    }
+                    detail.value = lines.join("\n");
+                }
                 detail
             })
             .collect()
     }
 }
 
-/// Get the category for a tool by name
-pub fn get_tool_category(name: &str) -> ToolCategory {
-    if matches!(name, "write_file" | "edit_file" | "apply_patch") {
-        ToolCategory::FileWrite
-    } else if matches!(name, "web_run" | "web_search" | "fetch_url") {
-        ToolCategory::Network
-    } else if matches!(
-        name,
-        "exec_shell"
-            | "task_shell_start"
-            | "task_shell_wait"
-            | "exec_shell_wait"
-            | "exec_shell_interact"
-            | "exec_wait"
-            | "exec_interact"
-    ) {
-        ToolCategory::Shell
-    } else if name.starts_with("list_mcp_")
-        || name.starts_with("read_mcp_")
-        || name.starts_with("get_mcp_")
-    {
-        ToolCategory::McpRead
-    } else if name.starts_with("mcp_") {
-        ToolCategory::McpAction
-    } else if matches!(
-        name,
-        "read_file"
-            | "list_dir"
-            | "todo_write"
-            | "todo_read"
-            | "note"
-            | "update_plan"
-            | "search"
-            | "file_search"
-            | "project"
-            | "diagnostics"
-    ) || name.starts_with("read_")
-        || name.starts_with("list_")
-        || name.starts_with("get_")
-    {
-        ToolCategory::Safe
-    } else {
-        ToolCategory::Unknown
+fn description_is_repo_law_prompt(description: &str) -> bool {
+    description.starts_with("Repo law holds this write:")
+        && description.contains(".codewhale/constitution.json")
+}
+
+#[must_use]
+fn build_permission_rule_save_preview(
+    rules: &[ToolAskRule],
+    max_entries: usize,
+) -> Option<PermissionRuleSavePreview> {
+    if rules.is_empty() {
+        return None;
+    }
+
+    let entries = rules
+        .iter()
+        .take(max_entries)
+        .map(format_permission_rule_save_entry)
+        .collect();
+    Some(PermissionRuleSavePreview {
+        action: rules[0].action,
+        rule_count: rules.len(),
+        entries,
+        omitted: rules.len().saturating_sub(max_entries),
+    })
+}
+
+#[must_use]
+fn format_permission_rule_save_entry(rule: &ToolAskRule) -> String {
+    let mut parts = vec![format!(
+        "tool={}",
+        sanitize_ask_rule_preview_value(&rule.tool)
+    )];
+    if let Some(command) = &rule.command {
+        parts.push(format!(
+            "command={}",
+            sanitize_ask_rule_preview_value(command)
+        ));
+    }
+    if let Some(path) = &rule.path {
+        parts.push(format!("path={}", sanitize_ask_rule_preview_value(path)));
+    }
+    if rule.command_exact {
+        parts.push("command_exact=true".to_string());
+    }
+    if let Some(workspace) = &rule.workspace {
+        parts.push(format!(
+            "workspace={}",
+            sanitize_ask_rule_preview_value(workspace)
+        ));
+    }
+    parts.join(" ")
+}
+
+#[must_use]
+fn sanitize_ask_rule_preview_value(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
+        .replace('\t', "\\t")
+}
+
+#[must_use]
+fn build_persistent_ask_rules(
+    tool_name: &str,
+    params: &Value,
+    workspace: &Path,
+) -> Vec<ToolAskRule> {
+    match tool_name {
+        "exec_shell" => build_exec_shell_ask_rules(params),
+        // File writes save an exact, workspace-relative path so a later
+        // edit/write of the same file is matched. read_file stays out: this
+        // boundary is about persisting *write* approvals only.
+        "write_file" | "edit_file" => build_file_write_ask_rules(tool_name, params, workspace),
+        "apply_patch" => build_apply_patch_ask_rules(params, workspace),
+        _ => Vec::new(),
     }
 }
 
-/// Decide the stakes variant for an approval request.
-///
-/// The bias is conservative: a category we don't recognise routes to
-/// `Destructive`, and any shell command that `command_safety` flags as
-/// `Dangerous` is forced to `Destructive` even when the rest of the
-/// request looks calm. The split lets the modal render stronger warning
-/// copy on anything that can touch state outside this turn.
 #[must_use]
-pub fn classify_risk(tool_name: &str, category: ToolCategory, params: &Value) -> RiskLevel {
-    match category {
-        // Read paths and discovery.
-        ToolCategory::Safe | ToolCategory::McpRead => RiskLevel::Benign,
-        // Query-only network is benign; opening a URL pulls arbitrary
-        // remote content, so it stays destructive.
-        ToolCategory::Network => match tool_name {
-            "web_search" | "web_run" => RiskLevel::Benign,
-            _ => RiskLevel::Destructive,
-        },
-        // Shell is always destructive. We probe command_safety for
-        // shape so a future routing tweak (say, pure-readonly `ls`
-        // staying benign) lands here without a second pass.
-        ToolCategory::Shell => {
-            if let Some(cmd) = params.get("command").and_then(Value::as_str) {
-                let _ = crate::command_safety::analyze_command(cmd);
-            }
-            RiskLevel::Destructive
-        }
-        // File writes, MCP actions, unclassified surfaces — all
-        // require explicit confirmation.
-        ToolCategory::FileWrite | ToolCategory::McpAction | ToolCategory::Unknown => {
-            RiskLevel::Destructive
+fn build_persistent_allow_rules(
+    tool_name: &str,
+    params: &Value,
+    workspace: &Path,
+    exact_rules: &[ToolAskRule],
+) -> Vec<ToolAskRule> {
+    if exact_rules.is_empty() {
+        return Vec::new();
+    }
+
+    if tool_name == "exec_shell" {
+        let Some(command) = params.get("command").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        if !matches!(
+            crate::command_safety::analyze_command(command).level,
+            crate::command_safety::SafetyLevel::Safe
+                | crate::command_safety::SafetyLevel::WorkspaceSafe
+        ) {
+            return Vec::new();
         }
     }
+
+    let workspace = workspace.to_string_lossy();
+    let Some(workspace) = codewhale_execpolicy::normalize_workspace_scope(workspace.as_ref())
+    else {
+        return Vec::new();
+    };
+
+    exact_rules
+        .iter()
+        .cloned()
+        .map(|rule| rule.into_exact_workspace_allow(workspace.clone()))
+        .collect()
+}
+
+#[must_use]
+fn build_exec_shell_ask_rules(params: &Value) -> Vec<ToolAskRule> {
+    let Some(command) = params
+        .get("command")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+    else {
+        return Vec::new();
+    };
+    vec![ToolAskRule::exec_shell(command)]
+}
+
+#[must_use]
+fn build_file_write_ask_rules(
+    tool_name: &str,
+    params: &Value,
+    workspace: &Path,
+) -> Vec<ToolAskRule> {
+    let Some(path) = params
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return Vec::new();
+    };
+    // Reuse the canonical matcher normalization so the saved rule equals what
+    // runtime matching compares against. `None` (and the degenerate
+    // workspace-root case) means the path is empty, traversing, drive-relative,
+    // or outside the workspace, so we save nothing and the `S` shortcut and
+    // preview stay disabled.
+    let workspace = workspace.to_string_lossy();
+    let Some(relative) =
+        codewhale_execpolicy::normalize_workspace_relative_path(path, workspace.as_ref())
+            .filter(|relative| !relative.is_empty())
+    else {
+        return Vec::new();
+    };
+    vec![ToolAskRule::file_path(tool_name, relative)]
+}
+
+#[must_use]
+fn build_apply_patch_ask_rules(params: &Value, workspace: &Path) -> Vec<ToolAskRule> {
+    let Ok(preflight) = crate::tools::apply_patch::preflight_apply_patch(params) else {
+        return Vec::new();
+    };
+    let workspace = workspace.to_string_lossy();
+    let mut rules = Vec::new();
+
+    for path in preflight.touched_files {
+        let Some(relative) =
+            codewhale_execpolicy::normalize_workspace_relative_path(&path, workspace.as_ref())
+                .filter(|relative| !relative.is_empty())
+        else {
+            return Vec::new();
+        };
+        let rule = ToolAskRule::file_path("apply_patch", relative);
+        if !rules.contains(&rule) {
+            rules.push(rule);
+        }
+    }
+
+    rules
 }
 
 fn param_preview(params: &Value, keys: &[&str], max_len: usize) -> Option<String> {
@@ -371,14 +615,7 @@ fn build_impact_summary(tool_name: &str, category: ToolCategory, params: &Value)
             impacts
         }
         ToolCategory::Shell => {
-            let mut impacts = vec!["Executes a shell command.".to_string()];
-            if let Some(command) = param_preview(params, &["cmd", "command"], 96) {
-                impacts.push(format!("Command: {command}"));
-            }
-            if let Some(workdir) = param_preview(params, &["workdir", "cwd"], 72) {
-                impacts.push(format!("Working dir: {workdir}"));
-            }
-            impacts
+            vec!["Executes a Bash command in your workspace.".to_string()]
         }
         ToolCategory::Network => {
             let mut impacts = vec!["May reach network services or remote content.".to_string()];
@@ -405,6 +642,21 @@ fn build_impact_summary(tool_name: &str, category: ToolCategory, params: &Value)
             }
             impacts
         }
+        ToolCategory::Agent if tool_name == "workflow" => {
+            // #4126: elevated Workflow plan card — goal, children, capability flags, budget.
+            crate::tools::workflow_plan_approval::analyze_workflow_plan_approval(params)
+                .approval_impacts()
+        }
+        ToolCategory::Agent => {
+            let mut impacts = vec![
+                "Starts or inspects a child agent task; the child's own tool gates still apply."
+                    .to_string(),
+            ];
+            if let Some(kind) = param_preview(params, &["type"], 40) {
+                impacts.push(format!("Child type: {kind}"));
+            }
+            impacts
+        }
         ToolCategory::Unknown => {
             let mut impacts = vec![
                 "Tool is not classified. Review params carefully before approving.".to_string(),
@@ -422,14 +674,16 @@ fn build_impact_summary(tool_name: &str, category: ToolCategory, params: &Value)
 }
 
 fn localized_description_zh_hans(category: ToolCategory) -> String {
+    let locale = Locale::ZhHans;
     match category {
-        ToolCategory::Safe => "请求执行只读操作。".to_string(),
-        ToolCategory::FileWrite => "请求修改文件。请确认路径和内容符合预期。".to_string(),
-        ToolCategory::Shell => "请求执行 shell 命令。请先检查命令和工作目录。".to_string(),
-        ToolCategory::Network => "请求访问网络或远程内容。请确认目标可信。".to_string(),
-        ToolCategory::McpRead => "请求从 MCP 服务器读取信息。".to_string(),
-        ToolCategory::McpAction => "请求调用 MCP 服务器操作，可能产生副作用。".to_string(),
-        ToolCategory::Unknown => "请求运行未分类工具。批准前请仔细检查参数。".to_string(),
+        ToolCategory::Safe => tr(locale, MessageId::ApprovalDescSafe).to_string(),
+        ToolCategory::FileWrite => tr(locale, MessageId::ApprovalDescFileWrite).to_string(),
+        ToolCategory::Shell => tr(locale, MessageId::ApprovalDescShell).to_string(),
+        ToolCategory::Network => tr(locale, MessageId::ApprovalDescNetwork).to_string(),
+        ToolCategory::McpRead => tr(locale, MessageId::ApprovalDescMcpRead).to_string(),
+        ToolCategory::McpAction => tr(locale, MessageId::ApprovalDescMcpAction).to_string(),
+        ToolCategory::Agent => tr(locale, MessageId::ApprovalDescAgent).to_string(),
+        ToolCategory::Unknown => tr(locale, MessageId::ApprovalDescUnknown).to_string(),
     }
 }
 
@@ -438,33 +692,27 @@ fn build_impact_summary_zh_hans(
     category: ToolCategory,
     params: &Value,
 ) -> Vec<String> {
+    let locale = Locale::ZhHans;
     match category {
         ToolCategory::Safe => {
-            let mut impacts = vec!["只读操作。".to_string()];
+            let mut impacts = vec![tr(locale, MessageId::ApprovalImpactSafe).to_string()];
             if let Some(path) = param_preview(params, &["path", "ref_id", "uri"], 72) {
                 impacts.push(format!("读取：{path}"));
             }
             impacts
         }
         ToolCategory::FileWrite => {
-            let mut impacts = vec!["会写入工作区或已批准写入范围内的文件。".to_string()];
+            let mut impacts = vec![tr(locale, MessageId::ApprovalImpactFileWrite).to_string()];
             if let Some(path) = param_preview(params, &["path", "target", "destination"], 72) {
                 impacts.push(format!("写入：{path}"));
             }
             impacts
         }
         ToolCategory::Shell => {
-            let mut impacts = vec!["执行 shell 命令。".to_string()];
-            if let Some(command) = param_preview(params, &["cmd", "command"], 96) {
-                impacts.push(format!("命令：{command}"));
-            }
-            if let Some(workdir) = param_preview(params, &["workdir", "cwd"], 72) {
-                impacts.push(format!("工作目录：{workdir}"));
-            }
-            impacts
+            vec![tr(locale, MessageId::ApprovalImpactShell).to_string()]
         }
         ToolCategory::Network => {
-            let mut impacts = vec!["可能访问网络服务或远程内容。".to_string()];
+            let mut impacts = vec![tr(locale, MessageId::ApprovalImpactNetwork).to_string()];
             if let Some(target) =
                 param_preview(params, &["url", "q", "query", "location", "repo"], 96)
             {
@@ -473,21 +721,28 @@ fn build_impact_summary_zh_hans(
             impacts
         }
         ToolCategory::McpRead => {
-            let mut impacts = vec!["从 MCP 服务器读取信息，不应产生本地写入。".to_string()];
+            let mut impacts = vec![tr(locale, MessageId::ApprovalImpactMcpRead).to_string()];
             if let Some(target) = mcp_target_hint(tool_name) {
                 impacts.push(format!("MCP 目标：{target}"));
             }
             impacts
         }
         ToolCategory::McpAction => {
-            let mut impacts = vec!["调用可能产生副作用的 MCP 服务器操作。".to_string()];
+            let mut impacts = vec![tr(locale, MessageId::ApprovalImpactMcpAction).to_string()];
             if let Some(target) = mcp_target_hint(tool_name) {
                 impacts.push(format!("MCP 目标：{target}"));
             }
             impacts
         }
+        ToolCategory::Agent => {
+            let mut impacts = vec![tr(locale, MessageId::ApprovalImpactAgent).to_string()];
+            if let Some(kind) = param_preview(params, &["type"], 40) {
+                impacts.push(format!("子代理类型：{kind}"));
+            }
+            impacts
+        }
         ToolCategory::Unknown => {
-            let mut impacts = vec!["工具未分类。批准前请仔细检查参数。".to_string()];
+            let mut impacts = vec![tr(locale, MessageId::ApprovalImpactUnknown).to_string()];
             if let Some(target) = param_preview(
                 params,
                 &["path", "cmd", "command", "url", "q", "query", "ref_id"],
@@ -500,7 +755,11 @@ fn build_impact_summary_zh_hans(
     }
 }
 
-fn build_prominent_details(category: ToolCategory, params: &Value) -> Vec<ApprovalDetail> {
+fn build_prominent_details(
+    tool_name: &str,
+    category: ToolCategory,
+    params: &Value,
+) -> Vec<ApprovalDetail> {
     let mut details = Vec::new();
     match category {
         ToolCategory::Shell => {
@@ -527,6 +786,13 @@ fn build_prominent_details(category: ToolCategory, params: &Value) -> Vec<Approv
                     shell_lines: None,
                 });
             }
+            if let Some(preview_lines) = file_write_preview_lines(tool_name, params) {
+                details.push(ApprovalDetail {
+                    label: "Preview".to_string(),
+                    value: preview_lines.join("\n"),
+                    shell_lines: Some(preview_lines),
+                });
+            }
         }
         ToolCategory::Safe => {
             if let Some(path) = param_preview(params, &["path", "ref_id", "uri"], 200) {
@@ -548,6 +814,41 @@ fn build_prominent_details(category: ToolCategory, params: &Value) -> Vec<Approv
                 });
             }
         }
+        ToolCategory::Agent if tool_name == "workflow" => {
+            // #4126: elevated Workflow plan card fields.
+            let summary =
+                crate::tools::workflow_plan_approval::analyze_workflow_plan_approval(params);
+            for (label, value) in summary.card_fields() {
+                details.push(ApprovalDetail {
+                    label: label.to_string(),
+                    value,
+                    shell_lines: None,
+                });
+            }
+        }
+        ToolCategory::Agent => {
+            if let Some(action) = param_preview(params, &["action"], 40) {
+                details.push(ApprovalDetail {
+                    label: "Action".to_string(),
+                    value: action,
+                    shell_lines: None,
+                });
+            }
+            if let Some(kind) = param_preview(params, &["type"], 40) {
+                details.push(ApprovalDetail {
+                    label: "Type".to_string(),
+                    value: kind,
+                    shell_lines: None,
+                });
+            }
+            if let Some(prompt) = param_preview(params, &["prompt", "task", "message"], 200) {
+                details.push(ApprovalDetail {
+                    label: "Prompt".to_string(),
+                    value: prompt,
+                    shell_lines: None,
+                });
+            }
+        }
         ToolCategory::McpRead | ToolCategory::McpAction | ToolCategory::Unknown => {
             if let Some(input) = param_preview(
                 params,
@@ -563,6 +864,226 @@ fn build_prominent_details(category: ToolCategory, params: &Value) -> Vec<Approv
         }
     }
     details
+}
+
+fn file_write_preview_lines(tool_name: &str, params: &Value) -> Option<Vec<String>> {
+    match tool_name {
+        "write_file" => {
+            let content = param_text(params, &["content"])?;
+            Some(prefixed_preview_lines(
+                "proposed content",
+                "+ ",
+                &content,
+                5,
+            ))
+        }
+        "edit_file" => {
+            // Keep the per-frame card preview bounded. The details pager builds the
+            // complete version lazily when the reviewer asks for it.
+            edit_file_preview_lines(params, 3)
+        }
+        "apply_patch" => match normalize_apply_patch_input(params) {
+            Ok(NormalizedApplyPatchInput::Patch(patch)) => apply_patch_preview_lines(patch),
+            Ok(NormalizedApplyPatchInput::Replacement { entries, .. }) => {
+                changes_preview_lines(entries)
+            }
+            Err(_) => None,
+        },
+        _ => None,
+    }
+    .filter(|lines| !lines.is_empty())
+}
+
+fn edit_file_preview_lines(params: &Value, max_lines: usize) -> Option<Vec<String>> {
+    let search = param_text(params, &["search"])?;
+    let replace = param_text(params, &["replace"])?;
+    let mut lines = Vec::new();
+    lines.extend(prefixed_preview_lines(
+        "replace this",
+        "- ",
+        &search,
+        max_lines,
+    ));
+    lines.extend(prefixed_preview_lines(
+        "with this",
+        "+ ",
+        &replace,
+        max_lines,
+    ));
+    Some(lines)
+}
+
+fn exact_edit_file_preview_lines(params: &Value, locale: Locale) -> Option<Vec<String>> {
+    let search = param_text(params, &["search"])?;
+    let replace = param_text(params, &["replace"])?;
+    let mut lines = vec![tr(locale, MessageId::ApprovalLabelReplaceThis).into_owned()];
+    lines.extend(exact_preview_body_lines("- ", &search));
+    lines.push(tr(locale, MessageId::ApprovalLabelWithThis).into_owned());
+    lines.extend(exact_preview_body_lines("+ ", &replace));
+    Some(lines)
+}
+
+fn exact_preview_body_lines(prefix: &str, content: &str) -> Vec<String> {
+    if content.is_empty() {
+        return vec![format!("{prefix}\"\"")];
+    }
+
+    content
+        .split_inclusive('\n')
+        .map(|chunk| {
+            let (body, ending) = if let Some(body) = chunk.strip_suffix("\r\n") {
+                (body, "\\r\\n")
+            } else if let Some(body) = chunk.strip_suffix('\n') {
+                (body, "\\n")
+            } else {
+                (chunk, "")
+            };
+            exact_preview_body_line(prefix, body, ending)
+        })
+        .collect()
+}
+
+fn exact_preview_body_line(prefix: &str, body: &str, ending: &str) -> String {
+    let mut line = String::with_capacity(prefix.len() + body.len() + ending.len() + 2);
+    line.push_str(prefix);
+    line.push('"');
+    for ch in body.chars() {
+        match ch {
+            '\\' => line.push_str("\\\\"),
+            '"' => line.push_str("\\\""),
+            ' ' => line.push_str("\\x20"),
+            '\t' => line.push_str("\\t"),
+            '\r' => line.push_str("\\r"),
+            ch if ch.is_whitespace() || ch.is_control() => line.extend(ch.escape_unicode()),
+            ch => line.push(ch),
+        }
+    }
+    line.push_str(ending);
+    line.push('"');
+    line
+}
+
+fn prefixed_preview_lines(
+    header: &str,
+    prefix: &str,
+    content: &str,
+    max_lines: usize,
+) -> Vec<String> {
+    let mut lines = vec![header.to_string()];
+    if content.is_empty() {
+        lines.push(format!("{prefix}<empty>"));
+        return lines;
+    }
+
+    let total = content.lines().count();
+    for line in content.lines().take(max_lines) {
+        lines.push(format!("{prefix}{line}"));
+    }
+    if total > max_lines {
+        lines.push(format!("... (+{} more lines)", total - max_lines));
+    }
+    lines
+}
+
+fn push_preview_line(lines: &mut Vec<String>, line: impl Into<String>, limit: usize) -> bool {
+    if lines.len() >= limit {
+        return false;
+    }
+    lines.push(line.into());
+    true
+}
+
+fn append_preview_truncation(lines: &mut Vec<String>, line: String, limit: usize) {
+    if push_preview_line(lines, line.clone(), limit) {
+        return;
+    }
+    if let Some(last) = lines.last_mut() {
+        *last = line;
+    }
+}
+
+fn apply_patch_preview_lines(patch: &str) -> Option<Vec<String>> {
+    const PREVIEW_LIMIT: usize = 7;
+
+    let mut lines = Vec::new();
+    let mut omitted = 0usize;
+    for line in patch.lines().filter(|line| !line.trim().is_empty()) {
+        let is_diff_header = line.starts_with("diff --git ")
+            || line.starts_with("--- ")
+            || line.starts_with("+++ ")
+            || line.starts_with("@@");
+        let is_change_line = (line.starts_with('+') && !line.starts_with("+++"))
+            || (line.starts_with('-') && !line.starts_with("---"));
+        if is_diff_header || is_change_line {
+            if !push_preview_line(&mut lines, line, PREVIEW_LIMIT) {
+                omitted += 1;
+            }
+        } else {
+            omitted += 1;
+        }
+    }
+
+    if lines.is_empty() {
+        omitted = 0;
+        for line in patch.lines().filter(|line| !line.trim().is_empty()) {
+            if !push_preview_line(&mut lines, line, PREVIEW_LIMIT) {
+                omitted += 1;
+            }
+        }
+    }
+
+    if omitted > 0 {
+        if lines.len() >= PREVIEW_LIMIT {
+            omitted += 1;
+        }
+        append_preview_truncation(
+            &mut lines,
+            format!("... (+{omitted} more patch lines)"),
+            PREVIEW_LIMIT,
+        );
+    }
+    if lines.is_empty() { None } else { Some(lines) }
+}
+
+fn changes_preview_lines(changes: &[Value]) -> Option<Vec<String>> {
+    const PREVIEW_LIMIT: usize = 7;
+
+    let mut lines = Vec::new();
+    let mut rendered_changes = 0usize;
+    for (idx, change) in changes.iter().enumerate() {
+        let path = change
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or("<file>");
+        let content = change.get("content").and_then(Value::as_str).unwrap_or("");
+        if idx > 0 && !push_preview_line(&mut lines, String::new(), PREVIEW_LIMIT) {
+            break;
+        }
+        if !push_preview_line(&mut lines, format!("file: {path}"), PREVIEW_LIMIT) {
+            break;
+        }
+        rendered_changes += 1;
+        for line in prefixed_preview_lines("replacement content", "+ ", content, PREVIEW_LIMIT)
+            .into_iter()
+            .skip(1)
+        {
+            if !push_preview_line(&mut lines, line, PREVIEW_LIMIT) {
+                break;
+            }
+        }
+        if lines.len() >= PREVIEW_LIMIT {
+            break;
+        }
+    }
+    let skipped_changes = changes.len().saturating_sub(rendered_changes);
+    if skipped_changes > 0 {
+        append_preview_truncation(
+            &mut lines,
+            format!("... (+{skipped_changes} more files)"),
+            PREVIEW_LIMIT,
+        );
+    }
+    if lines.is_empty() { None } else { Some(lines) }
 }
 
 fn param_text(params: &Value, keys: &[&str]) -> Option<String> {
@@ -585,18 +1106,42 @@ fn param_text(params: &Value, keys: &[&str]) -> Option<String> {
     None
 }
 
-fn localize_detail_label(label: &str, locale: Locale) -> &str {
+fn localize_detail_label(label: &str, locale: Locale) -> Cow<'static, str> {
     match locale {
         Locale::ZhHans => match label {
-            "Command" => "命令",
-            "Dir" => "目录",
-            "File" => "文件",
-            "Path" => "路径",
-            "Target" => "目标",
-            "Input" => "输入",
-            _ => label,
+            "Command" => tr(locale, MessageId::ApprovalLabelCommand),
+            "Dir" => tr(locale, MessageId::ApprovalLabelDir),
+            "File" => tr(locale, MessageId::ApprovalLabelFile),
+            "Preview" => tr(locale, MessageId::ApprovalLabelPreview),
+            "proposed content" => tr(locale, MessageId::ApprovalLabelProposedContent),
+            "replace this" => tr(locale, MessageId::ApprovalLabelReplaceThis),
+            "with this" => tr(locale, MessageId::ApprovalLabelWithThis),
+            "replacement content" => tr(locale, MessageId::ApprovalLabelReplacementContent),
+            "Path" => tr(locale, MessageId::ApprovalLabelPath),
+            "Target" => tr(locale, MessageId::ApprovalLabelTarget),
+            "Input" => tr(locale, MessageId::ApprovalLabelInput),
+            "Action" => tr(locale, MessageId::ApprovalLabelAction),
+            "Type" => tr(locale, MessageId::ApprovalLabelType),
+            "Prompt" => tr(locale, MessageId::ApprovalLabelPrompt),
+            "Goal" => "目标".into(),
+            "Children" => "子任务".into(),
+            "Writes" => "写入".into(),
+            "Shell" => "Shell".into(),
+            "Network" => "网络".into(),
+            "Budget" => "预算".into(),
+            _ => label.to_string().into(),
         },
-        _ => label,
+        _ => label.to_string().into(),
+    }
+}
+
+fn localize_preview_shell_line(tool_name: &str, line: &str, locale: Locale) -> Cow<'static, str> {
+    match tool_name {
+        "write_file" if line == "proposed content" => localize_detail_label(line, locale),
+        "edit_file" if matches!(line, "replace this" | "with this") => {
+            localize_detail_label(line, locale)
+        }
+        _ => line.to_string().into(),
     }
 }
 
@@ -786,6 +1331,7 @@ fn split_unquoted_redirect(command: &str) -> Option<(&str, &str)> {
 pub enum ApprovalOption {
     ApproveOnce,
     ApproveAlways,
+    AllowExactRepo,
     Deny,
     Abort,
 }
@@ -797,22 +1343,51 @@ impl ApprovalOption {
         ApprovalOption::Deny,
         ApprovalOption::Abort,
     ];
+    const ORDER_WITH_PERSISTENT_ALLOW: [ApprovalOption; 5] = [
+        ApprovalOption::ApproveOnce,
+        ApprovalOption::ApproveAlways,
+        ApprovalOption::AllowExactRepo,
+        ApprovalOption::Deny,
+        ApprovalOption::Abort,
+    ];
 
-    fn from_index(idx: usize) -> ApprovalOption {
-        Self::ORDER.get(idx).copied().unwrap_or(Self::Abort)
+    /// Workflow elevated-plan card (#4126): Approve / Edit plan / Cancel.
+    const WORKFLOW_ORDER: [ApprovalOption; 3] = [
+        ApprovalOption::ApproveOnce,
+        ApprovalOption::Deny,
+        ApprovalOption::Abort,
+    ];
+
+    fn order_for(request: &ApprovalRequest) -> &'static [ApprovalOption] {
+        if request.tool_name == "workflow" {
+            &Self::WORKFLOW_ORDER
+        } else if request.can_save_allow_rule() {
+            &Self::ORDER_WITH_PERSISTENT_ALLOW
+        } else {
+            &Self::ORDER
+        }
     }
 
-    fn index(self) -> usize {
-        Self::ORDER
+    fn from_index_for(request: &ApprovalRequest, idx: usize) -> ApprovalOption {
+        Self::order_for(request)
+            .get(idx)
+            .copied()
+            .unwrap_or(Self::Abort)
+    }
+
+    fn index_for(self, request: &ApprovalRequest) -> usize {
+        Self::order_for(request)
             .iter()
             .position(|o| *o == self)
-            .unwrap_or(Self::ORDER.len() - 1)
+            .unwrap_or(Self::order_for(request).len().saturating_sub(1))
     }
 
     fn decision(self) -> ReviewDecision {
         match self {
             ApprovalOption::ApproveOnce => ReviewDecision::Approved,
             ApprovalOption::ApproveAlways => ReviewDecision::ApprovedForSession,
+            ApprovalOption::AllowExactRepo => ReviewDecision::Approved,
+            // Workflow maps Deny → "Edit plan" (model revises plan).
             ApprovalOption::Deny => ReviewDecision::Denied,
             ApprovalOption::Abort => ReviewDecision::Abort,
         }
@@ -824,6 +1399,7 @@ impl ApprovalOption {
 pub struct ApprovalView {
     request: ApprovalRequest,
     selected: usize,
+    row_hitboxes: RefCell<Vec<Rect>>,
     locale: Locale,
     timeout: Option<Duration>,
     requested_at: Instant,
@@ -841,6 +1417,7 @@ impl ApprovalView {
         Self {
             request,
             selected: 0,
+            row_hitboxes: RefCell::new(Vec::new()),
             locale,
             timeout: None,
             requested_at: Instant::now(),
@@ -849,15 +1426,23 @@ impl ApprovalView {
     }
 
     fn select_prev(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+        let len = ApprovalOption::order_for(&self.request).len();
+        self.selected = crate::tui::list_nav::wrap_index(self.selected, len, -1);
     }
 
     fn select_next(&mut self) {
-        self.selected = (self.selected + 1).min(ApprovalOption::ORDER.len() - 1);
+        let len = ApprovalOption::order_for(&self.request).len();
+        self.selected = crate::tui::list_nav::wrap_index(self.selected, len, 1);
     }
 
     fn current_option(&self) -> ApprovalOption {
-        ApprovalOption::from_index(self.selected)
+        ApprovalOption::from_index_for(&self.request, self.selected)
+    }
+
+    /// Whether this approval is the elevated Workflow plan card (#4126).
+    #[must_use]
+    pub fn is_workflow_plan_approval(&self) -> bool {
+        self.request.tool_name == "workflow"
     }
 
     /// Test-only accessor for the selected option's decision.
@@ -869,6 +1454,10 @@ impl ApprovalView {
     /// Selected option for the renderer (used by the widget tests too).
     pub fn selected(&self) -> usize {
         self.selected
+    }
+
+    pub(crate) fn set_mouse_hitboxes(&self, hitboxes: Vec<Rect>) {
+        *self.row_hitboxes.borrow_mut() = hitboxes;
     }
 
     /// Risk level for the renderer's accent picking.
@@ -883,11 +1472,28 @@ impl ApprovalView {
 
     /// Commit the given option and close the approval modal.
     fn commit_option(&mut self, option: ApprovalOption) -> ViewAction {
-        self.selected = option.index();
-        self.emit_decision(option.decision(), false)
+        self.selected = option.index_for(&self.request);
+        if option == ApprovalOption::AllowExactRepo && self.request.can_save_allow_rule() {
+            self.emit_decision_with_rules(
+                option.decision(),
+                false,
+                self.request.persistent_allow_rules.clone(),
+            )
+        } else {
+            self.emit_decision(option.decision(), false)
+        }
     }
 
     fn emit_decision(&self, decision: ReviewDecision, timed_out: bool) -> ViewAction {
+        self.emit_decision_with_rules(decision, timed_out, Vec::new())
+    }
+
+    fn emit_decision_with_rules(
+        &self,
+        decision: ReviewDecision,
+        timed_out: bool,
+        persistent_rules: Vec<ToolAskRule>,
+    ) -> ViewAction {
         ViewAction::EmitAndClose(ViewEvent::ApprovalDecision {
             tool_id: self.request.id.clone(),
             tool_name: self.request.tool_name.clone(),
@@ -895,12 +1501,41 @@ impl ApprovalView {
             timed_out,
             approval_key: self.request.approval_key.clone(),
             approval_grouping_key: self.request.approval_grouping_key.clone(),
+            persistent_rules,
         })
     }
 
     fn emit_params_pager(&self) -> ViewAction {
-        let content = serde_json::to_string_pretty(&self.request.params)
-            .unwrap_or_else(|_| self.request.params.to_string());
+        // The compact prompt keeps the about/impact dossier out of the
+        // default band; the pager is where that context now lives.
+        let locale = self.locale();
+        let about_label = tr(locale, MessageId::ApprovalLabelAbout);
+        let impact_label = tr(locale, MessageId::ApprovalLabelImpact);
+        let mut content = String::new();
+        content.push_str(&about_label);
+        content.push_str(&self.request.description_for_locale(locale));
+        content.push('\n');
+        for impact in self.request.impacts_for_locale(locale) {
+            content.push_str(&impact_label);
+            content.push_str(&impact);
+            content.push('\n');
+        }
+        content.push('\n');
+        if canonical_action_alias(&self.request.tool_name, &self.request.params) == "edit_file"
+            && let Some(preview_lines) = exact_edit_file_preview_lines(&self.request.params, locale)
+        {
+            content.push_str(&tr(locale, MessageId::ApprovalLabelPreview));
+            content.push_str(":\n");
+            for line in preview_lines {
+                content.push_str(&line);
+                content.push('\n');
+            }
+            content.push('\n');
+        }
+        content.push_str(
+            &serde_json::to_string_pretty(&self.request.params)
+                .unwrap_or_else(|_| self.request.params.to_string()),
+        );
         ViewAction::Emit(ViewEvent::OpenTextPager {
             title: format!("Tool Params: {}", self.request.tool_name),
             content,
@@ -944,16 +1579,67 @@ impl ModalView for ApprovalView {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('1') => {
                 self.commit_option(ApprovalOption::ApproveOnce)
             }
-            KeyCode::Char('a') | KeyCode::Char('A') | KeyCode::Char('2') => {
+            KeyCode::Char('a') | KeyCode::Char('A') | KeyCode::Char('2')
+                if !self.is_workflow_plan_approval() =>
+            {
                 self.commit_option(ApprovalOption::ApproveAlways)
             }
+            KeyCode::Char('p') | KeyCode::Char('P') if self.request.can_save_allow_rule() => {
+                self.commit_option(ApprovalOption::AllowExactRepo)
+            }
+            // Workflow plan card (#4126): [2/e] Edit plan, [3/n/d] Cancel.
+            KeyCode::Char('e') | KeyCode::Char('E') | KeyCode::Char('2')
+                if self.is_workflow_plan_approval() =>
+            {
+                self.commit_option(ApprovalOption::Deny)
+            }
+            KeyCode::Char('s') | KeyCode::Char('S') if self.request.can_save_ask_rule() => self
+                .emit_decision_with_rules(
+                    ReviewDecision::Approved,
+                    false,
+                    self.request.persistent_ask_rules.clone(),
+                ),
             KeyCode::Char('n')
             | KeyCode::Char('N')
             | KeyCode::Char('d')
             | KeyCode::Char('D')
-            | KeyCode::Char('3') => self.commit_option(ApprovalOption::Deny),
-            KeyCode::Char('v') | KeyCode::Char('V') => self.emit_params_pager(),
+            | KeyCode::Char('3') => {
+                if self.is_workflow_plan_approval() {
+                    // Cancel (abort turn) rather than session-deny.
+                    self.commit_option(ApprovalOption::Abort)
+                } else {
+                    self.commit_option(ApprovalOption::Deny)
+                }
+            }
+            // Details is Alt+V / Option+V only; bare `v` is never a shortcut.
+            _ if crate::tui::shell_key_routing::is_tool_details_shortcut(&key) => {
+                self.emit_params_pager()
+            }
             KeyCode::Esc => self.emit_decision(ReviewDecision::Abort, false),
+            _ => ViewAction::None,
+        }
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) -> ViewAction {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.select_prev();
+                ViewAction::None
+            }
+            MouseEventKind::ScrollDown => {
+                self.select_next();
+                ViewAction::None
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let clicked = self.row_hitboxes.borrow().iter().position(|rect| {
+                    rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
+                });
+                if let Some(index) = clicked {
+                    return self
+                        .commit_option(ApprovalOption::from_index_for(&self.request, index));
+                }
+                ViewAction::None
+            }
             _ => ViewAction::None,
         }
     }
@@ -961,6 +1647,13 @@ impl ModalView for ApprovalView {
     fn render(&self, area: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer) {
         let approval_widget = ApprovalWidget::new(&self.request, self);
         approval_widget.render(area, buf);
+    }
+
+    fn occupied_region(&self, area: ratatui::layout::Rect) -> ratatui::layout::Rect {
+        // The approval is an inline, bottom-anchored prompt: it only occupies
+        // a band at the bottom of the frame so the backdrop dims that band and
+        // the transcript above stays visible. Must match what `render` paints.
+        ApprovalWidget::new(&self.request, self).inline_region(area)
     }
 
     fn tick(&mut self) -> ViewAction {
@@ -1135,6 +1828,7 @@ pub struct ElevationView {
     request: ElevationRequest,
     selected: usize,
     locale: Locale,
+    row_hitboxes: RefCell<Vec<Rect>>,
 }
 
 impl ElevationView {
@@ -1143,16 +1837,18 @@ impl ElevationView {
             request,
             selected: 0,
             locale,
+            row_hitboxes: RefCell::new(Vec::new()),
         }
     }
 
     fn select_prev(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+        self.selected =
+            crate::tui::list_nav::wrap_index(self.selected, self.request.options.len(), -1);
     }
 
     fn select_next(&mut self) {
-        let max = self.request.options.len().saturating_sub(1);
-        self.selected = (self.selected + 1).min(max);
+        self.selected =
+            crate::tui::list_nav::wrap_index(self.selected, self.request.options.len(), 1);
     }
 
     fn current_option(&self) -> &ElevationOption {
@@ -1216,8 +1912,36 @@ impl ModalView for ElevationView {
         }
     }
 
+    fn handle_mouse(&mut self, mouse: MouseEvent) -> ViewAction {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.select_prev();
+                ViewAction::None
+            }
+            MouseEventKind::ScrollDown => {
+                self.select_next();
+                ViewAction::None
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let clicked = self.row_hitboxes.borrow().iter().position(|rect| {
+                    rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
+                });
+                if let Some(index) = clicked {
+                    return self.emit_decision(self.request.options[index].clone());
+                }
+                ViewAction::None
+            }
+            _ => ViewAction::None,
+        }
+    }
+
     fn render(&self, area: ratatui::layout::Rect, buf: &mut ratatui::buffer::Buffer) {
-        let elevation_widget = ElevationWidget::new(&self.request, self.selected, self.locale);
+        let elevation_widget = ElevationWidget::new_with_hitboxes(
+            &self.request,
+            self.selected,
+            self.locale,
+            &self.row_hitboxes,
+        );
         elevation_widget.render(area, buf);
     }
 }
@@ -1228,8 +1952,10 @@ impl ModalView for ElevationView {
 
 #[cfg(test)]
 mod tests {
+    use super::policy::get_tool_category;
     use super::*;
-    use crossterm::event::{KeyCode, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::{Terminal, backend::TestBackend};
     use serde_json::json;
 
     fn create_key_event(code: KeyCode) -> KeyEvent {
@@ -1261,6 +1987,26 @@ mod tests {
         )
     }
 
+    fn critical_request() -> ApprovalRequest {
+        ApprovalRequest::new(
+            "test-id",
+            "exec_shell",
+            "Run a shell command",
+            &json!({"command": "rm -rf ~/"}),
+            "tool:exec_shell",
+        )
+    }
+
+    fn shell_request() -> ApprovalRequest {
+        ApprovalRequest::new(
+            "test-id",
+            "exec_shell",
+            "Run a shell command",
+            &json!({"command": "cargo test --workspace"}),
+            "tool:exec_shell",
+        )
+    }
+
     // ========================================================================
     // Tool Category Tests
     // ========================================================================
@@ -1270,6 +2016,8 @@ mod tests {
         assert_eq!(get_tool_category("read_file"), ToolCategory::Safe);
         assert_eq!(get_tool_category("list_dir"), ToolCategory::Safe);
         assert_eq!(get_tool_category("todo_write"), ToolCategory::Safe);
+        assert_eq!(get_tool_category("work_update"), ToolCategory::Safe);
+        assert_eq!(get_tool_category("checklist_write"), ToolCategory::Safe);
         assert_eq!(get_tool_category("todo_read"), ToolCategory::Safe);
         assert_eq!(get_tool_category("note"), ToolCategory::Safe);
         assert_eq!(get_tool_category("update_plan"), ToolCategory::Safe);
@@ -1337,6 +2085,11 @@ mod tests {
             classify_risk("fetch_url", cat, &json!({"url": "https://example.com"})),
             RiskLevel::Destructive
         );
+        // wait_for_dev_server only permits loopback targets.
+        assert_eq!(
+            classify_risk("wait_for_dev_server", cat, &json!({"port": 5173})),
+            RiskLevel::Benign
+        );
     }
 
     #[test]
@@ -1353,6 +2106,22 @@ mod tests {
                 classify_risk(name, cat, &json!({})),
                 RiskLevel::Destructive,
                 "expected {name:?} to be Destructive",
+            );
+        }
+    }
+
+    #[test]
+    fn risk_read_only_shell_commands_route_benign() {
+        let cat = ToolCategory::Shell;
+        for command in [
+            "codewhale --version",
+            "codewhale --help",
+            "git status --porcelain",
+        ] {
+            assert_eq!(
+                classify_risk("exec_shell", cat, &json!({ "command": command })),
+                RiskLevel::Benign,
+                "expected read-only shell command {command:?} to be Benign",
             );
         }
     }
@@ -1440,13 +2209,20 @@ mod tests {
             request
                 .impacts
                 .iter()
-                .any(|line| line.contains("Executes a shell command"))
+                .any(|line| line.contains("Executes a Bash command"))
         );
         assert!(
             request
                 .impacts
                 .iter()
-                .any(|line| line.contains("cargo test"))
+                .all(|line| !line.contains("cargo test")),
+            "command detail should not be duplicated in the impact summary"
+        );
+        let details = request.prominent_detail_items(Locale::En);
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.label == "Command" && detail.value.contains("cargo test"))
         );
     }
 
@@ -1518,6 +2294,271 @@ mod tests {
         assert_eq!(details[0].label, "File");
         assert_eq!(details[0].value, "src/main.rs");
         assert!(details[0].shell_lines.is_none());
+        assert_eq!(details[1].label, "Preview");
+        let preview = details[1].shell_lines.as_ref().expect("preview lines");
+        assert!(preview.iter().any(|line| line == "+ fn main() {}"));
+    }
+
+    #[test]
+    fn prominent_details_edit_file_includes_search_replace_preview() {
+        let request = ApprovalRequest::new(
+            "test-id",
+            "edit_file",
+            "Edit a file on disk",
+            &json!({
+                "path": "src/lib.rs",
+                "search": "old_call();",
+                "replace": "new_call();"
+            }),
+            "tool:edit_file",
+        );
+
+        let details = request.prominent_detail_items(Locale::En);
+        let preview = details
+            .iter()
+            .find(|detail| detail.label == "Preview")
+            .and_then(|detail| detail.shell_lines.as_ref())
+            .expect("edit preview");
+
+        assert!(preview.iter().any(|line| line == "- old_call();"));
+        assert!(preview.iter().any(|line| line == "+ new_call();"));
+    }
+
+    #[test]
+    fn prominent_details_apply_patch_includes_diff_preview() {
+        let patch = r#"diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,2 +1,2 @@
+-old
++new
+"#;
+        let request = ApprovalRequest::new(
+            "test-id",
+            "apply_patch",
+            "Apply a patch",
+            &json!({"patch": patch}),
+            "tool:apply_patch",
+        );
+
+        let details = request.prominent_detail_items(Locale::En);
+        let preview = details
+            .iter()
+            .find(|detail| detail.label == "Preview")
+            .and_then(|detail| detail.shell_lines.as_ref())
+            .expect("patch preview");
+
+        assert!(preview.iter().any(|line| line.starts_with("@@")));
+        assert!(preview.iter().any(|line| line == "-old"));
+        assert!(preview.iter().any(|line| line == "+new"));
+    }
+
+    #[test]
+    fn prominent_details_apply_patch_changes_array_preview_stays_bounded() {
+        let request = ApprovalRequest::new(
+            "test-id",
+            "apply_patch",
+            "Apply a patch",
+            &json!({
+                "replace": [
+                    {
+                        "path": "src/lib.rs",
+                        "content": "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight"
+                    },
+                    {
+                        "path": "src/main.rs",
+                        "content": "main"
+                    },
+                    {
+                        "path": "src/extra.rs",
+                        "content": "extra"
+                    }
+                ]
+            }),
+            "tool:apply_patch",
+        );
+
+        let details = request.prominent_detail_items(Locale::En);
+        let preview = details
+            .iter()
+            .find(|detail| detail.label == "Preview")
+            .and_then(|detail| detail.shell_lines.as_ref())
+            .expect("changes preview");
+
+        assert!(
+            preview.len() <= 7,
+            "preview should stay bounded: {preview:?}"
+        );
+        assert!(preview.iter().any(|line| line == "file: src/lib.rs"));
+        assert_eq!(
+            preview.last().map(String::as_str),
+            Some("... (+2 more files)")
+        );
+    }
+
+    #[test]
+    fn prominent_details_apply_patch_legacy_changes_includes_preview() {
+        let request = ApprovalRequest::new(
+            "test-id",
+            "apply_patch",
+            "Apply a patch",
+            &json!({
+                "changes": [{
+                    "path": "src/lib.rs",
+                    "content": "fn legacy() {}\n"
+                }]
+            }),
+            "tool:apply_patch",
+        );
+
+        let details = request.prominent_detail_items(Locale::En);
+        let preview = details
+            .iter()
+            .find(|detail| detail.label == "Preview")
+            .and_then(|detail| detail.shell_lines.as_ref())
+            .expect("legacy changes preview");
+
+        assert!(preview.iter().any(|line| line == "file: src/lib.rs"));
+        assert!(preview.iter().any(|line| line == "+ fn legacy() {}"));
+    }
+
+    #[test]
+    fn apply_patch_changes_array_preview_reports_second_file_when_first_fills_buffer() {
+        let request = ApprovalRequest::new(
+            "test-id",
+            "apply_patch",
+            "Apply a patch",
+            &json!({
+                "replace": [
+                    {
+                        "path": "src/lib.rs",
+                        "content": "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight"
+                    },
+                    {
+                        "path": "src/main.rs",
+                        "content": "main"
+                    }
+                ]
+            }),
+            "tool:apply_patch",
+        );
+
+        let details = request.prominent_detail_items(Locale::En);
+        let preview = details
+            .iter()
+            .find(|detail| detail.label == "Preview")
+            .and_then(|detail| detail.shell_lines.as_ref())
+            .expect("changes preview");
+
+        assert!(
+            preview.len() <= 7,
+            "preview should stay bounded: {preview:?}"
+        );
+        assert!(preview.iter().any(|line| line == "file: src/lib.rs"));
+        assert_eq!(
+            preview.last().map(String::as_str),
+            Some("... (+1 more files)")
+        );
+    }
+
+    #[test]
+    fn apply_patch_preview_counts_omitted_context_lines() {
+        let patch = r#"diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,8 +1,8 @@
+ context one
+ context two
+-old
++new
+ context three
+ context four
+ context five
+"#;
+
+        let preview = apply_patch_preview_lines(patch).expect("patch preview");
+
+        assert!(
+            preview.len() <= 7,
+            "preview should stay bounded: {preview:?}"
+        );
+        assert_eq!(
+            preview.last().map(String::as_str),
+            Some("... (+5 more patch lines)")
+        );
+    }
+
+    #[test]
+    fn apply_patch_preview_counts_replaced_visible_line_as_omitted() {
+        let patch = r#"diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,4 +1,4 @@
+-old1
++new1
+-old2
++new2
+ context one
+ context two
+"#;
+
+        let preview = apply_patch_preview_lines(patch).expect("patch preview");
+
+        assert_eq!(preview.len(), 7);
+        assert_eq!(
+            preview.last().map(String::as_str),
+            Some("... (+4 more patch lines)")
+        );
+    }
+
+    #[test]
+    fn preview_sublabels_are_localized_for_zh_hans() {
+        let write = ApprovalRequest::new(
+            "test-id",
+            "write_file",
+            "Write a file",
+            &json!({"path": "src/lib.rs", "content": "proposed content\nreplacement content"}),
+            "tool:write_file",
+        );
+        let write_preview = write
+            .prominent_detail_items(Locale::ZhHans)
+            .into_iter()
+            .find(|detail| detail.label == "预览")
+            .and_then(|detail| detail.shell_lines)
+            .expect("localized write preview");
+        assert!(write_preview.iter().any(|line| line == "拟写入内容"));
+        assert!(
+            write_preview
+                .iter()
+                .any(|line| line == "+ proposed content")
+        );
+        assert!(
+            write_preview
+                .iter()
+                .any(|line| line == "+ replacement content")
+        );
+
+        let edit = ApprovalRequest::new(
+            "test-id",
+            "edit_file",
+            "Edit a file",
+            &json!({
+                "path": "src/lib.rs",
+                "search": "with this",
+                "replace": "replace this"
+            }),
+            "tool:edit_file",
+        );
+        let edit_preview = edit
+            .prominent_detail_items(Locale::ZhHans)
+            .into_iter()
+            .find(|detail| detail.label == "预览")
+            .and_then(|detail| detail.shell_lines)
+            .expect("localized edit preview");
+        assert!(edit_preview.iter().any(|line| line == "替换此内容"));
+        assert!(edit_preview.iter().any(|line| line == "替换为"));
+        assert!(edit_preview.iter().any(|line| line == "- with this"));
+        assert!(edit_preview.iter().any(|line| line == "+ replace this"));
     }
 
     #[test]
@@ -1550,12 +2591,371 @@ mod tests {
     }
 
     #[test]
+    fn exec_shell_request_builds_ask_rule_preview() {
+        let request = shell_request();
+
+        assert_eq!(
+            request.persistent_ask_rules,
+            vec![ToolAskRule::exec_shell("cargo test --workspace")]
+        );
+        let preview = request.ask_rule_preview().expect("preview");
+        assert!(preview.contains("[[rules]]"));
+        assert!(preview.contains("tool = \"exec_shell\""));
+        assert!(preview.contains("command = \"cargo test --workspace\""));
+    }
+
+    #[test]
+    fn ask_rule_save_preview_formats_shell_rule() {
+        let request = shell_request();
+
+        let preview = request.ask_rule_save_preview().expect("save preview");
+        assert_eq!(preview.rule_count, 1);
+        assert_eq!(preview.summary(), "1 ask rule");
+        assert_eq!(
+            preview.entries,
+            vec!["tool=exec_shell command=cargo test --workspace"]
+        );
+        assert_eq!(preview.omitted, 0);
+    }
+
+    #[test]
+    fn safe_shell_request_builds_exact_workspace_allow_rule() {
+        let request = shell_request();
+        let expected = ToolAskRule::exec_shell("cargo test --workspace")
+            .into_exact_workspace_allow("/workspace");
+
+        assert!(request.can_save_allow_rule());
+        assert_eq!(request.persistent_allow_rules, vec![expected]);
+        let preview = request.allow_rule_save_preview().expect("allow preview");
+        assert_eq!(preview.summary(), "1 allow rule");
+        assert_eq!(
+            preview.entries,
+            vec![
+                "tool=exec_shell command=cargo test --workspace command_exact=true workspace=/workspace"
+            ]
+        );
+    }
+
+    #[test]
+    fn unsafe_shell_requests_cannot_persist_allow_rules() {
+        for command in [
+            "rm -rf ~/",
+            "git push origin main",
+            "curl https://example.com",
+            "cargo test && git status",
+        ] {
+            let request = ApprovalRequest::new(
+                "test-id",
+                "exec_shell",
+                "Run a shell command",
+                &json!({"command": command}),
+                "tool:exec_shell",
+            );
+            assert!(
+                request.persistent_allow_rules.is_empty(),
+                "{command:?} must not produce a remembered allow grant"
+            );
+            assert!(!request.can_save_allow_rule(), "{command:?}");
+            assert_eq!(request.allow_rule_save_preview(), None, "{command:?}");
+        }
+    }
+
+    #[test]
+    fn file_ask_rule_saved_for_write_file_approval() {
+        // A write_file approval offers an exact, workspace-relative file rule
+        // plus a preview so `S` can persist it.
+        let request = destructive_request();
+
+        assert_eq!(
+            request.persistent_ask_rules,
+            vec![ToolAskRule::file_path("write_file", "src/main.rs")]
+        );
+        assert!(request.can_save_ask_rule());
+        let preview = request.ask_rule_preview().expect("preview");
+        assert!(preview.contains("[[rules]]"));
+        assert!(preview.contains("tool = \"write_file\""));
+        assert!(preview.contains("path = \"src/main.rs\""));
+    }
+
+    #[test]
+    fn file_write_builds_exact_workspace_allow_rule() {
+        let request = destructive_request();
+        let expected = ToolAskRule::file_path("write_file", "src/main.rs")
+            .into_exact_workspace_allow("/workspace");
+
+        assert!(request.can_save_allow_rule());
+        assert_eq!(request.persistent_allow_rules, vec![expected]);
+        assert_eq!(
+            request
+                .allow_rule_save_preview()
+                .expect("allow preview")
+                .entries,
+            vec!["tool=write_file path=src/main.rs workspace=/workspace"]
+        );
+    }
+
+    #[test]
+    fn ask_rule_save_preview_formats_write_and_edit_file_paths() {
+        let write = destructive_request();
+        let edit = ApprovalRequest::new(
+            "test-id",
+            "edit_file",
+            "Edit a file on disk",
+            &json!({"path": "/workspace/src/lib.rs"}),
+            "tool:edit_file",
+        );
+
+        assert_eq!(
+            write
+                .ask_rule_save_preview()
+                .expect("write save preview")
+                .entries,
+            vec!["tool=write_file path=src/main.rs"]
+        );
+        assert_eq!(
+            edit.ask_rule_save_preview()
+                .expect("edit save preview")
+                .entries,
+            vec!["tool=edit_file path=src/lib.rs"]
+        );
+    }
+
+    #[test]
+    fn file_ask_rule_normalizes_absolute_edit_file_path_to_workspace_relative() {
+        // An absolute in-workspace path is stored in the workspace-relative
+        // form, matching how runtime ask-rule matching normalizes paths.
+        let request = ApprovalRequest::new(
+            "test-id",
+            "edit_file",
+            "Edit a file on disk",
+            &json!({"path": "/workspace/src/lib.rs"}),
+            "tool:edit_file",
+        );
+
+        assert_eq!(
+            request.persistent_ask_rules,
+            vec![ToolAskRule::file_path("edit_file", "src/lib.rs")]
+        );
+    }
+
+    #[test]
+    fn read_file_request_has_no_file_ask_rule() {
+        // The save boundary is write approvals only; read_file never offers a
+        // persistent rule.
+        let request = benign_request();
+
+        assert!(request.persistent_ask_rules.is_empty());
+        assert!(!request.can_save_ask_rule());
+        assert_eq!(request.ask_rule_preview(), None);
+        assert_eq!(request.ask_rule_save_preview(), None);
+    }
+
+    #[test]
+    fn file_ask_rule_skipped_for_unsafe_empty_or_external_paths() {
+        // Traversal, empty, and outside-workspace paths must not become rules,
+        // so the preview and `S` shortcut stay disabled.
+        for path in ["../escape.rs", "/etc/passwd", "   ", ""] {
+            let request = ApprovalRequest::new(
+                "test-id",
+                "write_file",
+                "Write a file to disk",
+                &json!({"path": path}),
+                "tool:write_file",
+            );
+            assert!(
+                request.persistent_ask_rules.is_empty(),
+                "path {path:?} must not produce a rule"
+            );
+            assert!(!request.can_save_ask_rule());
+            assert_eq!(request.ask_rule_preview(), None);
+            assert_eq!(request.ask_rule_save_preview(), None);
+        }
+    }
+
+    #[test]
+    fn apply_patch_ask_rules_saved_for_multi_file_patch() {
+        let patch = r"diff --git a/src/a.rs b/src/a.rs
+--- a/src/a.rs
++++ b/src/a.rs
+@@ -1,1 +1,1 @@
+-old
++new
+diff --git a/src/b.rs b/src/b.rs
+--- a/src/b.rs
++++ b/src/b.rs
+@@ -1,1 +1,1 @@
+-old
++new
+";
+
+        let request = ApprovalRequest::new(
+            "test-id",
+            "apply_patch",
+            "Apply a patch",
+            &json!({"patch": patch}),
+            "tool:apply_patch",
+        );
+
+        assert_eq!(
+            request.persistent_ask_rules,
+            vec![
+                ToolAskRule::file_path("apply_patch", "src/a.rs"),
+                ToolAskRule::file_path("apply_patch", "src/b.rs"),
+            ]
+        );
+        assert!(request.can_save_ask_rule());
+        let preview = request.ask_rule_save_preview().expect("save preview");
+        assert_eq!(preview.summary(), "2 ask rules");
+        assert_eq!(
+            preview.entries,
+            vec![
+                "tool=apply_patch path=src/a.rs",
+                "tool=apply_patch path=src/b.rs"
+            ]
+        );
+        assert_eq!(
+            request.persistent_allow_rules,
+            vec![
+                ToolAskRule::file_path("apply_patch", "src/a.rs")
+                    .into_exact_workspace_allow("/workspace"),
+                ToolAskRule::file_path("apply_patch", "src/b.rs")
+                    .into_exact_workspace_allow("/workspace"),
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_patch_ask_rules_dedupe_targets_after_normalization() {
+        let request = ApprovalRequest::new(
+            "test-id",
+            "apply_patch",
+            "Apply a patch",
+            &json!({
+                "replace": [
+                    { "path": "src/a.rs", "content": "one" },
+                    { "path": "/workspace/src/a.rs", "content": "two" }
+                ]
+            }),
+            "tool:apply_patch",
+        );
+
+        assert_eq!(
+            request.persistent_ask_rules,
+            vec![ToolAskRule::file_path("apply_patch", "src/a.rs")]
+        );
+    }
+
+    #[test]
+    fn apply_patch_ask_rule_handles_timestamp_headers() {
+        let patch = "diff --git a/src/lib.rs b/src/lib.rs\n\
+--- a/src/lib.rs\t2026-06-26 10:00:00 +0000\n\
++++ b/src/lib.rs\t2026-06-26 10:01:00 +0000\n\
+@@ -1,1 +1,1 @@\n\
+-old\n\
++new\n";
+
+        let request = ApprovalRequest::new(
+            "test-id",
+            "apply_patch",
+            "Apply a patch",
+            &json!({"patch": patch}),
+            "tool:apply_patch",
+        );
+
+        assert_eq!(
+            request.persistent_ask_rules,
+            vec![ToolAskRule::file_path("apply_patch", "src/lib.rs")]
+        );
+    }
+
+    #[test]
+    fn apply_patch_ask_rule_ignores_forged_headers_inside_hunk() {
+        let patch = r"--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,3 +1,3 @@
+ line1
+--- a/forged.rs
++++ b/forged.rs
+ line3
+";
+
+        let request = ApprovalRequest::new(
+            "test-id",
+            "apply_patch",
+            "Apply a patch",
+            &json!({"path": "src/lib.rs", "patch": patch}),
+            "tool:apply_patch",
+        );
+
+        assert_eq!(
+            request.persistent_ask_rules,
+            vec![ToolAskRule::file_path("apply_patch", "src/lib.rs")]
+        );
+    }
+
+    #[test]
+    fn apply_patch_ask_rule_skipped_when_any_target_traverses_workspace() {
+        let request = ApprovalRequest::new(
+            "test-id",
+            "apply_patch",
+            "Apply a patch",
+            &json!({
+                "replace": [
+                    { "path": "src/a.rs", "content": "safe" },
+                    { "path": "../escape.rs", "content": "unsafe" }
+                ]
+            }),
+            "tool:apply_patch",
+        );
+
+        assert!(request.persistent_ask_rules.is_empty());
+        assert!(!request.can_save_ask_rule());
+        assert_eq!(request.ask_rule_save_preview(), None);
+    }
+
+    #[test]
+    fn apply_patch_ask_rule_skipped_on_preflight_failure() {
+        let request = ApprovalRequest::new(
+            "test-id",
+            "apply_patch",
+            "Apply a patch",
+            &json!({"patch": "@@ -1 +1 @@\n-old\n+new\n"}),
+            "tool:apply_patch",
+        );
+
+        assert!(request.persistent_ask_rules.is_empty());
+        assert_eq!(request.ask_rule_preview(), None);
+        assert_eq!(request.ask_rule_save_preview(), None);
+    }
+
+    #[test]
+    fn ask_rule_save_preview_truncates_rule_list() {
+        let rules = vec![
+            ToolAskRule::file_path("apply_patch", "src/a.rs"),
+            ToolAskRule::file_path("apply_patch", "src/b.rs"),
+            ToolAskRule::file_path("apply_patch", "src/c.rs"),
+            ToolAskRule::file_path("apply_patch", "src/d.rs"),
+        ];
+
+        let preview = build_permission_rule_save_preview(&rules, 2).expect("save preview");
+        assert_eq!(preview.rule_count, 4);
+        assert_eq!(preview.summary(), "4 ask rules");
+        assert_eq!(
+            preview.entries,
+            vec![
+                "tool=apply_patch path=src/a.rs",
+                "tool=apply_patch path=src/b.rs"
+            ]
+        );
+        assert_eq!(preview.omitted, 2);
+    }
+
+    #[test]
     fn tab_toggles_collapsed_card_so_transcript_stays_visible() {
-        // Regression for PR #1455 / @tiger-dog: the approval modal
-        // rendered as a full-screen takeover that hid the transcript
-        // behind it, so users had to dismiss the prompt to remember
-        // what they were approving. Tab now flips between the full
-        // takeover card and a single-line bottom banner.
+        // Regression for PR #1455 / @tiger-dog: the approval modal once hid
+        // the transcript, so users had to dismiss the prompt to remember what
+        // they were approving. Tab flips between the expanded compact card
+        // and a single-line bottom banner.
         let mut view = ApprovalView::new(benign_request());
         assert!(
             !view.collapsed,
@@ -1568,7 +2968,7 @@ mod tests {
 
         let action = view.handle_key(create_key_event(KeyCode::Tab));
         assert!(matches!(action, ViewAction::None));
-        assert!(!view.collapsed, "second Tab restores the takeover card");
+        assert!(!view.collapsed, "second Tab restores the expanded card");
     }
 
     #[test]
@@ -1583,8 +2983,12 @@ mod tests {
         view.select_next();
         assert_eq!(view.selected, 3);
 
-        // Should clamp at 3
+        // Wraps to the first option rather than dead-ending (#4755).
         view.select_next();
+        assert_eq!(view.selected, 0);
+
+        // And back around the other way.
+        view.select_prev();
         assert_eq!(view.selected, 3);
 
         view.select_prev();
@@ -1607,6 +3011,111 @@ mod tests {
                 "expected Approved for {code:?}"
             );
         }
+    }
+
+    #[test]
+    fn save_ask_rule_shortcut_approves_once_with_rule() {
+        let mut view = ApprovalView::new(shell_request());
+
+        let action = view.handle_key(create_key_event(KeyCode::Char('s')));
+        let ViewAction::EmitAndClose(ViewEvent::ApprovalDecision {
+            decision,
+            persistent_rules,
+            ..
+        }) = action
+        else {
+            panic!("expected approval decision");
+        };
+
+        assert_eq!(decision, ReviewDecision::Approved);
+        assert_eq!(
+            persistent_rules,
+            vec![ToolAskRule::exec_shell("cargo test --workspace")]
+        );
+    }
+
+    #[test]
+    fn save_file_ask_rule_shortcut_emits_file_rule() {
+        // `S` on a write_file approval approves once and carries the exact
+        // workspace-relative file rule for persistence.
+        let mut view = ApprovalView::new(destructive_request());
+
+        let action = view.handle_key(create_key_event(KeyCode::Char('S')));
+        let ViewAction::EmitAndClose(ViewEvent::ApprovalDecision {
+            decision,
+            persistent_rules,
+            ..
+        }) = action
+        else {
+            panic!("expected approval decision");
+        };
+
+        assert_eq!(decision, ReviewDecision::Approved);
+        assert_eq!(
+            persistent_rules,
+            vec![ToolAskRule::file_path("write_file", "src/main.rs")]
+        );
+    }
+
+    #[test]
+    fn persistent_allow_option_approves_once_with_exact_repo_rule() {
+        let mut view = ApprovalView::new(shell_request());
+
+        let action = view.handle_key(create_key_event(KeyCode::Char('p')));
+        let ViewAction::EmitAndClose(ViewEvent::ApprovalDecision {
+            decision,
+            persistent_rules,
+            ..
+        }) = action
+        else {
+            panic!("expected approval decision");
+        };
+
+        assert_eq!(decision, ReviewDecision::Approved);
+        assert_eq!(
+            persistent_rules,
+            vec![
+                ToolAskRule::exec_shell("cargo test --workspace")
+                    .into_exact_workspace_allow("/workspace")
+            ]
+        );
+    }
+
+    #[test]
+    fn persistent_allow_shortcut_is_ignored_for_dangerous_command() {
+        let request = critical_request();
+        assert!(request.persistent_allow_rules.is_empty());
+        let mut view = ApprovalView::new(request);
+
+        assert!(matches!(
+            view.handle_key(create_key_event(KeyCode::Char('p'))),
+            ViewAction::None
+        ));
+    }
+
+    #[test]
+    fn repo_law_request_does_not_build_a_persistent_allow_candidate() {
+        let request = ApprovalRequest::new(
+            "test-id",
+            "edit_file",
+            "Repo law holds this write: protected path (matched Cargo.toml, .codewhale/constitution.json)",
+            &json!({"path": "Cargo.toml", "old": "a", "new": "b"}),
+            "tool:edit_file",
+        );
+
+        assert!(request.is_repo_law_prompt());
+        assert!(request.persistent_allow_rules.is_empty());
+        assert!(!request.can_save_allow_rule());
+        assert_eq!(request.allow_rule_save_preview(), None);
+    }
+
+    #[test]
+    fn save_ask_rule_shortcut_is_ignored_without_rule() {
+        let mut view = ApprovalView::new(benign_request());
+
+        let action = view.handle_key(create_key_event(KeyCode::Char('s')));
+
+        assert!(matches!(action, ViewAction::None));
     }
 
     #[test]
@@ -1633,6 +3142,85 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn mouse_click_renders_and_approves_inline_option() {
+        let mut view = ApprovalView::new(benign_request());
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).expect("test terminal");
+        terminal
+            .draw(|frame| view.render(frame.area(), frame.buffer_mut()))
+            .expect("render approval prompt");
+        let rect = view.row_hitboxes.borrow()[0];
+        let action = view.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(matches!(
+            action,
+            ViewAction::EmitAndClose(ViewEvent::ApprovalDecision {
+                decision: ReviewDecision::Approved,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn tiny_localized_approval_keeps_every_action_and_hitbox() {
+        const WIDTH: u16 = 40;
+        const HEIGHT: u16 = 12;
+        let expected = [
+            ReviewDecision::Approved,
+            ReviewDecision::ApprovedForSession,
+            ReviewDecision::Approved,
+            ReviewDecision::Denied,
+            ReviewDecision::Abort,
+        ];
+
+        for &locale in Locale::shipped() {
+            let rendered_view = ApprovalView::new_for_locale(destructive_request(), locale);
+            let rendered = render_lines(&rendered_view, WIDTH, HEIGHT).join("\n");
+            assert_approval_key_badges_visible(&rendered);
+            assert!(
+                rendered.contains(crate::tui::shell_key_routing::tool_details_chord().as_ref()),
+                "missing details chord for {locale:?}:\n{rendered}"
+            );
+
+            for (index, expected_decision) in expected.iter().enumerate() {
+                let mut view = ApprovalView::new_for_locale(destructive_request(), locale);
+                let mut terminal =
+                    Terminal::new(TestBackend::new(WIDTH, HEIGHT)).expect("test terminal");
+                terminal
+                    .draw(|frame| view.render(frame.area(), frame.buffer_mut()))
+                    .expect("render localized approval prompt");
+
+                let hitboxes = view.row_hitboxes.borrow().clone();
+                assert_eq!(hitboxes.len(), expected.len(), "{locale:?}: {hitboxes:?}");
+                for hitbox in &hitboxes {
+                    assert!(hitbox.height > 0, "{locale:?}: {hitboxes:?}");
+                    assert!(hitbox.right() <= WIDTH, "{locale:?}: {hitboxes:?}");
+                    assert!(hitbox.bottom() <= HEIGHT, "{locale:?}: {hitboxes:?}");
+                }
+                for pair in hitboxes.windows(2) {
+                    assert!(pair[0].bottom() <= pair[1].y, "{locale:?}: {hitboxes:?}");
+                }
+
+                let rect = hitboxes[index];
+                let action = view.handle_mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: rect.x,
+                    row: rect.y,
+                    modifiers: KeyModifiers::NONE,
+                });
+                let ViewAction::EmitAndClose(ViewEvent::ApprovalDecision { decision, .. }) = action
+                else {
+                    panic!("click {index} did not decide for {locale:?}");
+                };
+                assert_eq!(decision, *expected_decision, "{locale:?} option {index}");
+            }
+        }
     }
 
     #[test]
@@ -1714,7 +3302,10 @@ mod tests {
         let mut view = ApprovalView::new(benign_request());
 
         view.handle_key(create_key_event(KeyCode::Up));
-        assert_eq!(view.selected, 0); // clamped at 0
+        assert_eq!(view.selected, 3); // wraps to the last option (#4755)
+
+        view.handle_key(create_key_event(KeyCode::Down));
+        assert_eq!(view.selected, 0); // and back around to the first
 
         view.handle_key(create_key_event(KeyCode::Down));
         assert_eq!(view.selected, 1);
@@ -1728,19 +3319,105 @@ mod tests {
 
     #[test]
     fn test_approval_view_view_params() {
+        // Bare `v` must not open details (TUI-DOG-002).
         let mut view = ApprovalView::new(benign_request());
         let action = view.handle_key(create_key_event(KeyCode::Char('v')));
-        assert!(matches!(
-            action,
-            ViewAction::Emit(ViewEvent::OpenTextPager { .. })
-        ));
+        assert!(matches!(action, ViewAction::None));
 
         let mut view = ApprovalView::new(benign_request());
         let action = view.handle_key(create_key_event(KeyCode::Char('V')));
+        assert!(matches!(action, ViewAction::None));
+
+        // Alt+V / Option+V opens the params pager.
+        let mut view = ApprovalView::new(benign_request());
+        let action = view.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT));
         assert!(matches!(
             action,
             ViewAction::Emit(ViewEvent::OpenTextPager { .. })
         ));
+    }
+
+    #[test]
+    fn edit_file_details_pager_includes_complete_search_replace_preview() {
+        let request = ApprovalRequest::new(
+            "test-id",
+            "edit_file",
+            "Edit a file on disk",
+            &json!({
+                "path": "src/lib.rs",
+                "search": "  old_1();\r\n\told_2();\nold  3();\nold_4();\nold_5();\n",
+                "replace": "\tnew_1();\nnew  2();\r\nnew_3();\nnew_4();\nnew_5();"
+            }),
+            "tool:edit_file",
+        );
+        let mut view = ApprovalView::new(request);
+
+        let action = view.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT));
+        let ViewAction::Emit(ViewEvent::OpenTextPager { content, .. }) = action else {
+            panic!("Alt+V should open the edit details pager");
+        };
+
+        let expected_preview = [
+            "Preview:",
+            "replace this",
+            "- \"\\x20\\x20old_1();\\r\\n\"",
+            "- \"\\told_2();\\n\"",
+            "- \"old\\x20\\x203();\\n\"",
+            "- \"old_4();\\n\"",
+            "- \"old_5();\\n\"",
+            "with this",
+            "+ \"\\tnew_1();\\n\"",
+            "+ \"new\\x20\\x202();\\r\\n\"",
+            "+ \"new_3();\\n\"",
+            "+ \"new_4();\\n\"",
+            "+ \"new_5();\"",
+        ]
+        .join("\n");
+        assert!(
+            content.contains(&expected_preview),
+            "details pager omitted part of the edit preview:\n{content}"
+        );
+
+        let pager = crate::tui::pager::PagerView::from_text("Tool Params", &content, 200);
+        let displayed = pager.body_text();
+        assert!(
+            displayed.contains(&expected_preview),
+            "details pager display changed exact whitespace or line endings:\n{displayed}"
+        );
+    }
+
+    #[test]
+    fn edit_file_details_pager_localizes_preview_headers_for_every_locale() {
+        for &locale in Locale::shipped() {
+            let request = ApprovalRequest::new(
+                "test-id",
+                "edit_file",
+                "Edit a file on disk",
+                &json!({
+                    "path": "src/lib.rs",
+                    "search": "old();",
+                    "replace": "new();"
+                }),
+                "tool:edit_file",
+            );
+            let mut view = ApprovalView::new_for_locale(request, locale);
+
+            let action = view.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT));
+            let ViewAction::Emit(ViewEvent::OpenTextPager { content, .. }) = action else {
+                panic!("Alt+V should open the edit details pager for {locale:?}");
+            };
+            let expected_headers = format!(
+                "{}:\n{}\n- \"old();\"\n{}\n+ \"new();\"",
+                tr(locale, MessageId::ApprovalLabelPreview),
+                tr(locale, MessageId::ApprovalLabelReplaceThis),
+                tr(locale, MessageId::ApprovalLabelWithThis),
+            );
+
+            assert!(
+                content.contains(&expected_headers),
+                "details pager did not localize edit preview headers for {locale:?}:\n{content}"
+            );
+        }
     }
 
     #[test]
@@ -1881,8 +3558,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Render takeover smoke tests — keep the visual contract honest so a
-    // future widget refactor cannot silently shrink back to a popup.
+    // Render approval-card smoke tests — keep the visual contract honest.
     // ========================================================================
 
     fn render_lines(view: &ApprovalView, w: u16, h: u16) -> Vec<String> {
@@ -1903,39 +3579,260 @@ mod tests {
         lines.join("\n").replace(' ', "")
     }
 
+    fn assert_approval_key_badges_visible(joined: &str) {
+        for badge in ["[1 / y]", "[2 / a]", "[3 / d / n]", "[Esc]"] {
+            assert!(
+                joined.contains(badge),
+                "missing key badge {badge}:\n{joined}"
+            );
+        }
+    }
+
+    #[test]
+    fn web_run_risk_is_param_aware() {
+        // search/query is benign; open/click fetch arbitrary URLs -> destructive.
+        assert_eq!(
+            classify_risk("web_run", ToolCategory::Network, &json!({"search": "rust"})),
+            RiskLevel::Benign
+        );
+        assert_eq!(
+            classify_risk(
+                "web_run",
+                ToolCategory::Network,
+                &json!({"open": [{"ref": "https://evil.example"}]})
+            ),
+            RiskLevel::Destructive
+        );
+        assert_eq!(
+            classify_risk(
+                "web_run",
+                ToolCategory::Network,
+                &json!({"click": [{"ref": "1"}]})
+            ),
+            RiskLevel::Destructive
+        );
+    }
+
+    #[test]
+    fn stakes_split_routine_elevated_critical() {
+        assert_eq!(benign_request().stakes(), ApprovalStakes::Routine);
+        assert_eq!(destructive_request().stakes(), ApprovalStakes::Elevated);
+        assert_eq!(shell_request().stakes(), ApprovalStakes::Elevated);
+        assert_eq!(critical_request().stakes(), ApprovalStakes::Critical);
+        // Publish-like shell is critical in every origin.
+        let publish = ApprovalRequest::new(
+            "test-id",
+            "exec_shell",
+            "Run a shell command",
+            &json!({"command": "git push origin main"}),
+            "tool:exec_shell",
+        );
+        assert_eq!(publish.stakes(), ApprovalStakes::Critical);
+    }
+
+    #[test]
+    fn agent_tool_is_classified_and_renders_calm() {
+        assert_eq!(get_tool_category("agent"), ToolCategory::Agent);
+
+        let request = ApprovalRequest::new(
+            "test-id",
+            "agent",
+            "Start a sub-agent",
+            &json!({"action": "start", "type": "explore", "prompt": "map the workspace"}),
+            "tool:agent",
+        );
+        assert_eq!(request.category, ToolCategory::Agent);
+        assert_eq!(request.stakes(), ApprovalStakes::Elevated);
+
+        let view = ApprovalView::new(request);
+        let lines = render_lines(&view, 100, 40);
+        let joined = lines.join("\n");
+        assert!(joined.contains("APPROVAL"), "{joined}");
+        assert!(!joined.contains("DESTRUCTIVE"), "{joined}");
+        assert!(
+            !joined.contains("not classified"),
+            "agent must not render the unknown-tool warning:\n{joined}"
+        );
+        assert!(joined.contains("Action"), "{joined}");
+        assert!(joined.contains("start"), "{joined}");
+        assert!(joined.contains("explore"), "{joined}");
+        assert!(joined.contains("map the workspace"), "{joined}");
+    }
+
+    #[test]
+    fn agent_status_and_peek_are_benign() {
+        for action in ["status", "peek", "list"] {
+            let request = ApprovalRequest::new(
+                "test-id",
+                "agent",
+                "Inspect a sub-agent",
+                &json!({"action": action, "agent_id": "agent_1"}),
+                "tool:agent",
+            );
+            assert_eq!(request.risk, RiskLevel::Benign, "{action}");
+            assert_eq!(request.stakes(), ApprovalStakes::Routine, "{action}");
+        }
+    }
+
     #[test]
     fn render_benign_includes_review_badge_and_selection_hint() {
         let view = ApprovalView::new(benign_request());
         let lines = render_lines(&view, 100, 40);
         let joined = lines.join("\n");
         assert!(joined.contains("REVIEW"), "missing REVIEW badge:\n{joined}");
-        assert!(joined.contains("Choose"), "benign hint missing:\n{joined}");
+        assert_approval_key_badges_visible(&joined);
+        // The selection prose moved into the per-option key badges; the footer
+        // keeps only the escape-hatch hints.
         assert!(
-            joined.contains("Enter selected option"),
-            "benign selection hint missing:\n{joined}"
+            joined.contains("Pg↑/↓ review"),
+            "footer controls hint missing:\n{joined}"
         );
         assert!(joined.contains("read_file"));
     }
 
     #[test]
-    fn render_destructive_shows_warning_badge_and_one_step_hint() {
+    fn approval_footer_hints_use_muted_contrast_tier() {
+        // #3380: the footer key hints ("Pg↑/↓ review · Alt+V/⌥V details · Esc abort")
+        // must render one contrast tier above TEXT_HINT — TEXT_MUTED, the same
+        // color the app-wide ActionHint modal footers use for labels.
+        use crate::palette;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let view = ApprovalView::new(benign_request());
+        let (w, h) = (100u16, 40u16);
+        let mut buf = Buffer::empty(Rect::new(0, 0, w, h));
+        ModalView::render(&view, Rect::new(0, 0, w, h), &mut buf);
+
+        let target: Vec<String> = "Pg↑/↓ review".chars().map(|c| c.to_string()).collect();
+        let mut found = None;
+        for y in 0..h {
+            let symbols: Vec<String> = (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect();
+            for x in 0..=(w as usize - target.len()) {
+                if symbols[x..x + target.len()] == target[..] {
+                    found = Some((u16::try_from(x).expect("column fits"), y));
+                }
+            }
+        }
+        let (x, y) = found.expect("footer key hints must be rendered");
+        assert_eq!(
+            buf[(x, y)].fg,
+            palette::TEXT_MUTED,
+            "footer key hints must use the muted (not hint) contrast tier"
+        );
+    }
+
+    #[test]
+    fn render_elevated_write_is_calm_and_compact() {
+        // Ordinary state-touching work (a file write) renders as a calm
+        // APPROVAL ask: no DESTRUCTIVE badge, no policy dossier, no
+        // impact/category taxonomy — that detail stays one details chord away.
         let view = ApprovalView::new(destructive_request());
+        let lines = render_lines(&view, 100, 40);
+        let joined = lines.join("\n");
+        assert!(joined.contains("APPROVAL"), "missing calm badge:\n{joined}");
+        assert!(
+            !joined.contains("DESTRUCTIVE"),
+            "routine write must not scream DESTRUCTIVE:\n{joined}"
+        );
+        assert_approval_key_badges_visible(&joined);
+        assert!(
+            joined.contains("Pg↑/↓ review"),
+            "footer controls hint missing:\n{joined}"
+        );
+        assert!(
+            !joined.contains("active approval policy"),
+            "policy prose is critical-only:\n{joined}"
+        );
+        assert!(
+            !joined.contains("Impact:"),
+            "impact dossier is critical-only:\n{joined}"
+        );
+        assert!(
+            !joined.contains("Type:"),
+            "category taxonomy is critical-only:\n{joined}"
+        );
+        assert!(joined.contains("write_file"));
+    }
+
+    #[test]
+    fn render_critical_shows_warning_badge_and_policy_semantics() {
+        // Genuinely destructive work keeps the strong styling and the
+        // policy/cancel semantics.
+        let view = ApprovalView::new(critical_request());
         let lines = render_lines(&view, 100, 40);
         let joined = lines.join("\n");
         assert!(
             joined.contains("DESTRUCTIVE"),
             "missing DESTRUCTIVE badge:\n{joined}"
         );
+        assert_approval_key_badges_visible(&joined);
         assert!(
-            joined.contains("Enter selected option"),
-            "destructive hint missing:\n{joined}"
+            joined.contains("active approval policy"),
+            "missing policy/review-rule semantics:\n{joined}"
         );
-        assert!(joined.contains("write_file"));
+        assert!(
+            joined.contains("Deny rejects only this tool call"),
+            "missing deny-vs-abort semantics:\n{joined}"
+        );
+        assert!(joined.contains("rm -rf"));
     }
 
     #[test]
-    fn render_destructive_zh_hans_localizes_security_copy() {
+    fn render_elevated_zh_hans_is_calm_and_localized() {
         let view = ApprovalView::new_for_locale(destructive_request(), Locale::ZhHans);
+        let lines = render_lines(&view, 100, 40);
+        let joined = compact_rendered_text(&lines);
+        assert!(
+            joined.contains("需要批准"),
+            "missing zh calm badge:\n{joined}"
+        );
+        assert!(
+            !joined.contains("破坏性"),
+            "routine write must not use the destructive zh badge:\n{joined}"
+        );
+        assert!(
+            joined.contains("Pg↑/↓回看"),
+            "missing zh footer controls hint:\n{joined}"
+        );
+        assert!(
+            !joined.contains("影响："),
+            "impact dossier is critical-only:\n{joined}"
+        );
+        assert!(
+            joined.contains("仅允许本次"),
+            "missing zh approve option:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn approval_review_and_save_hints_stay_on_one_row_at_80_columns() {
+        for &locale in Locale::shipped() {
+            let view = ApprovalView::new_for_locale(destructive_request(), locale);
+            let lines = render_lines(&view, 80, 40);
+            let review_rows = lines
+                .iter()
+                .filter(|line| line.contains("Pg↑/↓"))
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                review_rows.len(),
+                1,
+                "expected one approval review-hint row for {locale:?}:\n{}",
+                lines.join("\n")
+            );
+            let controls = review_rows[0];
+            assert!(
+                controls.contains("Esc") && controls.contains(" s "),
+                "review, abort, and save-rule hints wrapped for {locale:?}:\n{}",
+                lines.join("\n")
+            );
+        }
+    }
+
+    #[test]
+    fn render_critical_zh_hans_localizes_security_copy() {
+        let view = ApprovalView::new_for_locale(critical_request(), Locale::ZhHans);
         let lines = render_lines(&view, 100, 40);
         let joined = compact_rendered_text(&lines);
         assert!(
@@ -1943,27 +3840,15 @@ mod tests {
             "missing zh risk badge:\n{joined}"
         );
         assert!(
-            joined.contains("选择："),
-            "missing zh selection prefix:\n{joined}"
-        );
-        assert!(
-            joined.contains("Enter执行选中项，或直接按y/a/d"),
-            "missing zh one-step hint:\n{joined}"
-        );
-        assert!(
-            joined.contains("文件写入"),
-            "missing zh category:\n{joined}"
-        );
-        assert!(
             joined.contains("影响："),
             "missing zh impact label:\n{joined}"
         );
         assert!(
-            joined.contains("写入：src/main.rs"),
-            "missing zh impact path:\n{joined}"
+            joined.contains("规则:"),
+            "missing zh policy semantics:\n{joined}"
         );
         assert!(
-            joined.contains("仅本次批准"),
+            joined.contains("仅允许本次"),
             "missing zh approve option:\n{joined}"
         );
     }
@@ -2357,6 +4242,121 @@ mod tests {
     }
 
     // ========================================================================
+    // Workflow elevated plan approval card (#4126)
+    // ========================================================================
+
+    #[test]
+    fn workflow_tool_is_agent_category_and_shows_plan_card_fields() {
+        assert_eq!(get_tool_category("workflow"), ToolCategory::Agent);
+        let request = ApprovalRequest::new(
+            "wf-1",
+            "workflow",
+            "Launch workflow",
+            &json!({
+                "action": "start",
+                "plan": {
+                    "goal": "ship the fix",
+                    "risk": "writes",
+                    "token_budget": 80_000,
+                    "children": [
+                        {
+                            "id": "impl",
+                            "label": "builder",
+                            "prompt": "edit files",
+                            "type": "implementer",
+                            "mode": "read_write"
+                        }
+                    ]
+                }
+            }),
+            "tool:workflow",
+        );
+        assert_eq!(request.category, ToolCategory::Agent);
+        let details = request.prominent_detail_items(Locale::En);
+        let labels: Vec<_> = details.iter().map(|d| d.label.as_str()).collect();
+        assert!(labels.contains(&"Goal"), "{labels:?}");
+        assert!(labels.contains(&"Children"), "{labels:?}");
+        assert!(labels.contains(&"Writes"), "{labels:?}");
+        assert!(labels.contains(&"Shell"), "{labels:?}");
+        assert!(labels.contains(&"Network"), "{labels:?}");
+        assert!(labels.contains(&"Budget"), "{labels:?}");
+        assert!(
+            details
+                .iter()
+                .any(|d| d.label == "Goal" && d.value.contains("ship the fix")),
+            "{details:?}"
+        );
+        assert!(
+            details
+                .iter()
+                .any(|d| d.label == "Writes" && d.value == "yes"),
+            "{details:?}"
+        );
+        assert!(
+            request
+                .impacts
+                .iter()
+                .any(|i| i.contains("Approve to launch")),
+            "{:?}",
+            request.impacts
+        );
+
+        let view = ApprovalView::new(request);
+        assert!(view.is_workflow_plan_approval());
+        assert_eq!(view.current_decision(), ReviewDecision::Approved);
+    }
+
+    #[test]
+    fn workflow_plan_card_edit_plan_and_cancel_keys() {
+        let request = ApprovalRequest::new(
+            "wf-2",
+            "workflow",
+            "Launch workflow",
+            &json!({
+                "action": "start",
+                "plan": {
+                    "goal": "risky",
+                    "risk": "elevated",
+                    "children": [{ "prompt": "go", "type": "implementer" }]
+                }
+            }),
+            "tool:workflow",
+        );
+        let mut view = ApprovalView::new(request);
+        // [2 / e] → Edit plan → Denied
+        let action = view.handle_key(create_key_event(KeyCode::Char('e')));
+        match action {
+            ViewAction::EmitAndClose(ViewEvent::ApprovalDecision { decision, .. }) => {
+                assert_eq!(decision, ReviewDecision::Denied);
+            }
+            other => panic!("expected edit-plan denial, got {other:?}"),
+        }
+
+        let request = ApprovalRequest::new(
+            "wf-3",
+            "workflow",
+            "Launch workflow",
+            &json!({
+                "action": "start",
+                "plan": {
+                    "goal": "risky",
+                    "risk": "elevated",
+                    "children": [{ "prompt": "go", "type": "implementer" }]
+                }
+            }),
+            "tool:workflow",
+        );
+        let mut view = ApprovalView::new(request);
+        let action = view.handle_key(create_key_event(KeyCode::Char('3')));
+        match action {
+            ViewAction::EmitAndClose(ViewEvent::ApprovalDecision { decision, .. }) => {
+                assert_eq!(decision, ReviewDecision::Abort);
+            }
+            other => panic!("expected cancel abort, got {other:?}"),
+        }
+    }
+
+    // ========================================================================
     // ApprovalMode Tests
     // ========================================================================
 
@@ -2382,5 +4382,100 @@ mod tests {
             Some(ApprovalMode::Never)
         );
         assert_eq!(ApprovalMode::from_config_value("unknown"), None);
+    }
+
+    #[test]
+    fn canonical_bash_keeps_original_name_but_uses_shell_approval_semantics() {
+        let request = ApprovalRequest::new_with_intent(
+            "bash-1",
+            "Bash",
+            "Run command",
+            &json!({"action": "run", "command": "cargo test", "cwd": "/workspace"}),
+            "tool:Bash",
+            None,
+            Path::new("/workspace"),
+        );
+
+        assert_eq!(request.tool_name, "Bash");
+        assert_eq!(request.category, ToolCategory::Shell);
+        assert_eq!(request.risk, RiskLevel::Destructive);
+        assert_eq!(
+            request.persistent_ask_rules,
+            vec![ToolAskRule::exec_shell("cargo test")]
+        );
+        let details = request.prominent_detail_items(Locale::En);
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.label == "Command" && detail.value == "cargo test")
+        );
+    }
+
+    #[test]
+    fn canonical_file_mutations_get_legacy_previews_and_scoped_ask_rules() {
+        let cases = [
+            (
+                "write",
+                json!({
+                    "action": "write",
+                    "path": "/workspace/src/lib.rs",
+                    "content": "pub fn whale() {}\n"
+                }),
+                "write_file",
+                "+ pub fn whale() {}",
+            ),
+            (
+                "edit",
+                json!({
+                    "action": "edit",
+                    "path": "/workspace/src/lib.rs",
+                    "search": "old",
+                    "replace": "new"
+                }),
+                "edit_file",
+                "- old",
+            ),
+            (
+                "patch",
+                json!({
+                    "action": "patch",
+                    "patch": "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+                }),
+                "apply_patch",
+                "-old",
+            ),
+        ];
+
+        for (action, params, rule_tool, preview_fragment) in cases {
+            let request = ApprovalRequest::new_with_intent(
+                action,
+                "File",
+                "Mutate file",
+                &params,
+                "tool:File",
+                None,
+                Path::new("/workspace"),
+            );
+            assert_eq!(request.tool_name, "File", "{action}");
+            assert_eq!(request.category, ToolCategory::FileWrite, "{action}");
+            assert_eq!(request.risk, RiskLevel::Destructive, "{action}");
+            assert!(
+                request
+                    .persistent_ask_rules
+                    .iter()
+                    .any(|rule| rule.tool == rule_tool),
+                "{action}: {:?}",
+                request.persistent_ask_rules
+            );
+            let preview = request
+                .prominent_detail_items(Locale::En)
+                .into_iter()
+                .find(|detail| detail.label == "Preview")
+                .expect("canonical file mutation must show a preview");
+            assert!(
+                preview.value.contains(preview_fragment),
+                "{action}: {preview:?}"
+            );
+        }
     }
 }

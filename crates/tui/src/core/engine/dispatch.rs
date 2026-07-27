@@ -7,21 +7,24 @@
 //!   (`final_tool_input`, `parse_tool_input`, fenced/JSON segment helpers).
 //! * The `multi_tool_use.parallel` payload parser.
 //! * Policy predicates the turn loop consults — when a batch can run in
-//!   parallel, when an `update_plan` step should stop the turn, when a Plan
-//!   prompt should force a plan-first hop, and the small set of read-only
-//!   MCP tools that are safe to run in parallel.
+//!   parallel and the small set of read-only MCP tools that are safe to run
+//!   in parallel.
 //! * The tool execution plan/outcome types the batch driver passes around.
 //!
 //! All items are `pub(super)`-only: the public engine surface (Op/Event,
 //! `EngineHandle`, `spawn_engine`) stays in `core/engine.rs`.
 
+use std::collections::HashMap;
+
 use serde_json::json;
 
 use crate::models::{Tool, ToolCaller};
-use crate::tools::spec::{ToolError, ToolResult};
-use crate::tui::app::AppMode;
+use crate::tools::spec::{
+    ResourceClaim, ToolError, ToolExecutionOutcome, ToolResult, schedule_non_conflicting,
+};
 
 use super::ToolUseState;
+use super::read_repeat_guard::{ReadRepeatGuard, ReadRepeatOccurrence};
 
 // === Types ============================================================
 
@@ -32,7 +35,7 @@ pub(super) struct ToolExecOutcome {
     pub(super) name: String,
     pub(super) input: serde_json::Value,
     pub(super) started_at: std::time::Instant,
-    pub(super) result: Result<ToolResult, ToolError>,
+    pub(super) terminal: ToolExecutionOutcome,
 }
 
 #[derive(Debug, Clone)]
@@ -45,9 +48,11 @@ pub(super) struct ToolExecutionPlan {
     pub(super) interactive: bool,
     pub(super) approval_required: bool,
     pub(super) approval_description: String,
+    pub(super) approval_force_prompt: bool,
     pub(super) supports_parallel: bool,
     pub(super) read_only: bool,
     pub(super) detached_start: bool,
+    pub(super) resources: Vec<ResourceClaim>,
     pub(super) blocked_error: Option<ToolError>,
     pub(super) guard_result: Option<ToolResult>,
 }
@@ -55,6 +60,18 @@ pub(super) struct ToolExecutionPlan {
 pub(super) enum ToolExecutionBatch {
     Parallel(Vec<ToolExecutionPlan>),
     Serial(Box<ToolExecutionPlan>),
+}
+
+pub(super) struct CoalescedReadPlan {
+    pub(super) leader_index: usize,
+    pub(super) follower: ToolExecutionPlan,
+    pub(super) occurrence: ReadRepeatOccurrence,
+}
+
+pub(super) struct ReadRepeatExecutionPlan {
+    pub(super) executable: Vec<ToolExecutionPlan>,
+    pub(super) coalesced: Vec<CoalescedReadPlan>,
+    pub(super) occurrences: HashMap<usize, ReadRepeatOccurrence>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -69,6 +86,60 @@ pub(super) struct ParallelToolResultEntry {
 #[derive(Debug, serde::Serialize)]
 pub(super) struct ParallelToolResult {
     pub(super) results: Vec<ParallelToolResultEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ToolApprovalStamp {
+    ApprovedByUser,
+    ApprovedWithPolicy,
+}
+
+impl ToolApprovalStamp {
+    fn decision(self) -> &'static str {
+        match self {
+            Self::ApprovedByUser => "approved_by_user",
+            Self::ApprovedWithPolicy => "approved_with_policy",
+        }
+    }
+
+    fn model_visible_note(self) -> &'static str {
+        match self {
+            Self::ApprovedByUser => {
+                "[approval] This tool call required approval and was approved by the user before execution."
+            }
+            Self::ApprovedWithPolicy => {
+                "[approval] This tool call required approval and was approved by the user with an adjusted execution policy before execution."
+            }
+        }
+    }
+}
+
+pub(super) fn stamp_tool_result_approval(result: &mut ToolResult, approval: ToolApprovalStamp) {
+    let approval_metadata = json!({
+        "required": true,
+        "decision": approval.decision(),
+        "model_visible": true,
+    });
+    let metadata = result.metadata.get_or_insert_with(|| json!({}));
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert("approval".to_string(), approval_metadata);
+    } else {
+        let prior = std::mem::replace(metadata, json!({}));
+        if let Some(object) = metadata.as_object_mut() {
+            object.insert("_prior".to_string(), prior);
+            object.insert("approval".to_string(), approval_metadata);
+        }
+    }
+
+    let note = approval.model_visible_note();
+    if result.content.starts_with("[approval] ") {
+        return;
+    }
+    if result.content.is_empty() {
+        result.content = note.to_string();
+    } else {
+        result.content = format!("{note}\n\n{}", result.content);
+    }
 }
 
 // Hold the lock guard for the duration of a tool execution.
@@ -109,8 +180,17 @@ fn mentions_mode_word(lower: &str) -> bool {
         .any(|word| word == "mode" || word == "modes")
 }
 
+#[cfg(test)]
 pub(super) fn format_tool_error(err: &ToolError, tool_name: &str) -> String {
-    match err {
+    format_tool_error_with_schema(err, tool_name, None)
+}
+
+pub(super) fn format_tool_error_with_schema(
+    err: &ToolError,
+    tool_name: &str,
+    input_schema: Option<&serde_json::Value>,
+) -> String {
+    let message = match err {
         ToolError::InvalidInput { message } => {
             format!("Invalid input for tool '{tool_name}': {message}")
         }
@@ -125,12 +205,13 @@ pub(super) fn format_tool_error(err: &ToolError, tool_name: &str) -> String {
         ToolError::Timeout { seconds } => format!(
             "Tool '{tool_name}' timed out after {seconds}s. Try a narrower scope or a longer timeout."
         ),
+        ToolError::Cancelled { message } => message.clone(),
         ToolError::NotAvailable { message } => {
             let lower = message.to_ascii_lowercase();
             // #3020: Pass through self-explanatory messages that already name the
             // cause (mode switch, allow_shell, feature flag).  Avoids appending a
             // conflicting "Check mode, feature flags" suffix on top of
-            // "switch to Agent or YOLO mode" which already gives the recovery path.
+            // "switch to Act mode" which already gives the recovery path.
             if lower.contains("current tool catalog")
                 || lower.contains("did you mean:")
                 || mentions_mode_word(&lower)
@@ -158,7 +239,124 @@ pub(super) fn format_tool_error(err: &ToolError, tool_name: &str) -> String {
                 )
             }
         }
+    };
+
+    let message = with_transient_tool_fallback_hint(message, err, tool_name);
+    let (category, bad_field) = match err {
+        ToolError::InvalidInput { .. } => ("invalid_input", None),
+        ToolError::MissingField { field } => ("missing_field", Some(field.as_str())),
+        ToolError::PathEscape { .. } => ("path_escape", Some("path")),
+        ToolError::NotAvailable { .. } => ("tool_not_available", Some("tool_name")),
+        _ => return message,
+    };
+    let valid_shape = input_schema.cloned().unwrap_or_else(|| {
+        serde_json::json!({
+            "type": "object",
+            "guidance": format!("Use the advertised input schema for '{tool_name}'")
+        })
+    });
+    let feedback = serde_json::json!({
+        "category": category,
+        "bad_field": bad_field,
+        "valid_shape": valid_shape,
+        "retryable": true,
+        "side_effect_status": "not_started"
+    });
+    format!("{message}\nTool validation feedback: {feedback}")
+}
+
+fn with_transient_tool_fallback_hint(message: String, err: &ToolError, tool_name: &str) -> String {
+    if message_already_has_recovery_hint(&message) {
+        return message;
     }
+
+    let Some(hint) = transient_tool_fallback_hint(err, tool_name, &message) else {
+        return message;
+    };
+
+    format!("{message} Fallback: {hint}")
+}
+
+fn message_already_has_recovery_hint(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("recovery:") || lower.contains("fallback:")
+}
+
+fn transient_tool_fallback_hint(
+    err: &ToolError,
+    tool_name: &str,
+    formatted_message: &str,
+) -> Option<&'static str> {
+    if !is_transient_tool_failure(err, formatted_message) {
+        return None;
+    }
+
+    let lower_tool = tool_name.to_ascii_lowercase();
+    if lower_tool.contains("web_search")
+        || lower_tool.contains("web_run")
+        || lower_tool == "web.run"
+    {
+        return Some(
+            "after one retry, switch to a direct URL/open/fetch path or cached context instead of repeating the same search.",
+        );
+    }
+
+    if lower_tool.contains("fetch_url") {
+        return Some(
+            "after one retry, try a narrower URL/source, use search results or cached context, or state the access limit instead of repeating the same request.",
+        );
+    }
+
+    if lower_tool.contains("file_search") || lower_tool.contains("grep") {
+        return Some(
+            "after one retry, narrow the query/path or inspect likely files directly instead of repeating the same search unchanged.",
+        );
+    }
+
+    if lower_tool.contains("exec_shell")
+        || lower_tool.contains("run_tests")
+        || lower_tool.contains("run_verifiers")
+    {
+        return Some(
+            "after one retry, narrow the command/scope, increase timeout only for expected long runs, or switch to file-level evidence.",
+        );
+    }
+
+    if lower_tool.contains("agent") {
+        return Some(
+            "after one retry, reduce delegated scope or continue in the parent context instead of repeatedly spawning the same agent.",
+        );
+    }
+
+    Some(
+        "after one retry, choose a different tool or narrower strategy instead of repeating the same call unchanged.",
+    )
+}
+
+fn is_transient_tool_failure(err: &ToolError, formatted_message: &str) -> bool {
+    if matches!(err, ToolError::Timeout { .. }) {
+        return true;
+    }
+
+    if !matches!(err, ToolError::ExecutionFailed { .. }) {
+        return false;
+    }
+
+    let lower = formatted_message.to_ascii_lowercase();
+    [
+        "timeout",
+        "timed out",
+        "request failed",
+        "connection",
+        "network",
+        "http 429",
+        "rate limit",
+        "http 5",
+        "anti-bot",
+        "captcha",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 // === Streaming-buffer parsing =========================================
@@ -176,6 +374,9 @@ pub(super) fn format_tool_error(err: &ToolError, tool_name: &str) -> String {
 ///      (the per-delta parser has already mirrored the most recent valid
 ///      partial parse into `tool_state.input`).
 pub(super) fn final_tool_input(state: &ToolUseState) -> serde_json::Value {
+    if state.input_parse_error.is_some() {
+        return malformed_tool_arguments_input(&state.input_buffer);
+    }
     if !state.input_buffer.trim().is_empty()
         && let Some(parsed) = parse_tool_input(&state.input_buffer)
     {
@@ -210,11 +411,20 @@ pub(super) fn parse_tool_input(buffer: &str) -> Option<serde_json::Value> {
         .and_then(|segment| serde_json::from_str::<serde_json::Value>(&segment).ok())
 }
 
+pub(super) fn malformed_tool_arguments_input(buffer: &str) -> serde_json::Value {
+    json!({ "raw_arguments": buffer })
+}
+
+pub(super) fn malformed_tool_arguments_error(buffer: &str) -> String {
+    format!("malformed tool arguments from model: expected valid JSON, got {buffer:?}")
+}
+
 fn strip_code_fences(text: &str) -> Option<String> {
     if !text.contains("```") {
         return None;
     }
-    let mut lines = Vec::new();
+    let line_count = text.lines().count();
+    let mut lines = Vec::with_capacity(line_count);
     for line in text.lines() {
         if line.trim_start().starts_with("```") {
             continue;
@@ -302,7 +512,17 @@ pub(super) fn parse_parallel_tool_calls(
 
 #[cfg(test)]
 pub(super) fn should_parallelize_tool_batch(plans: &[ToolExecutionPlan]) -> bool {
-    !plans.is_empty() && plans.iter().all(tool_plan_can_join_parallel_batch)
+    if plans.is_empty() || !plans.iter().all(tool_plan_can_join_parallel_batch) {
+        return false;
+    }
+    schedule_non_conflicting(
+        plans
+            .iter()
+            .map(|plan| ((), plan.resources.clone()))
+            .collect(),
+    )
+    .len()
+        == 1
 }
 
 pub(super) fn tool_plan_is_parallel_safe(plan: &ToolExecutionPlan) -> bool {
@@ -315,87 +535,88 @@ pub(super) fn tool_plan_can_join_parallel_batch(plan: &ToolExecutionPlan) -> boo
             || (plan.detached_start && !plan.approval_required && !plan.interactive))
 }
 
+/// Register finalized read-only calls and remove same-batch duplicates from
+/// physical execution. Every removed follower is retained so the turn loop can
+/// fan the leader's terminal result back out under the follower's own tool ID.
+pub(super) fn plan_read_repeat_execution(
+    plans: Vec<ToolExecutionPlan>,
+    guard: &mut ReadRepeatGuard,
+) -> ReadRepeatExecutionPlan {
+    let mut executable = Vec::with_capacity(plans.len());
+    let mut coalesced = Vec::new();
+    let mut occurrences = HashMap::new();
+    let mut leaders = HashMap::new();
+
+    for mut plan in plans {
+        let eligible = plan.read_only
+            && !plan.interactive
+            && !plan.detached_start
+            && plan.blocked_error.is_none()
+            && plan.guard_result.is_none();
+        if !eligible {
+            // A write, interactive call, detached start, denial, or other
+            // execution barrier may change what a later read observes. Do not
+            // subscribe a post-barrier read to a pre-barrier result.
+            leaders.clear();
+            executable.push(plan);
+            continue;
+        }
+
+        let occurrence = guard.register(&plan.name, &plan.input);
+        occurrences.insert(plan.index, occurrence.clone());
+
+        if let Some(receipt) = guard.prior_receipt(&occurrence) {
+            plan.guard_result = Some(receipt);
+            executable.push(plan);
+            continue;
+        }
+
+        if let Some(leader_index) = leaders.get(&occurrence.key).copied() {
+            coalesced.push(CoalescedReadPlan {
+                leader_index,
+                follower: plan,
+                occurrence,
+            });
+        } else {
+            leaders.insert(occurrence.key.clone(), plan.index);
+            executable.push(plan);
+        }
+    }
+
+    ReadRepeatExecutionPlan {
+        executable,
+        coalesced,
+        occurrences,
+    }
+}
+
 pub(super) fn plan_tool_execution_batches(
     plans: Vec<ToolExecutionPlan>,
 ) -> Vec<ToolExecutionBatch> {
     let mut batches = Vec::new();
-    let mut parallel_chunk = Vec::new();
+    let mut parallel_candidates = Vec::new();
+
+    let flush_parallel = |parallel_candidates: &mut Vec<_>,
+                          batches: &mut Vec<ToolExecutionBatch>| {
+        for chunk in schedule_non_conflicting(std::mem::take(parallel_candidates)) {
+            batches.push(ToolExecutionBatch::Parallel(chunk));
+        }
+    };
 
     for plan in plans {
         if tool_plan_can_join_parallel_batch(&plan) {
-            parallel_chunk.push(plan);
+            let resources = plan.resources.clone();
+            parallel_candidates.push((plan, resources));
             continue;
         }
 
-        if !parallel_chunk.is_empty() {
-            batches.push(ToolExecutionBatch::Parallel(std::mem::take(
-                &mut parallel_chunk,
-            )));
-        }
+        flush_parallel(&mut parallel_candidates, &mut batches);
         batches.push(ToolExecutionBatch::Serial(Box::new(plan)));
     }
 
-    if !parallel_chunk.is_empty() {
-        batches.push(ToolExecutionBatch::Parallel(parallel_chunk));
-    }
+    flush_parallel(&mut parallel_candidates, &mut batches);
 
     batches
-}
-
-pub(super) fn should_stop_after_plan_tool(
-    mode: AppMode,
-    tool_name: &str,
-    result: &Result<ToolResult, ToolError>,
-) -> bool {
-    mode == AppMode::Plan && tool_name == "update_plan" && result.is_ok()
-}
-
-pub(super) fn should_force_update_plan_first(mode: AppMode, content: &str) -> bool {
-    if mode != AppMode::Plan {
-        return false;
-    }
-
-    let lower = content.to_ascii_lowercase();
-    let asks_for_direct_plan = [
-        "quick plan",
-        "short plan",
-        "simple plan",
-        "3-step plan",
-        "3 step plan",
-        "three-step plan",
-        "three step plan",
-        "high-level plan",
-        "high level plan",
-        "give me a plan",
-        "make a plan",
-        "outline a plan",
-        "draft a plan",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle));
-
-    if !asks_for_direct_plan {
-        return false;
-    }
-
-    let asks_for_repo_exploration = [
-        "inspect the repo",
-        "inspect the code",
-        "explore the repo",
-        "search the repo",
-        "read the code",
-        "review the code",
-        "analyze the code",
-        "investigate",
-        "look through",
-        "understand the current",
-        "ground it in the codebase",
-        "based on the codebase",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle));
-
-    !asks_for_repo_exploration
 }
 
 pub(super) fn mcp_tool_is_parallel_safe(name: &str) -> bool {

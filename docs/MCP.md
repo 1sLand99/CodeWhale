@@ -1,16 +1,70 @@
 # MCP (External Tool Servers)
 
-codewhale can load additional tools via MCP (Model Context Protocol). MCP servers are local processes that the TUI starts and communicates with over stdio.
+codewhale can load additional tools via MCP (Model Context Protocol). MCP servers can be local stdio processes that the TUI starts, or remote URL-based servers that speak Streamable HTTP with legacy SSE fallback.
 
 Browsing note:
-- `web.run` is the canonical built-in browsing tool.
-- `web_search` remains available as a compatibility alias for older prompts and integrations.
+- `Web` is the canonical, deferred built-in browsing tool; it provides
+  `search`, `fetch`, and `wait` actions when network policy permits.
+- `web_search`, `fetch_url`, and `wait_for_dev_server` are hidden replay-only
+  aliases. New prompts and integrations should use `Web`.
 
 Server mode note:
 - `codewhale-tui serve --mcp` runs the MCP stdio server.
 - `codewhale-tui serve --http` runs the runtime HTTP/SSE API (separate mode).
 - The `codewhale` dispatcher exposes `codewhale mcp-server` as an equivalent stdio
   entrypoint used by the split CLI.
+
+## Setup wizard vs manual MCP setup (#3407)
+
+The constitution-first `/setup` wizard includes an optional **Tools and MCP**
+step. That step is discovery/readiness only:
+
+| Wizard can do | Still requires manual / explicit action |
+| --- | --- |
+| Show configured servers as `healthy` / `needs_config` / `off` | Start or connect MCP servers |
+| Report config path presence (global + project) | Write or edit `mcp.json` contents |
+| Safe static health probe (missing command/url, broken absolute path, missing bearer env) | `codewhale mcp validate`, live connect, OAuth login |
+| Point at safe on-ramps (`/mcp`, `codewhale mcp init`, `codewhale doctor`) | Install community skills, trust skills, enable plugins |
+| Share Hotbar source counts from the same skill/MCP adapters (#3399) | Bind Hotbar slots (Hotbar step / `H`) |
+| Record optional/`needs_action` setup_state without blocking first-run | Anything that spawns processes or installs packages |
+
+Empty inventory is **not** an error: first-run users see “nothing configured
+yet, that’s fine.” Failing or incomplete configured servers surface as
+`needs_config` with an actionable hint and never block setup completion.
+Enumeration never executes MCP/plugin commands beyond the static probe.
+Summaries redact commands, args, env, headers, and tokens.
+
+`codewhale doctor` reports MCP/skills/tools/plugins health with the same
+optional-surface intent (paths, counts, static checks) so wizard and doctor
+stay consistent.
+
+## Plugin-contributed MCP
+
+A reviewed local plugin bundle may contribute MCP servers without creating a
+second transport or approval system. The servers use the same MCP manager,
+tool approval, resource, prompt, timeout, and network-policy paths documented
+here, and appear under namespaced `<plugin>-<server>` identities.
+
+The bundle boundary is intentionally stricter than user-authored `mcp.json`:
+unknown fields and ambiguous transports fail closed; stdio environment values
+must be exact environment-source references; remote literal headers and
+secret-bearing URLs are rejected; declared network hosts must exactly match
+the normalized endpoint host set; and redirects remain on the reviewed origin.
+Reviewed plugin remotes also bypass ambient HTTP proxy configuration entirely;
+proxy credentials and proxy-observed traffic are not part of the v1 review.
+The plugin review discloses local host-user authority, structural argv,
+environment provenance, endpoint, auth source names, scopes, and tool filters
+without reading or printing secret values.
+
+Trust stages reviewed content but does not enable it. Enablement attaches that
+staged snapshot to the current workspace's MCP pool. Disable, revoke, and other
+cross-process generation changes remove catalog entries, cancel in-flight
+operations, and terminate plugin stdio children. Source or staged-tree drift is
+fully revalidated before each dispatch/catalogue boundary and fails the next
+boundary closed; v0.9.1 does not continuously hash mutable trees during an
+already-running call and therefore does not promise drift-triggered mid-call
+cancellation. MCP subscriptions are not exposed through plugin bundles. See
+[Plugin bundles](PLUGIN_BUNDLES.md) for the complete lifecycle contract.
 
 ## Bootstrap MCP Config
 
@@ -29,6 +83,9 @@ codewhale-tui mcp list
 codewhale-tui mcp tools [server]
 codewhale-tui mcp add <name> --command "<cmd>" --arg "<arg>"
 codewhale-tui mcp add <name> --url "http://localhost:3000/mcp"
+codewhale-tui mcp add <name> --url "https://example.com/mcp" --bearer-token-env-var MCP_TOKEN
+codewhale-tui mcp login <name>
+codewhale-tui mcp logout <name>
 codewhale-tui mcp enable <name>
 codewhale-tui mcp disable <name>
 codewhale-tui mcp remove <name>
@@ -49,6 +106,8 @@ Supported in-TUI actions:
 /mcp init --force
 /mcp add stdio <name> <command> [args...]
 /mcp add http <name> <url>
+/mcp login <name> [--scope scope]
+/mcp logout <name>
 /mcp enable <name>
 /mcp disable <name>
 /mcp remove <name>
@@ -61,23 +120,92 @@ manager snapshot. Config edits made from the TUI are written immediately, but
 the model-visible MCP tool pool is not hot-reloaded; the manager marks this as
 restart-required until the TUI is restarted.
 
+## Remote HTTP Auth
+
+URL-based MCP servers can use static headers, env-derived headers, bearer-token
+env vars, or OAuth. Authorization precedence is conservative:
+
+1. `headers` and `env_headers` are applied first.
+2. `bearer_token_env_var` adds `Authorization: Bearer <env value>` when no
+   Authorization header was already set.
+3. Stored OAuth credentials are used only when no Authorization header exists.
+
+For bearer-token auth, prefer env-backed config:
+
+```json
+{
+  "servers": {
+    "remote": {
+      "url": "https://example.com/mcp",
+      "bearer_token_env_var": "EXAMPLE_MCP_TOKEN"
+    }
+  }
+}
+```
+
+For generic remote MCP OAuth, add the URL server and run login:
+
+```bash
+codewhale-tui mcp add remote --url "https://example.com/mcp"
+codewhale-tui mcp login remote
+```
+
+Codewhale discovers the server OAuth metadata, opens the authorization URL in
+your browser, listens on a local callback, exchanges the code, and stores the
+token response through the Codewhale secrets backend. Stored OAuth tokens are
+looked up by server name plus URL and refreshed when possible before requests.
+During login, the CLI prints the authorization URL and a waiting status while
+the local callback listener is active. If a URL-based server returns 401 or
+Unauthorized during connect/discovery, `codewhale mcp connect <name>` reports
+that OAuth authentication is required and points to
+`codewhale mcp login <name>`. Resource helper listings also surface an
+`authentication_required` entry for auth-shaped failures instead of silently
+looking empty.
+
+Optional OAuth fields:
+
+```json
+{
+  "servers": {
+    "remote": {
+      "url": "https://example.com/mcp",
+      "scopes": ["tools/read"],
+      "oauth": {
+        "client_id": "public-client-id"
+      },
+      "oauth_resource": "https://example.com"
+    }
+  }
+}
+```
+
+User-level config can set callback behavior when the provider requires a fixed
+redirect:
+
+```toml
+mcp_oauth_callback_port = 1455
+mcp_oauth_callback_url = "http://127.0.0.1:1455/callback"
+```
+
+These callback fields are ignored from project-scope config overlays.
+
 ## Hugging Face MCP
 
 Hugging Face provides a hosted MCP server for Hub resources, documentation,
-datasets, Spaces, and community tools. CodeWhale does not call Hugging Face's
+datasets, Spaces, and community tools. Codewhale does not call Hugging Face's
 Hub HTTP APIs from `/hf`; it only helps you inspect and set up the MCP config
 that the regular MCP manager will load.
 
 The recommended setup path is Hugging Face's settings-generated configuration:
 
 1. Visit <https://huggingface.co/settings/mcp> while signed in.
-2. Choose the MCP client closest to your CodeWhale config shape and copy the
+2. Choose the MCP client closest to your Codewhale config shape and copy the
    generated server snippet.
 3. Paste the Hugging Face server entry into your resolved MCP config file.
-4. Restart CodeWhale, or run `/mcp reload` for the manager snapshot and restart
+4. Restart Codewhale, or run `/mcp reload` for the manager snapshot and restart
    if the model-visible tool pool still needs to rebuild.
 
-CodeWhale reads both `servers` and `mcpServers`, so settings-generated snippets
+Codewhale reads both `servers` and `mcpServers`, so settings-generated snippets
 can be adapted without changing the rest of the MCP file. A placeholder-only
 shape looks like this:
 
@@ -115,7 +243,7 @@ Official docs: <https://huggingface.co/docs/hub/hf-mcp-server>
 
 Default path:
 
-- `~/.codewhale/mcp.json` (`~/.deepseek/mcp.json` is still read when the CodeWhale file is absent)
+- `~/.codewhale/mcp.json` (`~/.deepseek/mcp.json` is still read when the Codewhale file is absent)
 
 Overrides:
 
@@ -261,12 +389,25 @@ Per-server settings:
 - `required` (bool, optional): startup/connect validation fails if this server cannot initialize.
 - `enabled_tools` (array, optional): allowlist of tool names for this server.
 - `disabled_tools` (array, optional): denylist applied after `enabled_tools`.
+- `url` (string, optional): Streamable HTTP endpoint for a remote MCP server.
+- `transport` (string, optional): set to `"sse"` for legacy SSE endpoints.
+- `headers` (object, optional): literal HTTP headers for URL-based servers.
+- `env_headers` or `env_http_headers` (object, optional): header names mapped to environment variable names.
+- `bearer_token_env_var` (string, optional): environment variable containing a bearer token.
+- `scopes` (array, optional): default OAuth scopes for `mcp login`.
+- `oauth.client_id` (string, optional): pre-registered OAuth client ID.
+- `oauth_resource` (string, optional): resource parameter appended to the authorization URL.
 
 ## Safety Notes
 
-MCP tools now flow through the same tool-approval framework as built-in tools. Read-only MCP helpers (resource/prompt listing and reads) can run without prompts in suggestive approval modes, while side-effectful MCP tools require approval.
+MCP tools flow through the same approval framework as built-in tools. Read-only
+MCP helpers (resource/prompt listing and reads) can run without prompts in Ask
+and Auto-Review when policy permits, while side-effectful MCP tools require
+approval. Full Access does not bypass hard policy holds.
 
 You should still only configure MCP servers you trust, and treat MCP server configuration as equivalent to running code on your machine.
+Avoid committing literal `Authorization` headers. Prefer `env_headers`,
+`bearer_token_env_var`, or OAuth login so secrets stay outside the MCP file.
 
 ## Troubleshooting
 

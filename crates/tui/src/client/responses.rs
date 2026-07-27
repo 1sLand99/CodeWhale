@@ -18,13 +18,16 @@ use crate::models::{
 };
 use crate::tools::schema_sanitize;
 
-use super::{DeepSeekClient, ERROR_BODY_MAX_BYTES, bounded_error_text, system_to_instructions};
+use super::{
+    DeepSeekClient, ERROR_BODY_MAX_BYTES, bounded_error_text, from_api_tool_name,
+    system_to_instructions, to_api_tool_name,
+};
 
 /// Base URL path for the Codex Responses endpoint.
-const CODEX_RESPONSES_PATH: &str = "/codex/responses";
+pub(super) const CODEX_RESPONSES_PATH: &str = "/codex/responses";
 
 /// Build the Responses API request body from a `MessageRequest`.
-fn build_responses_body(request: &MessageRequest) -> Value {
+pub(super) fn build_responses_body(request: &MessageRequest) -> Value {
     let model = &request.model;
     let mut body = json!({
         "model": model,
@@ -77,32 +80,68 @@ impl DeepSeekClient {
     /// Handle a streaming Responses API request for the OpenAI Codex provider.
     pub(super) async fn handle_responses_stream(
         &self,
-        request: MessageRequest,
+        prepared: &super::PreparedOutboundRequest,
     ) -> Result<StreamEventBox> {
-        let body = build_responses_body(&request);
-        let url = format!("{}{}", self.base_url, CODEX_RESPONSES_PATH);
+        // Body, endpoint, and route shape all come from the shared
+        // prepared-request seam (`prepare_outbound_request`).
+        let body = &prepared.body;
+        let is_codex = prepared.endpoint.shape == super::RouteShape::CodexResponses;
+        let url = prepared.endpoint.url.clone();
+        // The synthetic MessageStart below is emitted from inside the stream
+        // closure, which outlives `prepared`. Clone the wire model — the id
+        // actually placed on the body by the shared seam, after route
+        // remapping — rather than borrowing the request that no longer exists
+        // at this layer.
+        let wire_model = prepared.wire_model.clone();
 
         // The bearer Authorization header is already installed as a default
-        // header on `http_client` (resolved from the Codex OAuth access token),
-        // so it must not be set again here or it would be duplicated. The
-        // ChatGPT backend additionally requires the account id and the
-        // experimental Responses beta opt-in.
-        let mut builder = self
-            .http_client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("Accept", "text/event-stream")
-            .header("OpenAI-Beta", "responses=experimental")
-            .header("originator", "codex_cli_rs");
-        if let Some(account_id) = crate::oauth::codex_account_id() {
-            builder = builder.header("chatgpt-account-id", account_id);
-        }
-
-        let response = builder
-            .json(&body)
-            .send()
-            .await
-            .context("Responses API request failed")?;
+        // header on both the dual and the HTTP/1.1 twin client (resolved from
+        // the Codex OAuth access token), so it must not be set again here or
+        // it would be duplicated. The ChatGPT backend additionally requires
+        // the account id and the experimental Responses beta opt-in.
+        //
+        // The open itself goes through the shared stream-entry transport
+        // policy: bounded header wait, policy-selected client, and at most
+        // one HTTP/1.1 fallback retry on a classified H2 header stall. The
+        // pre-existing provider retry loop (rate limit / transient upstream)
+        // stays inside each open attempt, before any stream body exists.
+        let account_id = self.codex_account_id.clone();
+        let request_body =
+            serde_json::to_vec(&body).context("Failed to serialize Responses API request body")?;
+        let open_req = super::stream_entry::StreamOpenRequest::new(
+            super::stream_entry::stream_open_timeout(),
+            self.stream_idle_timeout,
+        );
+        let response = super::stream_entry::open_sse_response(&open_req, |policy| {
+            let url = url.clone();
+            let account_id = account_id.clone();
+            let request_body = request_body.clone();
+            async move {
+                let client = super::stream_entry::client_for_policy(
+                    &self.http_client,
+                    self.http1_fallback_client(),
+                    policy,
+                );
+                self.send_with_retry(|| {
+                    let mut builder = client
+                        .post(&url)
+                        .header("Content-Type", "application/json")
+                        .header("Accept", "text/event-stream");
+                    if is_codex {
+                        builder = builder
+                            .header("OpenAI-Beta", "responses=experimental")
+                            .header("originator", "codex_cli_rs");
+                        if let Some(account_id) = &account_id {
+                            builder = builder.header("chatgpt-account-id", account_id);
+                        }
+                    }
+                    builder.body(request_body.clone())
+                })
+                .await
+                .context("Responses API request failed")
+            }
+        })
+        .await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -123,7 +162,7 @@ impl DeepSeekClient {
                     r#type: "message".to_string(),
                     role: "assistant".to_string(),
                     content: vec![],
-                    model: request.model.clone(),
+                    model: wire_model.clone(),
                     stop_reason: None,
                     stop_sequence: None,
                     container: None,
@@ -132,11 +171,22 @@ impl DeepSeekClient {
             });
 
             let mut current_block_index: Option<u32> = None;
+            // Whether reasoning text has already been emitted for the current
+            // reasoning block. Used to insert a paragraph break between
+            // consecutive summary parts, which the wire protocol delivers
+            // back-to-back with no separator.
+            let mut reasoning_text_emitted = false;
             let mut saw_tool_call = false;
             let mut usage_data: Option<Usage> = None;
-            let mut buffer = String::new();
+            // Raw byte buffer: decode only COMPLETE lines so a multi-byte
+            // UTF-8 char split across two network reads is never corrupted
+            // to U+FFFD (line boundaries are ASCII). Mirrors chat.rs.
+            let mut buffer: Vec<u8> = Vec::new();
             let mut done = false;
             let mut content_block_counter: u32 = 0;
+            let stream_start = std::time::Instant::now();
+            let mut last_chunk_at = std::time::Instant::now();
+            let mut bytes_received: usize = 0;
 
             tokio::pin!(byte_stream);
 
@@ -149,17 +199,22 @@ impl DeepSeekClient {
                     }
                     Ok(None) => break,
                     Err(_) => {
-                        yield Err(anyhow::anyhow!("Stream idle timeout"));
+                        yield Err(anyhow::anyhow!(super::stream_entry::idle_timeout_message(
+                            stream_idle_timeout,
+                            bytes_received,
+                            stream_start.elapsed(),
+                            last_chunk_at.elapsed(),
+                        )));
                         return;
                     }
                 };
 
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                bytes_received += chunk.len();
+                last_chunk_at = std::time::Instant::now();
+                buffer.extend_from_slice(&chunk);
 
                 // Process complete SSE lines.
-                while let Some(line_end) = buffer.find('\n') {
-                    let line = buffer[..line_end].trim().to_string();
-                    buffer = buffer[line_end + 1..].to_string();
+                while let Some(line) = super::take_sse_line(&mut buffer) {
 
                     if line.is_empty() || line.starts_with(':') {
                         continue;
@@ -233,7 +288,7 @@ impl DeepSeekClient {
                                                 content_block:
                                                     ContentBlockStart::ToolUse {
                                                         id: composite_id,
-                                                        name,
+                                                        name: from_api_tool_name(&name),
                                                         input: json!({}),
                                                         caller: None,
                                                     },
@@ -242,6 +297,7 @@ impl DeepSeekClient {
                                                 Some(content_block_counter - 1);
                                         }
                                         "reasoning" => {
+                                            reasoning_text_emitted = false;
                                             content_block_counter += 1;
                                             yield Ok(StreamEvent::ContentBlockStart {
                                                 index: content_block_counter - 1,
@@ -289,10 +345,30 @@ impl DeepSeekClient {
                                     event.get("delta").and_then(|d| d.as_str())
                                     && let Some(idx) = current_block_index
                                 {
+                                    if !delta_text.is_empty() {
+                                        reasoning_text_emitted = true;
+                                    }
                                     yield Ok(StreamEvent::ContentBlockDelta {
                                         index: idx,
                                         delta: Delta::ThinkingDelta {
                                             thinking: delta_text.to_string(),
+                                        },
+                                    });
+                                }
+                            }
+                            "response.reasoning_summary_part.added" => {
+                                // Consecutive summary parts arrive with no
+                                // separator in the text deltas, so without a
+                                // boundary they concatenate as
+                                // "…done.**Next Phase**…". Insert a paragraph
+                                // break before every part after the first.
+                                if reasoning_text_emitted
+                                    && let Some(idx) = current_block_index
+                                {
+                                    yield Ok(StreamEvent::ContentBlockDelta {
+                                        index: idx,
+                                        delta: Delta::ThinkingDelta {
+                                            thinking: "\n\n".to_string(),
                                         },
                                     });
                                 }
@@ -359,12 +435,12 @@ impl DeepSeekClient {
     /// shape.
     pub(super) async fn handle_responses_message(
         &self,
-        request: MessageRequest,
+        prepared: &super::PreparedOutboundRequest,
     ) -> Result<MessageResponse> {
         use futures_util::StreamExt;
 
-        let model = request.model.clone();
-        let mut stream = self.handle_responses_stream(request).await?;
+        let model = prepared.wire_model.clone();
+        let mut stream = self.handle_responses_stream(prepared).await?;
 
         let mut response = MessageResponse {
             id: String::new(),
@@ -544,7 +620,7 @@ fn convert_messages_to_responses_input(request: &MessageRequest) -> Vec<Value> {
                             items.push(json!({
                                 "type": "function_call",
                                 "call_id": call_id,
-                                "name": name,
+                                "name": to_api_tool_name(name),
                                 "arguments": serde_json::to_string(input).unwrap_or_default(),
                             }));
                         }
@@ -596,7 +672,7 @@ fn tool_to_responses_function(tool: &Tool) -> Value {
     };
     json!({
         "type": "function",
-        "name": tool.name,
+        "name": to_api_tool_name(&tool.name),
         "description": description,
         "parameters": parameters,
         "strict": false,
@@ -675,22 +751,38 @@ fn parse_responses_usage(val: &Value) -> Usage {
     let input = val
         .get("input_tokens")
         .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+        .map_or(0, super::saturating_u32);
     let output = val
         .get("output_tokens")
         .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+        .map_or(0, super::saturating_u32);
     let cached = val
         .get("input_tokens_details")
         .and_then(|d| d.get("cached_tokens"))
         .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+        .map_or(0, super::saturating_u32);
+    // Mirror the Chat-Completions parser: derive cache-miss as input minus the
+    // cached hit when the payload reports cached input tokens. Responses nests
+    // reasoning under `output_tokens_details` (not `completion_tokens_details`).
+    let prompt_cache_hit_tokens = if cached > 0 { Some(cached) } else { None };
+    let prompt_cache_miss_tokens = prompt_cache_hit_tokens.map(|hit| input.saturating_sub(hit));
+    // `output_tokens` is already the total billable completion count, with
+    // reasoning a subset of it. A payload reporting more reasoning than output
+    // violates that, so the value is rejected as invalid telemetry rather than
+    // being trusted or turned into extra billable output (#4318).
+    let reasoning_tokens = val
+        .get("output_tokens_details")
+        .and_then(|d| d.get("reasoning_tokens"))
+        .and_then(|v| v.as_u64())
+        .map(super::saturating_u32)
+        .filter(|reasoning| *reasoning <= output);
     Usage {
         input_tokens: input,
         output_tokens: output,
-        prompt_cache_hit_tokens: if cached > 0 { Some(cached) } else { None },
-        prompt_cache_miss_tokens: None,
-        reasoning_tokens: None,
+        prompt_cache_hit_tokens,
+        prompt_cache_miss_tokens,
+        prompt_cache_write_tokens: None,
+        reasoning_tokens,
         reasoning_replay_tokens: None,
         server_tool_use: None,
     }
@@ -700,7 +792,372 @@ fn parse_responses_usage(val: &Value) -> Usage {
 mod tests {
     use super::*;
 
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures_util::StreamExt;
+
+    use crate::config::{Config, ProviderConfig, ProvidersConfig, RetryConfig};
     use crate::models::Message;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    #[derive(Clone)]
+    struct RetryThenSuccess {
+        attempts: Arc<AtomicUsize>,
+        retry_status: u16,
+        retry_body: &'static str,
+    }
+
+    impl Respond for RetryThenSuccess {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                let mut response =
+                    ResponseTemplate::new(self.retry_status).set_body_string(self.retry_body);
+                if self.retry_status == 429 {
+                    response = response.insert_header("Retry-After", "0");
+                }
+                return response;
+            }
+
+            ResponseTemplate::new(200)
+                .insert_header("Content-Type", "text/event-stream")
+                .set_body_string("data: [DONE]\n\n")
+        }
+    }
+
+    #[derive(Clone)]
+    struct AlwaysError {
+        attempts: Arc<AtomicUsize>,
+        status: u16,
+        body: &'static str,
+    }
+
+    impl Respond for AlwaysError {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            ResponseTemplate::new(self.status).set_body_string(self.body)
+        }
+    }
+
+    fn minimal_responses_request() -> MessageRequest {
+        MessageRequest {
+            model: "gpt-5.5".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "hello".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 128,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+        }
+    }
+
+    fn test_codex_config(server: &MockServer) -> Config {
+        Config {
+            provider: Some("openai-codex".to_string()),
+            retry: Some(RetryConfig {
+                enabled: Some(true),
+                max_retries: Some(1),
+                initial_delay: Some(0.0),
+                max_delay: Some(0.0),
+                exponential_base: Some(1.0),
+            }),
+            providers: Some(ProvidersConfig {
+                openai_codex: ProviderConfig {
+                    base_url: Some(server.uri()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_stream_retries_rate_limited_request() {
+        let server = MockServer::start().await;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path(CODEX_RESPONSES_PATH))
+            .respond_with(RetryThenSuccess {
+                attempts: Arc::clone(&attempts),
+                retry_status: 429,
+                retry_body: "rate limited",
+            })
+            .mount(&server)
+            .await;
+
+        let client = {
+            let _env_lock = crate::test_support::lock_test_env();
+            let _codex_token =
+                crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
+            let _legacy_codex_token =
+                crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
+            DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        };
+        let mut stream = client
+            .handle_responses_stream(
+                &client
+                    .prepare_outbound_request(minimal_responses_request(), true)
+                    .expect("responses request prepares"),
+            )
+            .await
+            .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(event) = stream.next().await {
+                event.unwrap();
+            }
+        })
+        .await
+        .expect("Responses retry stream should finish after [DONE]");
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn responses_stream_retries_transient_server_error() {
+        let server = MockServer::start().await;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path(CODEX_RESPONSES_PATH))
+            .respond_with(RetryThenSuccess {
+                attempts: Arc::clone(&attempts),
+                retry_status: 503,
+                retry_body: "temporarily unavailable",
+            })
+            .mount(&server)
+            .await;
+
+        let client = {
+            let _env_lock = crate::test_support::lock_test_env();
+            let _codex_token =
+                crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
+            let _legacy_codex_token =
+                crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
+            DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        };
+        let mut stream = client
+            .handle_responses_stream(
+                &client
+                    .prepare_outbound_request(minimal_responses_request(), true)
+                    .expect("responses request prepares"),
+            )
+            .await
+            .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(event) = stream.next().await {
+                event.unwrap();
+            }
+        })
+        .await
+        .expect("Responses retry stream should finish after [DONE]");
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn responses_stream_fails_fast_on_non_retryable_provider_error() {
+        let server = MockServer::start().await;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path(CODEX_RESPONSES_PATH))
+            .respond_with(AlwaysError {
+                attempts: Arc::clone(&attempts),
+                status: 403,
+                body: "<html><title>Access Denied</title><body>Security alert. Contact support. Ray ID 1234abcd.</body></html>",
+            })
+            .mount(&server)
+            .await;
+
+        let client = {
+            let _env_lock = crate::test_support::lock_test_env();
+            let _codex_token =
+                crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
+            let _legacy_codex_token =
+                crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
+            DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        };
+
+        let err = match client
+            .handle_responses_stream(
+                &client
+                    .prepare_outbound_request(minimal_responses_request(), true)
+                    .expect("responses request prepares"),
+            )
+            .await
+        {
+            Ok(_) => panic!("non-retryable Responses errors should fail fast"),
+            Err(err) => err,
+        };
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("Responses API request failed"),
+            "{message}"
+        );
+        assert!(message.contains("OpenAI Codex"), "{message}");
+        assert!(message.contains("Access Denied"), "{message}");
+        assert!(
+            message.contains("blocked before it reached the model"),
+            "{message}"
+        );
+        // #3884: the structured LlmError must stay downcastable through the
+        // context layers so sub-agent failure records can classify it.
+        assert!(
+            err.downcast_ref::<crate::llm_client::LlmError>().is_some(),
+            "LlmError should survive the anyhow chain"
+        );
+    }
+
+    #[test]
+    fn responses_body_serializes_exactly_one_load_skill_definition() {
+        // Mirror of the Anthropic contract: the real child catalog fixture
+        // maps 1:1 into Responses function tools with one load_skill entry.
+        let tools = crate::tools::subagent::kimi_general_child_request_tools_fixture();
+        let mut request = minimal_responses_request();
+        request.tools = Some(tools);
+        let body = build_responses_body(&request);
+        let serialized = body["tools"]
+            .as_array()
+            .expect("tools serialize as an array");
+        let load_skills: Vec<_> = serialized
+            .iter()
+            .filter(|tool| tool["name"] == "load_skill")
+            .collect();
+        assert_eq!(
+            load_skills.len(),
+            1,
+            "exactly one load_skill definition reaches the Responses wire"
+        );
+        assert!(
+            load_skills[0]["parameters"]["properties"].is_object(),
+            "load_skill keeps a valid parameters schema: {}",
+            load_skills[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_stream_open_preserves_wire_headers_through_shared_seam() {
+        use wiremock::matchers::header;
+
+        let server = MockServer::start().await;
+        // Every wire-specific header (SSE accept, Responses beta opt-in,
+        // originator, bearer auth from the default headers) must survive the
+        // shared stream-entry open path; the mock only answers when all are
+        // present.
+        Mock::given(method("POST"))
+            .and(path(CODEX_RESPONSES_PATH))
+            .and(header("Accept", "text/event-stream"))
+            .and(header("OpenAI-Beta", "responses=experimental"))
+            .and(header("originator", "codex_cli_rs"))
+            .and(header("Authorization", "Bearer test-token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "text/event-stream")
+                    .set_body_string("data: [DONE]\n\n"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = {
+            let _env_lock = crate::test_support::lock_test_env();
+            let _codex_token =
+                crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
+            let _legacy_codex_token =
+                crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
+            DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        };
+        let mut stream = client
+            .handle_responses_stream(
+                &client
+                    .prepare_outbound_request(minimal_responses_request(), true)
+                    .expect("responses request prepares"),
+            )
+            .await
+            .expect("stream opens with preserved headers");
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(event) = stream.next().await {
+                event.unwrap();
+            }
+        })
+        .await
+        .expect("stream should finish after [DONE]");
+    }
+
+    #[tokio::test]
+    async fn responses_stream_inserts_boundary_between_reasoning_summary_parts() {
+        let server = MockServer::start().await;
+        let sse_body = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\"}}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_part.added\",\"item_id\":\"rs_1\",\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"partA\"}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_part.added\",\"item_id\":\"rs_1\",\"summary_index\":1,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"partB\"}\n\n",
+            "data: {\"type\":\"response.output_item.done\"}\n\n",
+            "data: [DONE]\n\n",
+        );
+        Mock::given(method("POST"))
+            .and(path(CODEX_RESPONSES_PATH))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .mount(&server)
+            .await;
+
+        let client = {
+            let _env_lock = crate::test_support::lock_test_env();
+            let _codex_token =
+                crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
+            let _legacy_codex_token =
+                crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
+            DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        };
+        let mut stream = client
+            .handle_responses_stream(
+                &client
+                    .prepare_outbound_request(minimal_responses_request(), true)
+                    .expect("responses request prepares"),
+            )
+            .await
+            .unwrap();
+
+        let mut thinking = String::new();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(event) = stream.next().await {
+                if let StreamEvent::ContentBlockDelta {
+                    delta: Delta::ThinkingDelta { thinking: chunk },
+                    ..
+                } = event.unwrap()
+                {
+                    thinking.push_str(&chunk);
+                }
+            }
+        })
+        .await
+        .expect("Responses reasoning stream should finish after [DONE]");
+
+        // The second summary part must be separated from the first by a
+        // paragraph break, and no separator may precede the first part.
+        assert_eq!(thinking, "partA\n\npartB");
+    }
 
     #[test]
     fn codex_reasoning_effort_uses_responses_labels() {
@@ -792,6 +1249,90 @@ mod tests {
     }
 
     #[test]
+    fn parse_responses_usage_derives_cache_miss_and_reasoning() {
+        let usage = json!({
+            "input_tokens": 1000,
+            "output_tokens": 200,
+            "input_tokens_details": { "cached_tokens": 600 },
+            "output_tokens_details": { "reasoning_tokens": 120 }
+        });
+
+        let parsed = parse_responses_usage(&usage);
+
+        assert_eq!(parsed.input_tokens, 1000);
+        assert_eq!(parsed.output_tokens, 200);
+        assert_eq!(parsed.prompt_cache_hit_tokens, Some(600));
+        // Cache-miss is derived as input minus the cached hit when cached > 0.
+        assert_eq!(parsed.prompt_cache_miss_tokens, Some(400));
+        // Reasoning surfaces from output_tokens_details (Responses dialect).
+        assert_eq!(parsed.reasoning_tokens, Some(120));
+
+        // Without cached/reasoning details, the derived fields stay None.
+        let bare = json!({ "input_tokens": 1000, "output_tokens": 200 });
+        let parsed_bare = parse_responses_usage(&bare);
+        assert_eq!(parsed_bare.prompt_cache_hit_tokens, None);
+        assert_eq!(parsed_bare.prompt_cache_miss_tokens, None);
+        assert_eq!(parsed_bare.reasoning_tokens, None);
+    }
+
+    #[test]
+    fn parse_responses_usage_saturates_u64_fields() {
+        let parsed = parse_responses_usage(&json!({
+            "input_tokens": u64::MAX,
+            "output_tokens": u64::MAX,
+            "input_tokens_details": { "cached_tokens": u64::MAX },
+            "output_tokens_details": { "reasoning_tokens": u64::MAX }
+        }));
+        assert_eq!(parsed.input_tokens, u32::MAX);
+        assert_eq!(parsed.output_tokens, u32::MAX);
+        assert_eq!(parsed.prompt_cache_hit_tokens, Some(u32::MAX));
+        assert_eq!(parsed.prompt_cache_miss_tokens, Some(0));
+        assert_eq!(parsed.reasoning_tokens, Some(u32::MAX));
+    }
+
+    /// Regression fixture for the reasoning double-billing bug: a real
+    /// Responses usage payload has to survive the whole way into the pricing
+    /// conversion without reasoning tokens being charged twice. OpenAI's
+    /// `output_tokens` is already the *total* billable completion count, with
+    /// `output_tokens_details.reasoning_tokens` a subset of it.
+    #[test]
+    fn responses_usage_reaches_pricing_conversion_without_double_billing_reasoning() {
+        use crate::config::ApiProvider;
+        use crate::pricing::{calculate_turn_cost_estimate_for_provider, token_usage_for_pricing};
+
+        let usage = parse_responses_usage(&json!({
+            "input_tokens": 10_000,
+            "output_tokens": 4_000,
+            "total_tokens": 14_000,
+            "input_tokens_details": { "cached_tokens": 6_000 },
+            "output_tokens_details": { "reasoning_tokens": 3_500 }
+        }));
+
+        let classes = token_usage_for_pricing(&usage);
+        assert_eq!(classes.output, 4_000, "reasoning must not inflate output");
+        assert_eq!(classes.input, 4_000);
+        assert_eq!(classes.cache_read, 6_000);
+        assert_eq!(classes.cache_write, 0);
+
+        // gpt-5.5: 0.50 cache-read / 5.00 input / 30.00 output per million.
+        let cost =
+            calculate_turn_cost_estimate_for_provider(ApiProvider::Openai, "gpt-5.5", &usage)
+                .expect("direct OpenAI route is priced");
+        let expected = 0.006 * 0.50 + 0.004 * 5.00 + 0.004 * 30.00;
+        assert!(
+            (cost.usd - expected).abs() < 1e-12,
+            "expected {expected}, got {}",
+            cost.usd
+        );
+
+        // The bug charged the 3_500 reasoning tokens a second time at the
+        // output rate; assert the difference explicitly so a reintroduction is
+        // unambiguous rather than a silent number change.
+        let double_billed = expected + 0.0035 * 30.00;
+        assert!((cost.usd - double_billed).abs() > 1e-6);
+    }
+
+    #[test]
     fn responses_input_includes_user_role_tool_results() {
         let request = MessageRequest {
             model: "gpt-5.5".to_string(),
@@ -831,25 +1372,59 @@ mod tests {
 
         assert_eq!(input[0]["type"], "function_call");
         assert_eq!(input[0]["call_id"], "call_abc");
+        assert_eq!(input[0]["name"], "checklist_write");
         assert_eq!(input[1]["type"], "function_call_output");
         assert_eq!(input[1]["call_id"], "call_abc");
         assert_eq!(input[1]["output"], "<6 items>");
     }
 
     #[test]
+    fn responses_input_encodes_tool_call_names() {
+        let request = MessageRequest {
+            model: "gpt-5.5".to_string(),
+            messages: vec![Message {
+                role: "assistant".to_string(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_abc|fc_123".to_string(),
+                    name: "web.run".to_string(),
+                    input: json!({}),
+                    caller: None,
+                }],
+            }],
+            max_tokens: 128,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+        };
+
+        let input = convert_messages_to_responses_input(&request);
+
+        assert_eq!(input[0]["type"], "function_call");
+        assert_eq!(input[0]["name"], to_api_tool_name("web.run"));
+    }
+
+    #[test]
     fn responses_function_tool_sanitizes_root_composition_schema() {
         let tool = Tool {
             tool_type: None,
-            name: "apply_patch".to_string(),
+            name: "web.run".to_string(),
             description: "Apply patch".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "patch": {"type": "string"},
+                    "replace": {"type": "array"},
                     "changes": {"type": "array"}
                 },
                 "oneOf": [
                     {"required": ["patch"]},
+                    {"required": ["replace"]},
                     {"required": ["changes"]}
                 ]
             }),
@@ -863,6 +1438,7 @@ mod tests {
         let payload = tool_to_responses_function(&tool);
         let parameters = &payload["parameters"];
 
+        assert_eq!(payload["name"], to_api_tool_name("web.run"));
         assert_eq!(parameters["type"], "object");
         assert!(parameters.get("oneOf").is_none());
         assert!(parameters.get("anyOf").is_none());
@@ -870,10 +1446,11 @@ mod tests {
         assert!(parameters.get("enum").is_none());
         assert!(parameters.get("not").is_none());
         assert!(parameters["properties"].get("patch").is_some());
+        assert!(parameters["properties"].get("replace").is_some());
         assert!(parameters["properties"].get("changes").is_some());
         assert_eq!(
             payload["description"],
-            "Apply patch\n\nExactly one of these parameter groups must be provided: `changes` | `patch`."
+            "Apply patch\n\nExactly one of these parameter groups must be provided: `changes` | `patch` | `replace`."
         );
         assert!(tool.input_schema.get("oneOf").is_some());
     }
@@ -888,10 +1465,12 @@ mod tests {
                 "type": "object",
                 "properties": {
                     "patch": {"type": "string"},
+                    "replace": {"type": "array"},
                     "changes": {"type": "array"}
                 },
                 "oneOf": [
                     {"required": ["patch"]},
+                    {"required": ["replace"]},
                     {"required": ["changes"]}
                 ]
             }),
@@ -906,7 +1485,7 @@ mod tests {
 
         assert_eq!(
             payload["description"],
-            "Apply patch\n\nExactly one of these parameter groups must be provided: `changes` | `patch`."
+            "Apply patch\n\nExactly one of these parameter groups must be provided: `changes` | `patch` | `replace`."
         );
     }
 
