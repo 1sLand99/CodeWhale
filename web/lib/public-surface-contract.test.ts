@@ -138,8 +138,13 @@ describe("public surface contracts", () => {
     // A real screenshot may truthfully lag the source candidate until the
     // release's visual capture is refreshed. It must identify the version it
     // actually shows and may never claim a version newer than the candidate.
-    expect(comparableVersion(matrix.screenshot.sourceVersion)).toBeLessThanOrEqual(
-      comparableVersion(FACTS.version),
+    const screenshotSourceVersion = matrix.screenshot.sourceVersion;
+    expect(screenshotSourceVersion).not.toBeNull();
+    if (screenshotSourceVersion === null) {
+      throw new Error("the public screenshot must identify its source version");
+    }
+    expect(comparableVersion(screenshotSourceVersion)).toBeLessThanOrEqual(
+      comparableVersion(matrix.sourceCandidate.version),
     );
     expect(matrix.screenshot.sourceCommit).toMatch(/^[0-9a-f]{40}$/);
   });
