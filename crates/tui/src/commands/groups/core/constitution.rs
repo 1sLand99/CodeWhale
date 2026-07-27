@@ -18,7 +18,7 @@ use super::CommandResult;
 pub(in crate::commands) const COMMAND_INFO: CommandInfo = CommandInfo {
     name: "constitution",
     aliases: &["law"],
-    usage: "/constitution [status|preview|bundled|edit|review|repair|repo|explain|posture|help]",
+    usage: "/constitution [status|preview|base|suggestions|ratify <id>|migrate|rollback|bundled|edit|review|repair|repo|explain|posture|help]",
     description_id: MessageId::CmdConstitutionDescription,
 };
 
@@ -70,6 +70,29 @@ impl RegisterCommand for ConstitutionCmd {
             Some("bundled" | "default" | "use-bundled" | "use-default") => {
                 CommandResult::action(AppAction::UseBundledConstitution)
             }
+            // The exact effective base prompt for the next turn (#3928). Routed
+            // as an action because the assembly needs the session config, so the
+            // preview is built by the same function the dispatch path uses
+            // rather than a lookalike reconstruction.
+            Some("base" | "prompt" | "base-prompt" | "effective") => {
+                CommandResult::action(AppAction::PreviewEffectiveBasePrompt)
+            }
+            Some("suggestions" | "proposed") => {
+                open_suggestions(app);
+                CommandResult::ok()
+            }
+            Some("migrate") => CommandResult::message(migrate_text(app.ui_locale)),
+            Some("rollback" | "undo-migrate") => {
+                CommandResult::message(rollback_text(app.ui_locale))
+            }
+            Some(rest) if rest.starts_with("ratify") => {
+                let ids: Vec<String> = rest
+                    .trim_start_matches("ratify")
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect();
+                CommandResult::message(ratify_text(app.ui_locale, &ids))
+            }
             Some("help") => CommandResult::message(help_text(app.ui_locale)),
             Some(other) => CommandResult::error(format!(
                 "Unknown /constitution target '{other}'. Try `/constitution` for the manager."
@@ -110,6 +133,238 @@ fn open_repo_law(app: &mut App) {
 fn open_explanation(app: &mut App) {
     let locale = app.ui_locale;
     open_pager(app, explanation_title(locale), agents_explanation(locale));
+}
+
+/// Suggestions review surface (#3930).
+///
+/// Suggested clauses are shown here and *only* here — they are absent from
+/// `/constitution preview`, from the rendered block, and from the cache digest,
+/// because unratified model advice is not law.
+fn open_suggestions(app: &mut App) {
+    let locale = app.ui_locale;
+    let text = suggestions_text(locale);
+    open_pager(app, suggestions_title(locale), &text);
+}
+
+fn suggestions_text(locale: Locale) -> String {
+    let UserConstitutionStatus::Loaded { constitution, .. } = load_user_constitution() else {
+        return match locale {
+            Locale::ZhHans => "没有可供审阅的结构化用户全局协作准则。".to_string(),
+            _ => "No structured user-global constitution is available to review.".to_string(),
+        };
+    };
+    let digest = constitution.cache_projection().digest;
+    let suggested: Vec<_> = constitution.suggested_clauses().collect();
+    let accepted = constitution.accepted_clauses().count();
+
+    let mut out = String::new();
+    match locale {
+        Locale::ZhHans => {
+            let _ = writeln!(out, "已生效条款：{accepted}");
+            let _ = writeln!(out, "当前基线摘要：{digest}");
+            out.push('\n');
+            if suggested.is_empty() {
+                out.push_str("没有待批准的建议条款。模型建议在你明确批准之前不会生效。\n");
+            } else {
+                out.push_str("待批准的建议条款（未注入模型，未计入缓存）：\n");
+                for clause in &suggested {
+                    let _ = writeln!(out, "- [{}] {}", clause.id, clause.text);
+                }
+                out.push_str("\n用 /constitution ratify <id> 明确批准。基线变化后需要重新审阅。\n");
+            }
+        }
+        _ => {
+            let _ = writeln!(out, "Ratified clauses in force: {accepted}");
+            let _ = writeln!(out, "Current base digest: {digest}");
+            out.push('\n');
+            if suggested.is_empty() {
+                out.push_str(
+                    "No suggested clauses are awaiting review. Model advice never applies itself.\n",
+                );
+            } else {
+                out.push_str(
+                    "Suggested clauses awaiting ratification (not injected, not in the cache digest):\n",
+                );
+                for clause in &suggested {
+                    let _ = writeln!(out, "- [{}] {}", clause.id, clause.text);
+                }
+                out.push_str(
+                    "\nRatify explicitly with /constitution ratify <id>. If the base changes first, ratification is refused and you review again.\n",
+                );
+            }
+        }
+    }
+    out
+}
+
+/// Explicit ratification (#3930). Fails closed: it re-reads the live file,
+/// hands the live digest back to [`UserConstitution::ratify`], and persists only
+/// when the clause set is exactly what the user named.
+fn ratify_text(locale: Locale, ids: &[String]) -> String {
+    if ids.is_empty() {
+        return match locale {
+            Locale::ZhHans => {
+                "用法：/constitution ratify <id> [<id>...]。先用 /constitution suggestions 查看待批准条款。"
+                    .to_string()
+            }
+            _ => "Usage: /constitution ratify <id> [<id>...]. Run /constitution suggestions first to see what is pending.".to_string(),
+        };
+    }
+
+    let (path, constitution) = match load_user_constitution() {
+        UserConstitutionStatus::Loaded { path, constitution } => (path, constitution),
+        _ => {
+            return match locale {
+                Locale::ZhHans => "没有可批准的结构化用户全局协作准则。".to_string(),
+                _ => "There is no structured user-global constitution to ratify.".to_string(),
+            };
+        }
+    };
+
+    let digest = constitution.cache_projection().digest;
+    match constitution.ratify(&digest, ids, None) {
+        Err(err) => match locale {
+            Locale::ZhHans => format!("未批准任何条款：{err}"),
+            _ => format!("Nothing was ratified: {err}"),
+        },
+        Ok(ratification) => match ratification.constitution.save_to(&path) {
+            Err(err) => match locale {
+                Locale::ZhHans => format!("批准已计算但保存失败，文件未更改：{err:#}"),
+                _ => format!(
+                    "Ratification was computed but could not be saved; the file is unchanged: {err:#}"
+                ),
+            },
+            Ok(()) => match locale {
+                Locale::ZhHans => format!(
+                    "已批准 {} 条：{}\n摘要 {} → {}\n这些条款现在会注入模型；提示词缓存前缀已随之变化。",
+                    ratification.accepted_clause_ids.len(),
+                    ratification.accepted_clause_ids.join(", "),
+                    ratification.before_digest,
+                    ratification.after_digest,
+                ),
+                _ => format!(
+                    "Ratified {} clause(s): {}\nDigest {} → {}\nThey are injected from the next turn; the prompt-cache prefix moved with them.",
+                    ratification.accepted_clause_ids.len(),
+                    ratification.accepted_clause_ids.join(", "),
+                    ratification.before_digest,
+                    ratification.after_digest,
+                ),
+            },
+        },
+    }
+}
+
+/// Explicit schema migration with a receipt (#4782). A rejection writes nothing.
+fn migrate_text(locale: Locale) -> String {
+    let path = match codewhale_config::UserConstitution::path() {
+        Ok(path) => path,
+        Err(err) => return path_error_preview_text(locale, &err.to_string()),
+    };
+    match codewhale_config::UserConstitution::migrate_file(&path) {
+        Err(err) => match locale {
+            Locale::ZhHans => format!("迁移失败，文件未更改：{err:#}"),
+            _ => format!("Migration failed; the file is unchanged: {err:#}"),
+        },
+        Ok(codewhale_config::MigrationOutcome::AlreadyCurrent {
+            preserved_unknown_keys,
+            ..
+        }) => {
+            let preserved = format_preserved(&preserved_unknown_keys, locale);
+            match locale {
+                Locale::ZhHans => {
+                    format!("已是当前架构版本，未重写文件。\n保留的未知字段：{preserved}")
+                }
+                _ => format!(
+                    "Already at the current schema; nothing was rewritten.\nPreserved unknown fields: {preserved}"
+                ),
+            }
+        }
+        Ok(codewhale_config::MigrationOutcome::Migrated { receipt, .. }) => {
+            let preserved = format_preserved(&receipt.preserved_unknown_keys, locale);
+            let backup = receipt
+                .backup_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            match locale {
+                Locale::ZhHans => format!(
+                    "已从架构 v{} 迁移到 v{}。\n备份：{backup}\n保留的未知字段：{preserved}\n模型可见字节摘要：{} → {}（{}）\n用 /constitution rollback 撤销。",
+                    receipt.from_version,
+                    receipt.to_version,
+                    receipt.before_digest,
+                    receipt.after_digest,
+                    if receipt.is_cache_stable() {
+                        "未改变，提示词缓存保持有效"
+                    } else {
+                        "已改变，提示词缓存前缀随之变化"
+                    },
+                ),
+                _ => format!(
+                    "Migrated schema v{} → v{}.\nBackup: {backup}\nPreserved unknown fields: {preserved}\nModel-facing digest: {} → {} ({}).\nUndo with /constitution rollback.",
+                    receipt.from_version,
+                    receipt.to_version,
+                    receipt.before_digest,
+                    receipt.after_digest,
+                    if receipt.is_cache_stable() {
+                        "unchanged, so the prompt cache survives"
+                    } else {
+                        "changed, so the prompt-cache prefix moved"
+                    },
+                ),
+            }
+        }
+        Ok(codewhale_config::MigrationOutcome::Rejected(rejection)) => match locale {
+            Locale::ZhHans => format!(
+                "未迁移，文件保持原样。\n{}\n请手动修正后重试，或用 /constitution bundled 改用内置准则。",
+                rejection.receipt()
+            ),
+            _ => format!(
+                "Not migrated; the file is left exactly as it was.\n{}\nFix it by hand and retry, or run /constitution bundled to fall back to bundled law.",
+                rejection.receipt()
+            ),
+        },
+    }
+}
+
+fn rollback_text(locale: Locale) -> String {
+    let path = match codewhale_config::UserConstitution::path() {
+        Ok(path) => path,
+        Err(err) => return path_error_preview_text(locale, &err.to_string()),
+    };
+    match codewhale_config::UserConstitution::rollback_file(&path) {
+        Ok(backup) => match locale {
+            Locale::ZhHans => format!(
+                "已从 {} 恢复迁移前的内容。备份已消耗。",
+                backup.display()
+            ),
+            _ => format!(
+                "Restored the pre-migration constitution from {}. The backup is consumed.",
+                backup.display()
+            ),
+        },
+        Err(err) => match locale {
+            Locale::ZhHans => format!("未回滚：{err:#}"),
+            _ => format!("Nothing was rolled back: {err:#}"),
+        },
+    }
+}
+
+fn format_preserved(keys: &[String], locale: Locale) -> String {
+    if keys.is_empty() {
+        match locale {
+            Locale::ZhHans => "无".to_string(),
+            _ => "none".to_string(),
+        }
+    } else {
+        keys.join(", ")
+    }
+}
+
+fn suggestions_title(locale: Locale) -> &'static str {
+    match locale {
+        Locale::ZhHans => "待批准的建议条款",
+        _ => "Suggested Clauses",
+    }
 }
 
 fn open_pager(app: &mut App, title: &str, text: &str) {
@@ -570,6 +825,11 @@ fn help_text(locale: Locale) -> String {
 - /constitution bundled：记录使用内置/默认准则，不创建自定义文件。
 - /constitution repo：查看 .codewhale/constitution.json 仓库本地准则。
 - /constitution explain：解释内置基础准则、用户全局协作准则、仓库协作准则、AGENTS.md、记忆和交接的区别。
+- /constitution base：显示下一轮实际组装的确切基础提示词，附来源、摘要和字节/词元度量；只读，不发送请求，也不展开工具目录。
+- /constitution suggestions：查看待批准的建议条款；它们不会注入模型，也不影响提示词缓存。
+- /constitution ratify <id>：明确批准某条建议条款；若基线在审阅后发生变化则拒绝批准。
+- /constitution migrate：把协作准则文件迁移到当前架构版本并给出回执；被拒绝时文件保持原样。
+- /constitution rollback：恢复迁移前的备份。
 - /constitution posture：打开运行时姿态；协作准则只提供模型指导，不会更改批准、沙盒、Shell、网络、信任或 MCP 权限。",
         _ => "\
 Usage: /constitution [status|preview|bundled|edit|review|repair|repo|explain|posture|help]
@@ -582,6 +842,11 @@ Common commands:
 - /constitution bundled: record bundled/default law without creating a custom file.
 - /constitution repo: inspect repo-local .codewhale/constitution.json law.
 - /constitution explain: compare Constitution, user-global law, repo law, AGENTS.md, memory, and handoff.
+- /constitution base: show the exact effective base prompt assembled for the next turn, with per-block provenance, digests, and byte/token measures. Read-only: no provider request, no tool-catalog expansion.
+- /constitution suggestions: review suggested clauses awaiting ratification; they are not injected and do not move the prompt-cache digest.
+- /constitution ratify <id>: explicitly ratify a suggested clause. Refused if the base changed after you reviewed it.
+- /constitution migrate: migrate the constitution file to the current schema with a receipt; a rejected file is left exactly as it was.
+- /constitution rollback: restore the pre-migration backup.
 - /constitution posture: open runtime posture; constitution text is model guidance only and does not change approvals, sandbox, shell, network, trust, or MCP permissions.",
     }
     .to_string()
@@ -857,6 +1122,10 @@ impl ConstitutionManagerCopy {
                 maintenance_actions: &[
                     "编辑引导式协作准则：/constitution edit",
                     "预览渲染后的协作准则：/constitution preview",
+                    "查看下一轮的确切基础提示词：/constitution base",
+                    "审阅待批准的建议条款：/constitution suggestions",
+                    "批准某条建议条款：/constitution ratify <id>",
+                    "迁移到当前架构版本：/constitution migrate",
                     "使用内置/默认：/constitution bundled",
                     "查看现有内容：/constitution review",
                     "修复无效/空/不可读文件：/constitution repair",
@@ -901,6 +1170,10 @@ impl ConstitutionManagerCopy {
                 maintenance_actions: &[
                     "Edit guided constitution: /constitution edit",
                     "Preview rendered constitution: /constitution preview",
+                    "Show the next turn's exact base prompt: /constitution base",
+                    "Review suggested clauses: /constitution suggestions",
+                    "Ratify a suggested clause: /constitution ratify <id>",
+                    "Migrate to the current schema: /constitution migrate",
                     "Use bundled/default: /constitution bundled",
                     "Review existing: /constitution review",
                     "Repair invalid/empty/unreadable: /constitution repair",
@@ -1084,6 +1357,170 @@ mod tests {
         let body = pop_pager_body(&mut app);
         assert!(body.contains("<codewhale_user_constitution"));
         assert!(body.contains("Maintains release lanes."));
+    }
+
+    /// Seal `CODEWHALE_HOME` to a temp dir and write a constitution there.
+    fn sealed_home(
+        tmp: &tempfile::TempDir,
+        constitution: &UserConstitution,
+    ) -> crate::test_support::EnvVarGuard {
+        let home = tmp.path().join("codewhale-home");
+        std::fs::create_dir_all(&home).expect("home");
+        let guard = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.as_os_str());
+        constitution
+            .save_to(&home.join("constitution.json"))
+            .expect("save constitution");
+        guard
+    }
+
+    fn with_suggestion() -> UserConstitution {
+        UserConstitution {
+            about: Some("Maintains release lanes.".to_string()),
+            ..UserConstitution::default()
+        }
+        .with_recommendation(&codewhale_config::ConstitutionRecommendation {
+            clauses: vec![codewhale_config::ConstitutionClause::suggested(
+                "c1",
+                "Always run the focused suite before claiming green.",
+            )],
+            rationale: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn constitution_base_previews_the_exact_next_turn_prompt() {
+        let mut app = test_app();
+
+        let result = ConstitutionCmd::execute(&mut app, Some("base"));
+
+        // Routed as an action so the preview is assembled by the same function
+        // the dispatch path uses, with the session config in hand.
+        assert_eq!(result.action, Some(AppAction::PreviewEffectiveBasePrompt));
+        assert!(result.message.is_none());
+    }
+
+    #[test]
+    fn suggestions_are_listed_but_never_previewed_as_law() {
+        let _env_guard = crate::test_support::lock_test_env();
+        let tmp = tempdir().expect("tempdir");
+        let _home = sealed_home(&tmp, &with_suggestion());
+        let mut app = test_app();
+        app.ui_locale = Locale::En;
+
+        ConstitutionCmd::execute(&mut app, Some("suggestions"));
+        let suggestions = pop_pager_body(&mut app);
+        assert!(suggestions.contains("[c1]"));
+        assert!(suggestions.contains("focused suite"));
+        assert!(suggestions.contains("Ratified clauses in force: 0"));
+
+        // The same clause must be absent from the injected preview.
+        ConstitutionCmd::execute(&mut app, Some("preview"));
+        let preview = pop_pager_body(&mut app);
+        assert!(preview.contains("<codewhale_user_constitution"));
+        assert!(
+            !preview.contains("focused suite"),
+            "unratified advice reached the model-facing block: {preview}"
+        );
+    }
+
+    #[test]
+    fn ratify_requires_an_id_and_then_makes_the_clause_law() {
+        let _env_guard = crate::test_support::lock_test_env();
+        let tmp = tempdir().expect("tempdir");
+        let _home = sealed_home(&tmp, &with_suggestion());
+        let mut app = test_app();
+        app.ui_locale = Locale::En;
+
+        let bare = ConstitutionCmd::execute(&mut app, Some("ratify"))
+            .message
+            .expect("usage message");
+        assert!(bare.contains("Usage: /constitution ratify <id>"));
+
+        let unknown = ConstitutionCmd::execute(&mut app, Some("ratify nope"))
+            .message
+            .expect("refusal message");
+        assert!(unknown.contains("Nothing was ratified"));
+
+        let ok = ConstitutionCmd::execute(&mut app, Some("ratify c1"))
+            .message
+            .expect("ratified message");
+        assert!(ok.contains("Ratified 1 clause(s): c1"), "{ok}");
+        assert!(ok.contains("Digest"), "{ok}");
+
+        // Now — and only now — it appears in the injected block.
+        ConstitutionCmd::execute(&mut app, Some("preview"));
+        assert!(pop_pager_body(&mut app).contains("focused suite"));
+    }
+
+    #[test]
+    fn migrate_reports_a_receipt_and_rollback_restores() {
+        let _env_guard = crate::test_support::lock_test_env();
+        let tmp = tempdir().expect("tempdir");
+        let home = tmp.path().join("codewhale-home");
+        std::fs::create_dir_all(&home).expect("home");
+        let _home_guard = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.as_os_str());
+        let path = home.join("constitution.json");
+        let v1 = r#"{"schema_version":1,"about":"Legacy user."}"#;
+        std::fs::write(&path, v1).expect("write v1");
+        let mut app = test_app();
+        app.ui_locale = Locale::En;
+
+        let message = ConstitutionCmd::execute(&mut app, Some("migrate"))
+            .message
+            .expect("migrate receipt");
+        assert!(message.contains("Migrated schema v1"), "{message}");
+        assert!(message.contains("Preserved unknown fields: none"), "{message}");
+        assert!(
+            message.contains("the prompt cache survives"),
+            "a v1 file carries no clauses, so no model-facing byte moved: {message}"
+        );
+
+        let rolled = ConstitutionCmd::execute(&mut app, Some("rollback"))
+            .message
+            .expect("rollback receipt");
+        assert!(rolled.contains("Restored the pre-migration constitution"));
+        assert_eq!(std::fs::read_to_string(&path).expect("read back"), v1);
+    }
+
+    #[test]
+    fn migrate_rejects_a_runtime_policy_key_and_changes_nothing() {
+        let _env_guard = crate::test_support::lock_test_env();
+        let tmp = tempdir().expect("tempdir");
+        let home = tmp.path().join("codewhale-home");
+        std::fs::create_dir_all(&home).expect("home");
+        let _home_guard = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.as_os_str());
+        let path = home.join("constitution.json");
+        let raw = r#"{"about":"x","approval_policy":"bypass"}"#;
+        std::fs::write(&path, raw).expect("write file");
+        let mut app = test_app();
+        app.ui_locale = Locale::En;
+
+        let message = ConstitutionCmd::execute(&mut app, Some("migrate"))
+            .message
+            .expect("rejection receipt");
+        assert!(message.contains("Not migrated"), "{message}");
+        assert!(message.contains("approval_policy"), "{message}");
+        assert_eq!(std::fs::read_to_string(&path).expect("read back"), raw);
+    }
+
+    #[test]
+    fn help_and_manager_name_the_new_inspection_surfaces() {
+        let mut app = test_app();
+        app.ui_locale = Locale::En;
+
+        let help = ConstitutionCmd::execute(&mut app, Some("help"))
+            .message
+            .expect("help message");
+        assert!(help.contains("/constitution base"));
+        assert!(help.contains("no provider request"));
+        assert!(help.contains("/constitution ratify <id>"));
+        assert!(help.contains("Refused if the base changed"));
+        assert!(help.contains("/constitution migrate"));
+
+        ConstitutionCmd::execute(&mut app, None);
+        let body = pop_pager_body(&mut app);
+        assert!(body.contains("/constitution base"));
+        assert!(body.contains("/constitution suggestions"));
     }
 
     #[test]

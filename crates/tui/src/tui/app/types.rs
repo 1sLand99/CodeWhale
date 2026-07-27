@@ -828,6 +828,12 @@ pub enum AppAction {
     },
     /// Record that the bundled/default constitution should be used.
     UseBundledConstitution,
+    /// Open the exact effective base-prompt preview for the next turn (#3928).
+    ///
+    /// Handled where the session config lives, so the preview is built by the
+    /// same function the dispatch path uses. Human-only: it issues no provider
+    /// request and expands no tool catalog.
+    PreviewEffectiveBasePrompt,
     /// Disable the Hotbar: persist `hotbar = []` and clear the live slots.
     DisableHotbar,
     /// Restore the default recommended Hotbar slots: remove the `hotbar` key so

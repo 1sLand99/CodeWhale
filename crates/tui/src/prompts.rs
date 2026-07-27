@@ -15,6 +15,7 @@ use crate::tui::app::AppMode;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
+pub mod base_preview;
 pub(crate) mod text;
 
 #[derive(Debug, Clone)]
@@ -768,6 +769,29 @@ pub(crate) fn base_prompt_origin() -> BasePromptOrigin {
 /// otherwise.
 pub(crate) fn effective_base_prompt_text() -> &'static str {
     effective_base_prompt()
+}
+
+/// Where the effective base prompt actually comes from right now (#3928).
+///
+/// Reads the same cells composition reads, so a preview cannot claim "bundled"
+/// while an override is live. `config_dir` only supplies the path shown in the
+/// override label; it does not decide whether an override is in effect.
+#[must_use]
+pub fn effective_base_prompt_source(config_dir: Option<&Path>) -> base_preview::BasePromptSource {
+    if STATIC_PROMPT_COMPOSER.get().is_some() {
+        // An embedder composer wraps or replaces the whole static layer set, so
+        // it outranks the base-prompt cell as the honest answer.
+        return base_preview::BasePromptSource::EmbedderComposer;
+    }
+    if BASE_PROMPT_OVERRIDE.get().is_some() {
+        return base_preview::BasePromptSource::ConfigOverride {
+            path: config_dir.map_or_else(
+                || CONSTITUTION_OVERRIDE_FILE.to_string(),
+                |dir| dir.join(CONSTITUTION_OVERRIDE_FILE).display().to_string(),
+            ),
+        };
+    }
+    base_preview::BasePromptSource::Bundled
 }
 
 fn effective_static_prompt_composer() -> Option<&'static StaticPromptComposer> {
