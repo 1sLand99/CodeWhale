@@ -935,6 +935,175 @@ async fn release_ctrl_enter_steers_running_turn() -> Result<()> {
     Ok(())
 }
 
+/// Records, for every chat request, the highest-numbered follow-up marker
+/// present in the serialized body. Because history accumulates, request `k`
+/// contains markers `1..=k`, so the sequence of maxima is an exact record of
+/// which follow-up each request carried — which makes a dropped message and a
+/// double-sent message both visible, and distinguishable from each other.
+#[derive(Clone)]
+struct QueueOrderResponder {
+    markers: Vec<String>,
+    observed: Arc<std::sync::Mutex<Vec<usize>>>,
+    initial_delay: Duration,
+}
+
+impl QueueOrderResponder {
+    fn observed(&self) -> Vec<usize> {
+        self.observed
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+}
+
+impl Respond for QueueOrderResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let raw = request
+            .body_json::<Value>()
+            .unwrap_or(Value::Null)
+            .to_string();
+        let highest = self
+            .markers
+            .iter()
+            .enumerate()
+            .filter(|(_, marker)| raw.contains(marker.as_str()))
+            .map(|(index, _)| index + 1)
+            .max()
+            .unwrap_or(0);
+        self.observed
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(highest);
+        if highest == 0 {
+            return sse_response(text_sse(DEEPSEEK_TEST_MODEL, "initial-turn-output"))
+                .set_delay(self.initial_delay);
+        }
+        sse_response(text_sse(
+            DEEPSEEK_TEST_MODEL,
+            &format!("follow-up-{highest}-done"),
+        ))
+    }
+}
+
+/// The running-turn contract, end to end: while a turn is in flight, bare
+/// Enter queues rather than steering, the composer says so, and every queued
+/// follow-up dispatches exactly once, in order, after the turn completes.
+///
+/// This is the mailbox-backpressure row of #3758. Queueing six follow-ups
+/// against a busy engine puts several ops in flight behind the
+/// `dispatch_in_flight` guard (#4605); the failure modes it rules out are a
+/// silently dropped follow-up and a follow-up sent twice, which look identical
+/// on the transcript but are opposite bugs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn release_queued_follow_ups_dispatch_exactly_once_and_in_order() -> Result<()> {
+    let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
+    let server = MockServer::start().await;
+    mount_models(&server, &[DEEPSEEK_TEST_MODEL]).await;
+
+    // Six markers, none a prefix of another, so "contains" cannot confuse
+    // marker 1 with marker 10.
+    let markers: Vec<String> = (1..=6).map(|n| format!("queue-marker-{n}-end")).collect();
+    let responder = QueueOrderResponder {
+        markers: markers.clone(),
+        observed: Arc::new(std::sync::Mutex::new(Vec::new())),
+        initial_delay: Duration::from_secs(14),
+    };
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(responder.clone())
+        .mount(&server)
+        .await;
+
+    let ws = make_sealed_workspace()?;
+    let mut tui = common_tui_builder(&ws)
+        .env("CODEWHALE_PROVIDER", "deepseek")
+        .env("DEEPSEEK_API_KEY", "deepseek-local-test-key")
+        .env("DEEPSEEK_BASE_URL", server.uri())
+        .env("DEEPSEEK_MODEL", DEEPSEEK_TEST_MODEL)
+        .spawn()?;
+    enter_launch_session(&mut tui)?;
+
+    type_and_submit(&mut tui, "queue backpressure initial turn")?;
+    // Start the busy-state clock when the loopback server has actually
+    // received the request. Cold debug launches may spend most of the generic
+    // interaction budget before the request reaches wiremock; the responder's
+    // 14-second delay begins only after this signal.
+    let request_deadline = Instant::now() + INTERACTION_TIMEOUT;
+    while responder.observed().is_empty() {
+        tui.pump();
+        if Instant::now() >= request_deadline {
+            return Err(anyhow!(
+                "initial queue-order request never reached the mock server\n{}",
+                tui.debug_dump()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    let first_marker = markers.first().expect("queue matrix has a marker");
+    tui.send(keys::key::text(first_marker))?;
+    tui.wait_for_text(first_marker, Duration::from_secs(3))?;
+    tui.wait_for_text("Ctrl+↵ steer", Duration::from_secs(3))?;
+
+    // While the turn is running the composer must advertise queueing, and it
+    // must not advertise the stash chords as a way to send (#440 / #3758).
+    let busy_frame = tui.frame();
+    let busy_dump = busy_frame.debug_dump();
+    assert!(
+        busy_frame.contains("↵ queue"),
+        "busy composer must say Enter queues:\n{busy_dump}"
+    );
+    for line in busy_frame.text().lines() {
+        if !(line.contains("Ctrl+G") || line.contains("Ctrl+S")) {
+            continue;
+        }
+        let lowered = line.to_ascii_lowercase();
+        for forbidden in ["send", "queue", "steer", "submit"] {
+            assert!(
+                !lowered.contains(forbidden),
+                "stash chords must not be advertised as a send/queue/steer path: {line:?}"
+            );
+        }
+    }
+
+    std::thread::sleep(PASTE_GUARD_SETTLE);
+    tui.pump();
+    tui.send(keys::key::enter())?;
+    for marker in markers.iter().skip(1) {
+        type_and_submit(&mut tui, marker)?;
+    }
+
+    // One request for the initial turn plus one per follow-up.
+    let expected_requests = markers.len() + 1;
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        tui.pump();
+        if responder.observed().len() >= expected_requests {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(anyhow!(
+                "only {:?} of {expected_requests} requests arrived\n{}",
+                responder.observed(),
+                tui.debug_dump()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(80));
+    }
+
+    let observed = responder.observed();
+    let expected: Vec<usize> = (0..=markers.len()).collect();
+    assert_eq!(
+        observed,
+        expected,
+        "queued follow-ups must dispatch exactly once each, in order; \
+         a missing index is a dropped message and a repeated one is a double send\n{}",
+        tui.debug_dump()
+    );
+
+    let _ = tui.shutdown();
+    Ok(())
+}
+
 #[derive(Clone)]
 struct BenchFanoutResponder {
     child_requests: Arc<AtomicUsize>,

@@ -67,6 +67,77 @@ pub mod key {
         out.extend(ch(c));
         out
     }
+
+    /// `Ctrl+<letter>` as the ASCII control byte a legacy terminal sends.
+    /// Panics on a non-alphabetic argument so a typo cannot silently become
+    /// a different key.
+    pub fn ctrl(c: char) -> Vec<u8> {
+        assert!(c.is_ascii_alphabetic(), "ctrl() takes an ASCII letter");
+        vec![(c.to_ascii_lowercase() as u8) - b'a' + 1]
+    }
+
+    pub fn ctrl_c() -> Vec<u8> {
+        vec![0x03]
+    }
+
+    pub fn ctrl_d() -> Vec<u8> {
+        vec![0x04]
+    }
+
+    pub fn tab() -> Vec<u8> {
+        b"\t".to_vec()
+    }
+
+    /// DEL (0x7f) — what every xterm-family terminal sends for Backspace.
+    pub fn backspace() -> Vec<u8> {
+        vec![0x7f]
+    }
+
+    pub fn backspaces(count: usize) -> Vec<u8> {
+        vec![0x7f; count]
+    }
+
+    pub fn up() -> Vec<u8> {
+        b"\x1b[A".to_vec()
+    }
+
+    pub fn right() -> Vec<u8> {
+        b"\x1b[C".to_vec()
+    }
+
+    pub fn left() -> Vec<u8> {
+        b"\x1b[D".to_vec()
+    }
+
+    pub fn page_down() -> Vec<u8> {
+        b"\x1b[6~".to_vec()
+    }
+
+    /// SS3-encoded function keys, the form xterm-family terminals send.
+    pub fn f1() -> Vec<u8> {
+        b"\x1bOP".to_vec()
+    }
+
+    pub fn f2() -> Vec<u8> {
+        b"\x1bOQ".to_vec()
+    }
+
+    pub fn f4() -> Vec<u8> {
+        b"\x1bOS".to_vec()
+    }
+}
+
+/// Focus-reporting sequences the terminal sends when the window gains or
+/// loses focus (DEC private mode 1004). The TUI re-establishes its terminal
+/// modes on `FocusGained`, so these are inputs, not decoration.
+pub mod focus {
+    pub fn gained() -> Vec<u8> {
+        b"\x1b[I".to_vec()
+    }
+
+    pub fn lost() -> Vec<u8> {
+        b"\x1b[O".to_vec()
+    }
 }
 
 /// SGR mouse sequences use one-based terminal coordinates.
