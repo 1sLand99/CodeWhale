@@ -5,9 +5,10 @@
 #
 # Touches: Cargo.toml (workspace version), crates/*/Cargo.toml (internal
 # codewhale-* dependency pins), npm/codewhale/package.json (version +
-# codewhaleBinaryVersion), README*.md install-tag examples when present,
-# Cargo.lock, crates/tui/CHANGELOG.md (via sync-changelog.sh), and
-# web/lib/facts.generated.ts (via derive-facts.mjs).
+# codewhaleBinaryVersion), the root npm lock workspace record, the remote-smoke
+# default tag, README*.md install-tag examples when present, the public fact
+# matrix's source-candidate version, Cargo.lock, crates/tui/CHANGELOG.md (via
+# sync-changelog.sh), and web/lib/facts.generated.ts (via derive-facts.mjs).
 #
 # It does NOT write the CHANGELOG entry — add the `## [X.Y.Z] - YYYY-MM-DD`
 # section first (see docs/RELEASE_CHECKLIST.md), then run this script, then
@@ -23,6 +24,65 @@ fi
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${repo}"
 
+# Release preparation spans generated files and two package managers. Preserve
+# the exact starting bytes so any validation, generator, or downstream gate
+# failure cannot strand a half-bumped checkout. The backup lives outside the
+# repository and is removed on both success and failure.
+transaction_dir="$(mktemp -d)"
+transaction_active=1
+transaction_existing="${transaction_dir}/existing"
+transaction_missing="${transaction_dir}/missing"
+: >"${transaction_existing}"
+: >"${transaction_missing}"
+
+transaction_paths=(
+  Cargo.toml
+  Cargo.lock
+  package-lock.json
+  npm/codewhale/package.json
+  scripts/remote-smoke/setup-vm.sh
+  docs/public-surface-facts.json
+  docs/INSTALL.md
+  README.md
+  README.zh-CN.md
+  README.ja-JP.md
+  README.vi.md
+  README.ko-KR.md
+  crates/tui/CHANGELOG.md
+  web/lib/facts.generated.ts
+)
+for manifest in crates/*/Cargo.toml; do
+  transaction_paths+=("${manifest}")
+done
+for path in "${transaction_paths[@]}"; do
+  if [[ -e "${path}" ]]; then
+    mkdir -p "${transaction_dir}/files/$(dirname "${path}")"
+    cp -p "${path}" "${transaction_dir}/files/${path}"
+    printf '%s\n' "${path}" >>"${transaction_existing}"
+  else
+    printf '%s\n' "${path}" >>"${transaction_missing}"
+  fi
+done
+
+finish_transaction() {
+  status=$?
+  trap - EXIT
+  if [[ "${transaction_active}" == "1" && "${status}" != "0" ]]; then
+    while IFS= read -r path; do
+      [[ -n "${path}" ]] || continue
+      cp -p "${transaction_dir}/files/${path}" "${path}"
+    done <"${transaction_existing}"
+    while IFS= read -r path; do
+      [[ -n "${path}" ]] || continue
+      rm -f -- "${path}"
+    done <"${transaction_missing}"
+    echo "Release preparation failed; restored the checkout's pre-run release files." >&2
+  fi
+  rm -rf -- "${transaction_dir}"
+  exit "${status}"
+}
+trap finish_transaction EXIT
+
 old="$(grep -E '^version = "' Cargo.toml | head -n1 | sed -E 's/^version = "([^"]+)".*/\1/')"
 if ! grep -q "^## \[${new}\]" CHANGELOG.md; then
   echo "warning: CHANGELOG.md has no '## [${new}]' entry yet — add it before tagging" >&2
@@ -32,7 +92,7 @@ if [[ "${old}" != "${new}" ]]; then
   echo "Bumping ${old} -> ${new}"
 
   OLD_VERSION="${old}" NEW_VERSION="${new}" python3 - <<'PY'
-import os, pathlib, re, sys
+import json, os, pathlib, re, sys
 
 old, new = os.environ["OLD_VERSION"], os.environ["NEW_VERSION"]
 old_re = re.escape(old)
@@ -104,10 +164,10 @@ for readme in readmes:
     else:
         print(f"  {readme}: no versioned install-tag example; skipped")
 
-# 5) Public install/version snippets in README*.md and docs/INSTALL.md.
-#    These are the user-facing "verify your install" lines and the npm wrapper
-#    publish pointer. They drifted on a prior lane while check-versions still
-#    passed (#3767, #3552), so bump and (in check-versions.sh) guard them.
+# 5) Legacy numeric install/version snippets, if a branch still carries them.
+#    Current docs deliberately describe installed output generically, so zero
+#    matches is valid. If numeric forms exist, validate that they agree with
+#    the old workspace version before replacing them.
 version_doc_files = [
     "README.md",
     "README.zh-CN.md",
@@ -116,33 +176,110 @@ version_doc_files = [
     "README.ko-KR.md",
     "docs/INSTALL.md",
 ]
-version_comment_hits = 0
 for doc in version_doc_files:
     p = pathlib.Path(doc)
     text = p.read_text()
+    versions = sorted(set(re.findall(r"codewhale --version\s+#\s*([0-9]+\.[0-9]+\.[0-9]+)\b", text)))
+    stale = [version for version in versions if version != old]
+    if stale:
+        sys.exit(
+            f"error: {doc} has version-comment value(s) {', '.join(stale)}; expected {old}"
+        )
     out, n = re.subn(
         rf"(codewhale --version\s+#\s*){old_re}\b", rf"\g<1>{new}", text
     )
     if n:
         p.write_text(out)
         print(f"  {doc}: {n} version-comment replacement(s)")
-        version_comment_hits += n
-if version_comment_hits == 0:
-    sys.exit("error: no 'codewhale --version # X' snippets were bumped — wrong old version?")
 
-# docs/INSTALL.md npm-wrapper publish pointer ("published at vX.Y.Z").
-bump(
-    "docs/INSTALL.md",
+install = pathlib.Path("docs/INSTALL.md")
+install_text = install.read_text()
+pointer_versions = sorted(set(re.findall(r"wrapper is published at\s+v([0-9]+\.[0-9]+\.[0-9]+)\b", install_text)))
+stale_pointers = [version for version in pointer_versions if version != old]
+if stale_pointers:
+    sys.exit(
+        "error: docs/INSTALL.md has npm-wrapper publish pointer version(s) "
+        f"{', '.join(stale_pointers)}; expected {old}"
+    )
+install_out, pointer_hits = re.subn(
     rf"(wrapper is published at\s+)v{old_re}\b",
     rf"\g<1>v{new}",
+    install_text,
+)
+if pointer_hits:
+    install.write_text(install_out)
+    print(f"  docs/INSTALL.md: {pointer_hits} publish-pointer replacement(s)")
+
+# 6) Root npm lock workspace record. Keep the rest of the lock byte-stable.
+lock = pathlib.Path("package-lock.json")
+lock_text = lock.read_text()
+lock_out, lock_hits = re.subn(
+    rf'("npm/codewhale"\s*:\s*\{{[\s\S]*?"version"\s*:\s*"){old_re}(")',
+    rf"\g<1>{new}\g<2>",
+    lock_text,
+    count=1,
+)
+if lock_hits != 1:
+    sys.exit(
+        "error: expected package-lock.json packages['npm/codewhale'].version "
+        f"to be {old}; made {lock_hits} replacement(s)"
+    )
+lock.write_text(lock_out)
+print("  package-lock.json: 1 npm workspace replacement")
+
+# 7) Remote published-asset smoke defaults to the version being prepared.
+bump(
+    "scripts/remote-smoke/setup-vm.sh",
+    rf'(RELEASE_TAG="\$\{{RELEASE_TAG:-v){old_re}(\}}")',
+    rf"\g<1>{new}\g<2>",
     1,
 )
+
+# 8) Public facts distinguish source candidate from latest published release.
+#    Change only sourceCandidate.version; the published object and screenshot
+#    provenance must remain untouched until separately evidenced.
+facts = pathlib.Path("docs/public-surface-facts.json")
+facts_text = facts.read_text()
+facts_json = json.loads(facts_text)
+candidate = facts_json.get("sourceCandidate", {})
+if candidate.get("version") != old:
+    sys.exit(
+        "error: docs/public-surface-facts.json sourceCandidate.version is "
+        f"{candidate.get('version')!r}; expected {old!r}"
+    )
+published_before = facts_json.get("latestPublishedRelease")
+facts_out, facts_hits = re.subn(
+    rf'("sourceCandidate"\s*:\s*\{{[\s\S]*?"version"\s*:\s*"){old_re}(")',
+    rf"\g<1>{new}\g<2>",
+    facts_text,
+    count=1,
+)
+if facts_hits != 1:
+    sys.exit("error: failed to update sourceCandidate.version exactly once")
+facts_after = json.loads(facts_out)
+if facts_after.get("latestPublishedRelease") != published_before:
+    sys.exit("error: release preparation must not change latestPublishedRelease")
+facts.write_text(facts_out)
+print("  docs/public-surface-facts.json: 1 source-candidate replacement")
 PY
 
   echo "Refreshing Cargo.lock..."
   cargo update --workspace --offline >/dev/null
 else
   echo "Workspace is already at ${new}; refreshing generated release state and rerunning gates."
+  NEW_VERSION="${new}" python3 - <<'PY'
+import json, os, pathlib, sys
+
+expected = os.environ["NEW_VERSION"]
+facts = pathlib.Path("docs/public-surface-facts.json")
+candidate = json.loads(facts.read_text()).get("sourceCandidate", {})
+actual = candidate.get("version")
+if actual != expected:
+    sys.exit(
+        "error: docs/public-surface-facts.json sourceCandidate.version is "
+        f"{actual!r}; expected {expected!r}"
+    )
+PY
 fi
 
 echo "Regenerating crates/tui/CHANGELOG.md slice..."
@@ -154,4 +291,5 @@ node web/scripts/derive-facts.mjs
 echo "Validating..."
 ./scripts/release/check-versions.sh
 ./scripts/release/check-ohos-deps.sh
+transaction_active=0
 echo "Done. Review 'git diff', commit, and follow docs/RELEASE_CHECKLIST.md."
