@@ -945,8 +945,8 @@ pub(crate) fn fleet_role_to_agent_type(role: Option<&str>) -> FleetRole {
         Some("explorer") => FleetRole::Scout,
         // Coordination happens through delegation, which needs the full
         // General surface (#fleet-roster cutover (v0.8.67)). The operator is
-        // the helm of the whole operation (it assigns managers to workflows);
-        // the manager is the middle manager of one workflow. Both coordinate,
+        // the helm of the overall work (it assigns managers to Workflows);
+        // the manager is the middle manager of one Workflow. Both coordinate,
         // so both get the General surface — explicitly, not by fall-through.
         Some("manager") | Some("coordinator") | Some("operator") => FleetRole::Worker,
         // Synthesis is read-only, no shell: it must never fall through to
@@ -1535,7 +1535,7 @@ mod tests {
 
     #[test]
     fn fleet_role_operator_maps_to_general_explicitly() {
-        // The operator coordinates the whole operation (assigns managers to
+        // The operator coordinates the overall work (assigns managers to
         // workflows), so it needs the full General surface — by an explicit
         // match arm, not the unknown-role fall-through.
         assert_eq!(

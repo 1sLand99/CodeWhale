@@ -5,7 +5,7 @@ launches a focused `worker`, `scout`, `planner`, `reviewer`, `builder`,
 `verifier`, or `consultant` through `agent` and gets back an `agent_id` plus transcript handle
 while the worker runs. The internal runtime type is `FleetRole` (formerly
 `SubAgentType`); the older role spellings (`general`, `explore`, `plan`,
-`review`, `implementer`, …) remain accepted only as a persisted/deserialize
+`review`, `implementer`, `oracle`, …) remain accepted only as a persisted/deserialize
 compatibility adapter during v0.9.x. New prompts and config should use Fleet
 names.
 
