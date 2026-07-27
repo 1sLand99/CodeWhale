@@ -57,7 +57,11 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
 }
 
 fn welcome_step_labels(app: &App) -> Vec<String> {
-    let mut steps = vec![app.tr(MessageId::OnboardWelcomeStepLanguage).to_string()];
+    let mut steps = vec![
+        app.tr(MessageId::OnboardWelcomeStepLanguage).to_string(),
+        // #3937: the appearance step is unconditional, so the preview names it.
+        app.tr(MessageId::OnboardWelcomeStepAppearance).to_string(),
+    ];
     if app.onboarding_needs_api_key {
         steps.push(app.tr(MessageId::OnboardWelcomeStepApiKey).to_string());
     }
@@ -113,9 +117,9 @@ mod tests {
         assert!(body.contains("Code means two things"));
         assert!(body.contains("the law this agent works under"));
         assert!(body.contains("only these screens will appear"));
-        assert!(
-            body.contains("Next: choose language -> learn modes and permissions -> setup tips.")
-        );
+        assert!(body.contains(
+            "Next: choose language -> pick a look -> learn modes and permissions -> setup tips."
+        ));
         assert!(body.contains("/constitution"));
         assert!(!body.contains("add an API key"));
         assert!(!body.contains("land in the chat"));
@@ -140,7 +144,7 @@ mod tests {
         let body = body(&app);
 
         assert!(body.contains(
-            "Next: choose language -> connect API key -> trust workspace -> learn modes and permissions -> setup tips."
+            "Next: choose language -> pick a look -> connect API key -> trust workspace -> learn modes and permissions -> setup tips."
         ));
     }
 
@@ -154,7 +158,7 @@ mod tests {
 
         assert!(body.contains("Codewhale 会与你协作完成工作"));
         assert!(!body.contains("代码在这里有两层含义"));
-        assert!(body.contains("接下来：选择语言 -> 了解模式与权限 -> 设置提示。"));
+        assert!(body.contains("接下来：选择语言 -> 选择外观 -> 了解模式与权限 -> 设置提示。"));
         assert!(!body.contains("Press Enter"));
     }
 }

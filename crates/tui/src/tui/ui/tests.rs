@@ -11843,6 +11843,49 @@ fn onboarding_ctrl_c_quits_even_with_the_provider_picker_on_the_view_stack() {
     );
 }
 
+/// #3937: the theme picker owns every key on the appearance step, Escape
+/// included — the shell popping the modal itself would strand a previewed but
+/// unsaved theme instead of running the picker's revert.
+#[test]
+fn appearance_step_hands_every_key_including_escape_to_the_theme_picker() {
+    for key in [
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+    ] {
+        assert_eq!(
+            onboarding_key_route(
+                OnboardingState::Appearance,
+                Some(ModalKind::ThemePicker),
+                &key,
+            ),
+            OnboardingKeyRoute::ThemePicker,
+            "{key:?}",
+        );
+    }
+
+    // Ctrl+C still quits from under the picker.
+    assert_eq!(
+        onboarding_key_route(
+            OnboardingState::Appearance,
+            Some(ModalKind::ThemePicker),
+            &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        ),
+        OnboardingKeyRoute::Quit,
+    );
+
+    // With the picker closed the step falls back to the legacy switch, which
+    // is what lets Enter re-open it and Escape walk back to Language.
+    assert_eq!(
+        onboarding_key_route(
+            OnboardingState::Appearance,
+            None,
+            &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        ),
+        OnboardingKeyRoute::Legacy,
+    );
+}
+
 /// #3927: the offline exit must be reachable from both credential steps even
 /// while the provider picker owns the keys — otherwise the only advertised way
 /// out of a modal the user cannot satisfy is to quit.

@@ -111,6 +111,12 @@ pub enum OnboardingState {
     /// Defaults to auto-detection from `LC_ALL` / `LANG`; explicit picks
     /// land in the persisted settings.toml via `Settings::set("locale", …)`.
     Language,
+    /// "Make it yours" — pick a theme right after language (#3937).
+    ///
+    /// This is a one-key default step: it reuses the `/theme` picker, so the
+    /// preview is live and transactional (Enter persists, Esc restores the
+    /// theme the session started with) and there is no second theme registry.
+    Appearance,
     Provider,
     ApiKey,
     TrustDirectory,

@@ -39,6 +39,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let lines = match app.onboarding {
         OnboardingState::Welcome => welcome::lines(app),
         OnboardingState::Language => language::lines(app),
+        OnboardingState::Appearance => appearance_lines(app),
         OnboardingState::Provider => provider_lines(app),
         OnboardingState::ApiKey => api_key::lines(app),
         OnboardingState::TrustDirectory => trust_directory::lines(app),
@@ -75,9 +76,12 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
+/// Position and length of the first-run spine.
+///
+/// Welcome, Language, Appearance (#3937), Mental Models, and Tips are always
+/// shown; the credential pair and the trust screen are conditional.
 fn onboarding_step(app: &App) -> (usize, usize) {
-    // Welcome + Language + Mental Models + Tips are always shown.
-    let mut total = 4;
+    let mut total = 5;
     if app.onboarding_had_api_key_step {
         total += 2;
     }
@@ -88,13 +92,14 @@ fn onboarding_step(app: &App) -> (usize, usize) {
     let step = match app.onboarding {
         OnboardingState::Welcome => 1,
         OnboardingState::Language => 2,
-        OnboardingState::Provider => 3,
-        OnboardingState::ApiKey => 4,
+        OnboardingState::Appearance => 3,
+        OnboardingState::Provider => 4,
+        OnboardingState::ApiKey => 5,
         OnboardingState::TrustDirectory => {
             if app.onboarding_had_api_key_step {
-                5
+                6
             } else {
-                3
+                4
             }
         }
         OnboardingState::MentalModels => total - 1,
@@ -103,6 +108,36 @@ fn onboarding_step(app: &App) -> (usize, usize) {
     };
 
     (step, total)
+}
+
+/// The card rendered behind the theme picker on the appearance step (#3937).
+///
+/// The picker itself owns the list and the live preview; this card carries the
+/// promise (nothing is saved until Enter) in one short line, because that is
+/// the part a first-run user cannot discover from the list alone.
+fn appearance_lines(app: &App) -> Vec<ratatui::text::Line<'static>> {
+    use crate::localization::MessageId;
+    use ratatui::style::Modifier;
+    use ratatui::text::{Line, Span};
+
+    vec![
+        Line::from(Span::styled(
+            app.tr(MessageId::OnboardAppearanceTitle).to_string(),
+            Style::default()
+                .fg(palette::WHALE_INFO)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            app.tr(MessageId::OnboardAppearanceBlurb).to_string(),
+            Style::default().fg(palette::TEXT_MUTED),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            app.tr(MessageId::OnboardAppearanceFooter).to_string(),
+            Style::default().fg(palette::TEXT_MUTED),
+        )),
+    ]
 }
 
 pub fn tips_lines(app: &App) -> Vec<ratatui::text::Line<'static>> {
@@ -313,10 +348,18 @@ pub fn advance_onboarding_from_welcome(app: &mut App) {
     app.onboarding = OnboardingState::Language;
 }
 
-/// Language → next step. Routes to Provider/ApiKey when the session lacks a
-/// key, to TrustDirectory when the workspace is untrusted, otherwise to the
-/// mental-model primer.
+/// Language → appearance (#3937).
 pub fn advance_onboarding_after_language(app: &mut App) {
+    app.status_message = None;
+    app.onboarding = OnboardingState::Appearance;
+}
+
+/// Appearance → next step. Exactly the routing the language step used to
+/// perform: the appearance step is inserted into the spine, it replaces
+/// nothing. Routes to Provider/ApiKey when the session lacks a key, to
+/// TrustDirectory when the workspace is untrusted, otherwise to the
+/// mental-model primer.
+pub fn advance_onboarding_after_appearance(app: &mut App) {
     app.status_message = None;
     if app.onboarding_needs_api_key {
         app.onboarding = OnboardingState::Provider;
@@ -385,7 +428,7 @@ pub fn back_from_mental_models(app: &mut App) {
     } else if app.onboarding_had_api_key_step {
         OnboardingState::ApiKey
     } else {
-        OnboardingState::Language
+        OnboardingState::Appearance
     };
 }
 
@@ -576,6 +619,115 @@ mod tests {
             !ambient_home.join(".codewhale").exists(),
             "an explicit state root must not write into the ambient profile"
         );
+    }
+
+    // ── #3937: the "Make it yours" appearance step ───────────────────────
+
+    #[test]
+    fn appearance_sits_between_language_and_the_routing_the_language_step_used_to_do() {
+        // Untrusted workspace, key already present: language used to route
+        // straight to trust. It now routes through appearance and lands in
+        // exactly the same place.
+        let mut app = test_app_with_locale(Locale::En);
+        app.onboarding = OnboardingState::Language;
+        app.onboarding_needs_api_key = false;
+        app.trust_mode = false;
+        app.workspace = tempfile::tempdir().expect("tempdir").path().to_path_buf();
+
+        advance_onboarding_after_language(&mut app);
+        assert_eq!(app.onboarding, OnboardingState::Appearance);
+        advance_onboarding_after_appearance(&mut app);
+        assert_eq!(app.onboarding, OnboardingState::TrustDirectory);
+
+        // And the credential path is unchanged too.
+        let mut keyless = test_app_with_locale(Locale::En);
+        keyless.onboarding = OnboardingState::Language;
+        keyless.onboarding_needs_api_key = true;
+        advance_onboarding_after_language(&mut keyless);
+        assert_eq!(keyless.onboarding, OnboardingState::Appearance);
+        advance_onboarding_after_appearance(&mut keyless);
+        assert_eq!(keyless.onboarding, OnboardingState::Provider);
+    }
+
+    #[test]
+    fn the_step_counter_grows_with_the_spine_instead_of_overflowing() {
+        // The shortest first run: no key step, no trust step.
+        let mut app = test_app_with_locale(Locale::En);
+        app.onboarding_had_api_key_step = false;
+        app.onboarding_had_trust_step = false;
+        app.onboarding = OnboardingState::Appearance;
+        let (step, total) = onboarding_step(&app);
+        assert_eq!((step, total), (3, 5));
+
+        // The longest: credential pair plus trust.
+        app.onboarding_had_api_key_step = true;
+        app.onboarding_had_trust_step = true;
+        for (state, expected) in [
+            (OnboardingState::Welcome, 1),
+            (OnboardingState::Language, 2),
+            (OnboardingState::Appearance, 3),
+            (OnboardingState::Provider, 4),
+            (OnboardingState::ApiKey, 5),
+            (OnboardingState::TrustDirectory, 6),
+            (OnboardingState::MentalModels, 7),
+            (OnboardingState::Tips, 8),
+        ] {
+            app.onboarding = state;
+            let (step, total) = onboarding_step(&app);
+            assert_eq!(step, expected, "{state:?}");
+            assert_eq!(total, 8, "{state:?}");
+            assert!(step <= total, "{state:?} overflowed the counter");
+        }
+    }
+
+    #[test]
+    fn back_from_the_primer_returns_to_appearance_when_there_was_no_key_step() {
+        let mut app = test_app_with_locale(Locale::En);
+        app.onboarding = OnboardingState::MentalModels;
+        app.onboarding_had_api_key_step = false;
+        app.onboarding_had_trust_step = false;
+
+        back_from_mental_models(&mut app);
+
+        assert_eq!(app.onboarding, OnboardingState::Appearance);
+    }
+
+    #[test]
+    fn appearance_card_states_the_promise_the_theme_list_cannot() {
+        let mut app = test_app_with_locale(Locale::En);
+        app.onboarding = OnboardingState::Appearance;
+        let body = flattened(appearance_lines(&app));
+
+        assert!(body.contains("Make It Yours"));
+        // The card exists to say what the picker's list cannot: nothing is
+        // saved until Enter, and Esc puts back what was there.
+        assert!(body.contains("Enter"));
+        assert!(body.contains("Esc"));
+    }
+
+    #[test]
+    fn appearance_copy_is_translated_in_every_complete_pack() {
+        use crate::localization::{MessageId, tr};
+
+        for locale in Locale::shipped_complete() {
+            for id in [
+                MessageId::OnboardAppearanceTitle,
+                MessageId::OnboardAppearanceBlurb,
+                MessageId::OnboardAppearanceFooter,
+                MessageId::OnboardWelcomeStepAppearance,
+            ] {
+                let text = tr(*locale, id);
+                assert!(!text.is_empty(), "{locale:?} {id:?} is empty");
+                assert!(!text.contains('{'), "{locale:?} {id:?}: {text}");
+                if *locale != Locale::En {
+                    assert_ne!(
+                        text,
+                        tr(Locale::En, id),
+                        "{locale:?} {id:?} silently fell back to English"
+                    );
+                }
+            }
+        }
     }
 
     // ── #3927: the explicit offline ("explore") choice ───────────────────
