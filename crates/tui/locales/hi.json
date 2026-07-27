@@ -1196,5 +1196,20 @@
     "StepfunBillingRoutePaygOption": "Pay-as-you-go (टोकन मूल्य)",
     "StepfunBillingRoutePlanOption": "Step Plan सदस्यता (प्लान भत्ता)",
     "StepfunPlanApiKeyHint": "StepFun Step Plan सदस्यताओं के लिए अपने Step Plan के लिए जारी कुंजी उपयोग करें, pay-as-you-go कुंजी नहीं।",
-    "StepfunPlanRouteHint": "यह मार्ग {route} उपयोग करता है और आपके Step Plan भत्ते से बिल होता है।"
+    "StepfunPlanRouteHint": "यह मार्ग {route} उपयोग करता है और आपके Step Plan भत्ते से बिल होता है।",
+    "ConfigLabelSessionsRail": "सत्र पट्टी",
+    "ConfigLabelSessionAutoResume": "अंतिम सत्र स्वतः फिर शुरू करें",
+    "SessionsRailTitle": "सत्र",
+    "SessionsRailEmpty": "इस कार्यक्षेत्र में अभी कोई सत्र नहीं",
+    "SessionsRailBrowseAll": "सभी सत्र देखें",
+    "SessionsRailShowingCount": "{total} में से {shown} — सभी देखें",
+    "SessionsRailUnavailable": "सत्र अनुपलब्ध: {error}",
+    "SessionsActionArchive": "संग्रहित करें",
+    "SessionsActionShowArchived": "संग्रहित",
+    "SessionsArchived": "सत्र {id} संग्रहित हुआ",
+    "SessionsRestored": "सत्र {id} बहाल हुआ",
+    "SessionsArchiveFailed": "संग्रह विफल: {error}",
+    "SessionsShowingArchived": "संग्रहित सत्र दिखाए जा रहे हैं",
+    "SessionsHidingArchived": "संग्रहित सत्र छिपाए गए",
+    "SessionsArchivedCompact": "संग्रहित"
 }

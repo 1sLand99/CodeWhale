@@ -1196,5 +1196,20 @@
     "StepfunBillingRoutePaygOption": "Pay-as-you-go (Token-Preis)",
     "StepfunBillingRoutePlanOption": "Step-Plan-Abo (Plankontingent)",
     "StepfunPlanApiKeyHint": "Verwenden Sie für StepFun-Step-Plan-Abos den für Ihren Step Plan ausgestellten Schlüssel, keinen Pay-as-you-go-Schlüssel.",
-    "StepfunPlanRouteHint": "Diese Route nutzt {route} und wird gegen Ihr Step-Plan-Kontingent abgerechnet."
+    "StepfunPlanRouteHint": "Diese Route nutzt {route} und wird gegen Ihr Step-Plan-Kontingent abgerechnet.",
+    "ConfigLabelSessionsRail": "Sitzungsleiste",
+    "ConfigLabelSessionAutoResume": "Letzte Sitzung automatisch fortsetzen",
+    "SessionsRailTitle": "Sitzungen",
+    "SessionsRailEmpty": "Noch keine Sitzungen in diesem Arbeitsbereich",
+    "SessionsRailBrowseAll": "Alle Sitzungen durchsuchen",
+    "SessionsRailShowingCount": "{shown} von {total} — alle anzeigen",
+    "SessionsRailUnavailable": "Sitzungen nicht verfügbar: {error}",
+    "SessionsActionArchive": "archivieren",
+    "SessionsActionShowArchived": "archiviert",
+    "SessionsArchived": "Sitzung {id} archiviert",
+    "SessionsRestored": "Sitzung {id} wiederhergestellt",
+    "SessionsArchiveFailed": "Archivieren fehlgeschlagen: {error}",
+    "SessionsShowingArchived": "Archivierte Sitzungen werden angezeigt",
+    "SessionsHidingArchived": "Archivierte Sitzungen ausgeblendet",
+    "SessionsArchivedCompact": "archiviert"
 }

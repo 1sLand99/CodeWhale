@@ -1196,5 +1196,20 @@
     "StepfunBillingRoutePaygOption": "Pay-as-you-go (harga per token)",
     "StepfunBillingRoutePlanOption": "Langganan Step Plan (jatah paket)",
     "StepfunPlanApiKeyHint": "Untuk langganan StepFun Step Plan, gunakan kunci yang diterbitkan untuk Step Plan Anda, bukan kunci pay-as-you-go.",
-    "StepfunPlanRouteHint": "Rute ini memakai {route} dan ditagih dari jatah Step Plan Anda."
+    "StepfunPlanRouteHint": "Rute ini memakai {route} dan ditagih dari jatah Step Plan Anda.",
+    "ConfigLabelSessionsRail": "Panel sesi",
+    "ConfigLabelSessionAutoResume": "Lanjutkan otomatis sesi terakhir",
+    "SessionsRailTitle": "Sesi",
+    "SessionsRailEmpty": "Belum ada sesi di ruang kerja ini",
+    "SessionsRailBrowseAll": "Jelajahi semua sesi",
+    "SessionsRailShowingCount": "{shown} dari {total} — lihat semua",
+    "SessionsRailUnavailable": "Sesi tidak tersedia: {error}",
+    "SessionsActionArchive": "arsipkan",
+    "SessionsActionShowArchived": "diarsipkan",
+    "SessionsArchived": "Sesi {id} diarsipkan",
+    "SessionsRestored": "Sesi {id} dipulihkan",
+    "SessionsArchiveFailed": "Gagal mengarsipkan: {error}",
+    "SessionsShowingArchived": "Menampilkan sesi terarsip",
+    "SessionsHidingArchived": "Menyembunyikan sesi terarsip",
+    "SessionsArchivedCompact": "diarsipkan"
 }

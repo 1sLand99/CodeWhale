@@ -1196,5 +1196,20 @@
     "StepfunBillingRoutePaygOption": "Pay-as-you-go (preu per token)",
     "StepfunBillingRoutePlanOption": "Subscripció Step Plan (quota del pla)",
     "StepfunPlanApiKeyHint": "Per a subscripcions StepFun Step Plan, useu la clau emesa per al vostre Step Plan, no una clau pay-as-you-go.",
-    "StepfunPlanRouteHint": "Aquesta ruta usa {route} i es factura contra la quota del vostre Step Plan."
+    "StepfunPlanRouteHint": "Aquesta ruta usa {route} i es factura contra la quota del vostre Step Plan.",
+    "ConfigLabelSessionsRail": "Barra de sessions",
+    "ConfigLabelSessionAutoResume": "Reprendre automàticament l'última sessió",
+    "SessionsRailTitle": "Sessions",
+    "SessionsRailEmpty": "Encara no hi ha sessions en aquest espai de treball",
+    "SessionsRailBrowseAll": "Explora totes les sessions",
+    "SessionsRailShowingCount": "{shown} de {total} — veure-les totes",
+    "SessionsRailUnavailable": "Sessions no disponibles: {error}",
+    "SessionsActionArchive": "arxiva",
+    "SessionsActionShowArchived": "arxivades",
+    "SessionsArchived": "Sessió {id} arxivada",
+    "SessionsRestored": "Sessió {id} restaurada",
+    "SessionsArchiveFailed": "No s'ha pogut arxivar: {error}",
+    "SessionsShowingArchived": "Es mostren les sessions arxivades",
+    "SessionsHidingArchived": "S'amaguen les sessions arxivades",
+    "SessionsArchivedCompact": "arxivada"
 }

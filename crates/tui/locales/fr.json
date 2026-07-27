@@ -1196,5 +1196,20 @@
     "StepfunBillingRoutePaygOption": "Pay-as-you-go (tarif au token)",
     "StepfunBillingRoutePlanOption": "Abonnement Step Plan (quota du plan)",
     "StepfunPlanApiKeyHint": "Pour les abonnements StepFun Step Plan, utilisez la clé émise pour votre Step Plan, pas une clé pay-as-you-go.",
-    "StepfunPlanRouteHint": "Cette route utilise {route} et est facturée sur le quota de votre Step Plan."
+    "StepfunPlanRouteHint": "Cette route utilise {route} et est facturée sur le quota de votre Step Plan.",
+    "ConfigLabelSessionsRail": "Volet des sessions",
+    "ConfigLabelSessionAutoResume": "Reprendre automatiquement la dernière session",
+    "SessionsRailTitle": "Sessions",
+    "SessionsRailEmpty": "Aucune session dans cet espace de travail pour l'instant",
+    "SessionsRailBrowseAll": "Parcourir toutes les sessions",
+    "SessionsRailShowingCount": "{shown} sur {total} — tout parcourir",
+    "SessionsRailUnavailable": "Sessions indisponibles : {error}",
+    "SessionsActionArchive": "archiver",
+    "SessionsActionShowArchived": "archivées",
+    "SessionsArchived": "Session {id} archivée",
+    "SessionsRestored": "Session {id} restaurée",
+    "SessionsArchiveFailed": "Échec de l'archivage : {error}",
+    "SessionsShowingArchived": "Sessions archivées affichées",
+    "SessionsHidingArchived": "Sessions archivées masquées",
+    "SessionsArchivedCompact": "archivée"
 }

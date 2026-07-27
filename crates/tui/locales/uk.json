@@ -1196,5 +1196,20 @@
     "StepfunBillingRoutePaygOption": "Pay-as-you-go (потокенна оплата)",
     "StepfunBillingRoutePlanOption": "Підписка Step Plan (ліміт плану)",
     "StepfunPlanApiKeyHint": "Для підписок StepFun Step Plan використовуйте ключ, виданий для вашого Step Plan, а не ключ pay-as-you-go.",
-    "StepfunPlanRouteHint": "Цей маршрут використовує {route} і списується з ліміту вашого Step Plan."
+    "StepfunPlanRouteHint": "Цей маршрут використовує {route} і списується з ліміту вашого Step Plan.",
+    "ConfigLabelSessionsRail": "Панель сеансів",
+    "ConfigLabelSessionAutoResume": "Автовідновлення останнього сеансу",
+    "SessionsRailTitle": "Сеанси",
+    "SessionsRailEmpty": "У цьому робочому просторі ще немає сеансів",
+    "SessionsRailBrowseAll": "Усі сеанси",
+    "SessionsRailShowingCount": "{shown} з {total} — показати всі",
+    "SessionsRailUnavailable": "Сеанси недоступні: {error}",
+    "SessionsActionArchive": "архівувати",
+    "SessionsActionShowArchived": "архів",
+    "SessionsArchived": "Сеанс {id} заархівовано",
+    "SessionsRestored": "Сеанс {id} відновлено",
+    "SessionsArchiveFailed": "Не вдалося заархівувати: {error}",
+    "SessionsShowingArchived": "Показано архівні сеанси",
+    "SessionsHidingArchived": "Архівні сеанси приховано",
+    "SessionsArchivedCompact": "в архіві"
 }
