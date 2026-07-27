@@ -2515,18 +2515,19 @@ impl Engine {
         let snapshot = self.config.goal_state.lock().ok()?.snapshot();
         let same_goal =
             normalized_goal_objective(snapshot.objective.as_deref()).as_deref() == Some(objective);
-        let (tokens_used, time_used_seconds, continuation_count) = if same_goal {
+        let (tokens_used, time_used_seconds, continuation_count, token_budget) = if same_goal {
             (
                 snapshot.tokens_used,
                 snapshot.time_used_seconds,
                 snapshot.continuation_count,
+                snapshot.token_budget,
             )
         } else {
-            (0, 0, 0)
+            (0, 0, 0, prompt_context.goal_token_budget)
         };
 
         let mut telemetry = ResourceTelemetry::new(tokens_used, time_used_seconds);
-        if let Some(token_budget) = prompt_context.goal_token_budget {
+        if let Some(token_budget) = token_budget {
             telemetry = telemetry.with_token_budget(u64::from(token_budget));
         }
 
