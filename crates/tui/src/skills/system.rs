@@ -6,7 +6,9 @@ use std::io::Write;
 use std::path::Path;
 
 /// Bundled catalog generation for the default CodeWhale skill pack (#4691).
-const BUNDLED_SKILL_VERSION: &str = "6";
+///
+/// Generation 7 adds the explicit-only `help` router (#4698 parity slice).
+const BUNDLED_SKILL_VERSION: &str = "7";
 
 // ── system & extension (meta) ───────────────────────────────────────────────
 const SKILL_CREATOR_BODY: &str = include_str!("../../assets/skills/skill-creator/SKILL.md");
@@ -15,6 +17,7 @@ const PLUGIN_CREATOR_BODY: &str = include_str!("../../assets/skills/plugin-creat
 const SKILL_INSTALLER_BODY: &str = include_str!("../../assets/skills/skill-installer/SKILL.md");
 const MCP_BUILDER_BODY: &str = include_str!("../../assets/skills/mcp-builder/SKILL.md");
 const FLEET_MANAGER_BODY: &str = include_str!("../../assets/skills/fleet-manager/SKILL.md");
+const HELP_BODY: &str = include_str!("../../assets/skills/help/SKILL.md");
 
 // ── end-user workflows ──────────────────────────────────────────────────────
 const BEST_OF_N_BODY: &str = include_str!("../../assets/skills/best-of-n/SKILL.md");
@@ -90,6 +93,11 @@ const BUNDLED_SKILLS: &[BundledSkill] = &[
         name: "fleet-manager",
         body: FLEET_MANAGER_BODY,
         introduced_in: 4,
+    },
+    BundledSkill {
+        name: "help",
+        body: HELP_BODY,
+        introduced_in: 7,
     },
     // End-user workflows
     BundledSkill {
@@ -257,7 +265,7 @@ pub fn bundled_skill_tier(name: &str) -> Option<BundledSkillTier> {
         return None;
     }
     let tier = match name {
-        "skill-creator" | "plugin-creator" | "skill-installer" | "mcp-builder"
+        "skill-creator" | "plugin-creator" | "skill-installer" | "mcp-builder" | "help"
         | "frontend-design" | "webapp-testing" | "document" | "dataviz" | "docx" | "pdf"
         | "pptx" | "xlsx" | "documents" | "presentations" | "spreadsheets" => {
             BundledSkillTier::FormatTooling
@@ -265,6 +273,25 @@ pub fn bundled_skill_tier(name: &str) -> Option<BundledSkillTier> {
         _ => BundledSkillTier::CoreAgentic,
     };
     Some(tier)
+}
+
+/// Canonical names of every skill in the shipped starter pack, in bundle order.
+///
+/// Exposed so the catalog fixture matrix (#4698) can assert a *bijection*
+/// between the checked-in fixture and the real bundle: a skill added or removed
+/// without updating the fixture fails the build rather than silently changing
+/// what every user gets installed.
+#[must_use]
+#[allow(dead_code)] // consumed by the catalog matrix contract tests
+pub fn bundled_skill_names() -> Vec<&'static str> {
+    BUNDLED_SKILLS.iter().map(|skill| skill.name).collect()
+}
+
+/// The shipped generation marker written to `.system-installed-version`.
+#[must_use]
+#[allow(dead_code)] // consumed by the catalog matrix contract tests
+pub fn bundled_skill_generation() -> &'static str {
+    BUNDLED_SKILL_VERSION
 }
 
 /// Legacy v4-best-practices body digest helper (not in BUNDLED_SKILLS).

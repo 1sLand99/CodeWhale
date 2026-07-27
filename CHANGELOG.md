@@ -17,6 +17,48 @@ already claimed to.
 
 ### Added
 
+- The bundled skill pack now ships a `help` skill (catalog generation 7). It is
+  `invocation: explicit-only`, so it never enters the model's ambient catalogue
+  and costs no prompt budget. Its body is a routing card that points at the
+  surfaces this build actually exposes — `/help` and `/help <command>`,
+  `/skills` and `/skills inspect`, `/config`, `doctor`, and the `docs/` tree
+  when the workspace is a Codewhale checkout — and explicitly forbids pasting a
+  command list or settings table into context (#4698).
+
+- `crates/tui/assets/skills-catalog-matrix.json`: an authored, provider-free
+  expectation matrix covering every bundled skill (tier, invocation, aliases,
+  ambient-catalogue eligibility, shadowed aliases). Contract tests in
+  `crates/tui/src/skills/catalog_matrix.rs` assert a bijection between the
+  fixture and the shipped bundle, so the starter pack cannot change without an
+  explicit fixture update. The matrix covers positive eligibility and explicit
+  load, non-activation negatives, alias resolution, explicit-only exclusion,
+  alias-vs-canonical collision precedence, and prompt-budget invariants (no
+  duplicate catalogue entries, no aliases as extra entries, and the shipped
+  pack fitting inside the 12 000-char budget with no omitted-skills line). These
+  are deterministic registry/catalog/resolver assertions and make no claim about
+  semantic model routing (#4698).
+
+- Locale-routing coverage for the complete bundled catalog across every shipped
+  locale (`en`, `ja`, `zh-Hans`, `zh-Hant`, `pt-BR`, `es-419`, `vi`, `ko`). No
+  bundled skill ships a localized routing description and none was invented;
+  the tested contract is deterministic fallback to the canonical English
+  description, with the rendered catalogue byte-identical across locales.
+  Exact-tag match, primary-subtag fallback, and English fallback are covered
+  against a synthetic authored fixture, and the parity test fails if a bundled
+  skill ever gains localized metadata without source-backed coverage (#4698).
+
+- `docs/LIVE_SMOKE.md`: copy-pasteable, opt-in live-smoke instructions for Kimi
+  K3 and a second provider/model (DeepSeek). The runs are manual only — nothing
+  in CI, tests, or skills invokes them. They use `env -i` plus a throwaway
+  `CODEWHALE_HOME`; `HOME` is left unset rather than repurposed, and ambient
+  provider variables are not forwarded. The operator names the credential
+  variable explicitly, and the isolated child reads its value with echo off,
+  restores the prior terminal state on exit or interruption, and never persists
+  the value or puts it in a command argument. The page states the expected
+  route/model/reasoning/tool receipt fields while treating provider errors as
+  unclassified until provider configuration, authentication/entitlement, and
+  harness behavior have been corroborated independently (#4698).
+
 - Approval cards can now remember eligible safe shell and file-write approvals
   as exact `allow` rules scoped to the current repository. Remembered shell
   commands use complete-command matching, validated file and patch paths remain
