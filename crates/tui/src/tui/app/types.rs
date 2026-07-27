@@ -101,6 +101,24 @@ impl From<EffectiveReasoningEffort> for crate::work_graph::ReasoningEffortTier {
     }
 }
 
+impl From<crate::work_graph::ReasoningEffortTier> for EffectiveReasoningEffort {
+    fn from(value: crate::work_graph::ReasoningEffortTier) -> Self {
+        use crate::work_graph::ReasoningEffortTier as Tier;
+        match value {
+            Tier::Off => Self::Tier(ReasoningEffort::Off),
+            Tier::Low => Self::Tier(ReasoningEffort::Low),
+            Tier::Medium => Self::Tier(ReasoningEffort::Medium),
+            Tier::High => Self::Tier(ReasoningEffort::High),
+            Tier::Auto => Self::Tier(ReasoningEffort::Auto),
+            Tier::Max => Self::Tier(ReasoningEffort::Max),
+            Tier::ThinkingEnabledGranularityUnavailable => {
+                Self::ThinkingEnabledGranularityUnavailable
+            }
+            Tier::Unavailable => Self::Unavailable,
+        }
+    }
+}
+
 impl From<ReasoningEffort> for crate::work_graph::ReasoningEffortTier {
     fn from(value: ReasoningEffort) -> Self {
         match value {

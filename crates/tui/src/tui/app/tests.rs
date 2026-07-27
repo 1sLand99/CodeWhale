@@ -463,6 +463,152 @@ fn compatible_zai_gateway_records_effective_unavailable() {
 }
 
 #[test]
+fn minimax_m3_high_and_max_receipts_do_not_claim_tier_granularity() {
+    for (previous, requested, label) in [
+        (ReasoningEffort::Off, ReasoningEffort::High, "high"),
+        (ReasoningEffort::High, ReasoningEffort::Max, "max"),
+    ] {
+        let mut app = App::new(test_options(false), &Config::default());
+        app.api_provider = ApiProvider::Minimax;
+        app.auto_model = false;
+        app.active_route_base_url = crate::config::DEFAULT_MINIMAX_BASE_URL.to_string();
+        app.model = crate::config::DEFAULT_MINIMAX_MODEL.to_string();
+        app.reasoning_effort = previous;
+
+        app.cycle_effort();
+
+        assert_eq!(app.reasoning_effort, requested);
+        assert_eq!(
+            app.reasoning_effort_display_label(),
+            format!("{label}→thinking enabled; granularity unavailable")
+        );
+        let work = app
+            .work_state_snapshot()
+            .expect("Work snapshot")
+            .expect("effort activity creates graph state");
+        let activity = work
+            .graph
+            .expect("Work Graph")
+            .activities
+            .last()
+            .cloned()
+            .expect("effort activity");
+        let crate::work_graph::WorkActivityEvent::ReasoningEffortChanged {
+            effective,
+            endpoint_identity,
+            model,
+            ..
+        } = activity;
+        assert_eq!(
+            effective,
+            crate::work_graph::ReasoningEffortTier::ThinkingEnabledGranularityUnavailable
+        );
+        assert_eq!(
+            endpoint_identity.as_deref(),
+            Some(crate::config::DEFAULT_MINIMAX_BASE_URL)
+        );
+        assert_eq!(model.as_deref(), Some(crate::config::DEFAULT_MINIMAX_MODEL));
+    }
+}
+
+#[test]
+fn zai_gateway_off_and_high_receipts_remain_unavailable() {
+    for (previous, requested, label) in [
+        (ReasoningEffort::Max, ReasoningEffort::Off, "off"),
+        (ReasoningEffort::Off, ReasoningEffort::High, "high"),
+    ] {
+        let mut app = App::new(test_options(false), &Config::default());
+        app.api_provider = ApiProvider::Zai;
+        app.auto_model = false;
+        app.active_route_base_url = "https://gateway.example/v1".to_string();
+        app.model = crate::config::ZAI_GLM_5_2_MODEL.to_string();
+        app.reasoning_effort = previous;
+
+        app.cycle_effort();
+
+        assert_eq!(app.reasoning_effort, requested);
+        assert_eq!(
+            app.reasoning_effort_display_label(),
+            format!("{label}→effective unavailable")
+        );
+    }
+}
+
+#[test]
+fn kimi_code_high_and_max_work_receipts_preserve_exact_tiers() {
+    for (previous, requested) in [
+        (ReasoningEffort::Off, ReasoningEffort::High),
+        (ReasoningEffort::High, ReasoningEffort::Max),
+    ] {
+        let mut app = App::new(test_options(false), &Config::default());
+        app.api_provider = ApiProvider::Moonshot;
+        app.auto_model = false;
+        app.active_route_base_url = crate::config::DEFAULT_KIMI_CODE_BASE_URL.to_string();
+        app.model = crate::config::KIMI_CODE_K3_MODEL.to_string();
+        app.reasoning_effort = previous;
+
+        app.cycle_effort();
+
+        let work = app
+            .work_state_snapshot()
+            .expect("Work snapshot")
+            .expect("effort activity creates graph state");
+        let activity = work
+            .graph
+            .expect("Work Graph")
+            .activities
+            .last()
+            .cloned()
+            .unwrap();
+        let crate::work_graph::WorkActivityEvent::ReasoningEffortChanged {
+            effective,
+            endpoint_identity,
+            model,
+            ..
+        } = activity;
+        assert_eq!(effective, requested.into());
+        assert_eq!(
+            endpoint_identity.as_deref(),
+            Some(crate::config::DEFAULT_KIMI_CODE_BASE_URL)
+        );
+        assert_eq!(model.as_deref(), Some(crate::config::KIMI_CODE_K3_MODEL));
+    }
+}
+
+#[test]
+fn active_turn_zai_receipt_overrides_mutable_config_for_effective_truth() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Deepseek;
+    app.active_route_base_url = crate::config::DEFAULT_DEEPSEEK_BASE_URL.to_string();
+    app.model = "deepseek-chat".to_string();
+    app.reasoning_effort = ReasoningEffort::Max;
+    app.active_turn = Some(ActiveTurnMetadata {
+        turn_id: "turn-zai-receipt".to_string(),
+        created_at: chrono::Utc::now(),
+        route: Some(crate::core::events::TurnRoute {
+            provider: ApiProvider::Zai,
+            provider_identity: "zai".to_string(),
+            model: crate::config::ZAI_GLM_5_TURBO_MODEL.to_string(),
+            auto_model: false,
+            receipt: Some(crate::route_receipt::TurnRouteReceipt::new(
+                ApiProvider::Zai,
+                "zai",
+                crate::config::ZAI_GLM_5_TURBO_MODEL,
+                crate::config::DEFAULT_ZAI_BASE_URL,
+                "test-secret-never-persisted",
+            )),
+        }),
+        auto_route_receipt: None,
+        suggestion_authority: None,
+    });
+
+    assert_eq!(
+        app.reasoning_effort_display_label(),
+        "max→thinking enabled; granularity unavailable"
+    );
+}
+
+#[test]
 fn pending_zai_route_without_endpoint_receipt_is_effective_unavailable() {
     let mut app = App::new(test_options(false), &Config::default());
     app.api_provider = ApiProvider::Deepseek;

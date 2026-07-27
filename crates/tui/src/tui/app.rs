@@ -2314,13 +2314,22 @@ impl App {
             .reasoning_effort
             .cycle_next_for_provider(self.api_provider);
         let effective = self.effective_reasoning_effort_for_active_route(requested);
-        let provider = self.provider_identity_for_persistence().to_string();
+        let route_truth = self.active_reasoning_route_truth();
+        let provider = route_truth.map_or_else(
+            || self.provider_identity_for_persistence().to_string(),
+            |(_, provider_identity, _, _)| provider_identity.to_string(),
+        );
+        let endpoint_identity = route_truth
+            .map(|(_, _, endpoint, _)| crate::route_receipt::endpoint_identity(endpoint));
+        let model = route_truth.map(|(_, _, _, model)| model.to_string());
         if let Some(work) = self.runtime_services.work.clone()
             && let Err(err) = work.record_reasoning_effort_change(
                 self.current_session_id.as_deref(),
                 requested.into(),
                 effective.into(),
                 &provider,
+                endpoint_identity.as_deref(),
+                model.as_deref(),
             )
         {
             self.status_message = Some(format!(
@@ -4337,7 +4346,37 @@ impl App {
         // Prefer the immutable installed-client receipt while a turn is live.
         // If it is unavailable, only use the configured route when no pending
         // or active foreign route could make that identity stale.
-        let route_truth = if let Some(route) = self
+        let route_truth = self.active_reasoning_route_truth();
+        if let Some((provider, _, base_url, model)) = route_truth {
+            if let Some(constrained) = crate::work_graph::constrained_effective_reasoning_for_route(
+                requested.into(),
+                provider,
+                base_url,
+                model,
+            ) {
+                return constrained.into();
+            }
+        } else if self.active_turn.as_ref().is_some_and(|turn| {
+            turn.route.as_ref().is_some_and(|route| {
+                matches!(route.provider, ApiProvider::Zai | ApiProvider::Minimax)
+                    && route.receipt.is_none()
+            })
+        }) || self
+            .pending_turn_route
+            .as_ref()
+            .is_some_and(|(provider, _, _)| {
+                matches!(provider, ApiProvider::Zai | ApiProvider::Minimax)
+            })
+        {
+            // A route without its immutable endpoint receipt cannot prove
+            // first-party semantics from provider/model identity alone.
+            return EffectiveReasoningEffort::Unavailable;
+        }
+        EffectiveReasoningEffort::Tier(effective)
+    }
+
+    fn active_reasoning_route_truth(&self) -> Option<(ApiProvider, &str, &str, &str)> {
+        if let Some(route) = self
             .active_turn
             .as_ref()
             .and_then(|turn| turn.route.as_ref())
@@ -4345,6 +4384,7 @@ impl App {
             route.receipt.as_ref().map(|receipt| {
                 (
                     receipt.provider(),
+                    route.provider_identity.as_str(),
                     receipt.endpoint_identity(),
                     receipt.wire_model(),
                 )
@@ -4352,37 +4392,13 @@ impl App {
         } else if self.pending_turn_route.is_none() {
             Some((
                 self.api_provider,
+                self.provider_identity_for_persistence(),
                 self.active_route_base_url.as_str(),
                 self.model.as_str(),
             ))
         } else {
             None
-        };
-        if let Some((provider, base_url, model)) = route_truth {
-            if provider == ApiProvider::Zai
-                && !crate::config::is_exact_zai_chat_route(provider, base_url)
-            {
-                return EffectiveReasoningEffort::Unavailable;
-            }
-            if crate::config::is_exact_zai_glm_5_turbo_route(provider, base_url, model)
-                && !matches!(effective, ReasoningEffort::Off | ReasoningEffort::Auto)
-            {
-                return EffectiveReasoningEffort::ThinkingEnabledGranularityUnavailable;
-            }
-        } else if self.active_turn.as_ref().is_some_and(|turn| {
-            turn.route
-                .as_ref()
-                .is_some_and(|route| route.provider == ApiProvider::Zai && route.receipt.is_none())
-        }) || self
-            .pending_turn_route
-            .as_ref()
-            .is_some_and(|(provider, _, _)| *provider == ApiProvider::Zai)
-        {
-            // A route without its immutable endpoint receipt cannot prove
-            // first-party semantics from provider/model identity alone.
-            return EffectiveReasoningEffort::Unavailable;
         }
-        EffectiveReasoningEffort::Tier(effective)
     }
 
     fn reasoning_effort_resolution_label(

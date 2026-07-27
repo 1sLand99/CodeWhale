@@ -6913,6 +6913,14 @@ mod tests {
         assert!(body.get("reasoning_effort").is_none());
 
         let mut body = json!({});
+        apply_reasoning_effort(&mut body, Some("max"), ApiProvider::Minimax);
+        assert_eq!(
+            body.pointer("/thinking/type").and_then(Value::as_str),
+            Some("adaptive")
+        );
+        assert!(body.get("reasoning_effort").is_none());
+
+        let mut body = json!({});
         apply_reasoning_effort(&mut body, Some("off"), ApiProvider::Minimax);
         assert_eq!(
             body.get("reasoning_split").and_then(Value::as_bool),

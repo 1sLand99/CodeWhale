@@ -388,6 +388,8 @@ impl WorkRuntime {
         requested: ReasoningEffortTier,
         effective: ReasoningEffortTier,
         provider: &str,
+        endpoint_identity: Option<&str>,
+        model: Option<&str>,
     ) -> Result<Option<WorkNodeId>, String> {
         let todos = retry_lock(&self.todos, 100)
             .ok_or_else(|| "To-do state is busy; effort change was not recorded".to_string())?;
@@ -420,6 +422,8 @@ impl WorkRuntime {
                         requested,
                         effective,
                         provider: provider.to_string(),
+                        endpoint_identity: endpoint_identity.map(str::to_string),
+                        model: model.map(str::to_string),
                         ts: now,
                         operation: operation.clone(),
                     },
@@ -1594,6 +1598,8 @@ mod tests {
                 ReasoningEffortTier::Low,
                 ReasoningEffortTier::High,
                 "moonshot",
+                Some(crate::config::DEFAULT_MOONSHOT_BASE_URL),
+                Some("kimi-k2.5"),
             ),
             Ok(Some(node_id.clone()))
         );
@@ -1615,6 +1621,8 @@ mod tests {
                 requested: ReasoningEffortTier::Low,
                 effective: ReasoningEffortTier::High,
                 provider: "moonshot".to_string(),
+                endpoint_identity: Some(crate::config::DEFAULT_MOONSHOT_BASE_URL.to_string()),
+                model: Some("kimi-k2.5".to_string()),
                 ts,
                 operation: Some(node_id.clone()),
             }

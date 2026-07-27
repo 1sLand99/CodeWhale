@@ -7629,7 +7629,7 @@ pub(crate) fn is_exact_zai_glm_5_turbo_route(
 /// Chat API. Compatible gateways and the Anthropic Messages route retain
 /// their own token-limit dialects.
 #[must_use]
-pub(crate) fn minimax_m3_route_uses_max_completion_tokens(
+pub(crate) fn is_exact_minimax_m3_route(
     provider: ApiProvider,
     base_url: &str,
     model: &str,
@@ -7640,6 +7640,15 @@ pub(crate) fn minimax_m3_route_uses_max_completion_tokens(
             base_url,
         )
         && model.trim().eq_ignore_ascii_case(DEFAULT_MINIMAX_MODEL)
+}
+
+#[must_use]
+pub(crate) fn minimax_m3_route_uses_max_completion_tokens(
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) -> bool {
+    is_exact_minimax_m3_route(provider, base_url, model)
 }
 
 /// Fail closed on known-bad K3 model/endpoint pairings (#4687).

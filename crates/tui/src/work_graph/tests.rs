@@ -70,6 +70,8 @@ fn effort_activity(
         requested: ReasoningEffortTier::Low,
         effective: ReasoningEffortTier::High,
         provider: provider.into(),
+        endpoint_identity: Some("https://example.invalid/v1".to_string()),
+        model: Some("test-model".to_string()),
         ts,
         operation,
     }
@@ -747,6 +749,8 @@ fn effective_only_reasoning_states_cannot_be_requested() {
                     requested,
                     effective: requested,
                     provider: "zai".to_string(),
+                    endpoint_identity: Some(crate::config::DEFAULT_ZAI_BASE_URL.to_string()),
+                    model: Some(crate::config::ZAI_GLM_5_2_MODEL.to_string()),
                     ts: 10,
                     operation: None,
                 },
@@ -812,6 +816,51 @@ fn snapshot_serde_round_trips() {
     let restored: WorkGraphSnapshot = serde_json::from_str(&json).unwrap();
     assert_eq!(&restored, graph.snapshot());
     validate(&restored).expect("restored snapshot still satisfies invariants");
+}
+
+#[test]
+fn legacy_reasoning_activity_loads_with_effective_truth_unavailable() {
+    let mut wire = serde_json::to_value(effort_activity("moonshot", 10, None)).unwrap();
+    let object = wire.as_object_mut().expect("activity object");
+    object.remove("endpoint_identity");
+    object.remove("model");
+
+    let restored: WorkActivityEvent = serde_json::from_value(wire).expect("legacy activity loads");
+    let WorkActivityEvent::ReasoningEffortChanged {
+        effective,
+        endpoint_identity,
+        model,
+        ..
+    } = restored;
+    assert_eq!(effective, ReasoningEffortTier::Unavailable);
+    assert!(endpoint_identity.is_none());
+    assert!(model.is_none());
+}
+
+#[test]
+fn restored_zai_gateway_cannot_forge_effective_max() {
+    let mut snapshot = seeded().into_snapshot();
+    snapshot
+        .activities
+        .push_bounded(WorkActivityEvent::ReasoningEffortChanged {
+            requested: ReasoningEffortTier::Max,
+            effective: ReasoningEffortTier::Max,
+            provider: "zai".to_string(),
+            endpoint_identity: Some("https://gateway.example/v1".to_string()),
+            model: Some(crate::config::ZAI_GLM_5_2_MODEL.to_string()),
+            ts: 10,
+            operation: None,
+        });
+    let wire = serde_json::to_string(&snapshot).expect("serialize forged snapshot");
+    let restored: WorkGraphSnapshot = serde_json::from_str(&wire).expect("restore forged snapshot");
+
+    let report = validate(&restored).expect_err("gateway cannot prove effective max");
+    assert!(report.contains_code(ValidationCode::Structural));
+    assert!(report.violations.iter().any(|violation| {
+        violation
+            .message
+            .contains("impossible for its recorded route")
+    }));
 }
 
 #[test]
