@@ -830,8 +830,25 @@ enum OnboardingKeyRoute {
     Quit,
     /// Hand the key to the provider picker on the view stack.
     ProviderPicker,
+    /// Hand the key to the theme picker owning the appearance step (#3937).
+    /// Escape belongs to the picker so its revert path runs; the shell must
+    /// not pop the modal and strand a previewed-but-unsaved theme.
+    ThemePicker,
+    /// Take the advertised offline exit (#3927). Reachable from the Provider
+    /// and API-key steps even while the provider picker owns the screen, so
+    /// the choice is never hidden behind a modal the user cannot satisfy.
+    ExploreOffline,
     /// Fall through to the legacy onboarding key switch.
     Legacy,
+}
+
+/// Ctrl+O — the one gesture that selects "explore offline".
+///
+/// A plain letter cannot be used: the API-key screen is a text field and would
+/// swallow it into the draft secret.
+fn is_explore_offline_shortcut(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 /// Decide the onboarding route for one key press.
@@ -852,10 +869,46 @@ fn onboarding_key_route(
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return OnboardingKeyRoute::Quit;
     }
+    // Checked before the picker claim: the offline exit must stay reachable
+    // from behind a modal the user cannot satisfy.
+    if matches!(
+        onboarding,
+        OnboardingState::Provider | OnboardingState::ApiKey
+    ) && is_explore_offline_shortcut(key)
+    {
+        return OnboardingKeyRoute::ExploreOffline;
+    }
     if onboarding == OnboardingState::Provider && top_kind == Some(ModalKind::ProviderPicker) {
         return OnboardingKeyRoute::ProviderPicker;
     }
+    if onboarding == OnboardingState::Appearance && top_kind == Some(ModalKind::ThemePicker) {
+        return OnboardingKeyRoute::ThemePicker;
+    }
     OnboardingKeyRoute::Legacy
+}
+
+/// Open the one canonical theme surface for the appearance step (#3937).
+///
+/// This is the same `ThemePickerView` `/theme` uses, so onboarding inherits its
+/// transactional contract wholesale: navigating previews live through a
+/// non-persisting `ConfigUpdated`, Enter persists, and Escape reverts to the
+/// theme captured here. There is no second theme list and no second registry.
+fn open_onboarding_theme_picker(app: &mut App) {
+    if app.onboarding != OnboardingState::Appearance
+        || app.view_stack.top_kind() == Some(ModalKind::ThemePicker)
+    {
+        return;
+    }
+    let original = app.theme_id.name().to_string();
+    app.view_stack.push_boxed(
+        crate::tui::theme_picker::ThemePickerView::boxed_with_treatment(
+            original,
+            app.ocean_treatment,
+            app.ui_locale,
+            app.background_color_override,
+        ),
+    );
+    app.needs_redraw = true;
 }
 
 fn back_from_provider_onboarding(app: &mut App) {
@@ -5445,6 +5498,16 @@ async fn run_event_loop(
                     let _ = engine_handle.send(Op::Shutdown).await;
                     return Ok(());
                 }
+                // #3927: no provider is selected and no route is activated.
+                // The picker (a preview surface, never route authority) is
+                // popped without applying anything it was showing.
+                OnboardingKeyRoute::ExploreOffline => {
+                    if app.view_stack.top_kind() == Some(ModalKind::ProviderPicker) {
+                        let _ = app.view_stack.pop();
+                    }
+                    onboarding::choose_offline_explore(app);
+                    continue;
+                }
                 // Every other key, Escape included, belongs to the picker.
                 // The picker's own per-stage Escape walks key/OAuth entry
                 // back to the list and only dismisses from the list, where
@@ -5468,6 +5531,32 @@ async fn run_event_loop(
                     }
                     continue;
                 }
+                // #3937: the theme picker owns the appearance step, including
+                // Escape — its revert path restores the theme the session
+                // started with. When it closes (Enter persisted, or Escape
+                // reverted) the step is done either way, so the spine advances.
+                OnboardingKeyRoute::ThemePicker => {
+                    let events = app.view_stack.handle_key(key);
+                    app.needs_redraw = true;
+                    if handle_view_events_boxed(
+                        terminal,
+                        app,
+                        config,
+                        &task_manager,
+                        &mut engine_handle,
+                        &mut web_config_session,
+                        events,
+                    )
+                    .await?
+                    {
+                        return Ok(());
+                    }
+                    if app.view_stack.top_kind() != Some(ModalKind::ThemePicker) {
+                        onboarding::advance_onboarding_after_appearance(app);
+                        open_onboarding_provider_picker(app, config, &engine_handle, false).await;
+                    }
+                    continue;
+                }
                 OnboardingKeyRoute::Legacy => {}
             }
 
@@ -5483,6 +5572,12 @@ async fn run_event_loop(
                     }
                     KeyCode::Esc if app.onboarding == OnboardingState::Provider => {
                         back_from_provider_onboarding(app);
+                    }
+                    // Only reachable with the picker closed; with it open the
+                    // picker owns Escape so its theme revert runs first.
+                    KeyCode::Esc if app.onboarding == OnboardingState::Appearance => {
+                        app.onboarding = OnboardingState::Language;
+                        app.status_message = None;
                     }
                     KeyCode::Esc if app.onboarding == OnboardingState::Language => {
                         app.onboarding = OnboardingState::Welcome;
@@ -5525,13 +5620,7 @@ async fn run_event_loop(
                                         Some(2_500),
                                     );
                                     onboarding::advance_onboarding_after_language(app);
-                                    open_onboarding_provider_picker(
-                                        app,
-                                        config,
-                                        &engine_handle,
-                                        false,
-                                    )
-                                    .await;
+                                    open_onboarding_theme_picker(app);
                                 }
                                 Err(err) => {
                                     app.status_message =
@@ -5548,8 +5637,14 @@ async fn run_event_loop(
                             // Enter without a digit pick keeps the existing
                             // setting (which defaults to "auto").
                             onboarding::advance_onboarding_after_language(app);
-                            open_onboarding_provider_picker(app, config, &engine_handle, false)
-                                .await;
+                            open_onboarding_theme_picker(app);
+                        }
+                        // Reached only when the picker is not on the stack —
+                        // e.g. after walking Back from the mental-model
+                        // screen. Enter re-opens it rather than skipping the
+                        // step with no way to return.
+                        OnboardingState::Appearance => {
+                            open_onboarding_theme_picker(app);
                         }
                         OnboardingState::Provider => {
                             open_onboarding_provider_picker(app, config, &engine_handle, false)
@@ -10794,6 +10889,9 @@ async fn switch_provider(
         status_message.push_str(" (not fully persisted)");
     }
     app.status_message = Some(status_message);
+    // #3927: activating a route is the single event that retires the
+    // explore-offline label. Nothing time-based or screen-based clears it.
+    onboarding::clear_offline_explore_on_route_activation(app);
     if persisted {
         record_provider_model_setup_progress(app, config);
     }

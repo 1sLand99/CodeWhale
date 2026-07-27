@@ -15,7 +15,7 @@
     "in_model_catalogue": "true when the skill renders as an ambient catalogue line",
     "shadowed_aliases": "aliases that collide with another canonical bundled name; the canonical skill wins resolution"
   },
-  "generation": "7",
+  "generation": "8",
   "skills": [
     {
       "name": "skill-creator",
@@ -285,6 +285,14 @@
     },
     {
       "name": "release",
+      "tier": "core",
+      "invocation": "explicit-only",
+      "aliases": [],
+      "in_model_catalogue": false,
+      "shadowed_aliases": []
+    },
+    {
+      "name": "contributor-onboarding",
       "tier": "core",
       "invocation": "explicit-only",
       "aliases": [],

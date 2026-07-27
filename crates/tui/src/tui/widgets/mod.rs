@@ -1198,7 +1198,15 @@ impl Renderable for ComposerWidget<'_> {
                     }
                     SubmitDisposition::Queue => {
                         if self.app.offline_mode {
-                            (Some("↵ offline queue".to_string()), palette::STATUS_WARNING)
+                            // #3927: an explicitly chosen offline session keeps
+                            // naming its one recovery command, not just its
+                            // queue behavior.
+                            let label = if self.app.onboarding_explore_offline {
+                                "↵ offline queue · /provider connects".to_string()
+                            } else {
+                                "↵ offline queue".to_string()
+                            };
+                            (Some(label), palette::STATUS_WARNING)
                         } else if self.app.mode == crate::tui::app::AppMode::Operate {
                             // Enter queues while busy; Ctrl+Enter explicitly
                             // steers. Ctrl+G/Ctrl+S only stash drafts (#440).

@@ -130,6 +130,12 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
     }
 
     lines.push(Line::from(""));
+    // #3927: the offline exit is advertised here too, so a user without a key
+    // is never cornered into pasting one to get past onboarding.
+    lines.push(Line::from(Span::styled(
+        app.tr(MessageId::OnboardOfflineOption).to_string(),
+        Style::default().fg(palette::TEXT_MUTED),
+    )));
     lines.push(Line::from(Span::styled(
         app.tr(MessageId::OnboardApiKeyFooter).to_string(),
         Style::default().fg(palette::TEXT_MUTED),

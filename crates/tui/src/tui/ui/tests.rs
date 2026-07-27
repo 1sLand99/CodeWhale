@@ -11802,10 +11802,12 @@ fn mental_models_backtracks_to_the_last_first_run_decision() {
     crate::tui::onboarding::back_from_mental_models(&mut app);
     assert_eq!(app.onboarding, OnboardingState::ApiKey);
 
+    // With neither optional step, the last decision before the primer is the
+    // appearance step (#3937), not language.
     app.onboarding = OnboardingState::MentalModels;
     app.onboarding_had_api_key_step = false;
     crate::tui::onboarding::back_from_mental_models(&mut app);
-    assert_eq!(app.onboarding, OnboardingState::Language);
+    assert_eq!(app.onboarding, OnboardingState::Appearance);
 }
 
 // ---- Issue #4763: provider onboarding must never be a trap ----
@@ -11840,6 +11842,87 @@ fn onboarding_ctrl_c_quits_even_with_the_provider_picker_on_the_view_stack() {
             &ctrl_c,
         ),
         OnboardingKeyRoute::Quit,
+    );
+}
+
+/// #3937: the theme picker owns every key on the appearance step, Escape
+/// included — the shell popping the modal itself would strand a previewed but
+/// unsaved theme instead of running the picker's revert.
+#[test]
+fn appearance_step_hands_every_key_including_escape_to_the_theme_picker() {
+    for key in [
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+    ] {
+        assert_eq!(
+            onboarding_key_route(
+                OnboardingState::Appearance,
+                Some(ModalKind::ThemePicker),
+                &key,
+            ),
+            OnboardingKeyRoute::ThemePicker,
+            "{key:?}",
+        );
+    }
+
+    // Ctrl+C still quits from under the picker.
+    assert_eq!(
+        onboarding_key_route(
+            OnboardingState::Appearance,
+            Some(ModalKind::ThemePicker),
+            &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        ),
+        OnboardingKeyRoute::Quit,
+    );
+
+    // With the picker closed the step falls back to the legacy switch, which
+    // is what lets Enter re-open it and Escape walk back to Language.
+    assert_eq!(
+        onboarding_key_route(
+            OnboardingState::Appearance,
+            None,
+            &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        ),
+        OnboardingKeyRoute::Legacy,
+    );
+}
+
+/// #3927: the offline exit must be reachable from both credential steps even
+/// while the provider picker owns the keys — otherwise the only advertised way
+/// out of a modal the user cannot satisfy is to quit.
+#[test]
+fn explore_offline_shortcut_escapes_the_provider_picker_from_both_credential_steps() {
+    let ctrl_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+
+    assert_eq!(
+        onboarding_key_route(
+            OnboardingState::Provider,
+            Some(ModalKind::ProviderPicker),
+            &ctrl_o,
+        ),
+        OnboardingKeyRoute::ExploreOffline,
+    );
+    assert_eq!(
+        onboarding_key_route(OnboardingState::ApiKey, None, &ctrl_o),
+        OnboardingKeyRoute::ExploreOffline,
+    );
+
+    // It is scoped to the credential steps: elsewhere it stays an ordinary key.
+    assert_eq!(
+        onboarding_key_route(OnboardingState::Language, None, &ctrl_o),
+        OnboardingKeyRoute::Legacy,
+    );
+    assert_eq!(
+        onboarding_key_route(OnboardingState::None, None, &ctrl_o),
+        OnboardingKeyRoute::Legacy,
+    );
+
+    // A bare "o" is text on the API-key screen and must never trigger it.
+    let plain_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE);
+    assert_eq!(
+        onboarding_key_route(OnboardingState::ApiKey, None, &plain_o),
+        OnboardingKeyRoute::Legacy,
     );
 }
 
