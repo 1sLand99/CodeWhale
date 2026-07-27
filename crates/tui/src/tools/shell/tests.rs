@@ -642,8 +642,14 @@ async fn drain_finished_jobs_reports_once() {
         .to_string();
 
     let mut manager = ctx.shell_manager.lock().expect("shell manager");
+    assert!(manager.may_have_undelivered_completion());
+    assert!(
+        manager.may_have_undelivered_completion(),
+        "read-only detection must not consume the pending completion"
+    );
     let completed = wait_for_completed_shell(&mut manager, &task_id);
     assert_ne!(completed.status, ShellStatus::Running);
+    assert!(manager.may_have_undelivered_completion());
 
     let first = manager.drain_finished_jobs();
     assert_eq!(first.len(), 1);
@@ -653,6 +659,7 @@ async fn drain_finished_jobs_reports_once() {
 
     let second = manager.drain_finished_jobs();
     assert!(second.is_empty(), "completion should be reported only once");
+    assert!(!manager.may_have_undelivered_completion());
 }
 
 #[test]

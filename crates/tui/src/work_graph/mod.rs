@@ -47,6 +47,7 @@ pub use liveness::{
     task_owner_snapshot,
 };
 pub use migration::import_legacy;
+pub(crate) use model::constrained_effective_reasoning_for_route;
 pub use model::{
     ACTIVITY_CAP, AcceptanceRequirement, BoundedSet, BoundedVec, CompatPlanMetadata,
     CompatProjectionState, CompatTodoBinding, EdgeKind, EvidenceKind, EvidenceKindTag, EvidenceRef,

@@ -122,8 +122,8 @@ export const DOC_TOPICS: DocTopic[] = [
     slug: "work",
     label: { en: "Work Surface", zh: "工作面板" },
     description: {
-      en: "The counted To-do ledger, update_plan strategy context, and how work state flows to the sidebar, relay, and sub-agents.",
-      zh: "带计数的 To-do 台账、update_plan 策略上下文，以及工作状态如何流向侧栏、relay 和子 Agent。",
+      en: "The sole canonical To-do ledger, model-facing Work grounding, and how work state flows to the sidebar, relay, and sub-agents.",
+      zh: "唯一的 To-do 台账、模型可见的 Work grounding，以及工作状态如何流向侧栏、relay 和子 Agent。",
     },
     repoSource: ["docs/TOOL_SURFACE.md", "docs/TOOL_LIFECYCLE.md"],
     hasPage: true,

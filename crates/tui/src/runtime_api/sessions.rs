@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -12,8 +13,11 @@ use crate::runtime_threads::{
     TurnItemLifecycleStatus,
 };
 use crate::session_manager::{
-    SavedSession, SessionManager, SessionMetadata, create_saved_session_with_id_and_mode,
+    SavedSession, SessionListFilter, SessionManager, SessionMetadata, SessionMutator,
+    create_saved_session_with_id_and_mode,
 };
+use crate::session_peek::{MAX_PEEK_ENTRIES, SessionPeek, build_peek};
+use crate::session_projection::{SessionQuery, SessionSortMode, SessionSummary, project_sessions};
 
 use super::{ApiError, RuntimeApiState, map_thread_err, truncate_text};
 
@@ -61,6 +65,41 @@ pub(super) struct ResumeSessionResponse {
 pub(super) struct SessionsQuery {
     limit: Option<usize>,
     search: Option<String>,
+    /// Include archived sessions. Same name and meaning as the `/v1/threads`
+    /// query pair, so a client does not need two mental models (#4397).
+    #[serde(default)]
+    include_archived: Option<bool>,
+    /// Return archived sessions only. Overrides `include_archived`.
+    #[serde(default)]
+    archived_only: Option<bool>,
+    /// Restrict to sessions recorded against this workspace. Absent means
+    /// every workspace, matching the historical behaviour of this route.
+    #[serde(default)]
+    workspace: Option<PathBuf>,
+    /// `recent` (default), `name`, or `size`.
+    #[serde(default)]
+    sort: Option<String>,
+}
+
+/// `PATCH /v1/sessions/{id}` body. Both fields are optional; omitting one
+/// leaves it untouched.
+#[derive(Debug, Deserialize)]
+pub(super) struct PatchSessionRequest {
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    archived: Option<bool>,
+}
+
+/// Lifecycle receipt for a session mutation.
+///
+/// Deliberately shaped like the thread patch receipt: the caller gets the
+/// resulting record plus an explicit `changes` map of what actually moved, so
+/// a no-op patch is distinguishable from an applied one without diffing.
+#[derive(Debug, Serialize)]
+pub(super) struct PatchSessionResponse {
+    session: SessionMetadata,
+    changes: HashMap<String, Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,36 +121,167 @@ pub(super) struct SaveSessionResponse {
     session: SessionDetailResponse,
 }
 
+/// Turn a `SessionsQuery` into the shared projection query.
+///
+/// The whole point of routing through [`SessionQuery`] is that the API's
+/// filter/sort/search semantics are the *same code* the TUI picker and the
+/// sidebar rail run, not a parallel reimplementation that drifts.
+fn projection_query(query: &SessionsQuery) -> SessionQuery {
+    let mut projected = SessionQuery::default()
+        .with_filter(SessionListFilter::from_query(
+            query.include_archived,
+            query.archived_only,
+        ))
+        .with_sort(
+            query
+                .sort
+                .as_deref()
+                .map_or(SessionSortMode::Recent, SessionSortMode::from_str_or_recent),
+        )
+        .with_search(query.search.clone().unwrap_or_default())
+        .with_limit(query.limit.unwrap_or(50).clamp(1, 500));
+    if let Some(workspace) = query.workspace.as_deref() {
+        projected = projected.scoped_to(workspace);
+    }
+    projected
+}
+
 pub(super) async fn list_sessions(
     State(state): State<RuntimeApiState>,
     Query(query): Query<SessionsQuery>,
 ) -> Result<Json<SessionsResponse>, ApiError> {
     let manager = SessionManager::new(state.sessions_dir.clone())
         .map_err(|e| ApiError::internal(format!("Failed to open sessions dir: {e}")))?;
-    let mut sessions = if let Some(search) = query.search {
-        manager
-            .search_sessions(&search)
-            .map_err(|e| ApiError::internal(format!("Failed to search sessions: {e}")))?
-    } else {
-        manager
-            .list_sessions()
-            .map_err(|e| ApiError::internal(format!("Failed to list sessions: {e}")))?
-    };
-    let limit = query.limit.unwrap_or(50).clamp(1, 500);
-    sessions.truncate(limit);
+    let all = manager
+        .list_sessions()
+        .map_err(|e| ApiError::internal(format!("Failed to list sessions: {e}")))?;
+    // This route keeps returning full `SessionMetadata` for compatibility;
+    // `/v1/sessions/summary` is the projected shape. Membership *and* order
+    // come from the shared projection so the two routes never disagree.
+    let sessions: Vec<SessionMetadata> = project_sessions(&all, &projection_query(&query), None)
+        .into_iter()
+        .filter_map(|summary| all.iter().find(|m| m.id == summary.id).cloned())
+        .collect();
     Ok(Json(SessionsResponse { sessions }))
+}
+
+/// `GET /v1/sessions/summary` — the projected row shape.
+///
+/// Field-compatible with `/v1/threads/summary` so the embedded dashboard can
+/// render a saved session and a live thread with one row renderer, which is
+/// what "one projection" means in practice rather than as an aspiration.
+pub(super) async fn list_sessions_summary(
+    State(state): State<RuntimeApiState>,
+    Query(query): Query<SessionsQuery>,
+) -> Result<Json<Vec<SessionSummary>>, ApiError> {
+    let manager = SessionManager::new(state.sessions_dir.clone())
+        .map_err(|e| ApiError::internal(format!("Failed to open sessions dir: {e}")))?;
+    let all = manager
+        .list_sessions()
+        .map_err(|e| ApiError::internal(format!("Failed to list sessions: {e}")))?;
+    Ok(Json(project_sessions(
+        &all,
+        &projection_query(&query),
+        None,
+    )))
+}
+
+/// `PATCH /v1/sessions/{id}` — rename and/or archive a saved session.
+///
+/// Both mutations go through the manager's single writers
+/// (`rename_session`, `set_session_archived`), which is what keeps the web
+/// dashboard, the TUI picker, and `/sessions archive` from producing three
+/// different notions of the same lifecycle state.
+pub(super) async fn patch_session(
+    State(state): State<RuntimeApiState>,
+    Path(id): Path<String>,
+    Json(req): Json<PatchSessionRequest>,
+) -> Result<Json<PatchSessionResponse>, ApiError> {
+    if req.title.is_none() && req.archived.is_none() {
+        return Err(ApiError::bad_request(
+            "PATCH /v1/sessions/{id} requires at least one of `title` or `archived`",
+        ));
+    }
+    let manager = SessionManager::new(state.sessions_dir.clone())
+        .map_err(|e| ApiError::internal(format!("Failed to open sessions dir: {e}")))?;
+
+    let before = manager
+        .load_session(&id)
+        .map_err(|e| map_session_err(&id, e, "read"))?
+        .metadata;
+    let mut metadata = before.clone();
+    let mut changes: HashMap<String, Value> = HashMap::new();
+
+    if let Some(title) = req.title.as_deref() {
+        // Validate the title before touching the store so a rejected title
+        // reports *why* it was rejected rather than the generic "invalid
+        // session id" that `map_session_err` produces for `InvalidInput`.
+        crate::session_manager::normalize_session_title(title)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        metadata = manager
+            .rename_session(&id, title, SessionMutator::External)
+            .map_err(|e| map_session_err(&id, e, "rename"))?;
+        if metadata.title != before.title {
+            changes.insert("title".to_string(), json!(metadata.title));
+        }
+    }
+    if let Some(archived) = req.archived {
+        metadata = manager
+            .set_session_archived(&id, archived, SessionMutator::External)
+            .map_err(|e| map_session_err(&id, e, "archive"))?;
+        if metadata.archived != before.archived {
+            changes.insert("archived".to_string(), json!(metadata.archived));
+        }
+    }
+
+    Ok(Json(PatchSessionResponse {
+        session: metadata,
+        changes,
+    }))
+}
+
+/// `GET /v1/sessions/{id}` query options.
+#[derive(Debug, Deserialize, Default)]
+pub(super) struct SessionDetailQuery {
+    /// When true, return a bounded, redacted [`SessionPeek`] instead of the
+    /// full transcript. The dashboard always asks for this: shipping a
+    /// multi-megabyte transcript to a browser in order to show twelve lines is
+    /// both wasteful and a needless place to re-emit secrets.
+    #[serde(default)]
+    peek: Option<bool>,
+    /// Entry budget for the peek, clamped to [`MAX_PEEK_ENTRIES`].
+    #[serde(default)]
+    entries: Option<usize>,
+}
+
+/// Either the full session or a bounded peek, chosen by `?peek=true`.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub(super) enum SessionDetailOrPeek {
+    Peek(Box<SessionPeek>),
+    Detail(Box<SessionDetailResponse>),
 }
 
 pub(super) async fn get_session(
     State(state): State<RuntimeApiState>,
     Path(id): Path<String>,
-) -> Result<Json<SessionDetailResponse>, ApiError> {
+    Query(query): Query<SessionDetailQuery>,
+) -> Result<Json<SessionDetailOrPeek>, ApiError> {
     let manager = SessionManager::new(state.sessions_dir.clone())
         .map_err(|e| ApiError::internal(format!("Failed to open sessions dir: {e}")))?;
     let session = manager
         .load_session(&id)
         .map_err(|e| map_session_err(&id, e, "read"))?;
-    Ok(Json(session_to_detail(session)))
+
+    if query.peek.unwrap_or(false) {
+        let entries = query.entries.unwrap_or(MAX_PEEK_ENTRIES);
+        return Ok(Json(SessionDetailOrPeek::Peek(Box::new(build_peek(
+            &session, entries,
+        )))));
+    }
+    Ok(Json(SessionDetailOrPeek::Detail(Box::new(
+        session_to_detail(session),
+    ))))
 }
 
 pub(super) async fn resume_session_thread(
@@ -724,6 +894,13 @@ fn map_session_err(id: &str, err: std::io::Error, action: &str) -> ApiError {
         std::io::ErrorKind::InvalidInput => {
             ApiError::bad_request(format!("Invalid session id '{id}'"))
         }
+        // The session is open in an interactive Codewhale session, which holds
+        // the authoritative copy in memory. Fail closed with a typed conflict
+        // rather than write something its next autosave would revert.
+        std::io::ErrorKind::ResourceBusy => ApiError {
+            status: StatusCode::CONFLICT,
+            message: err.to_string(),
+        },
         _ => ApiError::internal(format!("Failed to {action} session '{id}': {err}")),
     }
 }
@@ -741,6 +918,91 @@ fn map_resume_thread_create_err(err: anyhow::Error) -> ApiError {
         // Thread-store writes, event persistence, and other runtime failures
         // are server-side faults; never disguise them as a client config error.
         ApiError::internal(message)
+    }
+}
+
+#[cfg(test)]
+mod session_query_tests {
+    use super::*;
+
+    fn query(
+        include_archived: Option<bool>,
+        archived_only: Option<bool>,
+        sort: Option<&str>,
+        workspace: Option<&str>,
+        limit: Option<usize>,
+    ) -> SessionsQuery {
+        SessionsQuery {
+            limit,
+            search: Some("whale".to_string()),
+            include_archived,
+            archived_only,
+            workspace: workspace.map(PathBuf::from),
+            sort: sort.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn archive_params_resolve_like_the_threads_routes() {
+        assert_eq!(
+            projection_query(&query(None, None, None, None, None)).filter,
+            SessionListFilter::ActiveOnly
+        );
+        assert_eq!(
+            projection_query(&query(Some(true), None, None, None, None)).filter,
+            SessionListFilter::IncludeArchived
+        );
+        assert_eq!(
+            projection_query(&query(Some(true), Some(true), None, None, None)).filter,
+            SessionListFilter::ArchivedOnly
+        );
+    }
+
+    #[test]
+    fn sort_and_workspace_scope_flow_through_and_bad_sorts_fall_back() {
+        let projected = projection_query(&query(None, None, Some("name"), Some("/repo"), Some(9)));
+        assert_eq!(projected.sort, SessionSortMode::Name);
+        // `Path` in this module is `axum::extract::Path`; spell out the std one.
+        assert_eq!(
+            projected.workspace_scope.as_deref(),
+            Some(std::path::Path::new("/repo"))
+        );
+        assert_eq!(projected.limit, 9);
+        assert_eq!(projected.search, "whale");
+
+        // An unknown sort must not fail the request — a stale client should
+        // still get a listing, just in the default order.
+        assert_eq!(
+            projection_query(&query(None, None, Some("nonsense"), None, None)).sort,
+            SessionSortMode::Recent
+        );
+    }
+
+    #[test]
+    fn limit_is_clamped_at_both_ends() {
+        assert_eq!(
+            projection_query(&query(None, None, None, None, Some(0))).limit,
+            1
+        );
+        assert_eq!(
+            projection_query(&query(None, None, None, None, Some(10_000))).limit,
+            500
+        );
+        // Absent limit keeps the historical page size.
+        assert_eq!(
+            projection_query(&query(None, None, None, None, None)).limit,
+            50
+        );
+    }
+
+    #[test]
+    fn absent_workspace_means_every_workspace() {
+        assert!(
+            projection_query(&query(None, None, None, None, None))
+                .workspace_scope
+                .is_none(),
+            "the API must not silently scope to the runtime's own CWD"
+        );
     }
 }
 

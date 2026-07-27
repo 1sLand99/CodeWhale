@@ -17,10 +17,21 @@
 use ratatui::style::Color;
 
 use super::adapt::blend;
+use super::themes::UiTheme;
 
 /// WCAG 2.x AA contrast floor for body text. Applied to every resolved
 /// foreground we can reason about.
 pub const AA_BODY_CONTRAST: f32 = 4.5;
+
+/// Contrast floor for secondary chrome: hint/dim text and status roles.
+/// Matches the WCAG 2.x AA threshold for large text and UI components (3:1).
+/// Status roles qualify because they are redundant by design — every status
+/// also carries a glyph and a word label, so color is never the only channel.
+///
+/// Consumed by the theme audit below, which runs as a test gate rather than
+/// at runtime — hence the `dead_code` allowance on this audit surface.
+#[allow(dead_code)]
+pub const SECONDARY_CHROME_CONTRAST: f32 = 3.0;
 
 /// Relative luminance per WCAG 2.x, in `0.0..=1.0`.
 ///
@@ -202,4 +213,121 @@ fn indexed_rgb(index: u8) -> (u8, u8, u8) {
         let level = 8 + 10 * (index - 232);
         (level, level, level)
     }
+}
+
+/// A single theme color pair that fails its contrast floor. See
+/// [`theme_contrast_violations`].
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThemeContrastViolation {
+    /// Static name of the failing pair, e.g. `"text_muted on panel_bg"`.
+    pub pair: &'static str,
+    /// The foreground as shipped by the theme.
+    pub fg: Color,
+    /// The surface it sits on.
+    pub bg: Color,
+    /// The measured WCAG contrast ratio (always below `floor`).
+    pub ratio: f32,
+    /// The floor the pair was audited against.
+    pub floor: f32,
+}
+
+/// `true` when the theme's surfaces belong to the terminal, not to us.
+///
+/// The `Terminal` theme paints [`Color::Reset`] surfaces so the host
+/// terminal's own scheme shows through. Those colors are terminal-owned and
+/// not enforceable: we cannot know their RGB, so the audit neither passes nor
+/// fails them — it stands down. This function is how callers tell that
+/// exemption apart from a clean bill of health.
+#[allow(dead_code)]
+#[must_use]
+pub fn theme_uses_terminal_owned_surfaces(theme: &UiTheme) -> bool {
+    theme.surface_bg == Color::Reset
+}
+
+/// Audit a theme's text and status color pairs against their contrast floors.
+///
+/// Pair table and floors:
+/// - `text_body`, `text_soft`, `text_muted` on each of `surface_bg`,
+///   `panel_bg`, `composer_bg`, `elevated_bg` — [`AA_BODY_CONTRAST`] (4.5:1).
+/// - `text_hint` on the same four surfaces, and `text_dim` on `surface_bg` —
+///   [`SECONDARY_CHROME_CONTRAST`] (3:1). Hint/dim are secondary chrome:
+///   de-emphasized metadata, never the sole carrier of meaning.
+/// - `status_ready` / `status_working` / `status_warning` and
+///   `warning` / `success` / `info` on `surface_bg` — 3:1, because these
+///   roles are redundant: every status is also spelled out by a glyph and a
+///   word label, so color is never the only signal.
+/// - `text_body` on `selection_bg` — 4.5:1 (the theme picker renders body
+///   text on the selection surface).
+/// - `diff_added_fg` on `diff_added_bg`, `diff_deleted_fg` on
+///   `diff_deleted_bg` — 3:1.
+/// - `error_text` on `error_surface` — 4.5:1.
+///
+/// Pairs where either color is terminal-defined ([`Color::Reset`], named
+/// ANSI, `Indexed(0..=15)`) are *skipped*, not passed: their real RGB is
+/// owned by the user's terminal profile and cannot be audited. The
+/// `Terminal` theme is therefore largely exempt by design — see
+/// [`theme_uses_terminal_owned_surfaces`], which makes that exemption
+/// explicit rather than silent.
+#[allow(dead_code)]
+#[must_use]
+pub fn theme_contrast_violations(theme: &UiTheme) -> Vec<ThemeContrastViolation> {
+    let mut violations = Vec::new();
+    let mut check = |pair: &'static str, fg: Color, bg: Color, floor: f32| {
+        // An unresolvable side means the terminal owns the color: skip the
+        // pair rather than recording a pass we cannot substantiate.
+        if let Some(ratio) = contrast_ratio(fg, bg) {
+            if ratio < floor {
+                violations.push(ThemeContrastViolation {
+                    pair,
+                    fg,
+                    bg,
+                    ratio,
+                    floor,
+                });
+            }
+        }
+    };
+    macro_rules! audit {
+        ($floor:expr; $(($fg:ident, $bg:ident)),+ $(,)?) => {
+            $(check(
+                concat!(stringify!($fg), " on ", stringify!($bg)),
+                theme.$fg,
+                theme.$bg,
+                $floor,
+            );)+
+        };
+    }
+    audit!(AA_BODY_CONTRAST;
+        (text_body, surface_bg),
+        (text_body, panel_bg),
+        (text_body, composer_bg),
+        (text_body, elevated_bg),
+        (text_soft, surface_bg),
+        (text_soft, panel_bg),
+        (text_soft, composer_bg),
+        (text_soft, elevated_bg),
+        (text_muted, surface_bg),
+        (text_muted, panel_bg),
+        (text_muted, composer_bg),
+        (text_muted, elevated_bg),
+        (text_body, selection_bg),
+        (error_text, error_surface),
+    );
+    audit!(SECONDARY_CHROME_CONTRAST;
+        (text_hint, surface_bg),
+        (text_hint, panel_bg),
+        (text_hint, composer_bg),
+        (text_hint, elevated_bg),
+        (text_dim, surface_bg),
+        (status_ready, surface_bg),
+        (status_working, surface_bg),
+        (status_warning, surface_bg),
+        (warning, surface_bg),
+        (success, surface_bg),
+        (info, surface_bg),
+        (diff_added_fg, diff_added_bg),
+        (diff_deleted_fg, diff_deleted_bg),
+    );
+    violations
 }

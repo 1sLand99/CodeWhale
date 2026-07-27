@@ -69,9 +69,17 @@ by the former spellings remain in force.
 | `work_update` | Replace the concrete To-do / Work progress projection for the active thread or durable task. |
 | `tool_search` | Discover and load a deferred tool only when the current turn needs it. |
 
-`update_plan` and `work_update` are complementary, not competing checklists.
-The former carries strategy; the latter is the concrete progress ledger shown
-to the user.
+`work_update` writes the **sole canonical Work ledger**. `update_plan` is
+conversational reasoning — strategy, constraints, and route notes that help a
+reader understand the approach. It is not a second Work surface, and plan-only
+state never becomes model-facing Work grounding.
+
+That distinction is enforced at the request boundary (#3983): the current To-do
+snapshot is rendered by one bounded renderer
+(`crates/tui/src/work_grounding.rs`) and appended to each parent turn-loop and
+sub-agent step request as a transient `<codewhale:work_state>` block. Forked
+sub-agents and `/relay` handoffs embed the byte-identical body. An empty To-do
+emits no block at all.
 
 ## Deferred and dynamic tools
 
@@ -89,6 +97,29 @@ dependencies are available.
 MCP tools are dynamic. Successfully connected servers register names such as
 `mcp_<server>_<tool>` from `~/.codewhale/mcp.json`; a failed or disabled server
 must not be presented as an available model tool.
+
+## Inspect the model-client request tool payload
+
+Run `/tools` after a model turn to inspect a bounded projection of the exact
+tool field in the latest prepared model-client request. `/tools json` emits the
+same evidence as bounded machine-readable JSON. Both formats open in a pager;
+they are not copied into transcript history. `/tool-studio` remains a human-
+command compatibility alias; it is not a model tool.
+
+The snapshot distinguishes an absent tool field from a present empty array. It
+reports the exact model-client tool JSON byte count and SHA-256 digest only when
+measurement fits the one-MiB inspection bound; larger payloads stay unavailable.
+Provider adapters may transform, sanitize, or omit those fields while building
+a provider-specific wire body, so `/tools` marks provider delivery and the wire
+payload unavailable. Capture and rendering are bounded: retained schemas,
+descriptions, caller lists, catalog rows, turn IDs, and payload measurement all
+carry explicit truncation, omission, or unavailable receipts. The snapshot stays
+in memory only for the current session and is replaced on each prepared request.
+
+Provider, model, approval, registry provenance, and runtime capability metadata
+are not fields in the request tool schema. `/tools` therefore reports them as
+unavailable instead of joining against mutable state or inferring values. Use
+the separate route and permission receipts for those facts.
 
 ## Modes and permission postures
 
@@ -157,6 +188,73 @@ fan-in, and verify worker receipts before reporting combined completion.
 RLM child-query batching is a different, cheaper cost class. Its
 `sub_query_batch` helper accepts 1–16 one-shot children inside a live `rlm`
 session; it is not a substitute for tool-carrying `agent` workers.
+
+## Human inspection: `/tools` (`/tool-studio`)
+
+`/tools` renders a **read-only, bounded human projection** of the tool field of
+the request that was prepared for one `(turn, step)`. It is not a second
+registry and not an execution surface.
+
+**The seam.** The snapshot is built in `crates/tui/src/core/engine/turn_loop.rs`
+immediately after `MessageRequest` is constructed, from `request.tools` — the
+same value the model client is handed. The engine resolves the surrounding
+per-turn data once in `engine.rs` (`ToolSurfaceContext`: flattened registry
+facts, the MCP pool's own server attribution, the engine-injected catalog names,
+and the resolved model client's receipt) and passes it as plain data, so the
+per-step seam never re-locks the MCP pool or holds a tool object.
+
+**Turn and step identity.** The tool set can differ between steps of a turn, so
+each snapshot is stamped with turn id and step and each seam emits its own. The
+TUI keeps only the latest (`SessionState.last_tool_request_snapshot`). Before
+the first seam there is no snapshot and `/tools` says so rather than rebuilding
+a registry in the UI.
+
+Two kinds of fact are kept apart:
+
+- **Wire facts** come from the prepared request: name, description, schema,
+  `defer_loading` / `strict` / `allowed_callers` / `cache_control`, byte
+  accounting, and the catalog digest.
+- **Surface facts** come from the `ToolSurfaceContext`: provenance
+  (`builtin` / `plugin` / `mcp` / `synthetic` / `unknown`), MCP server identity,
+  declared capabilities, declared approval requirement, and model visibility.
+
+Contract:
+
+- **One digest.** `active_tool_catalog_sha256`
+  (`crates/tui/src/core/engine/preview.rs`) is the single definition of the
+  active-tool-catalog hash. The request manifest publishes it as
+  `ToolSurfaceFacts::active_tool_catalog_sha256` and `/tools` reports the same
+  value for the same prepared request; neither surface keeps a hash of its own.
+- **Nothing is guessed.** MCP server identity is shown only when the real pool
+  attributed that exact model tool name. `McpPool::mcp_model_tool_name` is the
+  single definition shared by the model catalog and the human attribution, and
+  an ambiguous name (two servers colliding on one model name) resolves to no
+  server. Synthetic provenance comes from
+  `default_synthetic_catalog_tool_names`, which is asserted against the engine's
+  own `is_synthetic_catalog_tool` predicate. A transmitted tool with no registry
+  entry reports `capabilities: unknown`, never "none".
+- **Provider availability follows the resolved client.** It comes from
+  `Engine::tool_surface_provider_receipt`, never from "a tool registry exists".
+  With no client the receipt is `unavailable` even when the registry is full.
+- **Unknown shrinks, it does not vanish.** `unavailable_for_this_request` always
+  contains `provider_wire_payload`: nothing on this path observes what the
+  provider adapter finally transmits. It additionally contains `provider` and
+  `model` without a resolved client, and `provenance` / `capabilities` /
+  `approval` when no surface context was captured.
+- **Absent stays distinct from empty.** A request with no tools field is not a
+  request with an empty tools array; an unresolved field is `unknown` with a
+  reason, not a default.
+- **Bounded.** Rendering is capped by tool count (32), name, description, schema
+  bytes, allowed-caller count, and a payload measurement bound, each with an
+  explicit truncation or omission receipt. Registered tools that this request
+  does *not* carry are reported as a bounded name list plus an exact count
+  rather than expanding the projection.
+- **Inert.** The snapshot lives beside the transcript, never in
+  `session.messages`, so it cannot enter a model request or perturb the
+  provider's prefix cache. It never executes a tool, never reads credentials,
+  never reorders the catalog, and is never registered as a model-callable tool.
+- **Delivery is never claimed.** The capture happens before connection setup, so
+  `delivery_status` stays `unknown`.
 
 ## Release verification
 

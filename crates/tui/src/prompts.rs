@@ -15,6 +15,7 @@ use crate::tui::app::AppMode;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
+pub mod base_preview;
 pub(crate) mod text;
 
 #[derive(Debug, Clone)]
@@ -150,8 +151,26 @@ fn translation_target_language_for_tag(locale_tag: &str) -> &'static str {
         "Simplified Chinese (简体中文)"
     } else if normalized.starts_with("pt") {
         "Brazilian Portuguese (Português do Brasil)"
+    } else if normalized.starts_with("es") {
+        "Latin American Spanish (Español latinoamericano)"
     } else if normalized.starts_with("vi") {
         "Vietnamese (Tiếng Việt)"
+    } else if normalized.starts_with("ko") {
+        "Korean (한국어)"
+    } else if normalized.starts_with("ca") {
+        "Catalan (Català)"
+    } else if normalized.starts_with("de") {
+        "German (Deutsch)"
+    } else if normalized.starts_with("fr") {
+        "French (Français)"
+    } else if normalized.starts_with("id") {
+        "Indonesian (Bahasa Indonesia)"
+    } else if normalized.starts_with("hi") {
+        "Hindi (हिन्दी)"
+    } else if normalized.starts_with("ru") {
+        "Russian (Русский)"
+    } else if normalized.starts_with("uk") {
+        "Ukrainian (Українська)"
     } else {
         "English"
     }
@@ -709,6 +728,72 @@ fn effective_base_prompt() -> &'static str {
     effective_prompt_override(&BASE_PROMPT_OVERRIDE, BASE_PROMPT)
 }
 
+/// Where the base-prompt bytes used by this process actually came from.
+///
+/// #3928: diagnostics used to cite `crates/tui/src/prompts/text.rs`, which is
+/// a source-tree path that does not exist on an installed binary and says
+/// nothing about whether an override replaced the constant at startup. This
+/// reports the runtime truth instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BasePromptOrigin {
+    /// The `BASE_PROMPT` constant compiled into this binary.
+    Bundled,
+    /// An opted-in `prompts/constitution.md` override installed at startup.
+    ConfigOverride,
+}
+
+impl BasePromptOrigin {
+    /// Short, user-facing provenance label. Contains no filesystem paths.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Bundled => "bundled in this codewhale-tui build (BASE_PROMPT, compiled in)",
+            Self::ConfigOverride => concat!(
+                "config-directory override installed at startup ",
+                "(prompts/constitution.md, opt-in enabled)"
+            ),
+        }
+    }
+}
+
+/// Runtime provenance of the base prompt for this process.
+pub(crate) fn base_prompt_origin() -> BasePromptOrigin {
+    if BASE_PROMPT_OVERRIDE.get().is_some() {
+        BasePromptOrigin::ConfigOverride
+    } else {
+        BasePromptOrigin::Bundled
+    }
+}
+
+/// The exact base-prompt bytes this process will compose into the system
+/// prompt — the override when one is installed, the bundled constant
+/// otherwise.
+pub(crate) fn effective_base_prompt_text() -> &'static str {
+    effective_base_prompt()
+}
+
+/// Where the effective base prompt actually comes from right now (#3928).
+///
+/// Reads the same cells composition reads, so a preview cannot claim "bundled"
+/// while an override is live. `config_dir` only supplies the path shown in the
+/// override label; it does not decide whether an override is in effect.
+#[must_use]
+pub fn effective_base_prompt_source(config_dir: Option<&Path>) -> base_preview::BasePromptSource {
+    if STATIC_PROMPT_COMPOSER.get().is_some() {
+        // An embedder composer wraps or replaces the whole static layer set, so
+        // it outranks the base-prompt cell as the honest answer.
+        return base_preview::BasePromptSource::EmbedderComposer;
+    }
+    if BASE_PROMPT_OVERRIDE.get().is_some() {
+        return base_preview::BasePromptSource::ConfigOverride {
+            path: config_dir.map_or_else(
+                || CONSTITUTION_OVERRIDE_FILE.to_string(),
+                |dir| dir.join(CONSTITUTION_OVERRIDE_FILE).display().to_string(),
+            ),
+        };
+    }
+    base_preview::BasePromptSource::Bundled
+}
+
 fn effective_static_prompt_composer() -> Option<&'static StaticPromptComposer> {
     STATIC_PROMPT_COMPOSER.get().map(Box::as_ref)
 }
@@ -763,10 +848,12 @@ fn effective_authority_recap() -> &'static str {
 /// context, the symptom reported in #1118 and visible in the WeChat
 /// screenshot that prompted this change.
 ///
-/// The list is intentionally short (only locales the TUI ships UI
-/// strings for: `zh-Hans`, `ja`, `pt-BR`). Other locales fall through
-/// to `None` and get the English-only directive, which is the same
-/// behavior as before this change.
+/// The list is intentionally short (`zh-Hans`, `ja`, `pt-BR`, `vi`) even
+/// though the TUI ships UI packs for many more locales. Other locales fall
+/// through to `None` and get the English-only directive, which is the same
+/// behavior as before this change; the test
+/// `v092_locales_add_no_prompt_bookends_so_prompt_bytes_stay_stable` locks
+/// that set so adding a UI pack never silently changes prompt bytes.
 ///
 /// ## Design philosophy: why a bookend, not a full translation
 ///
@@ -2272,6 +2359,59 @@ start it",
         let pt = locale_reinforcement_closer("pt-BR").expect("pt-BR closer");
         assert!(pt.contains("português do Brasil"));
         assert!(pt.contains("reasoning_content"));
+    }
+
+    #[test]
+    fn v092_locales_add_no_prompt_bookends_so_prompt_bytes_stay_stable() {
+        // Cache-stability contract: adding the v0.9.2 UI locales
+        // (ca, de, fr, id, hi, ru, uk) — and the already-shipped UI packs
+        // that never had bookends (ko, es-419, zh-Hant) — must not change
+        // the model-visible system prompt for an identical route/session
+        // when translation is not explicitly enabled. The bookend list
+        // stays intentionally short (zh-Hans, ja, pt-BR, vi); every other
+        // shipped locale resolves to None and therefore renders the exact
+        // same prompt bytes as English.
+        for tag in [
+            "zh-Hant", "ko", "es-419", "ca", "de", "fr", "id", "hi", "ru", "uk",
+        ] {
+            assert!(
+                locale_reinforcement_preamble(tag).is_none(),
+                "{tag} must not gain a locale preamble"
+            );
+            assert!(
+                locale_reinforcement_closer(tag).is_none(),
+                "{tag} must not gain a locale closer"
+            );
+        }
+        // The bookend set is exactly the original four locales — growing it
+        // is a deliberate, reviewable prompt change, not a side effect of
+        // adding a UI pack.
+        for tag in ["zh-Hans", "ja", "pt-BR", "vi"] {
+            assert!(
+                locale_reinforcement_preamble(tag).is_some(),
+                "{tag} lost its locale preamble"
+            );
+            assert!(
+                locale_reinforcement_closer(tag).is_some(),
+                "{tag} lost its locale closer"
+            );
+        }
+    }
+
+    #[test]
+    fn translation_seam_names_every_shipped_locale_canonically() {
+        // The translation output instruction is the declared model-facing
+        // seam: it only enters the prompt when `translation_enabled` is
+        // true. When it does, every shipped locale must be named
+        // canonically (English name + endonym) — never silently "English".
+        for locale in crate::localization::Locale::shipped() {
+            assert_eq!(
+                translation_target_language_for_tag(locale.tag()),
+                locale.translation_target_name(),
+                "{} translation seam drifted from the canonical locale name",
+                locale.tag()
+            );
+        }
     }
 
     #[test]

@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:797a23968c31 -->
+<!-- source: README.md sha256:7e05c7acd044 -->
 # Codewhale
 
 一个面向终端的开源编程智能体——模型由你自带。
@@ -9,7 +9,7 @@ Codewhale 最初是为 DeepSeek 打造的原生体验,如今已成长为一个�
 
 我们一直在寻找贡献者和改进的方式。如果你在用的某个模型或 provider 还不支持,或者有什么东西坏了,告诉我们就是你能做的最有用的事之一——见[贡献](#贡献)。
 
-[English](README.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md)
+[English](README.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md)
 
 [![CI](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml/badge.svg)](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/codewhale-cli?label=crates.io)](https://crates.io/crates/codewhale-cli)
@@ -47,6 +47,7 @@ codewhale web                            # local browser client on 127.0.0.1
 - [docs/PROVIDERS.md](docs/PROVIDERS.md) — 每一条 provider 路由:托管、网关与本地
 - [docs/FLEET.md](docs/FLEET.md) — Fleet、账本与恢复
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`、hooks 与 constitution
+- [docs/HOOKS.md](docs/HOOKS.md) — 十一个 TUI 生命周期 hook 事件、其载荷，以及其中可引导回合的三个事件（`codewhale exec` 和 CLI 子命令不会触发 hooks）
 - [docs/WEB.md](docs/WEB.md) — 仅限回环地址的内置浏览器客户端及其一次性身份验证边界
 
 其余内容——模式、键位绑定、沙箱细节、MCP、运行时 API、架构——见 [docs](docs) 与 [codewhale.net](https://codewhale.net/)。

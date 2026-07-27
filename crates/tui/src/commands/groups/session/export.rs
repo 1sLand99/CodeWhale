@@ -258,14 +258,179 @@ fn render_conversation(app: &App) -> String {
         "\n> Hidden instructions, internal reasoning, and reasoning signatures are omitted. Secret-like values and credential-bearing URLs are redacted as a defense in depth; review the export before sharing it.\n\n",
     );
 
+    let restore_points = RestorePoints::read(&app.workspace);
+    restore_points.render_summary(&mut out);
+
     if app.api_messages.is_empty() {
         render_history_fallback(&mut out, &app.history);
     } else {
         for (index, message) in app.api_messages.iter().enumerate() {
             render_message(&mut out, index + 1, message);
+            restore_points.render_correlation(&mut out, message);
         }
     }
     out
+}
+
+/// Maximum restore points listed in the export summary. The side-git repo is
+/// already capped, but the export is a document a person reads, so it gets its
+/// own bound rather than inheriting whatever the repo happens to hold.
+const RESTORE_POINT_SUMMARY_MAX: usize = 100;
+
+/// Characters of the snapshot SHA shown as a restore-point id.
+const RESTORE_POINT_ID_LEN: usize = 12;
+
+/// Restore points (side-git workspace snapshots) recorded for this workspace,
+/// read read-only so `/export` never creates a snapshot repo as a side effect.
+enum RestorePoints {
+    /// The repo exists and these are its most recent snapshots (newest first).
+    Recorded(Vec<crate::snapshot::Snapshot>),
+    /// No snapshot repo exists for this workspace.
+    None,
+    /// The repo exists but could not be read. The reason is reported rather
+    /// than swallowed — a silent omission would read as "no restore points".
+    Unreadable(String),
+}
+
+impl RestorePoints {
+    fn read(workspace: &Path) -> Self {
+        match crate::snapshot::SnapshotRepo::open_existing(workspace) {
+            Ok(None) => Self::None,
+            Err(err) => Self::Unreadable(err.to_string()),
+            Ok(Some(repo)) => match repo.list(RESTORE_POINT_SUMMARY_MAX) {
+                Ok(snapshots) => Self::Recorded(snapshots),
+                Err(err) => Self::Unreadable(err.to_string()),
+            },
+        }
+    }
+
+    fn render_summary(&self, out: &mut String) {
+        out.push_str("## Restore points\n\n");
+        match self {
+            Self::None => {
+                out.push_str(
+                    "No workspace restore points are recorded for this workspace, so nothing in this export can be correlated to a restorable workspace state. Snapshots may be disabled, or no turn has taken one yet.\n\n",
+                );
+            }
+            Self::Unreadable(reason) => {
+                let _ = writeln!(
+                    out,
+                    "Workspace restore points could not be read ({}). Treat the correlation below as unavailable rather than empty.\n",
+                    inline_text(reason)
+                );
+            }
+            Self::Recorded(snapshots) if snapshots.is_empty() => {
+                out.push_str(
+                    "A snapshot repository exists for this workspace but records no restore points yet.\n\n",
+                );
+            }
+            Self::Recorded(snapshots) => {
+                let _ = writeln!(
+                    out,
+                    "The {} most recent workspace restore points, newest first. `/restore <N>` restores by the index in this table and `/restore list` shows the live list.\n",
+                    snapshots.len()
+                );
+                out.push_str(
+                    "> The index is the position at export time. Every new turn records another restore point and shifts it, so re-check `/restore list` before restoring from an older export. The snapshot id does not shift.\n\n",
+                );
+                out.push_str("| N | Restore point | Recorded (UTC) | Label |\n");
+                out.push_str("| --- | --- | --- | --- |\n");
+                for (index, snapshot) in snapshots.iter().enumerate() {
+                    let _ = writeln!(
+                        out,
+                        "| {} | `{}` | {} | {} |",
+                        index + 1,
+                        short_restore_id(snapshot.id.as_str()),
+                        format_snapshot_time(snapshot.timestamp),
+                        inline_text(&snapshot.label)
+                    );
+                }
+                out.push('\n');
+            }
+        }
+    }
+
+    /// Append the restore points correlated to a single user message.
+    ///
+    /// Correlation is by the prompt snippet the snapshot label actually
+    /// embeds, produced by the same function the snapshot writer uses. No
+    /// message-index-to-turn-sequence mapping is invented: a turn sequence and
+    /// an export message index are different counters, and asserting they line
+    /// up would be a guess presented as provenance.
+    fn render_correlation(&self, out: &mut String, message: &Message) {
+        if !message.role.trim().eq_ignore_ascii_case("user") {
+            return;
+        }
+        let Self::Recorded(snapshots) = self else {
+            return;
+        };
+        let Some(text) = first_text_block(message) else {
+            return;
+        };
+        let Some(snippet) = crate::core::turn::snapshot_label_prompt_snippet(text) else {
+            return;
+        };
+
+        let matches: Vec<(usize, &crate::snapshot::Snapshot)> = snapshots
+            .iter()
+            .enumerate()
+            .filter(|(_, snapshot)| {
+                let parsed = crate::core::turn::parse_snapshot_label(&snapshot.label);
+                matches!(parsed.kind.as_str(), "pre-turn" | "post-turn")
+                    && parsed.prompt_snippet.as_deref() == Some(snippet.as_str())
+            })
+            .collect();
+
+        if matches.is_empty() {
+            out.push_str(
+                "- Restore points: none recorded for this message within the listed window.\n\n",
+            );
+            return;
+        }
+
+        let ambiguous = matches.len() > 1;
+        let rendered: Vec<String> = matches
+            .iter()
+            .map(|(index, snapshot)| {
+                let parsed = crate::core::turn::parse_snapshot_label(&snapshot.label);
+                let seq = parsed
+                    .seq
+                    .map(|seq| format!(" turn {seq}"))
+                    .unwrap_or_default();
+                format!(
+                    "N{} `{}` ({}{})",
+                    index + 1,
+                    short_restore_id(snapshot.id.as_str()),
+                    parsed.kind,
+                    seq
+                )
+            })
+            .collect();
+        let _ = writeln!(out, "- Restore points: {}", rendered.join(", "));
+        if ambiguous {
+            out.push_str(
+                "  - More than one restore point carries this prompt snippet, so the match is ambiguous; compare the recorded times above before restoring.\n",
+            );
+        }
+        out.push('\n');
+    }
+}
+
+fn short_restore_id(id: &str) -> String {
+    id.chars().take(RESTORE_POINT_ID_LEN).collect()
+}
+
+fn format_snapshot_time(timestamp: i64) -> String {
+    chrono::DateTime::from_timestamp(timestamp, 0)
+        .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn first_text_block(message: &Message) -> Option<&str> {
+    message.content.iter().find_map(|block| match block {
+        ContentBlock::Text { text, .. } => Some(text.as_str()),
+        _ => None,
+    })
 }
 
 fn render_message(out: &mut String, index: usize, message: &Message) {
@@ -447,7 +612,9 @@ fn push_json(out: &mut String, value: &Value) {
     let _ = writeln!(out, "{fence}json\n{json}\n{fence}\n");
 }
 
-fn redact_json(value: &mut Value, key: Option<&str>) {
+// Widened to `pub(super)` so `/structcopy` (#2033) reuses this exact seam
+// instead of copying it.
+pub(super) fn redact_json(value: &mut Value, key: Option<&str>) {
     if key.is_some_and(is_sensitive_key) {
         *value = Value::String("[redacted]".to_string());
         return;
@@ -468,7 +635,10 @@ fn redact_json(value: &mut Value, key: Option<&str>) {
     }
 }
 
-fn is_sensitive_key(key: &str) -> bool {
+// Widened to `pub(super)` so `/structcopy` can classify a key again after
+// removing control/ANSI obfuscation. Classification before and after
+// normalization keeps the shared sensitive-key vocabulary authoritative.
+pub(super) fn is_sensitive_key(key: &str) -> bool {
     let normalized = key
         .trim()
         .trim_matches(['\'', '"'])
@@ -492,7 +662,9 @@ fn is_sensitive_key(key: &str) -> bool {
     .any(|hint| normalized.contains(hint))
 }
 
-fn sanitize_text(input: &str) -> String {
+// Widened to `pub(super)` so `/structcopy` (#2033) reuses this exact seam
+// instead of copying it.
+pub(super) fn sanitize_text(input: &str) -> String {
     let mut visible = String::with_capacity(input.len());
     crate::tui::osc8::strip_ansi_into(input, &mut visible);
     let visible = visible.replace("\r\n", "\n").replace('\r', "\n");
@@ -527,7 +699,9 @@ fn inline_text(input: &str) -> String {
         .replace('`', "'")
 }
 
-fn is_internal_role(role: &str) -> bool {
+// Widened to `pub(super)` so `/structcopy` (#2033) reuses this exact seam
+// instead of copying it.
+pub(super) fn is_internal_role(role: &str) -> bool {
     matches!(
         role.trim().to_ascii_lowercase().as_str(),
         "system" | "developer" | "internal"
@@ -1034,6 +1208,216 @@ mod tests {
                     force: false,
                 },
             }
+        );
+    }
+
+    fn snapshot(id: &str, label: &str, timestamp: i64) -> crate::snapshot::Snapshot {
+        crate::snapshot::Snapshot {
+            id: crate::snapshot::SnapshotId(id.to_string()),
+            label: label.to_string(),
+            timestamp,
+        }
+    }
+
+    fn user_message(text: &str) -> Message {
+        Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: text.to_string(),
+                cache_control: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn restore_point_summary_lists_each_point_with_its_restore_index() {
+        let points = RestorePoints::Recorded(vec![
+            snapshot(
+                "a".repeat(40).as_str(),
+                "pre-turn:2: second prompt",
+                1_700_000_100,
+            ),
+            snapshot(
+                "b".repeat(40).as_str(),
+                "pre-turn:1: first prompt",
+                1_700_000_000,
+            ),
+        ]);
+        let mut out = String::new();
+        points.render_summary(&mut out);
+
+        assert!(out.contains("## Restore points"), "{out}");
+        assert!(
+            out.contains(
+                "| 1 | `aaaaaaaaaaaa` | 2023-11-14T22:15:00Z | pre-turn:2: second prompt |"
+            ),
+            "newest point must be restore index 1: {out}"
+        );
+        assert!(
+            out.contains(
+                "| 2 | `bbbbbbbbbbbb` | 2023-11-14T22:13:20Z | pre-turn:1: first prompt |"
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("`/restore <N>`"),
+            "the export must name the command that consumes the index: {out}"
+        );
+        assert!(
+            out.contains("position at export time"),
+            "the index is only valid until the next snapshot; say so: {out}"
+        );
+    }
+
+    #[test]
+    fn user_message_correlates_to_its_own_restore_point() {
+        let points = RestorePoints::Recorded(vec![
+            snapshot(
+                "c".repeat(40).as_str(),
+                "pre-turn:4: rename the widget",
+                1_700_000_200,
+            ),
+            snapshot(
+                "d".repeat(40).as_str(),
+                "pre-turn:3: unrelated prompt",
+                1_700_000_100,
+            ),
+        ]);
+        let mut out = String::new();
+        points.render_correlation(&mut out, &user_message("rename the widget\ndetail line"));
+
+        assert!(
+            out.contains("- Restore points: N1 `cccccccccccc` (pre-turn turn 4)"),
+            "{out}"
+        );
+        assert!(
+            !out.contains("dddddddddddd"),
+            "an unrelated prompt must not be correlated: {out}"
+        );
+    }
+
+    #[test]
+    fn repeated_prompts_are_reported_as_ambiguous_rather_than_guessed() {
+        let points = RestorePoints::Recorded(vec![
+            snapshot(
+                "e".repeat(40).as_str(),
+                "pre-turn:9: run the tests",
+                1_700_000_300,
+            ),
+            snapshot(
+                "f".repeat(40).as_str(),
+                "pre-turn:5: run the tests",
+                1_700_000_100,
+            ),
+        ]);
+        let mut out = String::new();
+        points.render_correlation(&mut out, &user_message("run the tests"));
+
+        assert!(out.contains("N1 `eeeeeeeeeeee` (pre-turn turn 9)"), "{out}");
+        assert!(out.contains("N2 `ffffffffffff` (pre-turn turn 5)"), "{out}");
+        assert!(
+            out.contains("ambiguous"),
+            "two identical prompts must not be silently resolved to one: {out}"
+        );
+    }
+
+    #[test]
+    fn a_message_with_no_recorded_restore_point_says_none_rather_than_nothing() {
+        let points = RestorePoints::Recorded(vec![snapshot(
+            "1".repeat(40).as_str(),
+            "pre-turn:1: something else",
+            1_700_000_000,
+        )]);
+        let mut out = String::new();
+        points.render_correlation(&mut out, &user_message("never snapshotted"));
+        assert!(out.contains("none recorded for this message"), "{out}");
+    }
+
+    #[test]
+    fn tool_snapshots_are_not_correlated_to_user_messages() {
+        let points = RestorePoints::Recorded(vec![snapshot(
+            "2".repeat(40).as_str(),
+            "tool:call_abc: rename the widget",
+            1_700_000_000,
+        )]);
+        let mut out = String::new();
+        points.render_correlation(&mut out, &user_message("rename the widget"));
+        assert!(
+            out.contains("none recorded for this message"),
+            "a per-tool snapshot is not the turn's restore point: {out}"
+        );
+    }
+
+    #[test]
+    fn assistant_messages_get_no_correlation_line() {
+        let points = RestorePoints::Recorded(vec![snapshot(
+            "3".repeat(40).as_str(),
+            "pre-turn:1: hello",
+            1_700_000_000,
+        )]);
+        let mut out = String::new();
+        points.render_correlation(
+            &mut out,
+            &Message {
+                role: "assistant".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "hello".to_string(),
+                    cache_control: None,
+                }],
+            },
+        );
+        assert!(out.is_empty(), "{out}");
+    }
+
+    #[test]
+    fn absent_snapshot_repo_is_reported_as_unavailable_not_as_an_empty_list() {
+        let mut out = String::new();
+        RestorePoints::None.render_summary(&mut out);
+        assert!(
+            out.contains("No workspace restore points are recorded"),
+            "{out}"
+        );
+        assert!(
+            out.contains("nothing in this export can be correlated"),
+            "the export must not imply restorability it does not have: {out}"
+        );
+    }
+
+    #[test]
+    fn unreadable_snapshot_repo_reports_the_reason_instead_of_omitting_it() {
+        let mut out = String::new();
+        RestorePoints::Unreadable("permission denied".to_string()).render_summary(&mut out);
+        assert!(out.contains("could not be read"), "{out}");
+        assert!(out.contains("permission denied"), "{out}");
+        assert!(
+            out.contains("unavailable rather than empty"),
+            "unknown must stay unknown: {out}"
+        );
+    }
+
+    #[test]
+    fn an_existing_repo_with_no_commits_is_distinguished_from_no_repo() {
+        let mut out = String::new();
+        RestorePoints::Recorded(Vec::new()).render_summary(&mut out);
+        assert!(out.contains("records no restore points yet"), "{out}");
+    }
+
+    #[test]
+    fn export_does_not_create_a_snapshot_repo_for_a_fresh_workspace() {
+        let tmpdir = TempDir::new().expect("tempdir");
+        let workspace = tmpdir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let before = crate::snapshot::snapshot_git_dir(&workspace);
+        assert!(!before.exists(), "precondition: no side repo yet");
+
+        assert!(matches!(
+            RestorePoints::read(&workspace),
+            RestorePoints::None
+        ));
+
+        assert!(
+            !crate::snapshot::snapshot_git_dir(&workspace).exists(),
+            "reading restore points must never create the side repo"
         );
     }
 }

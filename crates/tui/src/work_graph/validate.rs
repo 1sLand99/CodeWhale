@@ -250,13 +250,38 @@ fn check_structural(snapshot: &WorkGraphSnapshot, out: &mut Vec<Violation>) {
         });
     }
     for activity in snapshot.activities.iter() {
-        let (provider, operation) = match activity {
-            WorkActivityEvent::ReasoningEffortChanged {
-                provider,
-                operation,
-                ..
-            } => (provider, operation),
-        };
+        let (requested, effective, provider_kind, provider, endpoint_identity, model, operation) =
+            match activity {
+                WorkActivityEvent::ReasoningEffortChanged {
+                    requested,
+                    effective,
+                    provider_kind,
+                    provider,
+                    endpoint_identity,
+                    model,
+                    operation,
+                    ..
+                } => (
+                    requested,
+                    effective,
+                    provider_kind,
+                    provider,
+                    endpoint_identity,
+                    model,
+                    operation,
+                ),
+            };
+        if matches!(
+            requested,
+            super::ReasoningEffortTier::ThinkingEnabledGranularityUnavailable
+                | super::ReasoningEffortTier::Unavailable
+        ) {
+            out.push(Violation {
+                code: ValidationCode::Structural,
+                message: "requested reasoning effort is not an operator-selectable tier"
+                    .to_string(),
+            });
+        }
         if provider.is_empty()
             || provider.chars().count() > 128
             || provider
@@ -267,6 +292,66 @@ fn check_structural(snapshot: &WorkGraphSnapshot, out: &mut Vec<Violation>) {
                 code: ValidationCode::Structural,
                 message: "activity provider is not a bounded route identity".to_string(),
             });
+        }
+        let provenance_is_bounded = provider_kind.is_some()
+            && endpoint_identity.as_ref().is_some_and(|endpoint| {
+                !endpoint.is_empty()
+                    && endpoint.chars().count() <= 512
+                    && !endpoint.chars().any(char::is_control)
+            })
+            && model.as_ref().is_some_and(|model| {
+                !model.trim().is_empty()
+                    && model.chars().count() <= 256
+                    && !model.chars().any(char::is_control)
+            });
+        if !provenance_is_bounded {
+            if *effective != super::ReasoningEffortTier::Unavailable {
+                out.push(Violation {
+                    code: ValidationCode::Structural,
+                    message:
+                        "activity without bounded route provenance must be effective unavailable"
+                            .to_string(),
+                });
+            }
+        } else {
+            let api_provider = provider_kind.expect("provenance bounded above");
+            if api_provider != crate::config::ApiProvider::Custom
+                && provider != api_provider.as_str()
+            {
+                out.push(Violation {
+                    code: ValidationCode::Structural,
+                    message: "activity provider identity does not match its recorded kind"
+                        .to_string(),
+                });
+                continue;
+            }
+            let constrained = match api_provider {
+                crate::config::ApiProvider::Custom => Some(super::ReasoningEffortTier::Unavailable),
+                api_provider => super::model::constrained_effective_reasoning_for_route(
+                    *requested,
+                    api_provider,
+                    endpoint_identity.as_deref().expect("bounded above"),
+                    model.as_deref().expect("bounded above"),
+                ),
+            };
+            if constrained.is_some_and(|expected| *effective != expected) {
+                out.push(Violation {
+                    code: ValidationCode::Structural,
+                    message: "activity effective reasoning is impossible for its recorded route"
+                        .to_string(),
+                });
+            } else if constrained.is_none()
+                && matches!(
+                    effective,
+                    super::ReasoningEffortTier::ThinkingEnabledGranularityUnavailable
+                )
+            {
+                out.push(Violation {
+                    code: ValidationCode::Structural,
+                    message: "granularity-unavailable receipt is not valid for this recorded route"
+                        .to_string(),
+                });
+            }
         }
         if let Some(operation) = operation {
             match snapshot.node(operation) {

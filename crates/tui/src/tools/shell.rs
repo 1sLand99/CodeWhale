@@ -2128,6 +2128,18 @@ impl ShellManager {
         events
     }
 
+    /// Whether the next production turn may inject a shell completion event.
+    ///
+    /// This deliberately does not poll processes or flip
+    /// `completion_reported`: preview is read-only. A running job counts as
+    /// pending because it can finish before production drains completions; in
+    /// that race an exact request body cannot be proved without mutation.
+    pub fn may_have_undelivered_completion(&self) -> bool {
+        self.processes
+            .values()
+            .any(|shell| !shell.completion_reported)
+    }
+
     /// Return agent owners whose tracked shell work is still running. The
     /// engine uses this to keep a worker's heartbeat alive while its only
     /// pending work is an explicitly tracked background shell task.

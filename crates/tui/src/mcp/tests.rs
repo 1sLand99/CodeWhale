@@ -5097,3 +5097,45 @@ fn add_runtime_server_config_accepts_new_name() {
     )
     .unwrap();
 }
+
+/// Server attribution and the model-facing tool name must come from one
+/// definition. If they ever drift, a human reading tool provenance would be
+/// told which server owns a name the model never saw.
+#[test]
+fn mcp_model_tool_names_and_server_attribution_share_one_definition() {
+    assert_eq!(
+        McpPool::mcp_model_tool_name("files", "read"),
+        "mcp_files_read"
+    );
+    // A server name containing `_` is exactly why the reverse split is a guess.
+    assert_eq!(
+        McpPool::mcp_model_tool_name("my_server", "read_file"),
+        "mcp_my_server_read_file"
+    );
+
+    let resolved =
+        McpPool::resolve_tool_server_map([("files", "read"), ("git", "status")].into_iter());
+    assert_eq!(
+        resolved.get("mcp_files_read").map(String::as_str),
+        Some("files")
+    );
+    assert_eq!(
+        resolved.get("mcp_git_status").map(String::as_str),
+        Some("git")
+    );
+
+    // Ambiguity: two servers collapse onto the same model name. Neither wins,
+    // so the name resolves to no server and callers report it as unknown —
+    // the same rule `all_tools` applies when it hides the ambiguous tool.
+    let ambiguous = McpPool::resolve_tool_server_map(
+        [("a_b", "c"), ("a", "b_c"), ("solo", "tool")].into_iter(),
+    );
+    assert!(
+        !ambiguous.contains_key("mcp_a_b_c"),
+        "an ambiguous model name must resolve to no server"
+    );
+    assert_eq!(
+        ambiguous.get("mcp_solo_tool").map(String::as_str),
+        Some("solo")
+    );
+}

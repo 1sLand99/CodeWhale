@@ -18,6 +18,27 @@ use crate::models::{MessageRequest, MessageResponse};
 pub trait ModelClient: Send + Sync {
     fn provider_name(&self) -> &str;
     fn model(&self) -> &str;
+    /// Concrete route base for billing classification, when this client can
+    /// prove one. Provider-neutral injected clients leave it unknown.
+    fn billing_base_url(&self) -> Option<&str> {
+        None
+    }
+    fn effective_route_envelope(
+        &self,
+        requested_model: &str,
+        dispatched_at: chrono::DateTime<chrono::Utc>,
+    ) -> crate::cost_status::EffectiveRouteEnvelope {
+        let provider = crate::config::ApiProvider::parse(self.provider_name())
+            .unwrap_or(crate::config::ApiProvider::Custom);
+        crate::cost_status::EffectiveRouteEnvelope::capture(
+            None,
+            provider,
+            self.provider_name(),
+            requested_model,
+            self.billing_base_url(),
+            dispatched_at,
+        )
+    }
     async fn create_message(&self, request: MessageRequest) -> Result<MessageResponse>;
     async fn create_message_stream(&self, request: MessageRequest) -> Result<StreamEventBox>;
     async fn health_check(&self) -> Result<bool>;
@@ -39,6 +60,18 @@ where
 
     fn model(&self) -> &str {
         LlmClient::model(self)
+    }
+
+    fn billing_base_url(&self) -> Option<&str> {
+        LlmClient::billing_base_url(self)
+    }
+
+    fn effective_route_envelope(
+        &self,
+        requested_model: &str,
+        dispatched_at: chrono::DateTime<chrono::Utc>,
+    ) -> crate::cost_status::EffectiveRouteEnvelope {
+        LlmClient::effective_route_envelope(self, requested_model, dispatched_at)
     }
 
     async fn create_message(&self, request: MessageRequest) -> Result<MessageResponse> {

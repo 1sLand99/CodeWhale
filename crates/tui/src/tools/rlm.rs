@@ -12,7 +12,7 @@
 //! for `exec_shell*` in #4625.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -41,6 +41,21 @@ const STDOUT_HANDLE_THRESHOLD_CHARS: usize = 1_000;
 const HARD_SUB_RLM_DEPTH_CAP: u32 = 3;
 
 const ALL_ACTIONS: &[&str] = &["session_objects", "open", "eval", "configure", "close"];
+
+fn rlm_kernel_error_result(
+    error: &str,
+    elapsed: Duration,
+    route: &crate::cost_status::EffectiveRouteEnvelope,
+    usage: &crate::models::Usage,
+) -> ToolResult {
+    let mut metadata = json!({
+        "tool": "rlm_eval",
+        "duration_ms": elapsed.as_millis() as u64,
+        "kernel_error": true,
+    });
+    crate::cost_status::attach_child_usage_metadata(&mut metadata, route, usage);
+    ToolResult::error(format!("rlm_eval: {error}")).with_metadata(metadata)
+}
 
 /// Unified RLM session tool.
 ///
@@ -425,25 +440,40 @@ impl RlmTool {
         };
 
         let started = Instant::now();
-        let (round, child_usage) = if let Some(client) = self.client.clone() {
+        let (round, child_usage, child_route) = if let Some(client) = self.client.clone() {
+            let route = client.effective_route_envelope(DEFAULT_CHILD_MODEL, chrono::Utc::now());
             let bridge = RlmBridge::new(
                 Arc::new(client),
                 DEFAULT_CHILD_MODEL.to_string(),
                 config.sub_rlm_max_depth.min(HARD_SUB_RLM_DEPTH_CAP),
             );
             let usage_handle = bridge.usage_handle();
-            let round = kernel
-                .run(code, Some(&bridge))
-                .await
-                .map_err(|e| ToolError::execution_failed(format!("rlm_eval: {e}")))?;
+            let round_result = kernel.run(code, Some(&bridge)).await;
             let usage = usage_handle.lock().await.clone();
-            (round, usage)
+            let round = match round_result {
+                Ok(round) => round,
+                Err(error) => {
+                    // A bridge request may have completed and accrued usage
+                    // before the Python kernel times out or closes stdout.
+                    // Return a failed ToolResult (rather than a bare ToolError)
+                    // so ToolCallComplete still carries the immutable child
+                    // receipt and the runtime can durably account for it.
+                    session.last_used_at = Instant::now();
+                    return Ok(rlm_kernel_error_result(
+                        &error.to_string(),
+                        started.elapsed(),
+                        &route,
+                        &usage,
+                    ));
+                }
+            };
+            (round, usage, Some(route))
         } else {
             let round = kernel
                 .run(code, None::<&RlmBridge>)
                 .await
                 .map_err(|e| ToolError::execution_failed(format!("rlm_eval: {e}")))?;
-            (round, Default::default())
+            (round, Default::default(), None)
         };
 
         session.rpc_count = session.rpc_count.saturating_add(round.rpc_count);
@@ -538,15 +568,15 @@ impl RlmTool {
             output["confidence"] = confidence;
         }
 
-        let metadata = json!({
+        let mut metadata = json!({
             "tool": "rlm_eval",
             "duration_ms": started.elapsed().as_millis() as u64,
-            "child_input_tokens": child_usage.input_tokens,
-            "child_output_tokens": child_usage.output_tokens,
-            "child_prompt_cache_hit_tokens": child_usage.prompt_cache_hit_tokens,
-            "child_prompt_cache_miss_tokens": child_usage.prompt_cache_miss_tokens,
-            "child_model": DEFAULT_CHILD_MODEL,
         });
+        // RLM fans out dozens of child rounds, so an undercounted class here
+        // scales; report every billable class from the shared producer (#4318).
+        if let Some(route) = child_route.as_ref() {
+            crate::cost_status::attach_child_usage_metadata(&mut metadata, route, &child_usage);
+        }
 
         Ok(ToolResult::json(&output)
             .map_err(|e| ToolError::execution_failed(e.to_string()))?
@@ -890,6 +920,43 @@ mod tests {
                 alias.name()
             );
         }
+    }
+
+    #[test]
+    fn kernel_failure_result_retains_child_usage_receipt() {
+        let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+            None,
+            crate::config::ApiProvider::Deepseek,
+            "deepseek-rlm",
+            DEFAULT_CHILD_MODEL,
+            Some(crate::config::ApiProvider::Deepseek.default_base_url()),
+            chrono::Utc::now(),
+        );
+        let usage = crate::models::Usage {
+            input_tokens: 23,
+            output_tokens: 5,
+            reasoning_replay_tokens: Some(7),
+            ..Default::default()
+        };
+        let result = rlm_kernel_error_result(
+            "kernel stdout closed",
+            Duration::from_millis(11),
+            &route,
+            &usage,
+        );
+
+        assert!(!result.success);
+        let metadata = result
+            .metadata
+            .expect("usage metadata on failed tool result");
+        assert_eq!(
+            crate::cost_status::child_route_envelope_from_metadata(&metadata),
+            Some(route)
+        );
+        assert_eq!(
+            crate::cost_status::child_usage_from_metadata(&metadata),
+            Some(usage)
+        );
     }
 
     #[test]

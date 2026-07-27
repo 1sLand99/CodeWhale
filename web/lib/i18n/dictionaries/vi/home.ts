@@ -1,0 +1,60 @@
+import type { HomeDict } from "../types";
+
+export const home: HomeDict = {
+  kicker: "Một đại dương dữ liệu và mã",
+  heroTitleA: "Lặn xuống biển sâu,",
+  heroTitleB: "để bạn khỏi phải lặn.",
+  heroIntro:
+    "Codewhale trao cho người bình thường đòn bẩy của LLM để kiến tạo. Trong terminal của bạn, nó đọc kho mã, sửa tệp, chạy kiểm tra và để lại biên lai — mà không mặc định bạn đã biết nói ngôn ngữ code. Chạy trên máy của bạn.",
+  install: "Cài đặt",
+  docs: "Tài liệu",
+  copy: "Sao chép",
+  copied: "Đã sao chép ✓",
+  latestRelease: "Bản phát hành mới nhất {tag}",
+  releaseUnavailable: "Trạng thái phát hành không khả dụng",
+  currentSource: "Mã nguồn hiện tại",
+  sourceCandidate: "Ứng viên từ mã nguồn",
+  providerRoutes: "{count} tuyến provider",
+  screenshotAlt:
+    "Phiên terminal Codewhale v{version} mới dùng tuyến Ollama cục bộ, không có thanh Work trống",
+  figcaption: "v{version} {state} · tuyến Ollama cục bộ · Plan / Act / Operate",
+  publishedRelease: "bản phát hành chính thức",
+  figcaptionSourceCandidate: "ứng viên mã nguồn",
+  proofHeading: "Một lớp vỏ terminal dưới nước. Trung lập về mô hình. Ưu tiên cục bộ.",
+  proofBody:
+    "Mang theo mô hình hosted, gateway hoặc cục bộ mà bạn đang dùng. Codewhale chạy trên máy của bạn và xem mô hình là một thành phần tùy chọn — không phải sản phẩm. Plan / Act / Operate cùng các tư thế quyền rõ ràng giữ cho cuộc lặn sâu luôn trong tầm kiểm soát.",
+  workflowHeading: "Từ tác vụ đến thay đổi đã kiểm chứng.",
+  workflow: [
+    ["Kiểm tra", "Đọc kho mã, hướng dẫn và tác vụ."],
+    ["Hành động", "Sửa tệp trong ranh giới phê duyệt rõ ràng."],
+    ["Xác minh", "Chạy kiểm tra và xem kết quả."],
+    ["Báo cáo", "Để lại biên lai ngắn gọn, bền vững."],
+  ],
+  receiptAria: "Ví dụ biên lai công việc",
+  boundariesHeadingA: "Mô hình của bạn.",
+  boundariesHeadingB: "Ranh giới của bạn.",
+  boundariesBody:
+    "Chọn rõ ràng mô hình, chế độ làm việc và tư thế quyền. Chi phí chưa biết vẫn là chưa biết, và các tính năng xem trước luôn được ghi nhãn đúng.",
+  hostedGatewayLocal: "Mô hình hosted, gateway và cục bộ",
+  planActOperateDesc: "Từ lập kế hoạch chỉ-đọc đến vận hành tự động",
+  askAutoReviewDesc: "Chọn tư thế quyền phù hợp với công việc",
+  tuiExecWebDesc: "Giao diện runtime tương tác và headless",
+  surfacesHeading: "Dùng runtime ngay nơi công việc diễn ra.",
+  surfaces: [
+    ["TUI", "Làm việc terminal tương tác"],
+    ["codewhale exec", "Script và CI"],
+    ["Ứng dụng web", "Trình duyệt chỉ dùng loopback"],
+    ["Runtime API + MCP", "Tích hợp cục bộ"],
+    ["Fleet", "Công việc đa tác tử bền vững"],
+  ],
+  runtimeLink: "Xem các giao diện runtime và ghi chú ổn định →",
+  installBandHeading: "Bắt đầu với một lệnh.",
+  binaries: "Gói nhị phân",
+  chinaMirrors: "mirror Trung Quốc",
+  installGuideLink: "Đọc hướng dẫn cài đặt →",
+  communityHeading: "Xây dựng công khai",
+  communityBody:
+    "Cấp phép MIT và được định hình bởi các cộng tác viên trên khắp runtime, provider, nền tảng, tài liệu và kiểm thử.",
+  communityLinksAria: "Liên kết cộng đồng",
+  contribute: "Đóng góp",
+};

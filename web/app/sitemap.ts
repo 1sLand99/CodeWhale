@@ -8,15 +8,16 @@ const PATHS = ["", "/install", "/constitution", "/models", "/runtime", "/docs", 
 
 export default function sitemap(): MetadataRoute.Sitemap {
   const lastModified = new Date();
+  // hreflang alternates derive from the canonical locale registry so new
+  // routed locales propagate without a sitemap edit.
   return PATHS.flatMap((path) =>
     locales.map((locale) => ({
       url: `${SITE_URL}/${locale}${path}`,
       lastModified,
       alternates: {
-        languages: {
-          en: `${SITE_URL}/en${path}`,
-          zh: `${SITE_URL}/zh${path}`,
-        },
+        languages: Object.fromEntries(
+          locales.map((l) => [l, `${SITE_URL}/${l}${path}`]),
+        ),
       },
     })),
   );

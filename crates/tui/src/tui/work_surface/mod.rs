@@ -975,7 +975,7 @@ mod tests {
             .iter()
             .find(|row| row.selectable)
             .expect("operation row");
-        assert_eq!(row.mark, "!");
+        assert_eq!(row.mark, crate::tui::glyphs::ATTENTION);
         assert!(row.detail.contains("completed · evidence pending"));
         assert_ne!(row.mark, "✓");
         let Some(SidebarRowAction::InspectWork { body, .. }) = row.primary_action.as_ref() else {

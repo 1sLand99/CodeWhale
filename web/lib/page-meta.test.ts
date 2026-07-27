@@ -1,27 +1,37 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { locales } from "./i18n/config";
 import { buildPageMetadata, IDENTITY_PHRASE, SITE_NAME, SITE_URL } from "./page-meta";
+
+/** hreflang alternates derive from the canonical locale registry. */
+function expectedLanguages(path: string): Record<string, string> {
+  const languages: Record<string, string> = {};
+  for (const l of locales) {
+    languages[l] = `${SITE_URL}/${l}${path}`;
+  }
+  languages["x-default"] = `${SITE_URL}/en${path}`;
+  return languages;
+}
 
 describe("page metadata", () => {
   it.each([
-    ["en", "/faq", "FAQ · Codewhale"],
-    ["zh", "/faq", "常见问题 · Codewhale"],
-    ["en", "/feed", "Activity · Codewhale"],
-    ["zh", "/feed", "动态 · Codewhale"],
-    ["en", "/roadmap", "Roadmap · Codewhale"],
-    ["zh", "/roadmap", "路线图 · Codewhale"],
-  ])("builds canonical, hreflang, Open Graph, and Twitter fields for %s%s", (locale, path, title) => {
+    ["en", "/faq", "FAQ · Codewhale", "en_US"],
+    ["zh", "/faq", "常见问题 · Codewhale", "zh_CN"],
+    ["en", "/feed", "Activity · Codewhale", "en_US"],
+    ["zh", "/feed", "动态 · Codewhale", "zh_CN"],
+    ["en", "/roadmap", "Roadmap · Codewhale", "en_US"],
+    ["zh", "/roadmap", "路线图 · Codewhale", "zh_CN"],
+    ["ru", "/faq", "FAQ · Codewhale", "ru_RU"],
+    ["uk", "/faq", "FAQ · Codewhale", "uk_UA"],
+    ["pt-BR", "/install", "Install · Codewhale", "pt_BR"],
+  ])("builds canonical, hreflang, Open Graph, and Twitter fields for %s%s", (locale, path, title, ogLocale) => {
     const description = `${locale} metadata contract`;
     const metadata = buildPageMetadata({ path, locale, title, description });
     const canonical = `${SITE_URL}/${locale}${path}`;
 
     expect(metadata.alternates).toEqual({
       canonical,
-      languages: {
-        en: `${SITE_URL}/en${path}`,
-        zh: `${SITE_URL}/zh${path}`,
-        "x-default": `${SITE_URL}/en${path}`,
-      },
+      languages: expectedLanguages(path),
     });
     expect(metadata.openGraph).toEqual({
       title,
@@ -29,7 +39,7 @@ describe("page metadata", () => {
       url: canonical,
       siteName: SITE_NAME,
       type: "website",
-      locale: locale === "zh" ? "zh_CN" : "en_US",
+      locale: ogLocale,
       images: [
         {
           url: `${SITE_URL}/opengraph-image`,
@@ -45,6 +55,21 @@ describe("page metadata", () => {
       description,
       images: [`${SITE_URL}/opengraph-image`],
     });
+  });
+
+  it("emits an hreflang alternate for every routed locale plus x-default", () => {
+    const metadata = buildPageMetadata({
+      path: "/docs",
+      locale: "ja",
+      title: "Docs · Codewhale",
+      description: "hreflang coverage",
+    });
+    const languages = metadata.alternates?.languages as Record<string, string>;
+    for (const l of locales) {
+      expect(languages[l], `missing hreflang for ${l}`).toBe(`${SITE_URL}/${l}/docs`);
+    }
+    expect(languages["x-default"]).toBe(`${SITE_URL}/en/docs`);
+    expect(Object.keys(languages)).toHaveLength(locales.length + 1);
   });
 
   it("keeps the previously incomplete indexable routes on the shared helper", () => {

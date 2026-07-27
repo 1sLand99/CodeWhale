@@ -1,6 +1,9 @@
 //! Skill discovery and registry for local SKILL.md files.
 
 pub mod audit;
+/// Provider-free contract tests for the bundled starter pack (#4698).
+#[cfg(test)]
+mod catalog_matrix;
 pub mod install;
 pub mod mutation;
 mod package_digest;

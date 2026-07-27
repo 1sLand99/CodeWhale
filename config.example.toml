@@ -17,11 +17,11 @@
 # `--provider fireworks`, `--provider siliconflow`, `--provider siliconflow-CN`,
 # `/provider arcee`, `/provider moonshot`, `/provider qianfan`, `/provider sglang`, `/provider vllm`,
 # `/provider ollama`, `/provider huggingface`, `/provider stepfun`, `/provider openmodel`,
-# `/provider opencode-go`, `/provider meta`, `/provider xai`) toggle without having to re-enter keys. Top-level
+# `/provider opencode-go`, `/provider opencode-zen`, `/provider meta`, `/provider xai`) toggle without having to re-enter keys. Top-level
 # `api_key` / `base_url` are
 # still read as DeepSeek defaults when `[providers.deepseek]` is absent
 # (backward compatibility).
-provider = "deepseek" # deepseek | deepseek-cn | deepseek-anthropic | nvidia-nim | openai | atlascloud | wanjie-ark | volcengine | openrouter | xiaomi-mimo | novita | fireworks | siliconflow | siliconflow-CN | arcee | moonshot | zai | stepfun | minimax | sglang | vllm | ollama | huggingface | together | qianfan | openai-codex | anthropic | openmodel | deepinfra | sakana | longcat | opencode-go | meta | xai
+provider = "deepseek" # deepseek | deepseek-cn | deepseek-anthropic | nvidia-nim | openai | atlascloud | wanjie-ark | volcengine | openrouter | xiaomi-mimo | novita | fireworks | siliconflow | siliconflow-CN | arcee | moonshot | zai | stepfun | minimax | sglang | vllm | ollama | huggingface | together | qianfan | openai-codex | anthropic | openmodel | deepinfra | sakana | longcat | opencode-go | opencode-zen | meta | xai
 api_key = "YOUR_DEEPSEEK_API_KEY" # must be non-empty
 base_url = "https://api.deepseek.com/beta"
 # provider = "deepseek-cn"                       # legacy alias (official host is still https://api.deepseek.com)
@@ -53,6 +53,7 @@ base_url = "https://api.deepseek.com/beta"
 #   kimi-k2.7-code                  — default direct Moonshot/Kimi K2.7 model ID
 #   k3                              — Kimi Code membership K3 API model ID
 #   kimi-for-coding                 — Kimi Code membership K2.7 compatibility ID
+#   kimi-for-coding-highspeed       — Kimi Code membership high-speed roster ID
 #   gpt-4.1                         — default generic OpenAI-compatible model ID
 #   deepseek-ai/deepseek-v4-flash   — default AtlasCloud model ID
 #   deepseek-reasoner               — default Wanjie Ark model ID
@@ -599,6 +600,20 @@ max_subagents = 10 # optional (1-20)
 # base_url = "https://opencode.ai/zen/go/v1"
 # model = "deepseek-v4-pro"
 
+# OpenCode Zen (https://opencode.ai/docs/zen/)
+# Model-aware gateway: GPT models use Responses, Claude/Qwen use Anthropic
+# Messages, and DeepSeek/MiniMax/GLM/Kimi/Grok/free models use Chat Completions.
+# Gemini uses a Google-specific protocol that Codewhale does not implement and
+# therefore fails closed instead of being sent with the wrong request shape.
+# Env vars: OPENCODE_ZEN_API_KEY (preferred), OPENCODE_API_KEY,
+# OPENCODE_ZEN_BASE_URL, OPENCODE_ZEN_MODEL
+[providers.opencode_zen]
+# api_key = "YOUR_OPENCODE_ZEN_API_KEY"
+# base_url = "https://opencode.ai/zen/v1"
+# model = "gpt-5.5"                         # Responses default
+# model = "claude-sonnet-4-6"               # Anthropic Messages example
+# model = "deepseek-v4-pro"                 # Chat Completions example
+
 # Meta Model API / Muse Spark (https://developer.meta.com/ai/)
 # OpenAI-compatible Chat Completions route.
 # Provider aliases: meta, meta-ai, meta-model-api, muse, muse-spark
@@ -806,7 +821,8 @@ osc8_links = true            # emit OSC 8 escapes around URLs (Cmd+click in iTer
 #                                    "always" = notify on every successful turn (no threshold);
 #                                    "never"  = suppress all turn-completion notifications;
 #                                    unset    = use [notifications] defaults (recommended).
-# locale = "auto"           # UI chrome language: auto | en | ja | zh-Hans | pt-BR
+# locale = "auto"           # UI chrome language: auto | en | ja | zh-Hans | zh-Hant | pt-BR | es-419
+#                           # | vi | ko | ca | de | fr | id | hi | ru | uk
 #                           # "auto" reads LC_ALL → LC_MESSAGES → LANG; falls back to English.
 #                           # Override: `locale = "zh-Hans"` for Simplified Chinese regardless of OS locale.
 #                           # Also settable at runtime: /config locale zh-Hans
@@ -985,6 +1001,16 @@ default_text_model = "deepseek-ai/deepseek-v4-pro"
 # completion_sound = "beep"
 # sound_file = "E:\\google\\downloads\\notify.wav"
 
+# Opt-in per-event sound cues (#4817): deterministic, terminal-bell level
+# (BEL bytes only — functional signals, platform-safe no-op when the terminal
+# ignores BEL). Off by default. When completion_sound is active, turn-complete
+# is left to that channel so the two never double-ding.
+# [notifications.event_sound]
+# enabled = false                                # master switch, default off
+# events = ["turn-complete", "approval-needed"]  # allow-list; unknown names ignored
+# min_interval_ms = 2000                         # per-event rate limit
+# quiet = false                                  # true silences all event sounds
+
 # ─────────────────────────────────────────────────────────────────────────────────
 # Workspace Snapshots (#137)
 # ─────────────────────────────────────────────────────────────────────────────────
@@ -1076,18 +1102,55 @@ default_text_model = "deepseek-ai/deepseek-v4-pro"
 # Hooks run shell commands on lifecycle events (session start/end, tool calls, etc.).
 # Configure as `[[hooks.hooks]]` under a `[hooks]` table.
 #
-# Available events: session_start, session_end, message_submit,
-# tool_call_before, tool_call_after, mode_change, on_error,
+# SCOPE: hooks are a TUI runtime feature. They fire from the interactive TUI
+# and the engine turn loop it drives. `codewhale exec`, the CLI subcommands,
+# the app-server / ACP surfaces, and the `workflow` tool do NOT fire them.
+#
+# Available events (all 11): session_start, session_end, message_submit,
+# tool_call_before, tool_call_after, mode_change, on_error, turn_end,
 # subagent_spawn, subagent_complete, shell_env.
+# See docs/HOOKS.md for the per-event payload, env var, and steering contract.
+#
+# `message_submit`, `tool_call_before`, and `shell_env` are the only events
+# whose result can change what Codewhale does. The rest are observer-only —
+# which means their RESULT is ignored, not that the command is harmless. Every
+# hook is an arbitrary shell command running with your credentials.
+#
+# Note: `default_timeout_secs` below OVERRIDES each hook's own `timeout_secs`.
+# Leave it unset if you want per-hook timeouts to apply. `/hooks list` shows the
+# effective value and names the override. `default_timeout_secs = 0` is
+# REJECTED at load — it would expire every hook immediately — and per-hook
+# `timeout_secs` applies instead. The timeout applies to background hooks too:
+# on expiry the whole process group is killed and then reaped, best-effort,
+# with a bounded reap wait (see docs/HOOKS.md → Timeouts).
+#
+# `background = true` means submitted and never awaited. The hook still gets
+# the documented stdin payload, environment, and timeout — it just has no exit
+# code, so it cannot steer. `shell_env` ignores the flag and always runs in the
+# foreground because its stdout is the contract.
+#
+# A condition that references context its event never carries is REJECTED at
+# load, logged, and shown by `/hooks list` — for example an `exit_code`
+# condition outside `tool_call_after` / `on_error`, or a `mode` condition on
+# `shell_env`. Rejection is per entry: a broken hook never drops another one
+# that happens to share its name. `on_error` fires for tool failures with the
+# tool name, call id, and reported exit code attached, so tool-scoped and
+# exit-code-scoped `on_error` hooks are supported.
 #
 # `shell_env` (#456) is special: the hook runs immediately before each
 # `exec_shell` invocation and its stdout is parsed as `KEY=VALUE\n` lines.
-# Those vars are merged into the spawned process environment (later hooks
-# override earlier ones). Use this for ephemeral credentials, per-skill
-# PATH adjustments, or short-lived tokens. The resolved KEY names (NEVER
-# values) are written to `~/.codewhale/audit.log` so each session can be
-# reconciled later. Hook failure / timeout simply contributes no vars —
-# it does not abort the shell call.
+# Those vars are applied on top of `exec_shell`'s environment. For LOCAL
+# execution that environment is built from a fixed allowlist of parent
+# variables (PATH, HOME, LANG, TERM, …) — an ambient secret exported in your
+# terminal is NOT forwarded to `exec_shell` by itself, so this hook is the
+# supported way to supply one. If an external sandbox backend is configured,
+# that allowlist does NOT apply: the backend owns its base environment and your
+# `shell_env` values are TRANSMITTED to it. Later hooks override
+# earlier ones. Use this for ephemeral credentials, per-skill PATH adjustments,
+# or short-lived tokens. The resolved KEY names (NEVER values) are written to
+# `~/.codewhale/audit.log` so each session can be reconciled later. Hook
+# failure / timeout simply contributes no vars — it does not abort the shell
+# call.
 #
 # [hooks]
 # enabled = true

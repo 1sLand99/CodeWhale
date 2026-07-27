@@ -8,7 +8,8 @@
 //!
 //! Motion language (shared with the rest of the shell): every mark can lerp
 //! between the water and its ink at a time-varying brightness. Fish carry a
-//! travelling sin² wave, jellyfish a slow floor-bounded pulse, bubbles an
+//! travelling sin² wave, jellyfish a slow floor-bounded pulse that opens and
+//! closes the dome while the tentacles trail it by ~350 ms, bubbles an
 //! occasional raised-cosine glint. Phases are wall-clock keyed and entity
 //! periods deliberately never match, so nothing strobes in sync.
 //!
@@ -18,6 +19,11 @@
 //! fully off-screen.
 //!
 //! Under reduced motion, entities remain visible but static.
+//!
+//! `render_ambient_life` returns per-frame budget counters
+//! ([`AmbientFrameStats`]): marks built always splits exactly into painted +
+//! text-skipped + clipped. Counting is a handful of `u32` increments — no
+//! allocation, no frame requests.
 
 use ratatui::{
     buffer::Buffer,
@@ -130,6 +136,28 @@ struct AmbientMark {
     brightness: Option<f32>,
 }
 
+/// Per-frame render budget counters. `marks_built` splits exactly into
+/// `marks_painted + marks_skipped_text + marks_clipped`. `cells_written`
+/// counts individual cell writes: a multi-cell glyph counts each of its
+/// cells, and two overlapping marks count the shared cell once per write.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AmbientFrameStats {
+    pub marks_built: u32,
+    pub marks_painted: u32,
+    pub marks_skipped_text: u32,
+    pub marks_clipped: u32,
+    pub cells_written: u32,
+}
+
+/// Hard upper bound on marks built in one frame: 7 fish + 2 jellyfish × 5
+/// parts (2 dome rows + 3 tentacles) + 2 bubbles + 2 whale-cameo cells = 21,
+/// plus headroom. This is a test-gate ceiling asserted against
+/// [`AmbientFrameStats::marks_built`], not a runtime clamp: the population is
+/// bounded by construction, and this constant is what fails the build if a
+/// future change makes it unbounded.
+#[allow(dead_code)]
+pub const MAX_FRAME_MARKS: u32 = 24;
+
 /// Optional pointer reaction for fish dart / bubble rise.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AmbientCursor {
@@ -151,6 +179,9 @@ pub struct WhaleCameo {
 const WHALE_CAMEO_MS: u128 = 2_400;
 
 /// Render ambient life into empty water cells of `area`.
+///
+/// Returns per-frame budget counters for tests and debug tooling; the
+/// counting itself is a few `u32` increments, never an allocation.
 #[allow(clippy::too_many_arguments)]
 pub fn render_ambient_life(
     area: Rect,
@@ -161,14 +192,18 @@ pub fn render_ambient_life(
     animated: bool,
     cursor: AmbientCursor,
     whale: WhaleCameo,
-) {
+) -> AmbientFrameStats {
     if area.width < AMBIENT_MIN_WIDTH || area.height < AMBIENT_MIN_HEIGHT {
-        return;
+        return AmbientFrameStats::default();
     }
 
     let density = LifeDensity::from_area(area);
-    let frame = build_frame_marks(area, elapsed_ms, animated, density, cursor, whale);
-    paint_marks(area, buf, inks, lines, &frame);
+    let mut stats = AmbientFrameStats::default();
+    let frame = build_frame_marks(
+        area, elapsed_ms, animated, density, cursor, whale, &mut stats,
+    );
+    paint_marks(area, buf, inks, lines, &frame, &mut stats);
+    stats
 }
 
 fn build_frame_marks(
@@ -178,6 +213,7 @@ fn build_frame_marks(
     density: LifeDensity,
     cursor: AmbientCursor,
     whale: WhaleCameo,
+    stats: &mut AmbientFrameStats,
 ) -> FrameMarks {
     let mut marks = Vec::with_capacity(48);
     let t = if animated { elapsed_ms } else { 0 };
@@ -290,10 +326,16 @@ fn build_frame_marks(
         });
     }
 
-    // --- Jellyfish: a bell with a lagging tentacle pulse ---
-    // The bell pulses on a slow floor-bounded sin²; the tentacle repeats the
-    // pulse ~350 ms later — the lag is what sells "jellyfish". They drift
-    // slowly upward through the side lanes and wrap.
+    // --- Jellyfish: a pulsing dome with lagging tentacles ---
+    // Two dome rows (arc + scalloped skirt) over a row of swaying
+    // tentacles. The dome opens and closes on a slow floor-bounded sin²;
+    // the tentacles repeat the pulse ~350 ms later and sway out of phase
+    // with each other — the lag is what sells "jellyfish". Rich/Normal get
+    // the full 5-cell dome with three tentacles; Sparse (narrow) swaps in a
+    // compact 3-cell dome with two — a real fallback silhouette, not just
+    // fewer jellies. They drift slowly upward through the side lanes, wrap,
+    // and park mid-rise just under the hero band under reduced motion.
+    let in_band = |row: u16| row > quiet_mid_lo && row < quiet_mid_hi;
     for j in 0..density.jellyfish_count() {
         let phase = 3_100u128.saturating_add((j as u128) * 4_700);
         let lane_x = if j % 2 == 0 {
@@ -306,21 +348,33 @@ fn build_frame_marks(
         } else {
             0
         };
+        let compact = density == LifeDensity::Sparse;
+        let (dome_top, dome_skirt, tentacle_cols): (&[&str], &[&str], &[u16]) = if compact {
+            (JELLY_DOME_TOP_COMPACT, JELLY_DOME_SKIRT_COMPACT, &[0, 2])
+        } else {
+            (JELLY_DOME_TOP_FRAMES, JELLY_DOME_SKIRT_FRAMES, &[1, 2, 3])
+        };
+        let dome_w = dome_top[0].len() as u16; // ASCII frames: len == width
         let x = lane_x
             .saturating_add(wobble)
-            .min(area.width.saturating_sub(JELLY_BELL.len() as u16 + 1));
+            .min(area.width.saturating_sub(dome_w + 1));
         let rise_rows = u128::from(area.height.saturating_sub(4).max(1));
         let rise_period = 8_600u128.saturating_add((j as u128) * 1_400);
-        let risen = if animated {
-            ((t.saturating_add(phase) / rise_period) % rise_rows) as u16
+        let y = if animated {
+            let risen = ((t.saturating_add(phase) / rise_period) % rise_rows) as u16;
+            area.height.saturating_sub(3).saturating_sub(risen)
         } else {
-            (rise_rows / 2) as u16
+            // Parked mid-rise, just below the hero band: parking inside the
+            // band would be culled by the quiet-band rule and the static
+            // pose would vanish.
+            quiet_mid_hi
+                .saturating_add(2)
+                .min(area.height.saturating_sub(3))
         };
-        let y = area.height.saturating_sub(2).saturating_sub(risen);
-        if y == 0 || (y > quiet_mid_lo && y < quiet_mid_hi) {
+        if y == 0 || in_band(y) {
             continue;
         }
-        let bell_brightness = if animated {
+        let dome_brightness = if animated {
             JELLY_BRIGHTNESS_FLOOR
                 + (1.0 - JELLY_BRIGHTNESS_FLOOR) * wave01(t, JELLY_PULSE_MS, phase)
         } else {
@@ -337,29 +391,53 @@ fn build_frame_marks(
         } else {
             0.45
         };
-        marks.push(AmbientMark {
-            x,
-            y,
-            glyph: JELLY_BELL,
-            depth: Depth::Midground,
-            style_mod: None,
-            brightness: Some(bell_brightness),
-        });
-        if y + 1 < area.height && !(y + 1 > quiet_mid_lo && y + 1 < quiet_mid_hi) {
-            let sway = if animated {
-                JELLY_TENTACLE_FRAMES
-                    [((t.saturating_add(phase) / 1_400) as usize) % JELLY_TENTACLE_FRAMES.len()]
-            } else {
-                "|"
-            };
-            marks.push(AmbientMark {
-                x: x.saturating_add(1),
-                y: y + 1,
-                glyph: sway,
-                depth: Depth::Background,
-                style_mod: None,
-                brightness: Some(tentacle_brightness),
-            });
+        // The dome opens/closes on the same clock as its glow; the parked
+        // pose holds the half-pulsed (contracted) frame.
+        let pulse_frame = if animated {
+            usize::from(wave01(t, JELLY_PULSE_MS, phase) > 0.5)
+        } else {
+            1
+        };
+        let dome_rows = [
+            (y, dome_top[pulse_frame]),
+            (y.saturating_add(1), dome_skirt[pulse_frame]),
+        ];
+        for (row, glyph) in dome_rows {
+            if row < area.height && !in_band(row) {
+                marks.push(AmbientMark {
+                    x,
+                    y: row,
+                    glyph,
+                    depth: Depth::Midground,
+                    style_mod: None,
+                    brightness: Some(dome_brightness),
+                });
+            }
+        }
+        let tentacle_row = y.saturating_add(2);
+        if tentacle_row < area.height && !in_band(tentacle_row) {
+            for (col, &dx) in tentacle_cols.iter().enumerate() {
+                // Each column runs the sway table with its own phase offset
+                // so the trio lags left-to-right; the parked pose holds a
+                // mid-sway frame.
+                let sway = if animated {
+                    let frame = t
+                        .saturating_add(phase)
+                        .saturating_add((col as u128) * JELLY_TENTACLE_PHASE_STEP_MS)
+                        / JELLY_TENTACLE_SWAY_MS;
+                    JELLY_TENTACLE_FRAMES[(frame as usize) % JELLY_TENTACLE_FRAMES.len()]
+                } else {
+                    JELLY_TENTACLE_FRAMES[1]
+                };
+                marks.push(AmbientMark {
+                    x: x.saturating_add(dx),
+                    y: tentacle_row,
+                    glyph: sway,
+                    depth: Depth::Background,
+                    style_mod: None,
+                    brightness: Some(tentacle_brightness),
+                });
+            }
         }
     }
 
@@ -456,6 +534,7 @@ fn build_frame_marks(
         }
     }
 
+    stats.marks_built = marks.len() as u32;
     FrameMarks { marks }
 }
 
@@ -474,17 +553,27 @@ const FISH_BRIGHTNESS_FLOOR: f32 = 0.45;
 const LEAD_FISH_RIGHT: &str = "><o>";
 const LEAD_FISH_LEFT: &str = "<o><";
 
-/// Jellyfish bell and its swaying tentacle frames (all width-1 ASCII).
-// Dome + lagging tentacle: read as jellyfish, not a parenthetical blob-on-a-string.
-// Keep ASCII-adjacent glyphs that render cleanly in common terminal fonts.
-const JELLY_BELL: &str = "o*";
-// Dome + lagging tentacle: jellyfish silhouette in ASCII-safe glyphs so the
-// low-motion / ascii_safe tier still covers ambient life.
+/// Jellyfish silhouette frames — pure ASCII by construction so the
+/// ascii_safe tier needs no fallback mapping for them (len == width).
+///
+/// Full dome (Rich/Normal), two rows with an open/closed pulse pair: a
+/// rounded arc over a scalloped skirt.
+const JELLY_DOME_TOP_FRAMES: &[&str] = &[".-~-.", ".'-.'"];
+const JELLY_DOME_SKIRT_FRAMES: &[&str] = &["(v_v)", "(v.v)"];
+/// Compact dome for the Sparse (narrow) tier: same two-row read at 3 cells.
+const JELLY_DOME_TOP_COMPACT: &[&str] = &[".-.", "'.'"];
+const JELLY_DOME_SKIRT_COMPACT: &[&str] = &["(v)", "(-)"];
+/// Tentacle sway frames (all width-1). Each column runs the same table with
+/// a phase offset so the trio lags instead of strobing in sync.
 const JELLY_TENTACLE_FRAMES: &[&str] = &["|", ":", "|", "."];
 
 const JELLY_PULSE_MS: u128 = 2_900;
-/// The tentacle repeats the bell pulse this much later.
+/// The tentacles repeat the dome pulse this much later.
 const JELLY_TENTACLE_LAG_MS: u128 = 350;
+/// Wall-clock milliseconds per tentacle sway frame.
+const JELLY_TENTACLE_SWAY_MS: u128 = 1_400;
+/// Per-column sway phase offset, so adjacent tentacles never move in sync.
+const JELLY_TENTACLE_PHASE_STEP_MS: u128 = 450;
 const JELLY_BRIGHTNESS_FLOOR: f32 = 0.35;
 
 /// Bubbles stay mostly steady with occasional glints, not a constant wave.
@@ -537,19 +626,28 @@ fn paint_marks(
     inks: (Color, Color),
     lines: &[Line<'static>],
     frame: &FrameMarks,
+    stats: &mut AmbientFrameStats,
 ) {
     for mark in &frame.marks {
+        let mark_width = UnicodeWidthStr::width(mark.glyph);
+        // Clipped is checked before text collision so a mark that fails
+        // both is charged to the bound it could never satisfy.
+        if mark.x.saturating_add(mark_width as u16) > area.width {
+            stats.marks_clipped += 1;
+            continue;
+        }
         let protected = lines
             .get(usize::from(mark.y))
             .and_then(occupied_text_bounds);
-        let mark_width = UnicodeWidthStr::width(mark.glyph);
         let collides = protected.is_some_and(|(start, end)| {
             usize::from(mark.x) < end.saturating_add(1)
                 && usize::from(mark.x) + mark_width > start.saturating_sub(1)
         });
-        if collides || mark.x.saturating_add(mark_width as u16) > area.width {
+        if collides {
+            stats.marks_skipped_text += 1;
             continue;
         }
+        stats.marks_painted += 1;
         let ink = if mark.depth.ink_index() == 1 {
             inks.1
         } else {
@@ -572,6 +670,7 @@ fn paint_marks(
             }
             cell.set_symbol(&ch.to_string());
             cell.set_style(style);
+            stats.cells_written += 1;
         }
     }
 }
@@ -840,6 +939,7 @@ mod tests {
 
     fn frame_at(t: u128) -> FrameMarks {
         let area = Rect::new(0, 0, 100, 30);
+        let mut stats = AmbientFrameStats::default();
         build_frame_marks(
             area,
             t,
@@ -847,6 +947,7 @@ mod tests {
             LifeDensity::from_area(area),
             AmbientCursor::default(),
             WhaleCameo::default(),
+            &mut stats,
         )
     }
 
@@ -895,7 +996,10 @@ mod tests {
             for mark in frame_at(t).marks {
                 let ok = matches!(mark.glyph, "><>" | "<><" | "><o>" | "<o><")
                     || matches!(mark.glyph, "·" | "˚" | "°")
-                    || mark.glyph == JELLY_BELL
+                    || JELLY_DOME_TOP_FRAMES.contains(&mark.glyph)
+                    || JELLY_DOME_SKIRT_FRAMES.contains(&mark.glyph)
+                    || JELLY_DOME_TOP_COMPACT.contains(&mark.glyph)
+                    || JELLY_DOME_SKIRT_COMPACT.contains(&mark.glyph)
                     || JELLY_TENTACLE_FRAMES.contains(&mark.glyph);
                 assert!(ok, "unexpected ambient glyph {:?} at t={t}", mark.glyph);
             }
@@ -903,30 +1007,219 @@ mod tests {
     }
 
     #[test]
-    fn jellyfish_reads_as_bell_with_lagging_tentacle() {
-        // Find a frame where a jelly is on-screen and assert its two-row
-        // structure: bell, tentacle one row below inside the bell, and the
-        // tentacle pulse trailing the bell pulse.
+    fn ambient_glyphs_are_ascii_or_have_fallbacks() {
+        // Every glyph the water can paint is either pure ASCII (fish and
+        // the whole jellyfish silhouette, by construction) or carries a
+        // glyphs::ascii_fallback entry (bubbles, whale cameo) so
+        // CODEWHALE_ASCII_SAFE=1 covers the whole field.
+        let mut jellyfish: Vec<&str> = Vec::new();
+        jellyfish.extend(JELLY_DOME_TOP_FRAMES);
+        jellyfish.extend(JELLY_DOME_SKIRT_FRAMES);
+        jellyfish.extend(JELLY_DOME_TOP_COMPACT);
+        jellyfish.extend(JELLY_DOME_SKIRT_COMPACT);
+        jellyfish.extend(JELLY_TENTACLE_FRAMES);
+        for glyph in jellyfish {
+            assert!(glyph.is_ascii(), "jellyfish glyph {glyph:?} must be ASCII");
+        }
+        for glyph in ["><>", "<><", "><o>", "<o><"] {
+            assert!(glyph.is_ascii(), "fish glyph {glyph:?} must be ASCII");
+        }
+        for glyph in ["·", "˚", "°", "≈≈>", "≈", "～"] {
+            assert!(
+                glyph.is_ascii() || crate::tui::glyphs::ascii_fallback(glyph).is_some(),
+                "ambient glyph {glyph:?} lacks an ASCII fallback"
+            );
+        }
+    }
+
+    #[test]
+    fn jellyfish_reads_as_dome_with_lagging_tentacles() {
+        // Find a frame where a full jelly is on-screen and assert its
+        // structure: a two-row dome at least four cells wide, exactly three
+        // tentacle columns one row below the skirt, and both dome and
+        // tentacles holding their brightness floors.
         let mut seen = false;
         for probe in 0..240u128 {
             let t = probe * 500;
             let frame = frame_at(t);
-            if let Some(bell) = frame.marks.iter().find(|mark| mark.glyph == JELLY_BELL) {
-                if let Some(tentacle) = frame.marks.iter().find(|mark| {
+            let Some(top) = frame
+                .marks
+                .iter()
+                .find(|mark| JELLY_DOME_TOP_FRAMES.contains(&mark.glyph))
+            else {
+                continue;
+            };
+            let dome_w = UnicodeWidthStr::width(top.glyph) as u16;
+            assert!(dome_w >= 4, "rich dome too narrow: {:?}", top.glyph);
+            let Some(skirt) = frame.marks.iter().find(|mark| {
+                JELLY_DOME_SKIRT_FRAMES.contains(&mark.glyph)
+                    && mark.x == top.x
+                    && mark.y == top.y + 1
+            }) else {
+                continue; // skirt row culled by the quiet band this frame
+            };
+            let tentacles: Vec<&AmbientMark> = frame
+                .marks
+                .iter()
+                .filter(|mark| {
                     JELLY_TENTACLE_FRAMES.contains(&mark.glyph)
-                        && mark.y == bell.y + 1
-                        && mark.x == bell.x + 1
-                }) {
-                    let bell_glow = bell.brightness.expect("bell pulses");
-                    let tentacle_glow = tentacle.brightness.expect("tentacle pulses");
-                    assert!(bell_glow >= JELLY_BRIGHTNESS_FLOOR - f32::EPSILON);
-                    assert!(tentacle_glow >= JELLY_BRIGHTNESS_FLOOR - f32::EPSILON);
-                    seen = true;
-                    break;
-                }
+                        && mark.y == skirt.y + 1
+                        && mark.x > top.x
+                        && mark.x < top.x + dome_w
+                })
+                .collect();
+            if tentacles.len() != 3 {
+                continue; // tentacle row culled by the quiet band this frame
             }
+            let dome_glow = top.brightness.expect("dome pulses");
+            assert!(dome_glow >= JELLY_BRIGHTNESS_FLOOR - f32::EPSILON);
+            for tentacle in &tentacles {
+                let glow = tentacle.brightness.expect("tentacle pulses");
+                assert!(glow >= JELLY_BRIGHTNESS_FLOOR - f32::EPSILON);
+            }
+            seen = true;
+            break;
         }
         assert!(seen, "no complete jellyfish found in 120s of frames");
+    }
+
+    #[test]
+    fn jellyfish_tentacles_sway_out_of_phase_and_dome_pulses() {
+        // Over a sweep: the dome shows both pulse frames within a few
+        // JELLY_PULSE_MS periods, each tentacle column cycles its sway
+        // frames, and the trio is not always in lockstep (per-column phase
+        // offset — the lag is what sells "jellyfish").
+        let mut dome_frames = std::collections::BTreeSet::new();
+        let mut column_frames: [std::collections::BTreeSet<&str>; 3] = Default::default();
+        let mut saw_desync = false;
+        for probe in 0..480u128 {
+            let frame = frame_at(probe * 100);
+            let Some(top) = frame
+                .marks
+                .iter()
+                .find(|mark| JELLY_DOME_TOP_FRAMES.contains(&mark.glyph))
+            else {
+                continue;
+            };
+            dome_frames.insert(top.glyph);
+            let mut trio = [""; 3];
+            let mut found = 0usize;
+            for (col, slot) in trio.iter_mut().enumerate() {
+                if let Some(tentacle) = frame.marks.iter().find(|mark| {
+                    JELLY_TENTACLE_FRAMES.contains(&mark.glyph)
+                        && mark.y == top.y + 2
+                        && mark.x == top.x + 1 + col as u16
+                }) {
+                    *slot = tentacle.glyph;
+                    column_frames[col].insert(tentacle.glyph);
+                    found += 1;
+                }
+            }
+            if found == 3 && !(trio[0] == trio[1] && trio[1] == trio[2]) {
+                saw_desync = true;
+            }
+        }
+        assert_eq!(
+            dome_frames.len(),
+            JELLY_DOME_TOP_FRAMES.len(),
+            "dome pulse should show every frame: {dome_frames:?}"
+        );
+        for (col, set) in column_frames.iter().enumerate() {
+            assert!(set.len() > 1, "tentacle column {col} never swayed");
+        }
+        assert!(saw_desync, "tentacle columns strobed in lockstep");
+    }
+
+    #[test]
+    fn sparse_water_gets_a_compact_jellyfish() {
+        // Narrow fallback: the Sparse tier swaps the full 5-cell dome for a
+        // 3-cell one with two tentacles — a different silhouette, not just
+        // fewer jellies.
+        let area = Rect::new(0, 0, 48, 12);
+        let mut saw_compact = false;
+        let mut saw_full = false;
+        let mut saw_two_tentacles = false;
+        for probe in 0..240u128 {
+            let mut stats = AmbientFrameStats::default();
+            let frame = build_frame_marks(
+                area,
+                probe * 500,
+                true,
+                LifeDensity::from_area(area),
+                AmbientCursor::default(),
+                WhaleCameo::default(),
+                &mut stats,
+            );
+            for mark in &frame.marks {
+                saw_compact |= JELLY_DOME_TOP_COMPACT.contains(&mark.glyph);
+                saw_full |= JELLY_DOME_TOP_FRAMES.contains(&mark.glyph);
+            }
+            let Some(top) = frame
+                .marks
+                .iter()
+                .find(|mark| JELLY_DOME_TOP_COMPACT.contains(&mark.glyph))
+            else {
+                continue;
+            };
+            let tentacles = frame
+                .marks
+                .iter()
+                .filter(|mark| JELLY_TENTACLE_FRAMES.contains(&mark.glyph) && mark.y == top.y + 2)
+                .count();
+            if tentacles > 0 {
+                assert!(tentacles <= 2, "compact dome grew extra tentacles");
+                saw_two_tentacles |= tentacles == 2;
+            }
+        }
+        assert!(saw_compact, "sparse water never showed the compact dome");
+        assert!(!saw_full, "sparse water used the full-size dome");
+        assert!(saw_two_tentacles, "compact jelly lost its tentacles");
+    }
+
+    #[test]
+    fn reduced_motion_parks_a_complete_jellyfish() {
+        // The static pose is deterministic and visible: a half-pulsed dome
+        // with its tentacles mid-sway, parked just below the hero band.
+        let area = Rect::new(0, 0, 100, 30);
+        let build = || {
+            let mut stats = AmbientFrameStats::default();
+            build_frame_marks(
+                area,
+                0,
+                false,
+                LifeDensity::from_area(area),
+                AmbientCursor::default(),
+                WhaleCameo::default(),
+                &mut stats,
+            )
+        };
+        let first = build();
+        let second = build();
+        let pose = |frame: &FrameMarks| {
+            frame
+                .marks
+                .iter()
+                .map(|mark| (mark.glyph, mark.x, mark.y))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(pose(&first), pose(&second), "static pose must repeat");
+        let top = first
+            .marks
+            .iter()
+            .find(|mark| JELLY_DOME_TOP_FRAMES.contains(&mark.glyph))
+            .expect("parked jellyfish dome");
+        assert!(
+            first.marks.iter().any(|mark| {
+                JELLY_DOME_SKIRT_FRAMES.contains(&mark.glyph) && mark.y == top.y + 1
+            }),
+            "parked jellyfish lost its skirt"
+        );
+        let tentacles = first
+            .marks
+            .iter()
+            .filter(|mark| JELLY_TENTACLE_FRAMES.contains(&mark.glyph) && mark.y == top.y + 2)
+            .count();
+        assert!(tentacles >= 3, "parked jellyfish lost its tentacles");
     }
 
     #[test]
@@ -939,6 +1232,121 @@ mod tests {
                 (BUBBLE_BRIGHTNESS_FLOOR..=1.0).contains(&g),
                 "glint01 lost its floor: {g}"
             );
+        }
+    }
+
+    #[test]
+    fn frame_stats_account_for_every_mark() {
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        let stats = render_ambient_life(
+            area,
+            &mut buf,
+            (Color::Cyan, Color::Blue),
+            &[],
+            12_000,
+            true,
+            AmbientCursor::default(),
+            WhaleCameo::default(),
+        );
+        assert_eq!(
+            stats.marks_built,
+            stats.marks_painted + stats.marks_skipped_text + stats.marks_clipped,
+            "every built mark is painted, text-skipped, or clipped: {stats:?}"
+        );
+        assert!(stats.marks_painted > 0, "empty water should paint life");
+        // cells_written counts each cell of a multi-cell glyph (and counts
+        // a shared cell once per overlapping mark), so the honest bound is
+        // per painted mark — at most the widest glyph (the 5-cell dome) —
+        // rather than per area cell.
+        assert!(stats.cells_written >= stats.marks_painted);
+        assert!(
+            stats.cells_written <= stats.marks_painted * 5,
+            "cells_written out of proportion: {stats:?}"
+        );
+    }
+
+    #[test]
+    fn frame_stats_stay_within_the_render_budget() {
+        // Worst case on the largest Rich field with the whale cameo active:
+        // 7 fish + 2 jellies x 5 parts + 2 bubbles + 2 cameo cells. Anything
+        // more is a leak in the O(1)-per-frame budget.
+        let area = Rect::new(0, 0, 160, 40);
+        let mut buf = Buffer::empty(area);
+        let whale = WhaleCameo {
+            elapsed_ms: Some(500), // Spout: cameo glyph plus spray
+            anchor_x: 80,
+            anchor_y: 26,
+        };
+        let stats = render_ambient_life(
+            area,
+            &mut buf,
+            (Color::Cyan, Color::Blue),
+            &[],
+            12_000,
+            true,
+            AmbientCursor::default(),
+            whale,
+        );
+        assert!(
+            stats.marks_built <= MAX_FRAME_MARKS,
+            "frame budget blown: {stats:?}"
+        );
+        assert_eq!(
+            stats.marks_built,
+            stats.marks_painted + stats.marks_skipped_text + stats.marks_clipped,
+            "every built mark is accounted for: {stats:?}"
+        );
+    }
+
+    #[test]
+    fn frame_stats_never_overwrite_text() {
+        // Property: on a text-covered field, colliding marks are charged to
+        // marks_skipped_text and no transcript cell is overwritten.
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        let lines: Vec<Line<'static>> = (0..usize::from(area.height))
+            .map(|i| {
+                Line::from(Span::raw(format!(
+                    "transcript row {i:02} occupies the water"
+                )))
+            })
+            .collect();
+        for (i, line) in lines.iter().enumerate() {
+            buf.set_line(area.x, area.y + i as u16, line, area.width);
+        }
+        let stats = render_ambient_life(
+            area,
+            &mut buf,
+            (Color::Cyan, Color::Blue),
+            &lines,
+            12_000,
+            true,
+            AmbientCursor::default(),
+            WhaleCameo::default(),
+        );
+        assert!(
+            stats.marks_skipped_text > 0,
+            "text-covered water should skip some marks: {stats:?}"
+        );
+        assert_eq!(
+            stats.marks_built,
+            stats.marks_painted + stats.marks_skipped_text + stats.marks_clipped,
+            "every built mark is accounted for: {stats:?}"
+        );
+        for (i, line) in lines.iter().enumerate() {
+            let text: String = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            for (x, ch) in text.chars().enumerate() {
+                assert_eq!(
+                    buf[(area.x + x as u16, area.y + i as u16)].symbol(),
+                    ch.to_string(),
+                    "ambient life overwrote transcript cell ({x},{i})"
+                );
+            }
         }
     }
 }

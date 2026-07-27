@@ -362,11 +362,62 @@ fronting layer.
 **Health**
 - `GET /health`
 
-**Sessions** (legacy session manager)
-- `GET /v1/sessions?limit=50&search=<substring>`
-- `GET /v1/sessions/{id}`
+**Sessions** (durable session manager)
+- `GET /v1/sessions?limit=50&search=<fuzzy>&include_archived=false&archived_only=false&workspace=<path>&sort=recent|name|size`
+- `GET /v1/sessions/summary?…` (same query params; projected row shape)
+- `GET /v1/sessions/{id}` (add `?peek=true&entries=12` for a bounded, redacted
+  read-only peek instead of the full transcript)
+- `PATCH /v1/sessions/{id}` (`{ "title"?: string, "archived"?: bool }`)
 - `DELETE /v1/sessions/{id}`
 - `POST /v1/sessions/{id}/resume-thread`
+
+Sessions and threads answer the same `include_archived` / `archived_only` pair
+with the same meaning, and `search` is the same fuzzy match (title, id,
+workspace — substring, then subsequence) the TUI session picker and the sidebar
+Sessions rail use. All three surfaces run one projection
+(`crates/tui/src/session_projection.rs`), so a listing cannot differ between
+the terminal and the dashboard.
+
+`GET /v1/sessions/summary` returns rows that are field-compatible with
+`GET /v1/threads/summary` — `id`, `title`, `preview`, `model`, `mode`,
+`workspace`, `archived`, `updated_at` — plus `message_count`, `total_tokens`,
+`created_at`, `parent_session_id`, and `is_current`. One caveat stated plainly:
+`preview` is the session's recorded **title**, not its last message. Session
+metadata does not store a last message, and reading every transcript to
+synthesise one would make a list view an unbounded read. Full transcript
+preview lives in the TUI session picker, which reads one selected session.
+
+`PATCH /v1/sessions/{id}` renames and/or archives a saved session and returns a
+lifecycle receipt shaped like the thread patch receipt:
+
+```json
+{
+  "session": { "id": "…", "title": "Renamed", "archived": true, "…": "…" },
+  "changes": { "title": "Renamed", "archived": true }
+}
+```
+
+`changes` lists only what actually moved, so a no-op patch is distinguishable
+from an applied one. Archiving is durable and reversible: an archived session
+stays on disk and stays loadable, disappears from default listings, and is
+never chosen by `--continue` or by auto-resume. The route is the same writer
+the TUI picker (`e`) and `/sessions archive <id>` use — there is no second
+archive notion.
+
+While a session is open in an interactive Codewhale process, that process holds
+the authoritative copy in memory and rewrites the whole document on its next
+autosave. `PATCH` therefore fails closed on it with `409 Conflict` rather than
+writing something that would be silently reverted. Change it in the terminal
+instead. A standalone `codewhale web` holds nothing open and is never blocked.
+
+`GET /v1/sessions/{id}?peek=true` returns a bounded, redacted, read-only view
+instead of the transcript: at most 12 entries of at most 400 characters each
+(`&entries=N` lowers the budget, never raises it past the cap), tool calls and
+results summarised to a name and a size rather than inlined, and
+credential-shaped substrings masked. `omitted_before` reports how many earlier
+messages were dropped. The payload carries `"live": false` and deliberately has
+no turn status, `running`, or `active` field — a saved session is a recording,
+and live state comes only from a resumed thread's SSE stream.
 
 **Threads** (durable runtime data model)
 - `GET /v1/threads?limit=50&include_archived=false&archived_only=false`
@@ -809,7 +860,9 @@ the TUI and parent model see.
 | Operation | Endpoint |
 |---|---|
 | List sessions | `GET /v1/sessions` |
+| List session summaries | `GET /v1/sessions/summary` |
 | Get session | `GET /v1/sessions/{id}` |
+| Rename / archive session | `PATCH /v1/sessions/{id}` |
 | Delete session | `DELETE /v1/sessions/{id}` |
 | Resume into thread | `POST /v1/sessions/{id}/resume-thread` |
 | Create thread | `POST /v1/threads` |

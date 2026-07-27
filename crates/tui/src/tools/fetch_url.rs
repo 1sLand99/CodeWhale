@@ -11,7 +11,9 @@ use super::handle::query_jsonpath;
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec, optional_u64,
 };
-use super::web::extract::{DocumentKind, ExtractedDocument, extract_document};
+use super::web::extract::{
+    DocumentKind, ExtractedDocument, decode_response_body, extract_document,
+};
 use super::web::fetch::{
     DEFAULT_MAX_BYTES, DEFAULT_TIMEOUT, FetchOptions, HARD_MAX_BYTES, HARD_MAX_TIMEOUT, fetch,
 };
@@ -172,8 +174,16 @@ impl ToolSpec for FetchUrlTool {
         )
         .await?;
         let is_success = (200..300).contains(&fetched.status);
-        let mut body_text = (!requested_fields.is_empty())
-            .then(|| String::from_utf8_lossy(&fetched.bytes).into_owned());
+        let body_text = if requested_fields.is_empty() {
+            None
+        } else {
+            // JSON is never allowed to discover an encoding from body markup.
+            Some(decode_response_body(
+                &fetched.bytes,
+                Some(&fetched.content_type),
+                false,
+            )?)
+        };
         let fields = match body_text.as_deref() {
             Some(body) => project_json_fields(body, &fetched.content_type, &requested_fields)?,
             None => None,
@@ -184,9 +194,14 @@ impl ToolSpec for FetchUrlTool {
                 Err(_error)
                     if format == Format::Raw && is_declared_textual(&fetched.content_type) =>
                 {
-                    let body_text = body_text
-                        .get_or_insert_with(|| String::from_utf8_lossy(&fetched.bytes).into_owned())
-                        .clone();
+                    let body_text = match body_text.as_ref() {
+                        Some(body_text) => body_text.clone(),
+                        None => decode_response_body(
+                            &fetched.bytes,
+                            Some(&fetched.content_type),
+                            is_declared_html(&fetched.content_type),
+                        )?,
+                    };
                     ExtractedDocument {
                         kind: DocumentKind::Text,
                         title: None,
@@ -197,10 +212,15 @@ impl ToolSpec for FetchUrlTool {
                         media_extension: None,
                     }
                 }
-                Err(_error) if !is_success => {
-                    let body_text = body_text
-                        .get_or_insert_with(|| String::from_utf8_lossy(&fetched.bytes).into_owned())
-                        .clone();
+                Err(_error) if !is_success && is_declared_textual(&fetched.content_type) => {
+                    let body_text = match body_text.as_ref() {
+                        Some(body_text) => body_text.clone(),
+                        None => decode_response_body(
+                            &fetched.bytes,
+                            Some(&fetched.content_type),
+                            is_declared_html(&fetched.content_type),
+                        )?,
+                    };
                     ExtractedDocument {
                         kind: DocumentKind::Text,
                         title: None,
@@ -289,6 +309,19 @@ fn is_declared_textual(content_type: &str) -> bool {
         || content_type.contains("javascript")
 }
 
+fn is_declared_html(content_type: &str) -> bool {
+    matches!(
+        content_type
+            .split(';')
+            .next()
+            .unwrap_or(content_type)
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "text/html" | "application/xhtml+xml"
+    )
+}
+
 fn render_extracted(
     url: &str,
     content_type: &str,
@@ -327,7 +360,11 @@ fn render_extracted(
     }
 
     let content = match format {
-        Format::Raw => String::from_utf8_lossy(bytes).into_owned(),
+        Format::Raw => decode_response_body(
+            bytes,
+            Some(content_type),
+            document.kind == DocumentKind::Html,
+        )?,
         Format::Text => document.text,
         Format::Markdown => document.markdown,
     };
@@ -474,6 +511,50 @@ mod tests {
         assert_eq!(Format::parse(Some("raw")).unwrap(), Format::Raw);
         assert_eq!(Format::parse(None).unwrap(), Format::Markdown);
         assert!(Format::parse(Some("yaml")).is_err());
+    }
+
+    #[test]
+    fn raw_text_uses_declared_charset_and_rejects_nul_binary() {
+        let document = || ExtractedDocument {
+            kind: DocumentKind::Text,
+            title: None,
+            text: String::new(),
+            markdown: String::new(),
+            cleaned_html: None,
+            pdf_pages: None,
+            media_extension: None,
+        };
+        let (bytes, _, _) = encoding_rs::WINDOWS_1252.encode("café");
+        let (content, artifact) = render_extracted(
+            "https://example.com/plain",
+            "text/plain; charset=windows-1252",
+            Format::Raw,
+            document(),
+            &bytes,
+            &ctx(),
+        )
+        .expect("decode raw text");
+        assert_eq!(content, "café");
+        assert!(artifact.is_none());
+
+        let error = render_extracted(
+            "https://example.com/not-text",
+            "text/plain",
+            Format::Raw,
+            document(),
+            b"binary\0payload",
+            &ctx(),
+        )
+        .expect_err("raw text must retain the binary guard");
+        assert!(error.to_string().contains("NUL bytes"));
+    }
+
+    #[test]
+    fn textual_and_html_fallback_classification_is_exact() {
+        assert!(is_declared_textual("Application/JSON; charset=utf-8"));
+        assert!(is_declared_html("TEXT/HTML; charset=gbk"));
+        assert!(!is_declared_html("text/plain; note=text/html"));
+        assert!(!is_declared_textual("application/octet-stream"));
     }
 
     #[test]

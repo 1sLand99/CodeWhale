@@ -321,13 +321,14 @@ fn agent_profile_from_toml(path: &Path, parsed: AgentProfileToml) -> Result<Agen
         .to_string();
     validate_agent_profile_token(path, "id/name", &id)?;
 
-    let role_name = first_present([
-        parsed.base_role.as_deref(),
-        parsed.role_hint.as_deref(),
-        parsed.name.as_deref(),
-    ])
-    .unwrap_or(&id)
-    .to_string();
+    let role_name = canonical_public_role_name(
+        first_present([
+            parsed.base_role.as_deref(),
+            parsed.role_hint.as_deref(),
+            parsed.name.as_deref(),
+        ])
+        .unwrap_or(&id),
+    );
     validate_agent_profile_token(path, "base_role/role_hint", &role_name)?;
 
     let loadout = first_present([parsed.loadout.as_deref()])
@@ -374,6 +375,18 @@ fn agent_profile_from_toml(path: &Path, parsed: AgentProfileToml) -> Result<Agen
         source: path.to_path_buf(),
         origin: ProfileOrigin::Workspace,
     })
+}
+
+/// Canonicalize renamed public Fleet roles at profile load boundaries.
+///
+/// Profile ids remain untouched so an older file can still be addressed by
+/// its saved id. Only the semantic role is migrated; every new receipt and UI
+/// label derived from it therefore says `consultant`.
+pub(crate) fn canonical_public_role_name(role: &str) -> String {
+    match role.trim().to_ascii_lowercase().as_str() {
+        "oracle" | "advisor" => "consultant".to_string(),
+        _ => role.to_string(),
+    }
 }
 
 fn reject_permission_expansion(
@@ -608,7 +621,7 @@ impl FleetProfileDraft {
             .and_then(trimmed_non_empty)
             .map(sanitize_profile_token)
         {
-            Some(token) if !token.is_empty() => token,
+            Some(token) if !token.is_empty() => canonical_public_role_name(&token),
             _ => return UntrustedProfileParse::Invalid("role_hint missing".to_string()),
         };
         let id = parsed
@@ -966,6 +979,34 @@ text = "Scout deeply."
         let profiles = load_agent_profiles_from_dir(dir.path()).expect("profile TOML loads");
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].profile.reasoning_effort.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn profile_loader_migrates_advisory_role_aliases_to_consultant() {
+        let dir = tempfile::tempdir().unwrap();
+        for alias in ["oracle", "advisor"] {
+            let path = dir.path().join(format!("{alias}.toml"));
+            std::fs::write(
+                &path,
+                format!("id = \"{alias}\"\nrole_hint = \"{alias}\"\n"),
+            )
+            .unwrap();
+            let loaded = load_agent_profile_file(&path).expect("load compatibility profile");
+            assert_eq!(loaded.id, alias, "saved identity remains addressable");
+            assert_eq!(loaded.profile.role.name, "consultant");
+            assert_eq!(loaded.profile.slot.as_str(), "consultant");
+        }
+    }
+
+    #[test]
+    fn model_draft_migrates_advisory_role_alias_to_consultant() {
+        let UntrustedProfileParse::Drafted(draft) = FleetProfileDraft::from_untrusted_json(
+            r#"{"id":"second-opinion","role_hint":"oracle","description":"Counsel."}"#,
+        ) else {
+            panic!("expected a drafted profile");
+        };
+        assert_eq!(draft.role_hint, "consultant");
+        assert!(draft.render_toml().contains("role_hint = \"consultant\""));
     }
 
     #[test]

@@ -62,6 +62,7 @@ pub struct SettingsSection {
     pub low_motion: bool,
     pub fancy_animations: bool,
     pub ocean_treatment: OceanTreatmentValue,
+    pub focus_texture: FocusTextureValue,
     pub work_surface_placement: WorkSurfacePlacementValue,
     #[schemars(range(min = 2, max = 16))]
     pub work_surface_top_height: u16,
@@ -221,6 +222,27 @@ pub enum UiLocale {
     #[serde(rename = "ko")]
     #[schemars(rename = "ko")]
     Ko,
+    #[serde(rename = "ca")]
+    #[schemars(rename = "ca")]
+    Ca,
+    #[serde(rename = "de")]
+    #[schemars(rename = "de")]
+    De,
+    #[serde(rename = "fr")]
+    #[schemars(rename = "fr")]
+    Fr,
+    #[serde(rename = "id")]
+    #[schemars(rename = "id")]
+    Id,
+    #[serde(rename = "hi")]
+    #[schemars(rename = "hi")]
+    Hi,
+    #[serde(rename = "ru")]
+    #[schemars(rename = "ru")]
+    Ru,
+    #[serde(rename = "uk")]
+    #[schemars(rename = "uk")]
+    Uk,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -244,6 +266,14 @@ pub enum UiThemeValue {
 pub enum OceanTreatmentValue {
     Ombre,
     Flat,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FocusTextureValue {
+    Off,
+    Scrim,
+    Grain,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -404,6 +434,7 @@ pub fn build_document(app: &App, config: &Config) -> Result<ConfigUiDocument> {
             low_motion: settings.low_motion,
             fancy_animations: settings.fancy_animations,
             ocean_treatment: settings.ocean_treatment.as_str().into(),
+            focus_texture: settings.focus_texture.as_str().into(),
             work_surface_placement: settings.work_surface_placement.as_str().into(),
             work_surface_top_height: settings.work_surface_top_height,
             work_surface_side_width: settings.work_surface_side_width,
@@ -594,6 +625,7 @@ pub fn apply_document(
         ("low_motion", bool_str(doc.settings.low_motion)),
         ("fancy_animations", bool_str(doc.settings.fancy_animations)),
         ("ocean_treatment", doc.settings.ocean_treatment.as_setting()),
+        ("focus_texture", doc.settings.focus_texture.as_setting()),
         (
             "work_surface_placement",
             doc.settings.work_surface_placement.as_setting(),
@@ -715,7 +747,6 @@ pub fn apply_document(
         // provider-scoped model map. `set_config_value("model", ...)` owns the
         // live App mutation, while this block persists that selection without
         // rewriting the DeepSeek-only global fallback (#3227).
-        let mut settings = Settings::load_persisted()?;
         let mut provider_models = doc
             .settings
             .provider_models
@@ -726,8 +757,10 @@ pub fn apply_document(
             app.provider_identity_for_persistence().to_string(),
             app.model_selection_for_persistence(),
         );
-        settings.provider_models = (!provider_models.is_empty()).then_some(provider_models);
-        settings.save()?;
+        Settings::transact(|settings| {
+            settings.provider_models = (!provider_models.is_empty()).then_some(provider_models);
+            Ok(())
+        })?;
         notes.push(format!(
             "{} model saved for {}",
             app.model_display_label(),
@@ -940,6 +973,13 @@ impl UiLocale {
             Self::Es419 => "es-419",
             Self::Vi => "vi",
             Self::Ko => "ko",
+            Self::Ca => "ca",
+            Self::De => "de",
+            Self::Fr => "fr",
+            Self::Id => "id",
+            Self::Hi => "hi",
+            Self::Ru => "ru",
+            Self::Uk => "uk",
         }
     }
 
@@ -954,6 +994,13 @@ impl UiLocale {
             Some("es-419") => Ok(Self::Es419),
             Some("vi") => Ok(Self::Vi),
             Some("ko") => Ok(Self::Ko),
+            Some("ca") => Ok(Self::Ca),
+            Some("de") => Ok(Self::De),
+            Some("fr") => Ok(Self::Fr),
+            Some("id") => Ok(Self::Id),
+            Some("hi") => Ok(Self::Hi),
+            Some("ru") => Ok(Self::Ru),
+            Some("uk") => Ok(Self::Uk),
             Some(other) => bail!("unsupported locale '{other}'"),
             None => bail!("invalid locale '{value}'"),
         }
@@ -1016,6 +1063,26 @@ impl From<&str> for OceanTreatmentValue {
             Self::Flat
         } else {
             Self::Ombre
+        }
+    }
+}
+
+impl FocusTextureValue {
+    fn as_setting(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Scrim => "scrim",
+            Self::Grain => "grain",
+        }
+    }
+}
+
+impl From<&str> for FocusTextureValue {
+    fn from(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "scrim" => Self::Scrim,
+            "grain" => Self::Grain,
+            _ => Self::Off,
         }
     }
 }

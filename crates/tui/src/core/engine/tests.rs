@@ -14,7 +14,7 @@ use crate::prompts::{
 };
 use crate::test_support::{EnvVarGuard, lock_test_env};
 use crate::tools::spec::ToolCapability;
-use crate::tools::todo::{TodoItem, TodoListSnapshot, TodoStatus};
+use crate::tools::todo::TodoStatus;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -177,12 +177,35 @@ fn failed_same_identity_route_preflight_leaves_old_client_untouched() {
 
 #[tokio::test]
 async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_builtin_route() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let custom_server = MockServer::start().await;
+    let custom_base_url = format!("{}/v1", custom_server.uri());
+    let done_sse = concat!(
+        "data: {\"id\":\"chatcmpl-exact-route\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"exact route\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-exact-route\",\"choices\":[{\"index\":0,",
+        "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(done_sse),
+        )
+        .expect(1)
+        .mount(&custom_server)
+        .await;
+
     let mut custom = HashMap::new();
     custom.insert(
         "custom-a".to_string(),
         crate::config::ProviderConfig {
             kind: Some("openai-compatible".to_string()),
-            base_url: Some("http://127.0.0.1:18181/v1".to_string()),
+            base_url: Some(custom_base_url.clone()),
             model: Some("local-model".to_string()),
             api_key: Some("local-test-key".to_string()),
             ..crate::config::ProviderConfig::default()
@@ -203,7 +226,7 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
         ..Config::default()
     };
     let engine_config = EngineConfig {
-        max_steps: 0,
+        max_steps: 1,
         snapshots_enabled: false,
         ..EngineConfig::default()
     };
@@ -258,34 +281,83 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
         .await
         .expect("send exact custom turn");
 
-    let mut saw_exact_start = false;
-    let mut saw_exact_endpoint = false;
-    for _ in 0..20 {
-        let event = tokio::time::timeout(Duration::from_secs(2), async {
-            handle.rx_event.write().await.recv().await
-        })
-        .await
-        .expect("engine event timeout")
-        .expect("engine event");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut lifecycle_stage = 0u8;
+    let mut diagnostics = Vec::new();
+    let mut rx = handle.rx_event.write().await;
+    loop {
+        let event = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .unwrap_or_else(|_| {
+                panic!("timed out waiting for semantic route sequence: {diagnostics:?}")
+            })
+            .expect("engine event channel closed before terminal route receipt");
+        diagnostics.push(match &event {
+            Event::TurnStarted { .. } => "turn_started",
+            Event::RouteDispatched { .. } => "route_dispatched",
+            Event::TurnComplete { .. } => "turn_complete",
+            Event::SessionUpdated { .. } => "session_updated",
+            Event::PrefixCacheChange { .. } => "prefix_cache",
+            Event::Status { .. } => "status",
+            _ => "other",
+        });
         match event {
-            Event::TurnStarted {
-                route: Some(route), ..
-            } => {
+            Event::TurnStarted { route, .. } => {
+                assert_eq!(
+                    lifecycle_stage, 0,
+                    "duplicate/reordered start: {diagnostics:?}"
+                );
+                // Lifecycle start still carries the installed-route receipt
+                // hosts authorize follow-up work against, but it must carry no
+                // billing envelope: nothing has been dispatched yet, and an
+                // undispatched route has no metering surface or billing time.
+                assert!(
+                    route.as_ref().is_none_or(|route| route.billing.is_none()),
+                    "billing route must not be stamped at lifecycle start"
+                );
+                lifecycle_stage = 1;
+            }
+            Event::RouteDispatched { route, .. } => {
+                assert_eq!(
+                    lifecycle_stage, 1,
+                    "dispatch missing, duplicated, or reordered: {diagnostics:?}"
+                );
                 assert_eq!(route.provider, ApiProvider::Custom);
                 assert_eq!(route.provider_identity, "custom-a");
                 assert_eq!(route.model, "local-model");
-                saw_exact_start = true;
+                assert_eq!(
+                    route
+                        .billing
+                        .as_ref()
+                        .and_then(|billing| billing.endpoint_fingerprint.clone()),
+                    crate::cost_status::endpoint_fingerprint(&custom_base_url),
+                    "dispatch receipt borrowed the later ambient route"
+                );
+                lifecycle_stage = 2;
             }
             Event::TurnComplete { base_url, .. } => {
-                assert_eq!(base_url.as_deref(), Some("http://127.0.0.1:18181/v1"));
-                saw_exact_endpoint = true;
+                assert_eq!(
+                    lifecycle_stage, 2,
+                    "terminal arrived without an ordered dispatch receipt: {diagnostics:?}"
+                );
+                assert_eq!(base_url.as_deref(), Some(custom_base_url.as_str()));
+                lifecycle_stage = 3;
                 break;
             }
             _ => {}
         }
     }
-    assert!(saw_exact_start);
-    assert!(saw_exact_endpoint);
+    drop(rx);
+    assert_eq!(lifecycle_stage, 3);
+    assert_eq!(
+        custom_server
+            .received_requests()
+            .await
+            .expect("recorded custom-route request")
+            .len(),
+        1,
+        "semantic dispatch sequence must bracket one real provider request"
+    );
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     run_task.await.expect("engine task");
 }
@@ -585,9 +657,18 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
         .expect("custom route")
         .base_url = Some(second_base_url.clone());
     *authoritative.write() = reloaded;
+    let refreshed_route = engine
+        .current_runtime_route()
+        .expect("resolve the updated authoritative route");
+    assert_eq!(
+        refreshed_route.candidate.endpoint().base_url,
+        second_base_url,
+        "the synthetic continuation must resolve the latest authoritative endpoint"
+    );
     let run_task = tokio::spawn(engine.run());
 
-    let mut starts = 0;
+    let mut lifecycle_starts = 0;
+    let mut dispatches = 0;
     let mut completes = 0;
     let mut awaiting_second_sync = false;
     let mut verified_synthetic_goal = false;
@@ -599,14 +680,32 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
         .expect("goal engine event timeout")
         .expect("goal engine event");
         match event {
-            Event::TurnStarted {
-                route: Some(route), ..
-            } => {
-                starts += 1;
-                assert_eq!(route.provider_identity, "custom-a");
-                if starts == 2 {
+            Event::TurnStarted { route, .. } => {
+                assert!(
+                    route.as_ref().is_none_or(|route| route.billing.is_none()),
+                    "lifecycle start must not carry billing time"
+                );
+                lifecycle_starts += 1;
+                if lifecycle_starts == 2 {
                     awaiting_second_sync = true;
                 }
+            }
+            Event::RouteDispatched { route, .. } => {
+                dispatches += 1;
+                assert_eq!(route.provider_identity, "custom-a");
+                let expected_base_url = if dispatches == 1 {
+                    first_base_url.as_str()
+                } else {
+                    second_base_url.as_str()
+                };
+                assert_eq!(
+                    route
+                        .billing
+                        .as_ref()
+                        .and_then(|billing| billing.endpoint_fingerprint.clone()),
+                    crate::cost_status::endpoint_fingerprint(expected_base_url),
+                    "goal continuation dispatch borrowed the wrong authoritative route"
+                );
             }
             Event::SessionUpdated {
                 messages,
@@ -673,17 +772,16 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
             }
             Event::TurnComplete { base_url, .. } => {
                 completes += 1;
-                let expected = if completes == 1 {
-                    first_base_url.as_str()
-                } else {
-                    second_base_url.as_str()
-                };
-                assert_eq!(base_url.as_deref(), Some(expected));
+                assert!(
+                    base_url.is_none(),
+                    "an injected provider-neutral transport must not claim the auxiliary route's endpoint"
+                );
             }
             _ => {}
         }
     }
-    assert_eq!(starts, 2);
+    assert_eq!(lifecycle_starts, 2);
+    assert_eq!(dispatches, 2);
     assert!(verified_synthetic_goal);
     let requests = model.captured_requests();
     assert_eq!(requests.len(), 2);
@@ -2767,8 +2865,15 @@ fn subagent_mailbox_keeps_lifecycle_events_reliable() {
     assert!(!subagent_mailbox_message_is_best_effort(
         &MailboxMessage::TokenUsage {
             agent_id: "agent_a".to_string(),
-            provider: ApiProvider::Deepseek,
-            model: "model".to_string(),
+            source_id: "response-a".to_string(),
+            route: crate::cost_status::EffectiveRouteEnvelope::capture(
+                None,
+                ApiProvider::Deepseek,
+                "deepseek",
+                "model",
+                Some(ApiProvider::Deepseek.default_base_url()),
+                chrono::Utc::now(),
+            ),
             usage: Usage::default(),
         }
     ));
@@ -2854,8 +2959,15 @@ fn subagent_mailbox_never_samples_lifecycle_or_usage_events() {
         &mut last_sent_at,
         &MailboxMessage::TokenUsage {
             agent_id: "agent_a".to_string(),
-            provider: ApiProvider::Deepseek,
-            model: "model".to_string(),
+            source_id: "response-a".to_string(),
+            route: crate::cost_status::EffectiveRouteEnvelope::capture(
+                None,
+                ApiProvider::Deepseek,
+                "deepseek",
+                "model",
+                Some(ApiProvider::Deepseek.default_base_url()),
+                chrono::Utc::now(),
+            ),
             usage: Usage::default(),
         },
         start,
@@ -2957,37 +3069,25 @@ fn tool_catalog_filter_is_inert_without_gates() {
     assert_eq!(catalog.len(), 2);
 }
 
+/// The turn-start capture carries mode/workspace/working-set state only. Work
+/// used to be rendered here; it moved to the fork seam (#3983) because this
+/// block is captured before the turn's first tool call. Fork-seam Work parity is
+/// covered by `fork_state_block_reuses_the_canonical_work_body`.
 #[test]
-fn structured_state_block_uses_checklist_as_work_surface() {
+fn structured_state_block_carries_stable_state_without_work() {
     let state = StructuredState {
         mode_label: "Agent".to_string(),
         workspace: PathBuf::from("/workspace/codewhale"),
         cwd: Some(PathBuf::from("/workspace/codewhale")),
         working_set_summary: None,
-        todo_snapshot: Some(TodoListSnapshot {
-            items: vec![
-                TodoItem {
-                    id: 1,
-                    content: "Wire Fleet progress projection".to_string(),
-                    status: TodoStatus::InProgress,
-                },
-                TodoItem {
-                    id: 2,
-                    content: "Run focused gates".to_string(),
-                    status: TodoStatus::Pending,
-                },
-            ],
-            completion_pct: 0,
-            in_progress_id: Some(1),
-        }),
         subagent_snapshots: Vec::new(),
     };
 
     let block = state.to_system_block().expect("fork state block");
 
-    assert!(block.contains("### Work"));
-    assert!(block.contains("To-do (0% settled)"));
-    assert!(block.contains("- [~] #1 Wire Fleet progress projection"));
+    assert!(block.contains("- Mode: `Agent`"));
+    assert!(!block.contains(crate::work_grounding::FORK_WORK_SECTION_HEADING));
+    assert!(!block.contains("To-do ("));
     assert!(!block.contains("Strategy"));
 }
 
@@ -3266,6 +3366,293 @@ impl crate::core::model_client::ModelClient for BlockingModelClient {
     }
 }
 
+#[tokio::test]
+async fn tool_request_snapshot_matches_the_exact_mock_request_payload() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn("Done.")]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let context = crate::tools::ToolContext::new(workspace.path().to_path_buf());
+    let mut registry = crate::tools::ToolRegistry::new(context);
+    registry.register(std::sync::Arc::new(crate::tools::file::ReadFileTool));
+    let tools = Some(registry.to_api_tools_with_cache(true));
+    let mut turn = crate::core::turn::TurnContext::new(4);
+
+    let (status, error) = engine
+        .handle_deepseek_turn(
+            &mut turn,
+            Some(&registry),
+            tools,
+            AppMode::Agent,
+            Vec::new(),
+            None,
+        )
+        .await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+
+    let request = mock.last_request().expect("mock request");
+    let mut events = handle.rx_event.write().await;
+    let snapshot = std::iter::from_fn(|| events.try_recv().ok())
+        .find_map(|event| match event {
+            Event::ToolRequestSnapshot { snapshot } => Some(snapshot),
+            _ => None,
+        })
+        .expect("request snapshot event");
+
+    assert_eq!(snapshot.tools_field_present, request.tools.is_some());
+    assert_eq!(
+        snapshot.tool_count,
+        request.tools.as_ref().map_or(0, Vec::len)
+    );
+    if let Some(request_tool) = request.tools.as_ref().and_then(|tools| tools.first()) {
+        assert_eq!(
+            snapshot.tools.first().expect("projected tool").name.value,
+            request_tool.name
+        );
+    }
+    assert_eq!(snapshot.turn_id.value, turn.id);
+    assert_eq!(snapshot.step, 0);
+    assert!(snapshot.delivery_status.starts_with("unknown"));
+}
+
+async fn snapshot_for_catalog(
+    workspace: &Path,
+    catalog: Option<Vec<crate::models::Tool>>,
+) -> crate::tool_inspection::ToolInspectionSnapshot {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn("Done.")]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace),
+        &Config::default(),
+        client,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(2);
+    let (status, error) = engine
+        .handle_deepseek_turn(&mut turn, None, catalog, AppMode::Agent, Vec::new(), None)
+        .await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    let mut events = handle.rx_event.write().await;
+    std::iter::from_fn(|| events.try_recv().ok())
+        .find_map(|event| match event {
+            Event::ToolRequestSnapshot { snapshot } => Some(snapshot),
+            _ => None,
+        })
+        .expect("request snapshot")
+}
+
+#[tokio::test]
+async fn request_selector_distinguishes_absent_tools_from_present_empty_tools() {
+    let workspace = tempdir().expect("tempdir");
+    let absent = snapshot_for_catalog(workspace.path(), None).await;
+    let deferred_only = crate::models::Tool {
+        tool_type: Some("function".to_string()),
+        name: "deferred_fixture".to_string(),
+        description: "Deferred fixture".to_string(),
+        input_schema: json!({"type": "object"}),
+        allowed_callers: None,
+        defer_loading: Some(true),
+        input_examples: None,
+        strict: None,
+        cache_control: None,
+    };
+    let selected = active_tools_for_request(&[deferred_only], &HashSet::new(), false);
+    let present_empty = crate::tool_inspection::ToolInspectionSnapshot::from_prepared_request(
+        "turn",
+        0,
+        selected.as_deref(),
+    );
+
+    assert!(!absent.tools_field_present);
+    assert_eq!(absent.tool_count, 0);
+    assert!(present_empty.tools_field_present);
+    assert_eq!(present_empty.tool_count, 0);
+    assert_eq!(present_empty.payload_json_bytes, Some(2));
+}
+
+#[tokio::test]
+async fn request_snapshots_advance_to_the_latest_tool_step() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    fs::write(workspace.path().join("README.md"), "fixture\n").expect("write fixture");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::tool_call_turn("call-read", "read_file", r#"{"path":"README.md"}"#),
+        canned::simple_text_turn("Done."),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let context = crate::tools::ToolContext::new(workspace.path().to_path_buf());
+    let mut registry = crate::tools::ToolRegistry::new(context);
+    registry.register(std::sync::Arc::new(crate::tools::file::ReadFileTool));
+    let tools = Some(registry.to_api_tools_with_cache(true));
+    let mut turn = crate::core::turn::TurnContext::new(4);
+
+    let (status, error) = engine
+        .handle_deepseek_turn(
+            &mut turn,
+            Some(&registry),
+            tools,
+            AppMode::Agent,
+            Vec::new(),
+            None,
+        )
+        .await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    let mut events = handle.rx_event.write().await;
+    let snapshots = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            Event::ToolRequestSnapshot { snapshot } => Some(snapshot),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(snapshots.len(), 2);
+    assert_eq!(snapshots[0].step, 0);
+    assert_eq!(snapshots[1].step, 1);
+    assert_eq!(snapshots[1].turn_id.value, turn.id);
+}
+
+#[tokio::test]
+async fn request_snapshot_reports_registry_provenance_for_the_transmitted_catalog() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn("Done.")]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    // Pin `read_file` loaded so this step's request actually carries it; the
+    // point of the test is what a *transmitted* tool is reported as.
+    let mut engine_config = deterministic_engine_config(workspace.path());
+    engine_config.tools_always_load = HashSet::from(["read_file".to_string()]);
+    let (mut engine, handle) =
+        Engine::new_with_model_client(engine_config, &Config::default(), client);
+    let context = crate::tools::ToolContext::new(workspace.path().to_path_buf());
+    let mut registry = crate::tools::ToolRegistry::new(context);
+    registry.register(std::sync::Arc::new(crate::tools::file::ReadFileTool));
+    // `read_file` is a hidden compatibility alias, so `to_api_tools` would hand
+    // the turn an empty catalog and nothing would be transmitted. Hand the
+    // engine an explicit catalog instead: the registry is still the source of
+    // the *facts*, including the fact that this tool is not model-visible.
+    let tools = Some(vec![crate::models::Tool {
+        tool_type: None,
+        name: "read_file".to_string(),
+        description: "Read a file".to_string(),
+        input_schema: json!({"type": "object"}),
+        allowed_callers: Some(vec!["direct".to_string()]),
+        defer_loading: Some(false),
+        input_examples: None,
+        strict: None,
+        cache_control: None,
+    }]);
+
+    // The same surface context `handle_send_message` resolves for a real turn:
+    // real registry facts, real (empty) MCP attribution, the engine's own
+    // synthetic-name list, and the resolved model client's receipt.
+    let synthetic_names = super::tool_catalog::default_synthetic_catalog_tool_names();
+    let surface = crate::tool_inspection::ToolSurfaceContext {
+        registry: registry.registry_facts(&HashSet::new()),
+        mcp_servers: std::collections::BTreeMap::new(),
+        synthetic_names: synthetic_names.clone(),
+        provider: engine.tool_surface_provider_receipt(),
+    };
+
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let (status, error) = engine
+        .handle_deepseek_turn(
+            &mut turn,
+            Some(&registry),
+            tools,
+            AppMode::Agent,
+            Vec::new(),
+            Some(surface),
+        )
+        .await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+
+    let mut events = handle.rx_event.write().await;
+    let snapshot = std::iter::from_fn(|| events.try_recv().ok())
+        .find_map(|event| match event {
+            Event::ToolRequestSnapshot { snapshot } => Some(snapshot),
+            _ => None,
+        })
+        .expect("request snapshot");
+
+    let transmitted = mock
+        .last_request()
+        .expect("captured request")
+        .tools
+        .unwrap_or_default();
+    assert!(!transmitted.is_empty(), "the turn must carry tools");
+
+    // The digest is the request path's, over what was prepared.
+    assert_eq!(
+        snapshot.active_tool_catalog_sha256.as_deref(),
+        Some(crate::core::engine::preview::active_tool_catalog_sha256(&transmitted).as_str())
+    );
+
+    // Provenance is registry-derived truth, not "unavailable".
+    assert!(snapshot.registry_facts_present);
+    assert!(snapshot.provider.is_available());
+    assert_eq!(
+        snapshot.unavailable_for_this_request,
+        vec!["provider_wire_payload"]
+    );
+
+    let read_file = snapshot
+        .tools
+        .iter()
+        .find(|entry| entry.name.value == "read_file")
+        .expect("read_file projected");
+    assert_eq!(
+        read_file.provenance,
+        crate::tool_inspection::Evidence::Known {
+            value: crate::tool_inspection::ToolProvenance::Builtin
+        }
+    );
+    assert!(matches!(
+        read_file.approval,
+        crate::tool_inspection::Evidence::Known { .. }
+    ));
+    // Registry truth, not an inference from the request: this alias is hidden
+    // from the model catalog even though this catalog carried it explicitly.
+    assert_eq!(
+        read_file.model_visible,
+        crate::tool_inspection::Evidence::Known { value: false }
+    );
+    assert!(read_file.visibility.in_request());
+
+    // Anything the engine injected rather than registered is reported as
+    // synthetic, from the engine's own list — never guessed from the name.
+    for entry in &snapshot.tools {
+        if synthetic_names.contains(&entry.name.value) {
+            assert_eq!(
+                entry.provenance,
+                crate::tool_inspection::Evidence::Known {
+                    value: crate::tool_inspection::ToolProvenance::Synthetic
+                },
+                "'{}' is engine-injected, not registry-backed",
+                entry.name.value
+            );
+            // Not in the registry, so capabilities are unknown, not "none".
+            assert!(matches!(
+                entry.capabilities,
+                crate::tool_inspection::Evidence::Unknown { .. }
+            ));
+        }
+    }
+}
+
 fn deterministic_engine_config(workspace: &Path) -> EngineConfig {
     EngineConfig {
         workspace: workspace.to_path_buf(),
@@ -3307,12 +3694,22 @@ async fn injected_model_drives_real_engine_navigation_trajectory() {
 
     let mut saw_read = false;
     let mut saw_answer = false;
+    let mut saw_unreceipted_injected_route = false;
+    let mut saw_unattributed_injected_completion = false;
     let mut rx = handle.rx_event.write().await;
     while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
         .await
         .expect("timed out waiting for deterministic navigation")
     {
         match event {
+            Event::TurnStarted { route, .. } => {
+                let route = route.expect("injected model turn route");
+                assert!(
+                    route.receipt.is_none(),
+                    "an auxiliary route client must not receipt injected model I/O"
+                );
+                saw_unreceipted_injected_route = true;
+            }
             Event::ToolCallComplete { name, result, .. } if name == "read_file" => {
                 let result = result.expect("read_file result");
                 assert!(result.success, "{result:?}");
@@ -3322,8 +3719,18 @@ async fn injected_model_drives_real_engine_navigation_trajectory() {
             Event::MessageDelta { content, .. } => {
                 saw_answer |= content.contains("Navigation complete");
             }
-            Event::TurnComplete { status, error, .. } => {
+            Event::TurnComplete {
+                status,
+                error,
+                base_url,
+                ..
+            } => {
                 assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+                assert!(
+                    base_url.is_none(),
+                    "an auxiliary route client must not attribute an injected completion"
+                );
+                saw_unattributed_injected_completion = true;
                 break;
             }
             _ => {}
@@ -3338,6 +3745,8 @@ async fn injected_model_drives_real_engine_navigation_trajectory() {
         saw_answer,
         "real stream projection must emit the final answer"
     );
+    assert!(saw_unreceipted_injected_route);
+    assert!(saw_unattributed_injected_completion);
     assert_eq!(mock.call_count(), 2);
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     task.await.expect("engine task");
@@ -3489,6 +3898,7 @@ async fn coalesced_raw_read_error_touches_working_set_once() {
                 tools,
                 AppMode::Agent,
                 Vec::new(),
+                None,
             )
             .await;
 
@@ -3598,6 +4008,20 @@ async fn engine_cancellation_drops_active_injected_model_request() {
     tokio::time::timeout(model_turn_event_timeout(), entered.notified())
         .await
         .expect("model request was never entered");
+
+    let mut rx = handle.rx_event.write().await;
+    let pending_snapshot = loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("timed out waiting for pending request snapshot")
+            .expect("engine event");
+        if let Event::ToolRequestSnapshot { snapshot } = event {
+            break snapshot;
+        }
+    };
+    assert!(pending_snapshot.delivery_status.starts_with("unknown"));
+    assert!(pending_snapshot.tools_field_present);
+    drop(rx);
     handle.cancel();
 
     let mut rx = handle.rx_event.write().await;
@@ -3676,8 +4100,7 @@ async fn operate_conversation_reaches_provider_when_workers_are_disabled() {
         .expect("timed out waiting for Operate completion")
     {
         match event {
-            Event::TurnStarted { route, .. } => {
-                let route = route.expect("model turn route");
+            Event::RouteDispatched { route, .. } => {
                 assert_eq!(route.provider, ApiProvider::Deepseek);
                 assert_eq!(route.model, crate::config::DEFAULT_TEXT_MODEL);
                 assert!(!route.auto_model);
@@ -8255,6 +8678,58 @@ fn build_tool_context_uses_typed_shell_policy_per_mode() {
 }
 
 #[test]
+fn turn_tool_context_uses_planned_authority_and_route_not_installed_session() {
+    let (mut engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
+    engine.session.allow_shell = false;
+    engine.session.trust_mode = false;
+    engine.session.model = "installed-old-model".to_string();
+
+    let authority = crate::core::authority::TurnAuthority::from_effective_fields(
+        AppMode::Yolo,
+        true,
+        true,
+        true,
+        crate::tui::approval::ApprovalMode::Bypass,
+    );
+    let route = TurnRouteContext {
+        provider: ApiProvider::Deepseek,
+        model: "planned-next-model".to_string(),
+        capabilities: codewhale_config::route::RouteCapabilities::default(),
+        limits: Some(codewhale_config::route::RouteLimits {
+            context_tokens: Some(123_456),
+            input_tokens: None,
+            output_tokens: Some(4_096),
+        }),
+        client: None,
+        api_config: Box::new(Config::default()),
+        locale_tag: engine.config.locale_tag.clone(),
+        role_models: engine.subagent_role_models(),
+        fleet_roster: engine.config.fleet_roster.clone(),
+        auto_model: false,
+        reasoning_effort: None,
+        reasoning_effort_auto: false,
+    };
+
+    let context = engine.build_tool_context_for_turn(&authority, &route);
+    assert_eq!(
+        context.shell_policy,
+        crate::worker_profile::ShellPolicy::Full
+    );
+    assert!(context.trust_mode);
+    assert!(context.auto_approve);
+    assert_eq!(context.route_context_window, Some(123_456));
+    assert_eq!(context.route_capabilities, route.capabilities);
+    assert_eq!(
+        context
+            .session_objects
+            .as_ref()
+            .expect("session object snapshot")
+            .model,
+        "planned-next-model"
+    );
+}
+
+#[test]
 fn agent_and_yolo_modes_elevate_shell_sandbox_to_allow_network() {
     // Regression for #273: the seatbelt-default policy denies all outbound
     // network (including DNS), which broke `curl`, `yt-dlp`, package managers,
@@ -8544,6 +9019,496 @@ fn messages_with_turn_metadata_returns_stored_session_messages() {
             .all(|message| message.role != "system"),
         "model request projection must not create appended system messages"
     );
+}
+
+// === #3983: canonical Work grounding at the request tail ===
+
+fn work_grounding_engine() -> (Engine, EngineHandle, tempfile::TempDir) {
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, handle) = Engine::new(config, &Config::default());
+    engine.session.messages = vec![Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::Text {
+            text: "land the grounding seam".to_string(),
+            cache_control: None,
+        }],
+    }]
+    .into();
+    (engine, handle, tmp)
+}
+
+fn message_text_of(message: &Message) -> String {
+    message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[tokio::test]
+async fn empty_todo_appends_no_work_state_block() {
+    let (engine, _handle, _tmp) = work_grounding_engine();
+
+    assert!(engine.work_state_tail_message().await.is_none());
+    assert_eq!(
+        engine.request_messages_with_work_state().await,
+        engine.messages_with_turn_metadata(),
+        "an empty To-do must add nothing to the request"
+    );
+}
+
+#[tokio::test]
+async fn request_tail_carries_work_state_without_storing_it() {
+    let (engine, _handle, _tmp) = work_grounding_engine();
+    {
+        let mut todos = engine.config.todos.lock().await;
+        todos.add("read the seam".to_string(), TodoStatus::Completed);
+        todos.add("write the renderer".to_string(), TodoStatus::InProgress);
+    }
+    let stored = engine.session.messages.clone();
+    let system_before = engine.session.system_prompt.clone();
+
+    let request = engine.request_messages_with_work_state().await;
+
+    // Stable prefix is byte-identical: the block is appended, never woven in.
+    assert_eq!(request.len(), stored.len() + 1);
+    assert_eq!(&request[..stored.len()], &stored[..]);
+    assert_eq!(engine.session.system_prompt, system_before);
+
+    let tail = request.last().expect("tail message");
+    assert_eq!(tail.role, "user");
+    let text = message_text_of(tail);
+    let snapshot = engine.config.todos.lock().await.snapshot();
+    assert_eq!(
+        text,
+        crate::work_grounding::work_state_block(&snapshot).expect("block")
+    );
+    assert!(text.contains("[~] #2 write the renderer"));
+
+    // Transient: nothing about the block reaches session history.
+    assert_eq!(&*engine.session.messages, &*stored);
+    assert!(
+        !engine
+            .session
+            .messages
+            .iter()
+            .any(|message| message_text_of(message)
+                .contains(crate::work_grounding::WORK_STATE_OPEN_TAG)),
+        "the work_state block must never be stored in session history"
+    );
+    assert!(engine.messages_with_turn_metadata().iter().all(|message| {
+        !message_text_of(message).contains(crate::work_grounding::WORK_STATE_OPEN_TAG)
+    }));
+}
+
+/// A `work_update` executed mid tool-loop must be visible on the next model
+/// step, because the block is rebuilt per request rather than pinned once.
+#[tokio::test]
+async fn later_request_sees_an_intervening_work_update() {
+    let (engine, _handle, _tmp) = work_grounding_engine();
+    {
+        let mut todos = engine.config.todos.lock().await;
+        todos.add("first step".to_string(), TodoStatus::InProgress);
+    }
+
+    let first = engine.request_messages_with_work_state().await;
+    let first_text = message_text_of(first.last().expect("tail"));
+    assert!(first_text.contains("first step"));
+    assert!(!first_text.contains("second step"));
+
+    {
+        let mut todos = engine.config.todos.lock().await;
+        let _ = todos.update_status(1, TodoStatus::Completed);
+        todos.add("second step".to_string(), TodoStatus::InProgress);
+    }
+
+    let second_text = message_text_of(
+        engine
+            .request_messages_with_work_state()
+            .await
+            .last()
+            .expect("tail"),
+    );
+    assert!(second_text.contains("[x] #1 first step"));
+    assert!(second_text.contains("[~] #2 second step"));
+}
+
+/// The turn-start structured state is deliberately Work-free: Work moves
+/// during a turn, so it is resolved at the fork seam instead.
+#[test]
+fn turn_start_structured_state_carries_no_work_section() {
+    let state = StructuredState {
+        mode_label: "Agent".to_string(),
+        workspace: PathBuf::from("/workspace/codewhale"),
+        cwd: None,
+        working_set_summary: None,
+        subagent_snapshots: Vec::new(),
+    };
+
+    let block = state.to_system_block().expect("fork state block");
+
+    assert!(
+        !block.contains(crate::work_grounding::FORK_WORK_SECTION_HEADING),
+        "stable capture must not pin a Work section: {block}"
+    );
+    assert!(!block.contains("To-do ("));
+}
+
+/// Parent request tail, fork state block, and `/relay` all state the same
+/// ledger. Relay parity is asserted in `commands::tests`.
+#[tokio::test]
+async fn fork_state_block_reuses_the_canonical_work_body() {
+    let (engine, _handle, _tmp) = work_grounding_engine();
+    {
+        let mut todos = engine.config.todos.lock().await;
+        todos.add(
+            "Wire Fleet progress projection".to_string(),
+            TodoStatus::InProgress,
+        );
+        todos.add("Run focused gates".to_string(), TodoStatus::Pending);
+    }
+    let snapshot = engine.config.todos.lock().await.snapshot();
+    let body = crate::work_grounding::canonical_todo_body(&snapshot).expect("body");
+
+    let state = StructuredState {
+        mode_label: "Agent".to_string(),
+        workspace: PathBuf::from("/workspace/codewhale"),
+        cwd: None,
+        working_set_summary: None,
+        subagent_snapshots: Vec::new(),
+    };
+    let fork_context = crate::tools::subagent::SubAgentForkContext {
+        messages: engine.messages_with_turn_metadata(),
+        structured_state_block: state.to_system_block(),
+        work_source: Some(engine.work_state_source()),
+    };
+
+    let resolved = fork_context
+        .with_resolved_state_block()
+        .await
+        .structured_state_block
+        .expect("resolved fork state block");
+    let tail_block = crate::work_grounding::work_state_block(&snapshot).expect("tail block");
+
+    assert!(resolved.contains(&body), "fork body drifted: {resolved}");
+    assert!(tail_block.contains(&body));
+}
+
+/// `update_plan` is conversational reasoning, not a Work ledger: plan-only
+/// state must not produce Work grounding.
+#[tokio::test]
+async fn plan_only_state_produces_no_work_grounding() {
+    let (engine, _handle, _tmp) = work_grounding_engine();
+    {
+        let mut plan = engine.config.plan_state.lock().await;
+        plan.update(crate::tools::plan::UpdatePlanArgs {
+            objective: Some("Ship the grounding seam".to_string()),
+            plan: vec![crate::tools::plan::PlanItemArg {
+                step: "draft the renderer".to_string(),
+                status: crate::tools::plan::StepStatus::InProgress,
+            }],
+            ..crate::tools::plan::UpdatePlanArgs::default()
+        });
+        assert!(!plan.snapshot().is_empty());
+    }
+
+    assert!(
+        engine.work_state_tail_message().await.is_none(),
+        "legacy plan-only state must not leak into Work grounding"
+    );
+}
+
+/// Engine whose To-do list is owned by a real `WorkRuntime`, i.e. the live
+/// configuration rather than the legacy no-runtime one.
+fn graph_backed_work_grounding_engine() -> (
+    Engine,
+    EngineHandle,
+    crate::tools::todo::SharedTodoList,
+    crate::work_graph::SharedWorkRuntime,
+    tempfile::TempDir,
+) {
+    let tmp = tempdir().expect("tempdir");
+    let todos = crate::tools::todo::new_shared_todo_list();
+    let plan = crate::tools::plan::new_shared_plan_state();
+    let work = crate::work_graph::new_shared_work_runtime(todos.clone(), plan.clone());
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        todos: todos.clone(),
+        plan_state: plan,
+        runtime_services: crate::tools::spec::RuntimeToolServices {
+            work: Some(work.clone()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let (engine, handle) = Engine::new(config, &Config::default());
+    (engine, handle, todos, work, tmp)
+}
+
+/// Run the real `work_update` tool against the attached graph — not a direct
+/// mutation of the legacy list, which is exactly the state this seam must stop
+/// trusting.
+async fn run_graph_backed_work_update(
+    todos: &crate::tools::todo::SharedTodoList,
+    work: &crate::work_graph::SharedWorkRuntime,
+    items: serde_json::Value,
+) {
+    use crate::tools::spec::ToolSpec as _;
+    let mut context = crate::tools::spec::ToolContext::new(std::env::temp_dir());
+    context.runtime.work = Some(work.clone());
+    crate::tools::todo::TodoWriteTool::work_update(todos.clone())
+        .execute(json!({ "todos": items }), &context)
+        .await
+        .expect("graph-backed work_update");
+}
+
+/// #3983 runtime regression: a real graph-backed `work_update` stages the new
+/// projection in the `WorkRuntime` and publishes into `config.todos` only later,
+/// asynchronously, from the UI. The next provider request must carry the staged
+/// projection, not the pre-write legacy view.
+#[tokio::test]
+async fn next_provider_request_reflects_graph_backed_work_update() {
+    let (engine, _handle, todos, work, _tmp) = graph_backed_work_grounding_engine();
+    assert!(
+        engine.work_state_source().is_graph_backed(),
+        "this engine must read the graph, not the legacy view"
+    );
+
+    run_graph_backed_work_update(
+        &todos,
+        &work,
+        json!([
+            { "content": "read the runtime seam", "status": "completed" },
+            { "content": "ground the next request", "status": "in_progress" }
+        ]),
+    )
+    .await;
+
+    // The staleness this test exists for: the legacy view is still empty here.
+    assert!(
+        todos.lock().await.snapshot().is_empty(),
+        "precondition: work_update stages in the graph and publishes later"
+    );
+
+    let tail = message_text_of(
+        engine
+            .request_messages_with_work_state()
+            .await
+            .last()
+            .expect("tail"),
+    );
+    assert!(
+        tail.contains("[x] #1 read the runtime seam"),
+        "request tail must carry the staged projection: {tail}"
+    );
+    assert!(tail.contains("[~] #2 ground the next request"), "{tail}");
+
+    // And a second graph-backed update lands on the following request.
+    run_graph_backed_work_update(
+        &todos,
+        &work,
+        json!([
+            { "content": "read the runtime seam", "status": "completed" },
+            { "content": "ground the next request", "status": "completed" },
+            { "content": "cover the child seam", "status": "in_progress" }
+        ]),
+    )
+    .await;
+    let tail = message_text_of(
+        engine
+            .request_messages_with_work_state()
+            .await
+            .last()
+            .expect("tail"),
+    );
+    assert!(tail.contains("[x] #2 ground the next request"), "{tail}");
+    assert!(tail.contains("[~] #3 cover the child seam"), "{tail}");
+}
+
+/// #3983: compaction must not freeze a To-do projection into the stable
+/// system prefix. The next request rehydrates from the live graph tail instead.
+#[tokio::test]
+async fn compaction_keeps_todos_out_of_prefix_and_next_tail_current() {
+    let (mut engine, _handle, todos, work, _tmp) = graph_backed_work_grounding_engine();
+    run_graph_backed_work_update(
+        &todos,
+        &work,
+        json!([{ "content": "staged graph-only todo", "status": "in_progress" }]),
+    )
+    .await;
+    assert!(
+        todos.lock().await.snapshot().is_empty(),
+        "precondition: the compatibility list is still stale"
+    );
+
+    let live = engine.capture_compaction_live_state().await;
+    let reminder = crate::compaction::format_live_state_reminder(&live);
+    assert!(
+        !reminder.contains("staged graph-only todo") && !reminder.contains("### Todos"),
+        "compaction live state must not create a second To-do surface: {reminder}"
+    );
+    engine.merge_compaction_summary(Some(SystemPrompt::Text(format!(
+        "{COMPACTION_SUMMARY_MARKER}\nsummary\n{reminder}"
+    ))));
+    let prefix = engine.rendered_compaction_summary().expect("summary");
+    assert!(!prefix.contains("staged graph-only todo"), "{prefix}");
+    assert!(!prefix.contains("### Todos"), "{prefix}");
+
+    let request = engine.request_messages_with_work_state().await;
+    let tail = message_text_of(request.last().expect("current Work tail"));
+    assert!(tail.contains("[~] #1 staged graph-only todo"), "{tail}");
+}
+
+/// #3983 runtime regression: `fork_context` is captured once at turn start, so a
+/// `work_update` followed by an `agent` spawn *in the same turn* must still hand
+/// the child the current canonical body. Only the Work portion is refreshed;
+/// the inherited transcript and stable state text are unchanged.
+#[tokio::test]
+async fn same_turn_fork_carries_the_updated_work_state() {
+    let (engine, _handle, todos, work, _tmp) = graph_backed_work_grounding_engine();
+
+    // Turn start: capture the fork context, before any work exists.
+    let stable_block = StructuredState {
+        mode_label: "Agent".to_string(),
+        workspace: engine.config.workspace.clone(),
+        cwd: None,
+        working_set_summary: None,
+        subagent_snapshots: Vec::new(),
+    }
+    .to_system_block();
+    let fork_context = crate::tools::subagent::SubAgentForkContext {
+        messages: engine.messages_with_turn_metadata(),
+        structured_state_block: stable_block.clone(),
+        work_source: Some(engine.work_state_source()),
+    };
+    let captured_messages = fork_context.messages.clone();
+    assert!(
+        !fork_context
+            .with_resolved_state_block()
+            .await
+            .structured_state_block
+            .expect("stable block")
+            .contains("To-do ("),
+        "no work yet, so no Work section"
+    );
+
+    // Mid-turn: the model calls work_update, then spawns an agent.
+    run_graph_backed_work_update(
+        &todos,
+        &work,
+        json!([{ "content": "hand the child the live ledger", "status": "in_progress" }]),
+    )
+    .await;
+
+    let resolved = fork_context.with_resolved_state_block().await;
+    let block = resolved
+        .structured_state_block
+        .as_deref()
+        .expect("resolved block");
+    let snapshot = engine.work_state_source().snapshot().await;
+    let body = crate::work_grounding::canonical_todo_body(&snapshot).expect("body");
+
+    assert!(
+        block.contains(&body),
+        "same-turn fork must carry the current body: {block}"
+    );
+    assert!(
+        block.contains("[~] #1 hand the child the live ledger"),
+        "{block}"
+    );
+    // Stable history semantics are untouched.
+    assert_eq!(resolved.messages, captured_messages);
+    assert!(
+        block.starts_with(stable_block.as_deref().expect("stable").trim()),
+        "the stable capture must stay a byte-identical prefix: {block}"
+    );
+}
+
+/// #3983 context safety: preflight must account for the exact transient tail
+/// bytes it is about to send. A request that fits at the ceiling must not be
+/// approved and then grow by up to `MAX_BODY_CHARS` of Work grounding.
+#[tokio::test]
+async fn preflight_accounting_includes_the_work_tail() {
+    let (mut engine, _handle, todos, work, _tmp) = graph_backed_work_grounding_engine();
+    // A large-but-bounded ledger: the tail is the maximum the renderer emits.
+    let items: Vec<serde_json::Value> = (1..=40)
+        .map(|idx| {
+            json!({
+                "content": format!("item {idx} {}", "grounding detail ".repeat(12)),
+                "status": if idx == 3 { "in_progress" } else { "pending" },
+            })
+        })
+        .collect();
+    run_graph_backed_work_update(&todos, &work, json!(items)).await;
+
+    let tail = engine.work_state_tail_message().await.expect("tail");
+    let tail_chars: usize = message_text_of(&tail).chars().count();
+    assert!(
+        tail_chars > crate::work_grounding::MAX_BODY_CHARS / 2,
+        "expected a near-maximal tail, got {tail_chars} chars"
+    );
+
+    let base = engine.estimated_input_tokens();
+    let with_tail = engine.estimated_input_tokens_with_work_tail(Some(&tail));
+
+    assert!(
+        with_tail > base,
+        "the tail must be counted: {with_tail} vs {base}"
+    );
+    // Near-limit regression: with the budget exactly at the untailed estimate,
+    // the tailed estimate must exceed it so preflight recovers instead of
+    // shipping an over-limit request.
+    let budget_at_the_edge = base;
+    assert!(
+        with_tail > budget_at_the_edge,
+        "preflight would have approved an over-limit request: {with_tail} <= {budget_at_the_edge}"
+    );
+    // Conservative, not exact: never an under-count of the bytes sent.
+    assert!(with_tail >= base + tail_chars / 4);
+
+    // The accounting is over the same message the request carries.
+    let request = engine.request_messages_with_work_tail(Some(&tail));
+    assert_eq!(request.last().expect("tail"), &tail);
+}
+
+/// #3983: repeated requests (retries, later tool-loop steps) must never
+/// accumulate a second tail, and the stored history must stay untouched.
+#[tokio::test]
+async fn repeated_requests_never_accumulate_a_second_work_tail() {
+    let (engine, _handle, todos, work, _tmp) = graph_backed_work_grounding_engine();
+    run_graph_backed_work_update(
+        &todos,
+        &work,
+        json!([{ "content": "only once", "status": "in_progress" }]),
+    )
+    .await;
+    let stored = engine.session.messages.clone();
+
+    for _ in 0..3 {
+        let tail = engine.work_state_tail_message().await;
+        let request = engine.request_messages_with_work_tail(tail.as_ref());
+        let blocks: usize = request
+            .iter()
+            .map(|message| {
+                message_text_of(message)
+                    .matches(crate::work_grounding::WORK_STATE_OPEN_TAG)
+                    .count()
+            })
+            .sum();
+        assert_eq!(blocks, 1, "exactly one Work tail per request");
+        assert_eq!(request.len(), stored.len() + 1);
+        assert_eq!(&request[..stored.len()], &stored[..]);
+    }
+
+    assert_eq!(&*engine.session.messages, &*stored);
 }
 
 #[tokio::test]
@@ -8981,7 +9946,9 @@ fn context_budget_uses_provider_effective_window_for_openai_codex() {
         .expect("OpenAI Codex should use a conservative fallback without route metadata");
     let expected = usize::try_from(crate::config::OPENAI_CODEX_EFFECTIVE_CONTEXT_WINDOW_TOKENS)
         .expect("context window fits usize")
-        - crate::config::provider_capability(ApiProvider::OpenaiCodex, "gpt-5.5").max_output
+        - crate::config::provider_capability(ApiProvider::OpenaiCodex, "gpt-5.5")
+            .max_output
+            .expect("Codex route publishes a deliberate conservative output cap")
             as usize
         - 1_024usize;
     assert_eq!(budget, expected);
@@ -9000,7 +9967,9 @@ fn route_context_budget_uses_shared_budget_service() {
     assert_eq!(
         budget.output_cap_tokens,
         u64::from(
-            crate::config::provider_capability(ApiProvider::OpenaiCodex, "gpt-5.5").max_output
+            crate::config::provider_capability(ApiProvider::OpenaiCodex, "gpt-5.5")
+                .max_output
+                .expect("Codex route publishes a deliberate conservative output cap")
         )
     );
     assert_eq!(
@@ -10545,7 +11514,11 @@ async fn slop_gate_survives_mid_turn_compaction_without_reinjection() {
         "fixture must prove the gate would otherwise be summarized away: {unpinned_plan:?}"
     );
 
-    let pins = engine.compaction_pins_for_active_turn(Some(&active_gate_message));
+    let pins = engine.compaction_pins_for_messages(
+        &engine.session.messages,
+        &engine.session.working_set,
+        Some(&active_gate_message),
+    );
     assert!(pins.contains(&0));
 
     let compaction = CompactionConfig {

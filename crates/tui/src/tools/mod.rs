@@ -18,6 +18,7 @@ pub mod dev_server_readiness;
 pub mod diagnostics;
 pub mod diff_format;
 pub mod dynamic;
+pub mod execution_envelope;
 pub mod file;
 pub mod file_search;
 pub mod finance;

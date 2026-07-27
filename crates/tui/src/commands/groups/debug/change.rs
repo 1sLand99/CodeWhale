@@ -93,17 +93,7 @@ pub fn change(app: &mut App, version: Option<&str>) -> CommandResult {
 {section_text}{prev_hint}"
         );
         let translation_source = format!("{latest_section}{prev_hint}");
-        let lang_name = match locale {
-            Locale::ZhHans => "Simplified Chinese (中文)",
-            Locale::ZhHant => "Traditional Chinese (繁體中文)",
-            Locale::Ja => "Japanese (日本語)",
-            Locale::PtBr => "Brazilian Portuguese (Português)",
-            Locale::Es419 => "Latin American Spanish (Español latinoamericano)",
-            Locale::Vi => "Vietnamese (Tiếng Việt)",
-            Locale::Ko => "Korean (한국어)",
-            // Fallback — should never reach here since we check En above.
-            Locale::En => "English",
-        };
+        let lang_name = locale.translation_target_name();
 
         let translation_prompt = format!(
             "Translate the following changelog into {lang_name}. \

@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -67,10 +67,11 @@ pub(crate) use composer::{
     MAX_SUBMITTED_INPUT_CHARS, next_grapheme_boundary, prev_grapheme_boundary,
 };
 pub use status::{StatusToast, StatusToastLevel};
+pub(crate) use types::EffectiveReasoningEffort;
 pub use types::{
     ApiKeyError, AppAction, AppMode, ComposerDensity, InitialInput, McpUiAction, QueuedMessage,
-    ReasoningEffort, ShellJobAction, SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind,
-    ToolCollapseMode, ToolDetailRecord, TranscriptSpacing, TuiOptions, VimMode,
+    ReasoningEffort, SettingSelection, ShellJobAction, SubmitDisposition, TaskPanelEntry,
+    TaskPanelEntryKind, ToolCollapseMode, ToolDetailRecord, TranscriptSpacing, TuiOptions, VimMode,
 };
 
 // === Types ===
@@ -86,6 +87,12 @@ pub struct ActiveTurnMetadata {
     pub route: Option<TurnRoute>,
     /// Auto decision metadata captured with this exact authoritative route.
     pub auto_route_receipt: Option<crate::model_routing::AutoRouteReceipt>,
+    /// Non-secret proof of the exact endpoint + credential this turn launched
+    /// against, adopted at `TurnStarted` from the engine's route receipt — not
+    /// re-resolved from mutable config. Only populated for routes that can
+    /// produce a follow-up prompt suggestion; see
+    /// [`crate::tui::prompt_suggestion::capture_route_authority`].
+    pub suggestion_authority: Option<crate::tui::prompt_suggestion::SuggestionRouteAuthority>,
 }
 
 /// Per-message context estimates used by the render-time context meter.
@@ -104,6 +111,12 @@ pub enum OnboardingState {
     /// Defaults to auto-detection from `LC_ALL` / `LANG`; explicit picks
     /// land in the persisted settings.toml via `Settings::set("locale", …)`.
     Language,
+    /// "Make it yours" — pick a theme right after language (#3937).
+    ///
+    /// This is a one-key default step: it reuses the `/theme` picker, so the
+    /// preview is live and transactional (Enter persists, Esc restores the
+    /// theme the session started with) and there is no second theme registry.
+    Appearance,
     Provider,
     ApiKey,
     TrustDirectory,
@@ -238,6 +251,18 @@ pub struct TurnCacheRecord {
     ///   — in that case the `/cache` formatter infers the miss as
     ///   `input_tokens − cache_hit_tokens`.
     pub cache_miss_tokens: Option<u32>,
+    /// Cache-creation tokens (`cache_creation_input_tokens` on Anthropic-style
+    ///   payloads). Billed at a premium where the provider publishes one, so
+    ///   they are recorded as their own class rather than folded into misses.
+    pub cache_write_tokens: Option<u32>,
+    /// Reasoning tokens the provider reported. **Informational only**: every
+    ///   provider counts these inside `output_tokens`, so they are never added
+    ///   to billable output.
+    pub reasoning_tokens: Option<u32>,
+    /// The turn's cost with its provenance and per-class completeness, taken
+    ///   from the same call that fed the session total. `None` for records made
+    ///   without route provenance (legacy rows, synthetic test rows).
+    pub cost_audit: Option<crate::pricing::TurnCostAudit>,
     /// Approximate tokens spent re-sending prior `reasoning_content` on
     ///   V4-thinking tool-calling turns (chars/3 heuristic). Helps separate
     ///   cache misses caused by reasoning-replay churn from misses caused by
@@ -744,7 +769,9 @@ pub struct SessionState {
     pub session_cost_cny: f64,
     pub subagent_cost: f64,
     pub subagent_cost_cny: f64,
-    pub subagent_cost_event_seqs: HashSet<u64>,
+    /// Mailbox usage envelopes already accrued, keyed by engine turn and the
+    /// mailbox-local sequence. Sequences restart at one for every turn.
+    pub subagent_cost_event_seqs: HashSet<(String, u64)>,
     pub displayed_cost_high_water: f64,
     pub displayed_cost_high_water_cny: f64,
     pub last_prompt_tokens: Option<u32>,
@@ -759,7 +786,55 @@ pub struct SessionState {
     pub total_input_tokens: u32,
     pub total_cache_hit_tokens: u32,
     pub total_cache_miss_tokens: u32,
+    /// Cache-creation (cache-write) tokens across the session. Tracked as its
+    /// own class because providers that publish a write premium bill it above
+    /// the ordinary input rate, so folding it into misses understated spend.
+    pub total_cache_write_tokens: u32,
     pub total_output_tokens: u32,
+    /// Turns whose route was money-metered and produced an authoritative
+    /// price. These are exactly the turns inside `session_cost`.
+    pub cost_priced_turns: u32,
+    /// Turns whose route was money-metered — or of unknown billing basis — but
+    /// produced no authoritative price, so they are missing from `session_cost`
+    /// entirely. `/cost` reports this instead of presenting the subtotal as a
+    /// complete figure.
+    pub cost_unpriced_turns: u32,
+    /// CNY-specific coverage. Most providers publish USD only, so these cannot
+    /// share the USD counters without falsely calling a mixed-route CNY subtotal
+    /// complete.
+    pub cost_cny_priced_turns: u32,
+    pub cost_cny_unpriced_turns: u32,
+    /// Stable reason labels for the unpriced turns, in sorted order.
+    ///
+    /// `String` rather than `&'static str` because this state round-trips
+    /// through a saved session: a label read back from disk was written by some
+    /// build's vocabulary, not necessarily this one's.
+    pub cost_unpriced_reasons: BTreeSet<String>,
+    pub cost_cny_unpriced_reasons: BTreeSet<String>,
+    /// Token classes used on some route this session that carry no published
+    /// price. Their turns fail closed rather than under-report.
+    pub cost_unpriced_classes: BTreeSet<String>,
+    /// Provenance labels of the pricing rows behind the priced turns
+    /// (`models_dev_bundled`, `provider_live`, `provider_docs`, …).
+    pub cost_pricing_provenances: BTreeSet<String>,
+    /// Live-pricing downgrade receipts: a live catalog row that could not be
+    /// verified for the endpoint that served a turn, so the bundled snapshot was
+    /// used instead of claiming authoritative live provenance.
+    pub cost_live_pricing_defects: BTreeSet<String>,
+    /// Live-pricing defects for which no bundled row could produce a price.
+    pub cost_live_pricing_unusable_defects: BTreeSet<String>,
+    /// One redacted receipt per distinct audited route:
+    /// provider, configured identity, wire model, billing surface, endpoint
+    /// fingerprint, billing mode, currency. Never a URL, credential, or filesystem path.
+    pub cost_route_receipts: BTreeSet<String>,
+    /// True when the restored session has no coverage state at all.
+    ///
+    /// Sessions written before coverage was tracked deserialize their new fields
+    /// from serde defaults, which look exactly like "0 priced, 0 unpriced" — i.e.
+    /// a complete total covering nothing. That reading is false, so the load path
+    /// marks the session explicitly unknown and `/cost` says so rather than
+    /// presenting fabricated completeness, even for an all-zero record (#4318).
+    pub cost_coverage_unknown_legacy: bool,
     pub turn_cache_history: VecDeque<TurnCacheRecord>,
     pub last_cache_inspection: Option<PromptInspection>,
     pub last_warmup_key: Option<CacheWarmupKey>,
@@ -768,6 +843,8 @@ pub struct SessionState {
     /// `/cache inspect` uses this to inspect the same tool schema bytes
     /// that were eligible for the provider's prefix cache.
     pub last_tool_catalog: Option<Vec<Tool>>,
+    /// Exact tool field captured at the latest model request seam.
+    pub last_tool_request_snapshot: Option<crate::tool_inspection::ToolInspectionSnapshot>,
     /// API base URL used by the most recent model request or cache warmup.
     pub last_base_url: Option<String>,
 }
@@ -899,11 +976,25 @@ impl Default for SessionState {
             total_input_tokens: 0,
             total_cache_hit_tokens: 0,
             total_cache_miss_tokens: 0,
+            total_cache_write_tokens: 0,
             total_output_tokens: 0,
+            cost_priced_turns: 0,
+            cost_unpriced_turns: 0,
+            cost_cny_priced_turns: 0,
+            cost_cny_unpriced_turns: 0,
+            cost_unpriced_reasons: BTreeSet::new(),
+            cost_cny_unpriced_reasons: BTreeSet::new(),
+            cost_unpriced_classes: BTreeSet::new(),
+            cost_pricing_provenances: BTreeSet::new(),
+            cost_live_pricing_defects: BTreeSet::new(),
+            cost_live_pricing_unusable_defects: BTreeSet::new(),
+            cost_route_receipts: BTreeSet::new(),
+            cost_coverage_unknown_legacy: false,
             turn_cache_history: VecDeque::new(),
             last_cache_inspection: None,
             last_warmup_key: None,
             last_tool_catalog: None,
+            last_tool_request_snapshot: None,
             last_base_url: None,
         }
     }
@@ -915,6 +1006,7 @@ impl SessionState {
         self.total_input_tokens = 0;
         self.total_cache_hit_tokens = 0;
         self.total_cache_miss_tokens = 0;
+        self.total_cache_write_tokens = 0;
         self.total_output_tokens = 0;
         self.last_output_throughput = None;
     }
@@ -996,7 +1088,7 @@ pub struct App {
     /// Sender for spawned dispatch tasks to report completion back to the
     /// event loop. The closure is called with `&mut App` so the async phase
     /// never needs `&mut App` while awaiting network I/O (#4605).
-    pub dispatch_completion_tx: Option<tokio::sync::mpsc::UnboundedSender<DispatchApplyFn>>,
+    pub dispatch_completion_tx: Option<tokio::sync::mpsc::Sender<DispatchApplyFn>>,
     /// True while a spawned dispatch task is in flight (#4605). Set in the
     /// sync prepare phase and cleared when the completion closure runs, so a
     /// submit after an Esc-cancel (which clears `is_loading`) still queues
@@ -1004,7 +1096,7 @@ pub struct App {
     pub dispatch_in_flight: bool,
     /// Timestamp of the most recent Enter while the engine was busy.
     /// Retained for session layout compatibility; bare-Enter double-tap
-    /// steering was removed (use Shift+Enter / Ctrl+Enter instead).
+    /// steering was removed (use Ctrl+Enter instead).
     #[allow(dead_code)]
     pub last_enter_instant: Option<Instant>,
     /// Whether the once-per-turn provider-wait incident (#3095) has already
@@ -1121,6 +1213,10 @@ pub struct App {
     /// Last concrete thinking tier chosen while `reasoning_effort` is auto.
     pub last_effective_reasoning_effort: Option<ReasoningEffort>,
     pub workspace: PathBuf,
+    /// Off-event-loop worker for durable Lane control writes. `/lane interrupt`
+    /// submits here instead of tearing down a Runtime on the composer thread
+    /// (#4022).
+    pub lane_control: crate::lane_control::LaneControlQueue,
     /// Immutable plugin catalogue scoped to this App's effective workspace.
     pub plugin_registry: std::sync::Arc<crate::plugins::PluginRegistry>,
     pub config_path: Option<PathBuf>,
@@ -1201,6 +1297,10 @@ pub struct App {
     /// Typed appearance treatment; appearance is independent from motion
     /// settings, and every underwater treatment keeps ambient life.
     pub ocean_treatment: crate::tui::ocean::OceanTreatment,
+    /// Focus-context texture prototype mode (#4823), parsed once from the
+    /// `focus_texture` setting. `Off` by default; while off the modal render
+    /// path is byte-identical to the pre-prototype path.
+    pub focus_texture: crate::tui::focus_texture::FocusTextureMode,
     /// Distinct pre-session menu. Once dismissed, the normal idle ocean owns
     /// the empty session and this state stays hidden.
     pub launch: LaunchState,
@@ -1284,6 +1384,15 @@ pub struct App {
     pub sidebar_focus_dirty: bool,
     /// Whether the session-context panel is enabled (#504).
     pub context_panel: bool,
+    /// Whether the persistent Sessions rail is enabled (#2934). Opt-in.
+    pub sessions_rail: bool,
+    /// Cached rail rows. `None` means "re-read on the next render".
+    ///
+    /// The rail must not touch the filesystem on every frame, so rows are
+    /// projected once and reused until the cache is invalidated — by the TTL
+    /// in [`crate::tui::sessions_rail`], by a session lifecycle change
+    /// (save/rename/archive/delete), or by toggling the setting.
+    pub sessions_rail_cache: Option<crate::tui::sessions_rail::SessionsRailCache>,
     /// Minimum number of consecutive safe tool cells needed for auto-collapse.
     ///
     /// Fixed at 3 for v0.9.x (#3256 decision): not a user setting. Rollups need
@@ -1366,6 +1475,11 @@ pub struct App {
     /// provider is missing its key. Esc then exits to the offline composer
     /// instead of walking back through first-run steps.
     pub onboarding_missing_key_recovery: bool,
+    /// True when the user explicitly chose "Explore offline" during onboarding
+    /// (#3927). No provider was selected, no route was activated, and no secret
+    /// was saved: the session browses with queued input until a route is
+    /// activated later (`/provider`), which is the only thing that clears it.
+    pub onboarding_explore_offline: bool,
     /// First-run route receipts used by the mental-model screen's Back action.
     pub onboarding_had_api_key_step: bool,
     pub onboarding_had_trust_step: bool,
@@ -1378,6 +1492,13 @@ pub struct App {
     pub yolo: bool,
     /// One-shot YOLO→Act+Bypass migration notice for this session (#0.8.68 M6).
     yolo_compat_notified: bool,
+    /// The single serialized owner of `settings.toml` startup-default writes
+    /// (mode, thinking, model). Keeping one owner per `App` is what stops two
+    /// rapid selections from interleaving their load/modify/save transactions
+    /// and losing the newer one. Failures are drained by the event loop into a
+    /// warning toast, so a settings write that did not land is never silently
+    /// reverted on the next launch.
+    pub startup_defaults: crate::tui::startup_defaults::StartupDefaultsWriter,
     /// One-shot Shift+Tab/Ctrl+T rebinding notice for this session (#0.8.68 M3).
     keybinding_migration_notified: bool,
     /// Durable Agent-era permission baseline that Plan/YOLO derive from and
@@ -1511,6 +1632,10 @@ pub struct App {
     pub last_exec_wait_command: Option<String>,
     /// Current streaming assistant cell
     pub streaming_message_index: Option<usize>,
+    /// Provenance for append-only changes to the current streaming cell.
+    /// Revisions are raw `history_revisions`; the widget maps them through its
+    /// cache-key transform before handing the receipt to the transcript cache.
+    pub(crate) streaming_source_receipt: Option<crate::tui::transcript::StreamingSourceReceipt>,
     /// True after a local cancel key has been handled and before the engine's
     /// authoritative TurnComplete arrives. Stream events already queued for
     /// the cancelled turn are ignored so text does not keep appearing after
@@ -1546,8 +1671,8 @@ pub struct App {
     /// Draft queued message being edited
     pub queued_draft: Option<QueuedMessage>,
     /// Legacy pending-steer bucket retained for session compatibility. New
-    /// in-flight input uses Enter for same-turn steering and Tab for queued
-    /// follow-ups; Esc only cancels the active turn.
+    /// in-flight input uses Ctrl+Enter for same-turn steering and Enter for
+    /// queued follow-ups; Esc only cancels the active turn.
     pub pending_steers: VecDeque<QueuedMessage>,
     /// Engine-rejected steers (e.g. a tool was already running and couldn't be
     /// cancelled cleanly). Surfaced in the pending-input preview so the user
@@ -1809,6 +1934,62 @@ fn push_enabled_provider_model(
 }
 
 impl App {
+    /// One truthful chip for cumulative session cost surfaces.
+    ///
+    /// Session history wins over the *current* route: switching to an OAuth or
+    /// local route must not hide spend already accrued on a metered route, and
+    /// an unpriced turn turns a displayed amount into a subtotal rather than a
+    /// complete total.
+    #[must_use]
+    pub fn cumulative_usage_chip(&self) -> crate::route_billing::UsageChip {
+        let displayed = self.displayed_session_cost_for_currency(self.cost_currency);
+        let (priced, unpriced) = match self.cost_display_currency(self.cost_currency) {
+            CostCurrency::Usd => (
+                self.session.cost_priced_turns,
+                self.session.cost_unpriced_turns,
+            ),
+            CostCurrency::Cny => (
+                self.session.cost_cny_priced_turns,
+                self.session.cost_cny_unpriced_turns,
+            ),
+        };
+        if self.session.cost_coverage_unknown_legacy {
+            return if displayed.is_finite() && displayed > 0.0 {
+                crate::route_billing::UsageChip::PricedSubtotal {
+                    amount: self.format_cost_amount(displayed),
+                    legacy: true,
+                }
+            } else {
+                crate::route_billing::UsageChip::Unknown
+            };
+        }
+        if unpriced > 0 {
+            return if displayed.is_finite() && displayed > 0.0 {
+                crate::route_billing::UsageChip::PricedSubtotal {
+                    amount: self.format_cost_amount(displayed),
+                    legacy: false,
+                }
+            } else {
+                crate::route_billing::UsageChip::Unknown
+            };
+        }
+        if priced > 0 {
+            return if displayed.is_finite() && displayed > 0.0 {
+                crate::route_billing::UsageChip::Money(self.format_cost_amount(displayed))
+            } else {
+                crate::route_billing::UsageChip::Hidden
+            };
+        }
+        crate::route_billing::usage_chip(
+            self.billing_presentation,
+            self.api_provider,
+            &self.model,
+            displayed,
+            self.cost_display_currency(self.cost_currency),
+            None,
+        )
+    }
+
     pub fn enable_provider_model(&mut self, provider: &str, model: &str) {
         push_enabled_provider_model(&mut self.enabled_provider_models, provider, model);
     }
@@ -1950,14 +2131,22 @@ impl App {
         if self.onboarding_needs_api_key {
             return;
         }
-        let mut settings = Settings::load_persisted().unwrap_or_default();
-        if settings.feature_intro_shown {
-            return;
-        }
-        settings.feature_intro_shown = true;
-        if let Err(err) = settings.save() {
-            self.status_message = Some(format!("Failed to save feature-intro flag: {err}"));
-            // Still show the nudge; the flag write may simply retry next launch.
+        // One transaction: the "already shown?" read and the flag write must not
+        // straddle another writer's whole-file save.
+        let write = Settings::transact_opt(|settings| {
+            if settings.feature_intro_shown {
+                return Ok(None);
+            }
+            settings.feature_intro_shown = true;
+            Ok(Some(()))
+        });
+        match write {
+            Ok(None) => return,
+            Ok(Some(())) => {}
+            Err(err) => {
+                self.status_message = Some(format!("Failed to save feature-intro flag: {err}"));
+                // Still show the nudge; the flag write may simply retry next launch.
+            }
         }
         self.status_message = Some(self.tr(MessageId::FleetReadyNotice).into_owned());
         self.needs_redraw = true;
@@ -1970,10 +2159,11 @@ impl App {
     /// and rewrites on exit, mirroring the pattern used by the `/config`
     /// surface.
     pub fn set_locale_from_onboarding(&mut self, tag: &str) -> anyhow::Result<()> {
-        let mut settings = Settings::load_persisted().unwrap_or_else(|_| Settings::default());
-        settings.set("locale", tag)?;
-        settings.save()?;
-        self.ui_locale = crate::localization::resolve_locale(&settings.locale);
+        let locale = Settings::transact(|settings| {
+            settings.set("locale", tag)?;
+            Ok(settings.locale.clone())
+        })?;
+        self.ui_locale = crate::localization::resolve_locale(&locale);
         self.needs_redraw = true;
         Ok(())
     }
@@ -2035,15 +2225,136 @@ impl App {
             self.yolo = matches!(policy.approval_mode, ApprovalMode::Bypass);
         }
 
-        // Execute mode change hooks
-        let context = HookContext::new()
+        // Execute mode change hooks. Built from `base_hook_context` so this
+        // event carries the same session id, workspace, model, and token total
+        // as every other event — it used to omit `DEEPSEEK_SESSION_ID`
+        // entirely, which made mode transitions uncorrelatable with the
+        // session they belonged to.
+        let context = self
+            .base_hook_context()
             .with_mode(mode.label())
-            .with_previous_mode(previous_mode.label())
-            .with_workspace(self.workspace.clone())
-            .with_model(&self.model);
-        let _ = self.hooks.execute(HookEvent::ModeChange, &context);
+            .with_previous_mode(previous_mode.label());
+        if let Err(error) = self.submit_hooks(HookEvent::ModeChange, context) {
+            self.surface_observer_hook_submission_failure(error);
+        }
         self.needs_redraw = true;
         true
+    }
+
+    /// Apply a *user-facing* mode selection: change the live session mode and
+    /// persist it as the startup default.
+    ///
+    /// This is the difference between [`Self::set_mode`] and this method.
+    /// `set_mode` is the session-only primitive — session restore and preset
+    /// application use it because they are re-installing a mode the user
+    /// already chose elsewhere, and re-persisting there would let a restored
+    /// session silently rewrite the startup default. Every interactive
+    /// selector (Tab/Shift+Tab cycling, the Alt+A/P/Y shortcuts, the hotbar
+    /// mode actions) goes through here instead, so "I switched to Operate"
+    /// survives a restart (reported by Hunter against v0.9.1).
+    ///
+    /// The write is queued, not performed here: it is ordered behind every
+    /// earlier selection by [`StartupDefaultsWriter`], and a failure surfaces
+    /// through [`Self::drain_startup_default_failures`] rather than being
+    /// dropped.
+    ///
+    /// What is persisted is `self.mode` — the mode `set_mode` actually
+    /// installed — not the requested enum. The legacy `Yolo` entry point installs
+    /// Act, so persisting the request would write a startup mode the user never
+    /// lands in. `AppMode::as_setting` collapses that alias too, but reading the
+    /// installed value keeps the two from having to agree.
+    ///
+    /// The outcome is typed, not a bool, because three things can happen and
+    /// only one of them means "nothing was saved":
+    ///
+    /// - [`SettingSelection::Changed`] — live mode moved *and* the startup
+    ///   default was queued.
+    /// - [`SettingSelection::PersistedSame`] — live mode was already the
+    ///   requested one, but the startup default was still queued. This is a
+    ///   real, reportable action: after a session restore the live mode and the
+    ///   startup default routinely disagree.
+    /// - [`SettingSelection::Refused`] — the #2982 turn lock rejected it and
+    ///   nothing was written anywhere.
+    ///
+    /// A bool collapsed the last two, so every caller (slash `/mode`, the
+    /// Alt+A/P/Y shortcuts, the hotbar mode rows) reported a refusal and a
+    /// successful same-mode save identically — as "already in that mode", with
+    /// no receipt for the write that did happen.
+    ///
+    /// [`StartupDefaultsWriter`]: crate::tui::startup_defaults::StartupDefaultsWriter
+    pub fn select_mode(&mut self, mode: AppMode) -> SettingSelection {
+        if self.reject_setting_change_while_busy(MessageId::SettingSubjectMode) {
+            return SettingSelection::Refused;
+        }
+        let changed = self.set_mode(mode);
+        // Persist an explicit selection even when it matches the live mode.
+        // A restored session can be Operate while the startup default remains
+        // Act; choosing Operate again is a request to make the visible state
+        // durable, not a no-op.
+        self.startup_defaults
+            .spawn(crate::tui::startup_defaults::StartupDefaults::mode(
+                self.mode,
+            ));
+        if changed {
+            SettingSelection::Changed
+        } else {
+            SettingSelection::PersistedSame
+        }
+    }
+
+    /// The receipt for an accepted selection that did not move live state.
+    ///
+    /// Without it a same-live selection is indistinguishable from a refusal on
+    /// screen, even though it wrote the file the user was trying to change.
+    #[must_use]
+    pub fn mode_startup_default_receipt(&self, mode: AppMode) -> String {
+        self.tr(MessageId::ModeAlreadyActiveSavedAsDefault)
+            .replace("{mode}", mode.display_name())
+    }
+
+    /// Surface any startup-default write that failed since the last drain.
+    /// Called once per event-loop iteration.
+    pub fn drain_startup_default_failures(&mut self) {
+        for failure in self.startup_defaults.drain_failures() {
+            let message = self.startup_default_failure_message(&failure);
+            self.push_status_toast(message, StatusToastLevel::Warning, Some(8_000));
+        }
+    }
+
+    /// Translate a typed startup-default failure at the locale boundary.
+    ///
+    /// The writer runs on a blocking pool and knows nothing about the user's
+    /// locale, so it reports `StartupDefaultSubject` values and a path-free
+    /// detail. Turning those into a sentence is this side's job.
+    #[must_use]
+    pub fn startup_default_failure_message(
+        &self,
+        failure: &crate::tui::startup_defaults::StartupDefaultFailure,
+    ) -> String {
+        use crate::tui::startup_defaults::StartupDefaultSubject;
+
+        let subject = if failure.subjects.is_empty() {
+            self.tr(MessageId::StartupDefaultSubjectAll).into_owned()
+        } else {
+            failure
+                .subjects
+                .iter()
+                .map(|subject| {
+                    self.tr(match subject {
+                        StartupDefaultSubject::Mode => MessageId::StartupDefaultSubjectMode,
+                        StartupDefaultSubject::Thinking => MessageId::StartupDefaultSubjectThinking,
+                        StartupDefaultSubject::Model => MessageId::StartupDefaultSubjectModel,
+                    })
+                    .into_owned()
+                })
+                .collect::<Vec<_>>()
+                // A separator, not a word: composed in code per the crate's
+                // localization rules.
+                .join(" + ")
+        };
+        self.tr(MessageId::StartupDefaultNotSaved)
+            .replace("{setting}", &subject)
+            .replace("{error}", &failure.detail)
     }
 
     fn notify_yolo_compat_once(&mut self) {
@@ -2060,10 +2371,10 @@ impl App {
         }
         // Persist the flag best-effort; toast still fires even if the write
         // fails (retries on the next attempt).
-        if let Ok(mut settings) = crate::settings::Settings::load_persisted() {
+        let _ = crate::settings::Settings::transact(|settings| {
             settings.yolo_deprecation_shown = true;
-            let _ = settings.save();
-        }
+            Ok(())
+        });
         self.push_status_toast(
             "Legacy full-access mode is deprecated — use Act + Full Access (Shift+Tab)".to_string(),
             StatusToastLevel::Warning,
@@ -2092,11 +2403,14 @@ impl App {
     /// are refused (#2982). Returns true (and posts a concise status message) if
     /// the change should be rejected — the caller leaves the selection unchanged
     /// so the chip "twitches" back instead of moving.
-    fn reject_setting_change_while_busy(&mut self, what: &str) -> bool {
+    ///
+    /// `subject` is a `MessageId`, not a `&str`, so the refusal is translated
+    /// as one sentence in the user's locale instead of splicing an English noun
+    /// into a translated template.
+    pub(crate) fn reject_setting_change_while_busy(&mut self, subject: MessageId) -> bool {
         if self.is_loading {
-            self.status_message = Some(format!(
-                "{what} is locked while a turn is running — press Esc to interrupt first"
-            ));
+            let message = self.setting_locked_message(subject);
+            self.status_message = Some(message);
             self.needs_redraw = true;
             true
         } else {
@@ -2104,31 +2418,55 @@ impl App {
         }
     }
 
+    /// The localized "locked while a turn is running" sentence for `subject`.
+    #[must_use]
+    pub(crate) fn setting_locked_message(&self, subject: MessageId) -> String {
+        self.tr(MessageId::SettingLockedDuringTurn)
+            .replace("{setting}", self.tr(subject).as_ref())
+    }
+
     /// Cycle through productive modes: Plan → Act → Operate → Plan.
     pub fn cycle_mode(&mut self) {
-        if self.reject_setting_change_while_busy("Mode") {
-            return;
-        }
         let next = self.mode.next();
-        let _ = self.set_mode(next);
+        let outcome = self.select_mode(next);
+        self.report_mode_selection(next, outcome);
     }
 
     /// Cycle through modes in reverse.
     #[allow(dead_code)]
     pub fn cycle_mode_reverse(&mut self) {
-        if self.reject_setting_change_while_busy("Mode") {
-            return;
-        }
         let next = self.mode.previous();
-        let _ = self.set_mode(next);
+        let outcome = self.select_mode(next);
+        self.report_mode_selection(next, outcome);
+    }
+
+    /// Show the startup-default receipt for a selection that did not move live
+    /// mode. `Changed` and `Refused` already have their own messaging (the mode
+    /// chip, and `reject_setting_change_while_busy` respectively).
+    pub(crate) fn report_mode_selection(&mut self, mode: AppMode, outcome: SettingSelection) {
+        if outcome == SettingSelection::PersistedSame {
+            let receipt = self.mode_startup_default_receipt(mode);
+            self.status_message = Some(receipt);
+            self.needs_redraw = true;
+        }
     }
 
     /// Cycle reasoning-effort through the active provider's distinct tiers.
-    pub fn cycle_effort(&mut self) {
-        if self.reject_setting_change_while_busy("Thinking") {
-            return;
+    ///
+    /// Typed for the same reason as [`Self::select_mode`]: a bool could not tell
+    /// the hotbar whether the turn lock refused the action or the provider
+    /// simply exposes a single tier.
+    pub fn cycle_effort(&mut self) -> SettingSelection {
+        if self.reject_setting_change_while_busy(MessageId::SettingSubjectThinking) {
+            return SettingSelection::Refused;
         }
+        let previous = self.reasoning_effort;
         self.apply_reasoning_effort_cycle();
+        if self.reasoning_effort == previous {
+            SettingSelection::PersistedSame
+        } else {
+            SettingSelection::Changed
+        }
     }
 
     /// Advance reasoning effort to the next tier for the active provider and
@@ -2140,13 +2478,24 @@ impl App {
             .reasoning_effort
             .cycle_next_for_provider(self.api_provider);
         let effective = self.effective_reasoning_effort_for_active_route(requested);
-        let provider = self.provider_identity_for_persistence().to_string();
+        let route_truth = self.active_reasoning_route_truth();
+        let provider_kind = route_truth.map_or(self.api_provider, |(provider, _, _, _)| provider);
+        let provider = route_truth.map_or_else(
+            || self.provider_identity_for_persistence().to_string(),
+            |(_, provider_identity, _, _)| provider_identity.to_string(),
+        );
+        let endpoint_identity = route_truth
+            .map(|(_, _, endpoint, _)| crate::route_receipt::endpoint_identity(endpoint));
+        let model = route_truth.map(|(_, _, _, model)| model.to_string());
         if let Some(work) = self.runtime_services.work.clone()
             && let Err(err) = work.record_reasoning_effort_change(
                 self.current_session_id.as_deref(),
                 requested.into(),
                 effective.into(),
+                provider_kind,
                 &provider,
+                endpoint_identity.as_deref(),
+                model.as_deref(),
             )
         {
             self.status_message = Some(format!(
@@ -2158,6 +2507,18 @@ impl App {
         self.reasoning_effort = requested;
         self.reasoning_effort_explicit = true;
         self.last_effective_reasoning_effort = None;
+        // Same persistence owner as the model/effort pickers, so Ctrl+T and the
+        // hotbar `reasoning.cycle` action restore on restart exactly like a
+        // picker selection does. Only the *requested* tier is persisted — the
+        // effective tier is a per-turn route fact, not a user preference.
+        let persisted_effort = requested.as_setting_for_route(
+            self.api_provider,
+            &self.active_route_base_url,
+            &self.model,
+        );
+        self.startup_defaults.spawn(
+            crate::tui::startup_defaults::StartupDefaults::reasoning_effort(persisted_effort),
+        );
         self.update_model_compaction_budget();
         self.status_message = Some(format!(
             "Reasoning effort: {}",
@@ -2211,42 +2572,59 @@ impl App {
             return false;
         }
 
-        let mut settings = match Settings::load_persisted() {
-            Ok(settings) => settings,
-            Err(err) => {
-                self.push_status_toast(
-                    format!("Permissions were not changed: could not load TUI settings ({err})"),
-                    StatusToastLevel::Warning,
-                    Some(8_000),
-                );
-                return false;
-            }
-        };
-        let previous = settings.permission_posture.clone();
-        settings.permission_posture = Some(Self::approval_posture_setting(next).to_string());
-        if let Err(err) = settings.save() {
-            self.push_status_toast(
-                format!("Permissions were not changed: could not save TUI posture ({err})"),
-                StatusToastLevel::Warning,
-                Some(8_000),
-            );
-            return false;
+        let active_config_path = crate::config::resolve_load_config_path(self.config_path.clone());
+        // The posture commit, the root-key release, and the rollback are one
+        // critical section. Two `Settings::transact` calls would expose the
+        // uncommitted middle state — a concurrent writer (a queued startup-default
+        // drain, say) could load the new posture, and the rollback save would then
+        // also revert whatever that writer had committed in between.
+        /// Why the critical section ended, carried out so every toast is
+        /// pushed after the settings lock is released.
+        enum RootPostureOutcome {
+            Committed,
+            Failed(String),
         }
 
-        let active_config_path = crate::config::resolve_load_config_path(self.config_path.clone());
-        if let Err(err) = crate::config_persistence::persist_unset_root_key(
-            active_config_path.as_deref(),
-            "approval_policy",
-        ) {
-            settings.permission_posture = previous;
-            let rollback = settings.save().err();
-            let rollback_note = rollback
-                .map(|rollback| format!("; settings rollback also failed: {rollback}"))
-                .unwrap_or_default();
+        let posture = Self::approval_posture_setting(next).to_string();
+        let outcome = crate::settings::with_settings_transaction(|transaction| {
+            let mut settings = match transaction.load() {
+                Ok(settings) => settings,
+                Err(err) => {
+                    return Ok(RootPostureOutcome::Failed(format!(
+                        "could not load TUI settings ({err})"
+                    )));
+                }
+            };
+            let previous = settings.permission_posture.clone();
+            settings.permission_posture = Some(posture);
+            if let Err(err) = transaction.save(&settings) {
+                return Ok(RootPostureOutcome::Failed(format!(
+                    "could not save TUI posture ({err})"
+                )));
+            }
+
+            if let Err(err) = crate::config_persistence::persist_unset_root_key(
+                active_config_path.as_deref(),
+                "approval_policy",
+            ) {
+                settings.permission_posture = previous;
+                let rollback_note = transaction
+                    .save(&settings)
+                    .err()
+                    .map(|rollback| format!("; settings rollback also failed: {rollback}"))
+                    .unwrap_or_default();
+                return Ok(RootPostureOutcome::Failed(format!(
+                    "could not release root config policy ({err}){rollback_note}"
+                )));
+            }
+            Ok(RootPostureOutcome::Committed)
+        })
+        .unwrap_or_else(|err| {
+            RootPostureOutcome::Failed(format!("could not lock TUI settings ({err})"))
+        });
+        if let RootPostureOutcome::Failed(reason) = outcome {
             self.push_status_toast(
-                format!(
-                    "Permissions were not changed: could not release root config policy ({err}){rollback_note}"
-                ),
+                format!("Permissions were not changed: {reason}"),
                 StatusToastLevel::Warning,
                 Some(8_000),
             );
@@ -2260,7 +2638,7 @@ impl App {
     }
 
     fn next_approval_posture(&mut self, allow_root_policy: bool) -> Option<ApprovalMode> {
-        if self.reject_setting_change_while_busy("Permissions") {
+        if self.reject_setting_change_while_busy(MessageId::SettingSubjectPermissions) {
             return None;
         }
         if self.mode == AppMode::Plan {
@@ -2287,10 +2665,18 @@ impl App {
         }
     }
 
+    /// Persist the Shift+Tab permission posture.
+    ///
+    /// Synchronous on purpose: `cycle_approval_posture` only moves the live
+    /// posture if this succeeded, so the keystroke already required the write.
+    /// It runs inside [`Settings::transact`] so it cannot interleave with a
+    /// queued mode/thinking write — the two used to load the same bytes and the
+    /// later save reverted the other's field.
     fn persist_permission_posture(next: ApprovalMode) -> anyhow::Result<()> {
-        let mut settings = Settings::load_persisted()?;
-        settings.permission_posture = Some(Self::approval_posture_setting(next).to_string());
-        settings.save()
+        Settings::transact(|settings| {
+            settings.permission_posture = Some(Self::approval_posture_setting(next).to_string());
+            Ok(())
+        })
     }
 
     fn finish_approval_posture_change(&mut self, next: ApprovalMode) {
@@ -2411,6 +2797,23 @@ impl App {
         self.hooks.execute(event, context)
     }
 
+    /// Submit observer hooks off the terminal event loop. Foreground in hook
+    /// configuration still means ordered/awaited within the worker; it no
+    /// longer means the UI waits on the child process.
+    pub fn submit_hooks(&self, event: HookEvent, context: HookContext) -> Result<(), String> {
+        self.hooks.submit_observer(event, context)
+    }
+
+    /// Preserve a lost observer event independently of the ordinary status
+    /// line. Agent lifecycle handlers immediately replace `status_message`
+    /// with their normal progress text, so a submission failure belongs in
+    /// the toast queue instead of that transient slot.
+    pub fn surface_observer_hook_submission_failure(&mut self, error: String) {
+        tracing::warn!(target: "hooks", %error, "observer hook was not submitted");
+        self.push_status_toast(error, StatusToastLevel::Error, Some(12_000));
+        self.needs_redraw = true;
+    }
+
     /// Create a hook context with common fields pre-populated
     pub fn base_hook_context(&self) -> HookContext {
         HookContext::new()
@@ -2461,10 +2864,176 @@ impl App {
         self.accrue_session_cost_estimate(CostEstimate::usd_only(delta));
     }
 
+    /// Record what a turn's pricing attempt actually produced.
+    ///
+    /// Called with the same audit that feeds [`Self::accrue_session_cost_estimate`],
+    /// so the completeness counters can never drift from the running total.
+    /// Routes that do not meter money at all (OAuth, token plans, local models)
+    /// are not counted in either bucket — there is no dollar figure to be
+    /// incomplete about.
+    pub fn record_turn_cost_audit(&mut self, audit: &crate::pricing::TurnCostAudit) {
+        // Provenance is recorded for every audited turn, priced or not: knowing
+        // *which* row a total was built from is part of explaining the total.
+        if let Some(provenance) = audit.provenance.as_ref() {
+            self.session
+                .cost_pricing_provenances
+                .insert(provenance.label().to_string());
+        }
+        if let Some(defect) = audit.live_pricing_defect.as_ref() {
+            if audit.estimate.is_some() {
+                self.session
+                    .cost_live_pricing_defects
+                    .insert(defect.label().to_string());
+            } else {
+                self.session
+                    .cost_live_pricing_unusable_defects
+                    .insert(defect.label().to_string());
+            }
+        }
+        // An exactly non-metered route has no dollar figure to be incomplete
+        // about, so it joins neither coverage bucket. Everything else does,
+        // including a route whose billing basis could not be established.
+        if !audit.counts_toward_money_coverage() {
+            return;
+        }
+        for class in &audit.unpriced_classes {
+            self.session
+                .cost_unpriced_classes
+                .insert(class.label().to_string());
+        }
+        if !audit.usd_priced
+            && let Some(reason) = audit.unpriced_reason
+        {
+            self.session
+                .cost_unpriced_reasons
+                .insert(reason.label().to_string());
+        }
+        if !audit.cny_priced {
+            self.session.cost_cny_unpriced_reasons.insert(
+                audit
+                    .unpriced_reason
+                    .map_or("currency_not_published", |reason| reason.label())
+                    .to_string(),
+            );
+        }
+        if audit.usd_priced {
+            self.session.cost_priced_turns = self.session.cost_priced_turns.saturating_add(1);
+        } else {
+            self.session.cost_unpriced_turns = self.session.cost_unpriced_turns.saturating_add(1);
+        }
+        if audit.cny_priced {
+            self.session.cost_cny_priced_turns =
+                self.session.cost_cny_priced_turns.saturating_add(1);
+        } else {
+            self.session.cost_cny_unpriced_turns =
+                self.session.cost_cny_unpriced_turns.saturating_add(1);
+        }
+    }
+
+    /// Record the route a turn's cost was resolved against, redacted.
+    pub fn record_turn_cost_route_receipt(&mut self, receipt: String) {
+        // Bound the set so a session that rotates routes cannot grow it without
+        // limit; the first 32 distinct routes are more than enough to explain a
+        // total, and the cap is reported rather than silently truncating.
+        const MAX_ROUTE_RECEIPTS: usize = 32;
+        if self.session.cost_route_receipts.len() < MAX_ROUTE_RECEIPTS {
+            self.session.cost_route_receipts.insert(receipt);
+        } else {
+            self.session
+                .cost_route_receipts
+                .insert("…additional routes not recorded (receipt cap reached)".to_string());
+        }
+    }
+
+    /// Fold a drained background-cost pool's coverage into the session's.
+    ///
+    /// The caller has already added `pool.estimate` to the running total; this
+    /// adds the counters and provenance that qualify it, from the same drained
+    /// value, so the two can never disagree.
+    pub fn absorb_background_cost_coverage(
+        &mut self,
+        pool: &crate::cost_status::PendingBackgroundCost,
+    ) {
+        self.session.cost_priced_turns = self
+            .session
+            .cost_priced_turns
+            .saturating_add(pool.priced_turns);
+        self.session.cost_unpriced_turns = self
+            .session
+            .cost_unpriced_turns
+            .saturating_add(pool.unpriced_turns);
+        self.session.cost_cny_priced_turns = self
+            .session
+            .cost_cny_priced_turns
+            .saturating_add(pool.cny_priced_turns);
+        self.session.cost_cny_unpriced_turns = self
+            .session
+            .cost_cny_unpriced_turns
+            .saturating_add(pool.cny_unpriced_turns);
+        for reason in &pool.unpriced_reasons {
+            self.session
+                .cost_unpriced_reasons
+                .insert((*reason).to_string());
+        }
+        for reason in &pool.cny_unpriced_reasons {
+            self.session
+                .cost_cny_unpriced_reasons
+                .insert((*reason).to_string());
+        }
+        for class in &pool.unpriced_classes {
+            self.session
+                .cost_unpriced_classes
+                .insert((*class).to_string());
+        }
+        for provenance in &pool.pricing_provenances {
+            self.session
+                .cost_pricing_provenances
+                .insert((*provenance).to_string());
+        }
+        for defect in &pool.live_pricing_defects {
+            self.session
+                .cost_live_pricing_defects
+                .insert((*defect).to_string());
+        }
+        for defect in &pool.live_pricing_unusable_defects {
+            self.session
+                .cost_live_pricing_unusable_defects
+                .insert((*defect).to_string());
+        }
+        for receipt in &pool.route_receipts {
+            self.record_turn_cost_route_receipt(receipt.clone());
+        }
+    }
+
+    /// Clear every live cost-coverage counter.
+    ///
+    /// Used by `/new` and by the session-load path: loading a session must not
+    /// leave the previous session's priced/unpriced turns attached to a total
+    /// that no longer contains them (#4318).
+    pub fn reset_cost_coverage(&mut self) {
+        self.session.cost_priced_turns = 0;
+        self.session.cost_unpriced_turns = 0;
+        self.session.cost_cny_priced_turns = 0;
+        self.session.cost_cny_unpriced_turns = 0;
+        self.session.cost_unpriced_reasons.clear();
+        self.session.cost_cny_unpriced_reasons.clear();
+        self.session.cost_unpriced_classes.clear();
+        self.session.cost_pricing_provenances.clear();
+        self.session.cost_live_pricing_defects.clear();
+        self.session.cost_live_pricing_unusable_defects.clear();
+        self.session.cost_route_receipts.clear();
+        self.session.cost_coverage_unknown_legacy = false;
+    }
+
     /// Add a dual-currency parent-turn cost estimate.
     pub fn accrue_session_cost_estimate(&mut self, estimate: CostEstimate) {
-        self.session.session_cost += estimate.usd;
-        self.session.session_cost_cny += estimate.cny;
+        let total = CostEstimate {
+            usd: self.session.session_cost,
+            cny: self.session.session_cost_cny,
+        }
+        .saturating_add(estimate);
+        self.session.session_cost = total.usd;
+        self.session.session_cost_cny = total.cny;
         self.refresh_displayed_cost_high_water();
     }
 
@@ -2477,8 +3046,13 @@ impl App {
 
     /// Add a dual-currency sub-agent/background cost estimate.
     pub fn accrue_subagent_cost_estimate(&mut self, estimate: CostEstimate) {
-        self.session.subagent_cost += estimate.usd;
-        self.session.subagent_cost_cny += estimate.cny;
+        let total = CostEstimate {
+            usd: self.session.subagent_cost,
+            cny: self.session.subagent_cost_cny,
+        }
+        .saturating_add(estimate);
+        self.session.subagent_cost = total.usd;
+        self.session.subagent_cost_cny = total.cny;
         self.refresh_displayed_cost_high_water();
     }
 
@@ -2491,6 +3065,26 @@ impl App {
         metadata.cost.subagent_cost_cny = self.session.subagent_cost_cny;
         metadata.cost.displayed_cost_high_water_usd = self.session.displayed_cost_high_water;
         metadata.cost.displayed_cost_high_water_cny = self.session.displayed_cost_high_water_cny;
+        // Coverage travels with the money it qualifies. A restored total without
+        // these fields cannot say what it covers, and its serde defaults read as
+        // a *complete* total covering zero turns — so they are persisted together
+        // and `coverage_recorded` marks that this writer actually knew (#4318).
+        metadata.cost.priced_turns = self.session.cost_priced_turns;
+        metadata.cost.unpriced_turns = self.session.cost_unpriced_turns;
+        metadata.cost.cny_priced_turns = self.session.cost_cny_priced_turns;
+        metadata.cost.cny_unpriced_turns = self.session.cost_cny_unpriced_turns;
+        metadata.cost.unpriced_reasons = self.session.cost_unpriced_reasons.clone();
+        metadata.cost.cny_unpriced_reasons = self.session.cost_cny_unpriced_reasons.clone();
+        metadata.cost.unpriced_classes = self.session.cost_unpriced_classes.clone();
+        metadata.cost.pricing_provenances = self.session.cost_pricing_provenances.clone();
+        metadata.cost.live_pricing_defects = self.session.cost_live_pricing_defects.clone();
+        metadata.cost.live_pricing_unusable_defects =
+            self.session.cost_live_pricing_unusable_defects.clone();
+        metadata.cost.route_receipts = self.session.cost_route_receipts.clone();
+        // A session restored as legacy-unknown stays unknown when re-saved:
+        // re-writing it as "recorded" would launder the missing evidence into an
+        // apparently complete zero.
+        metadata.cost.coverage_recorded = !self.session.cost_coverage_unknown_legacy;
         // Persist cumulative turn duration so the footer "worked" chip
         // survives session save/restore (#2038).
         metadata.cumulative_turn_secs = self.cumulative_turn_duration.as_secs();
@@ -2499,13 +3093,19 @@ impl App {
     /// Recompute the displayed cost high-water mark. Called any time a cost
     /// counter is mutated; never decreases.
     pub fn refresh_displayed_cost_high_water(&mut self) {
-        let current = self.session.session_cost + self.session.subagent_cost;
-        if current > self.session.displayed_cost_high_water {
-            self.session.displayed_cost_high_water = current;
+        let current = CostEstimate {
+            usd: self.session.session_cost,
+            cny: self.session.session_cost_cny,
         }
-        let current_cny = self.session.session_cost_cny + self.session.subagent_cost_cny;
-        if current_cny > self.session.displayed_cost_high_water_cny {
-            self.session.displayed_cost_high_water_cny = current_cny;
+        .saturating_add(CostEstimate {
+            usd: self.session.subagent_cost,
+            cny: self.session.subagent_cost_cny,
+        });
+        if current.usd > self.session.displayed_cost_high_water {
+            self.session.displayed_cost_high_water = current.usd;
+        }
+        if current.cny > self.session.displayed_cost_high_water_cny {
+            self.session.displayed_cost_high_water_cny = current.cny;
         }
     }
 
@@ -2521,11 +3121,27 @@ impl App {
     pub fn displayed_session_cost_for_currency(&self, currency: CostCurrency) -> f64 {
         match self.cost_display_currency(currency) {
             CostCurrency::Usd => {
-                let current = self.session.session_cost + self.session.subagent_cost;
+                let current = CostEstimate {
+                    usd: self.session.session_cost,
+                    cny: 0.0,
+                }
+                .saturating_add(CostEstimate {
+                    usd: self.session.subagent_cost,
+                    cny: 0.0,
+                })
+                .usd;
                 current.max(self.session.displayed_cost_high_water)
             }
             CostCurrency::Cny => {
-                let current = self.session.session_cost_cny + self.session.subagent_cost_cny;
+                let current = CostEstimate {
+                    usd: 0.0,
+                    cny: self.session.session_cost_cny,
+                }
+                .saturating_add(CostEstimate {
+                    usd: 0.0,
+                    cny: self.session.subagent_cost_cny,
+                })
+                .cny;
                 current.max(self.session.displayed_cost_high_water_cny)
             }
         }
@@ -2558,12 +3174,8 @@ impl App {
 
     pub(crate) fn cost_display_currency(&self, currency: CostCurrency) -> CostCurrency {
         if currency == CostCurrency::Cny
-            && self.session.session_cost_cny == 0.0
-            && self.session.subagent_cost_cny == 0.0
-            && self.session.displayed_cost_high_water_cny == 0.0
-            && (self.session.session_cost > 0.0
-                || self.session.subagent_cost > 0.0
-                || self.session.displayed_cost_high_water > 0.0)
+            && self.session.cost_cny_priced_turns == 0
+            && self.session.cost_priced_turns > 0
         {
             CostCurrency::Usd
         } else {
@@ -2767,9 +3379,36 @@ impl App {
             .filter_map(|(index, cell)| cell.has_live_motion().then_some(index))
             .collect();
         for index in live_history_indices {
+            let previous_revision = self.history_revisions.get(index).copied();
+            let streaming_content_len = (self.streaming_message_index == Some(index))
+                .then(|| match self.history.get(index) {
+                    Some(HistoryCell::Assistant {
+                        content,
+                        streaming: true,
+                    }) => Some(content.len()),
+                    _ => None,
+                })
+                .flatten();
             let revision = self.fresh_history_revision();
             if let Some(slot) = self.history_revisions.get_mut(index) {
                 *slot = revision;
+            }
+            if let (Some(previous_revision), Some(content_len)) =
+                (previous_revision, streaming_content_len)
+            {
+                let from_revision = self
+                    .streaming_source_receipt
+                    .filter(|receipt| {
+                        receipt.cell_index == index && receipt.to_revision == previous_revision
+                    })
+                    .map_or(previous_revision, |receipt| receipt.from_revision);
+                self.streaming_source_receipt =
+                    Some(crate::tui::transcript::StreamingSourceReceipt {
+                        cell_index: index,
+                        from_revision,
+                        to_revision: revision,
+                        content_len,
+                    });
             }
         }
 
@@ -2820,6 +3459,12 @@ impl App {
         // pushing through `add_message`. After resync, the index is valid
         // (or out of bounds — in which case there's nothing to bump).
         self.resync_history_revisions();
+        if self
+            .streaming_source_receipt
+            .is_some_and(|receipt| receipt.cell_index == idx)
+        {
+            self.streaming_source_receipt = None;
+        }
         if let Some(rev) = self.history_revisions.get_mut(idx) {
             let new_rev = self.next_history_revision;
             self.next_history_revision = self.next_history_revision.wrapping_add(1);
@@ -3583,7 +4228,8 @@ impl App {
     }
 
     /// Park a legacy pending steer. New keyboard handling routes running-turn
-    /// drafts through Enter (same-turn steer) or Tab (next-turn follow-up).
+    /// drafts through Ctrl+Enter (same-turn steer) or Enter (next-turn
+    /// follow-up).
     #[allow(dead_code)]
     pub fn push_pending_steer(&mut self, message: QueuedMessage) {
         self.pending_steers.push_back(message);
@@ -3604,15 +4250,13 @@ impl App {
 
     /// Decide how to route a fresh composer submit.
     ///
-    /// v0.8.68: streaming output queues. Busy-but-waiting turns steer so
-    /// Enter can amend the active turn before output starts. Explicit Shift/Ctrl+Enter
-    /// Enter within 500 ms triggers Steer while streaming; Ctrl+Enter forces
-    /// Steer in all busy states.
+    /// Running turns always queue bare-Enter submissions. Ctrl+Enter is the
+    /// single explicit gesture for amending the active turn, regardless of
+    /// whether the provider has emitted its first token yet.
     ///
     /// Truth table:
     ///   offline=F, busy=F → Immediate
-    ///   offline=F, busy=T, streaming=F → Steer
-    ///   offline=F, busy=T, streaming=T → Queue (Shift/Ctrl+Enter steers)
+    ///   offline=F, busy=T, streaming=* → Queue (Ctrl+Enter steers)
     ///   offline=T, busy=* → Queue
     #[must_use]
     pub fn decide_submit_disposition(&self) -> SubmitDisposition {
@@ -3627,19 +4271,15 @@ impl App {
         if !self.is_loading {
             return SubmitDisposition::Immediate;
         }
-        if self.streaming_message_index.is_none() {
-            return SubmitDisposition::Steer;
-        }
-        // Streaming: queue the message. Steer is an explicit gesture
-        // (Shift+Enter / Ctrl+Enter), not a bare double-Enter race.
+        // Busy: queue the message. Steer is an explicit Ctrl+Enter gesture,
+        // not a timing-sensitive change in bare Enter behavior.
         SubmitDisposition::Queue
     }
 
     /// Resolve what bare Enter should do right now.
     ///
     /// When the engine is busy, Enter queues. When idle, Enter submits
-    /// immediately. Steering is only available via explicit Shift+Enter or
-    /// Ctrl+Enter — a second bare Enter after queueing must not interrupt.
+    /// immediately. Steering is only available via explicit Ctrl+Enter.
     #[must_use]
     pub fn enter_with_double_tap(&mut self) -> Option<SubmitDisposition> {
         // Name kept for call-site stability; the double-tap window is gone.
@@ -3887,6 +4527,16 @@ impl App {
         )
     }
 
+    /// Whether onboarding is pointed at StepFun's Step Plan subscription
+    /// endpoint rather than its pay-as-you-go one (#4526).
+    pub fn onboarding_uses_stepfun_plan(&self) -> bool {
+        self.onboarding_provider == crate::config::ApiProvider::Stepfun
+            && crate::pricing::billing_surface_for_route(
+                crate::config::ApiProvider::Stepfun,
+                Some(&self.active_route_base_url),
+            ) == Some(crate::pricing::STEPFUN_PLAN_BILLING_SURFACE)
+    }
+
     pub fn set_active_context_window_override(&mut self, context_window: Option<u32>) {
         self.active_context_window_override = context_window;
         if context_window.is_some() {
@@ -4099,28 +4749,111 @@ impl App {
     fn effective_reasoning_effort_for_active_route(
         &self,
         requested: ReasoningEffort,
-    ) -> ReasoningEffort {
-        if self.auto_model || requested == ReasoningEffort::Auto {
-            return self
-                .last_effective_reasoning_effort
-                .unwrap_or(ReasoningEffort::Auto);
+    ) -> EffectiveReasoningEffort {
+        let effective = if self.auto_model || requested == ReasoningEffort::Auto {
+            self.last_effective_reasoning_effort
+                .unwrap_or(ReasoningEffort::Auto)
+        } else {
+            requested.normalize_for_route(
+                self.api_provider,
+                &self.active_route_base_url,
+                &self.model,
+            )
+        };
+
+        // Prefer the immutable installed-client receipt while a turn is live.
+        // If it is unavailable, only use the configured route when no pending
+        // or active foreign route could make that identity stale.
+        let route_truth = self.active_reasoning_route_truth();
+        if let Some((provider, _, base_url, model)) = route_truth {
+            if let Some(constrained) = crate::work_graph::constrained_effective_reasoning_for_route(
+                requested.into(),
+                provider,
+                base_url,
+                model,
+            ) {
+                return constrained.into();
+            }
+        } else if self.active_turn.as_ref().is_some_and(|turn| {
+            turn.route.as_ref().is_some_and(|route| {
+                matches!(
+                    route.provider,
+                    ApiProvider::Zai
+                        | ApiProvider::Minimax
+                        | ApiProvider::MinimaxAnthropic
+                        | ApiProvider::Custom
+                ) && route.receipt.is_none()
+            })
+        }) || self
+            .pending_turn_route
+            .as_ref()
+            .is_some_and(|(provider, _, _)| {
+                matches!(
+                    provider,
+                    ApiProvider::Zai
+                        | ApiProvider::Minimax
+                        | ApiProvider::MinimaxAnthropic
+                        | ApiProvider::Custom
+                )
+            })
+        {
+            // A route without its immutable endpoint receipt cannot prove
+            // first-party semantics from provider/model identity alone.
+            return EffectiveReasoningEffort::Unavailable;
         }
-        requested.normalize_for_route(self.api_provider, &self.active_route_base_url, &self.model)
+        EffectiveReasoningEffort::Tier(effective)
+    }
+
+    fn active_reasoning_route_truth(&self) -> Option<(ApiProvider, &str, &str, &str)> {
+        if let Some(route) = self
+            .active_turn
+            .as_ref()
+            .and_then(|turn| turn.route.as_ref())
+        {
+            route.receipt.as_ref().map(|receipt| {
+                (
+                    receipt.provider(),
+                    receipt.provider_identity(),
+                    receipt.endpoint_identity(),
+                    receipt.wire_model(),
+                )
+            })
+        } else if self.pending_turn_route.is_none() {
+            Some((
+                self.api_provider,
+                self.provider_identity_for_persistence(),
+                self.active_route_base_url.as_str(),
+                self.model.as_str(),
+            ))
+        } else {
+            None
+        }
     }
 
     fn reasoning_effort_resolution_label(
         requested: ReasoningEffort,
-        effective: ReasoningEffort,
+        effective: EffectiveReasoningEffort,
         provider: ApiProvider,
     ) -> String {
-        if requested == effective {
-            return effective.display_label_for_provider(provider).to_string();
-        }
-        let effective = effective.display_label_for_provider(provider);
-        if requested == ReasoningEffort::Auto {
-            format!("auto: {effective}")
-        } else {
-            format!("{}→{effective}", requested.short_label())
+        match effective {
+            EffectiveReasoningEffort::Tier(effective) => {
+                if requested == effective {
+                    return effective.display_label_for_provider(provider).to_string();
+                }
+                let effective = effective.display_label_for_provider(provider);
+                if requested == ReasoningEffort::Auto {
+                    format!("auto: {effective}")
+                } else {
+                    format!("{}→{effective}", requested.short_label())
+                }
+            }
+            EffectiveReasoningEffort::ThinkingEnabledGranularityUnavailable => format!(
+                "{}→thinking enabled; granularity unavailable",
+                requested.short_label()
+            ),
+            EffectiveReasoningEffort::Unavailable => {
+                format!("{}→effective unavailable", requested.short_label())
+            }
         }
     }
 

@@ -15,15 +15,15 @@ Customer-visible copy also follows the [Codewhale voice and terminal
 charter](VOICE.md); commands, key names, and glyphs remain code-owned around
 localized prose.
 
-Last updated: 2026-07-12.
+Last updated: 2026-07-27 (v0.9.2 wave).
 Source-of-truth README: `README.md` (English, post-#3087).
 
 ## Status legend
 
 | Status | Meaning |
 |--------|---------|
-| **shipped** | Live on codewhale.net and/or published as a standalone README |
-| **partial** | Shipped but missing sections; actively being filled in |
+| **shipped** | Live on codewhale.net and/or published as a standalone README, or a TUI pack at exact `en.json` parity |
+| **partial** | Shipped but intentionally incomplete; missing scope falls back to English and the partial status is visible |
 | **planned** | Explicitly prioritized for the next wave |
 | **deferred** | Acknowledged as wanted but not yet scheduled; needs layout QA, bridge support, or community champion |
 
@@ -38,41 +38,72 @@ only at exact raw key parity with it, enforced by
 `crates/tui/src/localization.rs`. See `crates/tui/locales/AGENTS.md` for the
 authoring contract.
 
-| Locale | File | Keys vs `en.json` (1131) | Status | Notes |
+| Locale | File | Keys vs `en.json` (1153) | Status | Notes |
 |--------|------|--------------------------|--------|-------|
-| English | `en.json` | 1131/1131 | **shipped** | Reference pack. |
-| Japanese | `ja.json` | 1131/1131 | **shipped** | Complete. |
-| Simplified Chinese | `zh-Hans.json` | 1131/1131 | **shipped** | Complete. |
-| Traditional Chinese | `zh-Hant.json` | 478/1131 | **partial** | Setup core only; missing keys fall back to English at runtime. Deliberate scope per #4057. |
-| Brazilian Portuguese | `pt-BR.json` | 1131/1131 | **shipped** | Complete. |
-| Latin American Spanish | `es-419.json` | 1131/1131 | **shipped** | Complete. Note the website tracks `es` as deferred — the shipped TUI pack is Latin American Spanish, not `es-ES`. |
-| Vietnamese | `vi.json` | 1131/1131 | **shipped** | Complete. |
-| Korean | `ko.json` | 1131/1131 | **shipped** | Complete. |
+| English | `en.json` | 1153/1153 | **shipped** | Reference pack. |
+| Japanese | `ja.json` | 1153/1153 | **shipped** | Complete. |
+| Simplified Chinese | `zh-Hans.json` | 1153/1153 | **shipped** | Complete. |
+| Traditional Chinese | `zh-Hant.json` | 483/1153 | **partial** | Setup core only; missing keys fall back to English at runtime. Deliberate scope per #4057. |
+| Brazilian Portuguese | `pt-BR.json` | 1153/1153 | **shipped** | Complete. |
+| Latin American Spanish | `es-419.json` | 1153/1153 | **shipped** | Complete. Note the website tracks `es` — the shipped TUI pack is Latin American Spanish, not `es-ES`. |
+| Vietnamese | `vi.json` | 1153/1153 | **shipped** | Complete. |
+| Korean | `ko.json` | 1153/1153 | **shipped** | Complete. |
+| Catalan | `ca.json` | 1153/1153 | **shipped** | Complete (#4749/#4788). Awaiting native-speaker review. |
+| German | `de.json` | 1153/1153 | **shipped** | Complete (#4788). Awaiting native-speaker review. |
+| French | `fr.json` | 1153/1153 | **shipped** | Complete (#4788). Awaiting native-speaker review. |
+| Indonesian | `id.json` | 1153/1153 | **shipped** | Complete (#4789). Awaiting native-speaker review. |
+| Hindi | `hi.json` | 1153/1153 | **shipped** | Complete (#4790). Devanagari shaping spike: `docs/evidence/v092-devanagari-terminal-shaping.md` — code-level guarantees only; terminal visual QA and native review still open. |
+| Russian | `ru.json` | 1153/1153 | **shipped** | Complete (#3092). Cyrillic script fixtures guard against mixed-language copy. Awaiting native-speaker review. |
+| Ukrainian | `uk.json` | 1153/1153 | **shipped** | Complete (#4791). Cyrillic script fixtures keep it distinct from Russian (no ы/э/ъ; і/ї/є/ґ present). Awaiting native-speaker review. |
 
 ## Website locales
+
+The website derives routing, the switcher, sitemap, and hreflang from
+`ALL_LOCALES` in `web/lib/i18n/config.ts` — one canonical registry, no
+second taxonomy. **partial** locales route and are selectable with a
+visible `(partial)` badge in the switcher; their dictionaries
+(`web/lib/i18n/dictionaries/<code>/`) cover shared chrome (nav, footer,
+switcher) and the home page, held to exact key parity with the English
+reference by `npm run check:locales` and `web/lib/i18n/dictionaries.test.ts`.
+Everything outside that scope renders the English page copy — a deliberate
+fallback, never a dictionary key on screen.
 
 | Locale | Code | Status | Notes |
 |--------|------|--------|-------|
 | English | `en` | **shipped** | Source text. Every page has an EN route. |
-| Simplified Chinese | `zh` | **shipped** | Full parity with EN on all first-class pages. |
-| Japanese | `ja` | **planned** | README exists (`README.ja-JP.md`); website route not yet live. Depends on locale-switcher supporting >2 languages and dictionary scaffolding (#3091). |
-| Vietnamese | `vi` | **planned** | README exists (`README.vi.md`); same dependencies as Japanese (#3091). |
-| Korean | `ko` | **planned** | README exists (`README.ko-KR.md`); #3093 next-wave locale. |
-| Russian | `ru` | **planned** | **Next-priority locale.** No README yet; explicitly scoped for #3092. Latin+Cyrillic layout is established in the CSS font stack; needs dictionary + route scaffolding. |
-| Spanish | `es` | **deferred** | #3093 next-wave. |
-| Brazilian Portuguese | `pt-BR` | **deferred** | #3093 next-wave. |
+| Simplified Chinese | `zh` | **shipped** | Full parity with EN on all first-class pages (inline en/zh copy). |
+| Japanese | `ja` | **partial** | #3091. Chrome + home page localized via dictionary; other page bodies/metadata fall back to English. |
+| Vietnamese | `vi` | **partial** | #3091. Same scope as Japanese. |
+| Korean | `ko` | **partial** | #3093. Same scope as Japanese. |
+| Russian | `ru` | **partial** | #3092. Same scope as Japanese. |
+| Ukrainian | `uk` | **partial** | #4791 — shipped alongside Russian, same scope. |
+| Spanish | `es` | **partial** | #3093. Same scope as Japanese. |
+| Brazilian Portuguese | `pt-BR` | **partial** | #3093. Same scope as Japanese. |
+| French | `fr` | **planned** | #4788 — TUI pack shipped in v0.9.2; website next wave. |
+| German | `de` | **planned** | #4788 — TUI pack shipped in v0.9.2; website next wave. |
+| Catalan | `ca` | **planned** | #4749/#4788 — TUI pack shipped in v0.9.2; website next wave. |
+| Indonesian | `id` | **planned** | #4789 — TUI pack shipped in v0.9.2; website next wave. |
+| Hindi | `hi` | **planned** | #4790 — TUI pack shipped in v0.9.2; website next wave. |
 | Arabic | `ar` | **deferred** | RTL candidate. Deferred until layout/typography QA exists (bidirectional text, mirrored chrome, number formatting). |
+
+Remaining website scope for the partial locales (next wave): per-page body
+copy and `generateMetadata` titles/descriptions beyond the home page. The
+dictionary layer, routing, hreflang, and switcher already cover them, so
+filling in a page is a dictionary edit, not plumbing.
 
 ## README locales
 
 | Locale | File | Status | Parity check |
 |--------|------|--------|-------------|
 | English | `README.md` | **shipped** | Canonical source |
-| Simplified Chinese | `README.zh-CN.md` | **shipped** | Manual review per release |
-| Japanese | `README.ja-JP.md` | **shipped** | Manual review per release |
-| Vietnamese | `README.vi.md` | **shipped** | Manual review per release |
-| Korean | `README.ko-KR.md` | **shipped** | Manual review per release |
-| Russian | _(not yet created)_ | **planned** | #3092 |
+| Simplified Chinese | `README.zh-CN.md` | **shipped** | `scripts/check-readme-translations.py` (stamp + fences + URLs + sections) |
+| Japanese | `README.ja-JP.md` | **shipped** | Same |
+| Vietnamese | `README.vi.md` | **shipped** | Same |
+| Korean | `README.ko-KR.md` | **shipped** | Same |
+| Latin American Spanish | `README.es-419.md` | **shipped** | Same |
+| Brazilian Portuguese | `README.pt-BR.md` | **shipped** | Same |
+| Russian | `README.ru.md` | **shipped** | Same (#3092). Awaiting native-speaker review. |
+| Ukrainian | `README.uk.md` | **shipped** | Same (#4791). Awaiting native-speaker review. |
 
 ## Drift checks
 
@@ -81,9 +112,14 @@ authoring contract.
 | TUI pack key parity with `en.json` (complete packs) | `scripts/check-tui-locale-parity.py` + parity tests in `crates/tui/src/localization.rs` | **Shipped** (CI Lint job) |
 | README translations stay in sync with `README.md` | `scripts/check-readme-translations.py` | **Shipped** (CI Lint job) |
 | README locale links symmetric | `scripts/check-readme-locales.sh` | **Shipped** (CI Lint job) |
-| Website dictionaries cover all shipped locales | `npm run check:locales` (vitest) | Planned — tracked by #3091 |
-| Accept-Language routes to all shipped locales | Middleware test | Planned — tracked by #3091 |
-| Locale selector lists all shipped locales | Component test | Planned — tracked by #3091 |
+| Website dictionaries cover all routed partial locales | `npm run check:locales` + `web/lib/i18n/dictionaries.test.ts` | **Shipped** (#3091) |
+| Accept-Language routes deterministically to all routed locales | `web/lib/i18n/detect.test.ts` (middleware delegates to `lib/i18n/detect.ts`) | **Shipped** (#3091) |
+| Locale selector lists all routed locales with partial badges | `web/lib/i18n/config.test.ts` (switcher + router derive from one registry) | **Shipped** (#3091) |
+| hreflang alternates cover every routed locale | `web/lib/page-meta.test.ts` | **Shipped** (#3091) |
+| Cyrillic packs stay script-pure (no mixed-language copy, ru≠uk) | `cyrillic_packs_have_script_purity_and_no_mixed_language_fixtures` in `crates/tui/src/localization.rs` + `dictionaries.test.ts` | **Shipped** (#3092/#4791) |
+| Devanagari grapheme-safe clip/wrap at 40/60/80 columns | `truncate_to_width_never_splits_devanagari_clusters` + width fixtures in `crates/tui/src/localization.rs` | **Shipped** (#4790) |
+| Adding a UI locale never changes model-visible prompt bytes | `v092_locales_add_no_prompt_bookends_so_prompt_bytes_stay_stable` in `crates/tui/src/prompts.rs` | **Shipped** (cache-stability contract) |
+| No shipped locale renders a missing-message marker | `no_shipped_locale_renders_a_missing_message_marker` in `crates/tui/src/localization.rs` | **Shipped** |
 
 ## How to add a locale
 
@@ -126,14 +162,15 @@ carry an explicit `planned`/`partial`/`deferred` row in this matrix.
 
 ### 3. Website
 
-1. Add the locale to `ALL_LOCALES` in `web/lib/i18n/config.ts` — the
-   switcher and routes derive from it, so no per-locale switcher edit is
-   needed. Use the `partial` status for locales that ship incomplete
-   (e.g. a `zh-Hant`-style scoped pack).
-2. Scaffold translation dictionaries under
-   `web/lib/i18n/dictionaries/<code>/` (#3091 layer).
-3. Verify `web/middleware.ts` routes the tag (base tags route with no
-   middleware change).
+1. Add/flip the locale entry in `ALL_LOCALES` in `web/lib/i18n/config.ts` —
+   the switcher, routes, middleware, sitemap, and hreflang derive from it,
+   so no per-locale switcher edit is needed. Use the `partial` status for
+   locales that ship the chrome+home dictionary scope before full page
+   parity.
+2. Create `web/lib/i18n/dictionaries/<code>/chrome.ts` and `home.ts`
+   following the English reference shape (`dictionaries/en/`).
+3. Middleware detection needs no change for base tags; region variants and
+   base→variant mappings live in `web/lib/i18n/detect.ts`.
 4. Run `cd web && npm run check:locales && npm test && npm run build`.
 
 ### 4. Matrix
@@ -166,6 +203,15 @@ in the same wave.
   bundles the locales that share acceptance criteria (Latin-script
   fr/de/ca/id, Cyrillic uk, Devanagari hi). gl/eu share only the
   review-capacity constraint, which neither clears.
+
+**Cost/demand evidence behind the decision:** a complete TUI pack is
+1,153 keys (~8–12k words) plus an ongoing obligation to retranslate every
+changed English string in lockstep — the parity gate makes silent drift a
+CI failure, so an unmaintained pack is worse than none. No community
+member has requested gl or eu (no issues, no PRs, no translations offered),
+while the gl/eu base tags already route cleanly through
+`web/middleware.ts` the day a champion appears. We do not ship packs we
+cannot get natively reviewed, and we do not advertise unshipped packs.
 
 Revisit when a native-speaker champion appears for either language, or if
 Catalan uptake after v0.9.2 suggests demand. Both base tags (`gl`, `eu`)

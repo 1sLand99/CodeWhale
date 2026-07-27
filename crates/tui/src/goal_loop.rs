@@ -122,9 +122,7 @@ pub fn decide_continuation(
     }
 
     // 2. Optional budget.
-    if let Some(tokens) = budget.token_budget
-        && progress.tokens_used >= tokens
-    {
+    if token_budget_exhausted(progress, budget) {
         return ContinuationDecision::Stop(StopReason::TokenBudget);
     }
     if let Some(secs) = budget.time_budget_seconds
@@ -142,6 +140,19 @@ pub fn decide_continuation(
 
     // 4. Keep going.
     ContinuationDecision::Continue
+}
+
+/// Whether the durable token usage has reached the active goal's budget.
+///
+/// Kept as the shared terminal predicate so offline request inspection cannot
+/// drift from the continuation gate that decides whether production may send
+/// another goal turn.
+#[must_use]
+pub const fn token_budget_exhausted(progress: GoalProgress, budget: GoalBudget) -> bool {
+    match budget.token_budget {
+        Some(tokens) => progress.tokens_used >= tokens,
+        None => false,
+    }
 }
 
 /// Whether a stop reason represents success (Completed) vs. an early/forced exit.

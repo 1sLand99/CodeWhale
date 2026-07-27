@@ -514,6 +514,7 @@ impl ToolSpec for ReviewTool {
             top_p: Some(0.9),
         };
 
+        let route = client.effective_route_envelope(&request.model, chrono::Utc::now());
         let response = client
             .create_message(request)
             .await
@@ -521,25 +522,26 @@ impl ToolSpec for ReviewTool {
 
         let response_text = extract_text(&response.content);
         let output = ReviewOutput::from_str(&response_text);
-        let metadata = review_usage_metadata(&response.model, &response.usage);
+        let metadata = review_usage_metadata(&route, &response.usage);
         let result =
             ToolResult::json(&output).map_err(|e| ToolError::execution_failed(e.to_string()))?;
         Ok(result.with_metadata(metadata))
     }
 }
 
-fn review_usage_metadata(model: &str, usage: &Usage) -> Value {
-    json!({
+fn review_usage_metadata(
+    route: &crate::cost_status::EffectiveRouteEnvelope,
+    usage: &Usage,
+) -> Value {
+    let mut metadata = json!({
         "tool": "review",
         "input_tokens": usage.input_tokens,
         "output_tokens": usage.output_tokens,
-        "child_model": model,
-        "child_input_tokens": usage.input_tokens,
-        "child_output_tokens": usage.output_tokens,
-        "child_prompt_cache_hit_tokens": usage.prompt_cache_hit_tokens,
-        "child_prompt_cache_miss_tokens": usage.prompt_cache_miss_tokens,
-        "child_reasoning_tokens": usage.reasoning_tokens,
-    })
+    });
+    // Every billable class, from the one shared producer, so a child turn can be
+    // priced with the same completeness as a parent turn (#4318).
+    crate::cost_status::attach_child_usage_metadata(&mut metadata, route, usage);
+    metadata
 }
 
 enum ReviewSource {
@@ -1027,8 +1029,16 @@ mod tests {
 
     #[test]
     fn review_usage_metadata_reports_child_tokens_for_cost_accrual() {
-        let metadata = review_usage_metadata(
+        let route = crate::cost_status::EffectiveRouteEnvelope::capture(
+            None,
+            crate::config::ApiProvider::Deepseek,
+            "deepseek",
             "deepseek-v4-flash",
+            Some("https://api.deepseek.com/v1"),
+            chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).expect("epoch"),
+        );
+        let metadata = review_usage_metadata(
+            &route,
             &Usage {
                 input_tokens: 123,
                 output_tokens: 45,

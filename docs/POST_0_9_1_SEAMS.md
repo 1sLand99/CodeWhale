@@ -57,6 +57,28 @@ StreamFn (shared decode loop) is still deferred.
 2. Keep the TUI a projection of state + input routing.
 3. Prefer new modules over adding to the three monoliths.
 
+## Reserved vocabulary: "Operation" (not shipped, not a rename)
+
+**Workflow keeps its name.** `/workflow`, `codewhale workflow`, the `workflow`
+tool, the `[workflow]` config table, `*.workflow.js` sources, and the public
+vocabulary below are unchanged in v0.9.2, and no `/operation` or
+`codewhale operation` alias ships.
+
+The public vocabulary stays:
+
+- **Fleet** = who does the work.
+- **Workflow** = what order the work follows.
+- **Lane** = one running Workflow.
+- **Runtime** = where and how a Lane executes.
+- **Operate** = the current mode (unchanged).
+
+"Operation" is **reserved for a future, distinct concept** — a continuous
+objective or organization-level control loop that coordinates *multiple Fleets
+and multiple Workflows over time*. It is a layer above a Workflow, not another
+name for one. Nothing implements this today; do not advertise it, add config
+keys for it, or introduce it as a synonym for Workflow. If it is ever built, it
+must earn the noun by being that coordinating layer.
+
 ## Optional deferred
 
 - Full live global model subscriptions (refresh on every open + `r` / Ctrl+R is

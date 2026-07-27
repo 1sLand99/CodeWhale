@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-07-27
+
+This is the Codewhale v0.9.2 source candidate. It is not a published release
+until the matching tag, packages, checksums, and release assets exist.
+
+### Changed — behavior
+
+- **Legacy `model = auto` no longer elects a network classifier on its own.**
+  Holding a DeepSeek API key used to silently select `deepseek-v4-flash` as the
+  classifier for every Auto turn — a per-turn cost on a route nobody asked for,
+  and one provider privileged over the rest. Auto now stays local and free
+  unless an explicit `[auto.router]` block names a provider and model.
+
+  **If you relied on the implicit default**, restore it explicitly:
+
+  ```toml
+  [auto.router]
+  provider = "deepseek"
+  model = "deepseek-v4-flash"
+  ```
+
+  `[auto.router]` remains legacy `model = auto` configuration. It is unrelated
+  to a Fleet's Adaptive Reasoning Router, which is a saved service referenced by
+  name from a Fleet file and decides only how hard an already-frozen route
+  thinks.
+
 Landed since v0.9.1, not yet released. A cluster of defects found by a
 read-through audit of the policy engine, the MCP proxy, the session index,
 and the app-server bridge — several of them cases where the wrong outcome
@@ -16,6 +42,93 @@ interface; every other entry below makes an existing one behave the way it
 already claimed to.
 
 ### Added
+
+- `/preview-request` (aliases `/dryrun` and `/preview_request`) is a human-only,
+  provider-free inspection of the next primary turn. Production dispatch and
+  preview share one prepared-request seam across Chat Completions, Anthropic
+  Messages, and OpenAI Responses, so the manifest reads the final wire model,
+  reasoning controls, tool choice, tool schemas, and body hash from the same
+  value production sends. Route, tool, or body facts that require Auto's
+  provider classifier, an MCP connection, mutable hooks, compaction, or queued
+  runtime injections remain typed unavailable. The manifest reports exact
+  primary role/lane identity, upstream route-source provenance, requested and
+  effective reasoning, canonical JSON sizes, conservative offline estimates,
+  and provider-reported usage as unavailable because no request ran. It never
+  adds a model-visible tool, sends a provider call, or prints prompt, message,
+  credential, endpoint-path, or workspace-path content. The explicit
+  `/preview-request base-prompt` mode prints only the exact effective base
+  prompt; effective system text remains protected behind its final hash. The
+  exact body includes the same authoritative transient Work/To-do tail used by
+  production, including graph-backed state newer than the legacy projection.
+  Preflight preserves production's separately framed base-plus-Work estimate,
+  and fails closed when the authoritative projection is unavailable. An
+  exhausted active goal token budget also produces a typed unavailable result
+  before any outbound request is built.
+  (#1004, #3928; dry-run concept harvested from PR #1099 by @GTC2080 / TaoMu.)
+
+- Slash commands, hotbar actions, and CLI entrypoints for the same Lane/Fleet
+  lifecycle operation now share one typed control-plane contract
+  (`codewhale-lane::control`): a stable `<domain>.<verb>` id, read-vs-write
+  authority, persistence scope, exact-identity target selection, retryability,
+  lifecycle outcome, and one bounded, sanitized receipt. `docs/COMMAND_CONTROL_PLANE.md`
+  documents it (#1888).
+
+- `/lane [list|status|interrupt|restart|resume]` — durable Lane control from the
+  composer, backed by the same executor `codewhale lane …` calls. `codewhale
+  lane interrupt|restart|resume` are the matching CLI verbs; `lane stop` stays as
+  a compatibility spelling of `lane interrupt`. Appending `@<lifecycle-seq>` to a
+  lane id fences a write to the exact durable generation you observed, so a
+  concurrent transition is rejected as a conflict rather than acted on (#1888).
+
+- `codewhale fleet list` and `/fleet [list|status|interrupt|resume]` — durable
+  Fleet run inspection and control from either surface, through shared DTOs that
+  carry the exact provider, provider-table id, model, effective reasoning tier,
+  and route source when the ledger records them, and a typed `not_recorded` /
+  `not_applicable` / `redacted` reason when it does not. Requested-vs-effective
+  reasoning is never back-filled: the ledger persists the effective tier only, so
+  the requested tier reports `not_recorded` (#4022).
+
+- The bundled skill pack now ships a `help` skill (catalog generation 7). It is
+  `invocation: explicit-only`, so it never enters the model's ambient catalogue
+  and costs no prompt budget. Its body is a routing card that points at the
+  surfaces this build actually exposes — `/help` and `/help <command>`,
+  `/skills` and `/skills inspect`, `/config`, `doctor`, and the `docs/` tree
+  when the workspace is a Codewhale checkout — and explicitly forbids pasting a
+  command list or settings table into context (#4698).
+
+- `crates/tui/assets/skills-catalog-matrix.json`: an authored, provider-free
+  expectation matrix covering every bundled skill (tier, invocation, aliases,
+  ambient-catalogue eligibility, shadowed aliases). Contract tests in
+  `crates/tui/src/skills/catalog_matrix.rs` assert a bijection between the
+  fixture and the shipped bundle, so the starter pack cannot change without an
+  explicit fixture update. The matrix covers positive eligibility and explicit
+  load, non-activation negatives, alias resolution, explicit-only exclusion,
+  alias-vs-canonical collision precedence, and prompt-budget invariants (no
+  duplicate catalogue entries, no aliases as extra entries, and the shipped
+  pack fitting inside the 12 000-char budget with no omitted-skills line). These
+  are deterministic registry/catalog/resolver assertions and make no claim about
+  semantic model routing (#4698).
+
+- Locale-routing coverage for the complete bundled catalog across every shipped
+  locale (`en`, `ja`, `zh-Hans`, `zh-Hant`, `pt-BR`, `es-419`, `vi`, `ko`). No
+  bundled skill ships a localized routing description and none was invented;
+  the tested contract is deterministic fallback to the canonical English
+  description, with the rendered catalogue byte-identical across locales.
+  Exact-tag match, primary-subtag fallback, and English fallback are covered
+  against a synthetic authored fixture, and the parity test fails if a bundled
+  skill ever gains localized metadata without source-backed coverage (#4698).
+
+- `docs/LIVE_SMOKE.md`: copy-pasteable, opt-in live-smoke instructions for Kimi
+  K3 and a second provider/model (DeepSeek). The runs are manual only — nothing
+  in CI, tests, or skills invokes them. They use `env -i` plus a throwaway
+  `CODEWHALE_HOME`; `HOME` is left unset rather than repurposed, and ambient
+  provider variables are not forwarded. The operator names the credential
+  variable explicitly, and the isolated child reads its value with echo off,
+  restores the prior terminal state on exit or interruption, and never persists
+  the value or puts it in a command argument. The page states the expected
+  route/model/reasoning/tool receipt fields while treating provider errors as
+  unclassified until provider configuration, authentication/entitlement, and
+  harness behavior have been corroborated independently (#4698).
 
 - Approval cards can now remember eligible safe shell and file-write approvals
   as exact `allow` rules scoped to the current repository. Remembered shell
@@ -33,6 +146,60 @@ already claimed to.
   (#4520, PR #4610 by @XhesicaFrost; harvested with co-authorship).
 
 ### Fixed
+
+- `/fleet status` read the current TUI session's sub-agents while `codewhale
+  fleet status` read the durable `.codewhale/fleet.jsonl` ledger — two different
+  things wearing one name, so a run started by `codewhale fleet run` never
+  appeared in the TUI. `/fleet status` now reads the durable ledger through the
+  same code path as the CLI; the session view keeps its own name as
+  `/fleet workers` (`/subagents` and `n` still work). When a workspace has no
+  ledger, both surfaces report a typed `no_fleet_ledger` reason instead of an
+  empty-looking "all clear", and neither creates the ledger as a side effect of
+  reading it (#4022).
+
+- `codewhale fleet status` (and `list`/`interrupt`/`resume`) created
+  `.codewhale/fleet.jsonl` as a side effect of opening the manager, then
+  reported `no_fleet_ledger` for the file it had just made — so the second
+  invocation showed an empty Fleet where none existed. The CLI now refuses
+  those verbs before the manager is constructed, matching `/fleet` (#4022).
+
+- `fleet resume <run-id>` accepted any string. An id absent from the ledger
+  reconciled nothing but still wrote a run-status record keyed by whatever was
+  typed, and reported `no_change`. Unknown ids are now refused as `not_found`
+  before any durable write (#4022).
+
+- `lane interrupt` reported `transitioned` even when it changed nothing —
+  another process's stop looked like our own. The Runtime backend now reports
+  whether *this* call performed the transition, and a no-op is `no_change`.
+  The `@<lifecycle-seq>` fence is also evaluated inside the registry's per-Lane
+  lock rather than before it, so a stale fence refuses without running Runtime
+  teardown instead of racing between the check and the stop (#1888).
+
+- `/lane` no longer runs Runtime teardown on the TUI composer thread. Reads on
+  the slash surface skip reconciliation (which probes tmux and takes a lock)
+  and say so on the receipt instead of implying freshness; `lane interrupt` is
+  CLI-only until that work runs off-thread, and reports
+  `surface_not_supported` naming `codewhale lane interrupt` (#4022).
+
+- The hotbar is no longer modelled as a third control surface. A slot binds a
+  slash command and fires it with no argument, so it runs *as* the slash
+  surface; the contract now declares which verb a bare press actually reaches
+  (`hotbar_bare_dispatch`, true only for `lane.list`) instead of advertising
+  target-taking verbs as hotbar-reachable (#1888).
+
+- `codewhale lane list --json` and `lane status --json` keep emitting the
+  `LaneRecord` shape they always have — the receipt did not replace it. The
+  human `lane status` output also regained `branch`, `session`, `socket`,
+  `attach`, and `log`, which the first cut of the shared DTO had dropped
+  (#1888).
+
+- No surface advertises a backend it does not have. `lane restart` and
+  `lane resume` have no implementation — a Lane is re-created by
+  `codewhale lane start`, and a stopped Lane's Runtime session is gone — so all
+  three surfaces refuse them with `backend_not_implemented` and say why.
+  `fleet restart` drives the manager loop to completion, which only the CLI
+  runs, so `/fleet restart` reports `surface_not_supported` and names the CLI
+  command rather than quietly doing a smaller thing (#1888).
 
 - Deny rules in `permissions.toml` no longer miss a command because of an
   intervening flag: deny matching is token-based with flag-skipping and
@@ -100,6 +267,52 @@ already claimed to.
 
 - Prefix-cache tool catalog entries store only the SHA-256 digest, not the
   joined catalog string. Unused plan-transition validation helpers are removed.
+
+- Settings sections now hold only what they claim (#4751). Fleet keeps
+  Fleet/member concerns; `/goal` moved to a **Session** section and Workflow
+  orchestration to its own **Workflow** section. The inert DeepSeek-only
+  `default_model` fallback moved out of Model settings into an explicit
+  **Legacy** section — exact-Fleet users switch Fleets, not fallback models;
+  the config field is retained because the runtime still reads it. This is
+  presentation only: the persisted keys (`goal_command`, `workflow`,
+  `default_model`), their values, scopes, and runtime behavior are unchanged.
+
+- Auto model routing is scoped to the active provider. The classifier
+  inventory no longer discloses other providers' runnable routes (or the fact
+  that their credentials exist), a classifier reply naming another provider is
+  refused, the local heuristic no longer falls back to a different provider
+  when the active one is unusable, and the implicit DeepSeek-flash classifier
+  is skipped for non-DeepSeek sessions. Auto receipts and the model picker
+  hint report the active-provider-only scope instead of "runnable providers".
+  Cross-provider Auto is available only through the persisted `[auto]
+  cross_provider = true` opt-in (an explicit `[auto.router]` route remains its
+  own opt-in for the classifier call). Same-provider strong/fast selection and
+  `[auto] cost_saving` are unchanged.
+
+### Contributors
+
+Thank you to the contributors whose code, reports, and reviews shaped v0.9.2:
+
+- [@greyfreedom](https://github.com/greyfreedom) — exact repository-scoped
+  allow grants and cross-platform path semantics (PR #4761).
+- [@nightt5879](https://github.com/nightt5879) — off-event-loop clipboard
+  writes and complete locale exposure in settings.
+- [@XhesicaFrost](https://github.com/XhesicaFrost) — the configurable
+  session-token header (PR #4610) and context-menu hover alignment (PR #4897).
+- [@cyq1017](https://github.com/cyq1017) — the hooks configuration/executor
+  split from PR #4087.
+- [@snailoniu](https://github.com/snailoniu) — OpenCode Zen's model-aware
+  routes, authentication, documentation, and test isolation.
+- [@SparkofSpike](https://github.com/SparkofSpike) — the zh-Hans translation
+  quality review harvested from PR #4908.
+- [@GTC2080](https://github.com/GTC2080) — the request-preview concept from
+  PR #1099.
+- [@h3c-hexin](https://github.com/h3c-hexin) — non-UTF-8 `fetch_url`
+  decoding direction from PR #4909.
+- [@fleitz](https://github.com/fleitz) — required source-candidate credit for
+  the canonical `Bash` no-`cwd` workspace fix and regression in PR #4673
+  (issue #4674).
+
 ## [0.9.1] - 2026-07-24
 
 ### Dogfood follow-ups (2026-07-24)
@@ -204,6 +417,10 @@ surface.
   of this narrow route until Codewhale supports per-model wire selection
   (#1481 by @seanthefuturegorilla; implementation harvested from PR #773 by
   @zhangweiii and PR #1050 by @sternelee).
+- Add OpenCode Zen as a separate model-aware API-key provider. Its curated
+  model catalog selects Responses, Anthropic Messages, or Chat Completions per
+  model; unsupported Gemini and unknown models fail closed, and Zen missing
+  credentials never fall through to ChatGPT/Codex OAuth guidance.
 - Add TelecomJS TokenHub as a first-class Chat Completions provider with
   `[providers.telecomjs]`, `TELECOMJS_API_KEY`, and a key-scoped live
   `/v1/models` refresh. Models.dev and provider-specific catalogs remain in
@@ -4142,7 +4359,8 @@ overflow report and `/theme` picker edge-wrapping patch in #1814.
 
 Older releases (v0.8.39 and earlier) are archived in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).
 
-[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.1...HEAD
+[0.9.2]: https://github.com/Hmbown/CodeWhale/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/Hmbown/CodeWhale/compare/v0.9.0...v0.9.1
 [0.8.68]: https://github.com/Hmbown/CodeWhale/compare/v0.8.67...v0.8.68
 [0.8.67]: https://github.com/Hmbown/CodeWhale/compare/v0.8.66...v0.8.67

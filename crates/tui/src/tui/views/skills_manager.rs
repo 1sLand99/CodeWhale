@@ -25,6 +25,7 @@ use crate::skills::audit::{
 use crate::skills::mutation::{ConflictPolicy, SkillMutationRequest, SkillTargetScope};
 use crate::skills::roots::SkillRootKind;
 use crate::tui::app::App;
+use crate::tui::menu_style;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ManagerMode {
@@ -326,7 +327,7 @@ impl SkillsManagerView {
             ];
         }
         let mut hints = vec![
-            ActionHint::new("↑/↓", "select"),
+            ActionHint::new("↑/↓", "move"),
             ActionHint::new("Enter", "action"),
             ActionHint::new("c", "scan mode"),
             ActionHint::new("s", "import scope"),
@@ -381,14 +382,11 @@ impl SkillsManagerView {
             }
             let selected = idx == self.selected;
             let style = if selected {
-                Style::default()
-                    .bg(palette::SURFACE_ELEVATED)
-                    .fg(palette::WHALE_INFO)
-                    .add_modifier(Modifier::BOLD)
+                menu_style::selected_row_style()
             } else {
                 Style::default().fg(palette::TEXT_PRIMARY)
             };
-            let mark = if selected { "›" } else { " " };
+            let mark = crate::tui::glyphs::selection_marker(selected);
             let line = format!(
                 "{mark} {:<6} {}  {}  {}",
                 skill_tier_label(skill),
@@ -403,7 +401,7 @@ impl SkillsManagerView {
     fn render_detail(&self, area: Rect, buf: &mut Buffer) {
         let block = Block::default()
             .title(Line::from(Span::styled(
-                " Detail ",
+                " Details ",
                 Style::default()
                     .fg(palette::WHALE_ACTION)
                     .add_modifier(Modifier::BOLD),
@@ -720,9 +718,7 @@ impl ModalView for SkillsManagerView {
             "  scan={}   import-target={}   {}",
             self.mode.label(),
             scope_label(self.import_scope),
-            self.status
-                .as_deref()
-                .unwrap_or("j/k move · actions in footer")
+            self.status.as_deref().unwrap_or("idle")
         );
         buf.set_stringn(
             header.x,
@@ -900,6 +896,37 @@ mod tests {
             }
         }
         assert!(found, "expected Skills title on 80x24 surface");
+    }
+
+    #[test]
+    fn selected_skill_row_uses_charter_pointer_and_selection_bg() {
+        let tmp = TempDir::new().unwrap();
+        let _home = IsolatedHome::new(&tmp);
+        let mut app = app_in(&tmp);
+        app.skills_dir = tmp.path().join("home").join(".codewhale").join("skills");
+        crate::skills::install_system_skills(&app.skills_dir).unwrap();
+
+        let view = SkillsManagerView::new(&app);
+        assert!(!view.skills.is_empty());
+        let area = Rect::new(0, 0, 100, 24);
+        let mut buf = Buffer::empty(area);
+        view.render(area, &mut buf);
+
+        let selected_row_painted = area
+            .positions()
+            .any(|position| buf[position].bg == palette::SELECTION_BG);
+        assert!(
+            selected_row_painted,
+            "selected skill row must use the shared selection highlight"
+        );
+        let text = area
+            .positions()
+            .map(|position| buf[position].symbol())
+            .collect::<String>();
+        assert!(
+            text.contains(crate::tui::glyphs::SELECTION),
+            "selected skill row must carry the charter pointer: {text}"
+        );
     }
 
     #[test]

@@ -24,7 +24,9 @@ use crate::tools::subagent::{
 };
 use crate::tui::app::App;
 use crate::tui::approval::{ElevationOption, ReviewDecision};
+use crate::tui::focus_texture::FocusTextureMode;
 use crate::tui::history::{HistoryCell, SubAgentCell, summarize_tool_output};
+use crate::tui::menu_style;
 use crate::tui::widgets::agent_card::AgentLifecycle;
 
 pub mod fleet_roster;
@@ -685,6 +687,15 @@ pub enum ViewEvent {
         session_id: String,
     },
     SessionRenamed {
+        metadata: Box<crate::session_manager::SessionMetadata>,
+    },
+    /// A session's archive flag was flipped (#2934 / #4397).
+    ///
+    /// Distinct from `SessionRenamed` so the receipt can say what actually
+    /// happened; reusing rename would report "Renamed session …" for an
+    /// archive, which is exactly the kind of small lie that erodes trust in
+    /// every other receipt.
+    SessionArchived {
         metadata: crate::session_manager::SessionMetadata,
     },
     SessionDeleted {
@@ -764,6 +775,9 @@ pub enum ViewEvent {
         provider: crate::config::ApiProvider,
         provider_id: Option<String>,
         api_key: String,
+        /// Endpoint chosen in the wizard's billing-route stage, applied to the
+        /// verification config only — nothing is written until confirm (#4526).
+        base_url: Option<String>,
     },
     /// Emitted by the `/provider` guided setup confirm stage after the user
     /// accepted provider + model. The handler persists the key (and model)
@@ -774,6 +788,9 @@ pub enum ViewEvent {
         api_key: String,
         model: String,
         context_window: Option<u32>,
+        /// Endpoint the key was verified against, persisted to the provider's
+        /// own `base_url` before the key is saved (#4526).
+        base_url: Option<String>,
     },
     /// Emitted by the `/provider` picker after the custom provider form is
     /// completed. The handler persists a named OpenAI-compatible provider
@@ -1001,11 +1018,29 @@ pub trait ModalView: std::any::Any {
 #[derive(Default)]
 pub struct ViewStack {
     views: Vec<Box<dyn ModalView>>,
+    /// Focus-context texture prototype mode (#4823). `Off` by default, which
+    /// keeps the render output byte-identical to the pre-prototype path.
+    focus_texture: FocusTextureMode,
+    /// Theme snapshot for the texture pass, set alongside the mode each
+    /// frame. `None` (e.g. tests that never opt in) disables the texture.
+    focus_texture_theme: Option<crate::palette::UiTheme>,
 }
 
 impl ViewStack {
     pub fn new() -> Self {
-        Self { views: Vec::new() }
+        Self {
+            views: Vec::new(),
+            focus_texture: FocusTextureMode::Off,
+            focus_texture_theme: None,
+        }
+    }
+
+    /// Set the focus-context texture mode and theme for subsequent renders
+    /// (#4823 prototype). Called once per frame from the UI render path with
+    /// the parsed setting; a plain enum/theme copy, no allocation.
+    pub fn set_focus_texture(&mut self, mode: FocusTextureMode, theme: crate::palette::UiTheme) {
+        self.focus_texture = mode;
+        self.focus_texture_theme = Some(theme);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1059,6 +1094,26 @@ impl ViewStack {
     }
 
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
+        // Focus-context texture prototype (#4823): runs over the already
+        // rendered background BEFORE any backdrop or view paint, so the
+        // focused modal is painted afterwards at full strength and the
+        // texture can never overwrite it. `Off` (the default) leaves the
+        // buffer untouched, keeping output byte-identical to the
+        // pre-prototype path.
+        if self.focus_texture != FocusTextureMode::Off {
+            if let (Some(focus), Some(theme)) =
+                (self.top_occupied_region(area), self.focus_texture_theme)
+            {
+                crate::tui::focus_texture::apply_focus_texture(
+                    area,
+                    buf,
+                    focus,
+                    &theme,
+                    self.focus_texture,
+                    crate::tui::color_compat::ascii_safe_enabled(),
+                );
+            }
+        }
         // Dim each view's own occupied region rather than the whole frame, so
         // an inline modal (the approval prompt) leaves the transcript above it
         // visible instead of blacking out the screen. Full-screen modals keep
@@ -1241,6 +1296,14 @@ enum ConfigSection {
     History,
     Mcp,
     Fleet,
+    /// Workflow orchestration (`/workflow`). Kept out of Fleet: a Fleet is
+    /// *who*, a Workflow is *what order* the work follows over it.
+    Workflow,
+    /// Session-scoped drivers such as `/goal`.
+    Session,
+    /// Explicitly legacy compatibility settings that are not a live choice —
+    /// e.g. the DeepSeek-only `default_model` fallback (#4751).
+    Legacy,
     Experimental,
 }
 
@@ -1288,7 +1351,12 @@ impl ConfigTab {
             ConfigTab::Display => matches!(section, ConfigSection::Display),
             ConfigTab::Advanced => matches!(
                 section,
-                ConfigSection::Mcp | ConfigSection::Fleet | ConfigSection::Experimental
+                ConfigSection::Mcp
+                    | ConfigSection::Fleet
+                    | ConfigSection::Workflow
+                    | ConfigSection::Session
+                    | ConfigSection::Legacy
+                    | ConfigSection::Experimental
             ),
         }
     }
@@ -1336,6 +1404,9 @@ impl ConfigSection {
                 ConfigSection::History => MessageId::ConfigSectionHistory,
                 ConfigSection::Mcp => MessageId::ConfigSectionMcp,
                 ConfigSection::Fleet => MessageId::ConfigSectionFleet,
+                ConfigSection::Workflow => MessageId::ConfigSectionWorkflow,
+                ConfigSection::Session => MessageId::ConfigSectionSession,
+                ConfigSection::Legacy => MessageId::ConfigSectionLegacy,
                 ConfigSection::Experimental => MessageId::ConfigSectionExperimental,
             },
         )
@@ -1585,6 +1656,13 @@ impl ConfigView {
             },
             ConfigRow {
                 section: ConfigSection::Display,
+                key: "focus_texture".to_string(),
+                value: settings.focus_texture.clone(),
+                editable: true,
+                scope: ConfigScope::Saved,
+            },
+            ConfigRow {
+                section: ConfigSection::Display,
                 key: "calm_mode".to_string(),
                 value: settings.calm_mode.to_string(),
                 editable: true,
@@ -1780,6 +1858,22 @@ impl ConfigView {
                 scope: ConfigScope::Saved,
             },
             ConfigRow {
+                section: ConfigSection::Sidebar,
+                key: "sessions_rail".to_string(),
+                value: settings.sessions_rail.to_string(),
+                editable: true,
+                scope: ConfigScope::Saved,
+            },
+            // Read at startup by `main`, not held on `App`, so the row reflects
+            // the persisted value rather than a live field (#2934).
+            ConfigRow {
+                section: ConfigSection::Sidebar,
+                key: "session_auto_resume".to_string(),
+                value: settings.session_auto_resume.to_string(),
+                editable: true,
+                scope: ConfigScope::Saved,
+            },
+            ConfigRow {
                 section: ConfigSection::History,
                 key: "auto_compact".to_string(),
                 value: settings.auto_compact.to_string(),
@@ -1836,25 +1930,22 @@ impl ConfigView {
             ApiProvider::Deepseek | ApiProvider::DeepseekCN | ApiProvider::DeepseekAnthropic
         ) || settings.default_model.is_some();
         if show_deepseek_fallback {
-            let insert_at = rows
-                .iter()
-                .position(|row| row.key == "fast_model")
-                .map(|i| i + 1)
-                .unwrap_or(rows.len());
-            rows.insert(
-                insert_at,
-                ConfigRow {
-                    section: ConfigSection::Model,
-                    key: "default_model".to_string(),
-                    value: settings
-                        .default_model
-                        .as_deref()
-                        .unwrap_or(&*tr(app.ui_locale, MessageId::ConfigDefaultValue))
-                        .to_string(),
-                    editable: false,
-                    scope: ConfigScope::Saved,
-                },
-            );
+            // #4751: an inert DeepSeek-only compatibility field is not a model
+            // choice and never a Fleet choice — exact-Fleet users switch
+            // Fleets, not fallback models. Keep the persisted `default_model`
+            // key (the runtime still reads it) but present it in the explicitly
+            // Legacy section at the end, not among live Model settings.
+            rows.push(ConfigRow {
+                section: ConfigSection::Legacy,
+                key: "default_model".to_string(),
+                value: settings
+                    .default_model
+                    .as_deref()
+                    .unwrap_or(&*tr(app.ui_locale, MessageId::ConfigDefaultValue))
+                    .to_string(),
+                editable: false,
+                scope: ConfigScope::Saved,
+            });
         }
         let external_status_rows = [ApiProvider::OpenaiCodex, ApiProvider::Xai]
             .into_iter()
@@ -2630,7 +2721,7 @@ fn experimental_config_rows(config: &Config) -> Vec<ConfigRow> {
     }
 
     rows.push(ConfigRow {
-        section: ConfigSection::Fleet,
+        section: ConfigSection::Session,
         key: "goal_command".to_string(),
         value:
             "/goal sets session objectives with optional token budgets; state shows in Work context"
@@ -2639,7 +2730,8 @@ fn experimental_config_rows(config: &Config) -> Vec<ConfigRow> {
         scope: ConfigScope::Saved,
     });
     rows.push(ConfigRow {
-        section: ConfigSection::Fleet,
+        // Workflow orchestration is its own section, not a Fleet concern.
+        section: ConfigSection::Workflow,
         key: "workflow".to_string(),
         value:
             "/workflow runs scripted fan-out/fan-in operations with run cards and cancel support"
@@ -2714,6 +2806,8 @@ fn config_label_message(key: &str) -> Option<MessageId> {
         "sidebar_width" => MessageId::ConfigLabelSidebarWidth,
         "sidebar_focus" => MessageId::ConfigLabelSidebarFocus,
         "context_panel" => MessageId::ConfigLabelContextPanel,
+        "sessions_rail" => MessageId::ConfigLabelSessionsRail,
+        "session_auto_resume" => MessageId::ConfigLabelSessionAutoResume,
         "auto_compact" => MessageId::ConfigLabelAutoCompact,
         "auto_compact_threshold_percent" => MessageId::ConfigLabelAutoCompactThreshold,
         "max_history" => MessageId::ConfigLabelMaxHistory,
@@ -2876,6 +2970,8 @@ fn config_boolean_key(key: &str) -> bool {
             | "paste_burst_detection"
             | "workspace_follow_symlinks"
             | "context_panel"
+            | "sessions_rail"
+            | "session_auto_resume"
             | "auto_compact"
             | "prefer_external_pdftotext"
     )
@@ -2910,6 +3006,7 @@ fn config_choice_values(key: &str, provider: ApiProvider) -> Option<Vec<String>>
             vec!["default", "auto", "off", "low", "medium", "high", "max"]
         }
         "ocean_treatment" => vec!["ombre", "flat"],
+        "focus_texture" => vec!["off", "scrim", "grain"],
         "work_surface_placement" => vec!["top", "left", "right"],
         "status_indicator" => vec!["cw", "whale", "dots", "off"],
         "synchronized_output" => vec!["auto", "on", "off"],
@@ -3413,7 +3510,7 @@ impl ModalView for ConfigView {
 
                 for (choice_idx, choice) in choices.iter().enumerate().take(end).skip(start) {
                     let selected = choice_idx == edit.selected_choice;
-                    let marker = if selected { "›" } else { " " };
+                    let marker = crate::tui::glyphs::selection_marker(selected);
                     let label = config_choice_label(self.locale, &edit.key, choice);
                     let line_y = inner.y.saturating_add(lines.len() as u16);
                     hitboxes.push((line_y, choice_idx));
@@ -3423,10 +3520,7 @@ impl ModalView for ConfigView {
                         truncate_view_text(&label, usize::from(inner.width).saturating_sub(8))
                     ));
                     line.style = if selected {
-                        Style::default()
-                            .fg(palette::SELECTION_TEXT)
-                            .bg(palette::SELECTION_BG)
-                            .bold()
+                        menu_style::selected_row_style()
                     } else {
                         Style::default().fg(palette::TEXT_PRIMARY)
                     };
@@ -3611,10 +3705,7 @@ impl ModalView for ConfigView {
                         row_hitboxes.push((line_y, *idx));
                         let selected = *idx == self.selected;
                         let style = if selected {
-                            Style::default()
-                                .fg(palette::SELECTION_TEXT)
-                                .bg(palette::SELECTION_BG)
-                                .add_modifier(ratatui::style::Modifier::BOLD)
+                            menu_style::selected_row_style()
                         } else {
                             Style::default().fg(palette::TEXT_PRIMARY)
                         };
@@ -3646,7 +3737,7 @@ impl ModalView for ConfigView {
                             ),
                         ]);
                         if selected {
-                            line.style = line.style.bg(palette::SELECTION_BG);
+                            line.style = menu_style::selected_row_bg_style();
                         }
                         lines.push(line);
                     }
@@ -3962,7 +4053,7 @@ impl ModalView for SubAgentsView {
                 Style::default().fg(palette::TEXT_MUTED),
             )));
             lines.push(Line::from(Span::styled(
-                "Use /fleet to configure role profiles and launch posture.",
+                "Configure roles and launch posture with /fleet.",
                 Style::default().fg(palette::TEXT_DIM),
             )));
         } else {
@@ -4264,7 +4355,7 @@ fn agent_type_order(agent_type: &FleetRole) -> u8 {
         FleetRole::Builder => 3,
         FleetRole::Verifier => 4,
         FleetRole::Reviewer => 5,
-        FleetRole::Oracle => 6,
+        FleetRole::Consultant => 6,
         FleetRole::Custom => 7,
     }
 }
@@ -4326,12 +4417,13 @@ fn fit_config_column(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionHint, ConfigListItem, ConfigScope, ConfigTab, ConfigView, EmptyState, HelpView,
-        ListDetailLayout, ModalKind, ModalView, SettingKind, SettingsRegistry, ViewAction,
-        ViewEvent, ViewStack, action_footer_lines, canonical_config_choice, centered_modal_area,
-        config_choice_detail, config_choice_label, config_choice_values, config_label_for_key,
-        config_label_for_key_for_locale, render_modal_footer_with_gutter,
-        render_underwater_surface, subagent_view_agents, truncate_view_text,
+        ActionHint, ConfigListItem, ConfigScope, ConfigTab, ConfigView, EmptyState,
+        FocusTextureMode, HelpView, ListDetailLayout, ModalKind, ModalView, SettingKind,
+        SettingsRegistry, ViewAction, ViewEvent, ViewStack, action_footer_lines,
+        canonical_config_choice, centered_modal_area, config_choice_detail, config_choice_label,
+        config_choice_values, config_label_for_key, config_label_for_key_for_locale,
+        render_modal_footer_with_gutter, render_underwater_surface, subagent_view_agents,
+        truncate_view_text,
     };
     use crate::config::Config;
     use crate::localization::{Locale, MessageId, tr};
@@ -4435,6 +4527,142 @@ mod tests {
             || SubAgentsView::new(Vec::new()),
             &["close", "refresh", "setup"],
         );
+    }
+
+    /// Focus-texture prototype (#4823): with a mode forced on, a real
+    /// full-screen modal must render exactly as before — the texture pass
+    /// no-ops because the focus region covers (nearly) the whole frame.
+    /// The default `Off` case is pinned by the existing
+    /// `*_modal_is_usable_and_opaque_at_blocker_sizes` tests above: they run
+    /// unmodified because `ViewStack::new()` defaults to `Off`, which leaves
+    /// the buffer byte-identical to the pre-prototype render.
+    #[test]
+    fn focus_texture_modes_keep_fullscreen_modal_usable_and_opaque() {
+        let _lock = crate::test_support::lock_test_env();
+        let theme = crate::palette::ThemeId::Whale.ui_theme();
+        for mode in [FocusTextureMode::Scrim, FocusTextureMode::Grain] {
+            for (w, h) in BLOCKER_SIZES {
+                let area = Rect::new(0, 0, w, h);
+                let mut buf = Buffer::empty(area);
+                let sentinel_style = Style::default().fg(Color::Magenta).bg(Color::Green);
+                for y in 0..h {
+                    for x in 0..w {
+                        buf[(x, y)].set_symbol("X").set_style(sentinel_style);
+                    }
+                }
+                let mut stack = ViewStack::new();
+                stack.push(create_config_view(Locale::En));
+                stack.set_focus_texture(mode, theme);
+                stack.render(area, &mut buf);
+
+                let rows: Vec<String> = (0..h)
+                    .map(|y| {
+                        (0..w)
+                            .map(|x| buf[(x, y)].symbol().to_string())
+                            .collect::<String>()
+                    })
+                    .collect();
+                let text = rows.join("\n");
+
+                assert!(
+                    text.contains("Search"),
+                    "{mode:?} {w}x{h}: missing 'Search'"
+                );
+                let unpainted = (0..h).find_map(|y| {
+                    (0..w).find_map(|x| {
+                        let cell = &buf[(x, y)];
+                        (cell.symbol() == "X"
+                            && cell.fg == Color::Magenta
+                            && cell.bg == Color::Green)
+                            .then_some((x, y))
+                    })
+                });
+                assert!(
+                    unpainted.is_none(),
+                    "{mode:?} {w}x{h}: background bleed-through at {unpainted:?}"
+                );
+                assert_eq!(
+                    buf[(w / 2, h / 2)].bg,
+                    palette::WHALE_BG,
+                    "{mode:?} {w}x{h}: modal interior must be opaque"
+                );
+            }
+        }
+    }
+
+    /// The texture actually engages outside an *inline* modal's band: the
+    /// approval prompt only occupies a bottom strip, so the sentinel field
+    /// above it goes through the scrim/grain pass. The modal is painted
+    /// after the texture, so its band stays fully opaque and its labels
+    /// survive at every blocker size.
+    #[test]
+    fn focus_texture_modes_keep_inline_modal_usable() {
+        let theme = crate::palette::ThemeId::Whale.ui_theme();
+        for mode in [FocusTextureMode::Scrim, FocusTextureMode::Grain] {
+            for (w, h) in BLOCKER_SIZES {
+                let area = Rect::new(0, 0, w, h);
+                let mut buf = Buffer::empty(area);
+                let sentinel_style = Style::default().fg(Color::Magenta).bg(Color::Green);
+                for y in 0..h {
+                    for x in 0..w {
+                        buf[(x, y)].set_symbol("X").set_style(sentinel_style);
+                    }
+                }
+                let request = crate::tui::approval::ApprovalRequest::new(
+                    "test-id",
+                    "read_file",
+                    "Read a file from disk",
+                    &serde_json::json!({"path": "src/main.rs"}),
+                    "tool:read_file",
+                );
+                let mut stack = ViewStack::new();
+                stack.push(crate::tui::approval::ApprovalView::new(request));
+                stack.set_focus_texture(mode, theme);
+                let focus = stack
+                    .top_occupied_region(area)
+                    .expect("approval view on the stack");
+                stack.render(area, &mut buf);
+
+                let rows: Vec<String> = (0..h)
+                    .map(|y| {
+                        (0..w)
+                            .map(|x| buf[(x, y)].symbol().to_string())
+                            .collect::<String>()
+                    })
+                    .collect();
+                let text = rows.join("\n");
+
+                assert!(
+                    text.contains("Do you want to proceed?") && text.contains("read_file"),
+                    "{mode:?} {w}x{h}: approval prompt must survive the texture"
+                );
+                // Zero sentinel bleed INSIDE the focused band: the backdrop
+                // and the modal own every cell there. Outside the band the
+                // texture intentionally leaves the sentinel glyphs in place
+                // (Scrim only re-colors; Grain never overwrites text).
+                let mut whale_bg_cells = 0_u32;
+                for y in focus.top()..focus.bottom() {
+                    for x in focus.left()..focus.right() {
+                        let cell = &buf[(x, y)];
+                        assert!(
+                            !(cell.symbol() == "X"
+                                && cell.fg == Color::Magenta
+                                && cell.bg == Color::Green),
+                            "{mode:?} {w}x{h}: sentinel bleed inside focus at ({x},{y})"
+                        );
+                        if cell.bg == palette::WHALE_BG {
+                            whale_bg_cells += 1;
+                        }
+                    }
+                }
+                // The band keeps the opaque modal ink. (Not every cell: the
+                // selected option row carries its own highlight background.)
+                assert!(
+                    whale_bg_cells > 0,
+                    "{mode:?} {w}x{h}: modal band lost its opaque WHALE_BG surface"
+                );
+            }
+        }
     }
 
     #[test]
@@ -4876,7 +5104,11 @@ mod tests {
                 .filter(|row| {
                     !matches!(
                         row.section,
-                        super::ConfigSection::Experimental | super::ConfigSection::Fleet
+                        super::ConfigSection::Experimental
+                            | super::ConfigSection::Fleet
+                            | super::ConfigSection::Workflow
+                            | super::ConfigSection::Session
+                            | super::ConfigSection::Legacy
                     ) && !DIAGNOSTIC_ONLY.contains(&row.key.as_str())
                         && !row.key.starts_with("managed_")
                 })
@@ -4888,7 +5120,11 @@ mod tests {
                 .filter(|row| {
                     matches!(
                         row.section,
-                        super::ConfigSection::Experimental | super::ConfigSection::Fleet
+                        super::ConfigSection::Experimental
+                            | super::ConfigSection::Fleet
+                            | super::ConfigSection::Workflow
+                            | super::ConfigSection::Session
+                            | super::ConfigSection::Legacy
                     )
                 })
                 .all(|row| !row.editable)
@@ -5191,6 +5427,69 @@ api_key_env = "ACME_API_KEY"
             config_label_for_key(&row.key),
             "Legacy fallback model (DeepSeek routes only)"
         );
+        // #4751: never a Fleet (or live Model) choice.
+        assert_eq!(row.section, super::ConfigSection::Legacy);
+    }
+
+    /// #4751: Fleet settings hold Fleet/member concerns only. The
+    /// legacy DeepSeek fallback is Legacy, `/goal` is Session, and Workflow
+    /// orchestration is Workflow — every persisted key is unchanged.
+    #[test]
+    fn config_view_settings_rows_land_in_truthful_sections() {
+        let _guard = ConfigSettingsEnvGuard::new("default_model = \"deepseek-v4-pro\"\n");
+        let mut app = create_test_app();
+        app.api_provider = crate::config::ApiProvider::Zai;
+        let view = ConfigView::new_for_app(&app);
+
+        let section_of = |key: &str| {
+            view.rows
+                .iter()
+                .find(|row| row.key == key)
+                .unwrap_or_else(|| panic!("{key} row"))
+                .section
+        };
+        assert_eq!(section_of("default_model"), super::ConfigSection::Legacy);
+        assert_eq!(section_of("goal_command"), super::ConfigSection::Session);
+        assert_eq!(section_of("workflow"), super::ConfigSection::Workflow);
+
+        // Relabelling is presentation only: the persisted key, the persisted
+        // value, the Saved scope, and the read-only posture all round-trip
+        // unchanged, so existing config files keep loading identically.
+        let legacy = view
+            .rows
+            .iter()
+            .find(|row| row.section == super::ConfigSection::Legacy)
+            .expect("legacy row");
+        assert_eq!(legacy.key, "default_model");
+        assert_eq!(legacy.value, "deepseek-v4-pro");
+        assert_eq!(legacy.scope, ConfigScope::Saved);
+        assert!(!legacy.editable);
+
+        // Fleet keeps Fleet/member concerns only.
+        let fleet_keys: Vec<&str> = view
+            .rows
+            .iter()
+            .filter(|row| row.section == super::ConfigSection::Fleet)
+            .map(|row| row.key.as_str())
+            .collect();
+        assert!(
+            fleet_keys.iter().all(|key| key.starts_with("fleet.")),
+            "non-Fleet concerns leaked into Fleet settings: {fleet_keys:?}"
+        );
+        assert!(
+            !fleet_keys.contains(&"default_model"),
+            "the legacy fallback must not be presented as a Fleet choice"
+        );
+
+        // Workflow keeps its own name and its `/workflow` wording.
+        let workflow = view
+            .rows
+            .iter()
+            .find(|row| row.section == super::ConfigSection::Workflow)
+            .expect("workflow row");
+        assert_eq!(workflow.key, "workflow");
+        assert!(workflow.value.starts_with("/workflow "), "{workflow:?}");
+        assert_eq!(config_label_for_key("workflow"), "Workflow");
     }
 
     #[test]
@@ -5278,12 +5577,14 @@ max_spawn_depth = 2
 
         view.clear_filter();
         type_filter(&mut view, "goal");
-        assert_eq!(visible_section_labels(&view), vec!["Fleet"]);
+        assert_eq!(visible_section_labels(&view), vec!["Session"]);
         assert_eq!(visible_row_keys(&view), vec!["goal_command"]);
 
+        // The `workflow` row keeps its key and its name; #4751 only moved it
+        // out of Fleet into its own Workflow section.
         view.clear_filter();
         type_filter(&mut view, "workflow");
-        assert_eq!(visible_section_labels(&view), vec!["Fleet"]);
+        assert_eq!(visible_section_labels(&view), vec!["Workflow"]);
         assert_eq!(visible_row_keys(&view), vec!["workflow"]);
 
         view.clear_filter();
@@ -5480,6 +5781,8 @@ base_url = "https://api.xiaomimimo.com/v1"
                 "sidebar_width",
                 "sidebar_focus",
                 "context_panel",
+                "sessions_rail",
+                "session_auto_resume",
             ]
         );
         assert_eq!(view.rows[view.selected].key, "work_surface_placement");
@@ -5502,6 +5805,8 @@ base_url = "https://api.xiaomimimo.com/v1"
                 "sidebar_width",
                 "sidebar_focus",
                 "context_panel",
+                "sessions_rail",
+                "session_auto_resume",
             ]
         );
     }

@@ -346,12 +346,14 @@ fn cycle_effort_updates_effort_status_and_compaction() {
         crate::work_graph::WorkActivityEvent::ReasoningEffortChanged {
             requested,
             effective,
+            provider_kind,
             provider,
             operation,
             ..
         } => {
             assert_eq!(*requested, crate::work_graph::ReasoningEffortTier::High);
             assert_eq!(*effective, crate::work_graph::ReasoningEffortTier::High);
+            assert_eq!(*provider_kind, Some(ApiProvider::Deepseek));
             assert_eq!(provider, "deepseek");
             assert!(operation.is_none());
         }
@@ -361,6 +363,509 @@ fn cycle_effort_updates_effort_status_and_compaction() {
     assert!(
         wire.get("text").is_none(),
         "activity must not carry reasoning text"
+    );
+}
+
+#[test]
+fn glm_5_turbo_records_enabled_with_granularity_unavailable() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Zai;
+    app.auto_model = false;
+    app.active_route_base_url = crate::config::DEFAULT_ZAI_BASE_URL.to_string();
+    app.model = crate::config::ZAI_GLM_5_TURBO_MODEL.to_string();
+    app.reasoning_effort = ReasoningEffort::High;
+
+    app.cycle_effort();
+
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Max);
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Reasoning effort: max→thinking enabled; granularity unavailable")
+    );
+    assert_eq!(
+        app.reasoning_effort_display_label(),
+        "max→thinking enabled; granularity unavailable"
+    );
+    let work = app
+        .work_state_snapshot()
+        .expect("Work snapshot")
+        .expect("effort activity creates graph state");
+    let activity = work
+        .graph
+        .expect("Work Graph")
+        .activities
+        .last()
+        .cloned()
+        .expect("effort activity");
+    let crate::work_graph::WorkActivityEvent::ReasoningEffortChanged {
+        requested,
+        effective,
+        provider,
+        ..
+    } = &activity;
+    assert_eq!(*requested, crate::work_graph::ReasoningEffortTier::Max);
+    assert_eq!(
+        *effective,
+        crate::work_graph::ReasoningEffortTier::ThinkingEnabledGranularityUnavailable
+    );
+    assert_eq!(provider, "zai");
+    assert_eq!(
+        serde_json::to_value(activity).expect("serialize activity")["effective"],
+        "thinking_enabled_granularity_unavailable"
+    );
+}
+
+#[test]
+fn glm_5_1_records_enabled_with_granularity_unavailable() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Zai;
+    app.auto_model = false;
+    app.active_route_base_url = crate::config::DEFAULT_ZAI_BASE_URL.to_string();
+    app.model = crate::config::ZAI_GLM_5_1_MODEL.to_string();
+    app.reasoning_effort = ReasoningEffort::High;
+
+    app.cycle_effort();
+
+    assert_eq!(
+        app.reasoning_effort_display_label(),
+        "max→thinking enabled; granularity unavailable"
+    );
+    let work = app
+        .work_state_snapshot()
+        .expect("Work snapshot")
+        .expect("effort activity creates graph state");
+    let crate::work_graph::WorkActivityEvent::ReasoningEffortChanged { effective, .. } = work
+        .graph
+        .expect("Work Graph")
+        .activities
+        .last()
+        .cloned()
+        .expect("effort activity");
+    assert_eq!(
+        effective,
+        crate::work_graph::ReasoningEffortTier::ThinkingEnabledGranularityUnavailable
+    );
+}
+
+#[test]
+fn unknown_model_on_exact_zai_endpoint_records_effective_unavailable() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Zai;
+    app.auto_model = false;
+    app.active_route_base_url = crate::config::DEFAULT_ZAI_BASE_URL.to_string();
+    app.model = "glm-future-unknown".to_string();
+    app.reasoning_effort = ReasoningEffort::High;
+
+    app.cycle_effort();
+
+    assert_eq!(
+        app.reasoning_effort_display_label(),
+        "max→effective unavailable"
+    );
+    let work = app
+        .work_state_snapshot()
+        .expect("Work snapshot")
+        .expect("effort activity creates graph state");
+    let crate::work_graph::WorkActivityEvent::ReasoningEffortChanged { effective, .. } = work
+        .graph
+        .expect("Work Graph")
+        .activities
+        .last()
+        .cloned()
+        .expect("effort activity");
+    assert_eq!(
+        effective,
+        crate::work_graph::ReasoningEffortTier::Unavailable
+    );
+}
+
+#[test]
+fn compatible_zai_gateway_records_effective_unavailable() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Zai;
+    app.auto_model = false;
+    app.active_route_base_url = "https://gateway.example/v1".to_string();
+    app.model = crate::config::ZAI_GLM_5_2_MODEL.to_string();
+    app.reasoning_effort = ReasoningEffort::High;
+
+    app.cycle_effort();
+
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Max);
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Reasoning effort: max→effective unavailable")
+    );
+    assert_eq!(
+        app.reasoning_effort_display_label(),
+        "max→effective unavailable"
+    );
+    let work = app
+        .work_state_snapshot()
+        .expect("Work snapshot")
+        .expect("effort activity creates graph state");
+    let activity = work
+        .graph
+        .expect("Work Graph")
+        .activities
+        .last()
+        .cloned()
+        .expect("effort activity");
+    let crate::work_graph::WorkActivityEvent::ReasoningEffortChanged {
+        requested,
+        effective,
+        provider,
+        ..
+    } = &activity;
+    assert_eq!(*requested, crate::work_graph::ReasoningEffortTier::Max);
+    assert_eq!(
+        *effective,
+        crate::work_graph::ReasoningEffortTier::Unavailable
+    );
+    assert_eq!(provider, "zai");
+    assert_eq!(
+        serde_json::to_value(activity).expect("serialize activity")["effective"],
+        "unavailable"
+    );
+}
+
+#[test]
+fn minimax_m3_high_and_max_receipts_do_not_claim_tier_granularity() {
+    for (previous, requested, label) in [
+        (ReasoningEffort::Off, ReasoningEffort::High, "high"),
+        (ReasoningEffort::High, ReasoningEffort::Max, "max"),
+    ] {
+        let mut app = App::new(test_options(false), &Config::default());
+        app.api_provider = ApiProvider::Minimax;
+        app.auto_model = false;
+        app.active_route_base_url = crate::config::DEFAULT_MINIMAX_BASE_URL.to_string();
+        app.model = crate::config::DEFAULT_MINIMAX_MODEL.to_string();
+        app.reasoning_effort = previous;
+
+        app.cycle_effort();
+
+        assert_eq!(app.reasoning_effort, requested);
+        assert_eq!(
+            app.reasoning_effort_display_label(),
+            format!("{label}→thinking enabled; granularity unavailable")
+        );
+        let work = app
+            .work_state_snapshot()
+            .expect("Work snapshot")
+            .expect("effort activity creates graph state");
+        let activity = work
+            .graph
+            .expect("Work Graph")
+            .activities
+            .last()
+            .cloned()
+            .expect("effort activity");
+        let crate::work_graph::WorkActivityEvent::ReasoningEffortChanged {
+            effective,
+            endpoint_identity,
+            model,
+            ..
+        } = activity;
+        assert_eq!(
+            effective,
+            crate::work_graph::ReasoningEffortTier::ThinkingEnabledGranularityUnavailable
+        );
+        assert_eq!(
+            endpoint_identity.as_deref(),
+            Some(crate::config::DEFAULT_MINIMAX_BASE_URL)
+        );
+        assert_eq!(model.as_deref(), Some(crate::config::DEFAULT_MINIMAX_MODEL));
+    }
+}
+
+#[test]
+fn minimax_anthropic_m3_high_and_max_receipts_match_adaptive_wire_truth() {
+    for (previous, requested, label) in [
+        (ReasoningEffort::Off, ReasoningEffort::High, "high"),
+        (ReasoningEffort::High, ReasoningEffort::Max, "max"),
+    ] {
+        let mut app = App::new(test_options(false), &Config::default());
+        app.api_provider = ApiProvider::MinimaxAnthropic;
+        app.auto_model = false;
+        app.active_route_base_url = crate::config::DEFAULT_MINIMAX_ANTHROPIC_BASE_URL.to_string();
+        app.model = crate::config::DEFAULT_MINIMAX_MODEL.to_string();
+        app.reasoning_effort = previous;
+
+        app.cycle_effort();
+
+        assert_eq!(app.reasoning_effort, requested);
+        assert_eq!(
+            app.reasoning_effort_display_label(),
+            format!("{label}→thinking enabled; granularity unavailable")
+        );
+        let work = app
+            .work_state_snapshot()
+            .expect("Work snapshot")
+            .expect("effort activity creates graph state");
+        let activity = work
+            .graph
+            .expect("Work Graph")
+            .activities
+            .last()
+            .cloned()
+            .expect("effort activity");
+        let crate::work_graph::WorkActivityEvent::ReasoningEffortChanged {
+            effective,
+            provider_kind,
+            provider,
+            endpoint_identity,
+            model,
+            ..
+        } = activity;
+        assert_eq!(
+            effective,
+            crate::work_graph::ReasoningEffortTier::ThinkingEnabledGranularityUnavailable
+        );
+        assert_eq!(provider_kind, Some(ApiProvider::MinimaxAnthropic));
+        assert_eq!(provider, "minimax-anthropic");
+        assert_eq!(
+            endpoint_identity.as_deref(),
+            Some(crate::config::DEFAULT_MINIMAX_ANTHROPIC_BASE_URL)
+        );
+        assert_eq!(model.as_deref(), Some(crate::config::DEFAULT_MINIMAX_MODEL));
+    }
+}
+
+#[test]
+fn named_custom_route_displays_and_persists_effective_unavailable() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.set_provider_identity(ApiProvider::Custom, "my-gateway");
+    app.auto_model = false;
+    app.active_route_base_url = "https://gateway.example/v1?api_key=must-not-persist".to_string();
+    app.model = "vendor-model-x".to_string();
+    app.reasoning_effort = ReasoningEffort::High;
+
+    app.cycle_effort();
+
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Max);
+    assert_eq!(
+        app.reasoning_effort_display_label(),
+        "max→effective unavailable"
+    );
+    let work = app
+        .work_state_snapshot()
+        .expect("Work snapshot")
+        .expect("unknown route activity creates valid graph state");
+    let activity = work
+        .graph
+        .expect("Work Graph")
+        .activities
+        .last()
+        .cloned()
+        .expect("effort activity");
+    let crate::work_graph::WorkActivityEvent::ReasoningEffortChanged {
+        effective,
+        provider_kind,
+        provider,
+        endpoint_identity,
+        model,
+        ..
+    } = activity;
+    assert_eq!(
+        effective,
+        crate::work_graph::ReasoningEffortTier::Unavailable
+    );
+    assert_eq!(provider_kind, Some(ApiProvider::Custom));
+    assert_eq!(provider, "my-gateway");
+    let endpoint = endpoint_identity.expect("redacted endpoint provenance");
+    assert!(endpoint.contains("gateway.example"), "{endpoint}");
+    assert!(!endpoint.contains("must-not-persist"), "{endpoint}");
+    assert_eq!(model.as_deref(), Some("vendor-model-x"));
+}
+
+#[test]
+fn custom_routes_named_with_builtin_slugs_retain_custom_kind_and_fail_closed() {
+    for identity in ["openai", "zai"] {
+        let mut app = App::new(test_options(false), &Config::default());
+        app.set_provider_identity(ApiProvider::Custom, identity);
+        app.auto_model = false;
+        app.active_route_base_url = "https://gateway.example/v1".to_string();
+        app.model = "vendor-model-x".to_string();
+        app.reasoning_effort = ReasoningEffort::High;
+
+        app.cycle_effort();
+
+        assert_eq!(
+            app.reasoning_effort_display_label(),
+            "max→effective unavailable"
+        );
+        let work = app
+            .work_state_snapshot()
+            .expect("Work snapshot")
+            .expect("effort activity creates graph state");
+        let activity = work
+            .graph
+            .expect("Work Graph")
+            .activities
+            .last()
+            .cloned()
+            .expect("effort activity");
+        let crate::work_graph::WorkActivityEvent::ReasoningEffortChanged {
+            effective,
+            provider_kind,
+            provider,
+            ..
+        } = activity;
+        assert_eq!(
+            effective,
+            crate::work_graph::ReasoningEffortTier::Unavailable
+        );
+        assert_eq!(provider_kind, Some(ApiProvider::Custom));
+        assert_eq!(provider, identity);
+    }
+}
+
+#[test]
+fn zai_gateway_off_and_high_receipts_remain_unavailable() {
+    for (previous, requested, label) in [
+        (ReasoningEffort::Max, ReasoningEffort::Off, "off"),
+        (ReasoningEffort::Off, ReasoningEffort::High, "high"),
+    ] {
+        let mut app = App::new(test_options(false), &Config::default());
+        app.api_provider = ApiProvider::Zai;
+        app.auto_model = false;
+        app.active_route_base_url = "https://gateway.example/v1".to_string();
+        app.model = crate::config::ZAI_GLM_5_2_MODEL.to_string();
+        app.reasoning_effort = previous;
+
+        app.cycle_effort();
+
+        assert_eq!(app.reasoning_effort, requested);
+        assert_eq!(
+            app.reasoning_effort_display_label(),
+            format!("{label}→effective unavailable")
+        );
+    }
+}
+
+#[test]
+fn kimi_code_high_and_max_work_receipts_preserve_exact_tiers() {
+    for (previous, requested) in [
+        (ReasoningEffort::Off, ReasoningEffort::High),
+        (ReasoningEffort::High, ReasoningEffort::Max),
+    ] {
+        let mut app = App::new(test_options(false), &Config::default());
+        app.api_provider = ApiProvider::Moonshot;
+        app.auto_model = false;
+        app.active_route_base_url = crate::config::DEFAULT_KIMI_CODE_BASE_URL.to_string();
+        app.model = crate::config::KIMI_CODE_K3_MODEL.to_string();
+        app.reasoning_effort = previous;
+
+        app.cycle_effort();
+
+        let work = app
+            .work_state_snapshot()
+            .expect("Work snapshot")
+            .expect("effort activity creates graph state");
+        let activity = work
+            .graph
+            .expect("Work Graph")
+            .activities
+            .last()
+            .cloned()
+            .unwrap();
+        let crate::work_graph::WorkActivityEvent::ReasoningEffortChanged {
+            effective,
+            endpoint_identity,
+            model,
+            ..
+        } = activity;
+        assert_eq!(effective, requested.into());
+        assert_eq!(
+            endpoint_identity.as_deref(),
+            Some(crate::config::DEFAULT_KIMI_CODE_BASE_URL)
+        );
+        assert_eq!(model.as_deref(), Some(crate::config::KIMI_CODE_K3_MODEL));
+    }
+}
+
+#[test]
+fn active_turn_zai_receipt_overrides_all_mutable_parallel_route_metadata() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Deepseek;
+    app.active_route_base_url = crate::config::DEFAULT_DEEPSEEK_BASE_URL.to_string();
+    app.model = "deepseek-chat".to_string();
+    app.reasoning_effort = ReasoningEffort::High;
+    app.active_turn = Some(ActiveTurnMetadata {
+        turn_id: "turn-zai-receipt".to_string(),
+        created_at: chrono::Utc::now(),
+        route: Some(crate::core::events::TurnRoute {
+            provider: ApiProvider::Zai,
+            provider_identity: "openai".to_string(),
+            model: "mutable-wrong-model".to_string(),
+            auto_model: false,
+            receipt: Some(crate::route_receipt::TurnRouteReceipt::new(
+                ApiProvider::Zai,
+                "zai",
+                crate::config::ZAI_GLM_5_TURBO_MODEL,
+                crate::config::DEFAULT_ZAI_BASE_URL,
+                "test-secret-never-persisted",
+            )),
+            billing: Some(crate::core::events::RouteBillingEnvelope {
+                billing_surface: None,
+                endpoint_fingerprint: None,
+                billing_mode: crate::cost_status::RouteBillingMode::Unknown,
+                dispatched_at: chrono::Utc::now(),
+            }),
+            base_url: crate::config::DEFAULT_ZAI_BASE_URL.to_string(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
+        }),
+        auto_route_receipt: None,
+        suggestion_authority: None,
+    });
+
+    assert_eq!(
+        app.reasoning_effort_display_label(),
+        "high→thinking enabled; granularity unavailable"
+    );
+
+    app.apply_reasoning_effort_cycle();
+    let work = app
+        .work_state_snapshot()
+        .expect("Work snapshot")
+        .expect("effort activity creates graph state");
+    let activity = work
+        .graph
+        .expect("Work Graph")
+        .activities
+        .last()
+        .cloned()
+        .expect("effort activity");
+    let crate::work_graph::WorkActivityEvent::ReasoningEffortChanged {
+        provider_kind,
+        provider,
+        endpoint_identity,
+        model,
+        ..
+    } = activity;
+    assert_eq!(provider_kind, Some(ApiProvider::Zai));
+    assert_eq!(provider, "zai");
+    assert_eq!(
+        endpoint_identity.as_deref(),
+        Some(crate::config::DEFAULT_ZAI_BASE_URL)
+    );
+    assert_eq!(model.as_deref(), Some(crate::config::ZAI_GLM_5_TURBO_MODEL));
+}
+
+#[test]
+fn pending_zai_route_without_endpoint_receipt_is_effective_unavailable() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Deepseek;
+    app.auto_model = false;
+    app.reasoning_effort = ReasoningEffort::Max;
+    app.pending_turn_route = Some((
+        ApiProvider::Zai,
+        crate::config::ZAI_GLM_5_2_MODEL.to_string(),
+        true,
+    ));
+
+    assert_eq!(
+        app.reasoning_effort_display_label(),
+        "max→effective unavailable"
     );
 }
 
@@ -378,6 +883,9 @@ fn reasoning_effort_display_receipts_route_normalization() {
     app.active_route_base_url = crate::config::DEFAULT_KIMI_CODE_BASE_URL.to_string();
     app.model = "k3".to_string();
     assert_eq!(app.reasoning_effort_display_label(), "low");
+
+    app.reasoning_effort = ReasoningEffort::Off;
+    assert_eq!(app.reasoning_effort_display_label(), "off→low");
 }
 
 #[test]
@@ -795,6 +1303,7 @@ fn cny_display_falls_back_to_usd_for_usd_only_costs() {
     let mut app = App::new(test_options(false), &Config::default());
     app.cost_currency = CostCurrency::Cny;
     app.accrue_session_cost_estimate(CostEstimate::usd_only(0.42));
+    app.session.cost_priced_turns = 1;
 
     let displayed = app.displayed_session_cost_for_currency(CostCurrency::Cny);
 
@@ -811,11 +1320,29 @@ fn cny_display_keeps_cny_when_costs_have_cny_rates() {
         usd: 0.42,
         cny: 2.5,
     });
+    app.session.cost_priced_turns = 1;
+    app.session.cost_cny_priced_turns = 1;
 
     let displayed = app.displayed_session_cost_for_currency(CostCurrency::Cny);
 
     assert_eq!(displayed, 2.5);
     assert_eq!(app.format_cost_amount(displayed), "¥2.50");
+}
+
+#[test]
+fn cny_display_does_not_fall_back_to_an_unproven_usd_total() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.cost_currency = CostCurrency::Cny;
+    app.accrue_session_cost_estimate(CostEstimate::usd_only(0.42));
+
+    assert_eq!(
+        app.cost_display_currency(CostCurrency::Cny),
+        CostCurrency::Cny
+    );
+    assert_eq!(
+        app.displayed_session_cost_for_currency(CostCurrency::Cny),
+        0.0
+    );
 }
 
 #[test]
@@ -825,6 +1352,47 @@ fn subscription_route_hides_stale_session_dollars_in_footer() {
     app.billing_presentation =
         crate::route_billing::BillingPresentation::Subscription("Codex OAuth quota");
     assert!(crate::tui::footer_ui::footer_cost_spans(&app).is_empty());
+}
+
+#[test]
+fn provider_switch_keeps_audited_cumulative_spend_visible() {
+    let mut app = App::new(test_options(false), &Config::default());
+    let usage = crate::models::Usage {
+        input_tokens: 10_000,
+        output_tokens: 1_000,
+        ..Default::default()
+    };
+    let priced = crate::pricing::audit_turn_cost_for_provider_at(
+        ApiProvider::Deepseek,
+        "deepseek-v4-flash",
+        &usage,
+        chrono::Utc::now(),
+    );
+    app.record_turn_cost_audit(&priced);
+    app.accrue_session_cost_estimate(priced.estimate.expect("priced"));
+
+    app.api_provider = ApiProvider::OpenaiCodex;
+    app.model = "gpt-5.5".to_string();
+    app.billing_presentation =
+        crate::route_billing::BillingPresentation::Subscription("Codex OAuth quota");
+    assert!(matches!(
+        app.cumulative_usage_chip(),
+        crate::route_billing::UsageChip::Money(_)
+    ));
+    assert!(!crate::tui::footer_ui::footer_cost_spans(&app).is_empty());
+
+    let unknown = crate::pricing::audit_turn_cost_for_route_at(
+        ApiProvider::Openai,
+        "gpt-5.5",
+        Some(crate::pricing::UNCLASSIFIED_BILLING_SURFACE),
+        &usage,
+        chrono::Utc::now(),
+    );
+    app.record_turn_cost_audit(&unknown);
+    assert!(matches!(
+        app.cumulative_usage_chip(),
+        crate::route_billing::UsageChip::PricedSubtotal { legacy: false, .. }
+    ));
 }
 
 #[test]
@@ -3406,6 +3974,34 @@ fn enter_inside_paste_burst_window_after_flush_inserts_newline_not_submit() {
     );
 }
 
+/// The absorbed Enter above must not buy the window more time. Re-arming on
+/// it meant a user pressing Enter to send kept extending suppression by
+/// another 120ms per press, so the composer only ever grew newlines and
+/// never submitted.
+#[test]
+fn enter_absorbed_after_flush_does_not_re_arm_the_suppression_window() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.use_paste_burst_detection = true;
+    app.input = "hello".to_string();
+    app.cursor_position = "hello".chars().count();
+    let now = Instant::now();
+    app.paste_burst.extend_window(now);
+
+    assert!(
+        app.handle_composer_enter().is_none(),
+        "first Enter is absorbed as the paste's possible trailing newline"
+    );
+    assert_eq!(app.input, "hello\n");
+
+    // The window must still expire relative to `now` — the moment the burst
+    // last saw real input — not relative to the Enter that was absorbed.
+    assert!(
+        !app.paste_burst
+            .newline_should_insert_instead_of_submit(now + Duration::from_millis(121)),
+        "absorbing an Enter must not extend the suppression window"
+    );
+}
+
 #[test]
 fn enter_outside_any_paste_burst_window_submits_normally() {
     // Regression guard: the suppression must not trip when the user
@@ -3736,13 +4332,13 @@ fn submit_disposition_immediate_when_idle_and_online() {
 
 #[test]
 fn submit_disposition_queue_when_busy_and_online_not_streaming() {
-    // Busy but not streaming means the model is still waiting, so Enter can
-    // amend the active turn immediately.
+    // Bare Enter has one stable busy-state meaning even before the provider
+    // emits its first token: queue a follow-up for the next turn.
     let mut app = App::new(test_options(false), &Config::default());
     app.is_loading = true;
     app.offline_mode = false;
     // streaming_message_index is None (default) → waiting phase
-    assert_eq!(app.decide_submit_disposition(), SubmitDisposition::Steer);
+    assert_eq!(app.decide_submit_disposition(), SubmitDisposition::Queue);
 }
 
 #[test]
@@ -3776,7 +4372,7 @@ fn submit_disposition_offline_busy_queues() {
 #[test]
 fn bare_enter_while_streaming_stays_queue_not_steer() {
     let mut app = App::new(test_options(false), &Config::default());
-    // Busy + streaming: every bare Enter queues. Steer is Shift/Ctrl+Enter only.
+    // Busy + streaming: every bare Enter queues. Steer is Ctrl+Enter only.
     app.is_loading = true;
     app.streaming_message_index = Some(0);
 
@@ -3787,7 +4383,7 @@ fn bare_enter_while_streaming_stays_queue_not_steer() {
 }
 
 #[test]
-fn empty_composer_second_enter_does_not_steal_queued_for_steer() {
+fn submit_disposition_does_not_mutate_the_queue() {
     let mut app = App::new(test_options(false), &Config::default());
     app.is_loading = true;
     app.streaming_message_index = Some(0);
@@ -3795,7 +4391,8 @@ fn empty_composer_second_enter_does_not_steal_queued_for_steer() {
     app.queue_message(QueuedMessage::new("older queued".to_string(), None));
     app.queue_message(QueuedMessage::new("just typed follow-up".to_string(), None));
     assert!(app.input.is_empty());
-    // Bare Enter no longer pops the queue for steer; messages stay queued.
+    // The event loop owns empty-Enter queue promotion. Merely asking for the
+    // typed-submit disposition must not mutate queue state.
     assert_eq!(app.enter_with_double_tap(), Some(SubmitDisposition::Queue));
     assert_eq!(app.queued_message_count(), 2);
 }
@@ -4829,4 +5426,965 @@ fn onboarding_submit_api_key_routes_non_deepseek_provider_table() -> std::io::Re
     assert!(contents.contains("openrouter"), "{contents}");
     assert!(contents.contains("onboarding-openrouter-key"));
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Startup-default persistence (mode + thinking)
+// ---------------------------------------------------------------------------
+//
+// Before this lane, `settings.default_mode` was written in exactly two places
+// — a setup-preset apply and `/config` — so interactive mode cycling never
+// persisted and Operate silently reverted to Act on restart. Reasoning effort
+// persisted, but only through the model/effort picker, so Ctrl+T and the
+// hotbar `reasoning.cycle` action were equally lossy.
+
+/// Seal `HOME`/`CODEWHALE_HOME` onto a temp dir so these tests can assert the
+/// real write/reload round trip without touching the developer's settings.
+fn sealed_settings_home(tmp: &std::path::Path) -> Vec<EnvVarGuard> {
+    vec![
+        EnvVarGuard::set("HOME", tmp),
+        EnvVarGuard::set("USERPROFILE", tmp),
+        EnvVarGuard::set("CODEWHALE_HOME", tmp.join(".codewhale")),
+        EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH"),
+        EnvVarGuard::remove("CODEWHALE_CONFIG_PATH"),
+    ]
+}
+
+#[test]
+fn interactive_mode_cycle_persists_the_startup_default() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let _env = sealed_settings_home(tmp.path());
+    let _writes = crate::tui::startup_defaults::allow_writes_in_tests();
+
+    let mut app = App::new(test_options(false), &Config::default());
+    app.mode = AppMode::Agent;
+    app.cycle_mode();
+
+    assert_eq!(
+        app.mode,
+        AppMode::Operate,
+        "Act -> Operate is the Tab cycle"
+    );
+    let reloaded = Settings::load().expect("reload settings");
+    assert_eq!(
+        reloaded.default_mode, "operate",
+        "the mode the user cycled into must be the startup default"
+    );
+    assert_eq!(
+        AppMode::from_setting(&reloaded.default_mode),
+        AppMode::Operate,
+        "a restart must restore the last user choice"
+    );
+    assert!(
+        app.startup_defaults.drain_failures().is_empty(),
+        "a successful write must not report a failure"
+    );
+}
+
+#[test]
+fn explicit_mode_selection_and_hotbar_share_the_persistence_owner() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let _env = sealed_settings_home(tmp.path());
+    let _writes = crate::tui::startup_defaults::allow_writes_in_tests();
+
+    let mut app = App::new(test_options(false), &Config::default());
+    assert_eq!(app.select_mode(AppMode::Plan), SettingSelection::Changed);
+    assert_eq!(Settings::load().expect("reload").default_mode, "plan");
+
+    // The legacy YOLO entry point installs Act, so that is what must persist —
+    // "yolo" is a permission alias, never a startup mode.
+    assert_eq!(app.select_mode(AppMode::Yolo), SettingSelection::Changed);
+    assert_eq!(Settings::load().expect("reload").default_mode, "agent");
+}
+
+#[test]
+fn session_restore_and_effective_turn_paths_do_not_rewrite_the_startup_default() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let _env = sealed_settings_home(tmp.path());
+    let _writes = crate::tui::startup_defaults::allow_writes_in_tests();
+
+    let mut app = App::new(test_options(false), &Config::default());
+    app.select_mode(AppMode::Plan);
+    assert_eq!(Settings::load().expect("reload").default_mode, "plan");
+
+    // `set_mode` is the session-only primitive used by session restore and
+    // preset application. It must move the live session without claiming the
+    // user picked a new startup default.
+    assert!(app.set_mode(AppMode::Operate));
+    assert_eq!(app.mode, AppMode::Operate);
+    assert_eq!(
+        Settings::load().expect("reload").default_mode,
+        "plan",
+        "restoring a session must not rewrite the startup default"
+    );
+}
+
+#[test]
+fn reselecting_restored_live_mode_updates_the_startup_default() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let _env = sealed_settings_home(tmp.path());
+    let _writes = crate::tui::startup_defaults::allow_writes_in_tests();
+
+    Settings::transact(|settings| {
+        settings.default_mode = "agent".to_string();
+        Ok(())
+    })
+    .expect("seed startup default");
+    let mut app = App::new(test_options(false), &Config::default());
+    assert!(app.set_mode(AppMode::Operate), "simulate session restore");
+    assert_eq!(Settings::load().expect("reload").default_mode, "agent");
+
+    assert_eq!(
+        app.select_mode(AppMode::Operate),
+        SettingSelection::PersistedSame,
+        "an accepted selection that did not move live mode is not a refusal"
+    );
+    assert_eq!(
+        Settings::load().expect("reload").default_mode,
+        "operate",
+        "the explicit same-live selection must still become the startup default"
+    );
+}
+
+#[test]
+fn mode_change_refused_while_a_turn_runs_persists_nothing() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let _env = sealed_settings_home(tmp.path());
+    let _writes = crate::tui::startup_defaults::allow_writes_in_tests();
+
+    let mut app = App::new(test_options(false), &Config::default());
+    app.select_mode(AppMode::Plan);
+    app.is_loading = true;
+    app.cycle_mode();
+
+    assert_eq!(app.mode, AppMode::Plan, "#2982 lock still holds");
+    assert_eq!(
+        Settings::load().expect("reload").default_mode,
+        "plan",
+        "a refused change must not be persisted"
+    );
+}
+
+#[test]
+fn reasoning_cycle_persists_through_the_same_owner_as_the_picker() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let _env = sealed_settings_home(tmp.path());
+    let _writes = crate::tui::startup_defaults::allow_writes_in_tests();
+
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Deepseek;
+    app.auto_model = false;
+    app.reasoning_effort = ReasoningEffort::Off;
+
+    // Ctrl+T and the hotbar `reasoning.cycle` action both land in
+    // `apply_reasoning_effort_cycle`.
+    app.apply_reasoning_effort_cycle();
+
+    assert_eq!(app.reasoning_effort, ReasoningEffort::High);
+    assert_eq!(
+        Settings::load()
+            .expect("reload settings")
+            .reasoning_effort
+            .as_deref(),
+        Some("high"),
+        "a restart must restore the last thinking choice"
+    );
+}
+
+#[test]
+fn failed_startup_default_write_is_reported_not_swallowed() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    // A regular file where the home directory must be: every settings write
+    // below it fails.
+    let blocked_home = tmp.path().join("codewhale-home-file");
+    std::fs::write(&blocked_home, "not a directory").expect("blocking file");
+    let _home = EnvVarGuard::set("HOME", tmp.path());
+    let _user_profile = EnvVarGuard::set("USERPROFILE", tmp.path());
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &blocked_home);
+    let _deepseek_config = EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
+    let _codewhale_config = EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
+    let _writes = crate::tui::startup_defaults::allow_writes_in_tests();
+
+    let mut app = App::new(test_options(false), &Config::default());
+    assert_eq!(
+        app.select_mode(AppMode::Plan),
+        SettingSelection::Changed,
+        "the live session still changes; only the durable write fails"
+    );
+    assert_eq!(app.mode, AppMode::Plan);
+
+    app.drain_startup_default_failures();
+    let toast = app
+        .status_toasts
+        .iter()
+        .find(|toast| toast.text.contains("startup mode"))
+        .expect("a failed startup-default write must surface a toast");
+    assert!(
+        toast.text.contains("was not saved"),
+        "toast must say the write did not land, got {:?}",
+        toast.text
+    );
+    assert!(
+        !toast.text.contains(".codewhale"),
+        "a failure toast must not carry the settings path, got {:?}",
+        toast.text
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Startup-default write ordering
+// ---------------------------------------------------------------------------
+//
+// Each write is a load / modify / save transaction over one `settings.toml`.
+// These tests run on a real multi-threaded runtime so the writes actually go
+// through `spawn_blocking`, and assert the outcome is decided by the order the
+// user acted in — not by which blocking task the scheduler happened to pick.
+// `StartupDefaultsWriter::flush` is the determinism hook: it blocks until the
+// queue is empty and no transaction is in flight.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rapid_mode_selections_persist_the_last_one_not_the_last_to_finish() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let _env = sealed_settings_home(tmp.path());
+    let _writes = crate::tui::startup_defaults::allow_writes_in_tests();
+
+    let mut app = App::new(test_options(false), &Config::default());
+    // Faster than a human can Tab, and deliberately revisiting modes so a
+    // reordered transaction would land on a value that is also "plausible".
+    for mode in [
+        AppMode::Plan,
+        AppMode::Operate,
+        AppMode::Agent,
+        AppMode::Plan,
+        AppMode::Operate,
+        AppMode::Agent,
+        AppMode::Plan,
+    ] {
+        app.select_mode(mode);
+    }
+    app.startup_defaults.flush();
+
+    assert_eq!(app.mode, AppMode::Plan);
+    assert_eq!(
+        Settings::load().expect("reload").default_mode,
+        "plan",
+        "the last selection must win, whatever order the writers ran in"
+    );
+    assert!(
+        app.startup_defaults.drain_failures().is_empty(),
+        "no write in the burst may fail"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rapid_thinking_selections_persist_the_last_one() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let _env = sealed_settings_home(tmp.path());
+    let _writes = crate::tui::startup_defaults::allow_writes_in_tests();
+
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Deepseek;
+    app.auto_model = false;
+    app.reasoning_effort = ReasoningEffort::Off;
+
+    for _ in 0..6 {
+        app.apply_reasoning_effort_cycle();
+    }
+    app.startup_defaults.flush();
+
+    let expected = app.reasoning_effort.as_setting_for_route(
+        app.api_provider,
+        &app.active_route_base_url,
+        &app.model,
+    );
+    assert_eq!(
+        Settings::load()
+            .expect("reload")
+            .reasoning_effort
+            .as_deref(),
+        Some(expected),
+        "the tier the session ended on must be the tier on disk"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interleaved_mode_thinking_and_model_writes_do_not_clobber_each_other() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let _env = sealed_settings_home(tmp.path());
+    let _writes = crate::tui::startup_defaults::allow_writes_in_tests();
+
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Deepseek;
+    app.auto_model = false;
+    app.reasoning_effort = ReasoningEffort::Off;
+
+    // Queued, non-blocking: mode then thinking.
+    assert_eq!(app.select_mode(AppMode::Plan), SettingSelection::Changed);
+    app.apply_reasoning_effort_cycle();
+    let cycled_effort = app.reasoning_effort.as_setting_for_route(
+        app.api_provider,
+        &app.active_route_base_url,
+        &app.model,
+    );
+
+    // The model picker's synchronous write. It must apply *behind* the two
+    // queued selections above, so neither is lost and neither is re-applied
+    // over a newer value.
+    app.startup_defaults
+        .apply_blocking(
+            crate::tui::startup_defaults::StartupDefaults::default()
+                .with_default_model("deepseek-chat"),
+        )
+        .expect("model write must land");
+
+    let after_model = Settings::load().expect("reload");
+    let persisted_model = after_model
+        .default_model
+        .clone()
+        .expect("model picker write must be on disk");
+    assert_eq!(
+        after_model.default_mode, "plan",
+        "the queued mode selection must have been applied before the model write"
+    );
+    assert_eq!(
+        after_model.reasoning_effort.as_deref(),
+        Some(cycled_effort),
+        "the queued thinking selection must not be lost by the model write"
+    );
+
+    // A later mode selection must win for its own field and leave the other
+    // two fields exactly as the earlier writes left them.
+    assert_eq!(app.select_mode(AppMode::Operate), SettingSelection::Changed);
+    app.startup_defaults.flush();
+
+    let final_settings = Settings::load().expect("reload");
+    assert_eq!(final_settings.default_mode, "operate");
+    assert_eq!(
+        final_settings.default_model.as_deref(),
+        Some(persisted_model.as_str()),
+        "a mode write must not roll back the model"
+    );
+    assert_eq!(
+        final_settings.reasoning_effort.as_deref(),
+        Some(cycled_effort),
+        "a mode write must not roll back the thinking level"
+    );
+    assert!(app.startup_defaults.drain_failures().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Startup defaults vs. the *other* settings writers
+// ---------------------------------------------------------------------------
+//
+// `StartupDefaultsWriter` only serializes the transactions it owns. The tests
+// above prove that much. What follows is the boundary the writer cannot provide
+// on its own: `settings.toml` has direct writers in the same process — most
+// sharply the Shift+Tab permission posture on the same event loop — and each of
+// them loads the whole file, changes some fields, and writes the whole file
+// back. Two such writers that do not share a load/modify/save lock each write
+// back the other's pre-image, and whichever saves last silently reverts the
+// other's field. That boundary now lives in `Settings::transact`.
+
+/// Seal the settings file onto `tmp` via the config-path override, and hand back
+/// the root config path the posture writers need. Caller must already hold
+/// `lock_test_env()`.
+fn sealed_settings_with_root_config(
+    tmp: &std::path::Path,
+) -> (std::path::PathBuf, Vec<EnvVarGuard>) {
+    let config_path = tmp.join("config.toml");
+    let guards = vec![
+        EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_path),
+        EnvVarGuard::remove("CODEWHALE_CONFIG_PATH"),
+        EnvVarGuard::remove("DEEPSEEK_APPROVAL_POLICY"),
+    ];
+    (config_path, guards)
+}
+
+/// Tab (queued mode write) and Shift+Tab (synchronous posture write) hit the
+/// same file through different writers. Neither may lose the other's field.
+///
+/// This is the concrete pair from the v0.9.1 report: mode cycling spawns a
+/// background `default_mode` transaction, the very next keystroke persists
+/// `permission_posture` inline, and before `Settings::transact` the two loaded
+/// the same bytes — so the later save reverted whichever field the earlier one
+/// had just written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mode_and_permission_posture_writes_do_not_clobber_each_other() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (config_path, _env) = sealed_settings_with_root_config(tmp.path());
+    let _writes = crate::tui::startup_defaults::allow_writes_in_tests();
+
+    let mut options = test_options(false);
+    options.start_in_agent_mode = true;
+    options.config_path = Some(config_path);
+    let mut app = App::new(options, &Config::default());
+    app.approval_mode = ApprovalMode::Suggest;
+    app.mode = AppMode::Agent;
+
+    // Alternate the two writers faster than a human can press keys. Plan is
+    // skipped because it refuses permission changes by design (#3386), so every
+    // iteration below genuinely performs both writes.
+    for next_mode in [
+        AppMode::Operate,
+        AppMode::Agent,
+        AppMode::Operate,
+        AppMode::Agent,
+        AppMode::Operate,
+    ] {
+        assert_eq!(
+            app.select_mode(next_mode),
+            SettingSelection::Changed,
+            "mode selection must change mode"
+        );
+        assert!(
+            app.cycle_approval_posture(),
+            "the posture write must succeed, or the assertion below is vacuous"
+        );
+    }
+    app.startup_defaults.flush();
+
+    let expected_posture = App::approval_posture_setting(app.mode_prefs.agent_approval_mode);
+    let saved = Settings::load_persisted().expect("reload settings");
+    assert_eq!(
+        saved.default_mode, "operate",
+        "the posture writer must not revert the mode the user cycled into"
+    );
+    assert_eq!(
+        saved.permission_posture.as_deref(),
+        Some(expected_posture),
+        "the mode writer must not revert the posture the user cycled into"
+    );
+    assert!(
+        app.startup_defaults.drain_failures().is_empty(),
+        "no write in the burst may fail"
+    );
+}
+
+/// The same boundary for the thinking write against an unrelated direct writer.
+///
+/// `Settings::transact` here stands in for every load/modify/save site that is
+/// not the startup-defaults writer — `/set --save`, the sidebar and work-surface
+/// size persists, the preset apply, the pin reorder. They all share one lock now,
+/// so a queued thinking write and an unrelated key cannot revert each other.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn thinking_and_an_unrelated_direct_setting_write_do_not_clobber_each_other() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let _env = sealed_settings_home(tmp.path());
+    let _writes = crate::tui::startup_defaults::allow_writes_in_tests();
+
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Deepseek;
+    app.auto_model = false;
+    app.reasoning_effort = ReasoningEffort::Off;
+
+    for index in 0..6 {
+        app.apply_reasoning_effort_cycle();
+        // Interleaved on the same thread, exactly as the event loop would when a
+        // `/set --save` or a divider drag lands between two Ctrl+T presses.
+        Settings::transact(|settings| settings.set("max_history", &(100 + index).to_string()))
+            .expect("the direct write must land");
+    }
+    app.startup_defaults.flush();
+
+    let expected_effort = app.reasoning_effort.as_setting_for_route(
+        app.api_provider,
+        &app.active_route_base_url,
+        &app.model,
+    );
+    let saved = Settings::load_persisted().expect("reload settings");
+    assert_eq!(
+        saved.reasoning_effort.as_deref(),
+        Some(expected_effort),
+        "the direct writer must not revert the thinking level"
+    );
+    assert_eq!(
+        saved.max_input_history, 105,
+        "the thinking writer must not revert the last direct write"
+    );
+    assert!(app.startup_defaults.drain_failures().is_empty());
+}
+
+/// Last write wins across *both* kinds of writer, and only for its own field.
+///
+/// The startup-default writer decides ordering among its own queued
+/// transactions; `Settings::transact` decides atomicity against everything else.
+/// Together the final file must be the last value the user chose for every field
+/// they touched — not a mixture that depends on which blocking task the
+/// scheduler picked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rapid_mixed_writes_settle_on_the_last_value_for_every_field() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let (config_path, _env) = sealed_settings_with_root_config(tmp.path());
+    let _writes = crate::tui::startup_defaults::allow_writes_in_tests();
+
+    let mut options = test_options(false);
+    options.start_in_agent_mode = true;
+    options.config_path = Some(config_path);
+    let mut app = App::new(options, &Config::default());
+    app.api_provider = ApiProvider::Deepseek;
+    app.auto_model = false;
+    app.reasoning_effort = ReasoningEffort::Off;
+    app.approval_mode = ApprovalMode::Suggest;
+    app.mode = AppMode::Agent;
+
+    for index in 0..5 {
+        // Queued (background) writers.
+        assert_eq!(
+            app.select_mode(if index % 2 == 0 {
+                AppMode::Operate
+            } else {
+                AppMode::Agent
+            }),
+            SettingSelection::Changed
+        );
+        app.apply_reasoning_effort_cycle();
+        // Synchronous direct writers.
+        assert!(app.cycle_approval_posture());
+        Settings::transact(|settings| settings.set("max_history", &(200 + index).to_string()))
+            .expect("the direct write must land");
+    }
+    // A model write goes through the synchronous startup-defaults path, which
+    // must land behind everything queued before it.
+    app.startup_defaults
+        .apply_blocking(
+            crate::tui::startup_defaults::StartupDefaults::default()
+                .with_default_model("deepseek-chat"),
+        )
+        .expect("model write must land");
+    app.startup_defaults.flush();
+
+    let expected_effort = app.reasoning_effort.as_setting_for_route(
+        app.api_provider,
+        &app.active_route_base_url,
+        &app.model,
+    );
+    let expected_posture = App::approval_posture_setting(app.mode_prefs.agent_approval_mode);
+    let saved = Settings::load_persisted().expect("reload settings");
+    assert_eq!(saved.default_mode, app.mode.as_setting());
+    assert_eq!(saved.reasoning_effort.as_deref(), Some(expected_effort));
+    assert_eq!(saved.permission_posture.as_deref(), Some(expected_posture));
+    assert_eq!(saved.max_input_history, 204);
+    assert_eq!(saved.default_model.as_deref(), Some("deepseek-chat"));
+    assert!(app.startup_defaults.drain_failures().is_empty());
+}
+
+/// A test that never sealed its environment must not be able to write, and must
+/// not pay for another test's sealed scope.
+///
+/// Almost every `App` test cycles modes without sealing `HOME`. Those calls have
+/// to be inert: not "usually inert because no other test happens to have opted
+/// in", but inert by construction, because the alternative is rewriting the
+/// developer's real `~/.codewhale/settings.toml` during `cargo test`.
+#[test]
+fn mode_cycling_in_an_unsealed_test_writes_nothing() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.mode = AppMode::Agent;
+    assert_eq!(
+        app.select_mode(AppMode::Operate),
+        SettingSelection::Changed,
+        "the live session must still change"
+    );
+    assert_eq!(app.mode, AppMode::Operate);
+    assert_eq!(
+        app.startup_defaults.pending_len(),
+        0,
+        "an unsealed test must enqueue nothing a later sealed drain could inherit"
+    );
+    assert!(
+        app.startup_defaults.drain_failures().is_empty(),
+        "a skipped test write is not a user-visible failure"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The live-route turn lock reaches the slash surfaces (#2982)
+// ---------------------------------------------------------------------------
+//
+// The lock used to live only in the selectors — Tab, Ctrl+T, the pickers, the
+// hotbar. `/set` and `/config <key> <value>` reached the same live route through
+// a different door, and both are reachable mid-turn: the composer accepts
+// Shift+Enter and the slash menu while `is_loading`. So during a running turn a
+// slash command could swap the model, thinking level, mode, or provider out from
+// under the engine *and* persist it. The refusal now sits in one place, above
+// every disk write and every `App` mutation.
+
+/// Every live-route key and alias, exercised through the same entry point the
+/// slash commands use. Live state, persisted state, the startup-default queue,
+/// and setup progress must all be exactly where they started.
+#[test]
+fn slash_config_and_set_refuse_every_live_route_key_while_a_turn_runs() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let _env = sealed_settings_home(tmp.path());
+    let _writes = crate::tui::startup_defaults::allow_writes_in_tests();
+
+    Settings::transact(|settings| {
+        settings.default_mode = "plan".to_string();
+        settings.default_model = Some("deepseek-chat".to_string());
+        settings.reasoning_effort = Some("off".to_string());
+        Ok(())
+    })
+    .expect("seed the persisted route");
+    let before = Settings::load_persisted().expect("read the seeded settings");
+
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Deepseek;
+    app.auto_model = false;
+    app.set_model_selection("deepseek-chat".to_string());
+    app.reasoning_effort = ReasoningEffort::Off;
+    let _ = app.set_mode(AppMode::Plan);
+    app.is_loading = true;
+
+    let live_mode = app.mode;
+    let live_model = app.model.clone();
+    let live_effort = app.reasoning_effort;
+    let live_provider = app.api_provider;
+
+    // Both `--save` and session-only forms: the refusal is above the branch
+    // that decides whether to persist, so neither may get through.
+    for persist in [true, false] {
+        for (key, value) in [
+            ("model", "deepseek-v4-pro"),
+            ("default_model", "deepseek-v4-pro"),
+            ("reasoning_effort", "high"),
+            ("effort", "high"),
+            ("mode", "operate"),
+            ("provider", "openai"),
+        ] {
+            let result = crate::commands::set_config_value(&mut app, key, value, persist);
+            assert!(
+                result.is_error,
+                "/set {key} {value} (persist={persist}) must be refused mid-turn"
+            );
+            let message = result.message.unwrap_or_default();
+            assert!(
+                message.contains("locked while a turn is running"),
+                "the refusal must say why, got {message:?}"
+            );
+        }
+    }
+
+    assert_eq!(app.mode, live_mode, "live mode must not move");
+    assert_eq!(app.model, live_model, "the live route model must not move");
+    assert_eq!(
+        app.reasoning_effort, live_effort,
+        "the live thinking tier must not move"
+    );
+    assert_eq!(
+        app.api_provider, live_provider,
+        "the live provider must not move"
+    );
+
+    let after = Settings::load_persisted().expect("reload settings");
+    assert_eq!(after.default_mode, before.default_mode);
+    assert_eq!(after.default_model, before.default_model);
+    assert_eq!(after.reasoning_effort, before.reasoning_effort);
+    assert_eq!(after.provider_models, before.provider_models);
+
+    assert_eq!(
+        app.startup_defaults.pending_len(),
+        0,
+        "a refused command must not queue a startup-default write"
+    );
+    app.startup_defaults.flush();
+    assert!(
+        app.startup_defaults.drain_failures().is_empty(),
+        "a refusal is not a write failure"
+    );
+    assert_eq!(
+        Settings::load_persisted()
+            .expect("reload after flush")
+            .default_mode,
+        before.default_mode,
+        "nothing may land after the queue is drained either"
+    );
+    assert!(
+        !codewhale_config::SetupState::path()
+            .expect("setup state path")
+            .exists(),
+        "a refused route change must not record provider/model setup progress"
+    );
+}
+
+/// `default_mode` is a restart default that `set_config_value` deliberately does
+/// not apply to the live session, so the turn lock must leave it alone. Locking
+/// it would refuse a key that cannot affect the running turn.
+#[test]
+fn restart_only_default_mode_is_still_settable_while_a_turn_runs() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let _env = sealed_settings_home(tmp.path());
+    let _writes = crate::tui::startup_defaults::allow_writes_in_tests();
+
+    let mut app = App::new(test_options(false), &Config::default());
+    let _ = app.set_mode(AppMode::Plan);
+    app.is_loading = true;
+
+    let result = crate::commands::set_config_value(&mut app, "default_mode", "operate", true);
+    assert!(
+        !result.is_error,
+        "default_mode is restart-only, got {:?}",
+        result.message
+    );
+    assert_eq!(
+        Settings::load_persisted().expect("reload").default_mode,
+        "operate"
+    );
+    assert_eq!(
+        app.mode,
+        AppMode::Plan,
+        "a restart default must not move the live session"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Shutdown
+// ---------------------------------------------------------------------------
+
+/// The last thing a user does before quitting is very often the selection they
+/// most want to keep. Those writes are queued off the event loop on purpose, so
+/// without an explicit join at shutdown the process can exit with the newest
+/// selection still sitting in the queue.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_flushes_the_last_selection_and_returns_late_failures() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let _env = sealed_settings_home(tmp.path());
+    let _writes = crate::tui::startup_defaults::allow_writes_in_tests();
+
+    let mut app = App::new(test_options(false), &Config::default());
+    // Deliberately *not* flushed and never drained by an event-loop iteration:
+    // this is the "Tab, then immediately quit" shape.
+    assert_eq!(app.select_mode(AppMode::Operate), SettingSelection::Changed);
+
+    let failures = app.startup_defaults.shutdown();
+    assert!(failures.is_empty(), "the write must land, not fail");
+    assert_eq!(
+        Settings::load_persisted().expect("reload").default_mode,
+        "operate",
+        "the last immediate selection must be on disk after shutdown"
+    );
+}
+
+/// A write that fails after the final redraw cannot be toasted — the toast
+/// surface will never be painted again. `shutdown` therefore *returns* the
+/// failures so the caller can print them on the restored terminal, and the
+/// message it produces is localized and path-free.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_late_startup_default_failure_is_returned_not_only_logged() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    // A regular file where the home directory must be: every settings write
+    // below it fails.
+    let blocked_home = tmp.path().join("codewhale-home-file");
+    std::fs::write(&blocked_home, "not a directory").expect("blocking file");
+    let _home = EnvVarGuard::set("HOME", tmp.path());
+    let _user_profile = EnvVarGuard::set("USERPROFILE", tmp.path());
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &blocked_home);
+    let _deepseek_config = EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
+    let _codewhale_config = EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
+    let _writes = crate::tui::startup_defaults::allow_writes_in_tests();
+
+    let mut app = App::new(test_options(false), &Config::default());
+    assert_eq!(app.select_mode(AppMode::Operate), SettingSelection::Changed);
+
+    let failures = app.startup_defaults.shutdown();
+    let failure = failures
+        .first()
+        .expect("a failed write must be reported at shutdown, not swallowed");
+    assert_eq!(
+        failure.subjects,
+        vec![crate::tui::startup_defaults::StartupDefaultSubject::Mode]
+    );
+
+    let message = app.startup_default_failure_message(failure);
+    assert!(
+        message.contains("startup mode") && message.contains("was not saved"),
+        "the shutdown notice must name what was lost, got {message:?}"
+    );
+    assert!(
+        !message.contains(".codewhale") && !message.contains(tmp.path().to_str().unwrap()),
+        "the shutdown notice must not print the settings path, got {message:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Selector truth: refusal, live change, and persisted-same are three outcomes
+// ---------------------------------------------------------------------------
+//
+// `select_mode` used to return a bool. A refusal and an accepted same-live
+// selection both came back `false`, so `/mode`, the Alt+A/P/Y shortcuts, and the
+// hotbar mode rows all reported "Already in X mode." for both — including for
+// the case that had just rewritten the startup default.
+
+/// The three outcomes are distinguishable, and only a live change is a live
+/// change.
+#[test]
+fn mode_selection_reports_refusal_change_and_persisted_same_distinctly() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let _env = sealed_settings_home(tmp.path());
+    let _writes = crate::tui::startup_defaults::allow_writes_in_tests();
+
+    let mut app = App::new(test_options(false), &Config::default());
+    let _ = app.set_mode(AppMode::Agent);
+
+    assert_eq!(app.select_mode(AppMode::Operate), SettingSelection::Changed);
+    assert!(SettingSelection::Changed.changed_live_state());
+    assert!(SettingSelection::Changed.accepted());
+
+    assert_eq!(
+        app.select_mode(AppMode::Operate),
+        SettingSelection::PersistedSame
+    );
+    assert!(
+        !SettingSelection::PersistedSame.changed_live_state(),
+        "a persisted-same selection must not resync the engine"
+    );
+    assert!(
+        SettingSelection::PersistedSame.accepted(),
+        "a persisted-same selection did write the startup default"
+    );
+
+    app.is_loading = true;
+    assert_eq!(app.select_mode(AppMode::Plan), SettingSelection::Refused);
+    assert!(!SettingSelection::Refused.accepted());
+    assert_eq!(app.mode, AppMode::Operate, "a refusal changes nothing");
+}
+
+/// Every accepted same-live selection shows a saved receipt, and a refusal
+/// shows the lock message instead — the two must not read the same.
+#[test]
+fn slash_mode_distinguishes_a_saved_startup_default_from_a_refusal() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let _env = sealed_settings_home(tmp.path());
+    let _writes = crate::tui::startup_defaults::allow_writes_in_tests();
+
+    let mut app = App::new(test_options(false), &Config::default());
+    let _ = app.set_mode(AppMode::Operate);
+    Settings::transact(|settings| {
+        settings.default_mode = "agent".to_string();
+        Ok(())
+    })
+    .expect("seed a startup default that disagrees with the live mode");
+
+    // Same live mode, different startup default: `/mode operate` is a real save.
+    let receipt = crate::commands::switch_mode(&mut app, AppMode::Operate);
+    assert!(
+        receipt.contains("saved as startup default"),
+        "the save must be reported, got {receipt:?}"
+    );
+    app.startup_defaults.flush();
+    assert_eq!(
+        Settings::load_persisted().expect("reload").default_mode,
+        "operate"
+    );
+
+    // Mid-turn the same command must be refused, and say so.
+    app.is_loading = true;
+    let refusal = crate::commands::switch_mode(&mut app, AppMode::Plan);
+    assert!(
+        refusal.contains("locked while a turn is running"),
+        "a refusal must not read like a save, got {refusal:?}"
+    );
+    assert_ne!(refusal, receipt);
+}
+
+/// The hotbar mode rows share the receipt: dispatching a row for the live mode
+/// is `Handled` (no engine resync) but still tells the user it saved.
+#[test]
+fn hotbar_mode_row_for_the_live_mode_still_shows_the_saved_receipt() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let _env = sealed_settings_home(tmp.path());
+    let _writes = crate::tui::startup_defaults::allow_writes_in_tests();
+
+    let mut app = App::new(test_options(false), &Config::default());
+    let _ = app.set_mode(AppMode::Plan);
+    let outcome = app.select_mode(AppMode::Plan);
+    app.report_mode_selection(AppMode::Plan, outcome);
+
+    assert_eq!(outcome, SettingSelection::PersistedSame);
+    assert!(
+        app.status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("saved as startup default")),
+        "got {:?}",
+        app.status_message
+    );
+    app.startup_defaults.flush();
+    assert_eq!(
+        Settings::load_persisted().expect("reload").default_mode,
+        "plan"
+    );
+}
+
+/// v0.9.1 kimi-k3 dogfood report: `settings.toml`'s `[provider_models]` is a memory of the last
+/// `/model` pick, so it must not override a model the user named for *this*
+/// launch. A dogfood user ran `codewhale --provider moonshot --model kimi-k3`
+/// and the session header kept showing the remembered `kimi-k2.7-code` while
+/// `doctor` reported `kimi-k3`; header and route have to agree.
+#[test]
+fn an_explicit_launch_model_outranks_the_remembered_provider_model() {
+    let _lock = lock_test_env();
+    let temp = tempfile::tempdir().expect("sealed state root");
+    let config_path = temp.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        "provider = \"moonshot\"\n\n[providers.moonshot]\napi_key = \"k\"\nmodel = \"kimi-k3\"\n",
+    )
+    .expect("seed config");
+    std::fs::write(
+        temp.path().join("settings.toml"),
+        "[provider_models]\nmoonshot = \"kimi-k2.7-code\"\n",
+    )
+    .expect("seed settings");
+    let _config_path_guard = EnvVarGuard::set("DEEPSEEK_CONFIG_PATH", &config_path);
+    let _codewhale_config_path = EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
+
+    let config = Config::load(Some(config_path.clone()), None).expect("load sealed config");
+
+    // Without an explicit request this launch, the remembered pick still wins:
+    // that stickiness is what `/model` exists for.
+    let _no_flag = EnvVarGuard::remove("CODEWHALE_MODEL");
+    let _no_legacy_flag = EnvVarGuard::remove("DEEPSEEK_MODEL");
+    let remembered = App::new(
+        TuiOptions {
+            model: config.default_model(),
+            ..test_options(false)
+        },
+        &config,
+    );
+    assert_eq!(
+        remembered.model, "kimi-k2.7-code",
+        "the remembered /model pick remains the default when nothing was named"
+    );
+
+    // `--model` reaches this binary as CODEWHALE_MODEL. It must win.
+    let _model_flag = EnvVarGuard::set("CODEWHALE_MODEL", "kimi-k3");
+    let requested = App::new(
+        TuiOptions {
+            model: config.default_model(),
+            ..test_options(false)
+        },
+        &config,
+    );
+    assert_eq!(
+        requested.model, "kimi-k3",
+        "an explicit --model must never be silently replaced by session memory"
+    );
 }

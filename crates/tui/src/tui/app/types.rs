@@ -8,6 +8,42 @@
 
 use super::*;
 
+/// What an interactive setting selection actually did.
+///
+/// The three cases are genuinely different to the user, and the boolean this
+/// replaced conflated the last two: a refused selection and an accepted one
+/// that only wrote the startup default both returned `false`, so every caller
+/// reported "already in that mode" and showed no receipt for the write.
+///
+/// Only [`Self::Changed`] means live session state moved — that is the case
+/// that must still emit an `AppAction` so the engine is resynchronized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingSelection {
+    /// Live state moved, and the startup default was persisted.
+    Changed,
+    /// Live state already matched, and the startup default was persisted. This
+    /// is the normal shape after a session restore, where the live value and
+    /// the startup default legitimately disagree.
+    PersistedSame,
+    /// Refused by the turn lock (#2982). Nothing was written anywhere.
+    Refused,
+}
+
+impl SettingSelection {
+    /// Whether live state moved — i.e. whether the engine needs resyncing.
+    #[must_use]
+    pub fn changed_live_state(self) -> bool {
+        matches!(self, Self::Changed)
+    }
+
+    /// Whether the selection was accepted at all (either case that persisted).
+    #[must_use]
+    #[cfg(test)]
+    pub fn accepted(self) -> bool {
+        !matches!(self, Self::Refused)
+    }
+}
+
 /// Supported application modes for the TUI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
@@ -38,6 +74,49 @@ pub enum ReasoningEffort {
     Auto,
     #[default]
     Max,
+}
+
+/// Provider-effective reasoning state used by durable receipts and visible
+/// requested-to-effective labels.
+///
+/// Some routes, notably first-party GLM-5-Turbo, support a thinking toggle but
+/// publish no effort tiers. Keeping that state distinct prevents a requested
+/// `max` from being displayed or persisted as an effective `max` claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EffectiveReasoningEffort {
+    Tier(ReasoningEffort),
+    ThinkingEnabledGranularityUnavailable,
+    Unavailable,
+}
+
+impl From<EffectiveReasoningEffort> for crate::work_graph::ReasoningEffortTier {
+    fn from(value: EffectiveReasoningEffort) -> Self {
+        match value {
+            EffectiveReasoningEffort::Tier(tier) => tier.into(),
+            EffectiveReasoningEffort::ThinkingEnabledGranularityUnavailable => {
+                Self::ThinkingEnabledGranularityUnavailable
+            }
+            EffectiveReasoningEffort::Unavailable => Self::Unavailable,
+        }
+    }
+}
+
+impl From<crate::work_graph::ReasoningEffortTier> for EffectiveReasoningEffort {
+    fn from(value: crate::work_graph::ReasoningEffortTier) -> Self {
+        use crate::work_graph::ReasoningEffortTier as Tier;
+        match value {
+            Tier::Off => Self::Tier(ReasoningEffort::Off),
+            Tier::Low => Self::Tier(ReasoningEffort::Low),
+            Tier::Medium => Self::Tier(ReasoningEffort::Medium),
+            Tier::High => Self::Tier(ReasoningEffort::High),
+            Tier::Auto => Self::Tier(ReasoningEffort::Auto),
+            Tier::Max => Self::Tier(ReasoningEffort::Max),
+            Tier::ThinkingEnabledGranularityUnavailable => {
+                Self::ThinkingEnabledGranularityUnavailable
+            }
+            Tier::Unavailable => Self::Unavailable,
+        }
+    }
 }
 
 impl From<ReasoningEffort> for crate::work_graph::ReasoningEffortTier {
@@ -528,6 +607,13 @@ pub struct TuiOptions {
     /// session with the PR context already typed — the user can edit
     /// before sending or hit Enter to fire as-is.
     pub initial_input: Option<InitialInput>,
+    /// One-line receipt to show once at startup.
+    ///
+    /// Auto-resume uses this to say what it did — reattached, or fell back to
+    /// a fresh transcript because the candidate was missing, unreadable, or
+    /// recorded against a different workspace (#2934). Silence is the correct
+    /// value when nothing happened worth reporting.
+    pub startup_notice: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -749,6 +835,12 @@ pub enum AppAction {
     },
     /// Record that the bundled/default constitution should be used.
     UseBundledConstitution,
+    /// Open the exact effective base-prompt preview for the next turn (#3928).
+    ///
+    /// Handled where the session config lives, so the preview is built by the
+    /// same function the dispatch path uses. Human-only: it issues no provider
+    /// request and expands no tool catalog.
+    PreviewEffectiveBasePrompt,
     /// Disable the Hotbar: persist `hotbar = []` and clear the live slots.
     DisableHotbar,
     /// Restore the default recommended Hotbar slots: remove the `hotbar` key so
@@ -773,6 +865,23 @@ pub enum AppAction {
         clear: bool,
     },
     ListSubAgents,
+    /// Ask the engine to describe the exact next outbound request
+    /// (`/preview-request`, #1004). The engine is the authority: only it can
+    /// rebuild the current tool catalog, MCP state, gates, and resolved route.
+    PreviewOutboundRequest {
+        /// Render the manifest as JSON instead of the human-readable table.
+        json: bool,
+        /// Render the exact base prompt only. Never includes runtime/system layers.
+        base_prompt_only: bool,
+        /// Optional text used only to resolve `auto` reasoning/routing. Never
+        /// added to the conversation and never sent to a provider.
+        hypothetical_prompt: Option<String>,
+    },
+    /// Show bounded read-only text without copying it into transcript history.
+    OpenTextPager {
+        title: String,
+        content: String,
+    },
     FetchModels,
     /// Force a Models.dev live-catalog refresh into ProviderLake (#4187).
     RefreshModelsDevCatalog,

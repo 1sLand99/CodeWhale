@@ -22,6 +22,12 @@ pub struct PtySession {
     child: Box<dyn Child + Send + Sync>,
     writer: Box<dyn Write + Send>,
     buffer: Arc<Mutex<Vec<u8>>>,
+    /// Every byte the child ever wrote, never drained. `buffer` is consumed by
+    /// the frame parser, which is the wrong shape for assertions about the
+    /// control stream itself — terminal-mode setup/teardown is only visible as
+    /// escape sequences, and a mode that was enabled and then disabled leaves
+    /// no trace on the rendered screen at all.
+    transcript: Arc<Mutex<Vec<u8>>>,
     reader_handle: Option<JoinHandle<()>>,
 }
 
@@ -121,7 +127,9 @@ impl<'a> PtySessionBuilder<'a> {
         let writer = pair.master.take_writer().context("take writer")?;
 
         let buffer: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let transcript: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let buf_thread = Arc::clone(&buffer);
+        let transcript_thread = Arc::clone(&transcript);
         let reader_handle = thread::Builder::new()
             .name("qa-pty-reader".into())
             .spawn(move || {
@@ -132,6 +140,9 @@ impl<'a> PtySessionBuilder<'a> {
                         Ok(n) => {
                             if let Ok(mut b) = buf_thread.lock() {
                                 b.extend_from_slice(&chunk[..n]);
+                            }
+                            if let Ok(mut t) = transcript_thread.lock() {
+                                t.extend_from_slice(&chunk[..n]);
                             }
                         }
                         Err(_) => break,
@@ -145,6 +156,7 @@ impl<'a> PtySessionBuilder<'a> {
             child,
             writer,
             buffer,
+            transcript,
             reader_handle: Some(reader_handle),
         })
     }
@@ -179,6 +191,15 @@ impl PtySession {
     /// Drain any bytes the reader thread has pushed into the buffer. Returns
     /// the bytes read this call. Non-blocking — returns immediately even if
     /// the buffer is empty.
+    /// Every byte the child has written so far, including bytes already fed
+    /// to the frame parser. Non-destructive, so it can be sampled repeatedly.
+    pub fn transcript(&self) -> Vec<u8> {
+        self.transcript
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     pub fn drain(&mut self) -> Vec<u8> {
         let mut b = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
         std::mem::take(&mut *b)

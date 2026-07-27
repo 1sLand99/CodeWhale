@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 #[cfg(feature = "pdf")]
 use std::fmt::Display;
 
+use encoding_rs::{Encoding, UTF_8, UTF_16BE, UTF_16LE};
 use regex::Regex;
 
 use crate::tools::spec::ToolError;
@@ -54,6 +55,11 @@ static FALLBACK_RE: OnceLock<Vec<Regex>> = OnceLock::new();
 static PAGE_CHROME_RE: OnceLock<Regex> = OnceLock::new();
 static TAG_RE: OnceLock<Regex> = OnceLock::new();
 static WHITESPACE_RE: OnceLock<Regex> = OnceLock::new();
+
+/// HTML's encoding declaration prescan is intentionally small. Keeping the
+/// bound here prevents a late body string, script, or injected fragment from
+/// changing how an already-started document is decoded.
+const HTML_ENCODING_SNIFF_BYTES: usize = 1_024;
 
 pub(crate) fn extract_document(
     url: &str,
@@ -117,8 +123,9 @@ pub(crate) fn extract_document(
         )));
     }
 
-    let body = decode_text(bytes)?;
-    if is_html(declared, url, &body) {
+    let sniff_html = should_sniff_html_encoding(declared, url, bytes);
+    let body = decode_response_body(bytes, content_type, sniff_html)?;
+    if sniff_html || is_html(declared, url, &body) {
         return extract_html(url, &body);
     }
     if is_markdown(declared, url) {
@@ -289,13 +296,276 @@ fn js_required_error(url: &str) -> ToolError {
     ))
 }
 
-fn decode_text(bytes: &[u8]) -> Result<String, ToolError> {
-    if bytes.iter().take(8_192).any(|byte| *byte == 0) {
+/// Decode one response body without guessing from language statistics.
+///
+/// Precedence is receipt-grade and deterministic: BOM, recognized transport
+/// charset, an HTML-only bounded meta prescan, then UTF-8. Unknown transport
+/// labels deliberately fall through to a valid HTML declaration. `html_sniff`
+/// must come from MIME/URL/ASCII markup evidence; JSON and plain text callers
+/// pass `false`, so a body string cannot impersonate an HTML declaration.
+pub(crate) fn decode_response_body(
+    bytes: &[u8],
+    content_type: Option<&str>,
+    html_sniff: bool,
+) -> Result<String, ToolError> {
+    if let Some((encoding, bom_len)) = Encoding::for_bom(bytes) {
+        let (decoded, _) = encoding.decode_without_bom_handling(&bytes[bom_len..]);
+        reject_binary_nul(bytes, encoding, &decoded)?;
+        return Ok(decoded.into_owned());
+    }
+
+    let transport_encoding = content_type.and_then(content_type_encoding);
+    let encoding = transport_encoding
+        .or_else(|| html_sniff.then(|| html_meta_encoding(bytes)).flatten())
+        .unwrap_or(UTF_8);
+    let (decoded, _) = encoding.decode_without_bom_handling(bytes);
+    reject_binary_nul(bytes, encoding, &decoded)?;
+    Ok(decoded.into_owned())
+}
+
+fn reject_binary_nul(
+    bytes: &[u8],
+    encoding: &'static Encoding,
+    decoded: &str,
+) -> Result<(), ToolError> {
+    // UTF-16 uses zero bytes structurally for many characters, so inspect its
+    // decoded scalar values. Every other encoding must be NUL-free across the
+    // complete response; neither a BOM nor a late byte may bypass the guard.
+    let contains_nul = if encoding == UTF_16LE || encoding == UTF_16BE {
+        decoded.contains('\0')
+    } else {
+        bytes.contains(&0)
+    };
+    if contains_nul {
         return Err(ToolError::execution_failed(
             "Unsupported binary response contained NUL bytes",
         ));
     }
-    Ok(String::from_utf8_lossy(bytes).into_owned())
+    Ok(())
+}
+
+/// Parse only exact semicolon-delimited `charset` parameters. A random
+/// `charset=` substring inside another parameter is not transport authority.
+fn content_type_encoding(value: &str) -> Option<&'static Encoding> {
+    value.split(';').skip(1).find_map(|parameter| {
+        let (name, raw_value) = parameter.split_once('=')?;
+        if !name.trim().eq_ignore_ascii_case("charset") {
+            return None;
+        }
+        let value = raw_value.trim();
+        let value = match (value.as_bytes().first(), value.as_bytes().last()) {
+            (Some(b'"'), Some(b'"')) | (Some(b'\''), Some(b'\'')) if value.len() >= 2 => {
+                &value[1..value.len() - 1]
+            }
+            _ if value.contains('"') || value.contains('\'') => return None,
+            _ => value,
+        };
+        let label = value.trim();
+        (!label.is_empty())
+            .then(|| Encoding::for_label(label.as_bytes()))
+            .flatten()
+    })
+}
+
+fn should_sniff_html_encoding(content_type: Option<&str>, url: &str, bytes: &[u8]) -> bool {
+    match content_type {
+        Some("text/html" | "application/xhtml+xml") => true,
+        // Explicit non-HTML text and structured formats never consult markup
+        // embedded in their body.
+        Some(value) if value.starts_with("text/") || is_structured_text_type(value) => false,
+        Some("application/octet-stream") | None => {
+            url_path_ends_with(url, &[".html", ".htm"]) || looks_like_html_bytes(bytes)
+        }
+        Some(_) => false,
+    }
+}
+
+fn is_structured_text_type(content_type: &str) -> bool {
+    content_type.contains("json")
+        || content_type.contains("xml")
+        || content_type.contains("yaml")
+        || content_type.contains("javascript")
+}
+
+fn looks_like_html_bytes(bytes: &[u8]) -> bool {
+    let start = Encoding::for_bom(bytes).map_or(0, |(_, length)| length);
+    let end = bytes
+        .len()
+        .min(start.saturating_add(HTML_ENCODING_SNIFF_BYTES));
+    let ascii = ascii_lowercase_projection(&bytes[start..end]);
+    let Some(prefix) = html_prefix_after_leading_declarations(&ascii) else {
+        return false;
+    };
+    prefix.starts_with("<!doctype html")
+        || prefix.starts_with("<html")
+        || prefix.starts_with("<head")
+        || prefix.starts_with("<meta")
+}
+
+fn html_prefix_after_leading_declarations(mut prefix: &str) -> Option<&str> {
+    loop {
+        prefix = prefix.trim_start();
+        if let Some(comment) = prefix.strip_prefix("<!--") {
+            let end = comment.find("-->")?;
+            prefix = &comment[end + 3..];
+            continue;
+        }
+        if let Some(declaration) = prefix.strip_prefix("<?xml") {
+            let end = declaration.find("?>")?;
+            prefix = &declaration[end + 2..];
+            continue;
+        }
+        return Some(prefix);
+    }
+}
+
+fn html_meta_encoding(bytes: &[u8]) -> Option<&'static Encoding> {
+    let sniff_len = bytes.len().min(HTML_ENCODING_SNIFF_BYTES);
+    let html = ascii_lowercase_projection(&bytes[..sniff_len]);
+    let mut cursor = 0usize;
+
+    while let Some(relative) = html[cursor..].find('<') {
+        let start = cursor + relative;
+        if html[start..].starts_with("<!--") {
+            cursor = html[start + 4..]
+                .find("-->")
+                .map_or(html.len(), |end| start + 4 + end + 3);
+            continue;
+        }
+        if tag_starts_at(&html, start, "script") || tag_starts_at(&html, start, "style") {
+            let name = if tag_starts_at(&html, start, "script") {
+                "script"
+            } else {
+                "style"
+            };
+            let close = format!("</{name}");
+            cursor = html[start..]
+                .find(&close)
+                .and_then(|close_start| {
+                    html[start + close_start..]
+                        .find('>')
+                        .map(|end| start + close_start + end + 1)
+                })
+                .unwrap_or(html.len());
+            continue;
+        }
+        if !tag_starts_at(&html, start, "meta") {
+            cursor = start + 1;
+            continue;
+        }
+        let relative_end = html[start..].find('>')?;
+        let end = start + relative_end + 1;
+        let tag = &html[start..end];
+        if let Some(label) = html_attribute_value(tag, "charset")
+            && let Some(encoding) = Encoding::for_label(label.as_bytes())
+        {
+            return Some(normalize_meta_encoding(encoding));
+        }
+        let is_content_type = html_attribute_value(tag, "http-equiv")
+            .is_some_and(|value| value.eq_ignore_ascii_case("content-type"));
+        if is_content_type
+            && let Some(content) = html_attribute_value(tag, "content")
+            && let Some(encoding) = content_type_encoding(&content)
+        {
+            return Some(normalize_meta_encoding(encoding));
+        }
+        cursor = end;
+    }
+    None
+}
+
+fn normalize_meta_encoding(encoding: &'static Encoding) -> &'static Encoding {
+    if encoding == UTF_16LE || encoding == UTF_16BE {
+        UTF_8
+    } else {
+        encoding
+    }
+}
+
+fn ascii_lowercase_projection(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| {
+            if byte.is_ascii() {
+                char::from(byte.to_ascii_lowercase())
+            } else {
+                ' '
+            }
+        })
+        .collect()
+}
+
+fn tag_starts_at(html: &str, start: usize, name: &str) -> bool {
+    let Some(after_name) = html.get(start + 1 + name.len()..) else {
+        return false;
+    };
+    html[start + 1..].starts_with(name)
+        && after_name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_whitespace() || matches!(ch, '/' | '>'))
+}
+
+fn html_attribute_value(tag: &str, wanted: &str) -> Option<String> {
+    let bytes = tag.as_bytes();
+    let mut cursor = 1usize;
+    while cursor < bytes.len() && !bytes[cursor].is_ascii_whitespace() && bytes[cursor] != b'>' {
+        cursor += 1;
+    }
+    while cursor < bytes.len() {
+        while cursor < bytes.len() && (bytes[cursor].is_ascii_whitespace() || bytes[cursor] == b'/')
+        {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() || bytes[cursor] == b'>' {
+            break;
+        }
+        let name_start = cursor;
+        while cursor < bytes.len()
+            && !bytes[cursor].is_ascii_whitespace()
+            && !matches!(bytes[cursor], b'=' | b'/' | b'>')
+        {
+            cursor += 1;
+        }
+        let name = &tag[name_start..cursor];
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() || bytes[cursor] != b'=' {
+            continue;
+        }
+        cursor += 1;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() {
+            break;
+        }
+        let (value_start, value_end) = if matches!(bytes[cursor], b'"' | b'\'') {
+            let quote = bytes[cursor];
+            cursor += 1;
+            let start = cursor;
+            while cursor < bytes.len() && bytes[cursor] != quote {
+                cursor += 1;
+            }
+            let end = cursor;
+            cursor = cursor.saturating_add(1);
+            (start, end)
+        } else {
+            let start = cursor;
+            while cursor < bytes.len()
+                && !bytes[cursor].is_ascii_whitespace()
+                && bytes[cursor] != b'>'
+            {
+                cursor += 1;
+            }
+            (start, cursor)
+        };
+        if name.eq_ignore_ascii_case(wanted) {
+            return Some(tag[value_start..value_end].trim().to_string());
+        }
+    }
+    None
 }
 
 fn normalized_content_type(content_type: Option<&str>) -> Option<String> {
@@ -632,6 +902,177 @@ mod tests {
 
         assert_eq!(document.kind, DocumentKind::Text);
         assert_eq!(document.text, r#"{"status":"ok"}"#);
+    }
+
+    #[test]
+    fn bom_wins_over_conflicting_transport_and_is_removed() {
+        let mut utf8 = b"\xef\xbb\xbf".to_vec();
+        utf8.extend_from_slice("café".as_bytes());
+        assert_eq!(
+            decode_response_body(&utf8, Some("text/html; charset=windows-1252"), true)
+                .expect("UTF-8 BOM"),
+            "café"
+        );
+
+        let mut utf16 = vec![0xff, 0xfe];
+        for unit in "BOM 日本語".encode_utf16() {
+            utf16.extend_from_slice(&unit.to_le_bytes());
+        }
+        assert_eq!(
+            decode_response_body(&utf16, Some("text/plain; charset=windows-1252"), false)
+                .expect("UTF-16 BOM"),
+            "BOM 日本語"
+        );
+    }
+
+    #[test]
+    fn content_type_charset_is_exact_recognized_and_order_independent() {
+        let (bytes, _, _) = encoding_rs::WINDOWS_1252.encode("café");
+        for content_type in [
+            "text/plain; charset=windows-1252",
+            "TEXT/PLAIN; boundary=x; CHARSET = \"windows-1252\"; q=1",
+            "text/plain; q=1; charset='windows-1252'",
+        ] {
+            assert_eq!(
+                decode_response_body(&bytes, Some(content_type), false).expect("declared charset"),
+                "café",
+                "{content_type}"
+            );
+        }
+
+        for malformed in [
+            "text/plain; note=charset=windows-1252",
+            "text/plain; charset=\"windows-1252",
+            "text/plain; charset=definitely-not-an-encoding",
+        ] {
+            let decoded =
+                decode_response_body(&bytes, Some(malformed), false).expect("UTF-8 fallback");
+            assert!(decoded.contains('\u{fffd}'), "{malformed}: {decoded}");
+        }
+    }
+
+    #[test]
+    fn invalid_header_falls_through_to_direct_and_legacy_html_meta() {
+        let direct = r#"<html><head><meta charset="gbk"></head><body>中文</body></html>"#;
+        let (direct_bytes, _, _) = encoding_rs::GBK.encode(direct);
+        assert!(
+            decode_response_body(&direct_bytes, Some("text/html; charset=not-real"), true,)
+                .expect("direct meta")
+                .contains("中文")
+        );
+
+        let legacy = r#"<html><head><meta content="text/html; charset=windows-1252" http-equiv="Content-Type"></head><body>café</body></html>"#;
+        let (legacy_bytes, _, _) = encoding_rs::WINDOWS_1252.encode(legacy);
+        assert!(
+            decode_response_body(&legacy_bytes, Some("text/html"), true)
+                .expect("legacy meta")
+                .contains("café")
+        );
+    }
+
+    #[test]
+    fn recognized_transport_charset_beats_conflicting_meta() {
+        let html = r#"<html><head><meta charset="shift_jis"></head><body>中文</body></html>"#;
+        let (bytes, _, _) = encoding_rs::GBK.encode(html);
+        let decoded = decode_response_body(&bytes, Some("text/html; charset=gbk"), true)
+            .expect("transport charset");
+        assert!(decoded.contains("中文"), "{decoded}");
+    }
+
+    #[test]
+    fn html_prescan_ignores_comments_scripts_and_late_meta() {
+        let cases = [
+            "<!-- <meta charset=windows-1252> --><html><body>café</body></html>".to_string(),
+            "<script>\"<meta charset=windows-1252>\"</script><html><body>café</body></html>"
+                .to_string(),
+            format!(
+                "<html><head>{}<meta charset=windows-1252></head><body>café</body></html>",
+                " ".repeat(HTML_ENCODING_SNIFF_BYTES)
+            ),
+        ];
+        for html in cases {
+            let (bytes, _, _) = encoding_rs::WINDOWS_1252.encode(&html);
+            let decoded = decode_response_body(&bytes, Some("text/html"), true)
+                .expect("bounded HTML fallback");
+            assert!(
+                decoded.contains('\u{fffd}'),
+                "late/ignored meta changed decoding: {decoded}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_html_bodies_never_sniff_meta_markup() {
+        let plain = "literal <meta charset=windows-1252> café";
+        let (bytes, _, _) = encoding_rs::WINDOWS_1252.encode(plain);
+        for content_type in ["text/plain", "application/json"] {
+            let decoded = decode_response_body(&bytes, Some(content_type), false)
+                .expect("non-HTML UTF-8 fallback");
+            assert!(decoded.contains('\u{fffd}'), "{content_type}: {decoded}");
+        }
+    }
+
+    #[test]
+    fn declared_gbk_shift_jis_and_windows_1252_decode_deterministically() {
+        let cases = [
+            (encoding_rs::GBK, "中文", "gbk"),
+            (encoding_rs::SHIFT_JIS, "日本語", "shift_jis"),
+            (encoding_rs::WINDOWS_1252, "café", "windows-1252"),
+        ];
+        for (encoding, text, label) in cases {
+            let (bytes, _, had_errors) = encoding.encode(text);
+            assert!(!had_errors, "fixture must be representable in {label}");
+            assert_eq!(
+                decode_response_body(&bytes, Some(&format!("text/plain; charset={label}")), false,)
+                    .expect("decode declared encoding"),
+                text
+            );
+        }
+    }
+
+    #[test]
+    fn nul_binary_is_rejected_but_utf16_bom_text_is_not() {
+        let error = decode_response_body(b"PK\0\x03\x04archive", Some("text/plain"), false)
+            .expect_err("NUL binary must fail");
+        assert!(error.to_string().contains("NUL bytes"));
+
+        let bom_binary = b"\xef\xbb\xbfapparently text\0binary";
+        let error = decode_response_body(bom_binary, Some("text/plain"), false)
+            .expect_err("a BOM must not bypass the NUL guard");
+        assert!(error.to_string().contains("NUL bytes"));
+
+        let mut late_binary = vec![b'x'; 8_193];
+        late_binary.push(0);
+        let error = decode_response_body(&late_binary, Some("text/plain"), false)
+            .expect_err("a late NUL must not bypass the full-body guard");
+        assert!(error.to_string().contains("NUL bytes"));
+
+        let utf16 = [0xff, 0xfe, b'O', 0, b'K', 0];
+        assert_eq!(
+            decode_response_body(&utf16, Some("application/octet-stream"), false)
+                .expect("BOM proves UTF-16 text"),
+            "OK"
+        );
+
+        let utf16_nul = [0xff, 0xfe, b'O', 0, 0, 0, b'K', 0];
+        let error = decode_response_body(&utf16_nul, Some("text/plain"), false)
+            .expect_err("decoded UTF-16 NUL must remain binary");
+        assert!(error.to_string().contains("NUL bytes"));
+    }
+
+    #[test]
+    fn extensionless_html_sniff_skips_leading_comments_and_xml_declarations() {
+        let cases = [
+            r#"<!-- deployment marker --><html><head><meta charset="windows-1252"><title>Café release notes</title></head><body><article><h1>Café release notes</h1><p>This extensionless page contains enough meaningful text for deterministic extraction.</p></article></body></html>"#,
+            r#"<?xml version="1.0"?><!-- marker --><head><meta charset="windows-1252"><title>Café release notes</title></head><body><article><h1>Café release notes</h1><p>This extensionless page contains enough meaningful text for deterministic extraction.</p></article></body>"#,
+        ];
+        for html in cases {
+            let (bytes, _, _) = encoding_rs::WINDOWS_1252.encode(html);
+            let document = extract_document("https://example.com/extensionless", None, &bytes)
+                .expect("leading declarations preserve extensionless HTML sniffing");
+            assert_eq!(document.kind, DocumentKind::Html);
+            assert_eq!(document.title.as_deref(), Some("Café release notes"));
+        }
     }
 
     #[test]

@@ -39,6 +39,105 @@ fn maps_models_dev_cost_with_bundled_provenance_in_usd() {
 }
 
 #[test]
+fn malformed_catalog_prices_fail_closed_at_every_projection() {
+    for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.01] {
+        for field in 0..4 {
+            let mut offering = priced(CatalogSource::Bundled);
+            offering.provider = "openrouter".to_string();
+            offering.wire_model_id = "openai/gpt-5.5".to_string();
+            let cost = offering.cost.as_mut().expect("cost fixture");
+            match field {
+                0 => cost.input = Some(invalid),
+                1 => cost.output = Some(invalid),
+                2 => cost.cache_read = Some(invalid),
+                3 => cost.cache_write = Some(invalid),
+                _ => unreachable!(),
+            }
+            assert!(
+                OfferingPricing::from_catalog_offering(&offering).is_none(),
+                "field {field} accepted {invalid:?}"
+            );
+            assert_eq!(
+                route_pricing_sku(&offering),
+                PricingSku::UnknownOrStale,
+                "route projection accepted field {field} = {invalid:?}"
+            );
+        }
+    }
+
+    let zero = priced(CatalogSource::Bundled);
+    let mut zero = zero;
+    let cost = zero.cost.as_mut().expect("cost fixture");
+    cost.input = Some(0.0);
+    cost.output = Some(0.0);
+    cost.cache_read = Some(0.0);
+    cost.cache_write = Some(0.0);
+    assert!(OfferingPricing::from_catalog_offering(&zero).is_some());
+}
+
+/// A price of an impossible magnitude is a unit error, not an expensive model.
+///
+/// The two ways this happens in the wild are a per-token price parsed as
+/// per-million (10^6 too large) and a minor-unit integer read as a major unit
+/// (10^2 too large). Both would bill the user orders of magnitude over, so the
+/// row is rejected at the same boundary that rejects NaN and negatives — and
+/// rejected *whole*, so the surviving fields cannot produce a quietly
+/// under-counted estimate instead.
+#[test]
+fn absurd_catalog_prices_fail_closed_at_every_projection() {
+    let absurd = [
+        // $3/token, mistakenly published as a per-million rate.
+        3_000_000.0,
+        // The declared bound itself is out, one ulp above is far out.
+        MAX_PLAUSIBLE_PRICE_PER_MILLION + 1.0,
+        f64::MAX,
+    ];
+    for price in absurd {
+        for field in 0..4 {
+            let mut offering = priced(CatalogSource::Bundled);
+            let cost = offering.cost.as_mut().expect("cost fixture");
+            match field {
+                0 => cost.input = Some(price),
+                1 => cost.output = Some(price),
+                2 => cost.cache_read = Some(price),
+                3 => cost.cache_write = Some(price),
+                _ => unreachable!(),
+            }
+            assert!(
+                !catalog_cost_is_valid(cost),
+                "field {field} accepted absurd price {price}"
+            );
+            assert!(
+                OfferingPricing::from_catalog_offering(&offering).is_none(),
+                "field {field} produced pricing from absurd price {price}"
+            );
+            assert_eq!(
+                route_pricing_sku(&offering),
+                PricingSku::UnknownOrStale,
+                "route projection accepted field {field} = {price}"
+            );
+        }
+    }
+
+    // The bound is generous on purpose: a genuinely expensive published rate
+    // stays priced. Rejecting a real price would be its own kind of lie.
+    let mut expensive = priced(CatalogSource::Bundled);
+    let cost = expensive.cost.as_mut().expect("cost fixture");
+    cost.input = Some(600.0);
+    cost.output = Some(2_400.0);
+    assert!(
+        OfferingPricing::from_catalog_offering(&expensive).is_some(),
+        "a plausible frontier rate must survive the magnitude bound"
+    );
+
+    // Exactly at the bound is still accepted; only values above it are not.
+    let mut boundary = priced(CatalogSource::Bundled);
+    let cost = boundary.cost.as_mut().expect("cost fixture");
+    cost.input = Some(MAX_PLAUSIBLE_PRICE_PER_MILLION);
+    assert!(OfferingPricing::from_catalog_offering(&boundary).is_some());
+}
+
+#[test]
 fn live_source_carries_provider_live_provenance_and_effective_at() {
     let src = CatalogSource::Live {
         base_url_fingerprint: "fp".into(),
@@ -47,6 +146,92 @@ fn live_source_carries_provider_live_provenance_and_effective_at() {
     let p = OfferingPricing::from_catalog_offering(&priced(src)).expect("priced");
     assert_eq!(p.provenance, PricingProvenance::ProviderLive);
     assert_eq!(p.effective_at, Some(1_700));
+    assert_eq!(p.endpoint_fingerprint.as_deref(), Some("fp"));
+}
+
+/// A live row is only authoritative while it is *both* fresh and fetched from
+/// the endpoint the turn was served on. Every other combination is a defect the
+/// caller must fail closed on rather than billing against.
+#[test]
+fn live_pricing_defect_gates_stale_and_mismatched_rows() {
+    let live = OfferingPricing::from_catalog_offering(&priced(CatalogSource::Live {
+        base_url_fingerprint: "route-fp".into(),
+        fetched_at: 1_000,
+    }))
+    .expect("priced");
+
+    // Fresh + fingerprint-matched: authoritative.
+    assert_eq!(
+        live.live_pricing_defect(Some("route-fp"), Some(1_500), 1_000),
+        None
+    );
+
+    // Same age, at the window boundary: stale is inclusive, matching
+    // `is_stale`, so a row exactly at the TTL is not authoritative.
+    assert_eq!(
+        live.live_pricing_defect(Some("route-fp"), Some(2_000), 1_000),
+        Some(LivePricingDefect::Stale {
+            age_secs: 1_000,
+            max_age_secs: 1_000,
+        })
+    );
+
+    // A row fetched from a different endpoint prices a different billing
+    // surface; it is never a "fresher price" for this route.
+    assert_eq!(
+        live.live_pricing_defect(Some("other-fp"), Some(1_500), 1_000),
+        Some(LivePricingDefect::EndpointMismatch {
+            row_fingerprint: "route-fp".into(),
+            route_fingerprint: "other-fp".into(),
+        })
+    );
+
+    // An unknown route endpoint cannot confirm any live row.
+    assert_eq!(
+        live.live_pricing_defect(None, Some(1_500), 1_000),
+        Some(LivePricingDefect::UnknownRouteEndpoint)
+    );
+
+    // No clock means the age is unknowable, so the row stays unproven rather
+    // than being assumed fresh.
+    assert_eq!(
+        live.live_pricing_defect(Some("route-fp"), None, 1_000),
+        Some(LivePricingDefect::MissingTimestamp)
+    );
+
+    // Non-live provenances carry no fetch clock and are not age-gated here.
+    for source in [CatalogSource::Bundled, CatalogSource::UserOverride] {
+        let row = OfferingPricing::from_catalog_offering(&priced(source)).expect("priced");
+        assert_eq!(row.live_pricing_defect(None, Some(u64::MAX), 1), None);
+        assert!(row.provenance.is_authoritative_without_freshness_check());
+    }
+    assert!(!PricingProvenance::ProviderLive.is_authoritative_without_freshness_check());
+}
+
+/// A live row that claims live provenance but lost its fingerprint (hand-built
+/// or migrated from an older schema) cannot be matched to a route.
+#[test]
+fn live_row_without_a_fingerprint_is_never_authoritative() {
+    let mut live = OfferingPricing::from_catalog_offering(&priced(CatalogSource::Live {
+        base_url_fingerprint: "fp".into(),
+        fetched_at: 1_000,
+    }))
+    .expect("priced");
+    live.endpoint_fingerprint = None;
+    assert_eq!(
+        live.live_pricing_defect(Some("fp"), Some(1_001), 1_000),
+        Some(LivePricingDefect::MissingEndpointFingerprint)
+    );
+
+    // Defect labels are stable, non-localized, and carry no URL — only the
+    // non-secret FNV digests the catalog already scopes caches on.
+    let mismatch = LivePricingDefect::EndpointMismatch {
+        row_fingerprint: "a".into(),
+        route_fingerprint: "b".into(),
+    };
+    assert_eq!(mismatch.label(), "live_pricing_endpoint_mismatch");
+    let json = serde_json::to_string(&mismatch).expect("serialize defect");
+    assert!(!json.contains("http"), "{json}");
 }
 
 #[test]
@@ -98,6 +283,40 @@ fn estimate_cost_with_zero_usage_is_zero() {
 }
 
 #[test]
+fn finite_rates_that_overflow_the_computed_total_fail_closed() {
+    // Constructed directly rather than through `from_catalog_offering`: the
+    // magnitude bound now rejects a rate this large at the catalog boundary, so
+    // the only way to reach the estimator with one is to bypass that boundary.
+    // The estimator keeps its own overflow guard regardless — it is the last
+    // check before a number becomes money, and it must not depend on an earlier
+    // layer having run.
+    let pricing = OfferingPricing {
+        provider: "deepseek".to_string(),
+        wire_model_id: "deepseek-v4-pro".to_string(),
+        canonical_model: Some("deepseek-v4-pro".to_string()),
+        currency: Currency::Usd,
+        input_per_million: Some(f64::MAX),
+        output_per_million: None,
+        cache_read_per_million: None,
+        cache_write_per_million: None,
+        provenance: PricingProvenance::ModelsDevBundled,
+        effective_at: None,
+        endpoint_fingerprint: None,
+    };
+    let usage = TokenUsage {
+        input: u64::MAX,
+        ..TokenUsage::default()
+    };
+    assert_eq!(pricing.estimate_cost(&usage), None);
+
+    // And the boundary itself refuses to hand such a row over in the first
+    // place, so the guard above is defence in depth, not the only defence.
+    let mut offering = priced(CatalogSource::Bundled);
+    offering.cost.as_mut().expect("cost fixture").input = Some(f64::MAX);
+    assert!(OfferingPricing::from_catalog_offering(&offering).is_none());
+}
+
+#[test]
 fn route_pricing_sku_is_token_when_priced_and_unknown_otherwise() {
     match route_pricing_sku(&priced(CatalogSource::Bundled)) {
         PricingSku::Token {
@@ -141,6 +360,7 @@ fn user_override_pricing_round_trips_and_carries_no_secrets() {
         cache_write_per_million: None,
         provenance: PricingProvenance::UserOverride,
         effective_at: None,
+        endpoint_fingerprint: None,
     };
     let json = serde_json::to_string_pretty(&pricing).expect("serialize");
     let back: OfferingPricing = serde_json::from_str(&json).expect("round-trip");
@@ -251,4 +471,62 @@ fn staleness_is_inclusive_at_the_ttl_boundary() {
     assert!(p.is_stale(1_100, 100));
     // ...one second younger is still fresh.
     assert!(!p.is_stale(1_099, 100));
+}
+
+#[test]
+fn unpriced_used_classes_names_exactly_what_makes_an_estimate_fail_closed() {
+    // The DeepSeek-shaped row publishes input/output/cache-read but no
+    // cache-write rate.
+    let pricing = OfferingPricing::from_catalog_offering(&priced(CatalogSource::Bundled))
+        .expect("priced row");
+
+    // A turn that never wrote to cache is fully priced.
+    let no_write = TokenUsage {
+        input: 1_000_000,
+        output: 1_000_000,
+        cache_read: 1_000_000,
+        cache_write: 0,
+    };
+    assert!(pricing.unpriced_used_classes(&no_write).is_empty());
+    assert_eq!(pricing.estimate_cost(&no_write), Some(0.28 + 0.42 + 0.028));
+
+    // The moment cache-write tokens appear, the estimate fails closed and the
+    // audit names the single class responsible.
+    let with_write = TokenUsage {
+        cache_write: 1,
+        ..no_write
+    };
+    assert_eq!(
+        pricing.unpriced_used_classes(&with_write),
+        vec![TokenClass::CacheWrite]
+    );
+    assert_eq!(pricing.estimate_cost(&with_write), None);
+
+    // Zero-token classes never count as unpriced.
+    let empty = TokenUsage::default();
+    assert!(pricing.unpriced_used_classes(&empty).is_empty());
+    assert_eq!(pricing.estimate_cost(&empty), Some(0.0));
+}
+
+#[test]
+fn token_class_labels_and_counts_stay_aligned_with_token_usage() {
+    let usage = TokenUsage {
+        input: 1,
+        output: 2,
+        cache_read: 3,
+        cache_write: 4,
+    };
+    let seen: Vec<(&str, u64)> = TokenClass::ALL
+        .into_iter()
+        .map(|class| (class.label(), class.tokens(&usage)))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            ("input", 1),
+            ("output", 2),
+            ("cache_read", 3),
+            ("cache_write", 4),
+        ]
+    );
 }

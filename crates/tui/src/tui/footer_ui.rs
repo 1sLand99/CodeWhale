@@ -10,6 +10,7 @@ use crate::tui::app::{App, TaskPanelEntryKind};
 use crate::tui::format_helpers;
 use crate::tui::history::{HistoryCell, ToolCell, ToolStatus, summarize_tool_output};
 use crate::tui::key_shortcuts;
+use crate::tui::menu_style;
 use crate::tui::subagent_routing::{
     active_fanout_counts, agents_sidebar_surface_visible, running_agent_count,
 };
@@ -889,19 +890,15 @@ pub(crate) fn footer_context_percent_spans(app: &App) -> Vec<Span<'static>> {
 }
 
 pub(crate) fn footer_cost_spans(app: &App) -> Vec<Span<'static>> {
-    let displayed_cost = app.displayed_session_cost_for_currency(app.cost_currency);
-    let chip = crate::route_billing::usage_chip(
-        app.billing_presentation,
-        app.api_provider,
-        &app.model,
-        displayed_cost,
-        app.cost_display_currency(app.cost_currency),
-        None,
-    );
-    // Footer only owns positive metered spend. Allowance/local/unknown live
-    // on the context panel so the chrome stays calm and never invents $0.00.
-    let crate::route_billing::UsageChip::Money(amount) = chip else {
-        return Vec::new();
+    let chip = app.cumulative_usage_chip();
+    // Footer owns positive priced spend, including an explicitly labelled
+    // subtotal. Allowance/local/bare unknown remain in the context panel.
+    let amount = match &chip {
+        crate::route_billing::UsageChip::Money(amount) => amount.clone(),
+        crate::route_billing::UsageChip::PricedSubtotal { .. } => {
+            crate::route_billing::format_usage_chip(&chip).unwrap_or_default()
+        }
+        _ => return Vec::new(),
     };
     let mut spans = vec![Span::styled(
         amount,
@@ -911,7 +908,7 @@ pub(crate) fn footer_cost_spans(app: &App) -> Vec<Span<'static>> {
     // saved money (#2038).
     if let Some(saved) = app.last_turn_cache_savings()
         && saved > 0.0
-        && app.billing_presentation.shows_money()
+        && matches!(chip, crate::route_billing::UsageChip::Money(_))
     {
         spans.push(Span::styled(
             format!(" · saved {}", app.format_cost_amount(saved)),
@@ -1161,7 +1158,12 @@ pub(crate) fn footer_state_label(app: &App) -> (&'static str, ratatui::style::Co
     // Sub-agents still surface "working" because that's a distinct lifecycle
     // the user can act on (open `/agents`).
     if running_agent_count(app) > 0 {
-        return ("working", app.ui_theme.status_working);
+        // Word from the shared status mark; the tone stays theme-sourced so
+        // the footer keeps its live-theme status ramp.
+        return (
+            menu_style::status_mark(menu_style::StatusKind::Working).word,
+            app.ui_theme.status_working,
+        );
     }
     // A paused pausable command is an actionable state even after the turn's
     // tools have drained: the user can resume or ESC-to-cancel. Without this
@@ -1173,7 +1175,10 @@ pub(crate) fn footer_state_label(app: &App) -> (&'static str, ratatui::style::Co
     // alongside `app.paused` so the label survives the turn-end window where
     // `app.paused` has been cleared but the hold is still resumable.
     if app.paused || app.paused_quarry.is_some() {
-        return ("paused \u{23F8}", app.ui_theme.status_warning);
+        return (
+            menu_style::status_inline_label(menu_style::StatusKind::Paused),
+            app.ui_theme.status_warning,
+        );
     }
 
     if app.queued_draft.is_some() {
@@ -1188,7 +1193,10 @@ pub(crate) fn footer_state_label(app: &App) -> (&'static str, ratatui::style::Co
         return ("draft", app.ui_theme.text_muted);
     }
 
-    ("idle", app.ui_theme.status_ready)
+    (
+        menu_style::status_mark(menu_style::StatusKind::Ready).word,
+        app.ui_theme.status_ready,
+    )
 }
 
 pub(crate) fn format_token_count_compact(tokens: u64) -> String {

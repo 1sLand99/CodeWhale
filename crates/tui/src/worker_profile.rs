@@ -173,7 +173,7 @@ impl WorkerRuntimeProfile {
             | FleetRole::Reviewer
             | FleetRole::Planner
             | FleetRole::Verifier
-            | FleetRole::Oracle => Self::READ_ONLY_MAX_STEPS,
+            | FleetRole::Consultant => Self::READ_ONLY_MAX_STEPS,
             FleetRole::Builder | FleetRole::Worker | FleetRole::Custom => Self::GENERAL_MAX_STEPS,
         }
     }
@@ -190,9 +190,9 @@ impl WorkerRuntimeProfile {
             }
             // Planner: analysis only, no shell.
             FleetRole::Planner => (PermissionSet::read_only(), ShellPolicy::None),
-            // Oracle: counsel only. Reads to ground its advice; never acts on
+            // Consultant: counsel only. Reads to ground its advice; never acts on
             // the workspace, so no shell either (#4752).
-            FleetRole::Oracle => (PermissionSet::read_only(), ShellPolicy::None),
+            FleetRole::Consultant => (PermissionSet::read_only(), ShellPolicy::None),
             // Verifier: doesn't modify code, but runs the test suite.
             FleetRole::Verifier => (PermissionSet::read_only(), ShellPolicy::Full),
             // Doers.
@@ -207,11 +207,11 @@ impl WorkerRuntimeProfile {
             tools: ToolScope::Inherit,
             model: ModelRoute::Inherit,
             provider: None,
-            // An Oracle is asked for judgement, so it defaults to the highest
+            // A Consultant is asked for judgement, so it defaults to the highest
             // reasoning tier rather than inheriting the session's (#4752).
             // Still only a default: an explicit spawn-time or profile value
             // wins via `derive_child`, same as every other role.
-            reasoning_effort: matches!(role, FleetRole::Oracle).then(|| "high".to_string()),
+            reasoning_effort: matches!(role, FleetRole::Consultant).then(|| "high".to_string()),
             denied_tools: Vec::new(),
             max_spawn_depth: codewhale_config::DEFAULT_SPAWN_DEPTH,
             max_steps: Self::default_max_steps(role.clone()),
@@ -402,34 +402,34 @@ mod tests {
         }
     }
 
-    /// #4752: Oracle is counsel, not labour. Its posture has to be read-only
+    /// #4752: Consultant is counsel, not labour. Its posture has to be read-only
     /// and shell-less by construction, not by the caller remembering to pass
     /// `write_authority: read-only`.
     #[test]
-    fn oracle_is_read_only_shell_less_and_high_reasoning_by_default() {
-        let oracle = WorkerRuntimeProfile::for_role(FleetRole::Oracle);
+    fn consultant_is_read_only_shell_less_and_high_reasoning_by_default() {
+        let consultant = WorkerRuntimeProfile::for_role(FleetRole::Consultant);
 
         assert!(
-            !oracle.permissions.write,
-            "an oracle advises, it never writes"
+            !consultant.permissions.write,
+            "a consultant advises, it never writes"
         );
         assert_eq!(
-            oracle.shell,
+            consultant.shell,
             ShellPolicy::None,
-            "an oracle has no reason to run commands"
+            "a consultant has no reason to run commands"
         );
         assert_eq!(
-            oracle.reasoning_effort.as_deref(),
+            consultant.reasoning_effort.as_deref(),
             Some("high"),
-            "the point of asking an oracle is the reasoning tier"
+            "the point of asking a consultant is the reasoning tier"
         );
         assert_eq!(
-            oracle.model,
+            consultant.model,
             ModelRoute::Inherit,
             "tier is a reasoning-effort default, not a hardcoded model"
         );
         assert_eq!(
-            oracle.max_steps,
+            consultant.max_steps,
             WorkerRuntimeProfile::READ_ONLY_MAX_STEPS,
             "read-mostly budget, like the other read-only roles"
         );
@@ -438,9 +438,9 @@ mod tests {
     /// The reasoning default must not become a ceiling: an explicit request
     /// still wins, exactly as it does for every other role.
     #[test]
-    fn an_explicit_reasoning_tier_overrides_the_oracle_default() {
+    fn an_explicit_reasoning_tier_overrides_the_consultant_default() {
         let parent = WorkerRuntimeProfile::for_role(FleetRole::Worker);
-        let mut requested = WorkerRuntimeProfile::for_role(FleetRole::Oracle);
+        let mut requested = WorkerRuntimeProfile::for_role(FleetRole::Consultant);
         requested.reasoning_effort = Some("max".to_string());
 
         let child = parent.derive_child(&requested);

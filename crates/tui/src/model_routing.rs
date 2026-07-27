@@ -381,8 +381,12 @@ impl AutoRouteTier {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum AutoRouteScope {
     /// The network classifier could choose any runnable provider/model pair in
-    /// the redacted inventory.
+    /// the redacted inventory. Only reachable under the persisted
+    /// `[auto] cross_provider = true` opt-in (#4411).
     RunnableProviders,
+    /// The network classifier saw only the active provider's runnable routes —
+    /// the default Auto scope (#4411).
+    ActiveProvider,
     /// The provider-aware local heuristic selected within one resolved route.
     ResolvedProvider,
 }
@@ -392,6 +396,7 @@ impl AutoRouteScope {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::RunnableProviders => "runnable providers",
+            Self::ActiveProvider => "active provider only",
             Self::ResolvedProvider => "resolved provider",
         }
     }
@@ -593,6 +598,27 @@ pub(crate) async fn resolve_auto_route_with_inventory_for_session(
     selected_model_mode: &str,
     selected_thinking_mode: &str,
 ) -> Result<AutoRouteSelection> {
+    resolve_auto_route_with_inventory_for_session_and_cache_policy(
+        config,
+        latest_request,
+        recent_context,
+        session_mode,
+        selected_model_mode,
+        selected_thinking_mode,
+        true,
+    )
+    .await
+}
+
+pub(crate) async fn resolve_auto_route_with_inventory_for_session_and_cache_policy(
+    config: &Config,
+    latest_request: &str,
+    recent_context: &str,
+    session_mode: &str,
+    selected_model_mode: &str,
+    selected_thinking_mode: &str,
+    allow_response_cache: bool,
+) -> Result<AutoRouteSelection> {
     let inventory = ModelInventory::from_config(config);
     if !inventory.router_available {
         // Fall back to heuristic-only auto routing when the flash router
@@ -616,6 +642,7 @@ pub(crate) async fn resolve_auto_route_with_inventory_for_session(
         session_mode,
         selected_model_mode,
         selected_thinking_mode,
+        allow_response_cache,
     )
     .await
     {
@@ -780,13 +807,20 @@ fn auto_route_from_classifier(
         provider: inventory.router_provider,
         model: inventory.router_model.to_string(),
     };
+    // Report the scope the classifier actually had, not the widest one it
+    // could ever have (#4411).
+    let scope = if inventory.cross_provider_auto {
+        AutoRouteScope::RunnableProviders
+    } else {
+        AutoRouteScope::ActiveProvider
+    };
     AutoRouteSelection {
         provider: recommendation.provider,
         receipt: Some(auto_route_receipt(
             inventory,
             recommendation.provider,
             &recommendation.model,
-            AutoRouteScope::RunnableProviders,
+            scope,
             data_path,
             AutoRouteReason::ClassifierRecommendation,
         )),
@@ -911,6 +945,7 @@ async fn auto_route_inventory_recommendation(
     session_mode: &str,
     selected_model_mode: &str,
     selected_thinking_mode: &str,
+    allow_response_cache: bool,
 ) -> Result<Option<InventoryAutoRouteRecommendation>> {
     let mut router_config = config.clone();
     // The classifier runs on the inventory's router route: the explicit
@@ -954,8 +989,15 @@ async fn auto_route_inventory_recommendation(
         top_p: None,
     };
 
-    let response =
-        tokio::time::timeout(Duration::from_secs(4), client.create_message(request)).await??;
+    let response = if allow_response_cache {
+        tokio::time::timeout(Duration::from_secs(4), client.create_message(request)).await??
+    } else {
+        tokio::time::timeout(
+            Duration::from_secs(4),
+            client.create_message_without_response_cache(request),
+        )
+        .await??
+    };
     Ok(parse_inventory_auto_route_recommendation(
         &message_response_text(&response),
         inventory,
@@ -963,14 +1005,26 @@ async fn auto_route_inventory_recommendation(
 }
 
 fn inventory_auto_router_system_prompt(inventory: &ModelInventory, cost_saving: bool) -> String {
-    let mut prompt = format!(
+    let mut prompt = if inventory.cross_provider_auto {
+        String::new()
+    } else {
+        // The inventory JSON below is already scoped to the active provider
+        // (#4411); say so, so the classifier does not try to name one it was
+        // never shown.
+        format!(
+            "Auto routing is scoped to the active provider `{}`. Every model in the inventory \
+below belongs to it; never select another provider.\n\n",
+            inventory.active_provider.as_str()
+        )
+    };
+    prompt.push_str(&format!(
         "You are the codewhale model-routing classifier. Return only compact JSON: \
 {{\"provider\":\"<provider>\",\"model\":\"<model>\",\"thinking\":\"off|high|max\"}}.\n\
 Choose only provider/model pairs present in the inventory JSON. Use off only for trivial no-tool answers, \
 high for ordinary reasoning, and max for agentic, coding, multi-file, release, architecture, debugging, \
 security, tool-heavy, or uncertain work.\n\nInventory JSON:\n{}",
         inventory.router_context_json()
-    );
+    ));
 
     if cost_saving {
         let active_pair = inventory.active_default().and_then(|active| {
@@ -1016,6 +1070,11 @@ fn parse_inventory_auto_route_recommendation(
         .get("provider")
         .and_then(serde_json::Value::as_str)
         .and_then(ApiProvider::parse)?;
+    // Defense in depth for #4411: the payload already hides other providers,
+    // but a hallucinated (or stale) provider must not become a route either.
+    if !inventory.auto_scope_allows(provider) {
+        return None;
+    }
     let model = value.get("model").and_then(serde_json::Value::as_str)?;
     let candidate = inventory
         .candidate(provider, model)
@@ -1486,7 +1545,7 @@ mod tests {
     }
 
     #[test]
-    fn classifier_receipt_discloses_cross_provider_scope_and_data_path() {
+    fn classifier_receipt_discloses_active_provider_scope_and_data_path() {
         let _env_lock = crate::test_support::lock_test_env();
         let _deepseek = crate::test_support::EnvVarGuard::set("DEEPSEEK_API_KEY", "ds-key");
         let _zai = crate::test_support::EnvVarGuard::set("ZAI_API_KEY", "zai-key");
@@ -1508,7 +1567,9 @@ mod tests {
         assert_eq!(route.source, AutoRouteSource::FlashRouter);
         let receipt = route.receipt.expect("classifier receipt");
         assert_eq!(receipt.tier, AutoRouteTier::Fast);
-        assert_eq!(receipt.scope, AutoRouteScope::RunnableProviders);
+        // #4411: the classifier only saw Z.ai routes, so the receipt says so
+        // instead of claiming the wider runnable-providers scope.
+        assert_eq!(receipt.scope, AutoRouteScope::ActiveProvider);
         assert_eq!(
             receipt.data_path,
             AutoRouteDataPath::Classifier {
@@ -1517,6 +1578,122 @@ mod tests {
             }
         );
         assert_eq!(receipt.reason, AutoRouteReason::ClassifierRecommendation);
+    }
+
+    #[test]
+    fn classifier_recommendation_for_another_provider_is_refused_by_default() {
+        // #4411: the payload never named DeepSeek, but a classifier can still
+        // emit one. The recommendation must not become a route unless the
+        // persisted cross-provider opt-in is set.
+        let _env_lock = crate::test_support::lock_test_env();
+        let _deepseek = crate::test_support::EnvVarGuard::set("DEEPSEEK_API_KEY", "ds-key");
+        let _zai = crate::test_support::EnvVarGuard::set("ZAI_API_KEY", "zai-key");
+        let scoped = Config {
+            provider: Some("zai".to_string()),
+            ..Default::default()
+        };
+        let scoped_inventory = ModelInventory::from_config(&scoped);
+        let raw = r#"{"provider":"deepseek","model":"deepseek-v4-flash","thinking":"off"}"#;
+
+        assert!(
+            parse_inventory_auto_route_recommendation(raw, &scoped_inventory).is_none(),
+            "cross-provider classifier output must be refused by default"
+        );
+        // The same inventory still accepts an in-scope active-provider route.
+        assert!(
+            parse_inventory_auto_route_recommendation(
+                r#"{"provider":"zai","model":"GLM-5.2","thinking":"max"}"#,
+                &scoped_inventory,
+            )
+            .is_some()
+        );
+
+        let opted_in = Config {
+            auto: Some(crate::config::AutoConfig {
+                cost_saving: None,
+                cross_provider: Some(true),
+                router: None,
+            }),
+            ..scoped.clone()
+        };
+        let opted_in_route =
+            parse_inventory_auto_route_recommendation(raw, &ModelInventory::from_config(&opted_in))
+                .expect("opt-in admits the cross-provider recommendation");
+        assert_eq!(opted_in_route.provider, ApiProvider::Deepseek);
+    }
+
+    #[test]
+    fn classifier_prompt_declares_active_provider_scope_by_default() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let _deepseek = crate::test_support::EnvVarGuard::set("DEEPSEEK_API_KEY", "ds-key");
+        let _zai = crate::test_support::EnvVarGuard::set("ZAI_API_KEY", "zai-key");
+        let config = Config {
+            provider: Some("zai".to_string()),
+            ..Default::default()
+        };
+
+        let prompt =
+            inventory_auto_router_system_prompt(&ModelInventory::from_config(&config), false);
+
+        assert!(
+            prompt.contains("Auto routing is scoped to the active provider `zai`"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("deepseek"), "{prompt}");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn active_provider_strong_fast_selection_survives_scoping() {
+        // Same-provider tier selection is the behavior scoping must not
+        // break: a complex request still reaches the active provider's strong
+        // tier, a trivial one still reaches its fast tier (#4411).
+        let _env_lock = crate::test_support::lock_test_env();
+        let _deepseek = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY");
+        let _zai = crate::test_support::EnvVarGuard::set("ZAI_API_KEY", "zai-key");
+        let config = Config {
+            provider: Some("zai".to_string()),
+            ..Default::default()
+        };
+
+        let strong = resolve_auto_route_with_inventory(
+            &config,
+            "refactor the routing module and audit its security boundaries",
+            "",
+            "auto",
+            "auto",
+        )
+        .await
+        .expect("strong-tier route");
+        assert_eq!(strong.provider, ApiProvider::Zai);
+        assert_eq!(strong.model, crate::config::ZAI_GLM_5_2_MODEL);
+        let strong_receipt = strong.receipt.expect("strong receipt");
+        assert_eq!(strong_receipt.tier, AutoRouteTier::Strong);
+        assert_eq!(strong_receipt.scope, AutoRouteScope::ResolvedProvider);
+
+        let fast = resolve_auto_route_with_inventory(&config, "hi", "", "auto", "auto")
+            .await
+            .expect("fast-tier route");
+        assert_eq!(fast.provider, ApiProvider::Zai);
+        assert_eq!(fast.model, crate::config::ZAI_GLM_5_TURBO_MODEL);
+        assert_eq!(
+            fast.receipt.expect("fast receipt").tier,
+            AutoRouteTier::Fast
+        );
+    }
+
+    #[test]
+    fn config_auto_cross_provider_defaults_to_false() {
+        assert!(!Config::default().auto_cross_provider());
+        let opted_in = Config {
+            auto: Some(crate::config::AutoConfig {
+                cost_saving: None,
+                cross_provider: Some(true),
+                router: None,
+            }),
+            ..Default::default()
+        };
+        assert!(opted_in.auto_cross_provider());
     }
 
     #[test]
@@ -1584,7 +1761,11 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn inventory_auto_route_uses_fallback_candidates_from_their_provider() {
+    async fn inventory_auto_route_never_falls_back_across_providers_by_default() {
+        // #4411: the active provider has no usable credential, but another
+        // provider does. Auto must stay on the active provider and report a
+        // no-runnable-candidate heuristic instead of silently spending the
+        // other provider's key.
         let _env_lock = crate::test_support::lock_test_env();
         let _deepseek = crate::test_support::EnvVarGuard::set("DEEPSEEK_API_KEY", "ds-key");
         let _zai = crate::test_support::EnvVarGuard::remove("ZAI_API_KEY");
@@ -1596,7 +1777,41 @@ mod tests {
         let route =
             resolve_auto_route_with_inventory(&config, "quick status check", "", "auto", "auto")
                 .await
-                .expect("inventory route should fall back to an authenticated provider");
+                .expect("inventory route should resolve without leaving the active provider");
+
+        assert_eq!(route.provider, ApiProvider::Zai);
+        assert_ne!(route.provider, ApiProvider::Deepseek);
+        assert_eq!(route.source, AutoRouteSource::Heuristic);
+        let receipt = route.receipt.expect("Auto route receipt");
+        assert_eq!(receipt.scope, AutoRouteScope::ResolvedProvider);
+        assert_eq!(
+            receipt.reason,
+            AutoRouteReason::LocalHeuristic(AutoRouteHeuristicReason::NoRunnableCandidate)
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn inventory_auto_route_crosses_providers_only_under_persisted_opt_in() {
+        // The same configuration as above, plus the persisted
+        // `[auto] cross_provider = true` opt-in (#4411).
+        let _env_lock = crate::test_support::lock_test_env();
+        let _deepseek = crate::test_support::EnvVarGuard::set("DEEPSEEK_API_KEY", "ds-key");
+        let _zai = crate::test_support::EnvVarGuard::remove("ZAI_API_KEY");
+        let config = Config {
+            provider: Some("zai".to_string()),
+            auto: Some(crate::config::AutoConfig {
+                cost_saving: None,
+                cross_provider: Some(true),
+                router: None,
+            }),
+            ..Default::default()
+        };
+
+        let route =
+            resolve_auto_route_with_inventory(&config, "quick status check", "", "auto", "auto")
+                .await
+                .expect("opted-in route should fall back to an authenticated provider");
 
         assert_eq!(route.provider, ApiProvider::Deepseek);
         assert_eq!(route.model, "deepseek-v4-flash");
@@ -1616,6 +1831,7 @@ mod tests {
         let cost_saving = Config {
             auto: Some(crate::config::AutoConfig {
                 cost_saving: Some(true),
+                cross_provider: None,
                 router: None,
             }),
             ..balanced.clone()
@@ -1937,6 +2153,7 @@ mod tests {
         let cfg = Config {
             auto: Some(crate::config::AutoConfig {
                 cost_saving: Some(true),
+                cross_provider: None,
                 router: None,
             }),
             ..Default::default()

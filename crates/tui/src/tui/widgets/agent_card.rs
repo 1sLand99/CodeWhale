@@ -18,8 +18,10 @@ use ratatui::text::{Line, Span};
 
 use crate::palette;
 use crate::tools::subagent::MailboxMessage;
+use crate::tools::todo::TodoListSnapshot;
 use crate::tui::ui_text::truncate_line_to_width;
 use crate::tui::widgets::tool_card::{ToolFamily, family_glyph, family_label};
+use crate::work_grounding::{TodoCardProjection, card_omission_line, card_todo_projection};
 use unicode_width::UnicodeWidthStr;
 
 /// Maximum number of recent actions kept on a `DelegateCard`. Older entries
@@ -95,6 +97,13 @@ pub struct DelegateCard {
     pub summary: Option<String>,
     actions: Vec<String>,
     truncated: bool,
+    /// The last To-do snapshot **this** agent published for itself (#4810).
+    ///
+    /// `None` means the child has never reported Work state — the card says
+    /// nothing rather than borrowing the parent's or a sibling's ledger. The
+    /// snapshot is only ever written from an envelope whose `agent_id` matches
+    /// [`Self::agent_id`], which is what keeps sibling cards disjoint.
+    todo: Option<TodoListSnapshot>,
 }
 
 impl DelegateCard {
@@ -107,7 +116,24 @@ impl DelegateCard {
             summary: None,
             actions: Vec::new(),
             truncated: false,
+            todo: None,
         }
+    }
+
+    /// Record this agent's own To-do snapshot. Returns whether the visible
+    /// projection changed (an update that renders identically is not a
+    /// redraw). Callers must only pass a snapshot published by this agent.
+    pub fn set_todo(&mut self, todo: TodoListSnapshot) -> bool {
+        let before = self.todo.as_ref().and_then(card_todo_projection);
+        let after = card_todo_projection(&todo);
+        self.todo = Some(todo);
+        before != after
+    }
+
+    /// The child's own To-do projection, if it has reported any work.
+    #[must_use]
+    pub fn todo_projection(&self) -> Option<TodoCardProjection> {
+        self.todo.as_ref().and_then(card_todo_projection)
     }
 
     /// Project this direct sub-agent card onto the shared workflow history
@@ -171,6 +197,40 @@ impl DelegateCard {
             &detail,
             content_width,
         ));
+        // The child's own Work state sits directly under its header, above the
+        // action tail: what it is working on outranks what it just did.
+        if let Some(todo) = self.todo_projection() {
+            let prefix = "  \u{22EF} "; // ⋯
+            lines.push(Line::from(vec![
+                Span::styled(prefix, Style::default().fg(palette::TEXT_DIM)),
+                Span::styled(
+                    truncate_action(&todo.header, line_detail_width(content_width, prefix)),
+                    Style::default().fg(palette::TEXT_MUTED),
+                ),
+            ]));
+            let item_prefix = "    ";
+            for item in &todo.items {
+                lines.push(Line::from(vec![
+                    Span::raw(item_prefix),
+                    Span::styled(
+                        truncate_action(item, line_detail_width(content_width, item_prefix)),
+                        Style::default().fg(palette::TEXT_TOOL_OUTPUT),
+                    ),
+                ]));
+            }
+            if todo.omitted > 0 {
+                lines.push(Line::from(vec![
+                    Span::raw(item_prefix),
+                    Span::styled(
+                        truncate_action(
+                            &card_omission_line(todo.omitted),
+                            line_detail_width(content_width, item_prefix),
+                        ),
+                        Style::default().fg(palette::TEXT_DIM),
+                    ),
+                ]));
+            }
+        }
         if self.truncated {
             lines.push(Line::from(Span::styled(
                 "  \u{2026}".to_string(), // …
@@ -550,6 +610,19 @@ pub fn apply_to_delegate(card: &mut DelegateCard, msg: &MailboxMessage) -> bool 
         MailboxMessage::Cancelled { .. } => {
             card.status = AgentLifecycle::Cancelled;
         }
+        MailboxMessage::WorkState { todo, .. } => {
+            // agent_id already matched above, so this is this child's own
+            // ledger. Publishing live work is evidence that a pending child
+            // has started, while terminal cards keep both their terminal
+            // status and the last snapshot the child published.
+            let status_changed = if card.status == AgentLifecycle::Pending {
+                card.status = AgentLifecycle::Running;
+                true
+            } else {
+                false
+            };
+            return card.set_todo(todo.clone()) || status_changed;
+        }
         MailboxMessage::ChildSpawned { .. } => {
             // Delegate cards represent a single agent; child spawns belong
             // to a sibling fanout card, not this one.
@@ -590,6 +663,13 @@ pub fn apply_to_fanout(card: &mut FanoutCard, msg: &MailboxMessage) -> bool {
         MailboxMessage::ChildSpawned { child_id, .. } => {
             card.upsert_worker(child_id, AgentLifecycle::Pending)
         }
+        // A fanout card is a dot grid of many workers with no per-worker row
+        // to hang a ledger on. Rather than merge N children's lists into one
+        // card — which would be exactly the cross-agent leak this surface must
+        // not have — it shows none of them. WorkState is intentionally
+        // unavailable on this fanout surface; an individually spawned child
+        // may show its own To-do when it has a separate delegate card.
+        MailboxMessage::WorkState { .. } => false,
         MailboxMessage::TokenUsage { .. } => {
             // Cost accumulation happens in handle_subagent_mailbox (ui.rs)
             // before this apply function is called; TokenUsage never reaches
@@ -990,6 +1070,284 @@ mod tests {
             !rendered.iter().any(|line| line.contains('·')),
             "counts line should be dropped: {rendered:?}"
         );
+    }
+
+    // === #4810: a child's own To-do on its own card ===
+
+    use crate::tools::todo::{TodoItem, TodoStatus};
+
+    fn todo(items: &[(u32, &str, TodoStatus)], in_progress_id: Option<u32>) -> TodoListSnapshot {
+        let items: Vec<TodoItem> = items
+            .iter()
+            .map(|(id, content, status)| TodoItem {
+                id: *id,
+                content: (*content).to_string(),
+                status: *status,
+            })
+            .collect();
+        let settled = items.iter().filter(|item| item.status.is_settled()).count();
+        let completion_pct = if items.is_empty() {
+            0
+        } else {
+            ((settled * 100) / items.len()) as u8
+        };
+        TodoListSnapshot {
+            items,
+            completion_pct,
+            in_progress_id,
+        }
+    }
+
+    fn work_state(agent_id: &str, snapshot: TodoListSnapshot) -> MailboxMessage {
+        MailboxMessage::WorkState {
+            agent_id: agent_id.to_string(),
+            todo: snapshot,
+        }
+    }
+
+    #[test]
+    fn delegate_card_renders_the_childs_own_todo_under_its_row() {
+        let mut card = DelegateCard::new("agent_child", "implementer");
+        apply_to_delegate(
+            &mut card,
+            &MailboxMessage::started("agent_child", crate::tools::subagent::FleetRole::Worker),
+        );
+        assert!(apply_to_delegate(
+            &mut card,
+            &work_state(
+                "agent_child",
+                todo(
+                    &[
+                        (1, "read the runtime seam", TodoStatus::Completed),
+                        (2, "write the projection", TodoStatus::InProgress),
+                    ],
+                    Some(2),
+                ),
+            ),
+        ));
+
+        let rendered = render_to_strings(&card.render_lines(100)).join("\n");
+        assert!(rendered.contains("To-do 1/2"), "{rendered}");
+        assert!(rendered.contains("50% settled"), "{rendered}");
+        assert!(
+            rendered.contains("[~] #2 write the projection"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("[x] #1 read the runtime seam"),
+            "{rendered}"
+        );
+        // Role, model-facing lifecycle label, and identity stay exactly as the
+        // row already reported them.
+        assert!(rendered.contains("delegate builder"), "{rendered}");
+        assert!(rendered.contains("[running]"), "{rendered}");
+    }
+
+    #[test]
+    fn delegate_card_ignores_work_state_addressed_to_another_agent() {
+        let mut card = DelegateCard::new("agent_a", "general");
+        assert!(!apply_to_delegate(
+            &mut card,
+            &work_state(
+                "agent_b",
+                todo(&[(1, "sibling only work", TodoStatus::InProgress)], Some(1)),
+            ),
+        ));
+        assert!(card.todo_projection().is_none());
+        let rendered = render_to_strings(&card.render_lines(100)).join("\n");
+        assert!(!rendered.contains("sibling only work"), "{rendered}");
+        assert!(!rendered.contains("To-do"), "{rendered}");
+    }
+
+    #[test]
+    fn delegate_card_shows_a_same_turn_update_without_waiting_for_completion() {
+        let mut card = DelegateCard::new("agent_child", "general");
+        apply_to_delegate(
+            &mut card,
+            &work_state(
+                "agent_child",
+                todo(&[(1, "draft the fix", TodoStatus::InProgress)], Some(1)),
+            ),
+        );
+
+        // Same step: the child calls work_update and immediately republishes.
+        apply_to_delegate(
+            &mut card,
+            &MailboxMessage::ToolCallCompleted {
+                agent_id: "agent_child".to_string(),
+                tool_name: "work_update".to_string(),
+                step: 1,
+                ok: true,
+            },
+        );
+        assert!(
+            apply_to_delegate(
+                &mut card,
+                &work_state(
+                    "agent_child",
+                    todo(
+                        &[
+                            (1, "draft the fix", TodoStatus::Completed),
+                            (2, "add the regression", TodoStatus::InProgress),
+                        ],
+                        Some(2),
+                    ),
+                ),
+            ),
+            "a changed ledger must redraw the card"
+        );
+
+        let rendered = render_to_strings(&card.render_lines(100)).join("\n");
+        assert_eq!(card.status, AgentLifecycle::Running, "still mid-turn");
+        assert!(rendered.contains("[~] #2 add the regression"), "{rendered}");
+        assert!(rendered.contains("[x] #1 draft the fix"), "{rendered}");
+        assert!(rendered.contains("To-do 1/2"), "{rendered}");
+
+        // Republishing the identical snapshot is not a visible change.
+        assert!(!apply_to_delegate(
+            &mut card,
+            &work_state(
+                "agent_child",
+                todo(
+                    &[
+                        (1, "draft the fix", TodoStatus::Completed),
+                        (2, "add the regression", TodoStatus::InProgress),
+                    ],
+                    Some(2),
+                ),
+            ),
+        ));
+    }
+
+    #[test]
+    fn delegate_card_empty_child_todo_renders_no_item_at_all() {
+        let mut card = DelegateCard::new("agent_child", "general");
+        card.push_action("read_file ok");
+        apply_to_delegate(
+            &mut card,
+            &work_state("agent_child", TodoListSnapshot::default()),
+        );
+
+        assert!(card.todo_projection().is_none());
+        let rendered = render_to_strings(&card.render_lines(100)).join("\n");
+        assert!(
+            !rendered.contains("To-do"),
+            "an empty ledger states nothing: {rendered}"
+        );
+        assert!(
+            !rendered.contains('#'),
+            "no synthesized item may appear: {rendered}"
+        );
+        assert!(rendered.contains("read_file ok"), "{rendered}");
+    }
+
+    #[test]
+    fn delegate_card_todo_is_bounded_and_marks_what_it_elided() {
+        let items: Vec<(u32, String, TodoStatus)> = (1..=9)
+            .map(|id| {
+                (
+                    id,
+                    format!("item {id} ").repeat(30),
+                    if id == 8 {
+                        TodoStatus::InProgress
+                    } else {
+                        TodoStatus::Pending
+                    },
+                )
+            })
+            .collect();
+        let refs: Vec<(u32, &str, TodoStatus)> = items
+            .iter()
+            .map(|(id, content, status)| (*id, content.as_str(), *status))
+            .collect();
+        let mut card = DelegateCard::new("agent_child", "general");
+        apply_to_delegate(&mut card, &work_state("agent_child", todo(&refs, Some(8))));
+
+        let projection = card.todo_projection().expect("projection");
+        assert_eq!(
+            projection.items.len(),
+            crate::work_grounding::MAX_CARD_ITEM_LINES
+        );
+        assert_eq!(
+            projection.omitted,
+            9 - crate::work_grounding::MAX_CARD_ITEM_LINES
+        );
+        assert!(
+            projection
+                .items
+                .iter()
+                .any(|line| line.starts_with("[~] #8")),
+            "the active item is never the one dropped: {projection:?}"
+        );
+
+        let rendered = render_to_strings(&card.render_lines(60));
+        assert!(
+            rendered.iter().any(|line| line.contains("+6 more")),
+            "elision must be stated: {rendered:?}"
+        );
+        for line in &rendered {
+            assert!(
+                UnicodeWidthStr::width(line.as_str()) <= 60,
+                "line exceeds the card width: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_delegate_cards_keep_the_last_child_todo() {
+        for terminal in [
+            MailboxMessage::Completed {
+                agent_id: "agent_child".to_string(),
+                summary: "done".to_string(),
+            },
+            MailboxMessage::Failed {
+                agent_id: "agent_child".to_string(),
+                error: "boom".to_string(),
+            },
+            MailboxMessage::Cancelled {
+                agent_id: "agent_child".to_string(),
+            },
+        ] {
+            let mut card = DelegateCard::new("agent_child", "general");
+            apply_to_delegate(
+                &mut card,
+                &work_state(
+                    "agent_child",
+                    todo(
+                        &[
+                            (1, "land the fix", TodoStatus::Completed),
+                            (2, "run the suite", TodoStatus::InProgress),
+                        ],
+                        Some(2),
+                    ),
+                ),
+            );
+            apply_to_delegate(&mut card, &terminal);
+
+            let rendered = render_to_strings(&card.render_lines(100)).join("\n");
+            assert!(card.status.is_terminal(), "{:?}", card.status);
+            assert!(
+                rendered.contains("[~] #2 run the suite"),
+                "terminal card keeps the last truthful ledger ({:?}): {rendered}",
+                card.status
+            );
+            assert!(rendered.contains("To-do 1/2"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn fanout_card_does_not_project_any_workers_todo() {
+        let mut card = FanoutCard::new("fanout").with_workers(["w_1", "w_2"]);
+        assert!(!apply_to_fanout(
+            &mut card,
+            &work_state(
+                "w_1",
+                todo(&[(1, "worker one work", TodoStatus::InProgress)], Some(1)),
+            ),
+        ));
+        let rendered = render_to_strings(&card.render_lines(100)).join("\n");
+        assert!(!rendered.contains("worker one work"), "{rendered}");
+        assert!(!rendered.contains("To-do"), "{rendered}");
     }
 
     #[test]

@@ -21,7 +21,7 @@ use codewhale_config::catalog::{
     ProviderCatalogCache, ProviderCatalogDelta, base_url_fingerprint, now_unix,
 };
 use codewhale_config::provider::WireFormat;
-use codewhale_config::route::ReadyRouteCandidate;
+use codewhale_config::route::{LogicalModelRef, ReadyRouteCandidate, RouteRequest, RouteResolver};
 use codewhale_config::{auth_mode_disables_api_key, is_upstream_auth_header};
 
 use crate::config::{
@@ -178,11 +178,21 @@ pub struct DeepSeekClient {
     model_bound_secret_values: Arc<Vec<String>>,
     pub(super) base_url: String,
     pub(super) api_provider: ApiProvider,
+    /// Exact configured provider identity and billing mode frozen when this
+    /// client is built. Child/tool calls only carry the client at dispatch, so
+    /// these route facts must travel with it instead of being reconstructed
+    /// from the mutable parent session at completion time.
+    provider_identity: String,
+    billing_surface: Option<String>,
+    billing_mode: crate::cost_status::RouteBillingMode,
     /// ChatGPT account id captured through the same consent-gated credential
     /// resolution as the Codex bearer token.
     pub(super) codex_account_id: Option<String>,
     wire_format: WireFormat,
     retry: RetryPolicy,
+    /// Auxiliary inspection calls use the normal bounded retry schedule but
+    /// never publish retry/rate-limit state into process-global UI cells.
+    isolated_request_state: bool,
     default_model: String,
     connection_health: Arc<AsyncMutex<ConnectionHealth>>,
     rate_limiter: Arc<AsyncMutex<TokenBucket>>,
@@ -193,6 +203,11 @@ pub struct DeepSeekClient {
     /// compiled out of release builds.
     #[cfg(test)]
     test_chat_transport_base_url: Option<String>,
+    /// Messages equivalent of `test_chat_transport_base_url`; keeps exact
+    /// route shaping bound to the semantic endpoint while tests capture on a
+    /// local server.
+    #[cfg(test)]
+    test_messages_transport_base_url: Option<String>,
     pub(super) reasoning_stream_style: Option<String>,
     pub(super) stream_idle_timeout: Duration,
 }
@@ -434,9 +449,13 @@ impl Clone for DeepSeekClient {
             model_bound_secret_values: Arc::clone(&self.model_bound_secret_values),
             base_url: self.base_url.clone(),
             api_provider: self.api_provider,
+            provider_identity: self.provider_identity.clone(),
+            billing_surface: self.billing_surface.clone(),
+            billing_mode: self.billing_mode,
             codex_account_id: self.codex_account_id.clone(),
             wire_format: self.wire_format,
             retry: self.retry.clone(),
+            isolated_request_state: self.isolated_request_state,
             default_model: self.default_model.clone(),
             connection_health: self.connection_health.clone(),
             rate_limiter: self.rate_limiter.clone(),
@@ -444,6 +463,8 @@ impl Clone for DeepSeekClient {
             path_suffix: self.path_suffix.clone(),
             #[cfg(test)]
             test_chat_transport_base_url: self.test_chat_transport_base_url.clone(),
+            #[cfg(test)]
+            test_messages_transport_base_url: self.test_messages_transport_base_url.clone(),
             reasoning_stream_style: self.reasoning_stream_style.clone(),
             stream_idle_timeout: self.stream_idle_timeout,
         }
@@ -751,7 +772,7 @@ fn is_version_segment(segment: &str) -> bool {
             .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit()))
 }
 
-pub(super) fn api_url(base_url: &str, path: &str) -> String {
+pub(crate) fn api_url(base_url: &str, path: &str) -> String {
     api_url_with_suffix(base_url, path, None)
 }
 
@@ -954,7 +975,18 @@ fn add_extra_root_certs(
 impl DeepSeekClient {
     /// Create a DeepSeek client from CLI configuration.
     pub fn new(config: &Config) -> Result<Self> {
-        Self::from_parts(config.deepseek_base_url(), config.default_model(), config)
+        let api_provider = config.api_provider();
+        if api_provider == ApiProvider::OpencodeZen {
+            let route = crate::route_runtime::resolve_runtime_route(config, api_provider, None)
+                .map_err(anyhow::Error::msg)?;
+            return Self::from_candidate(&route.config, &route.candidate);
+        }
+        Self::from_parts(
+            config.deepseek_base_url(),
+            config.default_model(),
+            provider_default_wire_format(api_provider),
+            config,
+        )
     }
 
     /// Create a DeepSeek client whose transport is bound to a runtime-resolved
@@ -967,15 +999,12 @@ impl DeepSeekClient {
     /// an auth-source *class*), so the API key and provider are still read from
     /// `config`.
     pub fn from_candidate(config: &Config, candidate: &ReadyRouteCandidate) -> Result<Self> {
-        let mut client = Self::from_parts(
+        Self::from_parts(
             candidate.endpoint().base_url.clone(),
             candidate.wire_model_id().as_str().to_string(),
+            candidate.protocol(),
             config,
-        )?;
-        // #185: dispatch the wire format from the resolved route offering,
-        // not from the provider enum.
-        client.wire_format = candidate.protocol();
-        Ok(client)
+        )
     }
 
     /// Shared constructor body for [`Self::new`] and [`Self::from_candidate`].
@@ -983,8 +1012,21 @@ impl DeepSeekClient {
     /// `base_url` and `default_model` are the only inputs that differ between
     /// the two entry points; everything else (auth, provider, retry, headers,
     /// timeouts) is derived from `config` so the two paths cannot drift.
-    fn from_parts(base_url: String, default_model: String, config: &Config) -> Result<Self> {
+    fn from_parts(
+        base_url: String,
+        default_model: String,
+        wire_format: WireFormat,
+        config: &Config,
+    ) -> Result<Self> {
         let api_provider = config.api_provider();
+        let provider_identity = config.provider_identity_for(api_provider);
+        let billing_surface = crate::route_billing::billing_surface_for_dispatch(
+            Some(config),
+            api_provider,
+            Some(&base_url),
+        )
+        .map(str::to_string);
+        let billing_mode = crate::route_billing::for_route(config, api_provider).into();
         if api_provider == ApiProvider::OpencodeGo {
             validate_route(api_provider, &default_model).map_err(anyhow::Error::msg)?;
         }
@@ -1051,6 +1093,7 @@ impl DeepSeekClient {
             &http_headers,
             api_provider,
             &base_url,
+            wire_format,
             auth_disabled,
             false,
         )?;
@@ -1062,17 +1105,10 @@ impl DeepSeekClient {
             &http_headers,
             api_provider,
             &base_url,
+            wire_format,
             auth_disabled,
             true,
         )?;
-
-        let wire_format = if api_provider == ApiProvider::OpenaiCodex {
-            WireFormat::Responses
-        } else if api_provider_uses_anthropic_messages(api_provider) {
-            WireFormat::AnthropicMessages
-        } else {
-            WireFormat::ChatCompletions
-        };
 
         Ok(Self {
             http_client,
@@ -1081,9 +1117,13 @@ impl DeepSeekClient {
             model_bound_secret_values,
             base_url,
             api_provider,
+            provider_identity,
+            billing_surface,
+            billing_mode,
             codex_account_id,
             wire_format,
             retry,
+            isolated_request_state: false,
             default_model,
             connection_health: Arc::new(AsyncMutex::new(ConnectionHealth::default())),
             rate_limiter: Arc::new(AsyncMutex::new(TokenBucket::from_env())),
@@ -1091,6 +1131,8 @@ impl DeepSeekClient {
             path_suffix,
             #[cfg(test)]
             test_chat_transport_base_url: None,
+            #[cfg(test)]
+            test_messages_transport_base_url: None,
             reasoning_stream_style,
             stream_idle_timeout,
         })
@@ -1107,6 +1149,17 @@ impl DeepSeekClient {
             return base_url;
         }
         &self.base_url
+    }
+
+    /// Transport destination for a prepared Anthropic-compatible request.
+    /// Production sends the exact prepared endpoint; tests may redirect the
+    /// transport while preserving that immutable endpoint for route shaping.
+    pub(super) fn messages_transport_url(&self, prepared_url: &str) -> String {
+        #[cfg(test)]
+        if let Some(base_url) = self.test_messages_transport_base_url.as_deref() {
+            return anthropic::anthropic_messages_url(base_url);
+        }
+        prepared_url.to_string()
     }
 
     /// Return a request whose tool results are safe to send to an upstream
@@ -1147,6 +1200,34 @@ impl DeepSeekClient {
         redact_model_bound_text(text, &self.model_bound_secret_values)
     }
 
+    fn bind_request_to_protocol(&self, mut request: MessageRequest) -> Result<MessageRequest> {
+        if self.api_provider != ApiProvider::OpencodeZen {
+            return Ok(request);
+        }
+
+        static RESOLVER: OnceLock<RouteResolver> = OnceLock::new();
+        let candidate = RESOLVER
+            .get_or_init(RouteResolver::new)
+            .resolve(&RouteRequest {
+                explicit_provider: ApiProvider::OpencodeZen.kind(),
+                model_selector: Some(LogicalModelRef::from(request.model.as_str())),
+                saved_provider_model: None,
+                base_url_override: Some(self.base_url.clone()),
+                limit_overrides: Vec::new(),
+            })
+            .map_err(anyhow::Error::msg)?;
+        if candidate.protocol() != self.wire_format {
+            bail!(
+                "OpenCode Zen model {:?} uses {:?}, but this client is bound to {:?}; resolve a new model route before sending",
+                request.model,
+                candidate.protocol(),
+                self.wire_format
+            );
+        }
+        request.model = candidate.wire_model_id().as_str().to_string();
+        Ok(request)
+    }
+
     #[cfg(test)]
     fn build_http_client(
         api_key: &str,
@@ -1159,6 +1240,7 @@ impl DeepSeekClient {
             extra_headers,
             api_provider,
             base_url,
+            provider_default_wire_format(api_provider),
             false,
             false,
         )
@@ -1169,6 +1251,7 @@ impl DeepSeekClient {
         extra_headers: &HashMap<String, String>,
         api_provider: ApiProvider,
         base_url: &str,
+        wire_format: WireFormat,
         auth_disabled: bool,
         force_http1: bool,
     ) -> Result<reqwest::Client> {
@@ -1177,6 +1260,7 @@ impl DeepSeekClient {
             extra_headers,
             api_provider,
             base_url,
+            wire_format,
             auth_disabled,
         )?;
         let mut builder = crate::tls::reqwest_client_builder()
@@ -1218,6 +1302,7 @@ impl DeepSeekClient {
             extra_headers,
             ApiProvider::Deepseek,
             crate::config::DEFAULT_DEEPSEEK_BASE_URL,
+            WireFormat::ChatCompletions,
             false,
         )
     }
@@ -1229,7 +1314,14 @@ impl DeepSeekClient {
         api_provider: ApiProvider,
         base_url: &str,
     ) -> Result<HeaderMap> {
-        build_default_headers(api_key, extra_headers, api_provider, base_url, false)
+        build_default_headers(
+            api_key,
+            extra_headers,
+            api_provider,
+            base_url,
+            provider_default_wire_format(api_provider),
+            false,
+        )
     }
 
     #[cfg(test)]
@@ -1239,7 +1331,14 @@ impl DeepSeekClient {
         api_provider: ApiProvider,
         base_url: &str,
     ) -> Result<HeaderMap> {
-        build_default_headers(api_key, extra_headers, api_provider, base_url, true)
+        build_default_headers(
+            api_key,
+            extra_headers,
+            api_provider,
+            base_url,
+            provider_default_wire_format(api_provider),
+            true,
+        )
     }
 }
 
@@ -1248,12 +1347,14 @@ fn build_default_headers(
     extra_headers: &HashMap<String, String>,
     api_provider: ApiProvider,
     base_url: &str,
+    wire_format: WireFormat,
     auth_disabled: bool,
 ) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     let api_key = api_key.trim();
-    if api_provider_uses_anthropic_messages(api_provider) {
+    let uses_anthropic_messages = wire_format == WireFormat::AnthropicMessages;
+    if uses_anthropic_messages {
         // #3014: most Messages API routes authenticate with `x-api-key`.
         // OpenModel also supports Bearer auth for Messages, and its `/models`
         // endpoint requires it, so the header chooser below keeps OpenModel on
@@ -1266,7 +1367,7 @@ fn build_default_headers(
     let auth_header_name = if auth_disabled {
         None
     } else if !api_key.is_empty()
-        && api_provider_uses_anthropic_messages(api_provider)
+        && uses_anthropic_messages
         && api_provider != ApiProvider::Openmodel
     {
         Some(HeaderName::from_static("x-api-key"))
@@ -1317,14 +1418,21 @@ fn is_auth_dialect_header(header_name: &HeaderName) -> bool {
         || header_name == HeaderName::from_static("x-api-key")
 }
 
-fn api_provider_uses_anthropic_messages(api_provider: ApiProvider) -> bool {
-    matches!(
-        api_provider,
-        ApiProvider::Anthropic
-            | ApiProvider::DeepseekAnthropic
-            | ApiProvider::MinimaxAnthropic
-            | ApiProvider::Openmodel
-    )
+fn provider_default_wire_format(api_provider: ApiProvider) -> WireFormat {
+    api_provider
+        .kind()
+        .and_then(|kind| {
+            codewhale_config::provider::provider_for_kind(kind)
+                .wire_policy()
+                .fixed()
+        })
+        .unwrap_or_else(|| {
+            if api_provider == ApiProvider::OpencodeZen {
+                WireFormat::Responses
+            } else {
+                WireFormat::ChatCompletions
+            }
+        })
 }
 
 fn api_provider_skips_models_probe(api_provider: ApiProvider) -> bool {
@@ -1354,8 +1462,15 @@ pub async fn verify_provider_api_key(
         // way; accept the key optimistically (same as health_check).
         return Ok(());
     }
-    let headers = build_default_headers(api_key, &Default::default(), provider, base_url, false)
-        .map_err(|err| format!("failed to build auth headers: {err:#}"))?;
+    let headers = build_default_headers(
+        api_key,
+        &Default::default(),
+        provider,
+        base_url,
+        provider_default_wire_format(provider),
+        false,
+    )
+    .map_err(|err| format!("failed to build auth headers: {err:#}"))?;
     let client = crate::tls::reqwest_client_builder()
         .default_headers(headers)
         .user_agent(concat!(
@@ -1486,9 +1601,191 @@ impl DeepSeekClient {
         &self.base_url
     }
 
+    /// Prepare — but do not send — the exact outbound request for `request`.
+    ///
+    /// This is *the* outbound seam (#1004). Production dispatch
+    /// (`create_message`, `create_message_stream`) and `/preview-request` both
+    /// call it, so a preview cannot describe a request different from the one
+    /// a turn would send.
+    ///
+    /// It runs, in production order:
+    ///
+    /// 1. tool-history repair and model-bound secret redaction
+    ///    ([`Self::prepare_model_bound_request`]);
+    /// 2. protocol binding and route model re-resolution
+    ///    ([`Self::bind_request_to_protocol`]);
+    /// 3. the dialect's own body builder — Chat Completions, Anthropic
+    ///    Messages, or OpenAI Responses — including every provider-specific
+    ///    sanitizer and reasoning shaper;
+    /// 4. exact endpoint resolution for that dialect and route shape.
+    ///
+    /// It performs no I/O and mutates no client state.
+    pub(crate) fn prepare_outbound_request(
+        &self,
+        request: MessageRequest,
+        stream: bool,
+    ) -> Result<PreparedOutboundRequest> {
+        let request = self.bind_request_to_protocol(self.prepare_model_bound_request(request))?;
+        let requested_effort = request.reasoning_effort.clone();
+        let dialect = WireDialect::from_wire_format(self.wire_format);
+        // `stream` is the caller's entry point, not a wire fact: each dialect
+        // decides for itself what the body's `stream` field says.
+        let entrypoint = CallerStreamMode::from_stream_flag(stream);
+
+        match self.wire_format {
+            WireFormat::ChatCompletions => {
+                let wire = chat::build_chat_wire_body(
+                    &request,
+                    self.api_provider,
+                    &self.base_url,
+                    stream,
+                )?;
+                let url = chat_completions_url(
+                    self.chat_transport_base_url(),
+                    &self.base_url,
+                    self.api_provider,
+                    self.path_suffix.as_deref(),
+                    &wire.body,
+                );
+                let shape = prepared::chat_route_shape(
+                    self.api_provider,
+                    &self.base_url,
+                    &wire.model,
+                    &url,
+                );
+                Ok(PreparedOutboundRequest::new(
+                    dialect,
+                    self.endpoint_identity(url, shape),
+                    wire.model,
+                    wire.body,
+                    requested_effort,
+                    wire.replay_input_tokens,
+                    entrypoint,
+                ))
+            }
+            WireFormat::AnthropicMessages => {
+                let body = self.build_anthropic_body(&request, stream);
+                let url = anthropic::anthropic_messages_url(&self.base_url);
+                let shape = if self.api_provider == ApiProvider::OpencodeZen {
+                    RouteShape::OpencodeZen
+                } else if self.api_provider == ApiProvider::Custom {
+                    RouteShape::CustomCompatible
+                } else {
+                    RouteShape::Standard
+                };
+                let wire_model = body
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .unwrap_or(request.model.as_str())
+                    .to_string();
+                Ok(PreparedOutboundRequest::new(
+                    dialect,
+                    self.endpoint_identity(url, shape),
+                    wire_model,
+                    body,
+                    requested_effort,
+                    None,
+                    entrypoint,
+                ))
+            }
+            WireFormat::Responses => {
+                let body = responses::build_responses_body(&request);
+                let is_codex = self.api_provider == ApiProvider::OpenaiCodex;
+                let url = if is_codex {
+                    format!("{}{}", self.base_url, responses::CODEX_RESPONSES_PATH)
+                } else {
+                    api_url(&self.base_url, "responses")
+                };
+                let shape = if is_codex {
+                    RouteShape::CodexResponses
+                } else if self.api_provider == ApiProvider::OpencodeZen {
+                    RouteShape::OpencodeZen
+                } else if self.api_provider == ApiProvider::Custom {
+                    RouteShape::CustomCompatible
+                } else {
+                    RouteShape::Standard
+                };
+                let wire_model = body
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .unwrap_or(request.model.as_str())
+                    .to_string();
+                Ok(PreparedOutboundRequest::new(
+                    dialect,
+                    self.endpoint_identity(url, shape),
+                    wire_model,
+                    body,
+                    requested_effort,
+                    None,
+                    entrypoint,
+                ))
+            }
+        }
+    }
+
+    /// Typed identity of the endpoint this client would POST to.
+    ///
+    /// `route_id` is left empty here on purpose: the client knows the provider
+    /// and the URL, but only the caller's resolved turn plan knows whether the
+    /// user reached this route through a named custom-provider entry. The
+    /// engine attaches it with [`PreparedOutboundRequest::with_route_id`].
+    fn endpoint_identity(&self, url: String, shape: RouteShape) -> EndpointIdentity {
+        EndpointIdentity {
+            provider_id: self.api_provider.as_str().to_string(),
+            provider_display: self.api_provider.display_name().to_string(),
+            route_id: None,
+            url,
+            shape,
+        }
+    }
+
     /// Returns the active API provider for this client.
     pub fn api_provider(&self) -> ApiProvider {
         self.api_provider
+    }
+
+    /// Secret-free receipt for the exact base endpoint and credential
+    /// generation this client was constructed with.
+    ///
+    /// This is the only way the API key leaves `client.rs`, and it leaves as a
+    /// one-way digest. Minting the receipt here — rather than re-reading config
+    /// at some later lifecycle point — is what makes it immutable proof of the
+    /// route that was actually installed for the turn.
+    #[must_use]
+    pub fn turn_route_receipt(
+        &self,
+        provider_identity: &str,
+    ) -> crate::route_receipt::TurnRouteReceipt {
+        crate::route_receipt::TurnRouteReceipt::new(
+            self.api_provider,
+            provider_identity,
+            &self.default_model,
+            &self.base_url,
+            &self.api_key,
+        )
+    }
+
+    /// Capture the immutable, redacted route envelope for a request immediately
+    /// before it is dispatched. The wire model is normalized exactly as the
+    /// transport will normalize it; a provider-returned alias must never replace
+    /// this billing identity later.
+    #[must_use]
+    pub fn effective_route_envelope(
+        &self,
+        requested_model: &str,
+        dispatched_at: chrono::DateTime<chrono::Utc>,
+    ) -> crate::cost_status::EffectiveRouteEnvelope {
+        let model =
+            wire_model_for_provider_route(self.api_provider, &self.base_url, requested_model);
+        crate::cost_status::EffectiveRouteEnvelope {
+            provider: self.api_provider,
+            provider_identity: self.provider_identity.clone(),
+            model,
+            billing_surface: self.billing_surface.clone(),
+            endpoint_fingerprint: crate::cost_status::endpoint_fingerprint(&self.base_url),
+            billing_mode: self.billing_mode,
+            dispatched_at,
+        }
     }
 
     /// Resolved in-flight provider request cap, if one is active.
@@ -1541,10 +1838,22 @@ impl DeepSeekClient {
         target_language: &str,
     ) -> Result<String> {
         let model = wire_model_for_provider_route(self.api_provider, &self.base_url, model);
-        if self.wire_format == WireFormat::AnthropicMessages {
-            let response = self
-                .handle_anthropic_message(translation_message_request(text, model, target_language))
-                .await?;
+        if self.wire_format != WireFormat::ChatCompletions {
+            // Non-Chat dialects reuse the prepared-request seam so translation
+            // cannot drift from production shaping. Translation is still an
+            // *auxiliary* call, not a primary agent turn: the Chat dialect
+            // below builds its own small fixed body, and `/preview-request`
+            // deliberately does not claim to describe either
+            // (see `docs/PREVIEW_REQUEST.md`).
+            let prepared = self.prepare_outbound_request(
+                translation_message_request(text, model, target_language),
+                false,
+            )?;
+            let response = match prepared.dialect {
+                WireDialect::OpenAiResponses => self.handle_responses_message(&prepared).await?,
+                WireDialect::AnthropicMessages => self.handle_anthropic_message(&prepared).await?,
+                WireDialect::ChatCompletions => unreachable!(),
+            };
             return translation_text_from_response(&response);
         }
 
@@ -1569,7 +1878,13 @@ impl DeepSeekClient {
             "temperature": 0.1,
             "stream": false
         });
-        apply_reasoning_effort(&mut body, Some("off"), self.api_provider);
+        chat::apply_route_reasoning_controls(
+            &mut body,
+            self.api_provider,
+            &self.base_url,
+            &model,
+            Some("off"),
+        );
 
         let response = self.send_json_with_retry(&url, &body).await?;
 
@@ -1957,6 +2272,9 @@ impl DeepSeekClient {
     where
         F: FnMut() -> reqwest::RequestBuilder,
     {
+        if self.isolated_request_state {
+            return self.send_with_isolated_retry(build).await;
+        }
         let retry_cfg: LlmRetryConfig = self.retry.clone().into();
         let request_result = with_retry(
             &retry_cfg,
@@ -2039,6 +2357,57 @@ impl DeepSeekClient {
         }
     }
 
+    /// The same bounded transport retry policy without process-global retry
+    /// banners, provider-wide pause cells, or shared connection-health writes.
+    /// Used only by the Auto classifier during read-only request inspection.
+    async fn send_with_isolated_retry<F>(&self, mut build: F) -> Result<reqwest::Response>
+    where
+        F: FnMut() -> reqwest::RequestBuilder,
+    {
+        let retry_cfg: LlmRetryConfig = self.retry.clone().into();
+        let request_result = with_retry(
+            &retry_cfg,
+            || {
+                let request = build();
+                async move {
+                    self.wait_for_rate_limit().await;
+                    let response = request
+                        .send()
+                        .await
+                        .map_err(|err| LlmError::from_reqwest(&err))?;
+                    let status = response.status();
+                    if status.is_success() {
+                        return Ok(response);
+                    }
+                    let retry_after = extract_retry_after(response.headers());
+                    let body = bounded_error_text(response, ERROR_BODY_MAX_BYTES).await;
+                    let body = sanitize_http_error_body(
+                        Some(self.api_provider.display_name()),
+                        status.as_u16(),
+                        &body,
+                    );
+                    Err(LlmError::from_http_response_with_retry_after(
+                        status.as_u16(),
+                        &body,
+                        retry_after,
+                    ))
+                }
+            },
+            Some(Box::new(|err, attempt, delay| {
+                let (reason_label, _) = retry_reason_label_and_human(err);
+                logging::warn(format!(
+                    "Isolated HTTP retry reason={} attempt={} delay={:.2}s",
+                    reason_label,
+                    attempt + 1,
+                    delay.as_secs_f64(),
+                ));
+            })),
+        )
+        .await;
+
+        request_result.map_err(|err| anyhow::Error::new(err.last_error))
+    }
+
     pub(super) async fn send_json_with_retry(
         &self,
         url: &str,
@@ -2077,6 +2446,34 @@ fn retry_reason_label_and_human(err: &LlmError) -> (&'static str, String) {
     }
 }
 
+impl DeepSeekClient {
+    /// Execute a non-streaming request without consulting or updating the
+    /// process-global response cache.
+    ///
+    /// Request previews use this only for Auto's auxiliary router classifier:
+    /// the classifier may call its configured provider, but an inspection must
+    /// not perturb later production routing through shared cache state.
+    pub(crate) async fn create_message_without_response_cache(
+        &self,
+        request: MessageRequest,
+    ) -> Result<MessageResponse> {
+        let mut isolated = self.clone();
+        isolated.isolated_request_state = true;
+        // The ordinary clone shares its provider token bucket so concurrent
+        // production calls observe one rate budget. Request inspection is an
+        // auxiliary classifier call, however: it must neither consume nor
+        // inherit that mutable foreground state.
+        isolated.rate_limiter = Arc::new(AsyncMutex::new(TokenBucket::from_env()));
+        let _permit = isolated.acquire_provider_request_permit().await;
+        let prepared = isolated.prepare_outbound_request(request, false)?;
+        match prepared.dialect {
+            WireDialect::OpenAiResponses => isolated.handle_responses_message(&prepared).await,
+            WireDialect::AnthropicMessages => isolated.handle_anthropic_message(&prepared).await,
+            WireDialect::ChatCompletions => isolated.create_message_chat(&prepared, false).await,
+        }
+    }
+}
+
 impl LlmClient for DeepSeekClient {
     fn provider_name(&self) -> &'static str {
         self.api_provider.as_str()
@@ -2084,6 +2481,18 @@ impl LlmClient for DeepSeekClient {
 
     fn model(&self) -> &str {
         &self.default_model
+    }
+
+    fn billing_base_url(&self) -> Option<&str> {
+        Some(&self.base_url)
+    }
+
+    fn effective_route_envelope(
+        &self,
+        requested_model: &str,
+        dispatched_at: chrono::DateTime<chrono::Utc>,
+    ) -> crate::cost_status::EffectiveRouteEnvelope {
+        DeepSeekClient::effective_route_envelope(self, requested_model, dispatched_at)
     }
 
     async fn health_check(&self) -> Result<bool> {
@@ -2116,11 +2525,14 @@ impl LlmClient for DeepSeekClient {
 
     async fn create_message(&self, request: MessageRequest) -> Result<MessageResponse> {
         let _permit = self.acquire_provider_request_permit().await;
-        let request = self.prepare_model_bound_request(request);
-        match self.wire_format {
-            WireFormat::Responses => self.handle_responses_message(request).await,
-            WireFormat::AnthropicMessages => self.handle_anthropic_message(request).await,
-            WireFormat::ChatCompletions => self.create_message_chat(&request).await,
+        // Cacheability is a property of the caller's request, not of the wire
+        // body, so it is read before the request is consumed by the seam.
+        let cacheable = crate::llm_response_cache::request_is_cacheable(&request);
+        let prepared = self.prepare_outbound_request(request, false)?;
+        match prepared.dialect {
+            WireDialect::OpenAiResponses => self.handle_responses_message(&prepared).await,
+            WireDialect::AnthropicMessages => self.handle_anthropic_message(&prepared).await,
+            WireDialect::ChatCompletions => self.create_message_chat(&prepared, cacheable).await,
         }
     }
 
@@ -2129,11 +2541,11 @@ impl LlmClient for DeepSeekClient {
         request: MessageRequest,
     ) -> Result<crate::llm_client::StreamEventBox> {
         let permit = self.acquire_provider_request_permit().await;
-        let request = self.prepare_model_bound_request(request);
-        let stream = match self.wire_format {
-            WireFormat::Responses => self.handle_responses_stream(request).await?,
-            WireFormat::AnthropicMessages => self.handle_anthropic_stream(request).await?,
-            WireFormat::ChatCompletions => self.handle_chat_completion_stream(request).await?,
+        let prepared = self.prepare_outbound_request(request, true)?;
+        let stream = match prepared.dialect {
+            WireDialect::OpenAiResponses => self.handle_responses_stream(&prepared).await?,
+            WireDialect::AnthropicMessages => self.handle_anthropic_stream(&prepared).await?,
+            WireDialect::ChatCompletions => self.handle_chat_completion_stream(prepared).await?,
         };
         Ok(Self::hold_provider_request_permit_for_stream(
             stream, permit,
@@ -2195,6 +2607,11 @@ struct OpenRouterPricing {
     completion: Option<String>,
     #[serde(default)]
     input_cache_read: Option<String>,
+    /// Per-token cache-write (cache-creation) price. OpenRouter publishes this
+    /// for the upstreams that charge a write premium (Anthropic, Qwen, …);
+    /// dropping it undercounted every cache-creation turn on those routes.
+    #[serde(default)]
+    input_cache_write: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2395,6 +2812,7 @@ fn openrouter_to_catalog_offering(
     };
 
     let cost = item.pricing.as_ref().map(|p| {
+        // OpenRouter quotes per-token USD strings; ModelsDevCost is per million.
         let parse_price = |s: &Option<String>| -> Option<f64> {
             s.as_ref()
                 .and_then(|v| v.parse::<f64>().ok())
@@ -2404,7 +2822,7 @@ fn openrouter_to_catalog_offering(
             input: parse_price(&p.prompt),
             output: parse_price(&p.completion),
             cache_read: parse_price(&p.input_cache_read),
-            cache_write: None,
+            cache_write: parse_price(&p.input_cache_write),
         }
     });
 
@@ -2493,13 +2911,6 @@ pub(super) fn apply_reasoning_effort(
     effort: Option<&str>,
     provider: ApiProvider,
 ) {
-    if matches!(provider, ApiProvider::Minimax) {
-        // MiniMax's OpenAI-compatible API keeps thinking inside `content`
-        // unless reasoning_split is enabled. Always request the split shape
-        // so private thinking renders as Thinking cells rather than answer
-        // prose.
-        body["reasoning_split"] = json!(true);
-    }
     let Some(effort) = effort else {
         return;
     };
@@ -2576,13 +2987,11 @@ pub(super) fn apply_reasoning_effort(
                     "thinking": false,
                 });
             }
-            ApiProvider::Minimax => {
-                body["thinking"] = json!({ "type": "disabled" });
-            }
+            ApiProvider::Minimax => {}
             ApiProvider::Stepfun => {}
             ApiProvider::Sakana => {}
             ApiProvider::LongCat => {}
-            ApiProvider::OpencodeGo => {}
+            ApiProvider::OpencodeGo | ApiProvider::OpencodeZen => {}
             ApiProvider::Meta => {}
             ApiProvider::Xai => {}
         },
@@ -2668,9 +3077,7 @@ pub(super) fn apply_reasoning_effort(
                     "reasoning_effort": "high",
                 });
             }
-            ApiProvider::Minimax => {
-                body["thinking"] = json!({ "type": "adaptive" });
-            }
+            ApiProvider::Minimax => {}
             ApiProvider::Zai => {
                 body["thinking"] = json!({
                     "type": "enabled",
@@ -2680,7 +3087,7 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Stepfun => {}
             ApiProvider::Sakana => {}
             ApiProvider::LongCat => {}
-            ApiProvider::OpencodeGo => {}
+            ApiProvider::OpencodeGo | ApiProvider::OpencodeZen => {}
             ApiProvider::Meta => {}
             ApiProvider::Xai => {}
         },
@@ -2746,9 +3153,7 @@ pub(super) fn apply_reasoning_effort(
                     "reasoning_effort": "max",
                 });
             }
-            ApiProvider::Minimax => {
-                body["thinking"] = json!({ "type": "adaptive" });
-            }
+            ApiProvider::Minimax => {}
             ApiProvider::Zai => {
                 body["thinking"] = json!({
                     "type": "enabled",
@@ -2758,12 +3163,16 @@ pub(super) fn apply_reasoning_effort(
             ApiProvider::Stepfun => {}
             ApiProvider::Sakana => {}
             ApiProvider::LongCat => {}
-            ApiProvider::OpencodeGo => {}
+            ApiProvider::OpencodeGo | ApiProvider::OpencodeZen => {}
             ApiProvider::Meta => {}
             ApiProvider::Xai => {}
         },
         _ => {}
     }
+}
+
+pub(super) fn saturating_u32(value: u64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 pub(super) fn parse_usage(usage: Option<&Value>) -> Usage {
@@ -2802,23 +3211,30 @@ pub(super) fn parse_usage(usage: Option<&Value>) -> Usage {
         .and_then(|u| u.get("prompt_cache_hit_tokens"))
         .and_then(Value::as_u64)
         .or(cached_tokens)
-        .map(|v| v as u32);
+        .map(saturating_u32);
     let prompt_cache_miss_tokens = usage
         .and_then(|u| u.get("prompt_cache_miss_tokens"))
         .and_then(Value::as_u64)
         .or_else(|| prompt_cache_hit_tokens.map(|hit| input_tokens.saturating_sub(u64::from(hit))))
-        .map(|v| v as u32);
-    let reasoning_tokens = reasoning_tokens_raw.map(|v| v as u32);
+        .map(saturating_u32);
+    // Reasoning tokens are a *subset* of the completion count every provider
+    // bills, so they are never added to output. A payload claiming more
+    // reasoning than output contradicts that invariant, which makes the figure
+    // invalid telemetry rather than extra billable output: drop it instead of
+    // letting a bad number reach the cost surfaces (#4318).
+    let reasoning_tokens = reasoning_tokens_raw
+        .filter(|reasoning| *reasoning <= output_tokens)
+        .map(saturating_u32);
 
     let server_tool_use = usage.and_then(|u| u.get("server_tool_use")).map(|server| {
         let code_execution_requests = server
             .get("code_execution_requests")
             .and_then(Value::as_u64)
-            .map(|v| v as u32);
+            .map(saturating_u32);
         let tool_search_requests = server
             .get("tool_search_requests")
             .and_then(Value::as_u64)
-            .map(|v| v as u32);
+            .map(saturating_u32);
         ServerToolUsage {
             code_execution_requests,
             tool_search_requests,
@@ -2826,8 +3242,8 @@ pub(super) fn parse_usage(usage: Option<&Value>) -> Usage {
     });
 
     Usage {
-        input_tokens: input_tokens.min(u64::from(u32::MAX)) as u32,
-        output_tokens: output_tokens.min(u64::from(u32::MAX)) as u32,
+        input_tokens: saturating_u32(input_tokens),
+        output_tokens: saturating_u32(output_tokens),
         prompt_cache_hit_tokens,
         prompt_cache_miss_tokens,
         prompt_cache_write_tokens: None,
@@ -2846,10 +3262,13 @@ impl DeepSeekClient {
         suffix: &str,
         max_tokens: u32,
     ) -> anyhow::Result<String> {
-        if self.wire_format == WireFormat::AnthropicMessages {
+        if self.api_provider == ApiProvider::OpencodeZen
+            || self.wire_format != WireFormat::ChatCompletions
+        {
             bail!(
-                "FIM completion is not supported for {} because it uses the Anthropic Messages protocol",
-                self.api_provider.display_name()
+                "FIM completion is not supported for {} because the route has no proven FIM wire contract ({:?})",
+                self.api_provider.display_name(),
+                self.wire_format
             );
         }
         let url = api_url_with_suffix(&self.base_url, "beta/completions", None);
@@ -2887,6 +3306,7 @@ impl DeepSeekClient {
 
 mod anthropic;
 mod chat;
+mod prepared;
 mod provider_native_search;
 mod responses;
 mod stream_entry;
@@ -2912,6 +3332,10 @@ fn take_sse_line(buffer: &mut Vec<u8>) -> Option<String> {
 }
 
 pub(crate) use chat::{CacheWarmupKey, PromptInspection};
+pub(crate) use prepared::{
+    CallerStreamMode, EndpointIdentity, PreparedOutboundRequest, RouteShape, WireBodyView,
+    WireDialect, canonical_json,
+};
 pub(crate) use provider_native_search::{ProviderNativeSearchClient, ProviderNativeSearchRequest};
 
 pub(crate) fn inspect_prompt_for_request(request: &MessageRequest) -> PromptInspection {
@@ -2934,7 +3358,8 @@ mod tests {
     use crate::client::responses::build_responses_body;
     use crate::config::{DEFAULT_TELECOMJS_MODEL, ProviderConfig, ProvidersConfig};
     use crate::models::{
-        ContentBlock, ContentBlockStart, Delta, Message, MessageRequest, StreamEvent, Tool,
+        ContentBlock, ContentBlockStart, Delta, Message, MessageRequest, MessageResponse,
+        StreamEvent, Tool,
     };
     use crate::tools::apply_patch::ApplyPatchTool;
     use crate::tools::spec::ToolSpec;
@@ -2943,6 +3368,57 @@ mod tests {
     use serde_json::json;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn openrouter_pricing_maps_cache_write_per_token_to_per_million() {
+        let payload = r#"{"data":[{
+            "id":"anthropic/claude-sonnet-4-6",
+            "pricing":{
+                "prompt":"0.000003",
+                "completion":"0.000015",
+                "input_cache_read":"0.0000003",
+                "input_cache_write":"0.00000375"
+            }
+        },{
+            "id":"some/no-write-row",
+            "pricing":{"prompt":"0.000001","completion":"0.000002"}
+        }]}"#;
+
+        let items = parse_openrouter_models_response(payload).expect("parses");
+        let priced = openrouter_to_catalog_offering(&items[0], "openrouter", "fp", 42);
+        let cost = priced.cost.as_ref().expect("pricing row");
+        assert_eq!(cost.input, Some(3.0));
+        assert_eq!(cost.output, Some(15.0));
+        assert_eq!(cost.cache_read, Some(0.3));
+        assert_eq!(cost.cache_write, Some(3.75));
+
+        // A cache-write premium must actually reach the estimator: the same
+        // tokens cost more when they are cache-creation rather than cache-read.
+        let pricing = codewhale_config::pricing::OfferingPricing::from_catalog_offering(&priced)
+            .expect("priced offering");
+        let write = codewhale_config::pricing::TokenUsage {
+            cache_write: 1_000_000,
+            ..Default::default()
+        };
+        assert_eq!(pricing.estimate_cost(&write), Some(3.75));
+        assert!(pricing.unpriced_used_classes(&write).is_empty());
+
+        // A row without a published write rate stays unknown, not zero, and
+        // fails closed for cache-creation turns.
+        let unwritten = openrouter_to_catalog_offering(&items[1], "openrouter", "fp", 42);
+        assert_eq!(
+            unwritten.cost.as_ref().and_then(|cost| cost.cache_write),
+            None
+        );
+        let unwritten =
+            codewhale_config::pricing::OfferingPricing::from_catalog_offering(&unwritten)
+                .expect("priced offering");
+        assert_eq!(unwritten.estimate_cost(&write), None);
+        assert_eq!(
+            unwritten.unpriced_used_classes(&write),
+            vec![codewhale_config::pricing::TokenClass::CacheWrite]
+        );
+    }
 
     fn test_tool(name: &str) -> Tool {
         Tool {
@@ -3052,6 +3528,56 @@ mod tests {
         client
     }
 
+    fn zai_request_boundary_client(
+        route_base_url: &str,
+        model: &str,
+        transport_base_url: String,
+    ) -> DeepSeekClient {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let mut client = DeepSeekClient::new(&Config {
+            provider: Some("zai".to_string()),
+            providers: Some(ProvidersConfig {
+                zai: ProviderConfig {
+                    api_key: Some("zai-request-boundary-key".to_string()),
+                    base_url: Some(route_base_url.to_string()),
+                    model: Some(model.to_string()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        })
+        .expect("Z.ai request-boundary client");
+        assert_eq!(client.base_url, route_base_url);
+        client.test_chat_transport_base_url = Some(transport_base_url);
+        client
+    }
+
+    fn minimax_request_boundary_client(
+        route_base_url: &str,
+        model: &str,
+        transport_base_url: String,
+    ) -> DeepSeekClient {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let mut client = DeepSeekClient::new(&Config {
+            provider: Some("minimax".to_string()),
+            providers: Some(ProvidersConfig {
+                minimax: ProviderConfig {
+                    api_key: Some("minimax-request-boundary-key".to_string()),
+                    base_url: Some(route_base_url.to_string()),
+                    model: Some(model.to_string()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        })
+        .expect("MiniMax request-boundary client");
+        assert_eq!(client.base_url, route_base_url);
+        client.test_chat_transport_base_url = Some(transport_base_url);
+        client
+    }
+
     fn deepseek_request_boundary_client(
         route_base_url: &str,
         transport_base_url: String,
@@ -3147,6 +3673,174 @@ mod tests {
         let path = requests[0].url.path().to_string();
         let body = serde_json::from_slice(&requests[0].body).expect("captured request JSON");
         (path, body)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cache_free_message_call_neither_reads_nor_writes_global_cache() {
+        let _retry_guard = crate::retry_status::test_guard();
+        crate::retry_status::clear();
+        crate::retry_status::clear_rate_limit();
+        crate::retry_status::start(7, Duration::from_secs(60), "foreground sentinel");
+        crate::retry_status::note_rate_limit(Duration::from_secs(60));
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "chatcmpl-cache-free-provider",
+                "object": "chat.completion",
+                "model": "deepseek-v4-pro",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "provider result"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = deepseek_request_boundary_client("https://api.deepseek.com/v1", server.uri());
+        let request = MessageRequest {
+            model: "deepseek-v4-pro".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "preview-router-cache-isolation-regression".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 128,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: Some("off".to_string()),
+            stream: Some(false),
+            temperature: Some(0.0),
+            top_p: None,
+        };
+        let prepared = client
+            .prepare_outbound_request(request.clone(), false)
+            .expect("request prepares");
+        let wire_body = serde_json::to_vec(&prepared.body).expect("wire body serializes");
+        let cache_key = crate::llm_response_cache::ResponseCache::make_key(
+            client.api_provider.as_str(),
+            &client.base_url,
+            client.path_suffix.as_deref(),
+            &client.api_key,
+            &wire_body,
+        );
+        crate::llm_response_cache::response_cache().put(
+            cache_key,
+            MessageResponse {
+                id: "cached-sentinel-must-survive".to_string(),
+                r#type: "message".to_string(),
+                role: "assistant".to_string(),
+                content: Vec::new(),
+                model: "deepseek-v4-pro".to_string(),
+                stop_reason: Some("end_turn".to_string()),
+                stop_sequence: None,
+                container: None,
+                usage: Default::default(),
+            },
+        );
+
+        let response = client
+            .create_message_without_response_cache(request)
+            .await
+            .expect("cache-free provider call succeeds");
+        assert_eq!(response.id, "chatcmpl-cache-free-provider");
+        assert_eq!(
+            crate::llm_response_cache::response_cache()
+                .get(&cache_key)
+                .expect("sentinel remains")
+                .id,
+            "cached-sentinel-must-survive"
+        );
+        match crate::retry_status::snapshot() {
+            crate::retry_status::RetryState::Active(banner) => {
+                assert_eq!(banner.attempt, 7);
+                assert_eq!(banner.reason, "foreground sentinel");
+            }
+            state => panic!("isolated success mutated retry state: {state:?}"),
+        }
+        assert!(
+            crate::retry_status::rate_limit_remaining().is_some(),
+            "isolated success must not clear the foreground provider pause"
+        );
+        crate::retry_status::clear();
+        crate::retry_status::clear_rate_limit();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cache_free_classifier_429_does_not_publish_global_retry_or_rate_limit_state() {
+        let _retry_guard = crate::retry_status::test_guard();
+        crate::retry_status::clear();
+        crate::retry_status::clear_rate_limit();
+        crate::retry_status::start(9, Duration::from_secs(60), "foreground sentinel 429");
+        crate::retry_status::note_rate_limit(Duration::from_secs(60));
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "120")
+                    .set_body_string("rate limited"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut client =
+            deepseek_request_boundary_client("https://api.deepseek.com/v1", server.uri());
+        client.retry.enabled = false;
+        client.retry.max_retries = 0;
+        let request = MessageRequest {
+            model: "deepseek-v4-pro".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "preview-router-429-isolation-regression".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 64,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: Some("off".to_string()),
+            stream: Some(false),
+            temperature: Some(0.0),
+            top_p: None,
+        };
+        let error = client
+            .create_message_without_response_cache(request)
+            .await
+            .expect_err("429 must fail when isolated retries are disabled");
+        assert!(
+            matches!(
+                error.downcast_ref::<LlmError>(),
+                Some(LlmError::RateLimited { .. })
+            ),
+            "{error:#}"
+        );
+        match crate::retry_status::snapshot() {
+            crate::retry_status::RetryState::Active(banner) => {
+                assert_eq!(banner.attempt, 9);
+                assert_eq!(banner.reason, "foreground sentinel 429");
+            }
+            state => panic!("isolated 429 mutated retry state: {state:?}"),
+        }
+        let remaining =
+            crate::retry_status::rate_limit_remaining().expect("foreground provider pause remains");
+        assert!(
+            remaining < Duration::from_secs(70),
+            "classifier Retry-After must not extend the global pause: {remaining:?}"
+        );
+        crate::retry_status::clear();
+        crate::retry_status::clear_rate_limit();
     }
 
     async fn assert_deepseek_strict_request_route_boundary(streaming: bool) {
@@ -3270,6 +3964,249 @@ mod tests {
         let requests = server.received_requests().await.expect("recorded request");
         assert_eq!(requests.len(), 1);
         serde_json::from_slice(&requests[0].body).expect("captured request JSON")
+    }
+
+    async fn capture_route_chat_request_body(
+        model: &str,
+        request: MessageRequest,
+        client_for_transport: impl FnOnce(String) -> DeepSeekClient,
+    ) -> (String, Value) {
+        let streaming = request.stream == Some(true);
+        let server = MockServer::start().await;
+        let response = if streaming {
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string("data: [DONE]\n\n")
+        } else {
+            ResponseTemplate::new(200).set_body_json(json!({
+                "id": "chatcmpl-provider-request-boundary",
+                "object": "chat.completion",
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2
+                }
+            }))
+        };
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(response)
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = client_for_transport(server.uri());
+        if streaming {
+            let mut stream = client
+                .create_message_stream(request)
+                .await
+                .expect("streaming request succeeds");
+            while let Some(event) = stream.next().await {
+                event.expect("captured SSE response remains valid");
+            }
+        } else {
+            client
+                .create_message(request)
+                .await
+                .expect("non-streaming request succeeds");
+        }
+
+        let requests = server.received_requests().await.expect("recorded request");
+        assert_eq!(requests.len(), 1);
+        (
+            requests[0].url.path().to_string(),
+            serde_json::from_slice(&requests[0].body).expect("captured request JSON"),
+        )
+    }
+
+    async fn capture_zai_chat_request(
+        route_base_url: &str,
+        model: &str,
+        effort: Option<&str>,
+        streaming: bool,
+    ) -> (String, Value) {
+        capture_route_chat_request_body(
+            model,
+            k3_request_fixture(model, effort, streaming),
+            |uri| zai_request_boundary_client(route_base_url, model, uri),
+        )
+        .await
+    }
+
+    async fn capture_minimax_chat_request(
+        route_base_url: &str,
+        model: &str,
+        effort: Option<&str>,
+        streaming: bool,
+    ) -> (String, Value) {
+        capture_route_chat_request_body(
+            model,
+            k3_request_fixture(model, effort, streaming),
+            |uri| minimax_request_boundary_client(route_base_url, model, uri),
+        )
+        .await
+    }
+
+    async fn assert_zai_request_truth(streaming: bool) {
+        for base_url in [
+            crate::config::DEFAULT_ZAI_BASE_URL,
+            "https://api.z.ai/api/paas/v4",
+        ] {
+            let (high_path, high) = capture_zai_chat_request(
+                base_url,
+                crate::config::ZAI_GLM_5_2_MODEL,
+                Some("high"),
+                streaming,
+            )
+            .await;
+            let (max_path, max) = capture_zai_chat_request(
+                base_url,
+                crate::config::ZAI_GLM_5_2_MODEL,
+                Some("max"),
+                streaming,
+            )
+            .await;
+            assert_eq!(high_path, "/v1/chat/completions");
+            assert_eq!(max_path, "/v1/chat/completions");
+            assert_eq!(high["reasoning_effort"], "high", "{base_url}: {high}");
+            assert_eq!(max["reasoning_effort"], "max", "{base_url}: {max}");
+            for body in [&high, &max] {
+                assert_eq!(
+                    body["thinking"],
+                    json!({"type": "enabled", "clear_thinking": false}),
+                    "{base_url}: {body}"
+                );
+                assert_eq!(body["model"], crate::config::ZAI_GLM_5_2_MODEL);
+            }
+            let mut high_without_effort = high.clone();
+            let mut max_without_effort = max.clone();
+            high_without_effort
+                .as_object_mut()
+                .expect("object")
+                .remove("reasoning_effort");
+            max_without_effort
+                .as_object_mut()
+                .expect("object")
+                .remove("reasoning_effort");
+            assert_eq!(high_without_effort, max_without_effort);
+
+            for model in [
+                crate::config::ZAI_GLM_5_1_MODEL,
+                crate::config::ZAI_GLM_5_TURBO_MODEL,
+            ] {
+                for requested in ["high", "max"] {
+                    let (_, toggle_only) =
+                        capture_zai_chat_request(base_url, model, Some(requested), streaming).await;
+                    assert!(
+                        toggle_only.get("reasoning_effort").is_none(),
+                        "{model}: {toggle_only}"
+                    );
+                    assert_eq!(
+                        toggle_only["thinking"],
+                        json!({"type": "enabled", "clear_thinking": false}),
+                        "{model}: {toggle_only}"
+                    );
+                }
+            }
+
+            let (_, unknown) =
+                capture_zai_chat_request(base_url, "glm-future-unknown", Some("max"), streaming)
+                    .await;
+            assert!(unknown.get("reasoning_effort").is_none(), "{unknown}");
+            assert!(unknown.get("thinking").is_none(), "{unknown}");
+        }
+
+        let (_, gateway) = capture_zai_chat_request(
+            "https://gateway.example/v1",
+            crate::config::ZAI_GLM_5_2_MODEL,
+            Some("max"),
+            streaming,
+        )
+        .await;
+        assert!(gateway.get("reasoning_effort").is_none(), "{gateway}");
+        assert!(gateway.get("thinking").is_none(), "{gateway}");
+
+        let (_, gateway_turbo) = capture_zai_chat_request(
+            "https://gateway.example/v1",
+            crate::config::ZAI_GLM_5_TURBO_MODEL,
+            Some("max"),
+            streaming,
+        )
+        .await;
+        assert!(
+            gateway_turbo.get("reasoning_effort").is_none(),
+            "{gateway_turbo}"
+        );
+        assert!(gateway_turbo.get("thinking").is_none(), "{gateway_turbo}");
+    }
+
+    async fn assert_minimax_request_truth(streaming: bool) {
+        for base_url in [
+            crate::config::DEFAULT_MINIMAX_BASE_URL,
+            "https://api.minimaxi.com/v1",
+        ] {
+            for (effort, expected_thinking) in [
+                ("off", json!({"type": "disabled"})),
+                ("high", json!({"type": "adaptive"})),
+                ("max", json!({"type": "adaptive"})),
+            ] {
+                let (_, body) = capture_minimax_chat_request(
+                    base_url,
+                    crate::config::DEFAULT_MINIMAX_MODEL,
+                    Some(effort),
+                    streaming,
+                )
+                .await;
+                assert_eq!(
+                    body["max_completion_tokens"], 64,
+                    "{base_url} {effort}: {body}"
+                );
+                assert!(
+                    body.get("max_tokens").is_none(),
+                    "{base_url} {effort}: {body}"
+                );
+                assert_eq!(body["reasoning_split"], true, "{base_url}: {body}");
+                assert_eq!(
+                    body["thinking"], expected_thinking,
+                    "{base_url} {effort}: {body}"
+                );
+            }
+        }
+
+        for (base_url, model) in [
+            (crate::config::DEFAULT_MINIMAX_BASE_URL, "MiniMax-M2"),
+            (
+                "https://gateway.example/v1",
+                crate::config::DEFAULT_MINIMAX_MODEL,
+            ),
+        ] {
+            for effort in ["off", "high", "max"] {
+                let (_, body) =
+                    capture_minimax_chat_request(base_url, model, Some(effort), streaming).await;
+                assert_eq!(
+                    body["max_tokens"], 64,
+                    "{base_url} {model} {effort}: {body}"
+                );
+                assert!(
+                    body.get("max_completion_tokens").is_none(),
+                    "{base_url} {model} {effort}: {body}"
+                );
+                assert!(
+                    body.get("reasoning_split").is_none(),
+                    "{base_url} {model} {effort}: {body}"
+                );
+                assert!(
+                    body.get("thinking").is_none(),
+                    "{base_url} {model} {effort}: {body}"
+                );
+            }
+        }
     }
 
     async fn assert_k3_request_json_route_boundaries(streaming: bool) {
@@ -3649,6 +4586,74 @@ mod tests {
         assert_k3_request_json_route_boundaries(true).await;
     }
 
+    /// v0.9.1 kimi-k3 dogfood report: the id the user selects has to be the id on the wire. A
+    /// dogfood user selecting `kimi-k3` was served `kimi-k2.7-code`, so this
+    /// asserts the wire `model` field for each K3 product on its own endpoint,
+    /// and that neither one's request carries the other's id.
+    #[tokio::test]
+    async fn selected_moonshot_k3_model_is_the_model_on_the_wire() {
+        let platform = capture_moonshot_chat_request(
+            crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            crate::config::MOONSHOT_KIMI_K3_MODEL,
+            Some("high"),
+            false,
+        )
+        .await;
+        assert_eq!(
+            platform["model"],
+            json!(crate::config::MOONSHOT_KIMI_K3_MODEL),
+            "the direct platform route must send the id the user named: {platform}"
+        );
+        assert_ne!(
+            platform["model"],
+            json!(crate::config::DEFAULT_MOONSHOT_MODEL),
+            "an explicit selection is never replaced by the provider default: {platform}"
+        );
+        assert_ne!(
+            platform["model"],
+            json!(crate::config::KIMI_CODE_K3_MODEL),
+            "the coding-plan id must not leak onto the platform route: {platform}"
+        );
+
+        let membership = capture_moonshot_chat_request(
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            crate::config::KIMI_CODE_K3_MODEL,
+            Some("high"),
+            false,
+        )
+        .await;
+        assert_eq!(
+            membership["model"],
+            json!(crate::config::KIMI_CODE_K3_MODEL),
+            "the Kimi Code membership route must send bare `k3`: {membership}"
+        );
+        assert_ne!(
+            membership["model"],
+            json!(crate::config::MOONSHOT_KIMI_K3_MODEL),
+            "the platform id must not leak onto the coding-plan route: {membership}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_message_request_json_keeps_zai_effort_route_exact() {
+        assert_zai_request_truth(false).await;
+    }
+
+    #[tokio::test]
+    async fn create_message_stream_request_json_keeps_zai_effort_route_exact() {
+        assert_zai_request_truth(true).await;
+    }
+
+    #[tokio::test]
+    async fn create_message_request_json_keeps_minimax_token_dialect_exact() {
+        assert_minimax_request_truth(false).await;
+    }
+
+    #[tokio::test]
+    async fn create_message_stream_request_json_keeps_minimax_token_dialect_exact() {
+        assert_minimax_request_truth(true).await;
+    }
+
     #[tokio::test]
     async fn create_message_routes_only_strict_deepseek_tools_to_beta() {
         assert_deepseek_strict_request_route_boundary(false).await;
@@ -3707,6 +4712,191 @@ mod tests {
     #[tokio::test]
     async fn create_message_captures_exact_mfjs_safe_general_child_catalog() {
         assert_kimi_code_captures_exact_general_child_catalog().await;
+    }
+
+    fn opencode_zen_client(server: &MockServer, model: &str) -> DeepSeekClient {
+        let config = Config {
+            provider: Some("opencode-zen".to_string()),
+            providers: Some(ProvidersConfig {
+                opencode_zen: ProviderConfig {
+                    api_key: Some("zen-test-key".to_string()),
+                    base_url: Some(server.uri()),
+                    model: Some(model.to_string()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        };
+        DeepSeekClient::new(&config).expect("OpenCode Zen client should resolve its model route")
+    }
+
+    fn minimal_zen_request(model: &str) -> MessageRequest {
+        translation_message_request("hello", model.to_string(), "English")
+    }
+
+    fn assert_zen_bearer_without_codex_headers(request: &wiremock::Request) {
+        assert_eq!(
+            request
+                .headers
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer zen-test-key")
+        );
+        for forbidden in [
+            "openai-beta",
+            "originator",
+            "chatgpt-account-id",
+            "x-api-key",
+        ] {
+            assert!(
+                request.headers.get(forbidden).is_none(),
+                "Zen request must not include {forbidden}"
+            );
+        }
+    }
+
+    fn assert_zen_messages_api_key_without_bearer(request: &wiremock::Request) {
+        assert_eq!(
+            request
+                .headers
+                .get("x-api-key")
+                .and_then(|value| value.to_str().ok()),
+            Some("zen-test-key")
+        );
+        assert!(
+            request.headers.get(AUTHORIZATION).is_none(),
+            "Zen Messages request must not include Authorization"
+        );
+        for forbidden in ["openai-beta", "originator", "chatgpt-account-id"] {
+            assert!(
+                request.headers.get(forbidden).is_none(),
+                "Zen request must not include {forbidden}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn opencode_zen_responses_request_uses_responses_route_without_oauth_headers() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "text/event-stream")
+                    .set_body_string("data: [DONE]\n\n"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = opencode_zen_client(&server, "gpt-5.5");
+        assert_eq!(client.wire_format, WireFormat::Responses);
+        let mut stream = client
+            .create_message_stream(minimal_zen_request("gpt-5.5"))
+            .await
+            .expect("Zen Responses request should start");
+        while let Some(event) = stream.next().await {
+            event.expect("Zen Responses stream event");
+        }
+
+        let requests = server.received_requests().await.expect("recorded request");
+        assert_eq!(requests.len(), 1);
+        assert_zen_bearer_without_codex_headers(&requests[0]);
+        let body: Value = serde_json::from_slice(&requests[0].body).expect("Responses JSON body");
+        assert_eq!(body.get("model").and_then(Value::as_str), Some("gpt-5.5"));
+        assert!(body.get("input").is_some(), "Responses body: {body}");
+        assert!(body.get("messages").is_none(), "Responses body: {body}");
+    }
+
+    #[tokio::test]
+    async fn opencode_zen_messages_request_shape_uses_api_key_anthropic_route() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg_zen",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ok"}],
+                "model": "claude-sonnet-4-6",
+                "stop_reason": "end_turn",
+                "stop_sequence": null,
+                "usage": {"input_tokens": 1, "output_tokens": 1}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = opencode_zen_client(&server, "claude-sonnet-4-6");
+        assert_eq!(client.wire_format, WireFormat::AnthropicMessages);
+        client
+            .create_message(minimal_zen_request("claude-sonnet-4-6"))
+            .await
+            .expect("Zen Messages request should succeed");
+
+        let requests = server.received_requests().await.expect("recorded request");
+        assert_eq!(requests.len(), 1);
+        assert_zen_messages_api_key_without_bearer(&requests[0]);
+        assert_eq!(
+            requests[0]
+                .headers
+                .get("anthropic-version")
+                .and_then(|value| value.to_str().ok()),
+            Some("2023-06-01")
+        );
+    }
+
+    #[tokio::test]
+    async fn opencode_zen_chat_request_uses_chat_completions_route() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "chatcmpl_zen",
+                "object": "chat.completion",
+                "model": "deepseek-v4-pro",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "ok"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = opencode_zen_client(&server, "deepseek-v4-pro");
+        assert_eq!(client.wire_format, WireFormat::ChatCompletions);
+        client
+            .create_message(minimal_zen_request("deepseek-v4-pro"))
+            .await
+            .expect("Zen Chat Completions request should succeed");
+
+        let requests = server.received_requests().await.expect("recorded request");
+        assert_eq!(requests.len(), 1);
+        assert_zen_bearer_without_codex_headers(&requests[0]);
+        assert!(requests[0].headers.get("anthropic-version").is_none());
+    }
+
+    #[tokio::test]
+    async fn opencode_zen_client_fails_closed_when_request_model_changes_protocol() {
+        let server = MockServer::start().await;
+        let client = opencode_zen_client(&server, "gpt-5.5");
+
+        let error = client
+            .create_message(minimal_zen_request("claude-sonnet-4-6"))
+            .await
+            .expect_err("a Responses-bound client must not send a Messages model");
+        assert!(format!("{error:#}").contains("resolve a new model route"));
+        assert!(
+            server
+                .received_requests()
+                .await
+                .expect("recorded requests")
+                .is_empty()
+        );
     }
 
     const CONFIG_SECRET_SENTINELS: [&str; 8] = [
@@ -4919,7 +6109,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = minimax_anthropic_client_with_base_url(format!("{}/anthropic", server.uri()));
+        let mut client = minimax_anthropic_client_with_base_url(
+            crate::config::DEFAULT_MINIMAX_ANTHROPIC_BASE_URL.to_string(),
+        );
+        client.test_messages_transport_base_url = Some(format!("{}/anthropic", server.uri()));
         let response = client
             .create_message(MessageRequest {
                 model: "MiniMax-M3".to_string(),
@@ -4968,7 +6161,7 @@ mod tests {
             message.contains("FIM completion is not supported"),
             "{message}"
         );
-        assert!(message.contains("Anthropic Messages protocol"), "{message}");
+        assert!(message.contains("no proven FIM wire contract"), "{message}");
         let requests = server.received_requests().await.expect("recorded requests");
         assert!(
             requests.is_empty(),
@@ -5934,9 +7127,15 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_effort_minimax_splits_reasoning_from_content() {
+    fn reasoning_effort_minimax_requires_exact_route_to_split_reasoning() {
         let mut body = json!({});
-        apply_reasoning_effort(&mut body, Some("high"), ApiProvider::Minimax);
+        chat::apply_route_reasoning_controls(
+            &mut body,
+            ApiProvider::Minimax,
+            crate::config::DEFAULT_MINIMAX_BASE_URL,
+            crate::config::DEFAULT_MINIMAX_MODEL,
+            Some("high"),
+        );
         assert_eq!(
             body.get("reasoning_split").and_then(Value::as_bool),
             Some(true)
@@ -5948,7 +7147,27 @@ mod tests {
         assert!(body.get("reasoning_effort").is_none());
 
         let mut body = json!({});
-        apply_reasoning_effort(&mut body, Some("off"), ApiProvider::Minimax);
+        chat::apply_route_reasoning_controls(
+            &mut body,
+            ApiProvider::Minimax,
+            crate::config::DEFAULT_MINIMAX_BASE_URL,
+            crate::config::DEFAULT_MINIMAX_MODEL,
+            Some("max"),
+        );
+        assert_eq!(
+            body.pointer("/thinking/type").and_then(Value::as_str),
+            Some("adaptive")
+        );
+        assert!(body.get("reasoning_effort").is_none());
+
+        let mut body = json!({});
+        chat::apply_route_reasoning_controls(
+            &mut body,
+            ApiProvider::Minimax,
+            crate::config::DEFAULT_MINIMAX_BASE_URL,
+            crate::config::DEFAULT_MINIMAX_MODEL,
+            Some("off"),
+        );
         assert_eq!(
             body.get("reasoning_split").and_then(Value::as_bool),
             Some(true)
@@ -5959,8 +7178,34 @@ mod tests {
         );
 
         let mut body = json!({});
-        apply_reasoning_effort(&mut body, None, ApiProvider::Minimax);
+        chat::apply_route_reasoning_controls(
+            &mut body,
+            ApiProvider::Minimax,
+            crate::config::DEFAULT_MINIMAX_BASE_URL,
+            crate::config::DEFAULT_MINIMAX_MODEL,
+            None,
+        );
         assert_eq!(body, json!({ "reasoning_split": true }));
+
+        for (base_url, model) in [
+            (
+                "https://gateway.example/v1",
+                crate::config::DEFAULT_MINIMAX_MODEL,
+            ),
+            (crate::config::DEFAULT_MINIMAX_BASE_URL, "MiniMax-M2"),
+        ] {
+            for effort in ["off", "high", "max"] {
+                let mut body = json!({});
+                chat::apply_route_reasoning_controls(
+                    &mut body,
+                    ApiProvider::Minimax,
+                    base_url,
+                    model,
+                    Some(effort),
+                );
+                assert_eq!(body, json!({}), "{base_url} {model} {effort}");
+            }
+        }
     }
 
     #[test]
@@ -7044,6 +8289,177 @@ mod tests {
         assert_eq!(usage.prompt_cache_hit_tokens, Some(70));
         assert_eq!(usage.prompt_cache_miss_tokens, Some(30));
         assert_eq!(usage.reasoning_tokens, Some(12));
+    }
+
+    #[test]
+    fn parse_usage_saturates_every_u64_token_field() {
+        let usage = parse_usage(Some(&json!({
+            "input_tokens": u64::MAX,
+            "output_tokens": u64::MAX,
+            "prompt_cache_hit_tokens": u64::MAX,
+            "prompt_cache_miss_tokens": u64::MAX,
+            "completion_tokens_details": { "reasoning_tokens": u64::MAX },
+            "server_tool_use": {
+                "code_execution_requests": u64::MAX,
+                "tool_search_requests": u64::MAX
+            }
+        })));
+        assert_eq!(usage.input_tokens, u32::MAX);
+        assert_eq!(usage.output_tokens, u32::MAX);
+        assert_eq!(usage.prompt_cache_hit_tokens, Some(u32::MAX));
+        assert_eq!(usage.prompt_cache_miss_tokens, Some(u32::MAX));
+        assert_eq!(usage.reasoning_tokens, Some(u32::MAX));
+        let server = usage.server_tool_use.expect("server usage");
+        assert_eq!(server.code_execution_requests, Some(u32::MAX));
+        assert_eq!(server.tool_search_requests, Some(u32::MAX));
+    }
+
+    #[test]
+    fn client_route_envelope_freezes_saved_minimax_billing_mode_and_wire_model() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let config = Config {
+            provider: Some("minimax".to_string()),
+            providers: Some(ProvidersConfig {
+                minimax: ProviderConfig {
+                    api_key: Some("test-key".to_string()),
+                    mode: Some("pay-as-you-go".to_string()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        };
+        let client = DeepSeekClient::new(&config).expect("MiniMax client");
+        let dispatched_at =
+            chrono::DateTime::<chrono::Utc>::from_timestamp(1_234, 0).expect("timestamp");
+        let route = client.effective_route_envelope("MiniMax-M3", dispatched_at);
+
+        assert_eq!(route.provider, ApiProvider::Minimax);
+        assert_eq!(route.provider_identity, "minimax");
+        assert_eq!(route.model, "MiniMax-M3");
+        assert_eq!(
+            route.billing_surface.as_deref(),
+            Some(crate::pricing::MINIMAX_PAYG_BILLING_SURFACE)
+        );
+        assert_eq!(
+            route.billing_mode,
+            crate::cost_status::RouteBillingMode::Metered
+        );
+        assert_eq!(route.dispatched_at.timestamp(), 1_234);
+    }
+
+    /// Real-shaped Chat-Completions usage payloads from the three providers most
+    /// likely to report reasoning tokens, carried end-to-end into pricing.
+    ///
+    /// Two invariants hold for every fixture: `reasoning_tokens <= output_tokens`,
+    /// and pricing never adds reasoning on top of output — dropping the reasoning
+    /// field entirely must not change the cost by a single cent.
+    #[test]
+    fn reasoning_parser_fixtures_never_exceed_or_add_to_billable_output() {
+        use crate::config::ApiProvider;
+        use crate::pricing::{calculate_turn_cost_estimate_for_provider, token_usage_for_pricing};
+
+        // (label, provider, model, payload)
+        let fixtures: [(&str, ApiProvider, &str, serde_json::Value); 3] = [
+            (
+                "moonshot",
+                ApiProvider::Moonshot,
+                "kimi-k2.7-code",
+                json!({
+                    "prompt_tokens": 30_000,
+                    "completion_tokens": 2_400,
+                    "total_tokens": 32_400,
+                    "prompt_tokens_details": { "cached_tokens": 24_000 },
+                    "completion_tokens_details": { "reasoning_tokens": 1_900 }
+                }),
+            ),
+            (
+                "minimax",
+                ApiProvider::Minimax,
+                "minimax-m3",
+                json!({
+                    "prompt_tokens": 12_000,
+                    "completion_tokens": 3_000,
+                    "total_tokens": 15_000,
+                    "prompt_tokens_details": { "cached_tokens": 4_000 },
+                    "completion_tokens_details": { "reasoning_tokens": 2_950 }
+                }),
+            ),
+            (
+                "openrouter",
+                ApiProvider::Openrouter,
+                "qwen/qwen3.7-plus",
+                json!({
+                    "prompt_tokens": 8_000,
+                    "completion_tokens": 1_500,
+                    "total_tokens": 9_500,
+                    "prompt_tokens_details": { "cached_tokens": 2_000 },
+                    "completion_tokens_details": { "reasoning_tokens": 1_500 }
+                }),
+            ),
+        ];
+
+        for (label, provider, model, payload) in fixtures {
+            let usage = parse_usage(Some(&payload));
+            let reasoning = usage.reasoning_tokens.expect("fixture reports reasoning");
+
+            // Invariant 1: reasoning is a subset of the billed completion count.
+            assert!(
+                reasoning <= usage.output_tokens,
+                "{label}: reasoning {reasoning} exceeds output {}",
+                usage.output_tokens
+            );
+            // Billable output is exactly the reported completion count.
+            let classes = token_usage_for_pricing(&usage);
+            assert_eq!(
+                classes.output,
+                u64::from(usage.output_tokens),
+                "{label}: reasoning leaked into billable output"
+            );
+
+            // Invariant 2: pricing does not add reasoning a second time. The same
+            // usage with the reasoning field removed must cost the same.
+            let without = crate::models::Usage {
+                reasoning_tokens: None,
+                ..usage.clone()
+            };
+            assert_eq!(
+                calculate_turn_cost_estimate_for_provider(provider, model, &usage),
+                calculate_turn_cost_estimate_for_provider(provider, model, &without),
+                "{label}: reasoning changed the price"
+            );
+        }
+    }
+
+    /// A payload claiming more reasoning than output contradicts the subset
+    /// invariant. That is broken telemetry, so the field is discarded — and it
+    /// must never become extra billable output.
+    #[test]
+    fn pathological_reasoning_above_output_is_rejected_not_billed() {
+        let usage = parse_usage(Some(&json!({
+            "prompt_tokens": 1_000,
+            "completion_tokens": 100,
+            "completion_tokens_details": { "reasoning_tokens": 5_000 }
+        })));
+
+        assert_eq!(usage.output_tokens, 100, "output stays as reported");
+        assert_eq!(
+            usage.reasoning_tokens, None,
+            "impossible reasoning telemetry is dropped rather than trusted"
+        );
+        let classes = crate::pricing::token_usage_for_pricing(&usage);
+        assert_eq!(classes.output, 100);
+
+        // `completion_tokens: 0` with reasoning present is the *legitimate*
+        // shape this filter must not break: providers that report only reasoning
+        // set output from it, keeping reasoning == output.
+        let zero_output = parse_usage(Some(&json!({
+            "prompt_tokens": 1_000,
+            "completion_tokens": 0,
+            "completion_tokens_details": { "reasoning_tokens": 12 }
+        })));
+        assert_eq!(zero_output.output_tokens, 12);
+        assert_eq!(zero_output.reasoning_tokens, Some(12));
     }
 
     #[test]

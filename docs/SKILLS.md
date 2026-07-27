@@ -108,6 +108,13 @@ advertise capabilities the runtime lacks. In particular, image understanding
 is available, but an image-generation skill is not bundled until a real
 image-generation tool exists.
 
+Repository-maintenance and release-operator helpers (the `gh-*` skills and
+`codew-release-qa-sweep` under [`skills/`](skills/README.md)) are **not** part
+of the end-user starter pack and are never auto-installed; a catalog-matrix
+test pins that boundary. Shipping them as an optional bundle is plugin-delivery
+work tracked separately in
+[#4836](https://github.com/Hmbown/CodeWhale/issues/4836).
+
 ### Invocation and alias metadata
 
 Bundled and user skills may declare two runtime-routing fields in frontmatter:
@@ -135,12 +142,74 @@ reference text or advertise unsupported tools:
 | `check-work` | Canonical alias/compatibility mapping to `verify` | `verify` is the shipped evidence-collection workflow. |
 | `code-review` | Canonical alias/compatibility mapping to `review` | `review` is the shipped read-only correctness workflow. |
 | `create-skill` | Canonical alias/compatibility mapping to `skill-creator` | `skill-creator` is the shipped authoring workflow. |
-| `help` | Do not add a giant ambient skill; resolve help from installed docs/config on request | `read_file`, `/help`, and the documented skill manager are the existing surfaces. |
+| `help` | Bounded `invocation: explicit-only` router, not an ambient manual | Routes to `/help`, `/skills`, `/config`, `doctor`, and the installed `docs/` tree; it embeds no manual text. |
 | `imagine` | Intentionally out of scope | Codewhale has no image-generation/edit tool, so the starter pack must not advertise one. |
+
+Notes on the two non-alias decisions:
+
+- **`help`** ships as a bundled skill (generation 7) but is `explicit-only`, so
+  it never appears in the model catalogue and costs zero ambient prompt budget.
+  Its body is a routing card — which surface owns which fact — and explicitly
+  forbids pasting a command list or settings table into context. A checked
+  invariant keeps it under 80 lines and requires it to name the `/help`,
+  `/skills`, `/config`, and `doctor` surfaces.
+- **`imagine`** stays out. The shipped runtime exposes image *understanding*,
+  not image generation or edit, so no bundled skill may advertise it. The
+  catalog matrix asserts that `imagine`, `image`, and `image-gen` are absent
+  from the bundle and resolve to nothing.
 
 No reference skill body is copied by this compatibility slice. The explicit
 aliases and invocation metadata are bounded routing facts; the full skill body
 still enters context only through `load_skill`.
+
+### Catalog fixture matrix (provider-free)
+
+[`crates/tui/assets/skills-catalog-matrix.json`](../crates/tui/assets/skills-catalog-matrix.json)
+is an **authored** expectation table covering every bundled skill: canonical
+name, tier, invocation, aliases, whether it renders as an ambient catalogue
+entry, and which of its aliases are shadowed by another canonical name. The
+tests in `crates/tui/src/skills/catalog_matrix.rs` assert a bijection between
+that fixture and `BUNDLED_SKILLS`, so the shipped pack cannot change without an
+explicit fixture update.
+
+What those tests do and do not claim:
+
+- They validate **deterministic registry / catalog / resolver behavior**:
+  install, parse, eligibility, explicit load, non-activation, alias resolution,
+  explicit-only exclusion, collision precedence, and prompt budget.
+- They validate **nothing about semantic LLM routing**. Whether a model chooses
+  `debug` for a stack trace is a live-provider question; see
+  [LIVE_SMOKE.md](LIVE_SMOKE.md).
+
+Collision and prompt-budget invariants asserted today:
+
+| Invariant | Meaning |
+| --- | --- |
+| Canonical wins | A canonical bundled name always beats another skill's alias (`docx` → `docx`, never `documents`). |
+| Single alias owner | No two bundled skills may claim the same alias. |
+| No duplicate entries | Each canonical name renders at most one catalogue line; aliases render zero. |
+| Budget headroom | The shipped pack alone renders under `MAX_AVAILABLE_SKILLS_CHARS` (12 000 chars) with **no** "additional skills omitted" line, so user skills are never silently displaced. |
+| No context poisoning | Descriptions stay single-line and are truncated to `MAX_SKILL_DESCRIPTION_CHARS` (280) before entering the prompt. |
+
+### Locale-aware routing metadata
+
+`description_<tag>` frontmatter is supported (exact tag, then primary subtag,
+then the canonical description — with Traditional Chinese excluded from the
+Simplified `zh` fallback). **No bundled skill ships a localized routing
+description**, and none is fabricated. The shipped contract is therefore an
+explicit, tested fallback:
+
+- For every skill in the bundle × every locale in `Locale::shipped()`
+  (`en`, `ja`, `zh-Hans`, `zh-Hant`, `pt-BR`, `es-419`, `vi`, `ko`),
+  `description_for_locale` returns the canonical English description.
+- The rendered catalogue block is byte-identical across all shipped locales.
+- Exact-tag match, primary-subtag fallback (`pt-BR` → `description_pt`), and
+  English fallback are covered against a synthetic authored fixture, so the
+  resolution paths stay tested even while the bundle itself is English-only.
+
+If a bundled skill later ships localized routing metadata, the parity test
+fails until source-backed coverage is added for it — the fallback contract
+cannot silently absorb a translation.
 
 ## Audit statuses
 

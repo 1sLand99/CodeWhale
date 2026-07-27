@@ -109,6 +109,9 @@ pub const KIMI_CODE_MEMBERSHIP_PLAN_CONSOLE_URL: &str =
 /// Official Kimi Code route model id. It is deliberately distinct from
 /// Moonshot's pay-as-you-go `kimi-k3` catalog id.
 pub const KIMI_CODE_K3_MODEL: &str = "k3";
+/// Kimi Code membership high-speed wire model id. Membership route only, not
+/// a direct Moonshot platform catalog model.
+pub const KIMI_CODE_HIGHSPEED_MODEL: &str = "kimi-for-coding-highspeed";
 // The K3 contract constants (`KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS`,
 // `KIMI_K3_CONTEXT_WINDOW_TOKENS`, and the distinct default/direct output
 // limits) live in `crate::models` — the model-facts table, which also compiles
@@ -164,6 +167,10 @@ pub const ZAI_GLM_5_TURBO_MODEL: &str = "GLM-5-Turbo";
 pub const DEFAULT_ZAI_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
 pub const DEFAULT_STEPFUN_MODEL: &str = "step-3.7-flash";
 pub const DEFAULT_STEPFUN_BASE_URL: &str = "https://api.stepfun.ai/v1";
+/// StepFun's Step Plan subscription endpoint. Billed against a plan allowance
+/// rather than per-token, so it is a separate route from pay-as-you-go and is
+/// never inferred — the user picks it during provider setup (#4526).
+pub const DEFAULT_STEPFUN_PLAN_BASE_URL: &str = "https://api.stepfun.ai/step_plan/v1";
 pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
 pub const ANTHROPIC_OPUS_MODEL: &str = "claude-opus-4-8";
 pub const ANTHROPIC_HAIKU_MODEL: &str = "claude-haiku-4-5";
@@ -188,6 +195,8 @@ pub const DEFAULT_LONGCAT_BASE_URL: &str = "https://api.longcat.chat/openai/v1";
 pub const DEFAULT_OPENCODE_GO_MODEL: &str = "deepseek-v4-pro";
 pub const DEFAULT_OPENCODE_GO_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
 pub use codewhale_config::OPENCODE_GO_CHAT_MODELS;
+pub const DEFAULT_OPENCODE_ZEN_MODEL: &str = "gpt-5.5";
+pub const DEFAULT_OPENCODE_ZEN_BASE_URL: &str = "https://opencode.ai/zen/v1";
 pub const DEFAULT_META_MODEL: &str = "muse-spark-1.1";
 pub const DEFAULT_META_BASE_URL: &str = "https://api.meta.ai/v1";
 pub const DEFAULT_XAI_MODEL: &str = "grok-4.5";

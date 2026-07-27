@@ -30,7 +30,10 @@ use subagent_limits::{resolve_subagent_api_timeout_secs, resolve_subagent_heartb
 mod models;
 pub use models::*;
 
-const API_KEYRING_SENTINEL: &str = "__KEYRING__";
+/// Legacy placeholder written into `api_key` when the real credential lives in
+/// the secret store. It is not a credential and must never be treated as one —
+/// including by billing classification, which reads credential *shape* only.
+pub(crate) const API_KEYRING_SENTINEL: &str = "__KEYRING__";
 pub const DEFAULT_ZAI_PROVIDER_MAX_CONCURRENCY: usize = 3;
 pub const MAX_PROVIDER_REQUEST_CONCURRENCY: usize = 64;
 
@@ -70,6 +73,7 @@ pub enum ApiProvider {
     Sakana,
     LongCat,
     OpencodeGo,
+    OpencodeZen,
     Meta,
     Xai,
     /// Jiangsu Telecom TokenHub — OpenAI-compatible AI gateway.
@@ -229,7 +233,7 @@ impl ApiProvider {
 
     /// `ApiProvider` discriminant → `ProviderKind` lookup.
     /// Index 1 is `None` for the legacy `DeepseekCN` variant.
-    const KIND_LOOKUP: [Option<codewhale_config::ProviderKind>; 37] = [
+    const KIND_LOOKUP: [Option<codewhale_config::ProviderKind>; 38] = [
         Some(codewhale_config::ProviderKind::Deepseek),
         None, // DeepseekCN
         Some(codewhale_config::ProviderKind::DeepseekAnthropic),
@@ -263,6 +267,7 @@ impl ApiProvider {
         Some(codewhale_config::ProviderKind::Sakana),
         Some(codewhale_config::ProviderKind::LongCat),
         Some(codewhale_config::ProviderKind::OpencodeGo),
+        Some(codewhale_config::ProviderKind::OpencodeZen),
         Some(codewhale_config::ProviderKind::Meta),
         Some(codewhale_config::ProviderKind::Xai),
         Some(codewhale_config::ProviderKind::Telecomjs),
@@ -270,7 +275,7 @@ impl ApiProvider {
     ];
 
     /// `ProviderKind` discriminant → `ApiProvider` lookup.
-    const FROM_KIND_LOOKUP: [Self; 36] = [
+    const FROM_KIND_LOOKUP: [Self; 37] = [
         Self::Deepseek,
         Self::DeepseekAnthropic,
         Self::NvidiaNim,
@@ -303,6 +308,7 @@ impl ApiProvider {
         Self::Sakana,
         Self::LongCat,
         Self::OpencodeGo,
+        Self::OpencodeZen,
         Self::Meta,
         Self::Xai,
         Self::Telecomjs,
@@ -402,6 +408,10 @@ fn subagent_provider_key_matches(key: &str, provider: ApiProvider) -> bool {
         ApiProvider::OpencodeGo => {
             matches!(normalized.as_str(), "opencode_go" | "opencodego")
         }
+        ApiProvider::OpencodeZen => matches!(
+            normalized.as_str(),
+            "opencode_zen" | "opencodezen" | "zen" | "opencode"
+        ),
         ApiProvider::Meta => matches!(
             normalized.as_str(),
             "meta" | "meta_ai" | "meta_model_api" | "muse" | "muse_spark"
@@ -428,13 +438,22 @@ pub struct ProviderCapability {
     pub resolved_model: String,
     /// Context window in tokens (the maximum input the model can accept).
     pub context_window: u32,
-    /// Known output ceiling for this provider/model metadata path.
+    /// Known output ceiling for this provider/model metadata path, when one is
+    /// actually known.
     ///
-    /// This may be a documented exact-route maximum or a conservative/default
-    /// ceiling when the route does not publish a maximum. It is metadata for
-    /// diagnostics and CI policy; normal turns use a separate, more
-    /// conservative request cap in the engine.
-    pub max_output: u32,
+    /// `None` means "this route publishes no output maximum we can stand
+    /// behind" — for example the Kimi Code membership ids, whose limits live in
+    /// the membership catalog rather than the static model catalogue. Unknown
+    /// must stay unknown: callers may **not** substitute a placeholder ceiling,
+    /// and in particular [`crate::route_budget`] does not clamp a requested
+    /// `max_tokens` against an unknown compatibility cap.
+    ///
+    /// When `Some`, the value is a documented exact-route maximum or a
+    /// deliberately conservative provider ceiling (Anthropic's 64K floor, the
+    /// Codex OAuth route). It is metadata for diagnostics and CI policy; normal
+    /// turns use a separate, more conservative request cap in the engine.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output: Option<u32>,
     /// Whether the provider+model supports thinking/reasoning mode.
     pub thinking_supported: bool,
     /// Whether the provider returns prompt-cache telemetry fields.
@@ -489,8 +508,11 @@ pub fn provider_capability(provider: ApiProvider, resolved_model: &str) -> Provi
             // their 1M windows from models.rs rows (#3014).
             context_window: crate::models::context_window_for_model(resolved_model)
                 .unwrap_or(200_000),
-            max_output: crate::models::max_output_tokens_for_model(resolved_model)
-                .unwrap_or(64_000),
+            // 64K is the documented Anthropic Messages floor, so it stays a
+            // known cap rather than an unknown.
+            max_output: Some(
+                crate::models::max_output_tokens_for_model(resolved_model).unwrap_or(64_000),
+            ),
             thinking_supported: crate::models::model_supports_reasoning(resolved_model),
             cache_telemetry_supported: matches!(provider, ApiProvider::Anthropic),
             request_payload_mode: RequestPayloadMode::AnthropicMessages,
@@ -503,10 +525,11 @@ pub fn provider_capability(provider: ApiProvider, resolved_model: &str) -> Provi
             provider,
             resolved_model: resolved_model.to_string(),
             context_window: OPENAI_CODEX_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
-            // The OAuth cache does not publish an output ceiling. Keep the
-            // compatibility capability conservative instead of inheriting the
-            // public API model's output limit.
-            max_output: 4096,
+            // The OAuth cache does not publish an output ceiling. This 4K is a
+            // deliberate, long-standing product decision for the Codex route
+            // (not a fallback): keep the compatibility capability conservative
+            // instead of inheriting the public API model's output limit.
+            max_output: Some(4096),
             thinking_supported: true,
             cache_telemetry_supported: false,
             request_payload_mode: RequestPayloadMode::Responses,
@@ -525,7 +548,9 @@ pub fn provider_capability(provider: ApiProvider, resolved_model: &str) -> Provi
             resolved_model: resolved_model.to_string(),
             context_window: crate::models::context_window_for_model(resolved_model)
                 .unwrap_or(crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS),
-            max_output: crate::models::max_output_tokens_for_model(resolved_model).unwrap_or(4096),
+            // No documented output maximum for these routes: stay unknown so
+            // no compatibility clamp is applied downstream.
+            max_output: crate::models::max_output_tokens_for_model(resolved_model),
             thinking_supported: crate::models::model_supports_reasoning(resolved_model),
             cache_telemetry_supported: false,
             request_payload_mode: RequestPayloadMode::ChatCompletions,
@@ -539,7 +564,9 @@ pub fn provider_capability(provider: ApiProvider, resolved_model: &str) -> Provi
             resolved_model: resolved_model.to_string(),
             context_window: crate::models::context_window_for_model(resolved_model)
                 .unwrap_or(crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS),
-            max_output: crate::models::max_output_tokens_for_model(resolved_model).unwrap_or(4096),
+            // No documented output maximum for these routes: stay unknown so
+            // no compatibility clamp is applied downstream.
+            max_output: crate::models::max_output_tokens_for_model(resolved_model),
             thinking_supported: crate::models::model_supports_reasoning(resolved_model),
             cache_telemetry_supported: false,
             request_payload_mode: RequestPayloadMode::ChatCompletions,
@@ -579,10 +606,17 @@ pub fn provider_capability(provider: ApiProvider, resolved_model: &str) -> Provi
 
     // Max output tokens: official DeepSeek V4 API metadata lists 384K;
     // runtime request caps remain separate and more conservative.
+    //
+    // Everything else answers from the static model catalogue, and answers
+    // `None` when the catalogue has no row. That is the truthful state for
+    // membership routes such as the `kimi-for-coding` family, whose ceilings
+    // are owned by the membership catalog. It must not become a placeholder
+    // number: a fabricated 4K here silently clamped offline membership routes
+    // to 4K output via `route_budget`.
     let max_output = if is_v4_pro || is_v4_flash {
-        384_000
+        Some(384_000)
     } else {
-        crate::models::max_output_tokens_for_model(resolved_model).unwrap_or(4096)
+        crate::models::max_output_tokens_for_model(resolved_model)
     };
 
     // Thinking support: V4 models support thinking on all providers, but
@@ -1267,7 +1301,22 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
             vec![DEFAULT_SILICONFLOW_MODEL, DEFAULT_SILICONFLOW_FLASH_MODEL]
         }
         ApiProvider::Arcee => vec![DEFAULT_ARCEE_MODEL, ARCEE_TRINITY_LARGE_PREVIEW_MODEL],
-        ApiProvider::Moonshot => vec![DEFAULT_MOONSHOT_MODEL],
+        // Moonshot's direct platform API (the provider's default route) serves
+        // `kimi-k3`; advertising only `kimi-k2.7-code` is half of why a
+        // dogfood user reported "I can't find k3" on v0.9.1.
+        //
+        // The bare `k3` id and `kimi-for-coding` deliberately stay out: they
+        // belong to the Kimi Code coding-plan endpoint
+        // (api.kimi.com/coding/v1), which `validate_kimi_code_api_model_id`
+        // enforces. A completion list is a per-provider fallback with no
+        // base-URL context, so offering an id this route would reject would
+        // just move the surprise later. Kimi Code routes surface their own
+        // ids through the configured model and the route-aware picker rows.
+        ApiProvider::Moonshot => vec![
+            DEFAULT_MOONSHOT_MODEL,
+            MOONSHOT_KIMI_K3_MODEL,
+            MOONSHOT_KIMI_K2_6_MODEL,
+        ],
         ApiProvider::Huggingface => {
             vec![DEFAULT_HUGGINGFACE_MODEL, DEFAULT_HUGGINGFACE_FLASH_MODEL]
         }
@@ -1308,6 +1357,7 @@ pub fn model_completion_names_for_provider(provider: ApiProvider) -> Vec<&'stati
         ApiProvider::Sakana => vec![DEFAULT_SAKANA_MODEL, SAKANA_FUGU_ULTRA_MODEL],
         ApiProvider::LongCat => vec![DEFAULT_LONGCAT_MODEL],
         ApiProvider::OpencodeGo => OPENCODE_GO_CHAT_MODELS.to_vec(),
+        ApiProvider::OpencodeZen => vec![DEFAULT_OPENCODE_ZEN_MODEL],
         ApiProvider::Meta => vec![DEFAULT_META_MODEL],
         ApiProvider::Xai => vec![
             DEFAULT_XAI_MODEL,
@@ -1559,6 +1609,53 @@ pub struct NotificationsConfig {
     /// Path to the WAV sound file used when `completion_sound = "file"`.
     #[serde(default)]
     pub sound_file: Option<PathBuf>,
+
+    /// Opt-in per-event sound policy (`[notifications.event_sound]`).
+    /// Disabled by default; see `tui::sound_policy` for the decision rules.
+    #[serde(default)]
+    pub event_sound: EventSoundConfig,
+}
+
+fn default_event_sound_events() -> Vec<String> {
+    vec!["turn-complete".to_string(), "approval-needed".to_string()]
+}
+
+fn default_event_sound_min_interval_ms() -> u64 {
+    2000
+}
+
+/// Opt-in, deterministic per-event sound policy (#4817). Terminal-bell
+/// level only: cues are BEL (`\x07`) bytes, a platform-safe no-op on
+/// terminals that ignore them. Off by default.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct EventSoundConfig {
+    /// Master switch. Default: `false` (nothing is emitted unless opted in).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Allow-list of event names, kebab-case (`"turn-complete"`,
+    /// `"subagent-terminal"`, `"approval-needed"`, `"input-needed"`,
+    /// `"elevation-needed"`, `"model-notify"`). Unknown names are ignored.
+    /// Default: `["turn-complete", "approval-needed"]`.
+    #[serde(default = "default_event_sound_events")]
+    pub events: Vec<String>,
+    /// Minimum milliseconds between two plays of the same event. Default: 2000.
+    #[serde(default = "default_event_sound_min_interval_ms")]
+    pub min_interval_ms: u64,
+    /// Quiet mode: suppress all event sounds without editing the allow-list.
+    /// Default: `false`.
+    #[serde(default)]
+    pub quiet: bool,
+}
+
+impl Default for EventSoundConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            events: default_event_sound_events(),
+            min_interval_ms: default_event_sound_min_interval_ms(),
+            quiet: false,
+        }
+    }
 }
 
 fn default_snapshots_enabled() -> bool {
@@ -2060,10 +2157,19 @@ pub struct SubagentProviderConfig {
 /// its strong tier when the task clearly benefits from deeper reasoning.
 /// Providers without a validated sibling stay on the active model. Default
 /// is `false` (balanced — match the existing routing voice).
+///
+/// `cross_provider` (#4411): Auto routing is scoped to the active provider
+/// unless this persisted opt-in is set to `true`. Without it, neither the
+/// classifier inventory nor the local heuristic may leave the provider the
+/// session is actually configured to use.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct AutoConfig {
     #[serde(default)]
     pub cost_saving: Option<bool>,
+    /// Persisted opt-in for cross-provider Auto routing (`[auto]
+    /// cross_provider = true`). Default `false`: active provider only.
+    #[serde(default)]
+    pub cross_provider: Option<bool>,
     /// Optional explicit auto-router classifier route (`[auto.router]`).
     #[serde(default)]
     pub router: Option<AutoRouterConfig>,
@@ -2071,10 +2177,15 @@ pub struct AutoConfig {
 
 /// Explicit classifier route for Auto model mode (`[auto.router]`).
 ///
-/// When `provider` + `model` are set, Auto mode's classifier call goes to
-/// that route instead of the built-in DeepSeek flash default. When unset,
-/// the legacy behavior stands: `deepseek-v4-flash` via DeepSeek when a
-/// DeepSeek key exists, else the local heuristic with no classifier call.
+/// When `provider` + `model` are set, Auto mode's classifier call goes to that
+/// route. When unset, Auto stays local and free: it uses the heuristic and
+/// makes no classifier call at all.
+///
+/// There is deliberately no implicit default. Holding a DeepSeek key used to
+/// elect `deepseek-v4-flash` as the classifier for every Auto turn, which spent
+/// a user's tokens on a route they never chose and privileged one provider over
+/// the rest. Electing a network classifier is now something the operator writes
+/// down.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct AutoRouterConfig {
     /// Provider id for the classifier route (e.g. `"deepseek"`, `"zai"`).
@@ -2338,17 +2449,67 @@ pub struct Config {
     #[serde(skip)]
     pub exec_policy_engine: ExecPolicyEngine,
 
-    /// Whether the active provider endpoint was replaced by an environment
-    /// override during [`Config::load`].
+    /// Receipt describing what the environment layer did to this config's
+    /// effective base URL.
     ///
     /// This provenance cannot be reconstructed from the merged provider table:
     /// environment overrides are written into the same `base_url` field as
     /// file-owned routes. Keep the receipt so a saved provider/root key (or a
     /// configured `api_key_env`) cannot silently follow an env-selected custom
-    /// host. Directly constructed configs and file-owned endpoints retain the
-    /// established route-bound credential behavior.
+    /// host, and so a cross-provider child cannot borrow an ambient generic
+    /// host that was never addressed to it.
     #[serde(skip)]
-    pub(crate) active_base_url_env_route: Option<(ApiProvider, String)>,
+    pub(crate) base_url_env_receipt: BaseUrlEnvReceipt,
+
+    /// Who owns the legacy root `base_url` field.
+    ///
+    /// `Deepseek` and `DeepseekCN` are two identities that share one legacy
+    /// root field, so the field alone cannot say whether it is a user's
+    /// file-owned endpoint (shared by both, as it always has been) or a
+    /// `CODEWHALE_BASE_URL`/`DEEPSEEK_BASE_URL` value that
+    /// [`apply_env_overrides`] addressed to exactly one of them.
+    ///
+    /// [`BaseUrlEnvReceipt::Unrecorded`] is the file-owned case and keeps the
+    /// legacy shared behavior.
+    #[serde(skip)]
+    pub(crate) root_base_url_owner: BaseUrlEnvReceipt,
+}
+
+/// What the environment layer decided about the generic
+/// `CODEWHALE_BASE_URL` / `DEEPSEEK_BASE_URL` override.
+///
+/// The distinction that matters is between "no receipt" and "a receipt saying
+/// nobody owns it". They are not the same state and must not collapse: a
+/// missing receipt is a config that never passed through the environment
+/// layer, while [`BaseUrlEnvReceipt::NoOwner`] is a positive statement that a
+/// higher-precedence layer took the endpoint away from the environment.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum BaseUrlEnvReceipt {
+    /// The environment layer never ran for this config — directly constructed
+    /// configs, embedded profiles, and unit-test fixtures. These keep the
+    /// established global fallback: the generic override applies to whatever
+    /// route is asked about.
+    #[default]
+    Unrecorded,
+    /// The environment layer ran and no route owns the generic override —
+    /// either it was absent, or a higher-precedence file layer (a managed
+    /// overlay) supplied/reselected the effective route's endpoint. No route,
+    /// active or pinned, may borrow the ambient generic host.
+    NoOwner,
+    /// The environment layer ran and addressed the override to exactly this
+    /// `(provider, identity)`. Only that route resolves it; every other route
+    /// falls through to its own default.
+    Route(ApiProvider, String),
+}
+
+impl BaseUrlEnvReceipt {
+    /// Whether `(provider, identity)` is the route this receipt names.
+    fn owns(&self, provider: ApiProvider, identity: &str) -> bool {
+        match self {
+            Self::Route(owner, owner_identity) => *owner == provider && owner_identity == identity,
+            Self::Unrecorded | Self::NoOwner => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -2911,6 +3072,14 @@ pub struct ProvidersConfig {
     pub opencode_go: ProviderConfig,
     #[serde(
         default,
+        alias = "opencode-zen",
+        alias = "opencodezen",
+        alias = "zen",
+        alias = "opencode"
+    )]
+    pub opencode_zen: ProviderConfig,
+    #[serde(
+        default,
         alias = "meta-ai",
         alias = "meta_ai",
         alias = "meta-model-api",
@@ -2981,6 +3150,7 @@ impl ProvidersConfig {
             ("providers.minimax_anthropic", &self.minimax_anthropic),
             ("providers.sakana", &self.sakana),
             ("providers.opencode_go", &self.opencode_go),
+            ("providers.opencode_zen", &self.opencode_zen),
             ("providers.meta", &self.meta),
             ("providers.xai", &self.xai),
         ];
@@ -3564,6 +3734,19 @@ impl Config {
         self.auto
             .as_ref()
             .and_then(|a| a.cost_saving)
+            .unwrap_or(false)
+    }
+
+    /// Return `true` only when `[auto] cross_provider = true` is persisted in
+    /// config (#4411). Auto mode otherwise stays on the active provider: the
+    /// classifier never sees other providers' routes, and the local heuristic
+    /// never selects one. There is no interactive toggle — enabling
+    /// cross-provider Auto is an explicit, durable config edit.
+    #[must_use]
+    pub fn auto_cross_provider(&self) -> bool {
+        self.auto
+            .as_ref()
+            .and_then(|a| a.cross_provider)
             .unwrap_or(false)
     }
 
@@ -4231,6 +4414,21 @@ impl Config {
         self.selects_literal_custom_provider() && !self.has_literal_custom_provider_table()
     }
 
+    /// Whether `identity` names a custom route that this config can resolve.
+    ///
+    /// Either an exact `[providers.<name>]` custom table, or the legacy
+    /// root-field literal `custom` route. Anything else — an empty key, a
+    /// removed table, a built-in provider name — is an unresolvable custom
+    /// identity and endpoint resolution must fail closed on it.
+    ///
+    /// The predicate that pins that contract for the regression suite; the
+    /// resolver itself fails closed without consulting it.
+    #[cfg(test)]
+    pub(crate) fn custom_identity_is_resolvable(&self, identity: &str) -> bool {
+        self.custom_provider_entry_for_identity(identity).is_some()
+            || (identity_is_literal_custom(identity) && self.uses_legacy_literal_custom_route())
+    }
+
     pub(crate) fn provider_config_for(&self, provider: ApiProvider) -> Option<&ProviderConfig> {
         let providers = self.providers.as_ref()?;
         // The custom provider's config lives in the flatten map, keyed by the
@@ -4277,6 +4475,7 @@ impl Config {
             ApiProvider::Sakana => &providers.sakana,
             ApiProvider::LongCat => &providers.longcat,
             ApiProvider::OpencodeGo => &providers.opencode_go,
+            ApiProvider::OpencodeZen => &providers.opencode_zen,
             ApiProvider::Meta => &providers.meta,
             ApiProvider::Xai => &providers.xai,
             ApiProvider::Telecomjs => &providers.telecomjs,
@@ -4343,6 +4542,7 @@ impl Config {
             ApiProvider::Sakana => &mut providers.sakana,
             ApiProvider::LongCat => &mut providers.longcat,
             ApiProvider::OpencodeGo => &mut providers.opencode_go,
+            ApiProvider::OpencodeZen => &mut providers.opencode_zen,
             ApiProvider::Meta => &mut providers.meta,
             ApiProvider::Xai => &mut providers.xai,
             ApiProvider::Telecomjs => &mut providers.telecomjs,
@@ -4420,8 +4620,10 @@ impl Config {
             .clone_from(&fresh.fallback_providers);
         self.retry.clone_from(&fresh.retry);
         self.providers.clone_from(&fresh.providers);
-        self.active_base_url_env_route
-            .clone_from(&fresh.active_base_url_env_route);
+        self.base_url_env_receipt
+            .clone_from(&fresh.base_url_env_receipt);
+        self.root_base_url_owner
+            .clone_from(&fresh.root_base_url_owner);
         self.reasoning_effort_inferred_from_legacy_alias =
             fresh.reasoning_effort_inferred_from_legacy_alias;
         self.migrated_deepseek_model_alias
@@ -4677,6 +4879,7 @@ impl Config {
             ApiProvider::Sakana => DEFAULT_SAKANA_MODEL,
             ApiProvider::LongCat => DEFAULT_LONGCAT_MODEL,
             ApiProvider::OpencodeGo => DEFAULT_OPENCODE_GO_MODEL,
+            ApiProvider::OpencodeZen => DEFAULT_OPENCODE_ZEN_MODEL,
             ApiProvider::Meta => DEFAULT_META_MODEL,
             ApiProvider::Xai => DEFAULT_XAI_MODEL,
             ApiProvider::Telecomjs => DEFAULT_TELECOMJS_MODEL,
@@ -4689,24 +4892,70 @@ impl Config {
         .to_string()
     }
 
-    /// Return the configured API base URL (normalized).
+    /// Return the configured API base URL (normalized) for the selected route.
     #[must_use]
     pub fn deepseek_base_url(&self) -> String {
-        let provider = self.api_provider();
-        let provider_base = self
-            .provider_config_string_with_runtime_fallback(provider, |entry| entry.base_url.clone());
+        self.base_url_for_route(self.api_provider())
+    }
+
+    /// Resolve `provider`'s endpoint from the layers that provider actually
+    /// owns, in precedence order:
+    ///
+    /// 1. its own `[providers.<table>]` entry (including in-memory runtime
+    ///    overrides), plus the legacy root `base_url` where that field still
+    ///    belongs to the route;
+    /// 2. its provider-specific environment contract (`MOONSHOT_BASE_URL`,
+    ///    `OPENAI_BASE_URL`, ...), which names exactly one provider and is
+    ///    therefore sound to read for a route that is not the session's;
+    /// 3. the generic `CODEWHALE_BASE_URL` / `DEEPSEEK_BASE_URL` override, but
+    ///    only when this config is still the route that override selected;
+    /// 4. the provider's canonical default endpoint.
+    ///
+    /// Step 3 is why this is identity-aware instead of a bare env read.
+    /// `CODEWHALE_BASE_URL` is documented as "base URL for the active
+    /// provider", and [`apply_env_overrides`] writes it onto exactly one
+    /// provider entry. Every cross-provider construction seam — a pinned
+    /// subagent/fleet child, the per-turn auto-router, tool routing, a picker
+    /// preview — works by cloning the session config and re-pointing
+    /// `provider`, so without the ownership check a Moonshot/Z.ai/MiniMax
+    /// child in a DeepSeek session would silently inherit the DeepSeek host
+    /// and dispatch a pinned model to the wrong vendor.
+    pub(crate) fn base_url_for_route(&self, provider: ApiProvider) -> String {
+        self.base_url_for_route_identity(provider, &self.provider_identity_for(provider))
+    }
+
+    /// [`Config::base_url_for_route`] for an explicitly named identity.
+    ///
+    /// Named custom routes are resolved by this `identity` — the
+    /// `[providers.<name>]` table key — and never by whichever custom route
+    /// the session happens to be on. An identity that names no custom table
+    /// fails closed to the descriptor placeholder rather than borrowing the
+    /// active custom host.
+    pub(crate) fn base_url_for_route_identity(
+        &self,
+        provider: ApiProvider,
+        identity: &str,
+    ) -> String {
+        let provider_base = if provider == ApiProvider::Custom {
+            self.custom_provider_entry_for_identity(identity)
+                .and_then(|entry| entry.base_url.clone())
+        } else {
+            self.provider_config_string_with_runtime_fallback(provider, |entry| {
+                entry.base_url.clone()
+            })
+        };
         // Root `base_url` is normally the legacy DeepSeek field. NvidiaNim has
         // a back-compat sniff (integrate.api.nvidia.com), and the literal
         // `provider = "custom"` legacy shape retains its root endpoint. Named
         // custom providers always read their own `[providers.<name>]` table.
         let root_base = match provider {
-            ApiProvider::Deepseek | ApiProvider::DeepseekCN => self.base_url.clone(),
+            ApiProvider::Deepseek | ApiProvider::DeepseekCN => {
+                self.route_owned_root_base_url(provider, identity)
+            }
             ApiProvider::DeepseekAnthropic => None,
             ApiProvider::NvidiaNim => self
-                .base_url
-                .as_ref()
-                .filter(|base| base.contains("integrate.api.nvidia.com"))
-                .cloned(),
+                .route_owned_root_base_url(provider, identity)
+                .filter(|base| base.contains("integrate.api.nvidia.com")),
             ApiProvider::Openai
             | ApiProvider::Anthropic
             | ApiProvider::Openmodel
@@ -4736,28 +4985,44 @@ impl Config {
             | ApiProvider::Sakana
             | ApiProvider::LongCat
             | ApiProvider::OpencodeGo
+            | ApiProvider::OpencodeZen
             | ApiProvider::Meta
             | ApiProvider::Xai
             | ApiProvider::Telecomjs => None,
-            ApiProvider::Custom if self.uses_legacy_literal_custom_route() => self.base_url.clone(),
+            // The legacy root endpoint belongs to the literal `custom`
+            // identity only. A named custom child asking about its own table
+            // must not inherit it.
+            ApiProvider::Custom
+                if identity_is_literal_custom(identity)
+                    && self.uses_legacy_literal_custom_route() =>
+            {
+                self.route_owned_root_base_url(provider, identity)
+            }
             // Named custom routes read their base URL from `provider_base`.
             ApiProvider::Custom => None,
         };
-        let configured_base_url = provider_base.or(root_base);
+        // A provider-scoped endpoint variable names exactly one provider, so it
+        // resolves for the selected identity whether or not that identity is
+        // the session route. `apply_env_overrides` only merges these into the
+        // active provider's table, which is why a non-active route has to read
+        // them here instead of relying on the merged config.
+        let configured_base_url = provider_base
+            .or(root_base)
+            .or_else(|| provider_env_base_url_override(provider));
         let base = if provider == ApiProvider::XiaomiMimo {
             let config_api_key = self
                 .provider_config_for(provider)
-                .and_then(|provider| provider.api_key.as_deref());
+                .and_then(|entry| entry.api_key.as_deref());
             let mode = self
                 .provider_config_for(provider)
-                .and_then(|provider| provider.mode.as_deref());
+                .and_then(|entry| entry.mode.as_deref());
             let env_api_key =
                 xiaomi_mimo_env_api_key_for_runtime(mode, configured_base_url.as_deref());
             let api_key = config_api_key.or(env_api_key.as_deref());
             resolve_xiaomi_mimo_base_url(configured_base_url, api_key, mode)
         } else {
             configured_base_url
-                .or_else(env_base_url_override)
+                .or_else(|| self.route_owned_generic_env_base_url(provider, identity))
                 .unwrap_or_else(|| {
                     match provider {
                         ApiProvider::Deepseek => DEFAULT_DEEPSEEK_BASE_URL,
@@ -4776,7 +5041,7 @@ impl Config {
                         ApiProvider::Arcee => DEFAULT_ARCEE_BASE_URL,
                         ApiProvider::Moonshot => {
                             if self
-                                .provider_config()
+                                .provider_config_for(provider)
                                 .is_some_and(provider_config_uses_kimi_imported_token)
                             {
                                 DEFAULT_KIMI_CODE_BASE_URL
@@ -4802,6 +5067,7 @@ impl Config {
                         ApiProvider::Sakana => DEFAULT_SAKANA_BASE_URL,
                         ApiProvider::LongCat => DEFAULT_LONGCAT_BASE_URL,
                         ApiProvider::OpencodeGo => DEFAULT_OPENCODE_GO_BASE_URL,
+                        ApiProvider::OpencodeZen => DEFAULT_OPENCODE_ZEN_BASE_URL,
                         ApiProvider::Meta => DEFAULT_META_BASE_URL,
                         ApiProvider::Xai => DEFAULT_XAI_BASE_URL,
                         ApiProvider::Telecomjs => DEFAULT_TELECOMJS_BASE_URL,
@@ -4818,20 +5084,82 @@ impl Config {
         normalize_base_url(&base)
     }
 
+    /// The generic `CODEWHALE_BASE_URL` / `DEEPSEEK_BASE_URL` override, but
+    /// only for the route that override actually selected.
+    ///
+    /// [`apply_env_overrides`] records the owning `(provider, identity)` in
+    /// [`Config::base_url_env_receipt`] at load time and writes the value onto
+    /// that provider's own entry. A config later re-pointed at another identity
+    /// is a different route: it must fall through to that provider's own
+    /// default rather than borrow the session host.
+    fn route_owned_generic_env_base_url(
+        &self,
+        provider: ApiProvider,
+        identity: &str,
+    ) -> Option<String> {
+        match &self.base_url_env_receipt {
+            // Never went through the environment layer: keep the established
+            // global fallback so directly constructed configs are unaffected.
+            BaseUrlEnvReceipt::Unrecorded => env_base_url_override(),
+            // A positive "nobody owns it" — a managed overlay took the
+            // endpoint. No route may borrow the ambient generic host.
+            BaseUrlEnvReceipt::NoOwner => None,
+            BaseUrlEnvReceipt::Route(..) => self
+                .base_url_env_receipt
+                .owns(provider, identity)
+                .then(env_base_url_override)
+                .flatten(),
+        }
+    }
+
+    /// The legacy root `base_url`, unless an environment write addressed it to
+    /// a different route.
+    ///
+    /// `Deepseek` and `DeepseekCN` share this one field. A user who writes
+    /// `base_url` in their config file still means it for both identities —
+    /// that legacy compatibility is preserved by `None` ownership. But when
+    /// [`apply_env_overrides`] wrote the value, it wrote it for exactly the
+    /// identity that was active, and a pinned child of the sibling identity
+    /// must not inherit it.
+    fn route_owned_root_base_url(&self, provider: ApiProvider, identity: &str) -> Option<String> {
+        let root = self.base_url.clone()?;
+        match &self.root_base_url_owner {
+            // File-owned legacy root: shared by every route that reads it, as
+            // it always has been.
+            BaseUrlEnvReceipt::Unrecorded => Some(root),
+            // An environment write that a higher-precedence layer has since
+            // taken authority over. It belongs to no route.
+            BaseUrlEnvReceipt::NoOwner => None,
+            BaseUrlEnvReceipt::Route(..) => self
+                .root_base_url_owner
+                .owns(provider, identity)
+                .then_some(root),
+        }
+    }
+
+    /// Resolve a named custom provider's table by explicit identity.
+    ///
+    /// Fails closed: an empty identity, or one that names no
+    /// `[providers.<name>]` custom table, resolves to nothing instead of
+    /// falling back to whichever custom route the session is currently on.
+    fn custom_provider_entry_for_identity(&self, identity: &str) -> Option<&ProviderConfig> {
+        let key = identity.trim();
+        if key.is_empty() {
+            return None;
+        }
+        self.providers.as_ref()?.custom_provider_config(key)
+    }
+
     fn active_provider_preserves_custom_base_url_model(&self) -> bool {
         self.provider_uses_custom_endpoint(self.api_provider())
     }
 
+    /// Whether `provider`'s effective endpoint is a custom host rather than its
+    /// shipped one. Resolved through the same identity-aware resolver the
+    /// client is built from, so this predicate cannot disagree with the URL the
+    /// request will actually be sent to.
     pub(crate) fn provider_uses_custom_endpoint(&self, provider: ApiProvider) -> bool {
-        let base_url = if provider == self.api_provider() {
-            self.deepseek_base_url()
-        } else {
-            self.provider_config_string_with_runtime_fallback(provider, |entry| {
-                entry.base_url.clone()
-            })
-            .unwrap_or_else(|| default_base_url_for_provider(provider).to_string())
-        };
-        provider_preserves_custom_base_url_model(provider, &base_url)
+        provider_preserves_custom_base_url_model(provider, &self.base_url_for_route(provider))
     }
 
     /// Whether file-owned credential slots are bound to `provider`'s
@@ -4857,36 +5185,46 @@ impl Config {
             return false;
         }
         let identity = self.provider_identity_for(provider);
-        if self
-            .active_base_url_env_route
-            .as_ref()
-            .is_some_and(|(owner, owner_id)| *owner == provider && owner_id == &identity)
-        {
+        if self.base_url_env_receipt.owns(provider, &identity) {
             return true;
         }
 
-        // A generic forwarded base URL remains the runtime fallback after an
-        // in-session provider switch. It owns the new route only when that
-        // provider has no explicit file/in-memory endpoint of its own.
-        env_base_url_override().is_some()
-            && self.configured_base_url_for_provider(provider).is_none()
+        // Below the receipt, the environment can still supply the endpoint for
+        // a route that has none of its own. A provider-scoped variable names
+        // exactly one provider, so it always owns that route's endpoint. The
+        // generic variable only does so while no receipt has said otherwise —
+        // once a receipt exists and does not name this route,
+        // `route_owned_generic_env_base_url` refuses it, so claiming env
+        // ownership here would contradict the URL actually resolved.
+        if self.configured_base_url_for_provider(provider).is_some() {
+            return false;
+        }
+        provider_env_base_url_override(provider).is_some()
+            || (matches!(self.base_url_env_receipt, BaseUrlEnvReceipt::Unrecorded)
+                && env_base_url_override().is_some())
     }
 
+    /// The endpoint `provider` owns through a file or in-memory layer, before
+    /// the environment layer is consulted.
+    ///
+    /// The legacy root field is read through
+    /// [`Config::route_owned_root_base_url`] so an environment write addressed
+    /// to one identity is not mistaken for the sibling identity's configured
+    /// endpoint.
     fn configured_base_url_for_provider(&self, provider: ApiProvider) -> Option<String> {
+        let identity = self.provider_identity_for(provider);
         let provider_base = self
             .provider_config_string_with_runtime_fallback(provider, |entry| entry.base_url.clone());
         match provider {
             ApiProvider::Deepseek | ApiProvider::DeepseekCN => {
-                provider_base.or_else(|| self.base_url.clone())
+                provider_base.or_else(|| self.route_owned_root_base_url(provider, &identity))
             }
             ApiProvider::NvidiaNim => provider_base.or_else(|| {
-                self.base_url
-                    .as_ref()
+                self.route_owned_root_base_url(provider, &identity)
                     .filter(|base| base.contains("integrate.api.nvidia.com"))
-                    .cloned()
             }),
             ApiProvider::Custom if self.uses_legacy_literal_custom_route() => {
-                provider_base.or_else(|| self.base_url.clone())
+                provider_base.or_else(|| self.route_owned_root_base_url(provider, &identity))
             }
             _ => provider_base,
         }
@@ -4895,19 +5233,14 @@ impl Config {
 
     /// Whether model ids for `provider` belong to the configured endpoint.
     ///
-    /// The active provider uses the fully resolved URL (including legacy root
-    /// fields and environment overrides). Inactive picker routes can only own
-    /// a custom namespace through their provider-scoped `base_url`.
+    /// Every route — active or pinned — is judged on the endpoint it will
+    /// actually be dispatched to, so a pinned child cannot canonicalize model
+    /// ids for a host that owns its own namespace (or pass through ids on a
+    /// route that resolves to a canonical endpoint). The resolver behind
+    /// [`Config::provider_uses_custom_endpoint`] is identity-aware, so this no
+    /// longer risks attributing the session's endpoint to another provider.
     pub(crate) fn model_ids_pass_through_for_provider(&self, provider: ApiProvider) -> bool {
-        if provider_passes_model_through(provider) {
-            return true;
-        }
-        if provider == self.api_provider() {
-            return self.active_provider_preserves_custom_base_url_model();
-        }
-        self.provider_config_for(provider)
-            .and_then(|entry| entry.base_url.as_deref())
-            .is_some_and(|base_url| provider_preserves_custom_base_url_model(provider, base_url))
+        provider_passes_model_through(provider) || self.provider_uses_custom_endpoint(provider)
     }
 
     pub(crate) fn model_ids_pass_through(&self) -> bool {
@@ -5291,6 +5624,9 @@ impl Config {
                 );
             }
             ApiProvider::Anthropic | ApiProvider::Openmodel => {
+                anyhow::bail!("{}", missing_provider_api_key_message(provider)?)
+            }
+            ApiProvider::OpencodeZen => {
                 anyhow::bail!("{}", missing_provider_api_key_message(provider)?)
             }
             ApiProvider::OpenaiCodex => anyhow::bail!("{}", crate::oauth::missing_auth_message()),
@@ -6198,6 +6534,7 @@ fn provider_env_base_url_override(provider: ApiProvider) -> Option<String> {
         ApiProvider::Xai => &["XAI_BASE_URL"],
         ApiProvider::Telecomjs => &["TELECOMJS_BASE_URL"],
         ApiProvider::OpencodeGo => &["OPENCODE_GO_BASE_URL"],
+        ApiProvider::OpencodeZen => &["OPENCODE_ZEN_BASE_URL"],
         ApiProvider::Deepseek
         | ApiProvider::DeepseekCN
         | ApiProvider::DeepseekAnthropic
@@ -6268,7 +6605,18 @@ fn apply_env_overrides_unlocked(config: &mut Config) {
     if let Ok(value) = codewhale_env_var("CODEWHALE_BASE_URL", "DEEPSEEK_BASE_URL") {
         match config.api_provider() {
             ApiProvider::Deepseek | ApiProvider::DeepseekCN => {
+                // DeepSeek and DeepSeek-CN share this one legacy root field.
+                // Record which of them the environment addressed so the
+                // sibling identity cannot inherit the value, while a
+                // file-owned root (no owner recorded) stays shared.
                 config.base_url = Some(value);
+                // Resolve the owner *after* the write: the root value is one
+                // of the inputs `api_provider()` sniffs, so the effective
+                // identity is the post-write one, matching the receipt
+                // recorded at the end of this function.
+                let owner = config.api_provider();
+                config.root_base_url_owner =
+                    BaseUrlEnvReceipt::Route(owner, config.provider_identity_for(owner));
             }
             ApiProvider::DeepseekAnthropic => {
                 config
@@ -6485,6 +6833,13 @@ fn apply_env_overrides_unlocked(config: &mut Config) {
                     .providers
                     .get_or_insert_with(ProvidersConfig::default)
                     .opencode_go
+                    .base_url = Some(value);
+            }
+            ApiProvider::OpencodeZen => {
+                config
+                    .providers
+                    .get_or_insert_with(ProvidersConfig::default)
+                    .opencode_zen
                     .base_url = Some(value);
             }
             ApiProvider::Meta => {
@@ -6776,6 +7131,7 @@ fn apply_env_overrides_unlocked(config: &mut Config) {
                 ApiProvider::Sakana => &mut providers.sakana,
                 ApiProvider::LongCat => &mut providers.longcat,
                 ApiProvider::OpencodeGo => &mut providers.opencode_go,
+                ApiProvider::OpencodeZen => &mut providers.opencode_zen,
                 ApiProvider::Meta => &mut providers.meta,
                 ApiProvider::Xai => &mut providers.xai,
                 ApiProvider::Telecomjs => &mut providers.telecomjs,
@@ -6973,6 +7329,16 @@ fn apply_env_overrides_unlocked(config: &mut Config) {
             .telecomjs
             .model = Some(value);
     }
+    if matches!(config.api_provider(), ApiProvider::OpencodeZen)
+        && let Ok(value) = std::env::var("OPENCODE_ZEN_MODEL")
+        && !value.trim().is_empty()
+    {
+        config
+            .providers
+            .get_or_insert_with(ProvidersConfig::default)
+            .opencode_zen
+            .model = Some(value);
+    }
     if let Some(value) = codewhale_env_var("CODEWHALE_MODEL", "DEEPSEEK_MODEL")
         .ok()
         .or_else(|| {
@@ -7048,6 +7414,7 @@ fn apply_env_overrides_unlocked(config: &mut Config) {
                 ApiProvider::Sakana => &mut providers.sakana,
                 ApiProvider::LongCat => &mut providers.longcat,
                 ApiProvider::OpencodeGo => &mut providers.opencode_go,
+                ApiProvider::OpencodeZen => &mut providers.opencode_zen,
                 ApiProvider::Meta => &mut providers.meta,
                 ApiProvider::Xai => &mut providers.xai,
                 ApiProvider::Telecomjs => &mut providers.telecomjs,
@@ -7161,10 +7528,16 @@ fn apply_env_overrides_unlocked(config: &mut Config) {
     {
         config.max_subagents = Some(parsed.clamp(1, MAX_SUBAGENTS));
     }
-    config.active_base_url_env_route = active_base_url_from_env.then(|| {
+    // Always leave a receipt: "the environment layer ran and nobody owns the
+    // base URL" is a different, stronger statement than "no receipt", and only
+    // the explicit form stops a pinned cross-provider child from treating the
+    // ambient generic host as a global fallback.
+    config.base_url_env_receipt = if active_base_url_from_env {
         let provider = config.api_provider();
-        (provider, config.provider_identity_for(provider))
-    });
+        BaseUrlEnvReceipt::Route(provider, config.provider_identity_for(provider))
+    } else {
+        BaseUrlEnvReceipt::NoOwner
+    };
 }
 
 fn normalize_model_config(config: &mut Config) {
@@ -7340,15 +7713,18 @@ pub(crate) fn provider_passes_model_through(provider: ApiProvider) -> bool {
     )
 }
 
+/// Whether a provider identity key is the historical literal `custom`.
+fn identity_is_literal_custom(identity: &str) -> bool {
+    identity
+        .trim()
+        .eq_ignore_ascii_case(ApiProvider::Custom.as_str())
+}
+
 fn provider_entry_uses_custom_base_url(provider: ApiProvider, entry: &ProviderConfig) -> bool {
     entry
         .base_url
         .as_deref()
         .is_some_and(|base_url| provider_preserves_custom_base_url_model(provider, base_url))
-}
-
-fn default_base_url_for_provider(provider: ApiProvider) -> &'static str {
-    provider.default_base_url()
 }
 
 fn xiaomi_mimo_base_url_for_mode(mode: &str) -> Option<&'static str> {
@@ -7548,11 +7924,159 @@ pub(crate) fn is_exact_kimi_code_k3_route(
         && model.trim().eq_ignore_ascii_case(KIMI_CODE_K3_MODEL)
 }
 
-/// Fail closed on known-bad K3 model/endpoint pairings (#4687).
+/// Whether a route is one of Z.ai's exact first-party Chat endpoints.
+#[must_use]
+pub(crate) fn is_exact_zai_chat_route(provider: ApiProvider, base_url: &str) -> bool {
+    provider == ApiProvider::Zai
+        && codewhale_config::provider::is_exact_zai_chat_route(
+            codewhale_config::ProviderKind::Zai,
+            base_url,
+        )
+}
+
+/// Whether a route is exactly first-party Z.ai GLM-5.2.
+#[must_use]
+pub(crate) fn is_exact_zai_glm_5_2_route(
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) -> bool {
+    is_exact_zai_chat_route(provider, base_url)
+        && model.trim().eq_ignore_ascii_case(ZAI_GLM_5_2_MODEL)
+}
+
+/// Whether a route is exactly first-party Z.ai GLM-5-Turbo.
+#[must_use]
+pub(crate) fn is_exact_zai_glm_5_turbo_route(
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) -> bool {
+    is_exact_zai_chat_route(provider, base_url)
+        && model.trim().eq_ignore_ascii_case(ZAI_GLM_5_TURBO_MODEL)
+}
+
+/// Whether a route is an exact first-party Z.ai model with a verified
+/// reasoning control. GLM-5.2 has tiered effort; GLM-5.1 and GLM-5-Turbo only
+/// expose the generic thinking toggle.
+#[must_use]
+pub(crate) fn is_exact_known_zai_reasoning_route(
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) -> bool {
+    is_exact_zai_glm_5_2_route(provider, base_url, model)
+        || is_exact_zai_glm_5_turbo_route(provider, base_url, model)
+        || (is_exact_zai_chat_route(provider, base_url)
+            && model.trim().eq_ignore_ascii_case(ZAI_GLM_5_1_MODEL))
+}
+
+/// MiniMax's own hosted routes, for both wire dialects.
 ///
-/// - Reject Claude Code's `k3[1m]` context hint as a Kimi Code API model id.
-/// - Reject `kimi-k3` on the exact Kimi Code membership endpoint (use `k3`).
-/// - Reject bare `k3` on the exact Moonshot direct platform endpoint (use `kimi-k3`).
+/// Kept as a pure string predicate so a dispatch receipt can be judged without
+/// a `Config`, and shared with billing classification so a MiniMax-compatible
+/// gateway cannot inherit the first-party PAYG/Token Plan duality. Both the
+/// `.io` and `.com` hosts are first-party; anything else is a gateway.
+#[must_use]
+pub(crate) fn minimax_base_url_is_supported_direct(base_url: &str) -> bool {
+    codewhale_config::provider::is_exact_minimax_chat_route(
+        codewhale_config::ProviderKind::Minimax,
+        base_url,
+    ) || codewhale_config::provider::is_exact_minimax_anthropic_route(
+        codewhale_config::ProviderKind::MinimaxAnthropic,
+        base_url,
+    )
+}
+
+/// Whether a route is exactly MiniMax-M3 on the first-party OpenAI-compatible
+/// Chat API. Compatible gateways and the Anthropic Messages route retain
+/// their own token-limit dialects.
+#[must_use]
+pub(crate) fn is_exact_minimax_m3_route(
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) -> bool {
+    provider == ApiProvider::Minimax
+        && codewhale_config::provider::is_exact_minimax_chat_route(
+            codewhale_config::ProviderKind::Minimax,
+            base_url,
+        )
+        && model.trim().eq_ignore_ascii_case(DEFAULT_MINIMAX_MODEL)
+}
+
+/// Whether a route is exactly MiniMax-M3 on a first-party Anthropic-compatible
+/// Messages endpoint. The wire supports adaptive/disabled thinking, but no
+/// distinct effort tier.
+#[must_use]
+pub(crate) fn is_exact_minimax_anthropic_m3_route(
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) -> bool {
+    provider == ApiProvider::MinimaxAnthropic
+        && codewhale_config::provider::is_exact_minimax_anthropic_route(
+            codewhale_config::ProviderKind::MinimaxAnthropic,
+            base_url,
+        )
+        && model.trim().eq_ignore_ascii_case(DEFAULT_MINIMAX_MODEL)
+}
+
+#[must_use]
+pub(crate) fn minimax_m3_route_uses_max_completion_tokens(
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) -> bool {
+    is_exact_minimax_m3_route(provider, base_url, model)
+}
+
+/// The Kimi Code membership roster, as one fact.
+///
+/// The picker offers these ids, `validate_kimi_code_api_model_id` accepts them
+/// on the membership endpoint and rejects them on the direct platform, and the
+/// model picker labels them as plan routes. Those sites previously kept
+/// independent literal lists and had already drifted (`kimi-for-coding` was
+/// missing from the picker label), so the roster lives here and nowhere else.
+pub(crate) const KIMI_CODE_MEMBERSHIP_MODELS: [&str; 3] = [
+    KIMI_CODE_K3_MODEL,
+    DEFAULT_KIMI_CODE_MODEL,
+    KIMI_CODE_HIGHSPEED_MODEL,
+];
+
+/// Whether `model` is a Kimi Code membership model id.
+///
+/// The single membership-roster predicate. Callers that need to name the
+/// product — output-ceiling provenance, picker rosters, setup validation, and
+/// the model picker's route label — must use this rather than re-listing ids.
+#[must_use]
+pub(crate) fn is_kimi_code_membership_model(model: &str) -> bool {
+    let model = model.trim();
+    KIMI_CODE_MEMBERSHIP_MODELS
+        .iter()
+        .any(|id| model.eq_ignore_ascii_case(id))
+}
+
+/// The Moonshot direct-platform roster, as one fact. Mirror of
+/// [`KIMI_CODE_MEMBERSHIP_MODELS`] for the pay-as-you-go product.
+pub(crate) const MOONSHOT_DIRECT_PLATFORM_MODELS: [&str; 3] = [
+    MOONSHOT_KIMI_K3_MODEL,
+    DEFAULT_MOONSHOT_MODEL,
+    MOONSHOT_KIMI_K2_6_MODEL,
+];
+
+/// Fail closed on known-bad model/endpoint pairings (#4687).
+///
+/// The two canonical endpoints each enforce their explicit model set:
+///
+/// - Exact Kimi Code membership endpoint (api.kimi.com/coding/v1): reject
+///   Claude Code's `k3[1m]` context hint and the known direct-platform ids
+///   (`kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`); the managed roster (`k3`,
+///   `kimi-for-coding`, `kimi-for-coding-highspeed`) is accepted.
+/// - Exact Moonshot direct platform endpoint (api.moonshot.ai/v1): reject the
+///   membership-only ids (`k3`, `kimi-for-coding`,
+///   `kimi-for-coding-highspeed`); they are membership products, not
+///   direct-platform catalog models.
 ///
 /// Custom Moonshot-compatible gateways are left alone: only the two canonical
 /// endpoints enforce the documented model IDs.
@@ -7576,25 +8100,140 @@ pub(crate) fn validate_kimi_code_api_model_id(
                     .to_string(),
             );
         }
-        if model.eq_ignore_ascii_case(MOONSHOT_KIMI_K3_MODEL) {
-            return Err(
-                "Kimi Code membership route (api.kimi.com/coding/v1) does not accept model = \"kimi-k3\". Use model = \"k3\" for this base_url. Direct Moonshot pay-as-you-go uses base_url = \"https://api.moonshot.ai/v1\" with model = \"kimi-k3\"."
-                    .to_string(),
-            );
+        for direct_id in MOONSHOT_DIRECT_PLATFORM_MODELS {
+            if model.eq_ignore_ascii_case(direct_id) {
+                return Err(format!(
+                    "Kimi Code membership route (api.kimi.com/coding/v1) does not accept model = \"{model}\": it is a direct Moonshot platform id. Use a Kimi Code membership model (\"k3\", \"kimi-for-coding\", or \"kimi-for-coding-highspeed\") for this base_url. Direct Moonshot pay-as-you-go uses base_url = \"https://api.moonshot.ai/v1\" with model = \"{direct_id}\"."
+                ));
+            }
         }
         return Ok(());
     }
 
-    if moonshot_base_url_is_exact_direct_platform(base_url)
-        && model.eq_ignore_ascii_case(KIMI_CODE_K3_MODEL)
-    {
-        return Err(
-            "Moonshot direct route (api.moonshot.ai/v1) does not accept bare model = \"k3\". Use model = \"kimi-k3\" for this base_url. Kimi Code membership uses base_url = \"https://api.kimi.com/coding/v1\" with model = \"k3\"."
-                .to_string(),
-        );
+    if moonshot_base_url_is_exact_direct_platform(base_url) {
+        for membership_id in KIMI_CODE_MEMBERSHIP_MODELS {
+            if model.eq_ignore_ascii_case(membership_id) {
+                return Err(format!(
+                    "Moonshot direct route (api.moonshot.ai/v1) does not accept model = \"{model}\": it is a Kimi Code membership model id, not a direct-platform catalog model. Kimi Code membership uses base_url = \"https://api.kimi.com/coding/v1\" with model = \"{membership_id}\"; direct Moonshot pay-as-you-go K3 uses model = \"kimi-k3\"."
+                ));
+            }
+        }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod kimi_code_pairing_tests {
+    use super::*;
+
+    #[test]
+    fn membership_roster_passes_on_kimi_code_endpoint() {
+        for model in [
+            KIMI_CODE_K3_MODEL,
+            DEFAULT_KIMI_CODE_MODEL,
+            KIMI_CODE_HIGHSPEED_MODEL,
+        ] {
+            assert!(
+                validate_kimi_code_api_model_id(
+                    ApiProvider::Moonshot,
+                    DEFAULT_KIMI_CODE_BASE_URL,
+                    model,
+                )
+                .is_ok(),
+                "{model} must be accepted on the exact Kimi Code membership endpoint"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_platform_ids_fail_on_kimi_code_endpoint() {
+        for model in [
+            MOONSHOT_KIMI_K3_MODEL,
+            DEFAULT_MOONSHOT_MODEL,
+            MOONSHOT_KIMI_K2_6_MODEL,
+        ] {
+            let err = validate_kimi_code_api_model_id(
+                ApiProvider::Moonshot,
+                DEFAULT_KIMI_CODE_BASE_URL,
+                model,
+            )
+            .expect_err("direct-platform ids are not Kimi Code membership roster models");
+            assert!(err.contains(model), "{err}");
+            assert!(err.contains("api.moonshot.ai/v1"), "{err}");
+        }
+    }
+
+    #[test]
+    fn membership_ids_fail_on_direct_moonshot_endpoint() {
+        for model in [
+            KIMI_CODE_K3_MODEL,
+            DEFAULT_KIMI_CODE_MODEL,
+            KIMI_CODE_HIGHSPEED_MODEL,
+        ] {
+            let err = validate_kimi_code_api_model_id(
+                ApiProvider::Moonshot,
+                DEFAULT_MOONSHOT_BASE_URL,
+                model,
+            )
+            .expect_err("membership ids are not direct-platform catalog models");
+            assert!(err.contains(model), "{err}");
+            assert!(err.contains("api.kimi.com/coding/v1"), "{err}");
+        }
+    }
+
+    #[test]
+    fn canonical_pairs_pass_and_custom_gateways_are_untouched() {
+        // Canonical pairs pass on both endpoints.
+        for (base_url, model) in [
+            (DEFAULT_KIMI_CODE_BASE_URL, KIMI_CODE_K3_MODEL),
+            (DEFAULT_KIMI_CODE_BASE_URL, DEFAULT_KIMI_CODE_MODEL),
+            (DEFAULT_KIMI_CODE_BASE_URL, KIMI_CODE_HIGHSPEED_MODEL),
+            (DEFAULT_MOONSHOT_BASE_URL, MOONSHOT_KIMI_K3_MODEL),
+            (DEFAULT_MOONSHOT_BASE_URL, DEFAULT_MOONSHOT_MODEL),
+            (DEFAULT_MOONSHOT_BASE_URL, MOONSHOT_KIMI_K2_6_MODEL),
+        ] {
+            assert!(
+                validate_kimi_code_api_model_id(ApiProvider::Moonshot, base_url, model).is_ok(),
+                "{base_url} / {model}"
+            );
+        }
+        // The pre-existing cross-pairings still fail closed.
+        assert!(
+            validate_kimi_code_api_model_id(
+                ApiProvider::Moonshot,
+                DEFAULT_KIMI_CODE_BASE_URL,
+                MOONSHOT_KIMI_K3_MODEL,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_kimi_code_api_model_id(
+                ApiProvider::Moonshot,
+                DEFAULT_MOONSHOT_BASE_URL,
+                KIMI_CODE_K3_MODEL,
+            )
+            .is_err()
+        );
+        // Custom gateways keep their own wire contract, membership ids
+        // included: only the two canonical endpoints enforce pairings.
+        for model in [
+            KIMI_CODE_K3_MODEL,
+            DEFAULT_KIMI_CODE_MODEL,
+            KIMI_CODE_HIGHSPEED_MODEL,
+            MOONSHOT_KIMI_K3_MODEL,
+        ] {
+            assert!(
+                validate_kimi_code_api_model_id(
+                    ApiProvider::Moonshot,
+                    "https://proxy.example/v1",
+                    model,
+                )
+                .is_ok(),
+                "{model} on a custom gateway"
+            );
+        }
+    }
 }
 
 /// Short route label for header/diagnostics without credentials (#4687).
@@ -7824,6 +8463,8 @@ fn apply_profile(config: ConfigFile, profile: Option<&str>) -> Result<Config> {
 }
 
 fn merge_config(base: Config, override_cfg: Config) -> Config {
+    // Captured before the struct literal moves the field out of `override_cfg`.
+    let override_defines_root_base_url = override_cfg.base_url.is_some();
     Config {
         provider: override_cfg.provider.or(base.provider),
         api_key: override_cfg.api_key.or(base.api_key),
@@ -7923,9 +8564,20 @@ fn merge_config(base: Config, override_cfg: Config) -> Config {
         runtime_api: override_cfg.runtime_api.or(base.runtime_api),
         workshop: override_cfg.workshop.or(base.workshop),
         exec_policy_engine: override_cfg.exec_policy_engine,
-        active_base_url_env_route: override_cfg
-            .active_base_url_env_route
-            .or(base.active_base_url_env_route),
+        base_url_env_receipt: match override_cfg.base_url_env_receipt {
+            BaseUrlEnvReceipt::Unrecorded => base.base_url_env_receipt,
+            recorded => recorded,
+        },
+        // A layer that supplies its own root `base_url` replaces the
+        // environment's write, so that layer's ownership wins outright.
+        root_base_url_owner: if override_defines_root_base_url {
+            override_cfg.root_base_url_owner
+        } else {
+            match override_cfg.root_base_url_owner {
+                BaseUrlEnvReceipt::Unrecorded => base.root_base_url_owner,
+                recorded => recorded,
+            }
+        },
     }
 }
 
@@ -8071,6 +8723,7 @@ fn merge_providers(
             sakana: merge_provider_config(base.sakana, override_cfg.sakana),
             longcat: merge_provider_config(base.longcat, override_cfg.longcat),
             opencode_go: merge_provider_config(base.opencode_go, override_cfg.opencode_go),
+            opencode_zen: merge_provider_config(base.opencode_zen, override_cfg.opencode_zen),
             meta: merge_provider_config(base.meta, override_cfg.meta),
             xai: merge_provider_config(base.xai, override_cfg.xai),
             telecomjs: merge_provider_config(base.telecomjs, override_cfg.telecomjs),
@@ -8162,7 +8815,22 @@ fn apply_managed_overrides(config: &mut Config) -> Result<()> {
         // Managed configuration is a higher-precedence file layer. If it
         // selects a different route or supplies that route's endpoint, the
         // lower environment layer no longer owns the effective base URL.
-        merged.active_base_url_env_route = None;
+        //
+        // Record that as an explicit "nobody owns it" rather than clearing the
+        // receipt. Clearing it would read as "this config never met the
+        // environment layer", which re-enables the generic
+        // `CODEWHALE_BASE_URL` fallback for every route — including pinned
+        // cross-provider children, which would then borrow an ambient host
+        // that managed routing had just taken authority over.
+        merged.base_url_env_receipt = BaseUrlEnvReceipt::NoOwner;
+        // The shared legacy root field is the same ambient host by another
+        // name. If the environment wrote it, managed authority takes it from
+        // every route rather than leaving it addressed to the identity that
+        // was active before the overlay. A *file*-owned root is left alone:
+        // managed did not override it, so it stays the user's value.
+        if matches!(merged.root_base_url_owner, BaseUrlEnvReceipt::Route(..)) {
+            merged.root_base_url_owner = BaseUrlEnvReceipt::NoOwner;
+        }
     }
     *config = merged;
     Ok(())
@@ -9173,6 +9841,40 @@ pub(crate) fn save_provider_model_for_identity(
     Ok(config_path)
 }
 
+/// Persist a guided-setup endpoint choice into the provider's own
+/// `[providers.<name>] base_url` (#4526).
+///
+/// Deliberately narrow: it never touches the root `base_url`, another
+/// provider's table, or any other key, so a billing-route choice cannot
+/// repoint an unrelated route.
+pub(crate) fn save_provider_base_url_for_identity(
+    identity: &ProviderIdentity,
+    _route_config: &Config,
+    base_url: &str,
+) -> Result<PathBuf> {
+    let base_url = base_url.trim();
+    anyhow::ensure!(!base_url.is_empty(), "base URL cannot be empty");
+    let config_path = default_config_path()
+        .context("Failed to resolve config path: home directory not found.")?;
+    ensure_parent_dir(&config_path)?;
+    let key_inside = if identity.provider == ApiProvider::Custom {
+        let key = identity.key.trim();
+        anyhow::ensure!(!key.is_empty(), "custom provider id cannot be empty");
+        key
+    } else {
+        provider_config_key(identity.provider).context("provider base URL table")?
+    };
+    crate::config_persistence::mutate_config_document(&config_path, |doc| {
+        crate::config_persistence::set_document_value(
+            doc,
+            &["providers", key_inside, "base_url"],
+            base_url,
+        )
+    })
+    .with_context(|| format!("Failed to write config to {}", config_path.display()))?;
+    Ok(config_path)
+}
+
 /// Persist a guided-setup context-window choice without replacing the user's
 /// surrounding TOML comments or formatting.
 pub(crate) fn save_provider_context_window_for_identity(
@@ -9433,6 +10135,22 @@ fn provider_secret_store_api_key_with_mode(
         .ok()
         .flatten()
         .filter(|value| !value.trim().is_empty())
+}
+
+/// The model this launch was explicitly asked for, if any.
+///
+/// The `codewhale` dispatcher forwards `--model` to this binary as
+/// `CODEWHALE_MODEL` (with the legacy `DEEPSEEK_MODEL` alias), so an explicit
+/// flag and an explicit shell export are the same signal here: *the user named
+/// a model for this run*. That has to outrank the remembered per-provider
+/// selection in `settings.toml`, which is a convenience memory of the last
+/// `/model` pick — never a reason to run something the user did not ask for
+/// (v0.9.1 kimi-k3 dogfood report).
+pub(crate) fn explicit_launch_model_override() -> Option<String> {
+    codewhale_env_var("CODEWHALE_MODEL", "DEEPSEEK_MODEL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 pub(crate) fn explicit_cli_api_key_override() -> Option<String> {

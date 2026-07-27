@@ -211,6 +211,115 @@ export async function snapshotThenSubscribe({
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Typed selection identity (#4397)
+//
+// The dashboard can have two very different things selected: a *saved session*
+// (a recording on disk) or a *live thread* (a running runtime object). Almost
+// every safety rule in this slice reduces to "which one is it?", so the answer
+// is a typed value rather than a pair of loosely-related string fields that can
+// both be set, both be empty, or disagree.
+// ---------------------------------------------------------------------------
+
+// Nothing selected.
+export const NO_TARGET = Object.freeze({ kind: "none" });
+
+// A saved session: read-only. Peek only, never reply, never approve.
+export function sessionTarget(sessionId) {
+  return Object.freeze({ kind: "session", sessionId: String(sessionId || "") });
+}
+
+// A live thread: the only thing that can receive a reply or an approval.
+export function threadTarget(threadId) {
+  return Object.freeze({ kind: "thread", threadId: String(threadId || "") });
+}
+
+// May the composer send to this target?
+//
+// Only a live thread. A saved session has no runtime to receive a message;
+// offering a composer against one would be an affordance with nothing behind
+// it, and "resume it silently on send" would attach the user's message to a
+// thread they never asked to create.
+export function canReply(target) {
+  return target?.kind === "thread" && Boolean(target.threadId);
+}
+
+// Resolve the id a reply must be POSTed to, or an explicit refusal.
+//
+// Fails closed on every ambiguity: no target, a session target, or a target
+// whose thread is not the one the live stream is following (a stale target —
+// the user changed rows while a request was in flight).
+export function resolveReplyTarget(target, streamState) {
+  if (!target || target.kind === "none") {
+    return { ok: false, reason: "no-target" };
+  }
+  if (target.kind === "session") {
+    return { ok: false, reason: "session-not-live" };
+  }
+  if (!target.threadId) {
+    return { ok: false, reason: "no-target" };
+  }
+  if (streamState && streamState.threadId && streamState.threadId !== target.threadId) {
+    return { ok: false, reason: "stale-target" };
+  }
+  return { ok: true, threadId: target.threadId };
+}
+
+// Resolve an approval decision to the thread that owns it, or refuse.
+//
+// An approval is authority: answering the wrong one, or answering one that
+// has already been decided elsewhere, is worse than not answering. So the
+// approval must be present in the *current* stream state, and that state must
+// belong to the selected live thread.
+export function resolveApprovalTarget(approvalId, target, streamState) {
+  const reply = resolveReplyTarget(target, streamState);
+  if (!reply.ok) return reply;
+  if (!approvalId) return { ok: false, reason: "no-approval" };
+  if (!streamState || streamState.threadId !== reply.threadId) {
+    return { ok: false, reason: "stale-target" };
+  }
+  if (!streamState.approvals || !streamState.approvals.has(approvalId)) {
+    // Decided, timed out, or belonging to a thread we are no longer watching.
+    return { ok: false, reason: "stale-approval" };
+  }
+  return { ok: true, threadId: reply.threadId, approvalId };
+}
+
+// Human-readable reason for a refusal, for the status banner.
+export function refusalMessage(reason) {
+  switch (reason) {
+    case "session-not-live":
+      return "This is a saved session, not a live thread — nothing was sent. Resume it first to reply.";
+    case "stale-target":
+      return "That thread is no longer the selected one — nothing was sent.";
+    case "stale-approval":
+      return "That request was already answered or has expired — nothing was sent.";
+    case "no-approval":
+      return "No approval was identified — nothing was sent.";
+    default:
+      return "Select a live thread first — nothing was sent.";
+  }
+}
+
+// The SSE resume cursor and whether the stream is known to have a gap.
+//
+// Surfaced rather than kept internal: after a reconnect the user needs to
+// know whether what they are reading is continuous or whether events were
+// missed and a re-snapshot is pending.
+export function streamCursor(state, { gap = false, connected = true } = {}) {
+  const seq = normalizedSequence(state?.latestSeq);
+  return {
+    latestSeq: seq,
+    gap: Boolean(gap),
+    connected: Boolean(connected),
+    label: !connected
+      ? `Reconnecting — resuming from #${seq}`
+      : gap
+        ? `Gap detected — re-syncing from #${seq}`
+        : `Live — event #${seq}`,
+  };
+}
+
 export function eventStreamUrl(threadId, latestSeq) {
   return `/v1/threads/${encodeURIComponent(threadId)}/events?since_seq=${normalizedSequence(latestSeq)}`;
 }
@@ -292,10 +401,22 @@ function startBrowserClient() {
     renameDialog: document.querySelector("#rename-dialog"),
     renameForm: document.querySelector("#rename-form"),
     renameInput: document.querySelector("#rename-input"),
+    peek: document.querySelector("#session-peek"),
+    savedSessions: document.querySelector("#saved-sessions"),
+    sessionList: document.querySelector("#session-list"),
   };
 
   const app = {
     summaries: [],
+    sessionSummaries: [],
+    // Typed selection: `none`, a read-only `session`, or a live `thread`.
+    // Every reply/approval authority check reads this, not a loose id.
+    target: NO_TARGET,
+    // Bounded, redacted peek for the selected saved session, or null.
+    peek: null,
+    // Set when the SSE stream reported a sequence gap and a re-snapshot is
+    // pending. Surfaced in the connection label rather than hidden.
+    streamGap: false,
     selectedThreadId: "",
     threadState: createThreadState(),
     workspace: null,
@@ -393,6 +514,150 @@ function startBrowserClient() {
     return app.summaries;
   }
 
+  // Saved sessions are the durable session store the terminal browses. They
+  // are rendered with the same row shape as threads because
+  // /v1/sessions/summary and /v1/threads/summary are field-compatible
+  // projections — one vocabulary, not two.
+  function renderSessionList() {
+    dom.sessionList.replaceChildren();
+    // The section only exists when the backend actually returned sessions;
+    // an affordance for an empty store would imply a capability that has
+    // nothing behind it.
+    dom.savedSessions.hidden = app.sessionSummaries.length === 0;
+    if (app.sessionSummaries.length === 0) return;
+
+    for (const summary of app.sessionSummaries) {
+      const row = element("button", "thread-row");
+      row.type = "button";
+      row.dataset.sessionId = summary.id;
+      const titleRow = element("span", "thread-title-row");
+      titleRow.append(element("span", "thread-title", summary.title || "Untitled session"));
+      row.append(titleRow);
+      row.append(element("span", "thread-preview", summary.preview || summary.title));
+      const scope = basename(summary.workspace) || "local";
+      row.append(
+        element(
+          "span",
+          "thread-meta",
+          `${scope} · ${summary.message_count} msg · ${relativeTime(summary.updated_at)}`,
+        ),
+      );
+      row.setAttribute(
+        "aria-current",
+        app.target.kind === "session" && app.target.sessionId === summary.id ? "true" : "false",
+      );
+      // Click peeks; resuming is a separate, explicit button inside the peek.
+      row.addEventListener("click", () => peekSession(summary.id));
+      dom.sessionList.append(row);
+    }
+  }
+
+  async function loadSessions(search = dom.search.value.trim()) {
+    const query = new URLSearchParams({ limit: "50" });
+    if (search) query.set("search", search);
+    try {
+      app.sessionSummaries = await api(`/v1/sessions/summary?${query.toString()}`);
+    } catch (_error) {
+      // A runtime without a readable session store is not a broken dashboard;
+      // hide the section rather than blocking the thread view behind an error.
+      app.sessionSummaries = [];
+    }
+    renderSessionList();
+    return app.sessionSummaries;
+  }
+
+  // Resume goes through the existing endpoint, which seeds a real thread from
+  // the saved messages. The dashboard does not reconstruct history itself.
+  // Selecting a saved session shows a read-only peek. It does NOT resume:
+  // resuming spawns a real thread and an engine, which must be a deliberate
+  // act, not a side effect of clicking a row to see what it was about.
+  async function peekSession(sessionId) {
+    stopStream();
+    app.selectedThreadId = "";
+    app.threadState = createThreadState();
+    app.target = sessionTarget(sessionId);
+    showStatus("");
+    renderThreadList();
+    renderSessionList();
+    try {
+      // `?peek=true` returns a bounded, redacted projection — twelve entries,
+      // tool payloads summarised — so the browser never receives the full
+      // transcript in order to display a preview of it.
+      app.peek = await api(
+        `/v1/sessions/${encodeURIComponent(sessionId)}?peek=true&entries=12`,
+      );
+    } catch (error) {
+      app.peek = null;
+      showStatus(error.message);
+    }
+    renderAll();
+  }
+
+  async function resumeSession(sessionId) {
+    showStatus("");
+    try {
+      const resumed = await api(`/v1/sessions/${encodeURIComponent(sessionId)}/resume-thread`, {
+        method: "POST",
+        body: "{}",
+      });
+      app.peek = null;
+      await loadThreads("");
+      // `selectThread` sets the live thread target; only after this can the
+      // composer or an approval act.
+      await selectThread(resumed.thread_id);
+      showStatus(resumed.summary || "");
+    } catch (error) {
+      showStatus(error.message);
+    }
+  }
+
+  // Render the read-only peek pane for a selected saved session.
+  function renderPeek() {
+    if (!dom.peek) return;
+    const showing = app.target.kind === "session" && app.peek;
+    dom.peek.hidden = !showing;
+    if (!showing) {
+      dom.peek.replaceChildren();
+      return;
+    }
+    const peek = app.peek;
+    dom.peek.replaceChildren();
+
+    const header = element("div", "peek-header");
+    header.append(element("p", "eyebrow", "Saved session — read only"));
+    header.append(element("h2", "", peek.title || "Untitled session"));
+    header.append(
+      element(
+        "p",
+        "thread-meta",
+        `${basename(peek.workspace) || "local"} · ${peek.message_count} messages · ${relativeTime(peek.updated_at)}${peek.archived ? " · archived" : ""}`,
+      ),
+    );
+    dom.peek.append(header);
+
+    if (peek.omitted_before > 0) {
+      dom.peek.append(
+        element("p", "peek-omitted", `${peek.omitted_before} earlier messages not shown`),
+      );
+    }
+
+    for (const entry of peek.entries || []) {
+      const row = element("div", `peek-entry peek-${entry.kind}`);
+      row.append(element("span", "peek-kind", entry.kind));
+      // `element()` assigns via textContent. Peek text is recorded user/model
+      // content and must never reach an HTML sink; this is the XSS boundary.
+      row.append(element("p", "peek-text", entry.text));
+      if (entry.redacted) row.append(element("span", "peek-flag", "redacted"));
+      if (entry.truncated) row.append(element("span", "peek-flag", "truncated"));
+      dom.peek.append(row);
+    }
+
+    const resume = element("button", "primary-button", "Resume into a live thread");
+    resume.type = "button";
+    resume.addEventListener("click", () => resumeSession(peek.session_id));
+    dom.peek.append(resume);
+  }
+
   function stopStream() {
     if (app.stream) app.stream.close();
     app.stream = null;
@@ -405,6 +670,11 @@ function startBrowserClient() {
     saveDraft(app.drafts, app.selectedThreadId, dom.composerInput.value);
     stopStream();
     app.selectedThreadId = threadId;
+    // A live thread is now the target: from here the composer and approvals
+    // may act. Clear any saved-session peek so the two surfaces are exclusive.
+    app.target = threadTarget(threadId);
+    app.peek = null;
+    app.streamGap = false;
     app.threadState = createThreadState(threadId);
     app.generation += 1;
     const generation = app.generation;
@@ -449,6 +719,8 @@ function startBrowserClient() {
       try {
         const envelope = JSON.parse(message.data);
         if (runtimeEventContinuity(app.threadState, envelope) === "gap") {
+          app.streamGap = true;
+          renderStreamCursor();
           showStatus("Runtime event continuity changed; refreshing the thread snapshot…");
           void recoverProjection(threadId, generation, stream);
           return;
@@ -517,10 +789,23 @@ function startBrowserClient() {
 
   function renderAll(preserveScroll = false) {
     renderHeader();
+    renderPeek();
     renderTranscript(preserveScroll);
     renderAttention();
     renderComposer();
     renderThreadList();
+    renderSessionList();
+    renderStreamCursor();
+  }
+
+  // Show the SSE resume cursor so "am I reading everything?" is answerable.
+  function renderStreamCursor() {
+    if (app.target.kind !== "thread") return;
+    const cursor = streamCursor(app.threadState, {
+      gap: app.streamGap,
+      connected: Boolean(app.stream),
+    });
+    setConnection(cursor.gap ? "error" : cursor.connected ? "ready" : "", cursor.label);
   }
 
   function renderHeader() {
@@ -644,8 +929,18 @@ function startBrowserClient() {
   }
 
   async function resolveApproval(approvalId, decision, remember) {
+    // Authority check before authority action. The approval must belong to the
+    // thread we are actually watching, and that thread must be the selected
+    // live target — never a saved-session peek, never a row the user has since
+    // moved off. Refusals are loud and send nothing.
+    const resolved = resolveApprovalTarget(approvalId, app.target, app.threadState);
+    if (!resolved.ok) {
+      showStatus(refusalMessage(resolved.reason));
+      renderAttention();
+      return;
+    }
     try {
-      await api(`/v1/approvals/${encodeURIComponent(approvalId)}`, {
+      await api(`/v1/approvals/${encodeURIComponent(resolved.approvalId)}`, {
         method: "POST",
         body: JSON.stringify({ decision, remember }),
       });
@@ -763,12 +1058,25 @@ function startBrowserClient() {
   async function sendMessage() {
     const prompt = dom.composerInput.value.trim();
     if (!prompt) return;
+    // A reply goes to a live thread or nowhere. A saved-session peek must not
+    // silently resume-and-send: that would attach the user's message to a
+    // thread they never asked to create.
+    if (app.target.kind === "session") {
+      showStatus(refusalMessage("session-not-live"));
+      return;
+    }
     let threadId = app.selectedThreadId;
     if (!threadId) {
       const thread = await createThread();
       if (!thread) return;
       threadId = thread.id;
     }
+    const resolved = resolveReplyTarget(threadTarget(threadId), app.threadState);
+    if (!resolved.ok) {
+      showStatus(refusalMessage(resolved.reason));
+      return;
+    }
+    threadId = resolved.threadId;
     const turn = activeTurn();
     dom.send.disabled = true;
     showStatus("");
@@ -895,6 +1203,7 @@ function startBrowserClient() {
     if (app.searchTimer) clearTimeout(app.searchTimer);
     app.searchTimer = setTimeout(() => {
       loadThreads().catch((error) => showStatus(error.message));
+      loadSessions().catch(() => {});
     }, 180);
   });
   globalThis.addEventListener("beforeunload", stopStream);
@@ -907,6 +1216,7 @@ function startBrowserClient() {
       ]);
       setConnection("ready", "Local runtime connected");
       await loadThreads();
+      await loadSessions();
       if (app.summaries[0]) await selectThread(app.summaries[0].id);
       else renderAll();
     } catch (error) {

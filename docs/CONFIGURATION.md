@@ -415,6 +415,14 @@ base_url = "https://api.stepfun.ai/step_plan/v1"
 model = "step-3.7-flash"
 ```
 
+`/provider` setup asks which StepFun billing route the key belongs to —
+pay-as-you-go (`https://api.stepfun.ai/v1`) or a Step Plan subscription
+(`https://api.stepfun.ai/step_plan/v1`) — and validates the key against the
+endpoint you pick before saving it. The answer is written to
+`[providers.stepfun].base_url` and nowhere else. If that key already holds a
+base URL Codewhale does not recognize as one of those two routes, the question
+is skipped and your value is left untouched.
+
 Alibaba Bailian / Model Studio DashScope Qwen routes use the same OpenAI
 provider shape:
 
@@ -673,6 +681,19 @@ aliases. When both forms are set the `CODEWHALE_*` value wins; the
 - `CODEWHALE_MODEL` (preferred) / `DEEPSEEK_MODEL` (legacy alias) — default model for the active provider
 - `CODEWHALE_BASE_URL` (preferred) / `DEEPSEEK_BASE_URL` (legacy alias) — base URL for the active provider
 
+`CODEWHALE_BASE_URL` applies to the **active** route only. A request pinned to
+another provider — a subagent or fleet child, a routed tool, the per-turn
+auto-router, a picker preview — resolves its endpoint from that provider's own
+`[providers.<table>]`, then its provider-scoped variable (`MOONSHOT_BASE_URL`,
+`OPENAI_BASE_URL`, …), then that provider's default. It never inherits the
+active session's host, and a custom route with no configured `base_url` fails
+closed on a loopback placeholder rather than borrowing another provider's
+endpoint. The legacy root `base_url` behaves the same way: written in your
+config file it stays shared by the DeepSeek and DeepSeek-CN identities as it
+always has, but a value the environment wrote belongs to the identity it was
+addressed to. A managed-config overlay that supplies or reselects the effective
+route's endpoint takes the generic override away from every route.
+
 Remaining variables:
 
 - `DEEPSEEK_API_KEY`
@@ -822,15 +843,48 @@ Rules:
   `<workspace>/.deepseek/config.toml`) ignores `instructions` so a cloned repo
   cannot choose arbitrary local files to place into the prompt.
 
+### Hooks
+
+Hooks are a **TUI runtime feature**. They fire from the interactive TUI and
+the engine turn loop it drives; `codewhale exec`, the CLI subcommands, the
+app-server / ACP surfaces, and the `workflow` tool do not fire them.
+
+[`docs/HOOKS.md`](HOOKS.md) is the authoritative reference for all eleven hook
+events — their firing points, environment variables, stdin payloads, timeout
+and background semantics, and which three of them can steer Codewhale. The
+sections below cover the configuration surface and the steering contracts in
+more depth.
+
+Two contract points worth reading there before writing a hook:
+
+- `background = true` means **submitted and never awaited**. The hook still
+  gets the documented stdin payload and the same timeout, but it has no exit
+  code and cannot steer.
+- A condition that references context its event never carries (an `exit_code`
+  condition outside `tool_call_after` / `on_error`, a `mode` condition on
+  `shell_env`, a tool condition on a non-tool event) is **rejected at load**,
+  logged, and shown in `/hooks list`. It does not silently never match.
+  Rejection is per entry, so a broken hook never drops another one that merely
+  shares its `name` or is likewise unnamed.
+
 ### `/hooks` listing
 
 Run `/hooks` (or `/hooks list`) inside the TUI to see every
 configured lifecycle hook grouped by event, including each
-hook's name, command preview, timeout, and condition. The
+hook's name, command preview, effective timeout, and condition. When
+`[hooks].default_timeout_secs` is set it replaces every per-hook
+`timeout_secs`, and the listing shows that effective value and names the
+override rather than echoing the per-hook number. A
+`default_timeout_secs = 0` is rejected at load — it would expire every hook
+in the config immediately — so the override is ignored, per-hook
+`timeout_secs` applies, the listing shows that per-hook value with no
+override provenance, and the rejection appears under `configuration
+problems`. The
 `[hooks].enabled` flag's state is shown at the top so it's
-obvious when hooks are globally suppressed. Hooks are
-configured under `[[hooks.hooks]]` entries — see the existing
-hook-system documentation for the full schema.
+obvious when hooks are globally suppressed, and any entry rejected
+at load is listed under `configuration problems` with the reason.
+Hooks are configured under `[[hooks.hooks]]` entries — see
+[`docs/HOOKS.md`](HOOKS.md) for the full schema.
 
 ### Mutable `message_submit` hooks
 
@@ -853,6 +907,9 @@ The hook receives JSON on stdin:
 {
   "event": "message_submit",
   "text": "original user text",
+  "text_bytes": 18,
+  "text_original_bytes": 18,
+  "text_truncated": false,
   "session_id": "sess_12345678",
   "workspace": "/path/to/workspace",
   "mode": "agent",
@@ -860,6 +917,12 @@ The hook receives JSON on stdin:
   "total_tokens": 1234
 }
 ```
+
+The entire serialized document is capped at 32 KiB. Codewhale retains the
+largest UTF-8-safe `text` prefix that fits after JSON escaping and bounded
+metadata, and the three `text_*` fields make truncation explicit. Immediate
+messages, restored queue entries, merged steers, and prior-hook replacements
+all cross this same serialization boundary.
 
 If the hook exits `0` and prints JSON with a non-empty string `text` field,
 that value replaces the submitted text:
@@ -871,8 +934,9 @@ that value replaces the submitted text:
 Exit `0` with empty stdout, or stdout JSON without `text`, leaves
 the current text unchanged. A JSON `text` field must not be empty;
 `{"text":""}` is treated as invalid stdout and ignored. Exit `2`
-blocks the submission before the turn starts; a `reason` field,
-stderr, or stdout can provide the status message shown in the TUI.
+blocks the submission before the turn starts; a structured `reason` field can
+provide the bounded, redacted status message shown in the TUI. Raw stdout,
+stderr, and process-error text are not copied into denial receipts.
 Other non-zero exits follow the hook's `continue_on_error` setting.
 Timeouts and spawn failures are also surfaced as transient TUI status
 messages when `continue_on_error = true` lets submission continue.
@@ -880,7 +944,9 @@ messages when `continue_on_error = true` lets submission continue.
 Multiple `message_submit` hooks run in config order, and each hook
 receives the text produced by the previous hook. Hooks marked
 `background = true` are observer-only and cannot transform or block
-the message. Existing environment variables remain available.
+the message — they still receive the same stdin payload and the same
+environment, they are simply never awaited. Existing environment
+variables remain available.
 `shell_env` hooks keep their existing `KEY=VALUE` stdout contract;
 JSON stdout contracts exist for `message_submit` (above) and
 `tool_call_before` (below).
@@ -903,7 +969,8 @@ stdout with exit code `0`:
 
 All fields are optional. Empty stdout, non-JSON stdout, and JSON
 without a `decision` field behave exactly as before (allow). An
-unrecognized `decision` string logs a warning and is treated as allow.
+unrecognized `decision` string logs a fixed warning without echoing the
+untrusted value and is treated as allow.
 
 - `deny` blocks the tool; the model receives a permission-denied tool
   result containing `reason`.
@@ -917,8 +984,23 @@ unrecognized `decision` string logs a warning and is treated as allow.
   concatenated.
 
 When multiple hooks match, precedence is deny > ask > allow. Hooks
-marked `background = true` cannot steer tool calls — they exit
-immediately without a captured result.
+marked `background = true` cannot steer tool calls — they are
+submitted and never awaited, so they have no verdict to contribute.
+
+A foreground hook that produced no verdict at all — it hit its timeout, the
+process could not be started, or a strict process exited non-zero without an
+explicit JSON decision — is not treated as permission. If
+*that* hook is configured with `continue_on_error = false`, the outcome
+denies the tool call and the denial names the hook and a bounded reason.
+Strictness is read off the hooks that actually matched this call, so a
+strict gate scoped to another tool cannot deny it, and a lenient hook's
+timeout does not deny merely because a strict hook exists elsewhere in
+config. Under the default `continue_on_error = true` the outcome is
+logged and the call proceeds.
+
+`reason` and `additionalContext` are capped (2 000 characters per field,
+8 000 for the concatenated context of one call) and stripped of control
+characters before they reach the TUI or the model.
 
 Example deny hook:
 
@@ -987,6 +1069,12 @@ observer-only: stdout is ignored, failures are logged as warnings, and
 the hook cannot block user input, mutate the transcript, or change the
 next queued follow-up.
 
+Observer-only UI events share one 32-entry queue and two persistent workers;
+the terminal loop uses non-blocking submission and does not create a thread per
+event. A full queue or unavailable dispatcher drops that observer event and is
+kept as an event-specific error toast, independent of ordinary agent/turn
+status text.
+
 ```toml
 [[hooks.hooks]]
 event = "turn_end"
@@ -1017,6 +1105,7 @@ The payload includes common hook metadata plus post-turn accounting:
     "output_tokens": 180,
     "prompt_cache_hit_tokens": 900,
     "prompt_cache_miss_tokens": 300,
+    "prompt_cache_write_tokens": 0,
     "reasoning_tokens": null,
     "reasoning_replay_tokens": null
   },
@@ -1106,16 +1195,26 @@ Previews are capped before delivery so lifecycle hooks do not receive full
 sub-agent prompts, transcripts, or unbounded results. Use the transcript handle
 returned by `agent` when full sub-agent details are needed.
 
+### Running-turn input
+
+Composer shortcuts keep the same role throughout a session:
+
+- **Enter** sends when idle and queues a next-turn follow-up while busy. The
+  behavior does not change before versus after the provider's first token.
+- With an empty composer and queued follow-ups visible, **Enter** sends the
+  oldest queued follow-up into the active turn now.
+- **Ctrl+Enter** (or **Cmd+Enter** when the terminal forwards it) explicitly
+  steers the active turn. It sends normally when idle.
+- **Shift+Enter**, **Alt+Enter**, and **Ctrl+J** always insert a newline.
+- **Ctrl+G** and **Ctrl+S** only stash drafts; they never send or steer.
+
 ### Composer stash (`/stash`, Ctrl+G / Ctrl+S)
 
 Press **Ctrl+G** in the composer to park the current draft to
 `~/.codewhale/composer_stash.jsonl`. `/stash list` shows parked
 drafts with one-line previews and timestamps; `/stash pop`
 restores the most recently parked draft (LIFO); `/stash clear`
-wipes the file. Capped at 200 entries; multiline drafts
-round-trip intact. When a turn is already running and queued follow-ups exist,
-the pending-input preview advertises **Ctrl+G send now**; in that state Ctrl+G
-sends the next queued follow-up into the active turn instead of stashing.
+wipes the file. Capped at 200 entries; multiline drafts round-trip intact.
 **Ctrl+S** remains an alias in terminals that forward it; Cursor and VS Code
 reserve Ctrl+S for Save, so Ctrl+G is the portable default.
 
@@ -1169,6 +1268,16 @@ Common settings keys:
   rail. Side choices fall back to the top layout on narrow terminals and in
   Classic without changing the saved Ocean preference. Set it live with
   `/config work_surface_placement right --save` (or `left` / `top`).
+- `focus_texture` (`off`, `scrim`, or `grain`; default `off`): focus-context
+  texture for modal views. `scrim` dims the already-rendered background
+  outside the focused modal toward the theme surface; `grain` sprinkles
+  sparse dots over blank cells there. The texture is static (no time
+  component, so it is unaffected by `low_motion`), never writes over a cell
+  that carries text, and preserves the 4.5:1 body-text contrast floor
+  wherever both colors are resolvable. It is skipped entirely on frames
+  below the ambient-life minimum size and when the focused modal already
+  covers 90% or more of the frame. Set it live with
+  `/config focus_texture scrim --save`.
 - `mention_menu_limit` (integer, default `128`): maximum number of
   `@`-mention popup candidates retained before the composer renders the
   visible window. The visible rows still depend on terminal height.
@@ -1217,6 +1326,22 @@ Common settings keys:
   `hidden` disables the right sidebar entirely so raw terminal selection cannot
   cross from the transcript into sidebar borders. Legacy `plan` and `todos`
   values, plus the old `work` name, are accepted and normalized to `pinned`.
+- `sessions_rail` (`on`/`off`; default `off`): show the persistent Sessions
+  rail in the sidebar panel stack. Rows list this workspace's recent
+  non-archived sessions, newest first, with the active one marked; activating a
+  row opens the session picker preselected on it (`/sessions open <id>`), so
+  resume keeps its single implementation. Rows are projected from cached
+  session metadata — the rail never reads a transcript per frame, and never
+  contacts a provider.
+- `session_auto_resume` (`on`/`off`; default `off`): reattach to this
+  workspace's most recent session when Codewhale starts. Off by default so
+  plain `codewhale` keeps starting fresh. `--resume`, `--continue`, and
+  `--fresh` always take precedence. When it is on, startup still refuses to
+  resume a session that is archived, fails to load, or is recorded against a
+  different workspace; each of those falls back to a fresh transcript and says
+  which session was skipped and why. It applies to the interactive launch only
+  — `codewhale "<prompt>"` and `codewhale exec` are never silently prefixed
+  with a prior conversation.
 - `max_history` (number of submitted input history entries; cleared drafts are
   also kept locally for composer history search)
 - `default_model` (model name override)
@@ -1281,6 +1406,7 @@ If you are upgrading from older releases:
 ### Core keys (used by the TUI/engine)
 
 - `provider` (string, optional): `deepseek` (default), `deepseek-anthropic`, `nvidia-nim`, `openai`, `atlascloud`, `wanjie-ark`, `volcengine`, `openrouter`, `xiaomi-mimo`, `novita`, `fireworks`, `siliconflow`, `arcee`, `siliconflow-CN`, `moonshot`, `sglang`, `vllm`, `ollama`, `huggingface`, `together`, `qianfan`, `openai-codex`, `anthropic`, `openmodel`, `zai`, `stepfun`, `minimax`, `deepinfra`, `sakana`, `longcat`, `opencode-go`, `meta`, `telecomjs`, or `xai`. Legacy `deepseek-cn` configs are still accepted as an alias for `deepseek`; DeepSeek uses the same official host [`https://api.deepseek.com`](https://api-docs.deepseek.com/) worldwide. `deepseek-anthropic` targets DeepSeek's Anthropic Messages-compatible endpoint at `https://api.deepseek.com/anthropic` using `DEEPSEEK_API_KEY`; `nvidia-nim` targets NVIDIA's NIM-hosted DeepSeek endpoints through `https://integrate.api.nvidia.com/v1`; `openai` targets a generic OpenAI-compatible endpoint, defaulting to `https://api.openai.com/v1`; `atlascloud` targets AtlasCloud's OpenAI-compatible endpoint at `https://api.atlascloud.ai/v1`; `wanjie-ark` targets Wanjie Ark's OpenAI-compatible endpoint at `https://maas-openapi.wanjiedata.com/api/v1`; `volcengine` targets Volcengine Ark's OpenAI-compatible coding endpoint at `https://ark.cn-beijing.volces.com/api/coding/v3`; `openrouter` targets `https://openrouter.ai/api/v1`; `xiaomi-mimo` targets Xiaomi MiMo's OpenAI-compatible endpoint, using `https://token-plan-sgp.xiaomimimo.com/v1` by default for Token Plan keys (`tp-...`) and `https://api.xiaomimimo.com/v1` for pay-as-you-go keys. For Token Plan accounts outside the Singapore default, set `base_url` explicitly or use `mode = "token-plan-cn"` for China and `mode = "token-plan-ams"` for Europe/Amsterdam; `novita` targets `https://api.novita.ai/openai/v1`; `fireworks` targets `https://api.fireworks.ai/inference/v1`; `siliconflow` targets SiliconFlow, defaulting to `https://api.siliconflow.com/v1`; `arcee` targets Arcee AI's OpenAI-compatible endpoint at `https://api.arcee.ai/api/v1`; `siliconflow-CN` targets the SiliconFlow China regional endpoint through `[providers.siliconflow_cn]`; `moonshot` targets Moonshot/Kimi, defaulting to `https://api.moonshot.ai/v1`; `sglang` targets a self-hosted OpenAI-compatible endpoint, defaulting to `http://localhost:30000/v1`; `vllm` targets a self-hosted vLLM OpenAI-compatible endpoint, defaulting to `http://localhost:8000/v1`; `ollama` targets Ollama's OpenAI-compatible endpoint, defaulting to `http://localhost:11434/v1`; `huggingface` targets Hugging Face Inference Providers at `https://router.huggingface.co/v1`; `together` targets Together AI at `https://api.together.xyz/v1`; `qianfan` targets Baidu Qianfan at `https://api.baiduqianfan.ai/v1`; `openai-codex` targets ChatGPT/Codex OAuth; `anthropic` targets Claude's native Messages API; `openmodel` targets OpenModel's Anthropic-compatible Messages API at `https://api.openmodel.ai`; `zai` targets Z.ai at `https://api.z.ai/api/coding/paas/v4`; `stepfun` targets StepFun at `https://api.stepfun.ai/v1`; `minimax` targets MiniMax at `https://api.minimax.io/v1`; `deepinfra` targets DeepInfra at `https://api.deepinfra.com/v1/openai`; `sakana` targets Sakana AI Fugu at `https://api.sakana.ai/v1`; `longcat` targets Meituan LongCat at `https://api.longcat.chat/openai/v1`; `opencode-go` targets the subscription-backed OpenCode Go Chat Completions route at `https://opencode.ai/zen/go/v1`; `meta` targets Meta Model API; `telecomjs` targets TelecomJS TokenHub at `https://aigw.telecomjs.com/v1`; and `xai` targets xAI's API-key or OAuth route.
+- `opencode-zen` (string provider value): selects the model-aware OpenCode Zen gateway through `[providers.opencode_zen]`. The default base URL is `https://opencode.ai/zen/v1`, the default model is `gpt-5.5`, and credentials come from `api_key`, `OPENCODE_ZEN_API_KEY`, or fallback `OPENCODE_API_KEY`—never ChatGPT/Codex OAuth. `OPENCODE_ZEN_BASE_URL` and `OPENCODE_ZEN_MODEL` are accepted. The selected model is resolved through the curated Zen catalog: GPT uses Responses, Claude/Qwen use Anthropic Messages, and the documented DeepSeek/MiniMax/GLM/Kimi/Grok/free rows use Chat Completions. Gemini and unknown models fail closed because Codewhale has no proven supported wire contract for them. See the exact current model groups in [`PROVIDERS.md`](PROVIDERS.md#opencode-zen-protocol-catalog).
 - `minimax-anthropic` (string provider value): selects MiniMax's Anthropic-compatible Messages route through `[providers.minimax_anthropic]`. The default Base URL is `https://api.minimax.io/anthropic`; set `https://api.minimaxi.com/anthropic` for China. Keep the `/anthropic` suffix because Codewhale appends `/v1/messages`. The route uses `MINIMAX_API_KEY` and defaults to `MiniMax-M3`; `MiniMax-M2.7` is also registered. Official M3 input modalities are text, image, and video, with adaptive or disabled thinking. M2.7 is text-only and always keeps thinking enabled.
 - `api_key` (string, required for hosted providers): must be non-empty for DeepSeek/hosted providers (or set the provider API key env var). Self-hosted SGLang, vLLM, and Ollama can omit it.
 - `auth_mode` (string, optional provider-table key): selects a provider-specific authentication contract. Kimi Code membership uses `auth_mode = "api_key"` (or omit the field), a key created in the [Kimi Code console](https://www.kimi.com/code/console), `base_url = "https://api.kimi.com/coding/v1"`, and bare `model = "k3"` for K3. Codewhale gives that route a safe 262,144-token baseline; set `context_window = 1048576` only when the Kimi Code plan includes 1M access (Allegretto and above). `k3[1m]` is a Claude Code-only convention, not an API model ID, and Codewhale rejects it instead of silently changing the wire model or assuming an entitlement. `model = "kimi-for-coding"` remains the valid K2.7 compatibility route available to all Kimi Code members. Legacy `auth_mode = "kimi_oauth"` fails closed with API-key guidance and never probes, reads, refreshes, or rewrites `kimi_cli`/`kimi_code_cli` credential files. First-class OAuth requires Codewhale's own vendor-registered client identity and remains tracked in #4417.
@@ -1593,6 +1719,11 @@ If you are upgrading from older releases:
   `[notifications].sound_file` on Windows.
 - `[notifications].sound_file` (path, optional): path to a custom WAV file
   used when `completion_sound = "file"`.
+- `[notifications.event_sound]` (table, optional): opt-in, deterministic
+  per-event sound cues. Keys: `enabled` (bool, default `false`), `events`
+  (array of kebab-case event names, default `["turn-complete",
+  "approval-needed"]`), `min_interval_ms` (int, default `2000`), `quiet`
+  (bool, default `false`). See "Event sound cues" below.
 - `tui.alternate_screen` (string, optional): `auto`, `always`, or `never`. This is retained for config compatibility, but interactive sessions now always use the TUI-owned alternate screen so host terminal scrollback cannot hijack the viewport.
 - `tui.mouse_capture` (bool, optional, default `true` on non-Windows terminals and on Windows Terminal/ConEmu/Cmder when the alternate screen is active; `false` on legacy Windows console and inside JetBrains JediTerm — PyCharm/IDEA/CLion/etc. — where mouse-event escapes leak into the input stream as garbled text, see #878 / #898): enable internal mouse scrolling, transcript selection, right-click context actions, and transcript scrollbar dragging. TUI-owned drag selection copies only transcript text, removes visual wrap-column line breaks from paragraphs, and keeps selection scoped to the transcript pane. Set this to `false` or run with `--no-mouse-capture` for raw terminal selection; set it to `true` or run with `--mouse-capture` to opt in anywhere it's defaulted off. On raw terminal selection, especially on legacy Windows console or when mouse capture is disabled, selection may cross the right sidebar and include visual wraps because the terminal, not the TUI, owns the selection.
 - `tui.terminal_probe_timeout_ms` (int, optional, default `500`): startup terminal-mode probe timeout in milliseconds. Values are clamped to `100..=5000`; timeout emits a warning and aborts startup instead of hanging indefinitely.
@@ -1673,6 +1804,41 @@ Windows users who run inside a known OSC-9 terminal (e.g. WezTerm on Windows) ke
 `completion_sound = "file"` is for Windows users who want a per-application
 completion sound without changing the global Windows sound scheme. It plays the
 configured WAV `sound_file` asynchronously via the native Windows audio API.
+
+#### Event sound cues
+
+`[notifications.event_sound]` is an opt-in, deterministic policy that emits a
+terminal-bell-level cue when specific notification events fire (approval
+prompts, blocked-on-input, sub-agent completion, and so on). It is **off by
+default**; with `enabled = false` nothing is emitted, which is the
+platform-safe no-op fallback.
+
+```toml
+[notifications.event_sound]
+enabled = false                              # default: off (opt-in)
+events = ["turn-complete", "approval-needed"] # default allow-list
+min_interval_ms = 2000                       # per-event rate limit
+quiet = false                                # true silences everything without editing the allow-list
+```
+
+The cue table is fixed — cues are functional BEL-based signals, not
+designed-for-pleasantness audio, and every cue is one or two `\x07` bytes
+(inert on terminals that ignore BEL, so this is a platform-safe no-op
+everywhere):
+
+| Event | Cue |
+|---|---|
+| `turn-complete` | BEL (`\x07`) |
+| `subagent-terminal` | BEL (`\x07`) |
+| `approval-needed` | double BEL (`\x07\x07`) |
+| `input-needed` | BEL (`\x07`) |
+| `elevation-needed` | double BEL (`\x07\x07`) |
+| `model-notify` | BEL (`\x07`) |
+
+Decision order: disabled → quiet mode → event not in `events` → `turn-complete`
+deferred to the `completion_sound` channel when that is active (so the two
+never double-ding) → per-event rate limit (`min_interval_ms` since the last
+play of that event) → play. Unknown strings in `events` are ignored.
 
 #### What a notification can contain
 

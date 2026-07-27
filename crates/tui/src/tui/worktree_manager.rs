@@ -19,6 +19,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::palette;
 use crate::tui::git_status::{self, GitStatusSnapshot, WorktreeEntry};
+use crate::tui::menu_style;
 use crate::tui::views::{ModalKind, ModalView, ViewAction, ViewEvent};
 
 /// Modes inside the worktree manager.
@@ -315,10 +316,7 @@ impl WorktreeManagerView {
                     .unwrap_or_else(|| entry.path.to_str().unwrap_or("?"));
                 let text = format!("{marker}{path} · {branch}{cur}{locked}");
                 let style = if selected {
-                    Style::default()
-                        .fg(palette::WHALE_ACTION)
-                        .add_modifier(Modifier::BOLD)
-                        .bg(palette::SELECTION_BG)
+                    menu_style::selected_row_style_with_fg(palette::WHALE_ACTION)
                 } else if current {
                     Style::default().fg(palette::WHALE_LIVE)
                 } else {

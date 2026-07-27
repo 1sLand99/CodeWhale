@@ -75,50 +75,13 @@ pub(super) fn render_message_with_copy_metadata_for_palette(
         palette_mode,
     );
     for (idx, rendered_line) in rendered.into_iter().enumerate() {
-        let display_prefix_width = if prefix.is_empty() {
-            0
-        } else {
-            prefix_width + 1
-        };
-        let links = rendered_line
-            .links
-            .iter()
-            .map(|link| link.shifted(display_prefix_width))
-            .collect();
-        let line = if idx == 0 {
-            let mut spans = Vec::new();
-            if !prefix.is_empty() {
-                spans.push(Span::styled(
-                    prefix.to_string(),
-                    label_style.add_modifier(Modifier::BOLD),
-                ));
-                spans.push(Span::raw(" "));
-            }
-            spans.extend(rendered_line.line.spans);
-            Line::from(spans)
-        } else {
-            let indent = if prefix.is_empty() {
-                String::new()
-            } else if rendered_line.is_code {
-                " ".repeat(prefix_width + 1)
-            } else {
-                let mut s = String::with_capacity(prefix_width + 1);
-                s.push('\u{258F}');
-                s.extend(std::iter::repeat_n(' ', prefix_width));
-                s
-            };
-            let rail_style = Style::default().fg(palette::TEXT_DIM);
-            let mut spans = vec![Span::styled(indent, rail_style)];
-            spans.extend(rendered_line.line.spans);
-            Line::from(spans)
-        };
-        lines.push(RenderedTranscriptLine {
-            line,
-            links,
-            copy_prefix_width: rendered_line.copy_prefix_width
-                + history_copy_prefix_width(prefix, prefix_width, rendered_line.is_code, idx),
-            copy_separator_after: rendered_line.copy_separator_after,
-        });
+        lines.push(decorate_markdown_line(
+            prefix,
+            prefix_width,
+            label_style,
+            idx,
+            rendered_line,
+        ));
     }
     if lines.is_empty() {
         lines.push(RenderedTranscriptLine {
@@ -129,6 +92,103 @@ pub(super) fn render_message_with_copy_metadata_for_palette(
         });
     }
     lines
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn update_streaming_message_render(
+    cache: &mut markdown_render::IncrementalMarkdownRenderCache,
+    content: &str,
+    width: u16,
+    label_style: Style,
+    body_style: Style,
+    palette_mode: palette::PaletteMode,
+    verified_append: bool,
+    lines: &mut Vec<Line<'static>>,
+    links: &mut Vec<Vec<crate::tui::osc8::LineLink>>,
+    copy_separators: &mut Vec<CopyLineSeparator>,
+    copy_prefix_widths: &mut Vec<usize>,
+) -> usize {
+    let prefix = ASSISTANT_GLYPH;
+    let prefix_width = UnicodeWidthStr::width(prefix);
+    let prefix_width_u16 = u16::try_from(prefix_width.saturating_add(2)).unwrap_or(u16::MAX);
+    let content_width = width.saturating_sub(prefix_width_u16).max(1);
+    let delta = cache.update(
+        content,
+        content_width,
+        body_style,
+        palette_mode,
+        verified_append,
+    );
+
+    let replace_from = delta.replace_from;
+    lines.truncate(replace_from);
+    links.truncate(replace_from);
+    copy_separators.truncate(replace_from);
+    copy_prefix_widths.truncate(replace_from);
+
+    for rendered_line in delta.lines {
+        let index = lines.len();
+        let rendered =
+            decorate_markdown_line(prefix, prefix_width, label_style, index, rendered_line);
+        lines.push(rendered.line);
+        links.push(rendered.links);
+        copy_separators.push(rendered.copy_separator_after);
+        copy_prefix_widths.push(rendered.copy_prefix_width);
+    }
+    replace_from
+}
+
+fn decorate_markdown_line(
+    prefix: &str,
+    prefix_width: usize,
+    label_style: Style,
+    index: usize,
+    rendered_line: markdown_render::RenderedMarkdownLine,
+) -> RenderedTranscriptLine {
+    let display_prefix_width = if prefix.is_empty() {
+        0
+    } else {
+        prefix_width + 1
+    };
+    let links = rendered_line
+        .links
+        .iter()
+        .map(|link| link.shifted(display_prefix_width))
+        .collect();
+    let line = if index == 0 {
+        let mut spans = Vec::new();
+        if !prefix.is_empty() {
+            spans.push(Span::styled(
+                prefix.to_string(),
+                label_style.add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::raw(" "));
+        }
+        spans.extend(rendered_line.line.spans);
+        Line::from(spans)
+    } else {
+        let indent = if prefix.is_empty() {
+            String::new()
+        } else if rendered_line.is_code {
+            " ".repeat(prefix_width + 1)
+        } else {
+            let mut s = String::with_capacity(prefix_width + 1);
+            s.push('\u{258F}');
+            s.extend(std::iter::repeat_n(' ', prefix_width));
+            s
+        };
+        let rail_style = Style::default().fg(palette::TEXT_DIM);
+        let mut spans = vec![Span::styled(indent, rail_style)];
+        spans.extend(rendered_line.line.spans);
+        Line::from(spans)
+    };
+    RenderedTranscriptLine {
+        line,
+        links,
+        copy_prefix_width: rendered_line.copy_prefix_width
+            + history_copy_prefix_width(prefix, prefix_width, rendered_line.is_code, index),
+        copy_separator_after: rendered_line.copy_separator_after,
+    }
 }
 
 fn history_copy_prefix_width(

@@ -167,13 +167,15 @@ pub fn handle_mouse(app: &mut App, mouse: MouseEvent) -> MouseOutcome {
         MouseEventKind::Up(MouseButton::Left) if app.work_surface.resizing => {
             app.work_surface.resizing = false;
             app.work_surface.divider_hovered = on_divider;
-            if let Ok(mut settings) = crate::settings::Settings::load_persisted() {
-                settings.work_surface_top_height = app.work_surface.top_height;
-                settings.work_surface_side_width = app.work_surface.side_width;
-                if let Err(error) = settings.save() {
-                    app.status_message =
-                        Some(format!("Failed to save To-do/Sub-agent bar size: {error}"));
-                }
+            let top_height = app.work_surface.top_height;
+            let side_width = app.work_surface.side_width;
+            if let Err(error) = crate::settings::Settings::transact(|settings| {
+                settings.work_surface_top_height = top_height;
+                settings.work_surface_side_width = side_width;
+                Ok(())
+            }) {
+                app.status_message =
+                    Some(format!("Failed to save To-do/Sub-agent bar size: {error}"));
             }
             app.needs_redraw = true;
             return MouseOutcome {

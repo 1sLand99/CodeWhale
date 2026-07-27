@@ -30,7 +30,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKi
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget, Wrap},
 };
@@ -51,6 +51,7 @@ use crate::provider_readiness::{
     credential_state_for_provider, route_identity_for_model,
 };
 use crate::tui::app::ReasoningEffort;
+use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, EmptyState, ListDetailLayout, ModalKind, ModalView, ViewAction, ViewEvent,
     centered_modal_area, render_modal_footer, render_modal_surface,
@@ -74,6 +75,9 @@ enum Stage {
     ModelPick,
     /// Kimi Code membership plan selection for the exact `api.kimi.com` route.
     PlanTier,
+    /// StepFun pay-as-you-go vs Step Plan endpoint choice, asked before key
+    /// entry so the selected route is the one that gets live-validated (#4526).
+    StepfunBillingRoute,
     /// Confirmation summary before any secret or model is persisted (#3875).
     Confirm,
     CustomForm,
@@ -90,6 +94,37 @@ enum ExternalConsentChoice {
 enum KimiCodePlanTier {
     Safe262k,
     OneMillion,
+}
+
+/// StepFun's two billing tracks. They are separate endpoints, not separate
+/// keys, so the setup wizard has to pick one before a key can be validated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepfunBillingRoute {
+    PayAsYouGo,
+    StepPlan,
+}
+
+impl StepfunBillingRoute {
+    fn base_url(self) -> &'static str {
+        match self {
+            Self::PayAsYouGo => crate::config::DEFAULT_STEPFUN_BASE_URL,
+            Self::StepPlan => crate::config::DEFAULT_STEPFUN_PLAN_BASE_URL,
+        }
+    }
+}
+
+/// Whether the StepFun billing-route choice applies to `base_url`.
+///
+/// Only the two endpoints Codewhale can classify are offered. A hand-edited
+/// endpoint (regional proxy, gateway, anything unrecognized) is a deliberate
+/// user choice, so the stage is skipped rather than silently rewriting it.
+fn stepfun_route_is_selectable(provider: ApiProvider, base_url: &str) -> bool {
+    provider == ApiProvider::Stepfun
+        && matches!(
+            crate::pricing::billing_surface_for_route(provider, Some(base_url)),
+            Some(crate::pricing::STEPFUN_PAYG_BILLING_SURFACE)
+                | Some(crate::pricing::STEPFUN_PLAN_BILLING_SURFACE)
+        )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +166,10 @@ pub struct ProviderPickerView {
     selected_model: Option<String>,
     selected_context_window: Option<u32>,
     kimi_code_plan_tier: KimiCodePlanTier,
+    stepfun_billing_route: StepfunBillingRoute,
+    /// Endpoint chosen in the setup wizard, carried unpersisted through key
+    /// validation and only written on confirm (#4526).
+    pending_base_url: Option<String>,
     custom_provider_field: CustomProviderField,
     custom_provider_id: String,
     custom_provider_base_url: String,
@@ -617,10 +656,9 @@ impl ProviderDashboardRow {
                     vec![
                         provider
                             .metadata()
-                            .map(|metadata| protocol_label(metadata.wire()).to_string())
-                            .unwrap_or_else(|| {
-                                protocol_label(WireFormat::ChatCompletions).to_string()
-                            }),
+                            .and_then(|metadata| metadata.wire_policy().fixed())
+                            .map(|protocol| protocol_label(protocol).to_string())
+                            .unwrap_or_else(|| "model-aware".to_string()),
                     ],
                     ProviderDefaultRoute {
                         logical_model: configured_model.unwrap_or_else(|| "invalid".to_string()),
@@ -1261,11 +1299,20 @@ fn usage_meter_for(provider: ApiProvider) -> String {
         ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm => "cost: local".to_string(),
         ApiProvider::OpenaiCodex => "usage: Codex OAuth quota".to_string(),
         ApiProvider::XiaomiMimo => "cost: token-plan".to_string(),
+        // OpenCode ships two billing tracks off one account; the rows must not
+        // both read as generic metering (#4526).
+        ApiProvider::OpencodeGo => "usage: OpenCode Go subscription".to_string(),
+        ApiProvider::OpencodeZen => "cost: OpenCode Zen pay-as-you-go".to_string(),
         _ => "cost: unknown".to_string(),
     }
 }
 
 fn pricing_label(provider: ApiProvider, pricing: Option<&PricingSku>) -> String {
+    // OpenCode Go spends a subscription allowance, not per-token dollars, so a
+    // catalog token price would misreport it as metered spend.
+    if provider == ApiProvider::OpencodeGo {
+        return usage_meter_for(provider);
+    }
     match pricing {
         Some(PricingSku::Token {
             input_per_mtok,
@@ -1395,6 +1442,8 @@ impl ProviderPickerView {
             selected_model: None,
             selected_context_window: None,
             kimi_code_plan_tier: KimiCodePlanTier::Safe262k,
+            stepfun_billing_route: StepfunBillingRoute::PayAsYouGo,
+            pending_base_url: None,
             custom_provider_field: CustomProviderField::Name,
             custom_provider_id: String::new(),
             custom_provider_base_url: String::new(),
@@ -1507,7 +1556,7 @@ impl ProviderPickerView {
         {
             picker.selected_idx = idx;
             if key_entry_for_missing_auth && !picker.selected_has_key() {
-                picker.enter_key_entry();
+                picker.begin_setup();
             }
         }
         picker
@@ -1534,7 +1583,7 @@ impl ProviderPickerView {
         // The target may be an unconfigured catalog row; show the catalog so
         // it is visible, then jump into key entry for it.
         picker.view = ProviderListView::Catalog;
-        picker.enter_key_entry();
+        picker.begin_setup();
         Some(picker)
     }
 
@@ -1636,9 +1685,49 @@ impl ProviderPickerView {
         self.api_key_input.clear();
         self.key_entry_error = None;
         self.pending_api_key = None;
+        self.pending_base_url = None;
         self.model_options.clear();
         self.model_selected_idx = 0;
         self.selected_model = None;
+    }
+
+    /// Start guided setup for the selected row. Providers that bill on more
+    /// than one endpoint choose the route first so the key is validated
+    /// against the endpoint it will actually be saved for (#4526).
+    fn begin_setup(&mut self) {
+        if self.stepfun_billing_route_applies() {
+            self.enter_stepfun_billing_route();
+        } else {
+            self.enter_key_entry();
+        }
+    }
+
+    fn stepfun_billing_route_applies(&self) -> bool {
+        self.rows
+            .get(self.selected_idx)
+            .is_some_and(|row| stepfun_route_is_selectable(row.provider, &row.base_url))
+    }
+
+    fn enter_stepfun_billing_route(&mut self) {
+        // Preselect whatever the row already resolves to so re-running setup
+        // on a configured Step Plan route does not default back to PAYG.
+        self.stepfun_billing_route = if crate::pricing::billing_surface_for_route(
+            ApiProvider::Stepfun,
+            Some(&self.rows[self.selected_idx].base_url),
+        ) == Some(crate::pricing::STEPFUN_PLAN_BILLING_SURFACE)
+        {
+            StepfunBillingRoute::StepPlan
+        } else {
+            StepfunBillingRoute::PayAsYouGo
+        };
+        self.stage = Stage::StepfunBillingRoute;
+    }
+
+    fn apply_stepfun_billing_route(&mut self) {
+        let base_url = self.stepfun_billing_route.base_url().to_string();
+        self.enter_key_entry();
+        self.rows[self.selected_idx].base_url.clone_from(&base_url);
+        self.pending_base_url = Some(base_url);
     }
 
     fn selected_external_consent_target(
@@ -1726,12 +1815,19 @@ impl ProviderPickerView {
         config: &Config,
         runtime_status: Option<ProviderRuntimeStatus>,
         api_key: String,
+        base_url: Option<String>,
     ) -> Option<Self> {
         let mut picker = Self::new_with_runtime_status(active, config, runtime_status);
         let idx = picker.rows.iter().position(|row| row.provider == target)?;
         picker.selected_idx = idx;
         picker.view = ProviderListView::Catalog;
         picker.pending_api_key = Some(api_key);
+        // The wizard's endpoint choice survives the validation round-trip so
+        // confirm persists exactly the route the key was verified against.
+        if let Some(base_url) = base_url {
+            picker.rows[idx].base_url.clone_from(&base_url);
+            picker.pending_base_url = Some(base_url);
+        }
         picker.api_key_input.clear();
         picker.key_entry_error = None;
         picker.enter_model_pick();
@@ -1840,6 +1936,7 @@ impl ProviderPickerView {
             api_key: api_key.to_string(),
             model: model.to_string(),
             context_window: self.selected_context_window,
+            base_url: self.pending_base_url.clone(),
         })
     }
 
@@ -1947,17 +2044,6 @@ impl ProviderPickerView {
             .min(max_start)
     }
 
-    fn selected_row_style(fg: Color) -> Style {
-        Style::default()
-            .fg(fg)
-            .bg(palette::SURFACE_ELEVATED)
-            .add_modifier(Modifier::BOLD)
-    }
-
-    fn selected_row_bg_style() -> Style {
-        Style::default().bg(palette::SURFACE_ELEVATED)
-    }
-
     fn render_list(&self, area: Rect, buf: &mut Buffer) {
         let enter_action = if !self.selected_route_is_valid() {
             self.tr(MessageId::PickerActionUnavailable)
@@ -2005,12 +2091,20 @@ impl ProviderPickerView {
                 inner,
                 buf,
                 &[
-                    ActionHint::new("Esc", self.tr(MessageId::PickerActionClear)),
+                    // Two-stage Esc (clear the query, then cancel) reads as one
+                    // hint instead of a duplicated key.
+                    ActionHint::new(
+                        "Esc",
+                        format!(
+                            "{} / {}",
+                            self.tr(MessageId::PickerActionClear),
+                            self.tr(MessageId::PickerActionCancel)
+                        ),
+                    ),
                     ActionHint::new("↑↓", self.tr(MessageId::PickerActionMove)),
                     ActionHint::new("Enter", enter_action),
                     ActionHint::new("A", view_action.clone()),
                     ActionHint::new("C", self.tr(MessageId::PickerActionCustom)),
-                    ActionHint::new("Esc", self.tr(MessageId::PickerActionCancel)),
                 ],
             )
         } else {
@@ -2072,12 +2166,12 @@ impl ProviderPickerView {
             let arrow = crate::tui::glyphs::selection_marker(is_selected);
             let active_dot = if is_active { " *" } else { "  " };
             let spacer_style = if is_selected {
-                Self::selected_row_bg_style()
+                menu_style::selected_row_bg_style()
             } else {
                 Style::default()
             };
             let label_style = if is_selected {
-                Self::selected_row_style(palette::TEXT_PRIMARY)
+                menu_style::selected_row_style_with_fg(palette::SELECTION_TEXT)
             } else {
                 Style::default().fg(palette::TEXT_PRIMARY)
             };
@@ -2095,7 +2189,7 @@ impl ProviderPickerView {
                 } else {
                     palette::STATUS_WARNING
                 };
-                Self::selected_row_style(hint_fg)
+                menu_style::selected_row_style_with_fg(hint_fg)
             } else if has_usable_auth {
                 Style::default().fg(palette::TEXT_MUTED)
             } else {
@@ -2118,13 +2212,13 @@ impl ProviderPickerView {
                 Span::styled(hint, hint_style),
             ]);
             if is_selected {
-                line.style = Self::selected_row_bg_style();
+                line.style = menu_style::selected_row_bg_style();
                 let target_width = usize::from(layout.list.width);
                 let line_width = line.width();
                 if line_width < target_width {
                     line.spans.push(Span::styled(
                         " ".repeat(target_width - line_width),
-                        Self::selected_row_bg_style(),
+                        menu_style::selected_row_bg_style(),
                     ));
                 }
             }
@@ -2628,7 +2722,7 @@ impl ProviderPickerView {
             let is_selected = idx == self.model_selected_idx;
             let arrow = crate::tui::glyphs::selection_marker(is_selected);
             let label_style = if is_selected {
-                Self::selected_row_style(palette::TEXT_PRIMARY)
+                menu_style::selected_row_style_with_fg(palette::SELECTION_TEXT)
             } else {
                 Style::default().fg(palette::TEXT_PRIMARY)
             };
@@ -2649,7 +2743,7 @@ impl ProviderPickerView {
                     Span::styled(
                         format!("  ({default_tag})"),
                         if is_selected {
-                            Self::selected_row_style(palette::TEXT_MUTED)
+                            menu_style::selected_row_style_with_fg(palette::TEXT_MUTED)
                         } else {
                             Style::default().fg(palette::TEXT_MUTED)
                         },
@@ -2657,7 +2751,7 @@ impl ProviderPickerView {
                 },
             ]);
             if is_selected {
-                line.style = Self::selected_row_bg_style();
+                line.style = menu_style::selected_row_bg_style();
             }
             lines.push(line);
         }
@@ -2705,6 +2799,53 @@ impl ProviderPickerView {
             Line::from(format!(
                 "{} 2. 1M context (only with an eligible plan)",
                 marker(KimiCodePlanTier::OneMillion)
+            )),
+        ])
+        .wrap(Wrap { trim: false })
+        .render(content, buf);
+    }
+
+    fn render_stepfun_billing_route(&self, area: Rect, buf: &mut Buffer) {
+        let outer = Block::default()
+            .title(Line::from(Span::styled(
+                format!(" {} ", self.tr(MessageId::StepfunBillingRouteTitle)),
+                Style::default()
+                    .fg(palette::WHALE_INFO)
+                    .add_modifier(Modifier::BOLD),
+            )))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette::BORDER_COLOR))
+            .style(Style::default().bg(palette::WHALE_BG));
+        let inner = outer.inner(area);
+        outer.render(area, buf);
+        let content = render_modal_footer(
+            inner,
+            buf,
+            &[
+                ActionHint::new("↑↓", "choose"),
+                ActionHint::new("Enter", "continue"),
+                ActionHint::new("Esc", "back"),
+            ],
+        );
+        let selected = self.stepfun_billing_route;
+        let marker = |route| crate::tui::glyphs::selection_marker(selected == route);
+        // The endpoint is shown next to each choice: it is the whole
+        // difference between the two billing tracks, and it is what gets
+        // written to `[providers.stepfun] base_url` on confirm.
+        Paragraph::new(vec![
+            Line::from(self.tr(MessageId::StepfunBillingRouteIntro).to_string()),
+            Line::from(""),
+            Line::from(format!(
+                "{} 1. {} — {}",
+                marker(StepfunBillingRoute::PayAsYouGo),
+                self.tr(MessageId::StepfunBillingRoutePaygOption),
+                StepfunBillingRoute::PayAsYouGo.base_url(),
+            )),
+            Line::from(format!(
+                "{} 2. {} — {}",
+                marker(StepfunBillingRoute::StepPlan),
+                self.tr(MessageId::StepfunBillingRoutePlanOption),
+                StepfunBillingRoute::StepPlan.base_url(),
             )),
         ])
         .wrap(Wrap { trim: false })
@@ -2860,14 +3001,14 @@ impl ProviderPickerView {
         let value = self.custom_form_field_value(field);
         let display = if value.is_empty() { placeholder } else { value };
         let value_style = if selected {
-            Self::selected_row_style(palette::TEXT_PRIMARY)
+            menu_style::selected_row_style_with_fg(palette::SELECTION_TEXT)
         } else if value.is_empty() {
             Style::default().fg(palette::TEXT_MUTED)
         } else {
             Style::default().fg(palette::TEXT_PRIMARY)
         };
         let label_style = if selected {
-            Self::selected_row_style(palette::WHALE_INFO)
+            menu_style::selected_row_style_with_fg(palette::WHALE_INFO)
         } else {
             Style::default().fg(palette::TEXT_MUTED)
         };
@@ -2884,7 +3025,7 @@ impl ProviderPickerView {
             ),
         ]);
         if selected {
-            line.style = Self::selected_row_bg_style();
+            line.style = menu_style::selected_row_bg_style();
         }
         Paragraph::new(line).render(area, buf);
     }
@@ -2945,6 +3086,7 @@ impl ModalView for ProviderPickerView {
             | Stage::ExternalConsentConfirm
             | Stage::ModelPick
             | Stage::PlanTier
+            | Stage::StepfunBillingRoute
             | Stage::Confirm => false,
         }
     }
@@ -2986,7 +3128,7 @@ impl ModalView for ProviderPickerView {
                             provider_id,
                         })
                     } else {
-                        self.enter_key_entry();
+                        self.begin_setup();
                         ViewAction::None
                     }
                 }
@@ -3008,7 +3150,7 @@ impl ModalView for ProviderPickerView {
                         && self.query.is_empty()
                         && self.row_visible(self.selected_idx) =>
                 {
-                    self.enter_key_entry();
+                    self.begin_setup();
                     ViewAction::None
                 }
                 // Toggle between the configured-only default view and the
@@ -3068,7 +3210,13 @@ impl ModalView for ProviderPickerView {
             },
             Stage::KeyEntry => match key.code {
                 KeyCode::Esc => {
-                    self.stage = Stage::List;
+                    // Back to the route choice when one was made, so Esc undoes
+                    // one wizard step instead of discarding the whole flow.
+                    self.stage = if self.pending_base_url.is_some() {
+                        Stage::StepfunBillingRoute
+                    } else {
+                        Stage::List
+                    };
                     self.api_key_input.clear();
                     self.key_entry_error = None;
                     self.pending_api_key = None;
@@ -3118,6 +3266,7 @@ impl ModalView for ProviderPickerView {
                             provider,
                             provider_id,
                             api_key: key,
+                            base_url: self.pending_base_url.clone(),
                         })
                     }
                 }
@@ -3230,6 +3379,33 @@ impl ModalView for ProviderPickerView {
                 }
                 _ => ViewAction::None,
             },
+            Stage::StepfunBillingRoute => match key.code {
+                KeyCode::Esc => {
+                    self.stage = Stage::List;
+                    self.pending_base_url = None;
+                    ViewAction::None
+                }
+                KeyCode::Up | KeyCode::Down => {
+                    self.stepfun_billing_route = match self.stepfun_billing_route {
+                        StepfunBillingRoute::PayAsYouGo => StepfunBillingRoute::StepPlan,
+                        StepfunBillingRoute::StepPlan => StepfunBillingRoute::PayAsYouGo,
+                    };
+                    ViewAction::None
+                }
+                KeyCode::Char('1') => {
+                    self.stepfun_billing_route = StepfunBillingRoute::PayAsYouGo;
+                    ViewAction::None
+                }
+                KeyCode::Char('2') => {
+                    self.stepfun_billing_route = StepfunBillingRoute::StepPlan;
+                    ViewAction::None
+                }
+                KeyCode::Enter => {
+                    self.apply_stepfun_billing_route();
+                    ViewAction::None
+                }
+                _ => ViewAction::None,
+            },
             Stage::PlanTier => match key.code {
                 KeyCode::Esc => {
                     self.stage = Stage::ModelPick;
@@ -3326,6 +3502,7 @@ impl ModalView for ProviderPickerView {
                 _ => {}
             },
             Stage::PlanTier
+            | Stage::StepfunBillingRoute
             | Stage::KeyEntry
             | Stage::ExternalConsentChoice
             | Stage::ExternalConsentConfirm
@@ -3354,6 +3531,7 @@ impl ModalView for ProviderPickerView {
             Stage::ExternalConsentConfirm => 13,
             Stage::ModelPick => 12,
             Stage::PlanTier => 10,
+            Stage::StepfunBillingRoute => 11,
             Stage::Confirm => 10,
             Stage::CustomForm => 12,
         };
@@ -3368,6 +3546,7 @@ impl ModalView for ProviderPickerView {
             Stage::ExternalConsentConfirm => self.render_external_consent_confirm(popup_area, buf),
             Stage::ModelPick => self.render_model_pick(popup_area, buf),
             Stage::PlanTier => self.render_plan_tier(popup_area, buf),
+            Stage::StepfunBillingRoute => self.render_stepfun_billing_route(popup_area, buf),
             Stage::Confirm => self.render_confirm(popup_area, buf),
             Stage::CustomForm => self.render_custom_form(popup_area, buf),
         }
@@ -3909,6 +4088,7 @@ mod tests {
             &config,
             None,
             "validated-key".to_string(),
+            None,
         )
         .expect("Kimi route row");
 
@@ -3935,6 +4115,7 @@ mod tests {
             &config,
             None,
             "validated-key".to_string(),
+            None,
         )
         .expect("generic Moonshot row");
         assert!(
@@ -5426,6 +5607,7 @@ mod tests {
             &config,
             None,
             "sk-validated".to_string(),
+            None,
         )
         .expect("OpenRouter has a picker row");
 
@@ -5445,6 +5627,7 @@ mod tests {
             &config,
             None,
             "sk-validated".to_string(),
+            None,
         )
         .expect("OpenRouter has a picker row");
 
@@ -5494,6 +5677,7 @@ mod tests {
             &config,
             None,
             "sk-kimi-plan".to_string(),
+            None,
         )
         .expect("Moonshot has a picker row");
 
@@ -5534,6 +5718,7 @@ mod tests {
             &config,
             None,
             "sk-validated".to_string(),
+            None,
         )
         .expect("OpenRouter has a picker row");
 
@@ -5554,6 +5739,203 @@ mod tests {
         assert!(picker.pending_api_key.is_some());
     }
 
+    fn stepfun_config(base_url: Option<&str>) -> Config {
+        Config {
+            providers: Some(crate::config::ProvidersConfig {
+                stepfun: crate::config::ProviderConfig {
+                    base_url: base_url.map(str::to_string),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// #4526: StepFun's two billing tracks are two endpoints. Setup asks which
+    /// one the key belongs to, and the choice reaches key entry as a pending —
+    /// not yet persisted — endpoint.
+    #[test]
+    fn stepfun_setup_asks_for_billing_route_before_key_entry() {
+        let config = stepfun_config(None);
+        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
+        move_to_provider(&mut picker, ApiProvider::Stepfun);
+
+        assert!(matches!(
+            picker.handle_key(key(KeyCode::Char('r'))),
+            ViewAction::None
+        ));
+        assert_eq!(picker.stage, Stage::StepfunBillingRoute);
+        assert_eq!(
+            picker.stepfun_billing_route,
+            StepfunBillingRoute::PayAsYouGo
+        );
+
+        // The endpoints are the whole difference between the two tracks, so
+        // both have to be legible at the narrow terminal size too.
+        for (w, h) in [(80u16, 24u16), (120u16, 32u16)] {
+            let rendered = render_text(&picker, w, h);
+            assert!(
+                rendered.contains(crate::config::DEFAULT_STEPFUN_BASE_URL)
+                    && rendered.contains(crate::config::DEFAULT_STEPFUN_PLAN_BASE_URL),
+                "{w}x{h} must show both StepFun endpoints:\n{rendered}"
+            );
+            for (idx, line) in rendered.lines().enumerate() {
+                assert!(
+                    crate::tui::ui_text::text_display_width(line) <= w as usize,
+                    "{w}x{h} billing-route line {idx} overflows: {line:?}"
+                );
+            }
+        }
+
+        assert!(matches!(
+            picker.handle_key(key(KeyCode::Char('2'))),
+            ViewAction::None
+        ));
+        assert!(matches!(
+            picker.handle_key(key(KeyCode::Enter)),
+            ViewAction::None
+        ));
+        assert_eq!(picker.stage, Stage::KeyEntry);
+        assert_eq!(
+            picker.pending_base_url.as_deref(),
+            Some(crate::config::DEFAULT_STEPFUN_PLAN_BASE_URL)
+        );
+    }
+
+    /// The chosen endpoint rides on the key-submit event so the live check in
+    /// `ui.rs` probes the Step Plan route, not the pay-as-you-go default.
+    #[test]
+    fn stepfun_plan_choice_travels_with_the_key_for_validation() {
+        let config = stepfun_config(None);
+        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
+        move_to_provider(&mut picker, ApiProvider::Stepfun);
+        picker.handle_key(key(KeyCode::Char('r')));
+        picker.handle_key(key(KeyCode::Char('2')));
+        picker.handle_key(key(KeyCode::Enter));
+        for c in "step-plan-key".chars() {
+            picker.handle_key(key(KeyCode::Char(c)));
+        }
+
+        match picker.handle_key(key(KeyCode::Enter)) {
+            ViewAction::EmitAndClose(ViewEvent::ProviderPickerApiKeySubmitted {
+                provider,
+                api_key,
+                base_url,
+                ..
+            }) => {
+                assert_eq!(provider, ApiProvider::Stepfun);
+                assert_eq!(api_key, "step-plan-key");
+                assert_eq!(
+                    base_url.as_deref(),
+                    Some(crate::config::DEFAULT_STEPFUN_PLAN_BASE_URL)
+                );
+            }
+            other => panic!("expected ProviderPickerApiKeySubmitted, got {other:?}"),
+        }
+    }
+
+    /// Confirm carries exactly the validated endpoint, and nothing else about
+    /// the route, so the handler writes only `[providers.stepfun] base_url`.
+    #[test]
+    fn stepfun_confirm_emits_only_the_validated_endpoint() {
+        let config = stepfun_config(None);
+        let mut picker = ProviderPickerView::new_for_model_pick_after_validation(
+            ApiProvider::Deepseek,
+            ApiProvider::Stepfun,
+            &config,
+            None,
+            "step-plan-key".to_string(),
+            Some(crate::config::DEFAULT_STEPFUN_PLAN_BASE_URL.to_string()),
+        )
+        .expect("StepFun has a picker row");
+
+        assert_eq!(picker.stage, Stage::ModelPick);
+        picker.handle_key(key(KeyCode::Enter));
+        assert_eq!(picker.stage, Stage::Confirm);
+        match picker.handle_key(key(KeyCode::Enter)) {
+            ViewAction::EmitAndClose(ViewEvent::ProviderPickerSetupConfirmed {
+                provider,
+                base_url,
+                context_window,
+                ..
+            }) => {
+                assert_eq!(provider, ApiProvider::Stepfun);
+                assert_eq!(
+                    base_url.as_deref(),
+                    Some(crate::config::DEFAULT_STEPFUN_PLAN_BASE_URL)
+                );
+                assert_eq!(context_window, None);
+            }
+            other => panic!("expected ProviderPickerSetupConfirmed, got {other:?}"),
+        }
+    }
+
+    /// A hand-configured StepFun endpoint is a deliberate choice. The wizard
+    /// skips the billing-route stage entirely and emits no endpoint, so the
+    /// custom value is never silently rewritten (#4526).
+    #[test]
+    fn stepfun_custom_base_url_survives_the_wizard_untouched() {
+        let custom = "https://stepfun.internal.example/v1";
+        let config = stepfun_config(Some(custom));
+        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
+        move_to_provider(&mut picker, ApiProvider::Stepfun);
+        assert_eq!(picker.rows[picker.selected_idx].base_url, custom);
+
+        picker.handle_key(key(KeyCode::Char('r')));
+        assert_eq!(picker.stage, Stage::KeyEntry);
+        assert_eq!(picker.pending_base_url, None);
+        assert_eq!(picker.rows[picker.selected_idx].base_url, custom);
+
+        for c in "custom-key".chars() {
+            picker.handle_key(key(KeyCode::Char(c)));
+        }
+        match picker.handle_key(key(KeyCode::Enter)) {
+            ViewAction::EmitAndClose(ViewEvent::ProviderPickerApiKeySubmitted {
+                base_url, ..
+            }) => assert_eq!(base_url, None, "custom endpoint must not be rewritten"),
+            other => panic!("expected ProviderPickerApiKeySubmitted, got {other:?}"),
+        }
+    }
+
+    /// A StepFun route already on Step Plan re-opens preselected there rather
+    /// than defaulting the user back onto pay-as-you-go.
+    #[test]
+    fn stepfun_plan_route_reopens_preselected() {
+        let config = stepfun_config(Some(crate::config::DEFAULT_STEPFUN_PLAN_BASE_URL));
+        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
+        move_to_provider(&mut picker, ApiProvider::Stepfun);
+        picker.handle_key(key(KeyCode::Char('r')));
+
+        assert_eq!(picker.stage, Stage::StepfunBillingRoute);
+        assert_eq!(picker.stepfun_billing_route, StepfunBillingRoute::StepPlan);
+    }
+
+    /// #4526: OpenCode Go (subscription allowance) and OpenCode Zen
+    /// (pay-as-you-go) are separate billing tracks and must not present as the
+    /// same generic meter.
+    #[test]
+    fn opencode_go_and_zen_read_as_distinct_billing_tracks() {
+        let go = usage_meter_for(ApiProvider::OpencodeGo);
+        let zen = usage_meter_for(ApiProvider::OpencodeZen);
+        assert_ne!(go, zen);
+        assert!(go.contains("subscription"), "Go label was {go:?}");
+        assert!(zen.contains("pay-as-you-go"), "Zen label was {zen:?}");
+        assert_ne!(go, usage_meter_for(ApiProvider::Openrouter));
+
+        // Go never reports catalog token prices: its allowance is not spend.
+        assert_eq!(
+            pricing_label(
+                ApiProvider::OpencodeGo,
+                Some(&PricingSku::Token {
+                    input_per_mtok: Some(1.0),
+                    output_per_mtok: Some(2.0),
+                }),
+            ),
+            go
+        );
+    }
+
     #[test]
     fn guided_flow_stages_render_at_80x24_and_120x32() {
         let config = Config::default();
@@ -5563,6 +5945,7 @@ mod tests {
             &config,
             None,
             "sk-validated-key".to_string(),
+            None,
         )
         .expect("OpenRouter has a picker row");
         let mut confirm = ProviderPickerView::new_for_model_pick_after_validation(
@@ -5571,6 +5954,7 @@ mod tests {
             &config,
             None,
             "sk-validated-key".to_string(),
+            None,
         )
         .expect("OpenRouter has a picker row");
         confirm.handle_key(key(KeyCode::Enter));
@@ -5685,10 +6069,12 @@ mod tests {
                 provider,
                 provider_id,
                 api_key,
+                base_url,
             }) => {
                 assert_eq!(provider, ApiProvider::Novita);
                 assert_eq!(provider_id, None);
                 assert_eq!(api_key, "novita-key");
+                assert_eq!(base_url, None);
             }
             other => panic!("expected ProviderPickerApiKeySubmitted, got {other:?}"),
         }
@@ -6235,13 +6621,36 @@ mod tests {
             .positions()
             .filter(|position| {
                 let cell = &buf[*position];
-                cell.bg == palette::SURFACE_ELEVATED
+                cell.bg == palette::SELECTION_BG
             })
             .count();
         assert!(
             highlighted_cells >= 32,
             "selected provider row should use a visible continuous highlight"
         );
+    }
+
+    #[test]
+    fn search_footer_shows_two_stage_esc_as_a_single_hint() {
+        let config = Config::default();
+        let mut picker = ProviderPickerView::new(ApiProvider::Deepseek, &config);
+        picker.query = "deep".to_string();
+        let area = Rect::new(0, 0, 100, 24);
+        let mut buf = Buffer::empty(area);
+
+        picker.render(area, &mut buf);
+
+        let text = area
+            .positions()
+            .map(|position| buf[position].symbol())
+            .collect::<String>();
+        // The key appears once, with both stages spelled out in its label.
+        assert_eq!(
+            text.matches(" Esc ").count(),
+            1,
+            "search footer must not duplicate the Esc key: {text}"
+        );
+        assert!(text.contains("clear / cancel"), "{text}");
     }
 
     #[test]

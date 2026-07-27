@@ -17,7 +17,7 @@ We're always looking for contributors and ways to improve. If a model or
 provider you use is missing, or something breaks, telling us is one of the most
 useful things you can do — see [Contributing](#contributing).
 
-[简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md)
+[简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md)
 
 [![CI](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml/badge.svg)](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/codewhale-cli?label=crates.io)](https://crates.io/crates/codewhale-cli)
@@ -72,6 +72,9 @@ path.
 - [docs/FLEET.md](docs/FLEET.md) — fleets, the ledger, and resume
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`, hooks, and
   the constitution
+- [docs/HOOKS.md](docs/HOOKS.md) — the eleven TUI lifecycle hook events, their
+  payloads, and which three of them can steer a turn (`codewhale exec` and the
+  CLI subcommands do not fire hooks)
 - [docs/WEB.md](docs/WEB.md) — the loopback-only browser client and its one-time
   authentication boundary
 

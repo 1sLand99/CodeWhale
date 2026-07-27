@@ -33,6 +33,7 @@ use crate::commands;
 use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
 use crate::tui::keybindings::KEYBINDINGS;
+use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, ModalKind, ModalView, ViewAction, render_modal_footer, render_panel_scroll_rail,
     render_underwater_surface,
@@ -620,14 +621,12 @@ impl ModalView for HelpView {
                         let entry = &self.entries[entry_idx];
                         let is_selected = slot == self.selected;
                         let style = if is_selected {
-                            Style::default()
-                                .fg(palette::SELECTION_TEXT)
-                                .bg(palette::SELECTION_BG)
-                                .add_modifier(Modifier::BOLD)
+                            menu_style::selected_row_style()
                         } else {
                             Style::default().fg(palette::TEXT_PRIMARY)
                         };
-                        let cursor = if is_selected { "▶ " } else { "  " };
+                        let cursor =
+                            format!("{} ", crate::tui::glyphs::selection_marker(is_selected));
                         let label = truncate_to_width(&entry.label, label_width);
                         let desc = truncate_to_width(&entry.description, desc_capacity);
                         let line_text = format!("{cursor}{label:<label_width$}  {desc}",);

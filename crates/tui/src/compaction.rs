@@ -37,20 +37,23 @@ pub struct CompactionConfig {
     /// into the successor-brief prompt so the summary weights what the user
     /// said matters. `None` for automatic compaction.
     pub focus: Option<String>,
-    /// Typed live runtime state for post-compact rehydrate (todos, workers,
-    /// shells, approvals, mode/permission). Host-owned snapshot; pure format
-    /// lives in [`format_live_state_reminder`].
+    /// Typed live runtime state for post-compact rehydrate (workers, shells,
+    /// approvals, mode/permission). Canonical To-do state is appended fresh at
+    /// the request tail instead of being frozen into the stable prefix.
+    /// Host-owned snapshot; pure format lives in [`format_live_state_reminder`].
     pub live_state: Option<CompactionLiveState>,
+    /// Runtime turn that owns provider calls made by this compaction pass.
+    /// `None` for the foreground TUI. This is accounting provenance only and
+    /// is never included in a provider request.
+    pub runtime_cost_owner: Option<String>,
 }
 
 /// Host-captured live state injected after compaction so the successor agent
-/// does not reconstruct todos/workers/mode from prose alone (compactionidea P1).
+/// does not reconstruct workers/mode from prose alone (compactionidea P1).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CompactionLiveState {
     pub mode: Option<String>,
     pub permission_posture: Option<String>,
-    /// Preformatted todo lines (status + content), newest or checklist order.
-    pub todos: Vec<String>,
     /// Running background shell commands (id + command).
     pub background_shells: Vec<String>,
     /// Running sub-agents / fleet workers (id + role + objective).
@@ -64,7 +67,6 @@ impl CompactionLiveState {
     pub fn is_empty(&self) -> bool {
         self.mode.is_none()
             && self.permission_posture.is_none()
-            && self.todos.is_empty()
             && self.background_shells.is_empty()
             && self.running_workers.is_empty()
             && self.open_approvals.is_empty()
@@ -96,6 +98,7 @@ impl Default for CompactionConfig {
             cache_summary: true,
             focus: None,
             live_state: None,
+            runtime_cost_owner: None,
         }
     }
 }
@@ -1284,6 +1287,7 @@ pub async fn compact_messages(
         &config.model,
         config.effective_context_window,
         config.focus.as_deref(),
+        config.runtime_cost_owner.as_deref(),
     )
     .await?;
 
@@ -1357,6 +1361,7 @@ async fn create_summary_with_ladder(
     model: &str,
     effective_context_window: Option<u32>,
     focus: Option<&str>,
+    runtime_cost_owner: Option<&str>,
 ) -> Result<String> {
     let rungs = [
         SummaryInputRung::Full,
@@ -1372,6 +1377,7 @@ async fn create_summary_with_ladder(
             model,
             effective_context_window,
             focus,
+            runtime_cost_owner,
             *rung,
         )
         .await
@@ -1398,6 +1404,7 @@ async fn create_summary_with_ladder(
                     model,
                     effective_context_window,
                     focus,
+                    runtime_cost_owner,
                     SummaryInputRung::Extreme,
                 )
                 .await
@@ -1464,6 +1471,7 @@ async fn create_summary(
     model: &str,
     effective_context_window: Option<u32>,
     focus: Option<&str>,
+    runtime_cost_owner: Option<&str>,
     rung: SummaryInputRung,
 ) -> Result<String> {
     let mut limits = summary_input_limits_for_model(model, effective_context_window);
@@ -1494,6 +1502,8 @@ async fn create_summary(
         build_formatted_summary_request(model, messages, limits, focus)
     };
 
+    let cost_scope = crate::cost_status::scope_token();
+    let mut cost_route = client.effective_route_envelope(model, chrono::Utc::now());
     let mut telemetry_cache_aligned = used_cache_aligned;
     let response = match client.create_message(request).await {
         Ok(response) => response,
@@ -1510,6 +1520,7 @@ async fn create_summary(
             ));
             telemetry_cache_aligned = false;
             let fallback_request = build_formatted_summary_request(model, messages, limits, focus);
+            cost_route = client.effective_route_envelope(model, chrono::Utc::now());
             client.create_message(fallback_request).await?
         }
         Err(err) => return Err(err),
@@ -1517,9 +1528,20 @@ async fn create_summary(
     // Compaction summary calls are billed by DeepSeek; route the
     // tokens through the side-channel so the dashboard total
     // matches the website (#526).
-    let api_provider = crate::config::ApiProvider::parse(client.provider_name())
-        .unwrap_or(crate::config::ApiProvider::Custom);
-    crate::cost_status::report(api_provider, &response.model, &response.usage);
+    crate::cost_status::report_effective_route_for_runtime(
+        cost_scope,
+        runtime_cost_owner,
+        &format!(
+            "compaction:dispatch:{}:response:{}",
+            cost_route
+                .dispatched_at
+                .timestamp_nanos_opt()
+                .unwrap_or_default(),
+            response.id
+        ),
+        &cost_route,
+        &response.usage,
+    );
 
     // #584: emit one debug-level event per summary call so the
     // cache-aligned win is observable post-deploy without
@@ -1558,12 +1580,6 @@ pub fn format_live_state_reminder(state: &CompactionLiveState) -> String {
     }
     if let Some(posture) = state.permission_posture.as_deref() {
         let _ = writeln!(out, "- Permission posture: `{posture}`");
-    }
-    if !state.todos.is_empty() {
-        out.push_str("\n### Todos\n");
-        for line in &state.todos {
-            let _ = writeln!(out, "- {line}");
-        }
     }
     if !state.background_shells.is_empty() {
         out.push_str("\n### Running background shells\n");
@@ -2354,7 +2370,6 @@ mod tests {
         let state = CompactionLiveState {
             mode: Some("operate".into()),
             permission_posture: Some("Ask".into()),
-            todos: vec!["[in_progress] #1 land fix".into()],
             background_shells: vec!["`sh_1`: `cargo test -p foo`".into()],
             running_workers: vec!["`agent_a` (role: implementer) — fix flaky".into()],
             open_approvals: vec!["shell: git push".into()],
@@ -2363,7 +2378,6 @@ mod tests {
         assert!(text.contains("Live State"));
         assert!(text.contains("operate"));
         assert!(text.contains("Ask"));
-        assert!(text.contains("land fix"));
         assert!(text.contains("cargo test"));
         assert!(text.contains("agent_a"));
         assert!(text.contains("git push"));

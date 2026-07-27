@@ -107,6 +107,16 @@ pub fn get_command_info(name: &str) -> Option<&'static CommandInfo> {
 
 /// Execute a slash command
 pub fn execute(cmd: &str, app: &mut App) -> CommandResult {
+    // Keep the command's raw remainder available for commands whose payload is
+    // byte-sensitive. Most slash commands intentionally receive a normalized
+    // argument below; `/preview-request --prompt`, however, must describe the
+    // exact prompt the send path would receive, including trailing whitespace
+    // and newlines.
+    let dispatch_input = cmd.trim_start();
+    let command_token_end = dispatch_input
+        .find(char::is_whitespace)
+        .unwrap_or(dispatch_input.len());
+    let raw_remainder = &dispatch_input[command_token_end..];
     let trimmed = cmd.trim();
 
     // `$skillname` is a backward-compatible alias for `/skill skillname`.
@@ -168,7 +178,12 @@ pub fn execute(cmd: &str, app: &mut App) -> CommandResult {
     }
 
     if let Some(command_object) = registry().get(command.as_str()) {
-        return command_object.execute(app, arg);
+        let command_arg = if command_object.info().name == "preview-request" {
+            Some(raw_remainder)
+        } else {
+            arg
+        };
+        return command_object.execute(app, command_arg);
     }
 
     match command.as_str() {
@@ -349,6 +364,17 @@ mod tests {
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
 
+    fn is_palette_safe_command_name(name: &str) -> bool {
+        let bytes = name.as_bytes();
+        !bytes.is_empty()
+            && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+            && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+            && bytes
+                .iter()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+            && !name.contains("--")
+    }
+
     fn create_test_app() -> App {
         let options = TuiOptions {
             ..crate::test_support::test_tui_options(PathBuf::from("."))
@@ -361,6 +387,22 @@ mod tests {
         super::user_registry::reload(None);
         let registry = super::user_registry::current_registry();
         assert!(registry.is_valid());
+    }
+
+    #[test]
+    fn preview_request_dispatch_preserves_prompt_edge_bytes() {
+        let mut app = create_test_app();
+        let result = execute("/preview-request --prompt   lead\ntrail  ", &mut app);
+
+        assert!(!result.is_error, "{result:?}");
+        assert!(matches!(
+            result.action,
+            Some(AppAction::PreviewOutboundRequest {
+                json: false,
+                base_prompt_only: false,
+                hypothetical_prompt,
+            }) if hypothetical_prompt.as_deref() == Some("  lead\ntrail  ")
+        ));
     }
 
     #[test]
@@ -698,10 +740,25 @@ mod tests {
         assert!(message.contains("Requested relay focus: verify install"));
         assert!(message.contains("Goal objective: Unify the work surface"));
         assert!(message.contains("Goal token budget: 12000"));
-        assert!(message.contains("To-do (primary progress surface, 50% complete)"));
-        assert!(message.contains("#1 [completed] inspect workspace"));
-        assert!(message.contains("#2 [in_progress] patch relay command"));
-        assert!(message.contains("Optional strategy metadata from update_plan"));
+        // #3983: the relay artifact carries the same bounded canonical body a
+        // parent request and a forked agent see — byte for byte.
+        let expected_body = crate::work_grounding::canonical_todo_body(
+            &app.todos.try_lock().expect("todo lock").snapshot(),
+        )
+        .expect("canonical body");
+        assert_eq!(
+            expected_body,
+            "To-do (50% settled)\n- [x] #1 inspect workspace\n- [~] #2 patch relay command"
+        );
+        assert!(
+            message.contains(&expected_body),
+            "relay must embed the canonical To-do body: {message}"
+        );
+        assert!(
+            !message.contains(crate::work_grounding::WORK_STATE_OPEN_TAG),
+            "the transient request-tail wrapper must not be stored in relay history: {message}"
+        );
+        assert!(message.contains("Conversational strategy notes from update_plan"));
         assert!(message.contains("Objective: Keep relays grounded"));
         assert!(message.contains("Explanation: RLM-style strategy"));
         assert!(message.contains("Source: transcript context"));
@@ -713,6 +770,78 @@ mod tests {
         assert!(
             !message.contains("Work checklist"),
             "relay copy should use To-do vocabulary: {message}"
+        );
+    }
+
+    /// #3983: `update_plan` is conversational strategy, not a Work ledger. A
+    /// session with plan state and an empty To-do has *no* Work state, and the
+    /// relay artifact must not manufacture one.
+    #[test]
+    fn relay_does_not_present_plan_only_state_as_work_state() {
+        let mut app = create_test_app();
+        {
+            let mut plan = app.plan_state.try_lock().expect("plan lock");
+            plan.update(UpdatePlanArgs {
+                objective: Some("Ship the grounding seam".to_string()),
+                plan: vec![PlanItemArg {
+                    step: "draft the renderer".to_string(),
+                    status: StepStatus::InProgress,
+                }],
+                ..UpdatePlanArgs::default()
+            });
+        }
+
+        let result = execute("/relay", &mut app);
+        let Some(AppAction::SendMessage(message)) = result.action else {
+            panic!("expected SendMessage action");
+        };
+
+        assert!(
+            !message.contains("Current Work state"),
+            "plan-only state must not render as Work state: {message}"
+        );
+        assert!(
+            !message.contains("To-do ("),
+            "plan-only state must not synthesize a To-do ledger: {message}"
+        );
+        assert!(message.contains("Conversational strategy notes from update_plan"));
+    }
+
+    /// #3983: a graph-backed update is authoritative immediately, even before
+    /// the compatibility To-do projection is published to the UI.
+    #[tokio::test]
+    async fn relay_reads_same_turn_graph_backed_work_update() {
+        use crate::tools::spec::ToolSpec as _;
+
+        let mut app = create_test_app();
+        let work =
+            crate::work_graph::new_shared_work_runtime(app.todos.clone(), app.plan_state.clone());
+        app.runtime_services.work = Some(work.clone());
+
+        let mut context = crate::tools::spec::ToolContext::new(app.workspace.clone());
+        context.runtime.work = Some(work);
+        crate::tools::todo::TodoWriteTool::work_update(app.todos.clone())
+            .execute(
+                serde_json::json!({
+                    "todos": [{"content": "relay the staged graph", "status": "in_progress"}]
+                }),
+                &context,
+            )
+            .await
+            .expect("graph-backed work_update");
+
+        assert!(
+            app.todos.lock().await.snapshot().is_empty(),
+            "precondition: legacy projection has not published yet"
+        );
+
+        let result = execute("/relay", &mut app);
+        let Some(AppAction::SendMessage(message)) = result.action else {
+            panic!("expected SendMessage action");
+        };
+        assert!(
+            message.contains("[~] #1 relay the staged graph"),
+            "{message}"
         );
     }
 
@@ -804,10 +933,8 @@ mod tests {
                 let info = cmd.info();
                 assert!(!info.name.is_empty(), "command name must not be empty");
                 assert!(
-                    info.name
-                        .chars()
-                        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit()),
-                    "/{} command names must be lowercase ASCII",
+                    is_palette_safe_command_name(info.name),
+                    "/{} command names must be lowercase ASCII kebab-case",
                     info.name
                 );
                 let usage_prefix = format!("/{}", info.name);
@@ -836,9 +963,9 @@ mod tests {
                 has_debug = true;
                 assert_eq!(
                     commands.len(),
-                    11,
+                    13,
                     "debug group (group-local metadata exception) expected \
-                     exactly 11 commands, got {}",
+                     exactly 13 commands, got {}",
                     commands.len()
                 );
             }
@@ -892,11 +1019,8 @@ mod tests {
                 command.name
             );
             assert!(
-                command
-                    .name
-                    .chars()
-                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit()),
-                "/{} command names must stay lowercase ASCII",
+                is_palette_safe_command_name(command.name),
+                "/{} command names must stay lowercase ASCII kebab-case",
                 command.name
             );
 

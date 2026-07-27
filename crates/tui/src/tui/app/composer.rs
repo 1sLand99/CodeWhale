@@ -1685,9 +1685,14 @@ impl App {
     ///    (i.e. the *next* line of a multi-line paste) is also absorbed.
     /// 2. **Window open after flush.** A burst just flushed into
     ///    `self.input`, but the suppression window is still alive. The
-    ///    Enter is the trailing newline of that paste, not a submit gesture
-    ///    by the user. Insert `\n` directly into the composer text and
-    ///    re-arm the window.
+    ///    Enter is probably the trailing newline of that paste, not a submit
+    ///    gesture by the user, so insert `\n` directly into the composer
+    ///    text. The window is deliberately *not* re-armed here: no burst is
+    ///    being assembled, so this Enter is only a guess, and re-arming on a
+    ///    guess meant every absorbed Enter bought another 120ms — a user
+    ///    pressing Enter to send just kept adding newlines and never
+    ///    submitted. Suppression now always ends 120ms after the last real
+    ///    keystroke.
     ///
     /// Outside both cases the call falls through to [`Self::submit_input`]
     /// unchanged so normal Enter-to-send behaviour is preserved.
@@ -1700,7 +1705,6 @@ impl App {
             {
                 if !self.paste_burst.append_newline_if_active(now) {
                     self.insert_char('\n');
-                    self.paste_burst.extend_window(now);
                 }
                 self.needs_redraw = true;
                 return None;

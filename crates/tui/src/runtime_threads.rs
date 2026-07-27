@@ -35,6 +35,9 @@ use crate::core::engine::{
 };
 use crate::core::events::{Event as EngineEvent, TurnOutcomeStatus};
 use crate::core::ops::Op;
+use crate::cost_status::{
+    EffectiveRouteEnvelope, EffectiveRouteUsage, RouteBillingMode, RuntimeUsageRecord,
+};
 use crate::models::{ContentBlock, Message, SystemPrompt, Usage};
 use crate::route_budget::{
     auto_compact_default_for_route, compaction_threshold_for_route_at_percent, known_route_limits,
@@ -62,6 +65,7 @@ const STREAM_DELTA_BATCH_MAX_LATENCY: Duration = Duration::from_millis(32);
 const STREAM_DELTA_BATCH_MAX_BYTES: usize = 16 * 1024;
 const REQUEST_USER_INPUT_TOOL_NAME: &str = "request_user_input";
 const REDACTED_USER_INPUT_RECEIPT: &str = "User input submitted";
+pub(crate) const MAX_ROUTED_USAGE_RECORDS_PER_TURN: usize = 64;
 
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -270,6 +274,59 @@ fn sort_turn_items_by_start(items: &mut [TurnItemRecord]) {
 /// thread/turn/item records did not change shape, but a v1 reader on a v2
 /// session should still fail closed rather than silently mis-replay.
 const CURRENT_RUNTIME_SCHEMA_VERSION: u32 = 2;
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
+fn serialize_route_label_option<S>(
+    value: &Option<String>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    value
+        .as_deref()
+        .map(crate::cost_status::sanitize_persisted_route_label)
+        .serialize(serializer)
+}
+
+fn serialize_endpoint_fingerprint_option<S>(
+    value: &Option<String>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    value
+        .as_deref()
+        .filter(|fingerprint| {
+            fingerprint.len() == 64 && fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        .map(str::to_ascii_lowercase)
+        .serialize(serializer)
+}
+
+fn serialize_routed_usage_source_ids<S>(
+    values: &[String],
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    values
+        .iter()
+        .map(|value| {
+            if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                value.to_ascii_lowercase()
+            } else {
+                codewhale_config::catalog::base_url_fingerprint(value)
+            }
+        })
+        .collect::<Vec<_>>()
+        .serialize(serializer)
+}
 const RUNTIME_RESTART_REASON: &str = "Interrupted by process restart";
 const EMPTY_TURN_REASON: &str = "Turn completed without engine output";
 const APPROVAL_DECISION_TIMEOUT: Duration = Duration::from_secs(300);
@@ -436,19 +493,67 @@ pub struct TurnRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
     /// Concrete generic provider kind selected for this turn.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_route_label_option"
+    )]
     pub effective_provider: Option<String>,
     /// Exact non-secret configured provider key selected for this turn.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_route_label_option"
+    )]
     pub effective_provider_id: Option<String>,
     /// Non-secret discriminator for routes whose provider/model pair spans
     /// different billing systems (for example StepFun PAYG vs Step Plan).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_route_label_option"
+    )]
     pub effective_billing_surface: Option<String>,
+    /// SHA-256 fingerprint of the concrete dispatch endpoint. Raw URLs are
+    /// intentionally never persisted.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_endpoint_fingerprint_option"
+    )]
+    pub effective_endpoint_fingerprint: Option<String>,
+    /// Immutable billing classification captured before dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_billing_mode: Option<RouteBillingMode>,
+    /// Dispatch timestamp used for historical/live pricing lookup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_dispatched_at: Option<DateTime<Utc>>,
     /// Concrete wire model selected for this turn (especially important when
     /// the thread is configured as `auto`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_route_label_option"
+    )]
     pub effective_model: Option<String>,
+    /// Model calls made beneath this parent turn, each paired with its own
+    /// immutable route. These are exclusive of `usage`, which is only the
+    /// parent engine turn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routed_usage: Vec<EffectiveRouteUsage>,
+    /// Fingerprints of provider-call identities already appended to this turn.
+    /// This durable ledger makes mailbox delivery, direct sinks, fallback
+    /// recovery, and process restart idempotent without persisting raw ids.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "serialize_routed_usage_source_ids"
+    )]
+    pub routed_usage_source_ids: Vec<String>,
+    /// Background provider calls discarded from the bounded fallback journal.
+    /// Non-zero means token/cost aggregation is necessarily incomplete.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub routed_usage_dropped_records: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default)]
@@ -468,6 +573,84 @@ impl TurnRecord {
                     .filter(|provider| !provider.trim().is_empty())
             })
     }
+
+    fn persist_effective_route(&mut self, route: &EffectiveRouteEnvelope) {
+        let route = route.sanitized_for_persistence();
+        self.effective_provider = Some(route.provider.as_str().to_string());
+        self.effective_provider_id = Some(route.provider_identity);
+        self.effective_billing_surface = route.billing_surface;
+        self.effective_endpoint_fingerprint = route.endpoint_fingerprint;
+        self.effective_billing_mode = Some(route.billing_mode);
+        self.effective_dispatched_at = Some(route.dispatched_at);
+        self.effective_model = Some(route.model);
+    }
+
+    /// Rehydrate only a complete persisted dispatch record. Legacy rows must
+    /// not borrow a provider identity or timestamp from the current thread.
+    fn effective_route_envelope(&self) -> Option<EffectiveRouteEnvelope> {
+        let provider = self
+            .effective_provider
+            .as_deref()
+            .and_then(ApiProvider::parse)?;
+        let provider_identity = self
+            .effective_provider_id
+            .as_deref()
+            .filter(|identity| !identity.trim().is_empty())?
+            .to_string();
+        let model = self
+            .effective_model
+            .as_deref()
+            .filter(|model| !model.trim().is_empty())?
+            .to_string();
+        let dispatched_at = self.effective_dispatched_at?;
+        Some(
+            EffectiveRouteEnvelope {
+                provider,
+                provider_identity,
+                model,
+                billing_surface: self.effective_billing_surface.clone(),
+                endpoint_fingerprint: self.effective_endpoint_fingerprint.clone(),
+                billing_mode: self
+                    .effective_billing_mode
+                    .unwrap_or(RouteBillingMode::Unknown),
+                dispatched_at,
+            }
+            .sanitized_for_persistence(),
+        )
+    }
+}
+
+fn routed_usage_source_fingerprint(source_id: &str) -> String {
+    codewhale_config::catalog::base_url_fingerprint(source_id.trim())
+}
+
+/// The only mutation path for routed provider usage. Every source is recorded
+/// once, route labels are sanitized at the boundary, and retained records are
+/// bounded regardless of whether they arrived synchronously, by mailbox, or
+/// from the fallback journal.
+fn append_routed_usage_record(
+    turn: &mut TurnRecord,
+    source_id: &str,
+    usage: EffectiveRouteUsage,
+) -> bool {
+    let source_fingerprint = routed_usage_source_fingerprint(source_id);
+    if turn
+        .routed_usage_source_ids
+        .iter()
+        .any(|persisted| persisted == &source_fingerprint)
+    {
+        return false;
+    }
+    turn.routed_usage_source_ids.push(source_fingerprint);
+    if turn.routed_usage.len() == MAX_ROUTED_USAGE_RECORDS_PER_TURN {
+        turn.routed_usage.remove(0);
+        turn.routed_usage_dropped_records = turn.routed_usage_dropped_records.saturating_add(1);
+    }
+    turn.routed_usage.push(EffectiveRouteUsage {
+        route: usage.route.sanitized_for_persistence(),
+        usage: usage.usage,
+    });
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1323,7 +1506,26 @@ pub struct UsageTotals {
     pub output_tokens: u64,
     pub cached_tokens: u64,
     pub reasoning_tokens: u64,
+    pub reasoning_replay_tokens: u64,
+    pub cache_write_tokens: u64,
     pub cost_usd: f64,
+    /// Authoritative USD coverage for this aggregate. `cost_usd` is a priced
+    /// subtotal whenever `unpriced_turns > 0`.
+    pub priced_turns: u64,
+    pub unpriced_turns: u64,
+    pub nonmetered_turns: u64,
+    pub cost_complete: bool,
+    pub unpriced_reasons: std::collections::BTreeSet<String>,
+    pub unpriced_classes: std::collections::BTreeSet<String>,
+    pub pricing_provenances: std::collections::BTreeSet<String>,
+    pub live_pricing_defects: std::collections::BTreeSet<String>,
+    pub live_pricing_unusable_defects: std::collections::BTreeSet<String>,
+    pub route_receipts: std::collections::BTreeSet<String>,
+    /// Provider-call receipts lost from a bounded fallback journal. A non-zero
+    /// value always makes `cost_complete` false.
+    pub dropped_usage_records: u64,
+    /// Number of provider-call usage records (parent turns plus child and
+    /// compaction calls), including zero-token audited calls.
     pub turns: u64,
 }
 
@@ -1334,7 +1536,21 @@ pub struct UsageBucket {
     pub output_tokens: u64,
     pub cached_tokens: u64,
     pub reasoning_tokens: u64,
+    pub reasoning_replay_tokens: u64,
+    pub cache_write_tokens: u64,
     pub cost_usd: f64,
+    pub priced_turns: u64,
+    pub unpriced_turns: u64,
+    pub nonmetered_turns: u64,
+    pub cost_complete: bool,
+    pub unpriced_reasons: std::collections::BTreeSet<String>,
+    pub unpriced_classes: std::collections::BTreeSet<String>,
+    pub pricing_provenances: std::collections::BTreeSet<String>,
+    pub live_pricing_defects: std::collections::BTreeSet<String>,
+    pub live_pricing_unusable_defects: std::collections::BTreeSet<String>,
+    pub route_receipts: std::collections::BTreeSet<String>,
+    pub dropped_usage_records: u64,
+    /// Provider-call usage records contributing to this bucket.
     pub turns: u64,
 }
 
@@ -1345,6 +1561,234 @@ pub struct UsageAggregation {
     pub group_by: String,
     pub totals: UsageTotals,
     pub buckets: Vec<UsageBucket>,
+}
+
+fn accumulate_runtime_cost_coverage(
+    audit: Option<&crate::pricing::TurnCostAudit>,
+    priced_turns: &mut u64,
+    unpriced_turns: &mut u64,
+    nonmetered_turns: &mut u64,
+    reasons: &mut std::collections::BTreeSet<String>,
+    provenances: &mut std::collections::BTreeSet<String>,
+) {
+    let Some(audit) = audit else {
+        *unpriced_turns = (*unpriced_turns).saturating_add(1);
+        reasons.insert("unknown_provider_route".to_string());
+        return;
+    };
+    if let Some(provenance) = audit.provenance.as_ref() {
+        provenances.insert(provenance.label().to_string());
+    }
+    if !audit.counts_toward_money_coverage() {
+        *nonmetered_turns = (*nonmetered_turns).saturating_add(1);
+        return;
+    }
+    if audit.usd_priced {
+        *priced_turns = (*priced_turns).saturating_add(1);
+    } else {
+        *unpriced_turns = (*unpriced_turns).saturating_add(1);
+        if let Some(reason) = audit.unpriced_reason {
+            reasons.insert(reason.label().to_string());
+        }
+    }
+}
+
+fn accumulate_runtime_cost_details(
+    audit: Option<&crate::pricing::TurnCostAudit>,
+    unpriced_classes: &mut std::collections::BTreeSet<String>,
+    live_pricing_defects: &mut std::collections::BTreeSet<String>,
+    live_pricing_unusable_defects: &mut std::collections::BTreeSet<String>,
+) {
+    let Some(audit) = audit else {
+        return;
+    };
+    unpriced_classes.extend(
+        audit
+            .unpriced_classes
+            .iter()
+            .map(|class| class.label().to_string()),
+    );
+    if let Some(defect) = audit.live_pricing_defect.as_ref() {
+        if audit.estimate.is_some() {
+            live_pricing_defects.insert(defect.label().to_string());
+        } else {
+            live_pricing_unusable_defects.insert(defect.label().to_string());
+        }
+    }
+}
+
+fn saturating_add_usd(total: &mut f64, delta: f64) {
+    *total = crate::pricing::CostEstimate::usd_only(*total)
+        .saturating_add(crate::pricing::CostEstimate::usd_only(delta))
+        .usd;
+}
+
+fn runtime_usage_bucket_key(
+    group_by: UsageGroupBy,
+    route: Option<&EffectiveRouteEnvelope>,
+    turn: &TurnRecord,
+    thread: &ThreadRecord,
+) -> String {
+    match group_by {
+        UsageGroupBy::Day => route
+            .map_or(turn.created_at, |route| route.dispatched_at)
+            .format("%Y-%m-%d")
+            .to_string(),
+        UsageGroupBy::Model => crate::cost_status::sanitize_persisted_route_label(
+            route
+                .map(|route| route.model.as_str())
+                .or_else(|| {
+                    turn.effective_model
+                        .as_deref()
+                        .filter(|model| !model.trim().is_empty())
+                })
+                .unwrap_or(&thread.model),
+        ),
+        UsageGroupBy::Provider => crate::cost_status::sanitize_persisted_route_label(
+            route
+                .map(|route| {
+                    if route.provider_identity.trim().is_empty() {
+                        route.provider.as_str()
+                    } else {
+                        route.provider_identity.as_str()
+                    }
+                })
+                .or_else(|| turn.effective_provider_label())
+                .unwrap_or("unknown"),
+        ),
+        UsageGroupBy::Thread => thread.id.clone(),
+    }
+}
+
+fn accumulate_runtime_usage_record(
+    totals: &mut UsageTotals,
+    buckets: &mut std::collections::BTreeMap<String, UsageBucket>,
+    group_by: UsageGroupBy,
+    route: Option<&EffectiveRouteEnvelope>,
+    usage: &Usage,
+    turn: &TurnRecord,
+    thread: &ThreadRecord,
+) {
+    let classes = crate::pricing::token_usage_for_pricing(usage);
+    let reasoning = u64::from(usage.reasoning_tokens.unwrap_or(0));
+    let reasoning_replay = u64::from(usage.reasoning_replay_tokens.unwrap_or(0));
+    let audit = route.map(|route| route.audit(usage));
+    let cost = audit
+        .as_ref()
+        .filter(|audit| audit.usd_priced)
+        .and_then(|audit| audit.estimate)
+        .map_or(0.0, |estimate| estimate.usd);
+    let receipt = route.zip(audit.as_ref()).map(|(route, audit)| {
+        crate::cost_status::effective_route_usage_receipt(route, audit, usage)
+    });
+
+    totals.input_tokens = totals.input_tokens.saturating_add(classes.input);
+    totals.output_tokens = totals.output_tokens.saturating_add(classes.output);
+    totals.cached_tokens = totals.cached_tokens.saturating_add(classes.cache_read);
+    totals.reasoning_tokens = totals.reasoning_tokens.saturating_add(reasoning);
+    totals.reasoning_replay_tokens = totals
+        .reasoning_replay_tokens
+        .saturating_add(reasoning_replay);
+    totals.cache_write_tokens = totals
+        .cache_write_tokens
+        .saturating_add(classes.cache_write);
+    saturating_add_usd(&mut totals.cost_usd, cost);
+    accumulate_runtime_cost_coverage(
+        audit.as_ref(),
+        &mut totals.priced_turns,
+        &mut totals.unpriced_turns,
+        &mut totals.nonmetered_turns,
+        &mut totals.unpriced_reasons,
+        &mut totals.pricing_provenances,
+    );
+    accumulate_runtime_cost_details(
+        audit.as_ref(),
+        &mut totals.unpriced_classes,
+        &mut totals.live_pricing_defects,
+        &mut totals.live_pricing_unusable_defects,
+    );
+    if let Some(receipt) = receipt.as_ref() {
+        totals.route_receipts.insert(receipt.clone());
+    }
+    totals.turns = totals.turns.saturating_add(1);
+
+    let key = runtime_usage_bucket_key(group_by, route, turn, thread);
+    let bucket = buckets.entry(key.clone()).or_insert_with(|| UsageBucket {
+        key,
+        ..UsageBucket::default()
+    });
+    bucket.input_tokens = bucket.input_tokens.saturating_add(classes.input);
+    bucket.output_tokens = bucket.output_tokens.saturating_add(classes.output);
+    bucket.cached_tokens = bucket.cached_tokens.saturating_add(classes.cache_read);
+    bucket.reasoning_tokens = bucket.reasoning_tokens.saturating_add(reasoning);
+    bucket.reasoning_replay_tokens = bucket
+        .reasoning_replay_tokens
+        .saturating_add(reasoning_replay);
+    bucket.cache_write_tokens = bucket
+        .cache_write_tokens
+        .saturating_add(classes.cache_write);
+    saturating_add_usd(&mut bucket.cost_usd, cost);
+    accumulate_runtime_cost_coverage(
+        audit.as_ref(),
+        &mut bucket.priced_turns,
+        &mut bucket.unpriced_turns,
+        &mut bucket.nonmetered_turns,
+        &mut bucket.unpriced_reasons,
+        &mut bucket.pricing_provenances,
+    );
+    accumulate_runtime_cost_details(
+        audit.as_ref(),
+        &mut bucket.unpriced_classes,
+        &mut bucket.live_pricing_defects,
+        &mut bucket.live_pricing_unusable_defects,
+    );
+    if let Some(receipt) = receipt {
+        bucket.route_receipts.insert(receipt);
+    }
+    bucket.turns = bucket.turns.saturating_add(1);
+}
+
+fn usage_timestamp_in_range(
+    timestamp: DateTime<Utc>,
+    since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
+) -> bool {
+    since.is_none_or(|lower| timestamp >= lower) && until.is_none_or(|upper| timestamp <= upper)
+}
+
+fn accumulate_truncated_runtime_usage(
+    totals: &mut UsageTotals,
+    buckets: &mut std::collections::BTreeMap<String, UsageBucket>,
+    group_by: UsageGroupBy,
+    dropped: u64,
+    turn: &TurnRecord,
+    thread: &ThreadRecord,
+) {
+    if dropped == 0 {
+        return;
+    }
+    totals.dropped_usage_records = totals.dropped_usage_records.saturating_add(dropped);
+    totals.unpriced_turns = totals.unpriced_turns.saturating_add(dropped);
+    totals.turns = totals.turns.saturating_add(dropped);
+    totals
+        .unpriced_reasons
+        .insert("runtime_usage_journal_truncated".to_string());
+
+    let key = match group_by {
+        UsageGroupBy::Day => turn.created_at.format("%Y-%m-%d").to_string(),
+        UsageGroupBy::Model | UsageGroupBy::Provider => "unknown-truncated".to_string(),
+        UsageGroupBy::Thread => thread.id.clone(),
+    };
+    let bucket = buckets.entry(key.clone()).or_insert_with(|| UsageBucket {
+        key,
+        ..UsageBucket::default()
+    });
+    bucket.dropped_usage_records = bucket.dropped_usage_records.saturating_add(dropped);
+    bucket.unpriced_turns = bucket.unpriced_turns.saturating_add(dropped);
+    bucket.turns = bucket.turns.saturating_add(dropped);
+    bucket
+        .unpriced_reasons
+        .insert("runtime_usage_journal_truncated".to_string());
 }
 
 fn resolve_runtime_thread_route(
@@ -1690,7 +2134,13 @@ impl RuntimeThreadManager {
     /// descriptor; the next `start_turn` resolves and installs the new route.
     pub async fn reload_config(&self, new_config: Config) -> Result<()> {
         let _engine_load = self.engine_load.lock().await;
-        let entries: Vec<(String, EngineHandle, ProviderIdentity, String)> = {
+        let entries: Vec<(
+            String,
+            EngineHandle,
+            ProviderIdentity,
+            String,
+            Option<String>,
+        )> = {
             let active = self.active.lock().await;
             active
                 .engines
@@ -1701,6 +2151,10 @@ impl RuntimeThreadManager {
                         state.engine.clone(),
                         state.route_identity.clone(),
                         state.route_model.clone(),
+                        state
+                            .active_turn
+                            .as_ref()
+                            .map(|active| active.turn_id.clone()),
                     )
                 })
                 .collect()
@@ -1708,13 +2162,13 @@ impl RuntimeThreadManager {
 
         let mut validated = Vec::with_capacity(entries.len());
         let mut failures = Vec::new();
-        for (thread_id, engine, provider_identity, engine_model) in entries {
+        for (thread_id, engine, provider_identity, engine_model, active_turn_id) in entries {
             match resolve_runtime_thread_route_for_identity(
                 &new_config,
                 &provider_identity,
                 Some(&engine_model),
             ) {
-                Ok(route) => validated.push((thread_id, engine, route)),
+                Ok(route) => validated.push((thread_id, engine, route, active_turn_id)),
                 Err(err) => failures.push(format!("{thread_id}: {err}")),
             }
         }
@@ -1732,10 +2186,10 @@ impl RuntimeThreadManager {
 
         let settings = crate::settings::Settings::load().unwrap_or_default();
         let stream_chunk_timeout_secs = self.read_config().stream_chunk_timeout_secs();
-        for (thread_id, engine, route) in validated {
+        for (thread_id, engine, route, active_turn_id) in validated {
             let provider = route.identity.provider;
             let route_limits = known_route_limits(route.candidate.limits());
-            let engine_compaction = runtime_compaction_config(
+            let mut engine_compaction = runtime_compaction_config(
                 provider,
                 &route.model,
                 route_limits,
@@ -1743,6 +2197,7 @@ impl RuntimeThreadManager {
                 crate::settings::Settings::auto_compact_explicitly_configured(),
                 settings.auto_compact_threshold_percent,
             );
+            engine_compaction.runtime_cost_owner = active_turn_id;
             let route_config = route.config;
             let _ = engine
                 .send(Op::SetCompaction {
@@ -3024,8 +3479,8 @@ impl RuntimeThreadManager {
     }
 
     /// Aggregate token + cost usage across all threads/turns inside the time
-    /// range `[since, until]`. Each turn's cost is computed via
-    /// provider-aware pricing using each turn's persisted concrete route.
+    /// range `[since, until]`. Each parent, child, and compaction call is
+    /// computed via provider-aware pricing using its persisted concrete route.
     /// Legacy turns without provider provenance and providers without an
     /// authoritative runtime price (including ChatGPT/Codex OAuth) accrue
     /// tokens but no fabricated dollar cost. Whalescale#261 / #564.
@@ -3038,78 +3493,56 @@ impl RuntimeThreadManager {
         until: Option<DateTime<Utc>>,
         group_by: UsageGroupBy,
     ) -> Result<UsageAggregation> {
-        use std::collections::BTreeMap;
-
-        let mut buckets: BTreeMap<String, UsageBucket> = BTreeMap::new();
+        let mut buckets: std::collections::BTreeMap<String, UsageBucket> =
+            std::collections::BTreeMap::new();
         let mut totals = UsageTotals::default();
         for thread in self.store.list_threads()? {
             let turns = self.store.list_turns_for_thread(&thread.id)?;
             for turn in turns {
-                if let Some(s) = since
-                    && turn.created_at < s
+                let parent_route = turn.effective_route_envelope();
+                let parent_dispatched_at = parent_route
+                    .as_ref()
+                    .map_or(turn.created_at, |route| route.dispatched_at);
+                if let Some(usage) = turn.usage.as_ref()
+                    && usage_timestamp_in_range(parent_dispatched_at, since, until)
                 {
-                    continue;
+                    accumulate_runtime_usage_record(
+                        &mut totals,
+                        &mut buckets,
+                        group_by,
+                        parent_route.as_ref(),
+                        usage,
+                        &turn,
+                        &thread,
+                    );
                 }
-                if let Some(u) = until
-                    && turn.created_at > u
-                {
-                    continue;
+                for child in &turn.routed_usage {
+                    if usage_timestamp_in_range(child.route.dispatched_at, since, until) {
+                        accumulate_runtime_usage_record(
+                            &mut totals,
+                            &mut buckets,
+                            group_by,
+                            Some(&child.route),
+                            &child.usage,
+                            &turn,
+                            &thread,
+                        );
+                    }
                 }
-                let Some(usage) = turn.usage.as_ref() else {
-                    continue;
-                };
-                let cached = usage.prompt_cache_hit_tokens.unwrap_or(0) as u64;
-                let reasoning = usage.reasoning_tokens.unwrap_or(0) as u64;
-                let input = usage.input_tokens as u64;
-                let output = usage.output_tokens as u64;
-                let model = turn
-                    .effective_model
-                    .as_deref()
-                    .filter(|model| !model.trim().is_empty())
-                    .unwrap_or(&thread.model);
-                let provider_kind = turn
-                    .effective_provider
-                    .as_deref()
-                    .filter(|provider| !provider.trim().is_empty())
-                    .unwrap_or("unknown");
-                let provider_label = turn.effective_provider_label().unwrap_or(provider_kind);
-                let provider = ApiProvider::parse(provider_kind);
-                let cost = provider
-                    .and_then(|provider| {
-                        crate::pricing::calculate_turn_cost_estimate_for_route_at(
-                            provider,
-                            model,
-                            turn.effective_billing_surface.as_deref(),
-                            usage,
-                            turn.created_at,
-                        )
-                    })
-                    .map(|estimate| estimate.usd)
-                    .unwrap_or(0.0);
-
-                totals.input_tokens += input;
-                totals.output_tokens += output;
-                totals.cached_tokens += cached;
-                totals.reasoning_tokens += reasoning;
-                totals.cost_usd += cost;
-                totals.turns += 1;
-
-                let key = match group_by {
-                    UsageGroupBy::Day => turn.created_at.format("%Y-%m-%d").to_string(),
-                    UsageGroupBy::Model => model.to_string(),
-                    UsageGroupBy::Provider => provider_label.to_string(),
-                    UsageGroupBy::Thread => thread.id.clone(),
-                };
-                let bucket = buckets.entry(key.clone()).or_insert_with(|| UsageBucket {
-                    key,
-                    ..UsageBucket::default()
-                });
-                bucket.input_tokens += input;
-                bucket.output_tokens += output;
-                bucket.cached_tokens += cached;
-                bucket.reasoning_tokens += reasoning;
-                bucket.cost_usd += cost;
-                bucket.turns += 1;
+                // Dropped fallback receipts no longer carry a trustworthy
+                // dispatch timestamp. Use the owning turn timestamp only to
+                // decide whether the explicit incompleteness marker belongs
+                // in this query window; never fabricate a model/provider.
+                if usage_timestamp_in_range(turn.created_at, since, until) {
+                    accumulate_truncated_runtime_usage(
+                        &mut totals,
+                        &mut buckets,
+                        group_by,
+                        turn.routed_usage_dropped_records,
+                        &turn,
+                        &thread,
+                    );
+                }
             }
         }
 
@@ -3120,6 +3553,11 @@ impl RuntimeThreadManager {
             UsageGroupBy::Thread => "thread",
         }
         .to_string();
+
+        totals.cost_complete = totals.unpriced_turns == 0;
+        for bucket in buckets.values_mut() {
+            bucket.cost_complete = bucket.unpriced_turns == 0;
+        }
 
         Ok(UsageAggregation {
             since,
@@ -3917,7 +4355,13 @@ impl RuntimeThreadManager {
                     effective_provider: None,
                     effective_provider_id: None,
                     effective_billing_surface: None,
+                    effective_endpoint_fingerprint: None,
+                    effective_billing_mode: None,
+                    effective_dispatched_at: None,
                     effective_model: None,
+                    routed_usage: Vec::new(),
+                    routed_usage_source_ids: Vec::new(),
+                    routed_usage_dropped_records: 0,
                     error: None,
                     item_ids,
                     steer_count: 0,
@@ -4029,6 +4473,8 @@ impl RuntimeThreadManager {
             }
         }
         let now = Utc::now();
+        crate::cost_status::finish_runtime_usage_owner(turn_id);
+        let background_usage = crate::cost_status::take_runtime_usage(turn_id);
         let mut terminal_items = Vec::new();
         match self.store.list_items_for_turn(turn_id) {
             Ok(items) => {
@@ -4057,6 +4503,12 @@ impl RuntimeThreadManager {
             let _turn_mutation = self.store.turn_mutation.lock();
             match self.store.load_turn(turn_id) {
                 Ok(mut turn) => {
+                    for record in background_usage.records.iter().cloned() {
+                        append_routed_usage_record(&mut turn, &record.source_id, record.usage);
+                    }
+                    turn.routed_usage_dropped_records = turn
+                        .routed_usage_dropped_records
+                        .saturating_add(background_usage.dropped_records);
                     if turn.status == RuntimeTurnStatus::InProgress {
                         turn.status = RuntimeTurnStatus::Failed;
                         turn.ended_at = Some(now);
@@ -4401,7 +4853,7 @@ impl RuntimeThreadManager {
         let model = route.model.clone();
         let route_limits = known_route_limits(route.candidate.limits());
         let settings = crate::settings::Settings::load().unwrap_or_default();
-        let compaction = runtime_compaction_config(
+        let mut compaction = runtime_compaction_config(
             provider,
             &model,
             route_limits,
@@ -4413,6 +4865,7 @@ impl RuntimeThreadManager {
 
         let now = Utc::now();
         let turn_id = format!("turn_{}", &Uuid::new_v4().to_string()[..8]);
+        compaction.runtime_cost_owner = Some(turn_id.clone());
         let mut turn = TurnRecord {
             schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
             id: turn_id.clone(),
@@ -4427,9 +4880,18 @@ impl RuntimeThreadManager {
             duration_ms: None,
             usage: None,
             effective_provider: Some(provider.as_str().to_string()),
-            effective_provider_id: provider_identity.exact_id.clone(),
+            effective_provider_id: provider_identity
+                .exact_id
+                .as_deref()
+                .map(crate::cost_status::sanitize_persisted_route_label),
             effective_billing_surface: None,
-            effective_model: Some(model.clone()),
+            effective_endpoint_fingerprint: None,
+            effective_billing_mode: None,
+            effective_dispatched_at: None,
+            effective_model: Some(crate::cost_status::sanitize_persisted_route_label(&model)),
+            routed_usage: Vec::new(),
+            routed_usage_source_ids: Vec::new(),
+            routed_usage_dropped_records: 0,
             error: None,
             item_ids: Vec::new(),
             steer_count: 0,
@@ -4539,6 +5001,7 @@ impl RuntimeThreadManager {
                 };
             }
 
+            self.register_runtime_usage_sink(&turn_id);
             // Sending through an owned permit cannot await or fail. From this
             // point the engine owns the operation and the spawned task owns
             // lifecycle events, monitoring, and terminal cleanup even if the
@@ -4724,7 +5187,7 @@ impl RuntimeThreadManager {
         let route_model = route.model.clone();
         let route_limits = known_route_limits(route.candidate.limits());
         let settings = crate::settings::Settings::load().unwrap_or_default();
-        let compaction = runtime_compaction_config(
+        let mut compaction = runtime_compaction_config(
             route_provider,
             &route_model,
             route_limits,
@@ -4735,6 +5198,7 @@ impl RuntimeThreadManager {
 
         let now = Utc::now();
         let turn_id = format!("turn_{}", &Uuid::new_v4().to_string()[..8]);
+        compaction.runtime_cost_owner = Some(turn_id.clone());
         let turn = TurnRecord {
             schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
             id: turn_id.clone(),
@@ -4751,9 +5215,20 @@ impl RuntimeThreadManager {
             duration_ms: None,
             usage: None,
             effective_provider: Some(route_provider.as_str().to_string()),
-            effective_provider_id: route_identity.exact_id.clone(),
+            effective_provider_id: route_identity
+                .exact_id
+                .as_deref()
+                .map(crate::cost_status::sanitize_persisted_route_label),
             effective_billing_surface: None,
-            effective_model: Some(route_model.clone()),
+            effective_endpoint_fingerprint: None,
+            effective_billing_mode: None,
+            effective_dispatched_at: None,
+            effective_model: Some(crate::cost_status::sanitize_persisted_route_label(
+                &route_model,
+            )),
+            routed_usage: Vec::new(),
+            routed_usage_source_ids: Vec::new(),
+            routed_usage_dropped_records: 0,
             error: None,
             item_ids: Vec::new(),
             steer_count: 0,
@@ -4808,6 +5283,7 @@ impl RuntimeThreadManager {
                 };
             }
 
+            self.register_runtime_usage_sink(&turn_id);
             let _sender = permit.send(op);
             touch_lru(&mut active.lru, thread_id);
             self.spawn_claimed_turn_monitor(
@@ -5287,6 +5763,38 @@ impl RuntimeThreadManager {
         Ok(messages)
     }
 
+    fn append_routed_usage_to_turn(
+        &self,
+        turn_id: &str,
+        source_id: &str,
+        usage: EffectiveRouteUsage,
+    ) -> Result<()> {
+        let _turn_mutation = self.store.turn_mutation.lock();
+        let mut turn = self.store.load_turn(turn_id)?;
+        if append_routed_usage_record(&mut turn, source_id, usage) {
+            self.store.save_turn(&turn)?;
+        }
+        Ok(())
+    }
+
+    fn register_runtime_usage_sink(&self, turn_id: &str) {
+        let store = self.store.clone();
+        let sink_turn_id = turn_id.to_string();
+        crate::cost_status::register_runtime_usage_sink(
+            turn_id,
+            Arc::new(move |record: RuntimeUsageRecord| {
+                let _turn_mutation = store.turn_mutation.lock();
+                let Ok(mut turn) = store.load_turn(&sink_turn_id) else {
+                    return false;
+                };
+                if !append_routed_usage_record(&mut turn, &record.source_id, record.usage) {
+                    return true;
+                }
+                store.save_turn(&turn).is_ok()
+            }),
+        );
+    }
+
     async fn monitor_turn(
         &self,
         thread_id: String,
@@ -5298,11 +5806,11 @@ impl RuntimeThreadManager {
         let mut tool_items: HashMap<String, String> = HashMap::new();
         let mut compaction_items: HashMap<String, String> = HashMap::new();
         let mut turn_usage: Option<Usage> = None;
-        let mut turn_base_url: Option<String> = None;
         let mut turn_status: Option<RuntimeTurnStatus> = None;
         let mut turn_error: Option<String> = None;
         let mut saw_engine_activity = false;
         let mut saw_turn_started = false;
+        let mut engine_turn_id: Option<String> = None;
         let mut pending_event: Option<EngineEvent> = None;
         let mut event_channel_closed = false;
 
@@ -5339,6 +5847,7 @@ impl RuntimeThreadManager {
                         | EngineEvent::AgentSpawned { .. }
                         | EngineEvent::AgentProgress { .. }
                         | EngineEvent::AgentComplete { .. }
+                        | EngineEvent::SubAgentMailbox { .. }
                 )
             {
                 continue;
@@ -5366,6 +5875,7 @@ impl RuntimeThreadManager {
                     | EngineEvent::AgentSpawned { .. }
                     | EngineEvent::AgentProgress { .. }
                     | EngineEvent::AgentComplete { .. }
+                    | EngineEvent::SubAgentMailbox { .. }
                     | EngineEvent::ApprovalRequired { .. }
                     | EngineEvent::ElevationRequired { .. }
                     | EngineEvent::UserInputRequired { .. }
@@ -5375,8 +5885,28 @@ impl RuntimeThreadManager {
             }
 
             match event {
-                EngineEvent::TurnStarted { .. } => {
+                EngineEvent::TurnStarted {
+                    turn_id: started_turn_id,
+                    created_at,
+                    route,
+                } => {
                     saw_turn_started = true;
+                    engine_turn_id = Some(started_turn_id);
+                    {
+                        let _turn_mutation = self.store.turn_mutation.lock();
+                        let mut turn = self.store.load_turn(&turn_id)?;
+                        turn.started_at = Some(created_at);
+                        // A lifecycle start carries no billing envelope, so
+                        // there is nothing to persist yet. The dispatch event
+                        // below is the only writer of effective-route columns.
+                        if let Some(route) = route
+                            .as_ref()
+                            .and_then(crate::core::events::TurnRoute::cost_envelope)
+                        {
+                            turn.persist_effective_route(&route);
+                        }
+                        self.store.save_turn(&turn)?;
+                    }
                     self.emit_event(
                         &thread_id,
                         Some(&turn_id),
@@ -5385,6 +5915,22 @@ impl RuntimeThreadManager {
                         json!({ "status": "in_progress" }),
                     )
                     .await?;
+                }
+                EngineEvent::RouteDispatched {
+                    turn_id: dispatched_turn_id,
+                    route,
+                } => {
+                    if engine_turn_id
+                        .as_deref()
+                        .is_some_and(|started| started == dispatched_turn_id)
+                    {
+                        let _turn_mutation = self.store.turn_mutation.lock();
+                        let mut turn = self.store.load_turn(&turn_id)?;
+                        if let Some(envelope) = route.cost_envelope() {
+                            turn.persist_effective_route(&envelope);
+                        }
+                        self.store.save_turn(&turn)?;
+                    }
                 }
                 EngineEvent::MessageStarted { .. } => {
                     let item_id = format!("item_{}", &Uuid::new_v4().to_string()[..8]);
@@ -5558,6 +6104,19 @@ impl RuntimeThreadManager {
                     .await?;
                 }
                 EngineEvent::ToolCallComplete { id, name, result } => {
+                    if let Ok(output) = &result
+                        && let Some(metadata) = output.metadata.as_ref()
+                        && let Some(route) =
+                            crate::cost_status::child_route_envelope_from_metadata(metadata)
+                        && let Some(usage) = crate::cost_status::child_usage_from_metadata(metadata)
+                    {
+                        let source = format!("tool:{id}");
+                        self.append_routed_usage_to_turn(
+                            &turn_id,
+                            &source,
+                            EffectiveRouteUsage { route, usage },
+                        )?;
+                    }
                     if let Some(item_id) = tool_items.remove(&id) {
                         let mut item = self.store.load_item(&item_id)?;
                         let now = Utc::now();
@@ -5612,6 +6171,28 @@ impl RuntimeThreadManager {
                             json!({ "item": item }),
                         )
                         .await?;
+                    }
+                }
+                EngineEvent::SubAgentMailbox {
+                    turn_id: mailbox_turn_id,
+                    message:
+                        crate::tools::subagent::MailboxMessage::TokenUsage {
+                            source_id,
+                            route,
+                            usage,
+                            ..
+                        },
+                    ..
+                } => {
+                    let belongs_to_turn = engine_turn_id
+                        .as_deref()
+                        .is_some_and(|started| started == mailbox_turn_id);
+                    if belongs_to_turn {
+                        self.append_routed_usage_to_turn(
+                            &turn_id,
+                            &source_id,
+                            EffectiveRouteUsage { route, usage },
+                        )?;
                     }
                 }
                 EngineEvent::CompactionStarted { id, auto, message } => {
@@ -6139,11 +6720,9 @@ impl RuntimeThreadManager {
                     usage,
                     status,
                     error,
-                    base_url,
                     ..
                 } => {
                     turn_usage = Some(usage);
-                    turn_base_url = base_url;
                     let reported_status = match status {
                         TurnOutcomeStatus::Completed => RuntimeTurnStatus::Completed,
                         TurnOutcomeStatus::Interrupted => RuntimeTurnStatus::Interrupted,
@@ -6259,6 +6838,8 @@ impl RuntimeThreadManager {
         }
 
         let ended_at = Utc::now();
+        crate::cost_status::finish_runtime_usage_owner(&turn_id);
+        let background_usage = crate::cost_status::take_runtime_usage(&turn_id);
         let turn = {
             let _turn_mutation = self.store.turn_mutation.lock();
             let mut turn = self.store.load_turn(&turn_id)?;
@@ -6266,14 +6847,12 @@ impl RuntimeThreadManager {
             turn.ended_at = Some(ended_at);
             turn.duration_ms = turn.started_at.map(|start| duration_ms(start, ended_at));
             turn.usage = turn_usage;
-            turn.effective_billing_surface = turn
-                .effective_provider
-                .as_deref()
-                .and_then(ApiProvider::parse)
-                .and_then(|provider| {
-                    crate::pricing::billing_surface_for_route(provider, turn_base_url.as_deref())
-                })
-                .map(str::to_string);
+            for record in background_usage.records {
+                append_routed_usage_record(&mut turn, &record.source_id, record.usage);
+            }
+            turn.routed_usage_dropped_records = turn
+                .routed_usage_dropped_records
+                .saturating_add(background_usage.dropped_records);
             turn.error = turn_error;
             turn
         };

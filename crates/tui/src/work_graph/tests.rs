@@ -66,10 +66,17 @@ fn effort_activity(
     ts: Ts,
     operation: Option<WorkNodeId>,
 ) -> WorkActivityEvent {
+    let provider = provider.into();
     WorkActivityEvent::ReasoningEffortChanged {
         requested: ReasoningEffortTier::Low,
         effective: ReasoningEffortTier::High,
-        provider: provider.into(),
+        provider_kind: Some(
+            crate::config::ApiProvider::parse(&provider)
+                .unwrap_or(crate::config::ApiProvider::Custom),
+        ),
+        provider,
+        endpoint_identity: Some("https://example.invalid/v1".to_string()),
+        model: Some("test-model".to_string()),
         ts,
         operation,
     }
@@ -734,6 +741,34 @@ fn activity_receipts_reject_bad_provider_identity_and_oversized_snapshots() {
 }
 
 #[test]
+fn effective_only_reasoning_states_cannot_be_requested() {
+    for requested in [
+        ReasoningEffortTier::ThinkingEnabledGranularityUnavailable,
+        ReasoningEffortTier::Unavailable,
+    ] {
+        let mut graph = seeded();
+        let before = graph.snapshot().clone();
+        let result = graph.apply(
+            WorkGraphChange::RecordActivity {
+                event: WorkActivityEvent::ReasoningEffortChanged {
+                    requested,
+                    effective: requested,
+                    provider_kind: Some(crate::config::ApiProvider::Zai),
+                    provider: "zai".to_string(),
+                    endpoint_identity: Some(crate::config::DEFAULT_ZAI_BASE_URL.to_string()),
+                    model: Some(crate::config::ZAI_GLM_5_2_MODEL.to_string()),
+                    ts: 10,
+                    operation: None,
+                },
+            },
+            ctx(10),
+        );
+        expect_code(result, ValidationCode::Structural);
+        assert_eq!(graph.snapshot(), &before, "rejection must be atomic");
+    }
+}
+
+#[test]
 fn activity_operation_links_require_live_operations_at_write_time() {
     let mut graph = seeded();
     for operation in [nid("missing"), nid("root")] {
@@ -787,6 +822,275 @@ fn snapshot_serde_round_trips() {
     let restored: WorkGraphSnapshot = serde_json::from_str(&json).unwrap();
     assert_eq!(&restored, graph.snapshot());
     validate(&restored).expect("restored snapshot still satisfies invariants");
+}
+
+#[test]
+fn legacy_reasoning_activity_loads_with_effective_truth_unavailable() {
+    let mut wire = serde_json::to_value(effort_activity("moonshot", 10, None)).unwrap();
+    let object = wire.as_object_mut().expect("activity object");
+    object.remove("endpoint_identity");
+    object.remove("model");
+
+    let restored: WorkActivityEvent = serde_json::from_value(wire).expect("legacy activity loads");
+    let WorkActivityEvent::ReasoningEffortChanged {
+        effective,
+        endpoint_identity,
+        model,
+        ..
+    } = restored;
+    assert_eq!(effective, ReasoningEffortTier::Unavailable);
+    assert!(endpoint_identity.is_none());
+    assert!(model.is_none());
+}
+
+#[test]
+fn legacy_reasoning_activity_missing_provider_kind_downgrades_effective_truth() {
+    let activity = WorkActivityEvent::ReasoningEffortChanged {
+        requested: ReasoningEffortTier::Max,
+        effective: ReasoningEffortTier::Max,
+        provider_kind: Some(crate::config::ApiProvider::Openai),
+        provider: "openai".to_string(),
+        endpoint_identity: Some(crate::config::DEFAULT_OPENAI_BASE_URL.to_string()),
+        model: Some(crate::config::DEFAULT_OPENAI_MODEL.to_string()),
+        ts: 10,
+        operation: None,
+    };
+    let mut wire = serde_json::to_value(activity).expect("serialize current activity");
+    wire.as_object_mut()
+        .expect("activity object")
+        .remove("provider_kind");
+
+    let restored: WorkActivityEvent =
+        serde_json::from_value(wire).expect("legacy activity remains loadable");
+    let WorkActivityEvent::ReasoningEffortChanged {
+        effective,
+        provider_kind,
+        endpoint_identity,
+        model,
+        ..
+    } = restored;
+    assert_eq!(provider_kind, None);
+    assert_eq!(effective, ReasoningEffortTier::Unavailable);
+    assert!(
+        endpoint_identity.is_some(),
+        "route provenance remains visible"
+    );
+    assert!(model.is_some(), "model provenance remains visible");
+}
+
+#[test]
+fn restored_custom_builtin_slug_collisions_cannot_forge_concrete_tiers() {
+    for provider in ["openai", "zai"] {
+        let mut forged = seeded().into_snapshot();
+        forged
+            .activities
+            .push_bounded(WorkActivityEvent::ReasoningEffortChanged {
+                requested: ReasoningEffortTier::Max,
+                effective: ReasoningEffortTier::Max,
+                provider_kind: Some(crate::config::ApiProvider::Custom),
+                provider: provider.to_string(),
+                endpoint_identity: Some("https://gateway.example/v1".to_string()),
+                model: Some("vendor-model-x".to_string()),
+                ts: 10,
+                operation: None,
+            });
+        let wire = serde_json::to_string(&forged).expect("serialize forged custom route");
+        let restored: WorkGraphSnapshot =
+            serde_json::from_str(&wire).expect("restore forged custom route");
+        let report = validate(&restored)
+            .expect_err("custom identity collision cannot inherit built-in reasoning tiers");
+        assert!(
+            report.contains_code(ValidationCode::Structural),
+            "{provider}"
+        );
+
+        let mut truthful_snapshot = seeded().into_snapshot();
+        truthful_snapshot
+            .activities
+            .push_bounded(WorkActivityEvent::ReasoningEffortChanged {
+                requested: ReasoningEffortTier::Max,
+                effective: ReasoningEffortTier::Unavailable,
+                provider_kind: Some(crate::config::ApiProvider::Custom),
+                provider: provider.to_string(),
+                endpoint_identity: Some("https://gateway.example/v1".to_string()),
+                model: Some("vendor-model-x".to_string()),
+                ts: 10,
+                operation: None,
+            });
+        let truthful_wire =
+            serde_json::to_string(&truthful_snapshot).expect("serialize truthful custom route");
+        let truthful: WorkGraphSnapshot =
+            serde_json::from_str(&truthful_wire).expect("restore truthful custom route");
+        validate(&truthful).expect("custom slug collision remains valid only as unavailable");
+    }
+}
+
+#[test]
+fn restored_genuine_openai_preserves_known_tier_with_exact_provenance() {
+    let mut snapshot = seeded().into_snapshot();
+    snapshot
+        .activities
+        .push_bounded(WorkActivityEvent::ReasoningEffortChanged {
+            requested: ReasoningEffortTier::Max,
+            effective: ReasoningEffortTier::Max,
+            provider_kind: Some(crate::config::ApiProvider::Openai),
+            provider: "openai".to_string(),
+            endpoint_identity: Some(crate::config::DEFAULT_OPENAI_BASE_URL.to_string()),
+            model: Some(crate::config::DEFAULT_OPENAI_MODEL.to_string()),
+            ts: 10,
+            operation: None,
+        });
+    let wire = serde_json::to_string(&snapshot).expect("serialize built-in OpenAI route");
+    let restored: WorkGraphSnapshot =
+        serde_json::from_str(&wire).expect("restore built-in OpenAI route");
+
+    validate(&restored).expect("kind plus exact identity and route provenance prove OpenAI");
+}
+
+#[test]
+fn restored_builtin_kind_rejects_mismatched_exact_identity() {
+    let mut snapshot = seeded().into_snapshot();
+    snapshot
+        .activities
+        .push_bounded(WorkActivityEvent::ReasoningEffortChanged {
+            requested: ReasoningEffortTier::Max,
+            effective: ReasoningEffortTier::Max,
+            provider_kind: Some(crate::config::ApiProvider::Openai),
+            provider: "zai".to_string(),
+            endpoint_identity: Some(crate::config::DEFAULT_OPENAI_BASE_URL.to_string()),
+            model: Some(crate::config::DEFAULT_OPENAI_MODEL.to_string()),
+            ts: 10,
+            operation: None,
+        });
+
+    let report = validate(&snapshot).expect_err("kind and exact identity cannot disagree");
+    assert!(report.contains_code(ValidationCode::Structural));
+    assert!(report.violations.iter().any(|violation| {
+        violation
+            .message
+            .contains("provider identity does not match its recorded kind")
+    }));
+}
+
+#[test]
+fn restored_zai_gateway_cannot_forge_effective_max() {
+    let mut snapshot = seeded().into_snapshot();
+    snapshot
+        .activities
+        .push_bounded(WorkActivityEvent::ReasoningEffortChanged {
+            requested: ReasoningEffortTier::Max,
+            effective: ReasoningEffortTier::Max,
+            provider_kind: Some(crate::config::ApiProvider::Zai),
+            provider: "zai".to_string(),
+            endpoint_identity: Some("https://gateway.example/v1".to_string()),
+            model: Some(crate::config::ZAI_GLM_5_2_MODEL.to_string()),
+            ts: 10,
+            operation: None,
+        });
+    let wire = serde_json::to_string(&snapshot).expect("serialize forged snapshot");
+    let restored: WorkGraphSnapshot = serde_json::from_str(&wire).expect("restore forged snapshot");
+
+    let report = validate(&restored).expect_err("gateway cannot prove effective max");
+    assert!(report.contains_code(ValidationCode::Structural));
+    assert!(report.violations.iter().any(|violation| {
+        violation
+            .message
+            .contains("impossible for its recorded route")
+    }));
+}
+
+#[test]
+fn restored_zai_toggle_only_and_unknown_models_enforce_effective_truth() {
+    for (model, truthful_effective) in [
+        (
+            crate::config::ZAI_GLM_5_1_MODEL,
+            ReasoningEffortTier::ThinkingEnabledGranularityUnavailable,
+        ),
+        (
+            crate::config::ZAI_GLM_5_TURBO_MODEL,
+            ReasoningEffortTier::ThinkingEnabledGranularityUnavailable,
+        ),
+        ("glm-future-unknown", ReasoningEffortTier::Unavailable),
+    ] {
+        let mut forged = seeded().into_snapshot();
+        forged
+            .activities
+            .push_bounded(WorkActivityEvent::ReasoningEffortChanged {
+                requested: ReasoningEffortTier::Max,
+                effective: ReasoningEffortTier::Max,
+                provider_kind: Some(crate::config::ApiProvider::Zai),
+                provider: "zai".to_string(),
+                endpoint_identity: Some(crate::config::DEFAULT_ZAI_BASE_URL.to_string()),
+                model: Some(model.to_string()),
+                ts: 10,
+                operation: None,
+            });
+        validate(&forged).expect_err("toggle-only/unknown Z.ai route cannot prove max");
+
+        let mut truthful = seeded().into_snapshot();
+        truthful
+            .activities
+            .push_bounded(WorkActivityEvent::ReasoningEffortChanged {
+                requested: ReasoningEffortTier::Max,
+                effective: truthful_effective,
+                provider_kind: Some(crate::config::ApiProvider::Zai),
+                provider: "zai".to_string(),
+                endpoint_identity: Some(crate::config::DEFAULT_ZAI_BASE_URL.to_string()),
+                model: Some(model.to_string()),
+                ts: 10,
+                operation: None,
+            });
+        validate(&truthful).expect("truthful Z.ai effective state restores");
+    }
+}
+
+#[test]
+fn restored_named_gateway_cannot_forge_effective_max() {
+    let mut snapshot = seeded().into_snapshot();
+    snapshot
+        .activities
+        .push_bounded(WorkActivityEvent::ReasoningEffortChanged {
+            requested: ReasoningEffortTier::Max,
+            effective: ReasoningEffortTier::Max,
+            provider_kind: Some(crate::config::ApiProvider::Custom),
+            provider: "my-gateway".to_string(),
+            endpoint_identity: Some("https://gateway.example/v1".to_string()),
+            model: Some("vendor-model-x".to_string()),
+            ts: 10,
+            operation: None,
+        });
+    let wire = serde_json::to_string(&snapshot).expect("serialize forged snapshot");
+    let restored: WorkGraphSnapshot = serde_json::from_str(&wire).expect("restore forged snapshot");
+
+    let report = validate(&restored).expect_err("unknown gateway cannot prove effective max");
+    assert!(report.contains_code(ValidationCode::Structural));
+    assert!(report.violations.iter().any(|violation| {
+        violation
+            .message
+            .contains("impossible for its recorded route")
+    }));
+}
+
+#[test]
+fn restored_named_gateway_accepts_truthful_effective_unavailable() {
+    let mut snapshot = seeded().into_snapshot();
+    snapshot
+        .activities
+        .push_bounded(WorkActivityEvent::ReasoningEffortChanged {
+            requested: ReasoningEffortTier::Max,
+            effective: ReasoningEffortTier::Unavailable,
+            provider_kind: Some(crate::config::ApiProvider::Custom),
+            provider: "my-gateway".to_string(),
+            endpoint_identity: Some("https://gateway.example/v1".to_string()),
+            model: Some("vendor-model-x".to_string()),
+            ts: 10,
+            operation: None,
+        });
+    let wire = serde_json::to_string(&snapshot).expect("serialize truthful unknown snapshot");
+    let restored: WorkGraphSnapshot =
+        serde_json::from_str(&wire).expect("restore truthful unknown snapshot");
+
+    validate(&restored).expect("unknown route remains valid when effective truth is unavailable");
 }
 
 #[test]

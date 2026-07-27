@@ -37,6 +37,80 @@ use unicode_width::UnicodeWidthStr;
 use crate::tui::selection::{SelectionAutoscroll, TranscriptSelectionPoint};
 use tempfile::TempDir;
 
+fn test_mailbox_route(
+    provider: ApiProvider,
+    model: &str,
+) -> crate::cost_status::EffectiveRouteEnvelope {
+    crate::cost_status::EffectiveRouteEnvelope::capture(
+        None,
+        provider,
+        provider.as_str(),
+        model,
+        Some(provider.default_base_url()),
+        chrono::Utc::now(),
+    )
+}
+
+fn served_endpoint_fingerprint() -> Option<String> {
+    crate::cost_status::endpoint_fingerprint("https://api.deepseek.com/v1")
+}
+
+#[test]
+fn completed_turn_cost_receipt_uses_the_captured_effective_route() {
+    let usage = crate::models::Usage {
+        input_tokens: 1_000,
+        output_tokens: 100,
+        ..Default::default()
+    };
+    let audit = crate::pricing::audit_turn_cost_for_route_at(
+        ApiProvider::Deepseek,
+        "deepseek-v4-flash",
+        Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
+        &usage,
+        chrono::Utc::now(),
+    );
+    let completed = crate::tui::app::ActiveTurnMetadata {
+        turn_id: "completed-deepseek".to_string(),
+        created_at: chrono::Utc::now(),
+        route: Some(crate::core::events::TurnRoute {
+            provider: ApiProvider::Deepseek,
+            provider_identity: "deepseek-cn".to_string(),
+            model: "deepseek-v4-flash".to_string(),
+            auto_model: false,
+            receipt: None,
+            billing: Some(crate::core::events::RouteBillingEnvelope {
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+                // A real fingerprint, produced by the production hasher. A
+                // receipt fails closed on anything that is not one, so a
+                // hand-written placeholder here would have tested nothing.
+                endpoint_fingerprint: served_endpoint_fingerprint(),
+                billing_mode: crate::cost_status::RouteBillingMode::Metered,
+                dispatched_at: chrono::Utc::now(),
+            }),
+            base_url: ApiProvider::Deepseek.default_base_url().to_string(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
+        }),
+        auto_route_receipt: None,
+        suggestion_authority: None,
+    };
+
+    let receipt = completed_turn_cost_route_receipt(Some(&completed), &audit)
+        .expect("captured model-backed turn has a receipt");
+
+    assert!(receipt.contains("provider=deepseek"), "{receipt}");
+    assert!(receipt.contains("identity=deepseek-cn"), "{receipt}");
+    assert!(receipt.contains("model=deepseek-v4-flash"), "{receipt}");
+    assert!(
+        receipt.contains(&format!(
+            "endpoint_fp={}",
+            served_endpoint_fingerprint().expect("fingerprintable endpoint")
+        )),
+        "{receipt}"
+    );
+    assert!(receipt.contains("billing_mode=metered"), "{receipt}");
+    assert!(receipt.contains("currency=usd+cny"), "{receipt}");
+}
+
 #[test]
 fn permission_cycle_shortcut_accepts_both_shift_tab_encodings() {
     assert!(is_permission_cycle_shortcut(&KeyEvent::new(
@@ -101,6 +175,24 @@ fn ctrl_t_key_event_reaches_reasoning_effort_cycle() {
             ),
         ),
         "Ctrl+Shift+T remains owned by the live transcript overlay",
+    );
+}
+
+#[test]
+fn ctrl_t_does_not_persist_an_ignored_tier_under_auto_model() {
+    let mut app = create_test_app();
+    app.auto_model = true;
+    app.reasoning_effort = ReasoningEffort::Auto;
+
+    assert!(handle_reasoning_effort_key(
+        &mut app,
+        &KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+    ));
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
+    assert!(
+        app.status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("automatic model routing"))
     );
 }
 
@@ -1292,7 +1384,7 @@ fn composer_newline_shortcuts_do_not_steal_ctrl_enter() {
 }
 
 #[test]
-fn forced_submit_accepts_ctrl_enter_and_ctrl_j_encodings() {
+fn forced_submit_accepts_only_ctrl_enter() {
     assert!(is_forced_submit_key(KeyEvent::new(
         KeyCode::Enter,
         KeyModifiers::CONTROL,
@@ -1301,11 +1393,11 @@ fn forced_submit_accepts_ctrl_enter_and_ctrl_j_encodings() {
         KeyCode::Enter,
         KeyModifiers::CONTROL | KeyModifiers::SHIFT,
     )));
-    assert!(is_forced_submit_key(KeyEvent::new(
+    assert!(!is_forced_submit_key(KeyEvent::new(
         KeyCode::Char('j'),
         KeyModifiers::CONTROL,
     )));
-    assert!(is_forced_submit_key(KeyEvent::new(
+    assert!(!is_forced_submit_key(KeyEvent::new(
         KeyCode::Char('J'),
         KeyModifiers::CONTROL | KeyModifiers::SHIFT,
     )));
@@ -4033,6 +4125,7 @@ fn saved_session_with_messages(messages: Vec<Message>) -> SavedSession {
             parent_session_id: None,
             forked_from_message_count: None,
             cumulative_turn_secs: 0,
+            archived: false,
         },
         messages,
         system_prompt: None,
@@ -4251,7 +4344,9 @@ fn apply_loaded_session_resets_unpersisted_telemetry() {
     app.session.session_cost_cny = 9.13;
     app.session.subagent_cost = 0.75;
     app.session.subagent_cost_cny = 5.48;
-    app.session.subagent_cost_event_seqs.insert(42);
+    app.session
+        .subagent_cost_event_seqs
+        .insert(("turn-test".to_string(), 42));
     app.session.displayed_cost_high_water = 2.0;
     app.session.displayed_cost_high_water_cny = 14.61;
     app.session.last_prompt_tokens = Some(120);
@@ -4259,6 +4354,11 @@ fn apply_loaded_session_resets_unpersisted_telemetry() {
     app.session.last_prompt_cache_hit_tokens = Some(80);
     app.session.last_prompt_cache_miss_tokens = Some(40);
     app.session.last_reasoning_replay_tokens = Some(12);
+    app.session.total_input_tokens = 120;
+    app.session.total_output_tokens = 35;
+    app.session.total_cache_hit_tokens = 80;
+    app.session.total_cache_miss_tokens = 40;
+    app.session.total_cache_write_tokens = 17;
     app.push_turn_cache_record(crate::tui::app::TurnCacheRecord {
         provider: None,
         provider_identity: None,
@@ -4269,6 +4369,9 @@ fn apply_loaded_session_resets_unpersisted_telemetry() {
         cache_hit_tokens: Some(80),
         cache_miss_tokens: Some(40),
         reasoning_replay_tokens: Some(12),
+        cache_write_tokens: None,
+        reasoning_tokens: None,
+        cost_audit: None,
         recorded_at: Instant::now(),
     });
     let mut session = saved_session_with_messages(vec![text_message("assistant", "ready")]);
@@ -4292,7 +4395,106 @@ fn apply_loaded_session_resets_unpersisted_telemetry() {
     assert_eq!(app.session.last_prompt_cache_hit_tokens, None);
     assert_eq!(app.session.last_prompt_cache_miss_tokens, None);
     assert_eq!(app.session.last_reasoning_replay_tokens, None);
+    assert_eq!(app.session.total_input_tokens, 0);
+    assert_eq!(app.session.total_output_tokens, 0);
+    assert_eq!(app.session.total_cache_hit_tokens, 0);
+    assert_eq!(app.session.total_cache_miss_tokens, 0);
+    assert_eq!(app.session.total_cache_write_tokens, 0);
     assert!(app.session.turn_cache_history.is_empty());
+}
+
+/// Loading a session replaces the money *and* the evidence that qualifies it.
+///
+/// Coverage counters describe one specific total. Carrying the live session's
+/// counters across a load would attach them to a different total — the loaded
+/// one — and the result reads as a complete, audited figure that nothing
+/// produced. The reverse is equally wrong: a saved session written before
+/// coverage existed deserializes its counters from `Default`, which is
+/// byte-identical to "complete total covering zero turns", so the load path has
+/// to recognize that shape rather than trust it (#4318).
+#[test]
+fn apply_loaded_session_replaces_cost_coverage_with_the_loaded_total() {
+    let mut app = create_test_app();
+    // Live state from the session being replaced.
+    app.session.cost_priced_turns = 9;
+    app.session.cost_unpriced_turns = 4;
+    app.session.cost_cny_priced_turns = 3;
+    app.session.cost_cny_unpriced_turns = 6;
+    app.session
+        .cost_unpriced_reasons
+        .insert("stale_live_reason".to_string());
+    app.session
+        .cost_unpriced_classes
+        .insert("stale_live_class".to_string());
+    app.session
+        .cost_route_receipts
+        .insert("stale live receipt".to_string());
+    app.session.cost_coverage_unknown_legacy = true;
+
+    let mut session = saved_session_with_messages(vec![text_message("assistant", "ready")]);
+    session.metadata.cost = crate::session_manager::SessionCostSnapshot {
+        session_cost_usd: 2.5,
+        priced_turns: 2,
+        unpriced_turns: 1,
+        cny_priced_turns: 0,
+        cny_unpriced_turns: 3,
+        unpriced_reasons: ["missing_class_price".to_string()].into(),
+        cny_unpriced_reasons: ["currency_not_published".to_string()].into(),
+        unpriced_classes: ["cache_write".to_string()].into(),
+        pricing_provenances: ["models_dev_bundled".to_string()].into(),
+        route_receipts: ["provider=deepseek identity=deepseek model=deepseek-v4-flash".to_string()]
+            .into(),
+        coverage_recorded: true,
+        ..crate::session_manager::SessionCostSnapshot::default()
+    };
+
+    apply_loaded_session(&mut app, &mut Config::default(), &session).expect("restore session");
+
+    assert_eq!(app.session.cost_priced_turns, 2);
+    assert_eq!(app.session.cost_unpriced_turns, 1);
+    assert_eq!(app.session.cost_cny_priced_turns, 0);
+    assert_eq!(app.session.cost_cny_unpriced_turns, 3);
+    assert_eq!(
+        app.session.cost_unpriced_reasons,
+        ["missing_class_price".to_string()].into()
+    );
+    assert_eq!(
+        app.session.cost_unpriced_classes,
+        ["cache_write".to_string()].into()
+    );
+    assert_eq!(app.session.cost_route_receipts.len(), 1);
+    assert!(
+        !app.session
+            .cost_route_receipts
+            .iter()
+            .any(|receipt| receipt.contains("stale live")),
+        "the replaced session's receipts survived the load"
+    );
+    assert!(
+        !app.session.cost_coverage_unknown_legacy,
+        "a coverage-recorded snapshot is not legacy-unknown"
+    );
+
+    // The pre-coverage shape: real money, no coverage evidence, every counter
+    // at its serde default. This must load as unknown, not as complete.
+    let mut legacy_app = create_test_app();
+    legacy_app.session.cost_priced_turns = 9;
+    let mut legacy = saved_session_with_messages(vec![text_message("assistant", "ready")]);
+    legacy.metadata.cost = serde_json::from_value(serde_json::json!({
+        "session_cost_usd": 1.25,
+        "displayed_cost_high_water_usd": 1.25
+    }))
+    .expect("legacy cost snapshot");
+
+    apply_loaded_session(&mut legacy_app, &mut Config::default(), &legacy)
+        .expect("restore legacy session");
+
+    assert_eq!(legacy_app.session.cost_priced_turns, 0);
+    assert_eq!(legacy_app.session.cost_unpriced_turns, 0);
+    assert!(
+        legacy_app.session.cost_coverage_unknown_legacy,
+        "a pre-coverage total must not read as a complete 0-of-0 figure"
+    );
 }
 
 #[tokio::test]
@@ -4809,8 +5011,13 @@ fn file_mentions_add_local_text_context_to_model_payload() {
     app.workspace = tmpdir.path().to_path_buf();
     let message = QueuedMessage::new("Summarize @guide.md".to_string(), None);
 
-    let content = queued_message_content_for_app(&app, &message, None)
-        .expect("native queued message should remain dispatchable");
+    let content = queued_message_content_for_app(
+        &app,
+        &message,
+        None,
+        &mut crate::tui::git_mention::GitMentionCache::default(),
+    )
+    .expect("native queued message should remain dispatchable");
 
     assert!(content.starts_with("Summarize @guide.md"));
     assert!(content.contains("Local context from @mentions:"));
@@ -4859,13 +5066,26 @@ fn persisted_queued_plugin_skill_is_denied_after_cross_process_revocation() {
     let restored = queued_session_to_ui(persisted);
     let mut app = create_test_app();
     app.workspace = workspace;
-    assert!(queued_message_content_for_app(&app, &restored, None).is_ok());
+    assert!(
+        queued_message_content_for_app(
+            &app,
+            &restored,
+            None,
+            &mut crate::tui::git_mention::GitMentionCache::default(),
+        )
+        .is_ok()
+    );
 
     let mut external = crate::plugins::discovery::discover_with_config(&discovery);
     external.revoke_trust("queued-skill").unwrap();
-    let error = queued_message_content_for_app(&app, &restored, None)
-        .expect_err("persisted queued Skill must be denied after external revocation")
-        .to_string();
+    let error = queued_message_content_for_app(
+        &app,
+        &restored,
+        None,
+        &mut crate::tui::git_mention::GitMentionCache::default(),
+    )
+    .expect_err("persisted queued Skill must be denied after external revocation")
+    .to_string();
     assert!(error.contains("disabled, revoked, or no longer matches"));
 }
 
@@ -5049,6 +5269,9 @@ async fn provider_switch_clears_turn_cache_history() {
         cache_hit_tokens: Some(70),
         cache_miss_tokens: Some(30),
         reasoning_replay_tokens: Some(12),
+        cache_write_tokens: None,
+        reasoning_tokens: None,
+        cost_audit: None,
         recorded_at: Instant::now(),
     });
     let mut engine = mock_engine_handle();
@@ -5768,9 +5991,15 @@ async fn immediate_submit_closed_mailbox_restores_composer_and_skill() {
     let engine = mock_engine_handle();
     drop(engine.rx_op);
 
-    submit_or_steer_message(&mut app, &Config::default(), &engine.handle, queued)
-        .await
-        .expect("UI submit failures must remain inside the TUI");
+    submit_or_steer_message(
+        &mut app,
+        &Config::default(),
+        &engine.handle,
+        queued,
+        DispatchRecovery::Immediate,
+    )
+    .await
+    .expect("UI submit failures must remain inside the TUI");
 
     assert_eq!(app.input, "retry this exactly");
     assert_eq!(app.cursor_position, app.input.chars().count());
@@ -5813,9 +6042,15 @@ async fn immediate_submit_custom_provider_preflight_restores_exact_message() {
     let queued = build_queued_message(&mut app, input);
     let (_engine, handle) = crate::core::engine::Engine::new(EngineConfig::default(), &config);
 
-    submit_or_steer_message(&mut app, &config, &handle, queued)
-        .await
-        .expect("provider preflight failures must remain inside the TUI");
+    submit_or_steer_message(
+        &mut app,
+        &config,
+        &handle,
+        queued,
+        DispatchRecovery::Immediate,
+    )
+    .await
+    .expect("provider preflight failures must remain inside the TUI");
 
     assert_eq!(app.input, "preserve 用户 input");
     assert_eq!(app.cursor_position, app.input.chars().count());
@@ -6138,6 +6373,326 @@ fn configure_message_submit_hooks(app: &mut App, dir: &TempDir, commands: Vec<St
 
 #[cfg(not(windows))]
 #[tokio::test]
+async fn foreground_message_submit_hook_does_not_park_terminal_dispatch() {
+    let dir = TempDir::new().expect("tempdir");
+    let slow = write_message_submit_hook(
+        &dir,
+        "slow_replace.sh",
+        r#"#!/bin/sh
+sleep 1
+printf '%s\n' '{"text":"off-loop replacement"}'
+"#,
+    );
+    let mut app = create_test_app();
+    configure_single_message_submit_hook(&mut app, &dir, slow);
+    let (completion_tx, mut completion_rx) =
+        tokio::sync::mpsc::channel::<crate::tui::app::DispatchApplyFn>(2);
+    app.dispatch_completion_tx = Some(completion_tx);
+    let engine = crate::core::engine::mock_engine_handle();
+    let config = Config::default();
+
+    let started = std::time::Instant::now();
+    dispatch_user_message(
+        &mut app,
+        &config,
+        &engine.handle,
+        QueuedMessage::new("original".to_string(), None),
+    )
+    .await
+    .expect("queue hook gate");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(250),
+        "terminal dispatch waited on the foreground hook: {:?}",
+        started.elapsed()
+    );
+    assert!(app.dispatch_in_flight);
+    assert!(app.api_messages.is_empty(), "gate has not answered yet");
+
+    let apply_hook = tokio::time::timeout(std::time::Duration::from_secs(3), completion_rx.recv())
+        .await
+        .expect("hook result timed out")
+        .expect("hook result channel closed");
+    apply_hook(&mut app, &engine.handle, &config).expect("apply hook result");
+    assert!(matches!(
+        &app.api_messages[0].content[0],
+        ContentBlock::Text { text, .. } if text == "off-loop replacement"
+    ));
+
+    let apply_dispatch =
+        tokio::time::timeout(std::time::Duration::from_secs(3), completion_rx.recv())
+            .await
+            .expect("dispatch result timed out")
+            .expect("dispatch result channel closed");
+    apply_dispatch(&mut app, &engine.handle, &config).expect("apply dispatch result");
+    assert!(!app.dispatch_in_flight);
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn live_steer_crosses_message_submit_transform_exactly_once() {
+    let dir = TempDir::new().expect("tempdir");
+    let count = dir.path().join("count.txt");
+    let replace = write_message_submit_hook(
+        &dir,
+        "steer_replace.sh",
+        &format!(
+            "#!/bin/sh\nprintf x >> '{}'\nprintf '%s\\n' '{{\"text\":\"transformed steer\"}}'\n",
+            count.display()
+        ),
+    );
+    let mut app = create_test_app();
+    app.is_loading = true;
+    configure_single_message_submit_hook(&mut app, &dir, replace);
+    let mut engine = crate::core::engine::mock_engine_handle();
+
+    attempt_steer_with_queue_fallback(
+        &mut app,
+        &engine.handle,
+        QueuedMessage::new("original steer".to_string(), None),
+        DispatchRecovery::Immediate,
+    )
+    .await;
+
+    assert_eq!(
+        engine.rx_steer.recv().await.as_deref(),
+        Some("transformed steer")
+    );
+    assert_eq!(std::fs::read_to_string(count).expect("hook count"), "x");
+    assert!(app.api_messages.iter().any(|message| matches!(
+        &message.content[0],
+        ContentBlock::Text { text, .. } if text == "transformed steer"
+    )));
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn denied_steer_restores_queued_draft_and_keeps_active_turn() {
+    let dir = TempDir::new().expect("tempdir");
+    let deny = write_message_submit_hook(
+        &dir,
+        "steer_deny.sh",
+        "#!/bin/sh\nprintf '%s\\n' '{\"reason\":\"policy denied steer\"}'\nexit 2\n",
+    );
+    let mut app = create_test_app();
+    app.is_loading = true;
+    configure_single_message_submit_hook(&mut app, &dir, deny);
+    let mut engine = crate::core::engine::mock_engine_handle();
+    let message = QueuedMessage::new("preserve edited draft".to_string(), None);
+
+    attempt_steer_with_queue_fallback(
+        &mut app,
+        &engine.handle,
+        message.clone(),
+        DispatchRecovery::Draft,
+    )
+    .await;
+
+    assert!(engine.rx_steer.try_recv().is_err());
+    assert!(app.is_loading, "denial must not stop the active turn");
+    assert_eq!(app.input, "preserve edited draft");
+    assert_eq!(app.queued_draft, Some(message));
+    assert_eq!(app.queued_message_count(), 0);
+    assert!(app.status_toasts.back().is_some_and(|toast| {
+        toast.level == StatusToastLevel::Warning && toast.text.contains("blocked the steer")
+    }));
+}
+
+#[tokio::test]
+async fn lost_strict_message_submit_executor_keeps_dispatch_atomic_and_recoverable() {
+    let mut app = create_test_app();
+    app.api_messages
+        .push(text_message("assistant", "existing conversation"));
+    app.add_message(HistoryCell::System {
+        content: "existing receipt".to_string(),
+    });
+    let mut strict = crate::hooks::Hook::new(
+        crate::hooks::HookEvent::MessageSubmit,
+        "unused because dispatch loss is injected",
+    );
+    strict.continue_on_error = false;
+    app.hooks = crate::hooks::HookExecutor::new(
+        crate::hooks::HooksConfig {
+            enabled: true,
+            hooks: vec![strict],
+            ..crate::hooks::HooksConfig::default()
+        },
+        app.workspace.clone(),
+    );
+    app.hooks.inject_message_submit_executor_loss_for_test();
+    let mut engine = crate::core::engine::mock_engine_handle();
+    let (completion_tx, mut completion_rx) =
+        tokio::sync::mpsc::channel::<crate::tui::app::DispatchApplyFn>(2);
+    app.dispatch_completion_tx = Some(completion_tx);
+
+    dispatch_user_message(
+        &mut app,
+        &Config::default(),
+        &engine.handle,
+        QueuedMessage::new("must stay out of the model".to_string(), None),
+    )
+    .await
+    .expect("lost strict gate is scheduled through the production mailbox");
+    assert!(app.dispatch_in_flight);
+    let apply_gate = tokio::time::timeout(std::time::Duration::from_secs(2), completion_rx.recv())
+        .await
+        .expect("lost strict gate result timed out")
+        .expect("production completion mailbox closed");
+    apply_gate(&mut app, &engine.handle, &Config::default()).expect("apply lost strict gate");
+
+    assert_eq!(app.api_messages.len(), 1);
+    assert_eq!(app.history.len(), 1);
+    assert!(matches!(
+        &app.history[0],
+        HistoryCell::System { content } if content == "existing receipt"
+    ));
+    assert!(!app.is_loading);
+    assert!(!app.dispatch_in_flight);
+    assert!(app.dispatch_started_at.is_none());
+    assert!(app.runtime_turn_status.is_none());
+    assert!(engine.rx_op.try_recv().is_err());
+    assert_eq!(app.input, "must stay out of the model");
+
+    // The failed gate leaves no poisoned dispatch state: a later ordinary
+    // message can start and reaches the engine exactly once.
+    app.hooks = crate::hooks::HookExecutor::disabled();
+    dispatch_user_message(
+        &mut app,
+        &Config::default(),
+        &engine.handle,
+        QueuedMessage::new("recover now".to_string(), None),
+    )
+    .await
+    .expect("later dispatch remains usable");
+    match engine.rx_op.recv().await.expect("recovery SendMessage") {
+        crate::core::ops::Op::SendMessage { content, .. } => {
+            assert_eq!(content, "recover now");
+        }
+        other => panic!("expected SendMessage, got {other:?}"),
+    }
+    let apply_dispatch =
+        tokio::time::timeout(std::time::Duration::from_secs(2), completion_rx.recv())
+            .await
+            .expect("recovery dispatch result timed out")
+            .expect("production completion mailbox closed");
+    apply_dispatch(&mut app, &engine.handle, &Config::default()).expect("apply recovery dispatch");
+    assert!(app.history.iter().any(|cell| matches!(
+        cell,
+        HistoryCell::User { content } if content == "recover now"
+    )));
+}
+
+#[tokio::test]
+async fn full_dispatch_completion_mailbox_restores_message_without_stuck_dispatch() {
+    let mut app = create_test_app();
+    let engine = crate::core::engine::mock_engine_handle();
+    let (completion_tx, _completion_rx) =
+        tokio::sync::mpsc::channel::<crate::tui::app::DispatchApplyFn>(1);
+    completion_tx
+        .try_send(Box::new(|_, _, _| Ok(())))
+        .expect("fill production completion mailbox");
+    app.dispatch_completion_tx = Some(completion_tx);
+
+    let error = dispatch_user_message(
+        &mut app,
+        &Config::default(),
+        &engine.handle,
+        QueuedMessage::new("recover from full mailbox".to_string(), None),
+    )
+    .await
+    .expect_err("full mailbox must reject before dispatch starts");
+
+    assert!(error.to_string().contains("mailbox is full"));
+    assert!(!app.dispatch_in_flight);
+    assert!(!app.is_loading);
+    assert!(app.api_messages.is_empty());
+    assert!(app.history.is_empty());
+    assert_eq!(app.input, "recover from full mailbox");
+    assert!(app.status_toasts.back().is_some_and(|toast| {
+        toast.level == StatusToastLevel::Error && toast.text.contains("mailbox is full")
+    }));
+}
+
+#[tokio::test]
+async fn closed_dispatch_completion_mailbox_restores_message_without_stuck_dispatch() {
+    let mut app = create_test_app();
+    let engine = crate::core::engine::mock_engine_handle();
+    let (completion_tx, completion_rx) =
+        tokio::sync::mpsc::channel::<crate::tui::app::DispatchApplyFn>(1);
+    drop(completion_rx);
+    app.dispatch_completion_tx = Some(completion_tx);
+
+    let error = dispatch_user_message(
+        &mut app,
+        &Config::default(),
+        &engine.handle,
+        QueuedMessage::new("recover from closed mailbox".to_string(), None),
+    )
+    .await
+    .expect_err("closed mailbox must reject before dispatch starts");
+
+    assert!(error.to_string().contains("mailbox is closed"));
+    assert!(!app.dispatch_in_flight);
+    assert!(!app.is_loading);
+    assert!(app.api_messages.is_empty());
+    assert!(app.history.is_empty());
+    assert_eq!(app.input, "recover from closed mailbox");
+    assert!(app.status_toasts.back().is_some_and(|toast| {
+        toast.level == StatusToastLevel::Error && toast.text.contains("mailbox is closed")
+    }));
+}
+
+#[test]
+fn subagent_event_handlers_preserve_dispatch_failures_as_separate_toasts() {
+    let mut app = create_test_app();
+    app.hooks = crate::hooks::HookExecutor::new(
+        crate::hooks::HooksConfig {
+            enabled: true,
+            hooks: vec![
+                crate::hooks::Hook::new(crate::hooks::HookEvent::SubagentSpawn, "unused"),
+                crate::hooks::Hook::new(crate::hooks::HookEvent::SubagentComplete, "unused"),
+            ],
+            ..crate::hooks::HooksConfig::default()
+        },
+        app.workspace.clone(),
+    );
+    app.hooks.inject_observer_dispatch_full_for_test();
+
+    apply_agent_spawned_status_and_observer(
+        &mut app,
+        "agent-test",
+        "inspect the repository",
+        "inspect the repository",
+    );
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Agent 1 starting: inspect the repository")
+    );
+    assert!(app.status_toasts.back().is_some_and(|toast| {
+        toast
+            .text
+            .contains("subagent_spawn observer hook queue is full")
+    }));
+
+    app.hooks.inject_observer_dispatch_disconnect_for_test();
+    apply_agent_complete_status_and_observer(
+        &mut app,
+        "agent-test",
+        "finished cleanly",
+        "completed",
+    );
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Agent 1 completed: finished cleanly")
+    );
+    assert!(app.status_toasts.back().is_some_and(|toast| {
+        toast
+            .text
+            .contains("subagent_complete observer hook dispatcher is unavailable")
+    }));
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
 async fn dispatch_user_message_surfaces_continued_message_submit_timeout() {
     let dir = TempDir::new().expect("tempdir");
     let slow = write_message_submit_hook(
@@ -6182,7 +6737,7 @@ printf '%s\n' '{"text":"after timeout"}'
 
     assert_eq!(
         app.status_message.as_deref(),
-        Some("Hook timed out after 1s")
+        Some("hook timed out after 1s")
     );
     match engine.rx_op.recv().await.expect("send message op") {
         crate::core::ops::Op::SendMessage { content, .. } => {
@@ -6225,7 +6780,10 @@ printf '%s\n' '{"text":"after soft failure"}'
     .await
     .expect("dispatch user message");
 
-    assert_eq!(app.status_message.as_deref(), Some("soft failure"));
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("message_submit hook exited with code 9")
+    );
     match engine.rx_op.recv().await.expect("send message op") {
         crate::core::ops::Op::SendMessage { content, .. } => {
             assert_eq!(content, "after soft failure");
@@ -7080,8 +7638,18 @@ fn turn_liveness_recovers_stalled_in_progress_turn() {
             provider_identity: "openai".to_string(),
             model: "gpt-5.5".to_string(),
             auto_model: false,
+            receipt: None,
+            billing: Some(crate::core::events::RouteBillingEnvelope {
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+                endpoint_fingerprint: Some("openai-endpoint".to_string()),
+                billing_mode: crate::cost_status::RouteBillingMode::Metered,
+                dispatched_at: chrono::Utc::now(),
+            }),
+            base_url: String::new(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
         auto_route_receipt: None,
+        suggestion_authority: None,
     });
 
     let recovered = reconcile_turn_liveness(&mut app, now, false);
@@ -7121,8 +7689,18 @@ fn engine_event_disconnect_recovers_live_turn_immediately() {
             provider_identity: "openai".to_string(),
             model: "gpt-5.5".to_string(),
             auto_model: false,
+            receipt: None,
+            billing: Some(crate::core::events::RouteBillingEnvelope {
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+                endpoint_fingerprint: Some("openai-endpoint".to_string()),
+                billing_mode: crate::cost_status::RouteBillingMode::Metered,
+                dispatched_at: chrono::Utc::now(),
+            }),
+            base_url: String::new(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
         auto_route_receipt: None,
+        suggestion_authority: None,
     });
     let thinking_idx = crate::tui::streaming_thinking::ensure_active_entry(&mut app);
     crate::tui::streaming_thinking::append(&mut app, thinking_idx, "partial reasoning");
@@ -7186,8 +7764,18 @@ fn engine_event_disconnect_cleans_cancelled_turn_metadata() {
             provider_identity: "openai".to_string(),
             model: "gpt-5.5".to_string(),
             auto_model: false,
+            receipt: None,
+            billing: Some(crate::core::events::RouteBillingEnvelope {
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+                endpoint_fingerprint: Some("openai-endpoint".to_string()),
+                billing_mode: crate::cost_status::RouteBillingMode::Metered,
+                dispatched_at: chrono::Utc::now(),
+            }),
+            base_url: String::new(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
         auto_route_receipt: None,
+        suggestion_authority: None,
     });
 
     let recovered = recover_engine_event_disconnect(&mut app);
@@ -7225,6 +7813,29 @@ fn auto_model_still_uses_auto_model_router() {
         crate::tui::auto_router::should_resolve_auto_model_selection(&app),
         "auto model still needs the router to choose the concrete model"
     );
+}
+
+#[tokio::test]
+async fn auto_preview_stops_before_the_provider_backed_route_planner() {
+    let mut app = create_test_app();
+    app.auto_model = true;
+    app.model = "auto".to_string();
+    let config = Config::default();
+    let (_engine, handle) = crate::core::engine::Engine::new(EngineConfig::default(), &config);
+
+    let inputs = build_preview_request_inputs(
+        &app,
+        &config,
+        &handle,
+        Some("classify this hypothetical turn".to_string()),
+    )
+    .await;
+
+    assert!(inputs.next_turn.is_none());
+    assert!(matches!(
+        inputs.unresolved,
+        crate::core::engine::preview::PreviewUnresolved::AutoRouteClassificationNotExecuted
+    ));
 }
 
 fn init_git_repo() -> TempDir {
@@ -8385,8 +8996,8 @@ fn subagent_token_usage_updates_live_cost_counter_without_card_change() {
         1,
         &crate::tools::subagent::MailboxMessage::TokenUsage {
             agent_id: "agent-a".to_string(),
-            provider: ApiProvider::Deepseek,
-            model: "deepseek-v4-flash".to_string(),
+            source_id: "response-a".to_string(),
+            route: test_mailbox_route(ApiProvider::Deepseek, "deepseek-v4-flash"),
             usage: crate::models::Usage {
                 input_tokens: 10_000,
                 output_tokens: 1_000,
@@ -8412,8 +9023,8 @@ fn subagent_token_usage_prices_the_child_route_not_the_parent_route() {
         2,
         &crate::tools::subagent::MailboxMessage::TokenUsage {
             agent_id: "agent-codex".to_string(),
-            provider: ApiProvider::OpenaiCodex,
-            model: "gpt-5.5".to_string(),
+            source_id: "response-codex".to_string(),
+            route: test_mailbox_route(ApiProvider::OpenaiCodex, "gpt-5.5"),
             usage: crate::models::Usage {
                 input_tokens: 10_000,
                 output_tokens: 1_000,
@@ -8433,8 +9044,8 @@ fn subagent_token_usage_is_deduped_by_mailbox_sequence() {
     let mut app = create_test_app();
     let usage = crate::tools::subagent::MailboxMessage::TokenUsage {
         agent_id: "agent-a".to_string(),
-        provider: ApiProvider::Deepseek,
-        model: "deepseek-v4-flash".to_string(),
+        source_id: "response-a".to_string(),
+        route: test_mailbox_route(ApiProvider::Deepseek, "deepseek-v4-flash"),
         usage: crate::models::Usage {
             input_tokens: 10_000,
             output_tokens: 1_000,
@@ -8448,6 +9059,31 @@ fn subagent_token_usage_is_deduped_by_mailbox_sequence() {
     assert_eq!(app.session.subagent_cost, first);
     handle_subagent_mailbox(&mut app, 8, &usage);
     assert!(app.session.subagent_cost > first);
+}
+
+#[test]
+fn subagent_token_usage_sequence_is_scoped_to_engine_turn() {
+    let mut app = create_test_app();
+    let usage = crate::tools::subagent::MailboxMessage::TokenUsage {
+        agent_id: "agent-a".to_string(),
+        source_id: "response-a".to_string(),
+        route: test_mailbox_route(ApiProvider::Deepseek, "deepseek-v4-flash"),
+        usage: crate::models::Usage {
+            input_tokens: 10_000,
+            output_tokens: 1_000,
+            ..Default::default()
+        },
+    };
+
+    handle_subagent_mailbox_for_turn(&mut app, "engine-turn-a", 1, &usage);
+    let first = app.session.subagent_cost;
+    handle_subagent_mailbox_for_turn(&mut app, "engine-turn-a", 1, &usage);
+    assert_eq!(app.session.subagent_cost, first, "same envelope dedupes");
+    handle_subagent_mailbox_for_turn(&mut app, "engine-turn-b", 1, &usage);
+    assert!(
+        app.session.subagent_cost > first,
+        "a new turn's sequence one must accrue independently"
+    );
 }
 
 #[test]
@@ -9588,6 +10224,15 @@ fn turn_started_route_is_captured_before_cancel_suppression() {
             provider_identity: "openai".to_string(),
             model: "gpt-5.5".to_string(),
             auto_model: true,
+            receipt: None,
+            billing: Some(crate::core::events::RouteBillingEnvelope {
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+                endpoint_fingerprint: Some("openai-endpoint".to_string()),
+                billing_mode: crate::cost_status::RouteBillingMode::Metered,
+                dispatched_at: created_at.clone(),
+            }),
+            base_url: String::new(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
     };
 
@@ -9617,6 +10262,97 @@ fn turn_started_route_is_captured_before_cancel_suppression() {
     assert_eq!(observer.route, Some(route));
 }
 
+/// #4404/#4411: prompt-suggestion authority comes off the engine's route
+/// receipt, not off live config.
+///
+/// The TUI drains web config events ahead of engine events, so by the time
+/// `TurnStarted` is handled, config may already describe a different route than
+/// the one whose client the engine preflighted and installed. This test hands
+/// the handler a receipt for route A while the app's own config knows nothing
+/// about route A at all — authority must still be A.
+#[test]
+fn turn_started_suggestion_authority_comes_from_the_route_receipt_not_config() {
+    let mut app = create_test_app();
+    let receipt = crate::route_receipt::TurnRouteReceipt::new(
+        ApiProvider::Deepseek,
+        "deepseek",
+        "deepseek-chat",
+        "https://api.deepseek.com/v1",
+        "sk-route-a-secret",
+    );
+    let event = EngineEvent::TurnStarted {
+        turn_id: "turn_route_receipt".to_string(),
+        created_at: chrono::Utc::now(),
+        route: Some(crate::core::events::TurnRoute {
+            provider: ApiProvider::Deepseek,
+            provider_identity: "deepseek".to_string(),
+            model: "deepseek-chat".to_string(),
+            auto_model: false,
+            receipt: Some(receipt),
+            billing: Some(crate::core::events::RouteBillingEnvelope {
+                billing_surface: None,
+                endpoint_fingerprint: None,
+                billing_mode: crate::cost_status::RouteBillingMode::Unknown,
+                dispatched_at: chrono::Utc::now(),
+            }),
+            base_url: String::new(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
+        }),
+    };
+
+    capture_turn_started_metadata(&mut app, &event);
+
+    let active_turn = app.active_turn.as_ref().expect("captured turn");
+    let authority = active_turn
+        .suggestion_authority
+        .as_ref()
+        .expect("the route receipt is the authority, so no config lookup is required");
+    assert_eq!(authority.provider(), ApiProvider::Deepseek);
+    assert_eq!(authority.provider_identity(), "deepseek");
+    assert_eq!(authority.model(), "deepseek-chat");
+    assert_eq!(authority.endpoint_identity(), "https://api.deepseek.com/v1");
+    // Nothing credential-derived may render.
+    let rendered = format!("{authority:?}");
+    assert!(!rendered.contains("sk-route-a-secret"), "{rendered}");
+    assert!(rendered.contains("<redacted>"), "{rendered}");
+}
+
+/// A turn with no installed-client receipt has no provenance, so it can never
+/// authorize a follow-up request — regardless of what config would resolve.
+#[test]
+fn turn_started_without_a_route_receipt_captures_no_suggestion_authority() {
+    let mut app = create_test_app();
+    let event = EngineEvent::TurnStarted {
+        turn_id: "turn_no_receipt".to_string(),
+        created_at: chrono::Utc::now(),
+        route: Some(crate::core::events::TurnRoute {
+            provider: ApiProvider::Deepseek,
+            provider_identity: "deepseek".to_string(),
+            model: "deepseek-chat".to_string(),
+            auto_model: false,
+            receipt: None,
+            billing: Some(crate::core::events::RouteBillingEnvelope {
+                billing_surface: None,
+                endpoint_fingerprint: None,
+                billing_mode: crate::cost_status::RouteBillingMode::Unknown,
+                dispatched_at: chrono::Utc::now(),
+            }),
+            base_url: String::new(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
+        }),
+    };
+
+    capture_turn_started_metadata(&mut app, &event);
+
+    assert!(
+        app.active_turn
+            .as_ref()
+            .expect("captured turn")
+            .suggestion_authority
+            .is_none()
+    );
+}
+
 #[test]
 fn engine_error_health_accounting_uses_active_turn_route() {
     let mut app = create_test_app();
@@ -9630,6 +10366,15 @@ fn engine_error_health_accounting_uses_active_turn_route() {
             provider_identity: "openai".to_string(),
             model: "gpt-5.5".to_string(),
             auto_model: true,
+            receipt: None,
+            billing: Some(crate::core::events::RouteBillingEnvelope {
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+                endpoint_fingerprint: Some("openai-endpoint".to_string()),
+                billing_mode: crate::cost_status::RouteBillingMode::Metered,
+                dispatched_at: chrono::Utc::now(),
+            }),
+            base_url: String::new(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
     };
     capture_turn_started_metadata(&mut app, &event);
@@ -10581,7 +11326,7 @@ async fn steer_user_message_records_prompt_for_cancel_restore() {
 }
 
 #[tokio::test]
-async fn composer_send_shortcut_sends_next_queued_message_into_running_turn() {
+async fn empty_enter_sends_next_queued_message_into_running_turn() {
     let mut app = create_test_app();
     app.is_loading = true;
     app.queue_message(crate::tui::app::QueuedMessage::new(
@@ -10592,9 +11337,9 @@ async fn composer_send_shortcut_sends_next_queued_message_into_running_turn() {
     let mut engine = crate::core::engine::mock_engine_handle();
 
     assert!(
-        send_shortcut_queued_message_now(&mut app, &config, &engine.handle)
+        send_next_queued_message_now(&mut app, &config, &engine.handle)
             .await
-            .expect("composer send shortcut succeeds")
+            .expect("empty Enter succeeds")
     );
 
     assert_eq!(app.queued_message_count(), 0);
@@ -10605,7 +11350,7 @@ async fn composer_send_shortcut_sends_next_queued_message_into_running_turn() {
 }
 
 #[tokio::test]
-async fn composer_send_shortcut_sends_edited_queued_draft_into_running_turn() {
+async fn empty_enter_does_not_send_an_edited_queued_draft() {
     let mut app = create_test_app();
     app.is_loading = true;
     app.queued_draft = Some(crate::tui::app::QueuedMessage::new(
@@ -10618,17 +11363,15 @@ async fn composer_send_shortcut_sends_edited_queued_draft_into_running_turn() {
     let mut engine = crate::core::engine::mock_engine_handle();
 
     assert!(
-        send_shortcut_queued_message_now(&mut app, &config, &engine.handle)
+        !send_next_queued_message_now(&mut app, &config, &engine.handle)
             .await
-            .expect("composer send shortcut succeeds")
+            .expect("empty Enter no-op succeeds")
     );
 
-    assert!(app.queued_draft.is_none());
-    assert!(app.input.is_empty());
+    assert!(app.queued_draft.is_some());
+    assert_eq!(app.input, "edited queued follow-up");
     assert_eq!(app.queued_message_count(), 0);
-    let content = engine.rx_steer.recv().await.expect("steer content");
-    assert!(content.contains("edited queued follow-up"));
-    assert!(content.contains("skill body"));
+    assert!(engine.rx_steer.try_recv().is_err());
 }
 
 #[test]
@@ -10677,7 +11420,7 @@ async fn queue_send_index_sends_selected_message_into_running_turn() {
 }
 
 #[tokio::test]
-async fn enter_while_model_waiting_steers_instead_of_queueing() {
+async fn enter_while_model_waiting_queues_instead_of_steering() {
     let mut app = create_test_app();
     app.is_loading = true;
     app.streaming_message_index = None;
@@ -10685,14 +11428,26 @@ async fn enter_while_model_waiting_steers_instead_of_queueing() {
     let mut engine = crate::core::engine::mock_engine_handle();
     let queued = build_queued_message(&mut app, "adjust current turn".to_string());
 
-    submit_or_steer_message(&mut app, &config, &engine.handle, queued)
-        .await
-        .expect("busy waiting submit steers");
+    submit_or_steer_message(
+        &mut app,
+        &config,
+        &engine.handle,
+        queued,
+        DispatchRecovery::Immediate,
+    )
+    .await
+    .expect("busy waiting submit queues");
 
-    assert_eq!(app.queued_message_count(), 0);
+    assert_eq!(app.queued_message_count(), 1);
     assert_eq!(
-        engine.rx_steer.recv().await.as_deref(),
+        app.queued_messages
+            .front()
+            .map(|message| message.display.as_str()),
         Some("adjust current turn")
+    );
+    assert!(
+        engine.rx_steer.try_recv().is_err(),
+        "bare Enter must never become a same-turn steer"
     );
 }
 
@@ -10751,7 +11506,13 @@ async fn steer_failure_queues_message_and_surfaces_toast() {
     drop(engine.rx_steer);
     let queued = crate::tui::app::QueuedMessage::new("follow up while busy".to_string(), None);
 
-    attempt_steer_with_queue_fallback(&mut app, &engine.handle, queued).await;
+    attempt_steer_with_queue_fallback(
+        &mut app,
+        &engine.handle,
+        queued,
+        DispatchRecovery::Immediate,
+    )
+    .await;
 
     assert_eq!(app.queued_message_count(), 1);
     let toast = app.status_toasts.back().expect("steer failure toast");
@@ -10768,9 +11529,15 @@ async fn streaming_enter_queue_pushes_visible_toast() {
     let engine = crate::core::engine::mock_engine_handle();
     let queued = build_queued_message(&mut app, "follow up during stream".to_string());
 
-    submit_or_steer_message(&mut app, &config, &engine.handle, queued)
-        .await
-        .expect("streaming submit queues");
+    submit_or_steer_message(
+        &mut app,
+        &config,
+        &engine.handle,
+        queued,
+        DispatchRecovery::Immediate,
+    )
+    .await
+    .expect("streaming submit queues");
 
     assert_eq!(app.queued_message_count(), 1);
     let toast = app.status_toasts.back().expect("queue toast");
@@ -10778,32 +11545,77 @@ async fn streaming_enter_queue_pushes_visible_toast() {
     assert!(toast.text.contains("Queued follow-up"));
 }
 
+#[test]
+fn streaming_append_receipt_chains_until_the_next_render() {
+    let mut app = create_test_app();
+    let index = ensure_streaming_assistant_history_cell(&mut app);
+    app.resync_history_revisions();
+    let initial_revision = app.history_revisions[index];
+
+    append_streaming_text(&mut app, index, "first");
+    let first_revision = app.history_revisions[index];
+    append_streaming_text(&mut app, index, " second");
+    let second_revision = app.history_revisions[index];
+
+    assert_ne!(initial_revision, first_revision);
+    assert_ne!(first_revision, second_revision);
+    assert_eq!(
+        app.streaming_source_receipt,
+        Some(crate::tui::transcript::StreamingSourceReceipt {
+            cell_index: index,
+            from_revision: initial_revision,
+            to_revision: second_revision,
+            content_len: "first second".len(),
+        })
+    );
+}
+
+#[test]
+fn unknown_streaming_cell_mutation_revokes_append_provenance() {
+    let mut app = create_test_app();
+    let index = ensure_streaming_assistant_history_cell(&mut app);
+    append_streaming_text(&mut app, index, "append-only");
+    assert!(app.streaming_source_receipt.is_some());
+
+    if let Some(HistoryCell::Assistant { content, .. }) = app.history.get_mut(index) {
+        content.insert_str(0, "rewritten ");
+    }
+    app.bump_history_cell(index);
+
+    assert!(app.streaming_source_receipt.is_none());
+}
+
 #[tokio::test]
-async fn empty_composer_second_enter_leaves_queued_message() {
-    // Bare Enter while streaming only queues. A second bare Enter must not
-    // steal the just-queued body for steer — use Shift+Enter / Ctrl+Enter.
+async fn empty_enter_promotes_the_oldest_queued_message() {
+    // Typed Enter while streaming queues. An explicit empty Enter promotes
+    // the oldest queued follow-up into the active turn.
     let mut app = create_test_app();
     app.is_loading = true;
     app.streaming_message_index = Some(0);
     let config = Config::default();
-    let engine = crate::core::engine::mock_engine_handle();
+    let mut engine = crate::core::engine::mock_engine_handle();
     let queued = build_queued_message(&mut app, "coordinate parallel tasks".to_string());
 
-    submit_or_steer_message(&mut app, &config, &engine.handle, queued)
-        .await
-        .expect("first enter queues while streaming");
+    submit_or_steer_message(
+        &mut app,
+        &config,
+        &engine.handle,
+        queued,
+        DispatchRecovery::Immediate,
+    )
+    .await
+    .expect("first enter queues while streaming");
     assert_eq!(app.queued_message_count(), 1);
     assert!(app.input.is_empty());
 
-    // Second bare Enter with empty composer is a no-op for queue contents.
-    assert!(app.input.trim().is_empty());
-    assert_eq!(
-        app.decide_submit_disposition(),
-        crate::tui::app::SubmitDisposition::Queue
+    assert!(
+        send_next_queued_message_now(&mut app, &config, &engine.handle)
+            .await
+            .expect("empty Enter promotes queue")
     );
-    assert_eq!(app.queued_message_count(), 1);
+    assert_eq!(app.queued_message_count(), 0);
     assert_eq!(
-        app.queued_messages.front().map(|m| m.display.as_str()),
+        engine.rx_steer.recv().await.as_deref(),
         Some("coordinate parallel tasks")
     );
 }
@@ -10818,9 +11630,15 @@ async fn operate_streaming_enter_queues_another_parallel_task() {
     let engine = crate::core::engine::mock_engine_handle();
     let queued = build_queued_message(&mut app, "check the docs too".to_string());
 
-    submit_or_steer_message(&mut app, &config, &engine.handle, queued)
-        .await
-        .expect("Operate streaming submit queues another task");
+    submit_or_steer_message(
+        &mut app,
+        &config,
+        &engine.handle,
+        queued,
+        DispatchRecovery::Immediate,
+    )
+    .await
+    .expect("Operate streaming submit queues another task");
 
     assert_eq!(app.queued_message_count(), 1);
     assert!(app.status_message.as_deref().is_some_and(
@@ -10843,9 +11661,15 @@ async fn inline_skill_request_keeps_instruction_when_busy_queueing() {
 
     let queued = build_queued_message(&mut app, "do X".to_string());
     assert!(app.active_skill.is_none(), "skill must be consumed once");
-    submit_or_steer_message(&mut app, &config, &engine.handle, queued)
-        .await
-        .expect("streaming skill request queues");
+    submit_or_steer_message(
+        &mut app,
+        &config,
+        &engine.handle,
+        queued,
+        DispatchRecovery::Immediate,
+    )
+    .await
+    .expect("streaming skill request queues");
 
     let queued = app.queued_messages.front().expect("queued skill request");
     assert_eq!(queued.display, "do X");
@@ -10994,10 +11818,12 @@ fn mental_models_backtracks_to_the_last_first_run_decision() {
     crate::tui::onboarding::back_from_mental_models(&mut app);
     assert_eq!(app.onboarding, OnboardingState::ApiKey);
 
+    // With neither optional step, the last decision before the primer is the
+    // appearance step (#3937), not language.
     app.onboarding = OnboardingState::MentalModels;
     app.onboarding_had_api_key_step = false;
     crate::tui::onboarding::back_from_mental_models(&mut app);
-    assert_eq!(app.onboarding, OnboardingState::Language);
+    assert_eq!(app.onboarding, OnboardingState::Appearance);
 }
 
 // ---- Issue #4763: provider onboarding must never be a trap ----
@@ -11032,6 +11858,87 @@ fn onboarding_ctrl_c_quits_even_with_the_provider_picker_on_the_view_stack() {
             &ctrl_c,
         ),
         OnboardingKeyRoute::Quit,
+    );
+}
+
+/// #3937: the theme picker owns every key on the appearance step, Escape
+/// included — the shell popping the modal itself would strand a previewed but
+/// unsaved theme instead of running the picker's revert.
+#[test]
+fn appearance_step_hands_every_key_including_escape_to_the_theme_picker() {
+    for key in [
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+    ] {
+        assert_eq!(
+            onboarding_key_route(
+                OnboardingState::Appearance,
+                Some(ModalKind::ThemePicker),
+                &key,
+            ),
+            OnboardingKeyRoute::ThemePicker,
+            "{key:?}",
+        );
+    }
+
+    // Ctrl+C still quits from under the picker.
+    assert_eq!(
+        onboarding_key_route(
+            OnboardingState::Appearance,
+            Some(ModalKind::ThemePicker),
+            &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        ),
+        OnboardingKeyRoute::Quit,
+    );
+
+    // With the picker closed the step falls back to the legacy switch, which
+    // is what lets Enter re-open it and Escape walk back to Language.
+    assert_eq!(
+        onboarding_key_route(
+            OnboardingState::Appearance,
+            None,
+            &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        ),
+        OnboardingKeyRoute::Legacy,
+    );
+}
+
+/// #3927: the offline exit must be reachable from both credential steps even
+/// while the provider picker owns the keys — otherwise the only advertised way
+/// out of a modal the user cannot satisfy is to quit.
+#[test]
+fn explore_offline_shortcut_escapes_the_provider_picker_from_both_credential_steps() {
+    let ctrl_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+
+    assert_eq!(
+        onboarding_key_route(
+            OnboardingState::Provider,
+            Some(ModalKind::ProviderPicker),
+            &ctrl_o,
+        ),
+        OnboardingKeyRoute::ExploreOffline,
+    );
+    assert_eq!(
+        onboarding_key_route(OnboardingState::ApiKey, None, &ctrl_o),
+        OnboardingKeyRoute::ExploreOffline,
+    );
+
+    // It is scoped to the credential steps: elsewhere it stays an ordinary key.
+    assert_eq!(
+        onboarding_key_route(OnboardingState::Language, None, &ctrl_o),
+        OnboardingKeyRoute::Legacy,
+    );
+    assert_eq!(
+        onboarding_key_route(OnboardingState::None, None, &ctrl_o),
+        OnboardingKeyRoute::Legacy,
+    );
+
+    // A bare "o" is text on the API-key screen and must never trigger it.
+    let plain_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE);
+    assert_eq!(
+        onboarding_key_route(OnboardingState::ApiKey, None, &plain_o),
+        OnboardingKeyRoute::Legacy,
     );
 }
 
@@ -12532,8 +13439,39 @@ fn shell_wait_without_command_uses_task_id_until_command_metadata_arrives() {
 }
 
 #[test]
-fn tool_child_usage_metadata_updates_live_cost_counter() {
+fn legacy_child_usage_metadata_fails_closed_without_parent_route_fallback() {
     let mut app = create_test_app();
+    // An in-process review child publishes no route of its own, so it runs on
+    // the parent turn's client and is billed from the parent's frozen receipt.
+    // Without a receipt there is nothing sound to bill from, so the turn has to
+    // be active for the child to accrue anything.
+    app.active_turn = Some(crate::tui::app::ActiveTurnMetadata {
+        turn_id: "turn-child-usage".to_string(),
+        created_at: chrono::Utc::now(),
+        route: Some(crate::core::events::TurnRoute {
+            provider: ApiProvider::Deepseek,
+            provider_identity: "deepseek".to_string(),
+            model: "deepseek-v4-flash".to_string(),
+            auto_model: false,
+            receipt: None,
+            // The parent turn is a fully dispatched, metered route. Even so,
+            // a child that publishes no route receipt of its own must not
+            // borrow it: the fail-closed answer is Unknown, reported as
+            // missing spend rather than silently inherited.
+            billing: Some(crate::core::events::RouteBillingEnvelope {
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+                endpoint_fingerprint: crate::cost_status::endpoint_fingerprint(
+                    crate::config::DEFAULT_DEEPSEEK_BASE_URL,
+                ),
+                billing_mode: crate::cost_status::RouteBillingMode::Metered,
+                dispatched_at: chrono::Utc::now(),
+            }),
+            base_url: crate::config::DEFAULT_DEEPSEEK_BASE_URL.to_string(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
+        }),
+        auto_route_receipt: None,
+        suggestion_authority: None,
+    });
     let result = Ok(crate::tools::spec::ToolResult::success("ok").with_metadata(
         serde_json::json!({
             "child_model": "deepseek-v4-flash",
@@ -12546,7 +13484,176 @@ fn tool_child_usage_metadata_updates_live_cost_counter() {
 
     handle_tool_call_complete(&mut app, "review-usage", "review", &result);
 
-    assert!(app.session.subagent_cost > 0.0);
+    assert_eq!(app.session.subagent_cost, 0.0);
+    assert_eq!(app.session.cost_unpriced_turns, 1);
+    assert!(
+        app.session
+            .cost_unpriced_reasons
+            .contains("unknown_billing_basis")
+    );
+}
+
+/// Child metadata has to carry every billable class end-to-end. The producer
+/// (`review`/`verify`/`rlm`) and the reconstruction in `tool_routing` are tested
+/// together here, because the bug was a mismatch between them: the reconstruction
+/// hardcoded `prompt_cache_write_tokens: None`, so a child's cache-creation
+/// tokens were billed at nothing *and* the turn still looked fully priced (#4318).
+#[test]
+fn child_usage_metadata_carries_cache_write_and_reasoning_end_to_end() {
+    let child_usage = crate::models::Usage {
+        input_tokens: 1_000_000,
+        output_tokens: 100_000,
+        prompt_cache_hit_tokens: Some(200_000),
+        prompt_cache_miss_tokens: Some(700_000),
+        prompt_cache_write_tokens: Some(100_000),
+        reasoning_tokens: Some(40_000),
+        reasoning_replay_tokens: Some(12_345),
+        server_tool_use: Some(crate::models::ServerToolUsage {
+            code_execution_requests: Some(2),
+            tool_search_requests: Some(1),
+        }),
+        ..Default::default()
+    };
+
+    // The shared producer emits every class.
+    let priced_route = crate::cost_status::EffectiveRouteEnvelope {
+        provider: crate::config::ApiProvider::Anthropic,
+        provider_identity: "anthropic-api".to_string(),
+        model: "claude-haiku-4-5".to_string(),
+        billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+        // Must be a real fingerprint: persistence and receipt boundaries drop
+        // anything that is not one, and a dropped field would have made the
+        // round-trip assertion below vacuously pass on both sides.
+        endpoint_fingerprint: crate::cost_status::endpoint_fingerprint(
+            "https://api.anthropic.com/v1",
+        ),
+        billing_mode: crate::cost_status::RouteBillingMode::Metered,
+        dispatched_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).expect("epoch"),
+    };
+    let fields = crate::cost_status::child_usage_metadata_fields(&priced_route, &child_usage);
+    assert_eq!(fields["child_prompt_cache_write_tokens"], 100_000);
+    assert_eq!(fields["child_reasoning_tokens"], 40_000);
+    assert_eq!(fields["child_reasoning_replay_tokens"], 12_345);
+    assert_eq!(
+        fields["child_server_tool_use"]["code_execution_requests"],
+        2
+    );
+    assert_eq!(fields["child_prompt_cache_hit_tokens"], 200_000);
+
+    // A priced child route with a published cache-write rate accrues money, and
+    // the reconstructed write class is what makes the amount correct.
+    //
+    // The parent deliberately stays DeepSeek: only the frozen child envelope
+    // may control this price.
+    let mut priced_app = create_test_app();
+    priced_app.api_provider = crate::config::ApiProvider::Deepseek;
+    priced_app.billing_presentation = crate::route_billing::BillingPresentation::Metered;
+    let mut metadata = serde_json::json!({});
+    crate::cost_status::attach_child_usage_metadata(&mut metadata, &priced_route, &child_usage);
+    assert_eq!(
+        crate::cost_status::child_route_envelope_from_metadata(&metadata),
+        Some(priced_route.clone()),
+        "typed child route metadata must round-trip exactly"
+    );
+    let priced = Ok(crate::tools::spec::ToolResult::success("ok").with_metadata(metadata));
+    handle_tool_call_complete(&mut priced_app, "verify-1", "verify", &priced);
+
+    // 0.7M input @1.00 + 0.1M output @5.00 + 0.2M read @0.10 + 0.1M write @1.25.
+    let expected = 0.7 * 1.0 + 0.1 * 5.0 + 0.2 * 0.1 + 0.1 * 1.25;
+    assert!(
+        (priced_app.session.subagent_cost - expected).abs() < 1e-9,
+        "got {}, want {expected}",
+        priced_app.session.subagent_cost
+    );
+    assert_eq!(priced_app.session.cost_priced_turns, 1);
+    assert_eq!(priced_app.session.cost_unpriced_turns, 0);
+
+    // The same usage on a route that publishes no cache-write rate must fail
+    // closed and name the class, rather than pricing "completely" at 0 for the
+    // write tokens.
+    let mut unpriced_app = create_test_app();
+    unpriced_app.api_provider = crate::config::ApiProvider::Deepseek;
+    unpriced_app.billing_presentation = crate::route_billing::BillingPresentation::Metered;
+    let unpriced_route = crate::cost_status::EffectiveRouteEnvelope {
+        provider: crate::config::ApiProvider::Moonshot,
+        provider_identity: "moonshot-api".to_string(),
+        model: "kimi-k2.7-code".to_string(),
+        billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+        endpoint_fingerprint: Some("test-moonshot-endpoint".to_string()),
+        billing_mode: crate::cost_status::RouteBillingMode::Metered,
+        dispatched_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).expect("epoch"),
+    };
+    let mut metadata = serde_json::json!({});
+    crate::cost_status::attach_child_usage_metadata(&mut metadata, &unpriced_route, &child_usage);
+    let unpriced = Ok(crate::tools::spec::ToolResult::success("ok").with_metadata(metadata));
+    handle_tool_call_complete(&mut unpriced_app, "rlm-1", "rlm", &unpriced);
+
+    assert_eq!(unpriced_app.session.subagent_cost, 0.0);
+    assert_eq!(unpriced_app.session.cost_priced_turns, 0);
+    assert_eq!(unpriced_app.session.cost_unpriced_turns, 1);
+    assert!(
+        unpriced_app
+            .session
+            .cost_unpriced_classes
+            .contains("cache_write"),
+        "{:?}",
+        unpriced_app.session.cost_unpriced_classes
+    );
+
+    // A child reporting more reasoning than output is contradicting the subset
+    // invariant; the figure is discarded rather than inflating billable output.
+    let mut pathological = create_test_app();
+    pathological.api_provider = crate::config::ApiProvider::Deepseek;
+    pathological.billing_presentation = crate::route_billing::BillingPresentation::Metered;
+    let mut metadata = serde_json::json!({});
+    crate::cost_status::attach_child_usage_metadata(
+        &mut metadata,
+        &test_mailbox_route(ApiProvider::Deepseek, "deepseek-v4-flash"),
+        &crate::models::Usage {
+            input_tokens: 1_000,
+            output_tokens: 100,
+            reasoning_tokens: Some(9_000),
+            ..Default::default()
+        },
+    );
+    let result = Ok(crate::tools::spec::ToolResult::success("ok").with_metadata(metadata));
+    handle_tool_call_complete(&mut pathological, "rlm-2", "rlm", &result);
+    // Cost is that of 1000 input / 100 output, with no reasoning surcharge.
+    let sane = crate::pricing::calculate_turn_cost_estimate_for_provider(
+        crate::config::ApiProvider::Deepseek,
+        "deepseek-v4-flash",
+        &crate::models::Usage {
+            input_tokens: 1_000,
+            output_tokens: 100,
+            ..Default::default()
+        },
+    )
+    .expect("DeepSeek flash is priced");
+    assert!(
+        (pathological.session.subagent_cost - sane.usd).abs() < 1e-12,
+        "impossible reasoning telemetry changed the price: {}",
+        pathological.session.subagent_cost
+    );
+}
+
+#[test]
+fn zero_usage_model_child_still_records_priced_receipt() {
+    let mut app = create_test_app();
+    let route = test_mailbox_route(ApiProvider::Deepseek, "deepseek-v4-flash");
+    let mut metadata = serde_json::json!({});
+    crate::cost_status::attach_child_usage_metadata(
+        &mut metadata,
+        &route,
+        &crate::models::Usage::default(),
+    );
+    let result = Ok(crate::tools::spec::ToolResult::error("kernel closed").with_metadata(metadata));
+
+    handle_tool_call_complete(&mut app, "rlm-zero", "rlm", &result);
+
+    assert_eq!(app.session.subagent_cost, 0.0);
+    assert_eq!(app.session.cost_priced_turns, 1);
+    assert_eq!(app.session.cost_unpriced_turns, 0);
+    assert_eq!(app.session.cost_route_receipts.len(), 1);
 }
 
 #[test]
@@ -13727,6 +14834,93 @@ async fn model_picker_persists_model_and_reasoning_effort() {
     assert!(provider_model_result.contains("auth=key saved · not checked"));
     assert!(provider_model_result.contains("health=attemptable"));
     assert!(!provider_model_result.contains("test-key"));
+}
+
+/// Re-picking the already-live model is a real, completed provider/model
+/// choice: after a session restore the live route routinely differs from the
+/// persisted defaults, so this is exactly how a user makes the restored route
+/// durable. It must persist *and* record setup progress — gating the receipt on
+/// "the model changed" made the setup step depend on what the session happened
+/// to be restored to.
+#[tokio::test]
+async fn reselecting_live_model_and_thinking_persists_startup_defaults() {
+    let _guard = SettingsHomeGuard::new();
+    let mut app = create_test_app();
+    app.set_model_selection("deepseek-v4-pro".to_string());
+    app.reasoning_effort = ReasoningEffort::High;
+    let mut engine = mock_engine_handle();
+    let mut config = Config {
+        api_key: Some("test-key".to_string()),
+        ..Default::default()
+    };
+    assert!(
+        codewhale_config::SetupState::load()
+            .ok()
+            .flatten()
+            .is_none(),
+        "the test home must start with no recorded setup progress"
+    );
+
+    apply_model_picker_choice(
+        &mut app,
+        &mut engine.handle,
+        &mut config,
+        "deepseek-v4-pro".to_string(),
+        None,
+        None,
+        ReasoningEffort::High,
+        "deepseek-v4-pro".to_string(),
+        ReasoningEffort::High,
+    )
+    .await;
+
+    let settings = crate::settings::Settings::load().expect("load settings");
+    assert_eq!(settings.default_model.as_deref(), Some("deepseek-v4-pro"));
+    assert_eq!(settings.reasoning_effort.as_deref(), Some("high"));
+    assert!(
+        app.status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("saved as startup default"))
+    );
+    let state = codewhale_config::SetupState::load()
+        .expect("read setup state")
+        .expect("a persisted concrete model selection must record setup progress");
+    assert!(
+        state
+            .steps
+            .contains_key(&codewhale_config::SetupStep::ProviderModel),
+        "the provider/model setup step must be recorded even when the model was already live"
+    );
+}
+
+#[tokio::test]
+async fn reselecting_live_thinking_only_persists_startup_default() {
+    let _guard = SettingsHomeGuard::new();
+    let mut app = create_test_app();
+    app.set_model_selection("deepseek-v4-pro".to_string());
+    app.reasoning_effort = ReasoningEffort::High;
+    let engine = mock_engine_handle();
+
+    apply_picker_effort_choice(
+        &mut app,
+        &engine.handle,
+        ReasoningEffort::High,
+        ReasoningEffort::High,
+    )
+    .await;
+
+    assert_eq!(
+        crate::settings::Settings::load()
+            .expect("load settings")
+            .reasoning_effort
+            .as_deref(),
+        Some("high")
+    );
+    assert!(
+        app.status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("saved as startup default"))
+    );
 }
 
 #[tokio::test]
@@ -16247,47 +17441,6 @@ fn next_escape_action_slash_menu_takes_priority() {
 }
 
 #[test]
-fn tab_queues_running_turn_draft_for_next_turn() {
-    let mut app = create_test_app();
-    app.is_loading = true;
-    app.input = "follow up next".to_string();
-    app.cursor_position = app.input.chars().count();
-
-    assert!(queue_current_draft_for_next_turn(&mut app));
-
-    assert!(app.input.is_empty());
-    assert_eq!(app.queued_message_count(), 1);
-    assert_eq!(
-        app.queued_messages.front().map(|msg| msg.display.as_str()),
-        Some("follow up next")
-    );
-    assert!(
-        app.status_message
-            .as_deref()
-            .is_some_and(|msg| msg.contains("queued follow-up(s)"))
-    );
-}
-
-#[test]
-fn tab_queue_preserves_queued_draft_skill_instruction() {
-    let mut app = create_test_app();
-    app.is_loading = true;
-    app.input = "edited queued follow-up".to_string();
-    app.cursor_position = app.input.chars().count();
-    app.queued_draft = Some(QueuedMessage::new(
-        "original".to_string(),
-        Some("skill body".to_string()),
-    ));
-
-    assert!(queue_current_draft_for_next_turn(&mut app));
-
-    let queued = app.queued_messages.front().expect("queued message");
-    assert_eq!(queued.display, "edited queued follow-up");
-    assert_eq!(queued.skill_instruction.as_deref(), Some("skill body"));
-    assert!(app.queued_draft.is_none());
-}
-
-#[test]
 fn merge_pending_steers_returns_none_when_empty() {
     let mut app = create_test_app();
     assert!(merge_pending_steers(&mut app).is_none());
@@ -16334,6 +17487,48 @@ fn merge_pending_steers_keeps_first_skill_instruction_only() {
     let merged = merge_pending_steers(&mut app).expect("merge yields a message");
     assert_eq!(merged.skill_instruction.as_deref(), Some("first skill"));
     assert_eq!(merged.display, "a\n\nb");
+}
+
+#[test]
+fn restored_queued_message_crosses_bounded_message_submit_serialization() {
+    let app = create_test_app();
+    let original = "restored 用户 \"quoted\"\n".repeat(8_000);
+    let persisted = queued_ui_to_session(&QueuedMessage::new(original.clone(), None));
+    let restored = queued_session_to_ui(persisted);
+    let payload = crate::hooks::message_submit_payload(&app.base_hook_context(), &restored.display);
+    let encoded = serde_json::to_vec(&payload).expect("serialize restored payload");
+
+    assert!(
+        encoded.len() <= crate::hooks::HOOK_MESSAGE_SUBMIT_PAYLOAD_MAX_BYTES,
+        "restored payload was {} bytes",
+        encoded.len()
+    );
+    assert_eq!(payload["text_original_bytes"], original.len());
+    assert_eq!(payload["text_truncated"], true);
+    assert!(original.starts_with(payload["text"].as_str().expect("text")));
+}
+
+#[test]
+fn merged_pending_steers_cross_bounded_message_submit_serialization() {
+    let mut app = create_test_app();
+    app.push_pending_steer(QueuedMessage::new("first \"quoted\"\n".repeat(5_000), None));
+    app.push_pending_steer(QueuedMessage::new("second 用户\n".repeat(5_000), None));
+    let merged = merge_pending_steers(&mut app).expect("merged message");
+    let payload = crate::hooks::message_submit_payload(&app.base_hook_context(), &merged.display);
+    let encoded = serde_json::to_vec(&payload).expect("serialize merged payload");
+
+    assert!(
+        encoded.len() <= crate::hooks::HOOK_MESSAGE_SUBMIT_PAYLOAD_MAX_BYTES,
+        "merged payload was {} bytes",
+        encoded.len()
+    );
+    assert_eq!(payload["text_original_bytes"], merged.display.len());
+    assert_eq!(payload["text_truncated"], true);
+    assert!(
+        merged
+            .display
+            .starts_with(payload["text"].as_str().expect("text"))
+    );
 }
 
 #[test]
@@ -16764,8 +17959,8 @@ fn duplicate_mailbox_token_usage_does_not_regress_displayed_cost() {
     let mut app = create_test_app();
     let usage = crate::tools::subagent::MailboxMessage::TokenUsage {
         agent_id: "agent-x".to_string(),
-        provider: ApiProvider::Deepseek,
-        model: "deepseek-v4-flash".to_string(),
+        source_id: "response-x".to_string(),
+        route: test_mailbox_route(ApiProvider::Deepseek, "deepseek-v4-flash"),
         usage: crate::models::Usage {
             input_tokens: 10_000,
             output_tokens: 1_000,
@@ -17204,6 +18399,7 @@ fn notification_settings_tui_always_keeps_configured_method_no_threshold() {
             sound_file: None,
             include_summary: true,
             subagent_completion: crate::config::SubagentCompletionNotification::default(),
+            event_sound: crate::config::EventSoundConfig::default(),
         }),
         ..Config::default()
     };
@@ -17238,6 +18434,7 @@ fn notification_settings_no_tui_override_uses_notifications_block() {
             sound_file: None,
             include_summary: false,
             subagent_completion: crate::config::SubagentCompletionNotification::default(),
+            event_sound: crate::config::EventSoundConfig::default(),
         }),
         ..Config::default()
     };

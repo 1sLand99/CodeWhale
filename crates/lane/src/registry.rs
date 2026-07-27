@@ -39,6 +39,30 @@ impl LaneStatus {
     }
 }
 
+/// Result of an attempted terminal transition.
+///
+/// The caller needs all three cases distinguished to report a truthful
+/// receipt: "I stopped it", "it was already terminal", and "it moved on since
+/// you read it, so I refused". Collapsing them into a bool made a concurrent
+/// stop by another process indistinguishable from our own transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalTransition {
+    /// This call performed the active -> terminal transition.
+    Transitioned,
+    /// The record was already terminal; nothing changed.
+    AlreadyTerminal,
+    /// The caller pinned a lifecycle generation and the record has moved on.
+    /// Nothing was changed and no backend teardown ran.
+    FenceMismatch { observed: u64 },
+}
+
+impl TerminalTransition {
+    #[must_use]
+    pub const fn transitioned(self) -> bool {
+        matches!(self, Self::Transitioned)
+    }
+}
+
 /// One lane record: a running (or completed) workflow instance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaneRecord {
@@ -97,6 +121,16 @@ pub fn lanes_dir() -> Result<PathBuf> {
     codewhale_config::ensure_state_dir(LANES_SUBDIR)
 }
 
+/// Where the Lane registry *would* live, without creating it.
+///
+/// [`lanes_dir`] creates the directory as a side effect, which makes it
+/// useless for answering "is there a durable Lane registry?" — a read-only
+/// status surface must not conjure the store it is reporting on. Availability
+/// probing goes through this instead (see [`crate::control::ControlContext`]).
+pub fn lane_registry_root() -> Result<PathBuf> {
+    Ok(codewhale_config::codewhale_home()?.join(LANES_SUBDIR))
+}
+
 /// Persist and load lane records.
 #[derive(Debug, Clone)]
 pub struct LaneRegistry {
@@ -146,9 +180,6 @@ impl LaneRegistry {
 
     pub fn load(&self, id: &str) -> Result<LaneRecord> {
         let path = self.record_path(id);
-        if !path.is_file() {
-            bail!("lane `{id}` not found under {}", self.root.display());
-        }
         let text = fs::read_to_string(&path)
             .with_context(|| format!("read lane record {}", path.display()))?;
         serde_json::from_str(&text).with_context(|| format!("parse lane record {}", path.display()))
@@ -318,6 +349,31 @@ impl LaneRegistry {
     where
         F: FnOnce(&LaneRecord) -> Result<()>,
     {
+        self.mark_terminal_if_active_fenced(record, status, None, before_transition)
+            .map(TerminalTransition::transitioned)
+    }
+
+    /// [`mark_terminal_if_active_with`] with an optional lifecycle fence.
+    ///
+    /// `expected_lifecycle_seq` is evaluated **after** the live record is
+    /// reloaded under the per-Lane advisory lock, not by the caller before it.
+    /// A pre-lock check is a TOCTOU: another process can transition the record
+    /// between the caller's read and this write, and the caller would then act
+    /// on a generation it never observed. Checking here means a stale fence
+    /// refuses without running `before_transition`, so no backend teardown
+    /// happens for a run the caller did not actually target.
+    ///
+    /// [`mark_terminal_if_active_with`]: Self::mark_terminal_if_active_with
+    pub fn mark_terminal_if_active_fenced<F>(
+        &self,
+        record: &mut LaneRecord,
+        status: LaneStatus,
+        expected_lifecycle_seq: Option<u64>,
+        before_transition: F,
+    ) -> Result<TerminalTransition>
+    where
+        F: FnOnce(&LaneRecord) -> Result<()>,
+    {
         if status.is_active() {
             bail!("terminal lane transition requires a terminal status");
         }
@@ -336,9 +392,17 @@ impl LaneRegistry {
             .with_context(|| format!("lock lane record {}", record.id))?;
 
         let mut current = self.load(&record.id)?;
+        // Fence first: a mismatched generation must not run backend teardown.
+        if let Some(expected) = expected_lifecycle_seq
+            && expected != current.lifecycle_seq
+        {
+            let observed = current.lifecycle_seq;
+            *record = current;
+            return Ok(TerminalTransition::FenceMismatch { observed });
+        }
         if !current.status.is_active() {
             *record = current;
-            return Ok(false);
+            return Ok(TerminalTransition::AlreadyTerminal);
         }
         before_transition(&current)?;
         current.lifecycle_seq = current.lifecycle_seq.max(1).saturating_add(1);
@@ -347,7 +411,7 @@ impl LaneRegistry {
         current.attach_target = None;
         self.save(&current)?;
         *record = current;
-        Ok(true)
+        Ok(TerminalTransition::Transitioned)
     }
 }
 

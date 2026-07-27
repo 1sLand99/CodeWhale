@@ -46,7 +46,8 @@ use constants::{TOOL_RUNNING_SYMBOLS, TOOL_STATUS_SYMBOL_MS};
 use message::{
     RenderedTranscriptLine, assistant_label_style_for, hard_break_copy_lines, message_body_style,
     render_message, render_message_with_copy_metadata_for_palette, render_plain_message,
-    render_user_message, system_body_style, system_label_style, user_body_style, user_label_style,
+    render_user_message, system_body_style, system_label_style, update_streaming_message_render,
+    user_body_style, user_label_style,
 };
 #[cfg(test)]
 pub(super) use thinking::render_thinking_with_highlight;
@@ -209,6 +210,48 @@ impl HistoryCell {
             | HistoryCell::ArchivedContext { .. }
             | HistoryCell::SubAgent(_) => false,
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn update_incremental_streaming_render(
+        &self,
+        width: u16,
+        options: TranscriptRenderOptions,
+        verified_append: bool,
+        cache: &mut crate::tui::markdown_render::IncrementalMarkdownRenderCache,
+        lines: &mut Vec<Line<'static>>,
+        links: &mut Vec<Vec<crate::tui::osc8::LineLink>>,
+        copy_separators: &mut Vec<CopyLineSeparator>,
+        copy_prefix_widths: &mut Vec<usize>,
+    ) -> Option<usize> {
+        let HistoryCell::Assistant {
+            content,
+            streaming: true,
+        } = self
+        else {
+            return None;
+        };
+        if content.trim().is_empty() {
+            lines.clear();
+            links.clear();
+            copy_separators.clear();
+            copy_prefix_widths.clear();
+            *cache = crate::tui::markdown_render::IncrementalMarkdownRenderCache::default();
+            return Some(0);
+        }
+        Some(update_streaming_message_render(
+            cache,
+            content,
+            width,
+            assistant_label_style_for(true, options.low_motion),
+            message_body_style(),
+            options.palette_mode,
+            verified_append,
+            lines,
+            links,
+            copy_separators,
+            copy_prefix_widths,
+        ))
     }
 
     /// Render the cell into a set of terminal lines.
@@ -2571,7 +2614,7 @@ fn apply_hot_tail_to_last_line(lines: &mut [Line<'static>], low_motion: bool) {
     }
 }
 
-fn apply_hot_tail_to_line(line: &mut Line<'static>, low_motion: bool) {
+pub(crate) fn apply_hot_tail_to_line(line: &mut Line<'static>, low_motion: bool) {
     if line.spans.is_empty() {
         return;
     }

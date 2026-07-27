@@ -149,6 +149,43 @@ impl Frame {
         None
     }
 
+    /// Whether any painted cell carries a 24-bit color. The palette adapter
+    /// downgrades every `Color::Rgb` before it reaches crossterm on terminals
+    /// that only advertise 256 or 16 colors, so this is the parsed-ANSI proof
+    /// that the capability tier was honored — not a claim about what the
+    /// renderer intended.
+    pub fn any_truecolor_cell(&self) -> bool {
+        for row in 0..self.rows() {
+            for col in 0..self.cols() {
+                let Some(cell) = self.parser.screen().cell(row, col) else {
+                    continue;
+                };
+                if matches!(cell.fgcolor(), vt100::Color::Rgb(..))
+                    || matches!(cell.bgcolor(), vt100::Color::Rgb(..))
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Every distinct character painted on the screen. Unicode/ASCII fallback
+    /// rows classify this set rather than substring-matching known glyphs.
+    pub fn painted_chars(&self) -> std::collections::BTreeSet<char> {
+        self.text().chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    /// Whether any row overflows the terminal width. `vt100` clips at the
+    /// right margin, so an overflowing renderer shows up as wrapped content
+    /// rather than a long row; this catches the parser-visible half.
+    pub fn max_row_width(&self) -> usize {
+        (0..self.rows())
+            .map(|y| self.row(y).chars().count())
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Whether any row of the screen has non-blank content. Used to detect a
     /// fully detached / blank viewport.
     pub fn any_visible_text(&self) -> bool {
