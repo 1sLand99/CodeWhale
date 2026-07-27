@@ -2208,6 +2208,73 @@ fn consultant_spawns_as_a_first_class_read_only_role() {
     assert!(escalation.contains("read-only role"), "{escalation}");
 }
 
+#[test]
+fn direct_consultant_aliases_apply_role_reasoning_default_after_inheritance() {
+    for parent_effort in [None, Some("low")] {
+        for role in ["consultant", "oracle", "advisor"] {
+            let request = parse_spawn_request(&json!({
+                "prompt": "give a second opinion",
+                "type": role
+            }))
+            .expect("advisory role parses");
+            assert_eq!(request.agent_type, FleetRole::Consultant);
+
+            let mut runtime = stub_runtime();
+            runtime.reasoning_effort = parent_effort.map(str::to_string);
+            let route = worker_profile_subagent_assignment_route(
+                &runtime,
+                &ModelRoute::Inherit,
+                request.thinking,
+                &request.prompt,
+                &request.agent_type,
+            );
+            assert_eq!(
+                route.reasoning_effort.as_deref(),
+                Some("high"),
+                "role={role}, parent={parent_effort:?}"
+            );
+        }
+    }
+
+    let request = parse_spawn_request(&json!({
+        "prompt": "give a concise second opinion",
+        "type": "consultant",
+        "thinking": "max"
+    }))
+    .expect("explicit consultant thinking parses");
+    let route = worker_profile_subagent_assignment_route(
+        &stub_runtime(),
+        &ModelRoute::Inherit,
+        request.thinking,
+        &request.prompt,
+        &request.agent_type,
+    );
+    assert_eq!(
+        route.reasoning_effort.as_deref(),
+        Some("max"),
+        "explicit child reasoning must override the role default"
+    );
+
+    let request = parse_spawn_request(&json!({
+        "prompt": "give a concise second opinion",
+        "type": "consultant",
+        "thinking": "low"
+    }))
+    .expect("explicit low consultant thinking parses");
+    let route = worker_profile_subagent_assignment_route(
+        &stub_runtime(),
+        &ModelRoute::Inherit,
+        request.thinking,
+        &request.prompt,
+        &request.agent_type,
+    );
+    assert_eq!(
+        route.reasoning_effort.as_deref(),
+        Some("high"),
+        "the DeepSeek route capability normalization remains the effective ceiling"
+    );
+}
+
 /// The role name has to survive the wire, or receipts and resumed sessions
 /// silently reclassify a consultant as the default worker.
 #[test]
@@ -10149,6 +10216,24 @@ fn consultant_reads_released_advisory_role_model_override_keys() {
             .expect("released compatibility override should remain valid");
         assert_eq!(model.as_deref(), Some("deepseek-v4-flash"), "{legacy_key}");
     }
+}
+
+#[test]
+fn canonical_consultant_model_override_precedes_compatibility_keys() {
+    let mut runtime = stub_runtime();
+    runtime
+        .role_models
+        .insert("consultant".to_string(), "deepseek-v4-pro".to_string());
+    runtime
+        .role_models
+        .insert("oracle".to_string(), "deepseek-v4-flash".to_string());
+    runtime
+        .role_models
+        .insert("advisor".to_string(), "deepseek-v4-flash".to_string());
+
+    let model = configured_model_for_role_or_type(&runtime, None, &FleetRole::Consultant)
+        .expect("canonical consultant override should resolve");
+    assert_eq!(model.as_deref(), Some("deepseek-v4-pro"));
 }
 
 #[test]

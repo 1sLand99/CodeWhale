@@ -121,7 +121,9 @@ fn validate_fleet_reasoning_effort(
     let agent_profile = resolve_task_agent_profile(task, agent_profiles)
         .ok()
         .flatten();
-    let Some(effort) = effective_fleet_reasoning_effort(agent_profile) else {
+    let Some(effort) =
+        effective_fleet_reasoning_effort_for_role(task.worker.as_ref(), agent_profile)
+    else {
         return Ok(());
     };
     if matches!(effort.as_str(), "inherit" | "auto" | "off") {
@@ -183,7 +185,9 @@ pub fn fleet_task_to_worker_spec_with_profiles(
         model_source,
     );
     requested_runtime.provider = explicit_fleet_provider_id(agent_profile);
-    requested_runtime.reasoning_effort = effective_fleet_reasoning_effort(agent_profile);
+    if let Some(reasoning_effort) = effective_fleet_reasoning_effort(agent_profile) {
+        requested_runtime.reasoning_effort = Some(reasoning_effort);
+    }
     if let Some(agent_profile) = agent_profile
         && let Some(profile_depth) = agent_profile.profile.delegation.max_spawn_depth
     {
@@ -487,7 +491,7 @@ pub(crate) fn resolve_fleet_route_with_config(
             ))
             .to_string(),
         ),
-        reasoning_effort: effective_fleet_reasoning_effort(agent_profile),
+        reasoning_effort: effective_fleet_reasoning_effort_for_role(worker_profile, agent_profile),
         role_source: role_source.map(str::to_string),
         loadout_source: loadout_source.map(str::to_string),
         model_class_source: model_class_source.map(str::to_string),
@@ -549,7 +553,7 @@ pub(crate) fn resolve_fleet_route_from_worker_report(
             ))
             .to_string(),
         ),
-        reasoning_effort: effective_fleet_reasoning_effort(agent_profile),
+        reasoning_effort: effective_fleet_reasoning_effort_for_role(worker_profile, agent_profile),
         role_source: role_source.map(str::to_string),
         loadout_source: loadout_source.map(str::to_string),
         model_class_source: model_class_source.map(str::to_string),
@@ -837,11 +841,21 @@ pub(crate) fn effective_fleet_reasoning_effort(
         .map(str::to_string)
 }
 
-/// The explicit reasoning/thinking tier a fleet worker should launch with.
+fn effective_fleet_reasoning_effort_for_role(
+    worker_profile: Option<&FleetTaskWorkerProfile>,
+    agent_profile: Option<&AgentProfile>,
+) -> Option<String> {
+    effective_fleet_reasoning_effort(agent_profile).or_else(|| {
+        let role = effective_fleet_role(worker_profile, agent_profile);
+        WorkerRuntimeProfile::for_role(fleet_role_to_agent_type(role.as_deref())).reasoning_effort
+    })
+}
+
+/// The effective reasoning/thinking tier a Fleet worker should launch with.
 ///
-/// This is the launch-side twin of the receipt/runtime-profile field: it reads
-/// only the resolved AgentProfile tier, so task model overrides can change the
-/// model without accidentally inventing a thinking tier.
+/// This is the launch-side twin of the receipt/runtime-profile field: an
+/// explicit resolved AgentProfile tier wins, otherwise the selected role's
+/// documented default applies. Task model overrides do not invent a tier.
 pub(crate) fn fleet_worker_launch_reasoning_effort(
     task_spec: &FleetTaskSpec,
     agent_profiles: &[AgentProfile],
@@ -849,7 +863,7 @@ pub(crate) fn fleet_worker_launch_reasoning_effort(
     let agent_profile = resolve_task_agent_profile(task_spec, agent_profiles)
         .ok()
         .flatten();
-    effective_fleet_reasoning_effort(agent_profile)
+    effective_fleet_reasoning_effort_for_role(task_spec.worker.as_ref(), agent_profile)
 }
 
 /// The route (model selector + optional explicit provider id) that a fleet
@@ -1919,6 +1933,69 @@ mod tests {
         assert_eq!(permissions.profile_id.as_deref(), Some("reviewer"));
         assert_eq!(permissions.profile_origin.as_deref(), Some("workspace"));
         assert_eq!(permissions.source, "worker_runtime_profile");
+    }
+
+    #[test]
+    fn role_only_consultant_aliases_keep_high_reasoning_and_locked_posture() {
+        let worker = FleetWorkerSpec {
+            id: "worker-1".to_string(),
+            name: "Worker".to_string(),
+            host: FleetHostSpec::Local,
+            trust_level: None,
+            labels: Default::default(),
+            capabilities: vec![],
+            max_concurrent_tasks: None,
+        };
+
+        for parent_effort in [None, Some("low")] {
+            for role in ["consultant", "oracle", "advisor"] {
+                let task = fleet_task(
+                    &format!("advice-{role}"),
+                    Some(worker_profile(None, Some(role), None, None, None, vec![])),
+                );
+                let mut parent = WorkerRuntimeProfile::for_role(FleetRole::Worker);
+                parent.reasoning_effort = parent_effort.map(str::to_string);
+                let spec = fleet_task_to_worker_spec_with_profiles(
+                    "worker-1",
+                    "run-1",
+                    &task,
+                    &worker,
+                    "deepseek-v4-pro",
+                    std::path::Path::new("/tmp"),
+                    &[],
+                    Some(&parent),
+                )
+                .expect("role-only consultant should produce a worker spec");
+
+                assert_eq!(spec.role.as_deref(), Some("consultant"));
+                assert_eq!(spec.agent_type, FleetRole::Consultant);
+                assert_eq!(spec.model, "deepseek-v4-pro", "session model is inherited");
+                assert_eq!(spec.runtime_profile.model, ModelRoute::Inherit);
+                assert_eq!(
+                    spec.runtime_profile.provider, None,
+                    "provider is not invented"
+                );
+                assert_eq!(
+                    spec.runtime_profile.reasoning_effort.as_deref(),
+                    Some("high"),
+                    "role={role}, parent={parent_effort:?}"
+                );
+                assert!(!spec.runtime_profile.permissions.write);
+                assert!(!spec.runtime_profile.permissions.network);
+                assert_eq!(
+                    spec.runtime_profile.shell,
+                    crate::worker_profile::ShellPolicy::None
+                );
+                assert_eq!(
+                    fleet_worker_launch_reasoning_effort(&task, &[]).as_deref(),
+                    Some("high")
+                );
+                let route = resolve_fleet_route(&task, &[], Some("deepseek-v4-pro"))
+                    .expect("receipt route resolves");
+                assert_eq!(route.role.as_deref(), Some("consultant"));
+                assert_eq!(route.reasoning_effort.as_deref(), Some("high"));
+            }
+        }
     }
 
     #[test]

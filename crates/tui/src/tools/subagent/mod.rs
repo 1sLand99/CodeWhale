@@ -10725,7 +10725,7 @@ fn worker_profile_subagent_assignment_route(
     model_route: &ModelRoute,
     requested_thinking: SubAgentThinking,
     prompt: &str,
-    _agent_type: &FleetRole,
+    agent_type: &FleetRole,
 ) -> SubAgentResolvedRoute {
     let candidates = subagent_router_candidates(runtime);
     let mut requested_fast_lane = false;
@@ -10741,12 +10741,15 @@ fn worker_profile_subagent_assignment_route(
         ModelRoute::Inherit => runtime.model.clone(),
     };
 
+    let role_reasoning_default =
+        WorkerRuntimeProfile::for_role(agent_type.clone()).reasoning_effort;
     let reasoning_effort = subagent_reasoning_effort_for_request(
         runtime,
         &model,
         prompt,
         requested_fast_lane,
         requested_thinking,
+        role_reasoning_default.as_deref(),
     );
 
     SubAgentResolvedRoute::new(model_route.clone(), model, reasoning_effort)
@@ -10758,6 +10761,7 @@ fn subagent_reasoning_effort_for_request(
     prompt: &str,
     requested_fast_lane: bool,
     requested_thinking: SubAgentThinking,
+    role_reasoning_default: Option<&str>,
 ) -> Option<String> {
     let normalize = |effort: ReasoningEffort| {
         effort.normalize_for_route(
@@ -10773,6 +10777,14 @@ fn subagent_reasoning_effort_for_request(
                 .as_setting()
                 .to_string(),
         ),
+        // A role default is child intent, not inherited parent state. It wins
+        // whenever the caller left thinking at `inherit`, while explicit
+        // Effort/Auto requests above still take precedence. Route
+        // normalization remains the final capability ceiling.
+        SubAgentThinking::Inherit if role_reasoning_default.is_some() => role_reasoning_default
+            .map(ReasoningEffort::from_setting)
+            .map(normalize)
+            .map(|effort| effort.as_setting().to_string()),
         SubAgentThinking::Inherit if requested_fast_lane => {
             // Faster/explore lane: cheaper reasoning by default. The OpenAI Codex
             // (GPT-5.5) adapter has no true "off" on the wire (it collapses off
