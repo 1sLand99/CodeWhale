@@ -1707,6 +1707,16 @@ fn legacy_work_ctrl_t_save_export_and_restart_are_consistent() -> anyhow::Result
 
     let mut restored = spawn()?;
     enter_launch_session(&mut restored)?;
+    // The Ctrl+T selection above is the user's last explicit choice, so it is
+    // the startup default the next launch must come up with — before any
+    // session is loaded. Asserting it here separates the two mechanisms that
+    // could otherwise both explain a `max` header after `/load`: a persisted
+    // startup default, or session-restored state.
+    assert!(
+        restored.frame().row(0).contains(" · max "),
+        "fresh launch lost the persisted effort selection:\n{}",
+        restored.frame().debug_dump()
+    );
     restored.send(keys::key::text(&format!(
         "/load {}",
         after_path.to_string_lossy()
@@ -1725,7 +1735,7 @@ fn legacy_work_ctrl_t_save_export_and_restart_are_consistent() -> anyhow::Result
         frame.debug_dump()
     );
     assert!(
-        frame.row(0).contains(" · high ") && frame.row(0).contains("Full Access"),
+        frame.row(0).contains(" · max ") && frame.row(0).contains("Full Access"),
         "restart lost narrow effort/permission truth:\n{}",
         frame.debug_dump()
     );
