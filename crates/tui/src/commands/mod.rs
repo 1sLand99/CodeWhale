@@ -364,6 +364,17 @@ mod tests {
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
 
+    fn is_palette_safe_command_name(name: &str) -> bool {
+        let bytes = name.as_bytes();
+        !bytes.is_empty()
+            && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+            && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+            && bytes
+                .iter()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+            && !name.contains("--")
+    }
+
     fn create_test_app() -> App {
         let options = TuiOptions {
             ..crate::test_support::test_tui_options(PathBuf::from("."))
@@ -922,10 +933,8 @@ mod tests {
                 let info = cmd.info();
                 assert!(!info.name.is_empty(), "command name must not be empty");
                 assert!(
-                    info.name
-                        .chars()
-                        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit()),
-                    "/{} command names must be lowercase ASCII",
+                    is_palette_safe_command_name(info.name),
+                    "/{} command names must be lowercase ASCII kebab-case",
                     info.name
                 );
                 let usage_prefix = format!("/{}", info.name);
@@ -954,9 +963,9 @@ mod tests {
                 has_debug = true;
                 assert_eq!(
                     commands.len(),
-                    11,
+                    13,
                     "debug group (group-local metadata exception) expected \
-                     exactly 11 commands, got {}",
+                     exactly 13 commands, got {}",
                     commands.len()
                 );
             }
@@ -1010,11 +1019,8 @@ mod tests {
                 command.name
             );
             assert!(
-                command
-                    .name
-                    .chars()
-                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit()),
-                "/{} command names must stay lowercase ASCII",
+                is_palette_safe_command_name(command.name),
+                "/{} command names must stay lowercase ASCII kebab-case",
                 command.name
             );
 
