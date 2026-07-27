@@ -24,6 +24,9 @@ use uuid::Uuid;
 
 /// Maximum number of sessions to retain
 const MAX_SESSIONS: usize = 50;
+/// Maximum session title length, in `char`s. Matches the bound the session
+/// picker's rename prompt has always enforced.
+pub const MAX_SESSION_TITLE_CHARS: usize = 100;
 const WORK_GRAPH_IMPORT_ARCHIVE_DIR: &str = ".work-graph-import-archive";
 const CURRENT_SESSION_SCHEMA_VERSION: u32 = 1;
 const CURRENT_QUEUE_SCHEMA_VERSION: u32 = 1;
@@ -149,6 +152,134 @@ pub struct SessionMetadata {
     /// (#2038).
     #[serde(default)]
     pub cumulative_turn_secs: u64,
+    /// Durable archive flag (#2934 / #4397). Archived sessions stay on disk
+    /// and stay loadable; they are hidden from the default browse surfaces
+    /// and are never chosen by auto-resume.
+    ///
+    /// This mirrors `ThreadRecord::archived` in [`crate::runtime_threads`] so
+    /// the TUI session surfaces and the Runtime API/web dashboard project the
+    /// same lifecycle field instead of two divergent notions of "put away".
+    /// Additive and `skip_serializing_if`-guarded: sessions written before
+    /// v0.9.2 load as `archived = false` and round-trip byte-identically
+    /// until the flag is actually set.
+    #[serde(default, skip_serializing_if = "is_not_archived")]
+    pub archived: bool,
+}
+
+fn is_not_archived(archived: &bool) -> bool {
+    !*archived
+}
+
+/// Sessions currently owned by an in-process interactive surface (the TUI).
+///
+/// A saved session is a file, and a running TUI holds the authoritative copy
+/// in memory: it autosaves the whole document from `App` state. That makes an
+/// out-of-band write to the *same* session unsafe — the next autosave would
+/// silently revert it. Rather than let that happen quietly, the owner claims
+/// the id here and any external writer is refused.
+///
+/// A static registry rather than a field on `RuntimeApiState` because the
+/// embedded Runtime API runs inside the TUI process; a standalone
+/// `codewhale web` has an empty registry and is therefore never blocked, which
+/// is exactly right — there is no TUI holding anything.
+static LIVE_SESSIONS: std::sync::OnceLock<std::sync::RwLock<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
+
+fn live_sessions() -> &'static std::sync::RwLock<std::collections::HashSet<String>> {
+    LIVE_SESSIONS.get_or_init(Default::default)
+}
+
+/// Who is asking to mutate a saved session.
+///
+/// This is an authority distinction, not a convenience one: the owner may
+/// write because it will update its in-memory copy in the same step; anyone
+/// else may not, because it cannot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionMutator {
+    /// The in-process surface that currently owns the session (the TUI). It
+    /// is responsible for updating its cached metadata atomically with the
+    /// write — see `App::apply_session_mutation`.
+    Owner,
+    /// Any other writer: the Runtime API, the web dashboard, a second
+    /// process. Refused while the session is claimed.
+    External,
+}
+
+/// Set the claimed session to exactly `session_id` (or nothing).
+///
+/// The TUI owns at most one session at a time, so switching sessions must
+/// release the previous claim in the same step — otherwise a `/new` would
+/// leave the old id permanently locked against the dashboard.
+pub fn set_live_session(session_id: Option<&str>) {
+    if let Ok(mut live) = live_sessions().write() {
+        live.clear();
+        if let Some(id) = session_id.map(str::trim).filter(|id| !id.is_empty()) {
+            live.insert(id.to_string());
+        }
+    }
+}
+
+/// Is this session currently owned by an in-process interactive surface?
+#[must_use]
+pub fn is_live_session(session_id: &str) -> bool {
+    live_sessions()
+        .read()
+        .is_ok_and(|live| live.contains(session_id))
+}
+
+/// The error an external writer gets when the session is live.
+///
+/// `ResourceBusy` so callers can map it to a typed conflict rather than
+/// pattern-matching on a message.
+fn live_session_conflict(session_id: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::ResourceBusy,
+        format!(
+            "session '{session_id}' is open in an interactive Codewhale session; \
+             change it there instead — an external write would be reverted by its next autosave"
+        ),
+    )
+}
+
+/// Which archive states a session listing includes.
+///
+/// Deliberately the same three-way shape as
+/// [`crate::runtime_threads::ThreadListFilter`] so `/v1/sessions` and
+/// `/v1/threads` answer the same `include_archived` / `archived_only` query
+/// pair with the same semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionListFilter {
+    /// Only `archived = false` sessions. The browse default.
+    #[default]
+    ActiveOnly,
+    /// Active and archived sessions, newest first.
+    IncludeArchived,
+    /// Only `archived = true` sessions.
+    ArchivedOnly,
+}
+
+impl SessionListFilter {
+    /// Resolve the `include_archived` / `archived_only` query pair the same
+    /// way the threads routes do.
+    #[must_use]
+    pub fn from_query(include_archived: Option<bool>, archived_only: Option<bool>) -> Self {
+        if archived_only.unwrap_or(false) {
+            Self::ArchivedOnly
+        } else if include_archived.unwrap_or(false) {
+            Self::IncludeArchived
+        } else {
+            Self::ActiveOnly
+        }
+    }
+
+    #[must_use]
+    pub fn admits(self, archived: bool) -> bool {
+        match self {
+            Self::ActiveOnly => !archived,
+            Self::IncludeArchived => true,
+            Self::ArchivedOnly => archived,
+        }
+    }
 }
 
 fn default_model_provider() -> String {
@@ -766,6 +897,89 @@ impl SessionManager {
         Ok(sessions)
     }
 
+    /// Set the durable archive flag on a saved session and return the
+    /// resulting metadata.
+    ///
+    /// This is the single writer for the flag: the picker, the `/sessions`
+    /// command, and `PATCH /v1/sessions/{id}` all route through it so the TUI
+    /// and the web dashboard cannot drift into two archive notions. A no-op
+    /// call (already in the requested state) still returns the metadata and
+    /// does not rewrite the file.
+    pub fn set_session_archived(
+        &self,
+        id: &str,
+        archived: bool,
+        mutator: SessionMutator,
+    ) -> std::io::Result<SessionMetadata> {
+        if mutator == SessionMutator::External && is_live_session(id) {
+            return Err(live_session_conflict(id));
+        }
+        let mut session = self.load_session(id)?;
+        if session.metadata.archived == archived {
+            return Ok(session.metadata);
+        }
+        session.metadata.archived = archived;
+        self.save_session(&session)?;
+        Ok(session.metadata)
+    }
+
+    /// Re-read the durable lifecycle fields for `metadata` from disk.
+    ///
+    /// This is the autosave-survival guard. A TUI autosave rebuilds the whole
+    /// session document from in-memory `App` state; any lifecycle field it
+    /// carries from a stale cache would silently revert a rename or archive
+    /// that landed in between — including one applied by the picker earlier in
+    /// the same event loop, or by `/rename` while a snapshot was already
+    /// queued.
+    ///
+    /// So rather than trusting any cache, the writer re-reads the persisted
+    /// values immediately before writing. `title`, `archived`, `created_at`,
+    /// and fork lineage are *lifecycle* state owned by the file, not
+    /// conversation state owned by the running turn. Reading them back costs
+    /// one bounded metadata-prefix read.
+    ///
+    /// Returns `true` when an existing record was found and merged. A missing
+    /// record is not an error: the first save of a new session has nothing to
+    /// merge from.
+    pub fn merge_persisted_lifecycle(&self, metadata: &mut SessionMetadata) -> bool {
+        let Ok(path) = self.validated_session_path(&metadata.id) else {
+            return false;
+        };
+        let Ok(persisted) = Self::load_session_metadata(&path) else {
+            return false;
+        };
+        metadata.title = persisted.title;
+        metadata.archived = persisted.archived;
+        metadata.created_at = persisted.created_at;
+        metadata.parent_session_id = persisted.parent_session_id;
+        metadata.forked_from_message_count = persisted.forked_from_message_count;
+        true
+    }
+
+    /// Rename a saved session and return the resulting metadata.
+    ///
+    /// Titles are trimmed and bounded to [`MAX_SESSION_TITLE_CHARS`]
+    /// characters (counted in `char`s, not bytes, so a CJK or emoji title is
+    /// not truncated mid-scalar). Created-at and fork lineage are untouched.
+    pub fn rename_session(
+        &self,
+        id: &str,
+        title: &str,
+        mutator: SessionMutator,
+    ) -> std::io::Result<SessionMetadata> {
+        let title = normalize_session_title(title)?;
+        if mutator == SessionMutator::External && is_live_session(id) {
+            return Err(live_session_conflict(id));
+        }
+        let mut session = self.load_session(id)?;
+        if session.metadata.title == title {
+            return Ok(session.metadata);
+        }
+        session.metadata.title = title;
+        self.save_session(&session)?;
+        Ok(session.metadata)
+    }
+
     /// Load only the metadata from a session file.
     ///
     /// Optimization for #337: previously this called
@@ -902,13 +1116,18 @@ impl SessionManager {
     }
 
     /// Get the most recent session scoped to the current workspace.
+    ///
+    /// Archived sessions are skipped: archiving is the user saying "not this
+    /// one", and `--continue` / auto-resume must honour that rather than
+    /// dragging a put-away session back.
     pub fn get_latest_session_for_workspace(
         &self,
         workspace: &Path,
     ) -> std::io::Result<Option<SessionMetadata>> {
         let sessions = self.list_sessions()?;
         Ok(sessions.into_iter().find(|session| {
-            workspace_scope_matches(&session.workspace, workspace)
+            !session.archived
+                && workspace_scope_matches(&session.workspace, workspace)
                 && !is_empty_auto_created_session(session)
         }))
     }
@@ -923,6 +1142,28 @@ impl SessionManager {
             .filter(|s| s.title.to_lowercase().contains(&query_lower))
             .collect())
     }
+}
+
+/// Trim and bound a user-supplied session title.
+///
+/// Returns `InvalidInput` for an empty title or one longer than
+/// [`MAX_SESSION_TITLE_CHARS`] so every rename surface (picker, `/rename`,
+/// `PATCH /v1/sessions/{id}`) rejects the same inputs with the same reason.
+pub fn normalize_session_title(title: &str) -> std::io::Result<String> {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Session title cannot be empty",
+        ));
+    }
+    if trimmed.chars().count() > MAX_SESSION_TITLE_CHARS {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("Session title cannot exceed {MAX_SESSION_TITLE_CHARS} characters"),
+        ));
+    }
+    Ok(trimmed.to_string())
 }
 
 pub(crate) fn workspace_scope_matches(saved_workspace: &Path, current_workspace: &Path) -> bool {
@@ -1170,6 +1411,7 @@ pub fn create_saved_session_with_id_and_mode(
             parent_session_id: None,
             forked_from_message_count: None,
             cumulative_turn_secs: 0,
+            archived: false,
         },
         messages: messages.to_vec(),
         system_prompt: system_prompt_to_string(system_prompt),
@@ -1576,6 +1818,7 @@ mod tests {
                 parent_session_id: None,
                 forked_from_message_count: None,
                 cumulative_turn_secs: 0,
+                archived: false,
             },
             system_prompt: None,
             context_references: Vec::new(),
@@ -1611,6 +1854,7 @@ mod tests {
                 parent_session_id: None,
                 forked_from_message_count: None,
                 cumulative_turn_secs: 0,
+                archived: false,
             },
             system_prompt: None,
             context_references: Vec::new(),

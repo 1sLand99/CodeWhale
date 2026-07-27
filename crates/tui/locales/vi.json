@@ -143,6 +143,8 @@
     "ConfigLabelSidebarWidth": "Chiều rộng thanh bên",
     "ConfigLabelSidebarFocus": "Tiêu điểm thanh bên",
     "ConfigLabelContextPanel": "Bảng ngữ cảnh",
+    "ConfigLabelSessionsRail": "Thanh phiên",
+    "ConfigLabelSessionAutoResume": "Tự động tiếp tục phiên gần nhất",
     "ConfigLabelAutoCompact": "Tự động thu gọn",
     "ConfigLabelAutoCompactThreshold": "Ngưỡng thu gọn",
     "ConfigLabelMaxHistory": "Lịch sử nhập",
@@ -1196,5 +1198,18 @@
     "StartupDefaultSubjectMode": "chế độ khởi động",
     "StartupDefaultSubjectThinking": "mức suy nghĩ",
     "StartupDefaultSubjectModel": "mô hình",
-    "StartupDefaultSubjectAll": "các mặc định khi khởi động"
+    "StartupDefaultSubjectAll": "các mặc định khi khởi động",
+    "SessionsRailTitle": "Phiên",
+    "SessionsRailEmpty": "Chưa có phiên nào trong workspace này",
+    "SessionsRailBrowseAll": "Xem tất cả phiên",
+    "SessionsRailShowingCount": "{shown} trên {total} — xem tất cả",
+    "SessionsRailUnavailable": "Không đọc được phiên: {error}",
+    "SessionsActionArchive": "lưu trữ",
+    "SessionsActionShowArchived": "đã lưu trữ",
+    "SessionsArchived": "Đã lưu trữ phiên {id}",
+    "SessionsRestored": "Đã khôi phục phiên {id}",
+    "SessionsArchiveFailed": "Lưu trữ thất bại: {error}",
+    "SessionsShowingArchived": "Đang hiển thị phiên đã lưu trữ",
+    "SessionsHidingArchived": "Đang ẩn phiên đã lưu trữ",
+    "SessionsArchivedCompact": "đã lưu trữ"
 }

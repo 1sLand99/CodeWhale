@@ -1152,6 +1152,19 @@ pub async fn run_tui(
         }
     }
 
+    // Auto-resume's receipt (#2934). It overrides the generic resume message
+    // because it is the more specific truth: it names what was reattached, or
+    // why nothing was. It never overwrites a *failure* message from the load
+    // path above — a real error outranks a decision receipt.
+    if let Some(notice) = options.startup_notice.clone()
+        && app
+            .status_message
+            .as_deref()
+            .is_none_or(|current| !current.starts_with("Failed to"))
+    {
+        app.status_message = Some(notice);
+    }
+
     if let Ok(manager) = SessionManager::default_location() {
         match manager.load_offline_queue_state() {
             Ok(Some(state)) => {
@@ -7681,10 +7694,7 @@ fn deliver_fleet_draft_result(
 
 // `format_*` chip/message builders moved to `tui/format_helpers.rs`.
 
-fn build_session_snapshot(
-    app: &mut App,
-    _manager: &SessionManager,
-) -> Result<SavedSession, String> {
+fn build_session_snapshot(app: &mut App, manager: &SessionManager) -> Result<SavedSession, String> {
     let model = app.model_selection_for_persistence();
     let work_state = match app.try_work_state_snapshot() {
         Ok(work_state) => work_state,
@@ -7724,6 +7734,18 @@ fn build_session_snapshot(
             .parent_session_id
             .clone_from(&cached.parent_session_id);
         session.metadata.forked_from_message_count = cached.forked_from_message_count;
+        session.metadata.archived = cached.archived;
+    }
+    // The cache above is a hint; disk is the authority for lifecycle state.
+    // Re-reading here is what makes "an archive or rename cannot be reverted
+    // by autosave" true regardless of which surface applied it or when
+    // (#2934 / #4397). One bounded metadata-prefix read, not a transcript scan.
+    let _ = manager.merge_persisted_lifecycle(&mut session.metadata);
+    if let Some(cached) = app.current_session_metadata.as_mut()
+        && cached.id == session.metadata.id
+    {
+        cached.title.clone_from(&session.metadata.title);
+        cached.archived = session.metadata.archived;
     }
     session
         .metadata
@@ -7734,6 +7756,16 @@ fn build_session_snapshot(
     session.work_state = work_state;
     session.last_auto_route = app.auto_route_for_persistence();
     app.current_session_metadata = Some(session.metadata.clone());
+    // Claim ownership of this session for the process. From here on the
+    // Runtime API refuses external renames/archives of it with a typed 409
+    // rather than writing something the next snapshot would revert.
+    //
+    // Claiming here rather than at each of the ten `current_session_id`
+    // assignment sites is deliberate: this is the function that establishes
+    // "the TUI holds the authoritative copy", which is exactly the condition
+    // the conflict protects. A session that has never been snapshotted has no
+    // in-memory state to lose, so leaving it unclaimed is correct, not a gap.
+    crate::session_manager::set_live_session(Some(&session.metadata.id));
     Ok(session)
 }
 
@@ -14095,6 +14127,7 @@ async fn handle_view_events(
             ViewEvent::SessionRenamed { metadata } => {
                 let session_id = metadata.id.clone();
                 let title = metadata.title.clone();
+                app.sessions_rail_cache = None;
                 let mut work_snapshot_warning = None;
                 if apply_picker_session_rename_to_active_app(app, *metadata)
                     && let Ok(manager) = SessionManager::default_location()
@@ -14132,7 +14165,30 @@ async fn handle_view_events(
                     )
                 }));
             }
+            ViewEvent::SessionArchived { metadata } => {
+                // The manager already wrote the flag. Keep the active app's
+                // cached metadata in step so the next autosave carries the new
+                // state forward instead of reverting it, and drop the rail
+                // cache so the row disappears (or returns) immediately.
+                if let Some(cached) = app.current_session_metadata.as_mut()
+                    && cached.id == metadata.id
+                {
+                    cached.archived = metadata.archived;
+                }
+                app.sessions_rail_cache = None;
+                app.status_message = Some(format!(
+                    "{} session {} ({})",
+                    if metadata.archived {
+                        "Archived"
+                    } else {
+                        "Restored"
+                    },
+                    crate::session_manager::truncate_id(&metadata.id),
+                    metadata.title
+                ));
+            }
             ViewEvent::SessionDeleted { session_id, title } => {
+                app.sessions_rail_cache = None;
                 app.status_message = Some(format!(
                     "Deleted session {} ({})",
                     crate::session_manager::truncate_id(&session_id),

@@ -79,8 +79,8 @@ mod workspace;
 use self::auth::{ResolvedRuntimeAuth, token_from_cookie_header};
 use self::auth::{require_runtime_token, resolve_runtime_auth, runtime_auth_status_lines};
 use self::sessions::{
-    create_session_from_thread, delete_session, get_session, list_sessions, resume_session_thread,
-    save_current_session,
+    create_session_from_thread, delete_session, get_session, list_sessions, list_sessions_summary,
+    patch_session, resume_session_thread, save_current_session,
 };
 #[cfg(test)]
 use self::sessions::{messages_from_thread_detail, session_to_detail};
@@ -609,7 +609,11 @@ pub fn build_router(state: RuntimeApiState) -> Router {
                 .post(create_session_from_thread)
                 .put(save_current_session),
         )
-        .route("/v1/sessions/{id}", get(get_session).delete(delete_session))
+        .route("/v1/sessions/summary", get(list_sessions_summary))
+        .route(
+            "/v1/sessions/{id}",
+            get(get_session).patch(patch_session).delete(delete_session),
+        )
         .route(
             "/v1/sessions/{id}/resume-thread",
             post(resume_session_thread),

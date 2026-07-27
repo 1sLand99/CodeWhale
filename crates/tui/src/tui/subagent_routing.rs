@@ -991,6 +991,7 @@ mod tests {
             max_subagents: 4,
             start_in_agent_mode: true,
             initial_input: None::<InitialInput>,
+            startup_notice: None,
             ..crate::test_support::test_tui_options(PathBuf::from("."))
         }
     }

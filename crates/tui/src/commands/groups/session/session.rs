@@ -339,9 +339,74 @@ pub fn sessions(app: &mut App, arg: Option<&str>) -> CommandResult {
                 .push(SessionPickerView::new(&app.workspace, app.ui_locale));
             CommandResult::ok()
         }
+        // `open` is what the sidebar Sessions rail dispatches (#2934): it
+        // opens the existing picker preselected on a session rather than
+        // resuming inline, so resume keeps its single implementation.
+        "open" => open_session(app, parts.next()),
+        "archive" => set_archived(app, parts.next(), true),
+        "unarchive" | "restore" => set_archived(app, parts.next(), false),
         _ => CommandResult::error(format!(
-            "unknown subcommand `{action}`. usage: /sessions [show|prune <days>]"
+            "unknown subcommand `{action}`. usage: /sessions [show|open <id>|archive <id>|unarchive <id>|prune <days>]"
         )),
+    }
+}
+
+/// Open the session picker with `session_id` preselected.
+fn open_session(app: &mut App, session_id: Option<&str>) -> CommandResult {
+    let Some(session_id) = session_id.map(str::trim).filter(|id| !id.is_empty()) else {
+        return CommandResult::error("usage: /sessions open <session-id>");
+    };
+    app.view_stack.push(SessionPickerView::new_selecting(
+        &app.workspace,
+        app.ui_locale,
+        session_id,
+    ));
+    CommandResult::ok()
+}
+
+/// Archive or restore a saved session.
+///
+/// Routes through [`crate::session_manager::SessionManager::set_session_archived`]
+/// — the same writer the picker and `PATCH /v1/sessions/{id}` use — so all
+/// three surfaces produce one durable lifecycle state.
+fn set_archived(app: &mut App, session_id: Option<&str>, archived: bool) -> CommandResult {
+    let verb = if archived { "archive" } else { "unarchive" };
+    let Some(session_id) = session_id.map(str::trim).filter(|id| !id.is_empty()) else {
+        return CommandResult::error(format!("usage: /sessions {verb} <session-id>"));
+    };
+    let manager = match crate::session_manager::SessionManager::default_location() {
+        Ok(manager) => manager,
+        Err(err) => {
+            return CommandResult::error(format!("could not open sessions directory: {err}"));
+        }
+    };
+    // `Owner`: this is the in-process interactive surface, and the block below
+    // updates the live cached metadata in the same step.
+    match manager.set_session_archived(
+        session_id,
+        archived,
+        crate::session_manager::SessionMutator::Owner,
+    ) {
+        Ok(metadata) => {
+            // Atomic with the write, from the app's point of view: nothing can
+            // run between the manager call and this update, so the next
+            // autosave already sees the new lifecycle state.
+            if let Some(cached) = app.current_session_metadata.as_mut()
+                && cached.id == metadata.id
+            {
+                cached.archived = metadata.archived;
+            }
+            // The rail caches projected rows; a lifecycle change must not wait
+            // for the TTL to become visible.
+            app.sessions_rail_cache = None;
+            CommandResult::message(format!(
+                "{} session {} ({})",
+                if archived { "Archived" } else { "Restored" },
+                crate::session_manager::truncate_id(&metadata.id),
+                metadata.title
+            ))
+        }
+        Err(err) => CommandResult::error(format!("{verb} failed: {err}")),
     }
 }
 

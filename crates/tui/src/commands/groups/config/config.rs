@@ -361,6 +361,24 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
         "context_panel" | "context" | "session_panel" => {
             Some(if app.context_panel { "true" } else { "false" }.to_string())
         }
+        "sessions_rail" | "sessions_panel" | "session_rail" => {
+            Some(if app.sessions_rail { "true" } else { "false" }.to_string())
+        }
+        // Read the persisted value rather than reporting a hard-coded default:
+        // this setting is consumed at startup by `main`, so `App` has no live
+        // copy, and printing "false" unconditionally would misreport a user who
+        // has it on.
+        "session_auto_resume" | "auto_resume" => Some(
+            if crate::settings::Settings::load_persisted()
+                .map(|settings| settings.session_auto_resume)
+                .unwrap_or(false)
+            {
+                "true"
+            } else {
+                "false"
+            }
+            .to_string(),
+        ),
         "composer_density" | "composer" => Some(density_display(app.composer_density).to_string()),
         "composer_border" | "border" => {
             Some(if app.composer_border { "true" } else { "false" }.to_string())
@@ -2130,6 +2148,14 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
         }
         "context_panel" | "context" | "session_panel" => {
             app.context_panel = settings.context_panel;
+            app.needs_redraw = true;
+        }
+        "sessions_rail" | "sessions_panel" | "session_rail" => {
+            app.sessions_rail = settings.sessions_rail;
+            // The rail reads from disk, so a fresh enable must invalidate the
+            // cached rows rather than render an empty panel until the next
+            // session write.
+            app.sessions_rail_cache = None;
             app.needs_redraw = true;
         }
         _ => {}

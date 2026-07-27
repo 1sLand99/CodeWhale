@@ -131,6 +131,7 @@ fn saved_session_with_blocks(blocks: Vec<crate::models::ContentBlock>) -> SavedS
             parent_session_id: None,
             forked_from_message_count: None,
             cumulative_turn_secs: 0,
+            archived: false,
         },
         messages: vec![crate::models::Message {
             role: "assistant".to_string(),
@@ -4215,6 +4216,273 @@ fn snapshots_endpoint_lists_workspace_snapshots() -> Result<()> {
     let bad_limit = snapshot_entries_for_workspace(&workspace, SnapshotsQuery { limit: Some(101) })
         .expect_err("limit above cap should fail");
     assert_eq!(bad_limit.status, StatusCode::BAD_REQUEST);
+    Ok(())
+}
+
+/// Seed a sessions directory and start a server against it.
+///
+/// The route tests below need to control what is on disk, so they cannot use
+/// the `spawn_test_server()` convenience that hides its own temp paths.
+async fn spawn_server_with_saved_sessions(
+    sessions: &[(&str, &str, bool)],
+) -> Result<Option<(SocketAddr, PathBuf, tokio::task::JoinHandle<()>)>> {
+    let root = std::env::temp_dir().join(format!("codewhale-session-routes-{}", Uuid::new_v4()));
+    let sessions_dir = root.join("sessions");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace)?;
+    let manager = crate::session_manager::SessionManager::new(sessions_dir.clone())?;
+    for (id, title, archived) in sessions {
+        let mut saved = crate::session_manager::create_saved_session_with_id_and_mode(
+            (*id).to_string(),
+            &[
+                crate::models::Message {
+                    role: "user".to_string(),
+                    content: vec![crate::models::ContentBlock::Text {
+                        text: format!("prompt for {title} with token=hunter2"),
+                        cache_control: None,
+                    }],
+                },
+                crate::models::Message {
+                    role: "assistant".to_string(),
+                    content: vec![crate::models::ContentBlock::Text {
+                        text: "acknowledged".to_string(),
+                        cache_control: None,
+                    }],
+                },
+            ],
+            "deepseek-chat",
+            &workspace,
+            12,
+            None,
+            Some("agent"),
+        );
+        saved.metadata.title = (*title).to_string();
+        saved.metadata.archived = *archived;
+        manager.save_session(&saved)?;
+    }
+    let Some((addr, _threads, handle)) =
+        spawn_test_server_with_root(root, sessions_dir.clone()).await?
+    else {
+        return Ok(None);
+    };
+    Ok(Some((addr, sessions_dir, handle)))
+}
+
+/// `/v1/sessions/summary` is routed, projects the shared row shape, and hides
+/// archived rows until asked — the dashboard's whole session list depends on
+/// all three being true at once.
+#[tokio::test]
+async fn session_summary_route_projects_rows_and_honours_archive_filters() -> Result<()> {
+    let Some((addr, _dir, handle)) = spawn_server_with_saved_sessions(&[
+        ("sess-active", "Active work", false),
+        ("sess-putaway", "Put away", true),
+    ])
+    .await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let active: Vec<serde_json::Value> = client
+        .get(format!("http://{addr}/v1/sessions/summary"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        active
+            .iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["sess-active"],
+        "archived sessions must not appear in the default listing"
+    );
+    // Field-compatible with /v1/threads/summary — the dashboard renders both
+    // with one row renderer.
+    for field in [
+        "title",
+        "preview",
+        "model",
+        "mode",
+        "workspace",
+        "updated_at",
+    ] {
+        assert!(!active[0][field].is_null(), "summary row missing {field}");
+    }
+    assert_eq!(active[0]["preview"], active[0]["title"]);
+
+    let archived: Vec<serde_json::Value> = client
+        .get(format!(
+            "http://{addr}/v1/sessions/summary?archived_only=true"
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(
+        archived
+            .iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["sess-putaway"]
+    );
+
+    handle.abort();
+    Ok(())
+}
+
+/// `PATCH /v1/sessions/{id}` renames and archives through the one writer, and
+/// reports only what actually moved.
+#[tokio::test]
+async fn session_patch_route_renames_archives_and_reports_real_changes() -> Result<()> {
+    let Some((addr, sessions_dir, handle)) =
+        spawn_server_with_saved_sessions(&[("sess-patch", "Before", false)]).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let patched: serde_json::Value = client
+        .patch(format!("http://{addr}/v1/sessions/sess-patch"))
+        .json(&json!({ "title": "After", "archived": true }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(patched["session"]["title"], "After");
+    assert_eq!(patched["session"]["archived"], true);
+    assert_eq!(patched["changes"]["title"], "After");
+    assert_eq!(patched["changes"]["archived"], true);
+
+    // Durable, not just echoed back.
+    let manager = crate::session_manager::SessionManager::new(sessions_dir)?;
+    let reloaded = manager.load_session("sess-patch")?;
+    assert_eq!(reloaded.metadata.title, "After");
+    assert!(reloaded.metadata.archived);
+
+    // A re-patch to the same state changes nothing, and says so.
+    let repeat: serde_json::Value = client
+        .patch(format!("http://{addr}/v1/sessions/sess-patch"))
+        .json(&json!({ "archived": true }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(
+        repeat["changes"]
+            .as_object()
+            .expect("changes object")
+            .is_empty(),
+        "a no-op patch must report no changes"
+    );
+
+    // An empty body is a client error, not a silent no-op.
+    let empty = client
+        .patch(format!("http://{addr}/v1/sessions/sess-patch"))
+        .json(&json!({}))
+        .send()
+        .await?;
+    assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+
+    // A blank title is rejected with the reason, not accepted.
+    let blank = client
+        .patch(format!("http://{addr}/v1/sessions/sess-patch"))
+        .json(&json!({ "title": "   " }))
+        .send()
+        .await?;
+    assert_eq!(blank.status(), StatusCode::BAD_REQUEST);
+
+    handle.abort();
+    Ok(())
+}
+
+/// A session the TUI holds open is refused with a typed 409 rather than
+/// written behind its back.
+#[tokio::test]
+async fn session_patch_route_refuses_a_live_session_with_a_conflict() -> Result<()> {
+    // The live-session claim is process-global by construction (the embedded
+    // API runs inside the TUI process), so this test must not run alongside
+    // anything else that claims or clears it.
+    let _lock = lock_test_env();
+    let Some((addr, _dir, handle)) =
+        spawn_server_with_saved_sessions(&[("sess-live", "Held open", false)]).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    crate::session_manager::set_live_session(Some("sess-live"));
+    let conflict = client
+        .patch(format!("http://{addr}/v1/sessions/sess-live"))
+        .json(&json!({ "title": "Renamed from the dashboard" }))
+        .send()
+        .await?;
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+
+    crate::session_manager::set_live_session(None);
+    let allowed = client
+        .patch(format!("http://{addr}/v1/sessions/sess-live"))
+        .json(&json!({ "title": "Renamed from the dashboard" }))
+        .send()
+        .await?;
+    assert_eq!(allowed.status(), StatusCode::OK);
+
+    handle.abort();
+    Ok(())
+}
+
+/// `?peek=true` returns the bounded redacted projection, and the plain route
+/// still returns the full detail shape.
+#[tokio::test]
+async fn session_detail_route_serves_a_bounded_redacted_peek_on_request() -> Result<()> {
+    let Some((addr, _dir, handle)) =
+        spawn_server_with_saved_sessions(&[("sess-peek", "Peekable", false)]).await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let peek: serde_json::Value = client
+        .get(format!(
+            "http://{addr}/v1/sessions/sess-peek?peek=true&entries=12"
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(peek["session_id"], "sess-peek");
+    assert_eq!(peek["live"], false);
+    assert!(peek["entries"].as_array().expect("entries").len() <= 12);
+    // The seeded prompt carries `token=hunter2`; a peek must not re-emit it.
+    let body = peek.to_string();
+    assert!(
+        !body.contains("hunter2"),
+        "peek leaked a credential: {body}"
+    );
+    // No field a client could read as live turn state.
+    for forbidden in ["status", "running", "active", "turn"] {
+        assert!(peek.get(forbidden).is_none(), "peek exposed `{forbidden}`");
+    }
+
+    let detail: serde_json::Value = client
+        .get(format!("http://{addr}/v1/sessions/sess-peek"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(detail["metadata"]["id"], "sess-peek");
+    assert!(
+        detail["messages"].is_array(),
+        "the plain route keeps returning full detail"
+    );
+
+    handle.abort();
     Ok(())
 }
 

@@ -143,6 +143,8 @@
     "ConfigLabelSidebarWidth": "Ancho de barra lateral",
     "ConfigLabelSidebarFocus": "Enfoque de barra lateral",
     "ConfigLabelContextPanel": "Panel de contexto",
+    "ConfigLabelSessionsRail": "Barra de sesiones",
+    "ConfigLabelSessionAutoResume": "Reanudar automáticamente la última sesión",
     "ConfigLabelAutoCompact": "Compactación automática",
     "ConfigLabelAutoCompactThreshold": "Umbral de compactación",
     "ConfigLabelMaxHistory": "Historial de entrada",
@@ -1196,5 +1198,18 @@
     "StartupDefaultSubjectMode": "el modo de inicio",
     "StartupDefaultSubjectThinking": "el nivel de razonamiento",
     "StartupDefaultSubjectModel": "el modelo",
-    "StartupDefaultSubjectAll": "los valores predeterminados de inicio"
+    "StartupDefaultSubjectAll": "los valores predeterminados de inicio",
+    "SessionsRailTitle": "Sesiones",
+    "SessionsRailEmpty": "Aún no hay sesiones en este espacio de trabajo",
+    "SessionsRailBrowseAll": "Ver todas las sesiones",
+    "SessionsRailShowingCount": "{shown} de {total} — ver todas",
+    "SessionsRailUnavailable": "Sesiones no disponibles: {error}",
+    "SessionsActionArchive": "archivar",
+    "SessionsActionShowArchived": "archivadas",
+    "SessionsArchived": "Sesión {id} archivada",
+    "SessionsRestored": "Sesión {id} restaurada",
+    "SessionsArchiveFailed": "Error al archivar: {error}",
+    "SessionsShowingArchived": "Mostrando sesiones archivadas",
+    "SessionsHidingArchived": "Ocultando sesiones archivadas",
+    "SessionsArchivedCompact": "archivada"
 }

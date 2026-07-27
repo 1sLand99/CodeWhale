@@ -379,6 +379,22 @@ pub struct Settings {
     /// Enable the session-context panel (#504). Shows working set, tokens,
     /// cost, MCP/LSP status, cycle count, and memory info.
     pub context_panel: bool,
+    /// Show the persistent Sessions rail in the sidebar (#2934).
+    ///
+    /// Off by default: the rail spends sidebar rows that Work, Activity, and
+    /// Agents already compete for, so it is opt-in rather than something a
+    /// user discovers by having their layout change under them.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub sessions_rail: bool,
+    /// Reattach to this workspace's most recent session on startup (#2934).
+    ///
+    /// Off by default. `--resume`/`--continue` remain the explicit paths and
+    /// always take precedence; when this is on, startup still refuses to
+    /// resume an archived, unreadable, or foreign-workspace session and falls
+    /// back to a fresh transcript with a receipt. See
+    /// [`crate::session_resume`] for the decision table.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub session_auto_resume: bool,
     /// Cost display currency: usd or cny.
     pub cost_currency: String,
     /// Maximum number of input history entries to save
@@ -532,6 +548,8 @@ impl Default for Settings {
             sidebar_focus: "auto".to_string(),
             sidebar_auto_collapse_opt_in: true,
             context_panel: false,
+            sessions_rail: false,
+            session_auto_resume: false,
             cost_currency: "usd".to_string(),
             max_input_history: 100,
             default_provider: None,
@@ -1238,6 +1256,12 @@ impl Settings {
             "context_panel" | "context" | "session_panel" => {
                 self.context_panel = parse_bool(value)?;
             }
+            "sessions_rail" | "sessions_panel" | "session_rail" => {
+                self.sessions_rail = parse_bool(value)?;
+            }
+            "session_auto_resume" | "auto_resume" => {
+                self.session_auto_resume = parse_bool(value)?;
+            }
             "cost_currency" | "currency" => {
                 let Some(currency) = crate::pricing::CostCurrency::from_setting(value) else {
                     anyhow::bail!(
@@ -1581,6 +1605,14 @@ impl Settings {
             (
                 "context_panel",
                 "Show the session context sidebar panel: on/off",
+            ),
+            (
+                "sessions_rail",
+                "Show the persistent Sessions rail in the sidebar: on/off (default off)",
+            ),
+            (
+                "session_auto_resume",
+                "Reattach to this workspace's most recent session on startup: on/off (default off). --resume/--continue still win; archived, unreadable, or other-workspace sessions are never auto-resumed.",
             ),
             ("cost_currency", "Cost display currency: usd, cny"),
             ("max_history", "Max input history entries"),

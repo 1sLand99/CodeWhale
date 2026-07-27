@@ -177,8 +177,15 @@ tmux's `load-buffer -w` path when running inside tmux.
 | `/`                  | Search sessions                                    |
 | `s`                  | Cycle sort order                                   |
 | `a`                  | Toggle current-workspace scope vs all workspaces   |
+| `e`                  | Archive / restore the selected session             |
+| `x`                  | Show or hide archived sessions                     |
 | `d`                  | Delete selected session after confirmation         |
 | `Esc` / `q`          | Close the picker                                   |
+
+Archive (`e`) is undestructive and needs no confirmation: the session stays on
+disk and stays loadable, it just leaves the default list and stops being an
+auto-resume candidate. Press `e` again to bring it back. Delete (`d`) is the
+destructive one and keeps its confirmation.
 
 ## Approval modal (when a tool requests approval)
 
