@@ -230,11 +230,11 @@ pub struct OfferingPricing {
     /// Fingerprint of the base URL this price was fetched from, for
     /// [`PricingProvenance::ProviderLive`] rows.
     ///
-    /// This is the same non-secret FNV digest the catalog cache scopes on (see
-    /// [`crate::catalog::base_url_fingerprint`]) — never the URL itself. It
-    /// exists so a live row can be proven to price the endpoint a turn was
-    /// actually served on; a row whose fingerprint does not match the route is
-    /// a different billing surface, not a fresher price for this one.
+    /// This is the same non-secret SHA-256 digest the catalog cache scopes on
+    /// (see [`crate::catalog::base_url_fingerprint`]) — never the URL itself.
+    /// It exists so a live row can be proven to price the endpoint a turn was
+    /// actually served on; a row whose fingerprint does not match the route
+    /// is a different billing surface, not a fresher price for this one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_fingerprint: Option<String>,
 }
