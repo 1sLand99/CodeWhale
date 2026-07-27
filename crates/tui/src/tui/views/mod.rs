@@ -1698,6 +1698,13 @@ impl ConfigView {
             },
             ConfigRow {
                 section: ConfigSection::Display,
+                key: "thinking_default_expanded".to_string(),
+                value: settings.thinking_default_expanded.to_string(),
+                editable: true,
+                scope: ConfigScope::Saved,
+            },
+            ConfigRow {
+                section: ConfigSection::Display,
                 key: "thinking_highlight".to_string(),
                 value: settings.thinking_highlight.to_string(),
                 editable: true,
@@ -2913,6 +2920,9 @@ fn config_hint_for_key(key: &str) -> &'static str {
         "fancy_animations" => "on animates truthful tool, status, and ocean live state",
         "ocean_treatment" => "ombre | flat (appearance; independent of motion)",
         "show_thinking" => "show or hide model reasoning in chat; task lists stay concise",
+        "thinking_default_expanded" => {
+            "expand model reasoning by default; Space still toggles each block"
+        }
         "thinking_highlight" => {
             "fill the model reasoning background; the dashed rail remains visible when off"
         }
@@ -2963,6 +2973,7 @@ fn config_boolean_key(key: &str) -> bool {
             | "fancy_animations"
             | "launch_screen"
             | "show_thinking"
+            | "thinking_default_expanded"
             | "thinking_highlight"
             | "show_tool_details"
             | "composer_border"
@@ -5069,6 +5080,7 @@ mod tests {
         assert!(keys.contains(&"locale"));
         assert!(keys.contains(&"background_color"));
         assert!(keys.contains(&"fancy_animations"));
+        assert!(keys.contains(&"thinking_default_expanded"));
         assert!(keys.contains(&"status_indicator"));
         assert!(keys.contains(&"synchronized_output"));
         assert!(keys.contains(&"auto_compact"));
@@ -5819,7 +5831,11 @@ base_url = "https://api.xiaomimimo.com/v1"
         type_filter(&mut view, "thinking");
         assert_eq!(
             visible_row_keys(&view),
-            vec!["show_thinking", "thinking_highlight"]
+            vec![
+                "show_thinking",
+                "thinking_default_expanded",
+                "thinking_highlight"
+            ]
         );
 
         view.clear_filter();

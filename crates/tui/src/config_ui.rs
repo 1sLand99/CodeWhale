@@ -70,6 +70,7 @@ pub struct SettingsSection {
     pub work_surface_side_width: u16,
     pub paste_burst_detection: bool,
     pub show_thinking: bool,
+    pub thinking_default_expanded: bool,
     pub thinking_highlight: bool,
     pub show_tool_details: bool,
     pub inline_diffs: InlineDiffValue,
@@ -440,6 +441,7 @@ pub fn build_document(app: &App, config: &Config) -> Result<ConfigUiDocument> {
             work_surface_side_width: settings.work_surface_side_width,
             paste_burst_detection: settings.paste_burst_detection,
             show_thinking: settings.show_thinking,
+            thinking_default_expanded: settings.thinking_default_expanded,
             thinking_highlight: settings.thinking_highlight,
             show_tool_details: settings.show_tool_details,
             inline_diffs: settings.inline_diffs.as_str().into(),
@@ -643,6 +645,10 @@ pub fn apply_document(
             bool_str(doc.settings.paste_burst_detection),
         ),
         ("show_thinking", bool_str(doc.settings.show_thinking)),
+        (
+            "thinking_default_expanded",
+            bool_str(doc.settings.thinking_default_expanded),
+        ),
         (
             "thinking_highlight",
             bool_str(doc.settings.thinking_highlight),

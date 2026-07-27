@@ -1289,6 +1289,11 @@ Common settings keys:
   applies mention frecency. `browser` lists only the immediate children of the
   currently typed directory segment in deterministic alphabetical order.
 - `show_thinking` (on/off)
+- `thinking_default_expanded` (on/off, default off): renders thinking blocks
+  expanded initially when `show_thinking` is enabled. Space still toggles the
+  selected block, so setting this to `true` inverts the default without
+  removing per-block folding. This is useful in SSH/tmux environments where
+  the Space binding may be intercepted.
 - `show_tool_details` (on/off)
 - `inline_diffs` (`full`, `summary`, or `off`; default `full`): controls the
   inline presentation of successful structured File mutations. `full` shows a

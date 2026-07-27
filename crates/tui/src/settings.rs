@@ -337,6 +337,11 @@ pub struct Settings {
     pub mention_menu_behavior: String,
     /// Show thinking blocks from the model
     pub show_thinking: bool,
+    /// When true, thinking blocks render expanded by default instead of
+    /// collapsed. Space still toggles collapse/expand. Useful for SSH/tmux
+    /// users where the Space key may be captured by the terminal layer.
+    #[serde(default)]
+    pub thinking_default_expanded: bool,
     /// Keep thinking visible while disabling its filled background treatment.
     pub thinking_highlight: bool,
     /// Show detailed tool output
@@ -538,6 +543,7 @@ impl Default for Settings {
             // Reasoning is useful when explicitly requested, but it should
             // never displace the actual conversation in the default TUI.
             show_thinking: false,
+            thinking_default_expanded: false,
             thinking_highlight: true,
             show_tool_details: false,
             inline_diffs: "full".to_string(),
@@ -1133,6 +1139,9 @@ impl Settings {
             "show_thinking" | "thinking" => {
                 self.show_thinking = parse_bool(value)?;
             }
+            "thinking_default_expanded" | "thinking_expanded" => {
+                self.thinking_default_expanded = parse_bool(value)?;
+            }
             "thinking_highlight" | "reasoning_highlight" => {
                 self.thinking_highlight = parse_bool(value)?;
             }
@@ -1407,6 +1416,10 @@ impl Settings {
             self.mention_menu_behavior
         ));
         lines.push(format!("  show_thinking:      {}", self.show_thinking));
+        lines.push(format!(
+            "  thinking_expanded:   {}",
+            self.thinking_default_expanded
+        ));
         lines.push(format!("  thinking_highlight: {}", self.thinking_highlight));
         lines.push(format!("  show_tool_details:  {}", self.show_tool_details));
         lines.push(format!("  inline_diffs:      {}", self.inline_diffs));
@@ -1555,6 +1568,10 @@ impl Settings {
                 "@-mention completion behavior: fuzzy/browser (default fuzzy)",
             ),
             ("show_thinking", "Show model thinking: on/off"),
+            (
+                "thinking_default_expanded",
+                "Expand model thinking by default; Space still toggles: on/off",
+            ),
             (
                 "thinking_highlight",
                 "Fill the thinking/reasoning background: on/off",
@@ -2932,6 +2949,22 @@ mod tests {
             toml::from_str(&toml::to_string(&settings).expect("serialize settings"))
                 .expect("restore settings");
         assert!(!restored.thinking_highlight);
+    }
+
+    #[test]
+    fn thinking_default_expanded_is_opt_in_and_persisted() {
+        let mut settings = Settings::default();
+        assert!(!settings.thinking_default_expanded);
+
+        settings
+            .set("thinking_default_expanded", "true")
+            .expect("valid thinking expansion setting");
+        assert!(settings.thinking_default_expanded);
+
+        let restored: Settings =
+            toml::from_str(&toml::to_string(&settings).expect("serialize settings"))
+                .expect("restore settings");
+        assert!(restored.thinking_default_expanded);
     }
 
     /// Explicit animated baseline for env-force tests (#4095 flipped defaults to calm).
