@@ -295,11 +295,19 @@ Examples:
   codewhale lane status <lane-id>
   codewhale lane attach <lane-id>
   codewhale lane logs <lane-id>
-  codewhale lane stop <lane-id>
+  codewhale lane interrupt <lane-id>
+  codewhale lane interrupt <lane-id>@<lifecycle-seq>
   codewhale lane start --workflow stopship --fleet stopship --runtime tmux --goal verify-release-candidate -- echo hello
 
 Lane records persist under $CODEWHALE_HOME/lanes/. tmux durability belongs to
 Runtime, not Fleet.
+
+list/status/interrupt/restart/resume share one control-plane contract with the
+`/lane` slash command and its hotbar action: same verb ids, same availability,
+same read-vs-write authority, same exact-identity target selection, and the
+same receipt (`--json`). `lane stop` is a compatibility spelling of
+`lane interrupt`. Appending `@<lifecycle-seq>` fences a write to the exact
+lifecycle generation you observed.
 ")]
     Lane(LaneArgs),
     /// Run a Codewhale-powered code review over a git diff.
@@ -563,7 +571,31 @@ enum LaneCommand {
         tail: usize,
     },
     /// Stop a running lane and run worktree TTL cleanup.
+    ///
+    /// Compatibility spelling for `lane interrupt`; both resolve to the
+    /// `lane.interrupt` control-plane verb (#1888).
     Stop { lane_id: String },
+    /// Interrupt a running lane (durable `lane.interrupt`).
+    ///
+    /// Accepts an exact lane id, optionally fenced as `<lane-id>@<seq>` so the
+    /// stop only applies to the lifecycle generation you observed.
+    Interrupt {
+        lane_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Restart a lane in place (declared, no backend — reports why).
+    Restart {
+        lane_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Resume a stopped lane (declared, no backend — reports why).
+    Resume {
+        lane_id: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
     /// Start a lane under a Runtime backend (tmux|inline|vm|ci).
     Start {
         /// Workflow name (e.g. `stopship`).
@@ -730,81 +762,83 @@ fn start_lane(request: LaneStartRequest) -> Result<()> {
     Ok(())
 }
 
+/// Print one shared control receipt on the CLI surface.
+///
+/// The CLI does not format Lane control results itself: it renders the same
+/// [`codewhale_lane::ControlReceipt`] the slash command and hotbar render, so
+/// the three surfaces cannot drift in what they report (#1888).
+fn emit_control_receipt(receipt: &codewhale_lane::ControlReceipt, json: bool) -> Result<()> {
+    if json {
+        // v0.9.2 compatibility: `lane list --json` has always emitted an array
+        // of `LaneRecord`, and `lane status --json` a single one. Scripts
+        // select `.[].id`, `.worktree_path`, `.log_path` off that shape, so the
+        // receipt does not replace it. The receipt is what every other verb
+        // emits, and what the human renderer shows for these two.
+        match receipt.operation {
+            codewhale_lane::ControlOperation::LaneList => {
+                println!("{}", serde_json::to_string_pretty(&receipt.lane_records)?);
+            }
+            codewhale_lane::ControlOperation::LaneStatus => match receipt.lane_records.first() {
+                Some(record) => println!("{}", serde_json::to_string_pretty(record)?),
+                // Legacy behaviour for an unknown id: `reg.load()` failed, so
+                // the command errored on stderr and printed *nothing* on
+                // stdout. Emitting a receipt (or a bare `null`) here would make
+                // `lane status --json <bad-id> | jq` succeed where it used to
+                // fail. Stay silent and let the bail! below set the exit code.
+                None if receipt.is_error() => {}
+                None => println!("{}", serde_json::to_string_pretty(receipt)?),
+            },
+            _ => println!("{}", serde_json::to_string_pretty(receipt)?),
+        }
+    } else if receipt.is_error() {
+        eprintln!("{}", receipt.render());
+    } else {
+        println!("{}", receipt.render());
+    }
+    if receipt.is_error() {
+        let detail = receipt
+            .failure
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| receipt.outcome.as_str().to_string());
+        bail!("{}: {detail}", receipt.operation_id);
+    }
+    Ok(())
+}
+
+fn run_lane_control(
+    operation: codewhale_lane::ControlOperation,
+    lane_id: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let receipt = codewhale_lane::control::execute_lane_control(
+        codewhale_lane::ControlSurface::Cli,
+        operation,
+        lane_id,
+    );
+    emit_control_receipt(&receipt, json)
+}
+
 fn run_lane_command(args: LaneArgs) -> Result<()> {
-    use codewhale_lane::{LaneRegistry, backend_for};
+    use codewhale_lane::{ControlOperation, LaneRegistry, backend_for};
     use std::io::{BufRead, Seek, Write};
     use std::process::Command;
     use std::thread;
     use std::time::Duration;
 
     match args.command {
-        LaneCommand::List { json } => {
-            let reg = LaneRegistry::open_default()?;
-            let mut lanes = reg.list()?;
-            for lane in &mut lanes {
-                if let Err(err) = backend_for(lane).reconcile(&reg, lane) {
-                    eprintln!("warning: could not reconcile lane `{}`: {err:#}", lane.id);
-                }
-            }
-            if json {
-                println!("{}", serde_json::to_string_pretty(&lanes)?);
-            } else if lanes.is_empty() {
-                println!("No lanes under {}", reg.root().display());
-            } else {
-                println!(
-                    "{:<16} {:<10} {:<12} {:<16} {:<10} STARTED",
-                    "ID", "STATUS", "RUNTIME", "WORKFLOW", "ISSUE"
-                );
-                for lane in lanes {
-                    println!(
-                        "{:<16} {:<10} {:<12} {:<16} {:<10} {}",
-                        lane.id,
-                        lane.status.as_str(),
-                        lane.runtime.as_str(),
-                        lane.workflow.as_deref().unwrap_or("-"),
-                        lane.issue.as_deref().unwrap_or("-"),
-                        lane.started_at,
-                    );
-                }
-            }
-            Ok(())
-        }
+        LaneCommand::List { json } => run_lane_control(ControlOperation::LaneList, None, json),
         LaneCommand::Status { lane_id, json } => {
-            let reg = LaneRegistry::open_default()?;
-            let mut lane = reg.load(&lane_id)?;
-            backend_for(&lane).reconcile(&reg, &mut lane)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&lane)?);
-            } else {
-                println!("lane:     {}", lane.id);
-                println!("status:   {}", lane.status.as_str());
-                println!("runtime:  {}", lane.runtime.as_str());
-                println!("workflow: {}", lane.workflow.as_deref().unwrap_or("-"));
-                println!("fleet:    {}", lane.fleet.as_deref().unwrap_or("-"));
-                println!("issue:    {}", lane.issue.as_deref().unwrap_or("-"));
-                println!("goal:     {}", lane.goal.as_deref().unwrap_or("-"));
-                println!("started:  {}", lane.started_at);
-                println!("stopped:  {}", lane.stopped_at.as_deref().unwrap_or("-"));
-                println!(
-                    "worktree: {}",
-                    lane.worktree_path
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "-".into())
-                );
-                println!("branch:   {}", lane.branch.as_deref().unwrap_or("-"));
-                println!("tmux:     {}", lane.tmux_session.as_deref().unwrap_or("-"));
-                println!(
-                    "socket:   {}",
-                    lane.tmux_socket
-                        .as_ref()
-                        .map(|path| path.display().to_string())
-                        .unwrap_or_else(|| "-".to_string())
-                );
-                println!("attach:   {}", lane.attach_target.as_deref().unwrap_or("-"));
-                println!("log:      {}", lane.log_path.display());
-            }
-            Ok(())
+            run_lane_control(ControlOperation::LaneStatus, Some(&lane_id), json)
+        }
+        LaneCommand::Interrupt { lane_id, json } => {
+            run_lane_control(ControlOperation::LaneInterrupt, Some(&lane_id), json)
+        }
+        LaneCommand::Restart { lane_id, json } => {
+            run_lane_control(ControlOperation::LaneRestart, Some(&lane_id), json)
+        }
+        LaneCommand::Resume { lane_id, json } => {
+            run_lane_control(ControlOperation::LaneResume, Some(&lane_id), json)
         }
         LaneCommand::Attach { lane_id, print } => {
             let reg = LaneRegistry::open_default()?;
@@ -896,13 +930,11 @@ fn run_lane_command(args: LaneArgs) -> Result<()> {
                 }
             }
         }
+        // `stop` is the historical spelling of `interrupt`. Both go through
+        // the same verb so the durable transition, the lifecycle fence, and
+        // the receipt are identical.
         LaneCommand::Stop { lane_id } => {
-            let reg = LaneRegistry::open_default()?;
-            let mut lane = reg.load(&lane_id)?;
-            let backend = backend_for(&lane);
-            backend.stop(&reg, &mut lane)?;
-            println!("stopped {}", lane.id);
-            Ok(())
+            run_lane_control(ControlOperation::LaneInterrupt, Some(&lane_id), false)
         }
         LaneCommand::Start {
             workflow,
@@ -5477,6 +5509,73 @@ model = "qwen-2.5-7b"
             command,
             Some(Commands::Lane(LaneArgs {
                 command: LaneCommand::List { json: true }
+            }))
+        ));
+    }
+
+    /// #1888: the CLI must expose exactly the Lane verbs the shared contract
+    /// declares, under the same ids — no CLI-only verb, no missing verb.
+    #[test]
+    fn cli_lane_subcommands_cover_the_shared_control_contract() {
+        use codewhale_lane::{ControlDomain, ControlOperation, ControlSurface};
+
+        for descriptor in codewhale_lane::control::operations_for_domain(ControlDomain::Lane) {
+            let argv = vec![
+                "codewhale".to_string(),
+                "lane".to_string(),
+                descriptor.verb.to_string(),
+            ];
+            let mut argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+            if descriptor.target.requires_identity() {
+                argv.push("lane-a1b2c3d4");
+            }
+            let cli = parse_ok(&argv);
+            let Some(Commands::Lane(args)) = cli.command else {
+                panic!("`{}` must parse as a lane subcommand", descriptor.verb);
+            };
+            let parsed = match args.command {
+                LaneCommand::List { .. } => ControlOperation::LaneList,
+                LaneCommand::Status { .. } => ControlOperation::LaneStatus,
+                LaneCommand::Interrupt { .. } | LaneCommand::Stop { .. } => {
+                    ControlOperation::LaneInterrupt
+                }
+                LaneCommand::Restart { .. } => ControlOperation::LaneRestart,
+                LaneCommand::Resume { .. } => ControlOperation::LaneResume,
+                other => panic!(
+                    "unexpected lane subcommand for {}: {other:?}",
+                    descriptor.verb
+                ),
+            };
+            assert_eq!(
+                parsed, descriptor.operation,
+                "`codewhale lane {}` must map to {}",
+                descriptor.verb, descriptor.id
+            );
+            assert!(
+                descriptor.offers(ControlSurface::Cli),
+                "{} must be declared on the CLI surface",
+                descriptor.id
+            );
+        }
+    }
+
+    /// `lane stop` is a compatibility spelling, not a second verb.
+    #[test]
+    fn lane_stop_and_interrupt_resolve_to_one_verb() {
+        use codewhale_lane::{ControlDomain, ControlOperation};
+
+        for spelling in ["stop", "interrupt", "cancel", "kill"] {
+            assert_eq!(
+                ControlOperation::parse_verb(ControlDomain::Lane, spelling),
+                Some(ControlOperation::LaneInterrupt),
+                "{spelling}"
+            );
+        }
+        let stop = parse_ok(&["codewhale", "lane", "stop", "lane-a1b2c3d4"]);
+        assert!(matches!(
+            stop.command,
+            Some(Commands::Lane(LaneArgs {
+                command: LaneCommand::Stop { .. }
             }))
         ));
     }
