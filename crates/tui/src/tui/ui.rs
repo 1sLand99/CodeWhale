@@ -2176,6 +2176,39 @@ fn build_app_system_prompt(app: &App, config: &Config) -> SystemPrompt {
     build_app_system_prompt_with_goal(app, config, app.hunt.quarry.as_deref())
 }
 
+/// Open the exact effective base-prompt preview (#3928).
+///
+/// Assembles the prompt through [`build_app_system_prompt_with_goal`] — the same
+/// function the dispatch path calls — so the preview is the next turn's bytes,
+/// not a reconstruction of them. Nothing is sent and no tool catalog is
+/// expanded; the preview is a pure read.
+fn preview_effective_base_prompt(app: &mut App, config: &Config) {
+    use crate::prompts::base_preview;
+
+    let prompt = build_app_system_prompt_with_goal(app, config, app.hunt.quarry.as_deref());
+    let home = codewhale_config::codewhale_home().ok();
+    let constitution_path = codewhale_config::UserConstitution::path().ok();
+    let sources = base_preview::PreviewSources {
+        base_prompt: Some(crate::prompts::effective_base_prompt_source(
+            home.as_deref(),
+        )),
+        user_constitution_path: constitution_path.as_deref(),
+        workspace: Some(app.workspace.as_path()),
+        home: home.as_deref(),
+    };
+    let report = base_preview::render_report(&base_preview::preview(&prompt, &sources));
+    let width = app
+        .viewport
+        .last_transcript_area
+        .map(|area| area.width)
+        .unwrap_or(80);
+    app.view_stack.push(crate::tui::pager::PagerView::from_text(
+        crate::prompts::base_preview::PREVIEW_TITLE,
+        &report,
+        width.saturating_sub(2),
+    ));
+}
+
 fn build_app_system_prompt_with_goal(
     app: &App,
     config: &Config,
@@ -11658,6 +11691,7 @@ async fn apply_command_result(
                 }
             }
             AppAction::UseBundledConstitution => use_bundled_constitution(app, config),
+            AppAction::PreviewEffectiveBasePrompt => preview_effective_base_prompt(app, config),
             AppAction::DisableHotbar => disable_hotbar(app, config),
             AppAction::RestoreHotbarDefaults => restore_hotbar_defaults(app, config),
             AppAction::OpenExternalUrl { url, label } => match open_external_url(&url) {
