@@ -79,8 +79,11 @@ export default async function LocaleLayout({
               "(function(){try{var t=localStorage.getItem('cw-theme');if(t==='light'||t==='dark'){document.documentElement.setAttribute('data-theme',t);}}catch(e){}})();",
           }}
         />
+        <a href="#main-content" className="skip-link">
+          {locale === "zh" ? "跳到主要内容" : "Skip to main content"}
+        </a>
         <Nav locale={locale as Locale} />
-        <main>{children}</main>
+        <main id="main-content">{children}</main>
         <Footer locale={locale as Locale} />
       </body>
     </html>

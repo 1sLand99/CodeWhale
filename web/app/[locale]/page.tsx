@@ -1,5 +1,6 @@
 import Image from "next/image";
 import Link from "next/link";
+import { GettingStartedSteps } from "@/components/getting-started-steps";
 import { InstallCodeBlock } from "@/components/install-code-block";
 import { Whale } from "@/components/whale";
 import { getFacts } from "@/lib/facts";
@@ -235,6 +236,28 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
             <span>act&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; edit through the selected permission posture</span>
             <span>verify&nbsp;&nbsp;&nbsp; cargo test --locked</span>
             <strong>report&nbsp;&nbsp;&nbsp; checks passed · receipt saved</strong>
+          </div>
+        </div>
+      </section>
+
+      <section className="product-start">
+        <div className="product-container">
+          <h2>
+            {isZh ? "第一次使用？四步走完。" : "New to Codewhale? Four steps end to end."}
+          </h2>
+          <p className="product-start-lede">
+            {isZh
+              ? "安装 → 无需密钥的首次会话 → 连接提供商 → 第一个 Fleet Workflow。名词含义见产品名词页。"
+              : "Install → a first keyless session → provider connection → a first Fleet workflow. The nouns are defined on the vocabulary page."}
+          </p>
+          <GettingStartedSteps locale={locale} />
+          <div className="product-start-links">
+            <Link href={`/${locale}/docs/guide`}>
+              {isZh ? "阅读新手指引 →" : "Read the getting-started guide →"}
+            </Link>
+            <Link href={`/${locale}/docs/vocabulary`}>
+              {isZh ? "查看产品名词 →" : "See the product vocabulary →"}
+            </Link>
           </div>
         </div>
       </section>

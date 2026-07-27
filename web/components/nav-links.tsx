@@ -9,7 +9,7 @@ export function NavLinks({ links, isZh }: { links: NavLink[]; isZh: boolean }) {
   const pathname = usePathname();
 
   return (
-    <nav className="hidden md:flex items-center gap-7">
+    <nav className="hidden md:flex items-center gap-7" aria-label={isZh ? "主导航" : "Primary"}>
       {links.map((l) => {
         const isActive = pathname === l.href || pathname.startsWith(`${l.href}/`);
         return (
