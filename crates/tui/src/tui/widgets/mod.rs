@@ -850,7 +850,10 @@ impl ChatWidget {
                 anchor_x: area.x.saturating_add(area.width / 2),
                 anchor_y: area.y.saturating_add(area.height.saturating_mul(2) / 3),
             };
-            crate::tui::ambient_life::render_ambient_life(
+            // Per-frame budget counters (built/painted/skipped/clipped);
+            // consumed by ambient-life tests and debug tooling, not by the
+            // widget itself.
+            let _ambient_stats = crate::tui::ambient_life::render_ambient_life(
                 area,
                 buf,
                 inks,
