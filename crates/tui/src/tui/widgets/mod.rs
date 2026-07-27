@@ -196,6 +196,16 @@ impl ChatWidget {
         // cell forces only those rows to re-render — committed history rows
         // are unaffected.
         app.resync_history_revisions();
+        app.viewport.transcript_cache.set_streaming_source_receipt(
+            app.streaming_source_receipt.map(|receipt| {
+                crate::tui::transcript::StreamingSourceReceipt {
+                    cell_index: receipt.cell_index,
+                    from_revision: history_entry_revision(receipt.from_revision),
+                    to_revision: history_entry_revision(receipt.to_revision),
+                    content_len: receipt.content_len,
+                }
+            }),
+        );
         let active_entries: &[HistoryCell] = app
             .active_cell
             .as_ref()
@@ -368,6 +378,14 @@ impl ChatWidget {
                 &app.folded_thinking,
                 Some(&app.collapsed_cell_map),
             );
+        }
+
+        // The cache has now observed this revision (or the cell was filtered,
+        // in which case a later reveal must cold-render). Start the next append
+        // receipt from the current revision instead of chaining across an
+        // already-consumed proof.
+        if let Some(receipt) = app.streaming_source_receipt.as_mut() {
+            receipt.from_revision = receipt.to_revision;
         }
 
         let total_lines = app.viewport.transcript_cache.total_lines();

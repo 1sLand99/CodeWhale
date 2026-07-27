@@ -8407,14 +8407,35 @@ fn append_streaming_text(app: &mut App, index: usize, text: &str) {
     if text.is_empty() {
         return;
     }
+    app.resync_history_revisions();
+    let Some(previous_revision) = app.history_revisions.get(index).copied() else {
+        return;
+    };
+    let chained_from_revision = app
+        .streaming_source_receipt
+        .filter(|receipt| receipt.cell_index == index && receipt.to_revision == previous_revision)
+        .map_or(previous_revision, |receipt| receipt.from_revision);
+    let mut content_len = None;
     if let Some(HistoryCell::Assistant { content, .. }) = app.history.get_mut(index) {
         content.push_str(text);
+        content_len = Some(content.len());
         // Bump only the streaming cell's per-cell revision so the transcript
         // cache re-renders just this cell. Without this, the cache would
         // either skip the update entirely (now that the global
         // history_version is no longer fanned out across every cell) or fall
         // back to a full re-wrap of the entire transcript every chunk.
         app.bump_history_cell(index);
+    }
+    let Some(content_len) = content_len else {
+        return;
+    };
+    if let Some(to_revision) = app.history_revisions.get(index).copied() {
+        app.streaming_source_receipt = Some(crate::tui::transcript::StreamingSourceReceipt {
+            cell_index: index,
+            from_revision: chained_from_revision,
+            to_revision,
+            content_len,
+        });
     }
 }
 

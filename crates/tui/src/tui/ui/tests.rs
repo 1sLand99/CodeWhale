@@ -11277,6 +11277,46 @@ async fn streaming_enter_queue_pushes_visible_toast() {
     assert!(toast.text.contains("Queued follow-up"));
 }
 
+#[test]
+fn streaming_append_receipt_chains_until_the_next_render() {
+    let mut app = create_test_app();
+    let index = ensure_streaming_assistant_history_cell(&mut app);
+    app.resync_history_revisions();
+    let initial_revision = app.history_revisions[index];
+
+    append_streaming_text(&mut app, index, "first");
+    let first_revision = app.history_revisions[index];
+    append_streaming_text(&mut app, index, " second");
+    let second_revision = app.history_revisions[index];
+
+    assert_ne!(initial_revision, first_revision);
+    assert_ne!(first_revision, second_revision);
+    assert_eq!(
+        app.streaming_source_receipt,
+        Some(crate::tui::transcript::StreamingSourceReceipt {
+            cell_index: index,
+            from_revision: initial_revision,
+            to_revision: second_revision,
+            content_len: "first second".len(),
+        })
+    );
+}
+
+#[test]
+fn unknown_streaming_cell_mutation_revokes_append_provenance() {
+    let mut app = create_test_app();
+    let index = ensure_streaming_assistant_history_cell(&mut app);
+    append_streaming_text(&mut app, index, "append-only");
+    assert!(app.streaming_source_receipt.is_some());
+
+    if let Some(HistoryCell::Assistant { content, .. }) = app.history.get_mut(index) {
+        content.insert_str(0, "rewritten ");
+    }
+    app.bump_history_cell(index);
+
+    assert!(app.streaming_source_receipt.is_none());
+}
+
 #[tokio::test]
 async fn empty_enter_promotes_the_oldest_queued_message() {
     // Typed Enter while streaming queues. An explicit empty Enter promotes

@@ -777,6 +777,7 @@ impl App {
             ignored_tool_calls: HashSet::new(),
             last_exec_wait_command: None,
             streaming_message_index: None,
+            streaming_source_receipt: None,
             suppress_stream_events_until_turn_complete: false,
             streaming_thinking_active_entry: None,
             thinking_revision_last_bump_at: None,

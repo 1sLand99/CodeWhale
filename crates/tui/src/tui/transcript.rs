@@ -40,7 +40,7 @@ use crate::tui::ui_text::CopyLineSeparator;
 /// `Arc::make_mut` to produce an owned `Vec` for the final `lines`
 /// assembly, so the only deep-clone occurs on the flattened output — once
 /// per frame instead of once per cell.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct CachedCell {
     /// Revision the cell was at when the lines/meta were rendered.
     revision: u64,
@@ -65,6 +65,25 @@ struct CachedCell {
     kind: TranscriptBlockKind,
     /// Whether this cell participates in the compact tool-card rail group.
     is_tool_groupable: bool,
+    /// Persistent parser/highlighter carry for the one changing Assistant
+    /// cell. Stable rendered lines remain in the vectors above and are
+    /// truncated only from the cache's replaceable-tail index.
+    incremental_markdown: Option<Box<crate::tui::markdown_render::IncrementalMarkdownRenderCache>>,
+    /// The hot-tail treatment mutates the last line for animation. Preserve
+    /// its settled form so the next append can restore it without re-rendering
+    /// the stable prefix.
+    hot_tail_original: Option<(usize, Line<'static>)>,
+}
+
+/// Provenance that one live Assistant cell's source stayed unchanged or only
+/// gained appended bytes. Visual-only revision bumps can therefore reuse it.
+/// Revisions use the same transformed keys passed to `ensure_*`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StreamingSourceReceipt {
+    pub cell_index: usize,
+    pub from_revision: u64,
+    pub to_revision: u64,
+    pub content_len: usize,
 }
 
 /// Visual role of one transcript cell.
@@ -133,6 +152,11 @@ pub struct TranscriptViewCache {
     /// columns past visual-only decoration glyphs without guessing which
     /// spans are decorative (#1163).
     rail_prefix_widths: Vec<usize>,
+    streaming_source_receipt: Option<StreamingSourceReceipt>,
+    /// Deterministic receipt for actual flattened-line reconstruction work.
+    /// Kept in production state so tests measure the real path without hooks.
+    streaming_lines_reflattened: u64,
+    streaming_meta_rows_scanned: u64,
 }
 
 impl TranscriptViewCache {
@@ -148,7 +172,26 @@ impl TranscriptViewCache {
             line_links: Vec::new(),
             line_meta: Vec::new(),
             rail_prefix_widths: Vec::new(),
+            streaming_source_receipt: None,
+            streaming_lines_reflattened: 0,
+            streaming_meta_rows_scanned: 0,
         }
+    }
+
+    pub(crate) fn set_streaming_source_receipt(&mut self, receipt: Option<StreamingSourceReceipt>) {
+        self.streaming_source_receipt = receipt;
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    fn streaming_lines_reflattened(&self) -> u64 {
+        self.streaming_lines_reflattened
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    fn streaming_meta_rows_scanned(&self) -> u64 {
+        self.streaming_meta_rows_scanned
     }
 
     /// Ensure cached lines match the provided cells/widths/per-cell revisions.
@@ -272,8 +315,14 @@ impl TranscriptViewCache {
             None
         };
 
+        let mut old_per_cell: Vec<Option<CachedCell>> = std::mem::take(&mut self.per_cell)
+            .into_iter()
+            .map(Some)
+            .collect();
         let mut new_per_cell: Vec<CachedCell> = Vec::with_capacity(total_cells);
         let revisions_match = cell_revisions.len() == total_cells;
+        let mut dirty_cells = 0usize;
+        let mut streaming_tail_update = None;
 
         let mut idx: usize = 0;
         for cell in cells {
@@ -288,17 +337,24 @@ impl TranscriptViewCache {
             // same index (cells can shift on insert/remove, so we only
             // reuse when the index is identical — a stricter invariant
             // codex also uses for its active-cell tail).
-            if let Some(prev) = self.per_cell.get(idx)
-                && !layout_changed
-                && prev.revision == current_rev
+            if !layout_changed
                 && revisions_match
+                && old_per_cell
+                    .get(idx)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|prev| prev.revision == current_rev)
             {
-                new_per_cell.push(prev.clone());
+                new_per_cell.push(
+                    old_per_cell[idx]
+                        .take()
+                        .expect("cached cell checked as present"),
+                );
                 idx += 1;
                 continue;
             }
 
             any_dirty = true;
+            dirty_cells = dirty_cells.saturating_add(1);
             first_dirty = Some(first_dirty.map_or(idx, |current| current.min(idx)));
             let is_tool_groupable = matches!(cell, HistoryCell::Tool(_));
             let render_width = if is_tool_groupable {
@@ -310,6 +366,77 @@ impl TranscriptViewCache {
                 .map(|m| *m.get(idx).unwrap_or(&idx))
                 .unwrap_or(idx);
             let folded = folded_cells.contains(&original_idx);
+
+            if matches!(
+                cell,
+                HistoryCell::Assistant {
+                    streaming: true,
+                    ..
+                }
+            ) {
+                let mut cached = old_per_cell
+                    .get_mut(idx)
+                    .and_then(Option::take)
+                    .unwrap_or_else(|| CachedCell {
+                        revision: current_rev,
+                        lines: Arc::new(Vec::new()),
+                        links: Arc::new(Vec::new()),
+                        copy_separators: Arc::new(Vec::new()),
+                        copy_prefix_widths: Arc::new(Vec::new()),
+                        is_empty: true,
+                        kind: TranscriptBlockKind::Answer,
+                        is_tool_groupable: false,
+                        incremental_markdown: Some(Box::default()),
+                        hot_tail_original: None,
+                    });
+                if let Some((line_index, original)) = cached.hot_tail_original.take()
+                    && let Some(line) = Arc::make_mut(&mut cached.lines).get_mut(line_index)
+                {
+                    *line = original;
+                }
+                let content_len = match cell {
+                    HistoryCell::Assistant { content, .. } => content.len(),
+                    _ => 0,
+                };
+                let verified_append = self.streaming_source_receipt.is_some_and(|receipt| {
+                    receipt.cell_index == original_idx
+                        && receipt.from_revision == cached.revision
+                        && receipt.to_revision == current_rev
+                        && receipt.content_len == content_len
+                });
+                let incremental = cached.incremental_markdown.get_or_insert_with(Box::default);
+                let replace_from = cell
+                    .update_incremental_streaming_render(
+                        render_width,
+                        options,
+                        verified_append,
+                        incremental,
+                        Arc::make_mut(&mut cached.lines),
+                        Arc::make_mut(&mut cached.links),
+                        Arc::make_mut(&mut cached.copy_separators),
+                        Arc::make_mut(&mut cached.copy_prefix_widths),
+                    )
+                    .expect("streaming Assistant matched above");
+                let cached_lines = Arc::make_mut(&mut cached.lines);
+                let last_index = cached_lines.len().checked_sub(1);
+                if let Some((index, last)) = last_index
+                    .and_then(|index| cached_lines.get_mut(index).map(|line| (index, line)))
+                {
+                    cached.hot_tail_original = Some((index, last.clone()));
+                    crate::tui::history::apply_hot_tail_to_line(last, options.low_motion);
+                }
+                cached.revision = current_rev;
+                cached.is_empty = cached.lines.is_empty();
+                cached.kind = TranscriptBlockKind::Answer;
+                cached.is_tool_groupable = false;
+                // The hot-tail style also changes on the preceding settled
+                // line, so reflatten one line before the Markdown tail.
+                streaming_tail_update = Some((idx, replace_from.saturating_sub(1)));
+                new_per_cell.push(cached);
+                idx += 1;
+                continue;
+            }
+
             let rendered = cell.lines_with_copy_metadata_folded(render_width, options, folded);
             let mut lines = Vec::with_capacity(rendered.len());
             let mut links = Vec::with_capacity(rendered.len());
@@ -335,6 +462,8 @@ impl TranscriptViewCache {
                 is_empty,
                 kind: TranscriptBlockKind::for_cell(cell),
                 is_tool_groupable,
+                incremental_markdown: None,
+                hot_tail_original: None,
             });
             idx += 1;
         }
@@ -344,6 +473,17 @@ impl TranscriptViewCache {
         if !any_dirty {
             // All cells reused at the same indices: nothing to reflatten.
             // (Width didn't change either, since that bumps `layout_changed`.)
+            return;
+        }
+
+        if !layout_changed
+            && !folded_changed
+            && old_len == total_cells
+            && dirty_cells == 1
+            && let Some((cell_index, line_from)) = streaming_tail_update
+            && cell_index + 1 == total_cells
+            && self.flatten_streaming_tail(cell_index, line_from)
+        {
             return;
         }
 
@@ -401,6 +541,78 @@ impl TranscriptViewCache {
         self.append_flattened_cells(spacing, first_cell);
     }
 
+    /// Replace only the changing tail of the final streaming cell in the
+    /// flattened viewport. Returns false when the prior cell had no visible
+    /// line at the requested boundary, in which case the caller performs the
+    /// canonical suffix rebuild.
+    fn flatten_streaming_tail(&mut self, cell_index: usize, line_from: usize) -> bool {
+        // Search backward: for append-only updates `line_from` is at the old
+        // hot tail, so this examines only the replaceable suffix rather than
+        // the full transcript prefix.
+        let mut truncate_at = None;
+        for (index, meta) in self.line_meta.iter().enumerate().rev() {
+            self.streaming_meta_rows_scanned = self.streaming_meta_rows_scanned.saturating_add(1);
+            if matches!(
+                meta,
+                TranscriptLineMeta::CellLine {
+                    cell_index: candidate,
+                    line_in_cell,
+                    ..
+                } if *candidate == cell_index && *line_in_cell == line_from
+            ) {
+                truncate_at = Some(index);
+                break;
+            }
+        }
+        let Some(truncate_at) = truncate_at else {
+            return false;
+        };
+        self.lines.truncate(truncate_at);
+        self.line_links.truncate(truncate_at);
+        self.line_meta.truncate(truncate_at);
+        self.rail_prefix_widths.truncate(truncate_at);
+
+        let Some(cached) = self.per_cell.get(cell_index) else {
+            return false;
+        };
+        let rendered_line_count = cached.lines.len();
+        for line_in_cell in line_from..rendered_line_count {
+            let line = &cached.lines[line_in_cell];
+            let rail = tool_group_rail(
+                self.per_cell.as_slice(),
+                cell_index,
+                line_in_cell,
+                rendered_line_count,
+            );
+            let final_line = line_with_group_rail(line, rail, usize::from(self.width));
+            let final_links = links_with_group_rail(
+                cached.links.get(line_in_cell).map_or(&[], Vec::as_slice),
+                rail,
+                usize::from(self.width),
+            );
+            self.rail_prefix_widths
+                .push(compute_rail_prefix_width(&final_line));
+            self.lines.push(final_line);
+            self.line_links.push(final_links);
+            self.line_meta.push(TranscriptLineMeta::CellLine {
+                cell_index,
+                line_in_cell,
+                copy_prefix_width: cached
+                    .copy_prefix_widths
+                    .get(line_in_cell)
+                    .copied()
+                    .unwrap_or(0),
+                copy_separator_after: cached
+                    .copy_separators
+                    .get(line_in_cell)
+                    .copied()
+                    .unwrap_or(CopyLineSeparator::Newline),
+            });
+            self.streaming_lines_reflattened = self.streaming_lines_reflattened.saturating_add(1);
+        }
+        true
+    }
+
     fn append_flattened_cells(&mut self, spacing: TranscriptSpacing, start_cell: usize) {
         for (cell_index, cached) in self.per_cell.iter().enumerate().skip(start_cell) {
             if cached.is_empty {
@@ -441,6 +653,8 @@ impl TranscriptViewCache {
                         .copied()
                         .unwrap_or(CopyLineSeparator::Newline),
                 });
+                self.streaming_lines_reflattened =
+                    self.streaming_lines_reflattened.saturating_add(1);
             }
 
             if let Some(next) = next_visible_cell(&self.per_cell, cell_index) {
@@ -1012,6 +1226,71 @@ mod tests {
         assert_eq!(cache.per_cell[0].revision, 1);
         assert_eq!(cache.per_cell[1].revision, 2);
         assert_eq!(cache.per_cell[2].revision, 1);
+    }
+
+    #[test]
+    fn streaming_assistant_keeps_a_persistent_linear_render_prefix() {
+        let mut content = String::new();
+        let mut revision = 1u64;
+        let mut cache = TranscriptViewCache::new();
+        let mut options = TranscriptRenderOptions::default();
+        options.low_motion = true;
+
+        content.push_str("start\n```rust\nlet value_0 = 0;\n```\n\n");
+        let mut cells = vec![assistant_cell(&content, true)];
+        cache.ensure(&cells, &[revision], 96, options);
+        let lines_arc = Arc::as_ptr(&cache.per_cell[0].lines);
+
+        for index in 1..120usize {
+            let previous = revision;
+            revision += 1;
+            content.push_str(&format!(
+                "段落 {index} e\u{301} 🚀\n```rust\nlet value_{index} = {index};\n```\n\n"
+            ));
+            cells[0] = assistant_cell(&content, true);
+            cache.set_streaming_source_receipt(Some(StreamingSourceReceipt {
+                cell_index: 0,
+                from_revision: previous,
+                to_revision: revision,
+                content_len: content.len(),
+            }));
+            cache.ensure(&cells, &[revision], 96, options);
+        }
+
+        let previous = revision;
+        revision += 1;
+        cache.set_streaming_source_receipt(Some(StreamingSourceReceipt {
+            cell_index: 0,
+            from_revision: previous,
+            to_revision: revision,
+            content_len: content.len(),
+        }));
+        cache.ensure(&cells, &[revision], 96, options);
+
+        assert_eq!(Arc::as_ptr(&cache.per_cell[0].lines), lines_arc);
+        let work = cache.per_cell[0]
+            .incremental_markdown
+            .as_ref()
+            .expect("streaming markdown cache")
+            .work();
+        assert_eq!(work.invalidations, 1);
+        assert_eq!(work.tail_blocks_rendered, 0);
+        assert_eq!(work.classified_lines as usize, content.lines().count());
+        assert!(
+            cache.streaming_lines_reflattened() <= (cache.total_lines() + 121) as u64,
+            "flatten work must be final output plus at most one hot-tail line per update: work={}, final={}",
+            cache.streaming_lines_reflattened(),
+            cache.total_lines()
+        );
+        assert!(
+            cache.streaming_meta_rows_scanned() <= 121,
+            "reverse lookup must inspect only the replaceable tail: {}",
+            cache.streaming_meta_rows_scanned()
+        );
+
+        let mut cold = TranscriptViewCache::new();
+        cold.ensure(&cells, &[revision], 96, options);
+        assert_eq!(plain_lines(&cache), plain_lines(&cold));
     }
 
     #[test]

@@ -1528,6 +1528,10 @@ pub struct App {
     pub last_exec_wait_command: Option<String>,
     /// Current streaming assistant cell
     pub streaming_message_index: Option<usize>,
+    /// Provenance for append-only changes to the current streaming cell.
+    /// Revisions are raw `history_revisions`; the widget maps them through its
+    /// cache-key transform before handing the receipt to the transcript cache.
+    pub(crate) streaming_source_receipt: Option<crate::tui::transcript::StreamingSourceReceipt>,
     /// True after a local cancel key has been handled and before the engine's
     /// authoritative TurnComplete arrives. Stream events already queued for
     /// the cancelled turn are ignored so text does not keep appearing after
@@ -3006,9 +3010,36 @@ impl App {
             .filter_map(|(index, cell)| cell.has_live_motion().then_some(index))
             .collect();
         for index in live_history_indices {
+            let previous_revision = self.history_revisions.get(index).copied();
+            let streaming_content_len = (self.streaming_message_index == Some(index))
+                .then(|| match self.history.get(index) {
+                    Some(HistoryCell::Assistant {
+                        content,
+                        streaming: true,
+                    }) => Some(content.len()),
+                    _ => None,
+                })
+                .flatten();
             let revision = self.fresh_history_revision();
             if let Some(slot) = self.history_revisions.get_mut(index) {
                 *slot = revision;
+            }
+            if let (Some(previous_revision), Some(content_len)) =
+                (previous_revision, streaming_content_len)
+            {
+                let from_revision = self
+                    .streaming_source_receipt
+                    .filter(|receipt| {
+                        receipt.cell_index == index && receipt.to_revision == previous_revision
+                    })
+                    .map_or(previous_revision, |receipt| receipt.from_revision);
+                self.streaming_source_receipt =
+                    Some(crate::tui::transcript::StreamingSourceReceipt {
+                        cell_index: index,
+                        from_revision,
+                        to_revision: revision,
+                        content_len,
+                    });
             }
         }
 
@@ -3059,6 +3090,12 @@ impl App {
         // pushing through `add_message`. After resync, the index is valid
         // (or out of bounds — in which case there's nothing to bump).
         self.resync_history_revisions();
+        if self
+            .streaming_source_receipt
+            .is_some_and(|receipt| receipt.cell_index == idx)
+        {
+            self.streaming_source_receipt = None;
+        }
         if let Some(rev) = self.history_revisions.get_mut(idx) {
             let new_rev = self.next_history_revision;
             self.next_history_revision = self.next_history_revision.wrapping_add(1);
