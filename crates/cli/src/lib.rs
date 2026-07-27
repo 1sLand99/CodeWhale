@@ -3614,7 +3614,14 @@ fn run_model_command(
             Ok(())
         }
         ModelCommand::Resolve { model, provider } => {
-            let subcommand_provider = model_command_provider_hint(provider, top_level_provider);
+            // Only `model resolve --provider X` is a hypothetical. The
+            // top-level `--provider` is the route this process is actually on,
+            // and it is already folded into `resolved_runtime` — treating it as
+            // a hypothetical made `codewhale --provider moonshot --model
+            // kimi-k3 model resolve` re-derive a registry default and report
+            // `kimi-k2.7-code` while the runtime used `kimi-k3` (v0.9.1 kimi-k3 dogfood report). The
+            // top-level `--model` was not consulted at all on that path.
+            let subcommand_provider = provider.map(ProviderKind::from);
             let queried = model.as_deref().map(str::trim).filter(|m| !m.is_empty());
 
             // With no explicit query, this reports the route the runtime would
@@ -3647,7 +3654,18 @@ fn run_model_command(
             // registry — but default the provider to the configured one rather
             // than to any single vendor.
             let provider_hint = subcommand_provider.or(Some(resolved_runtime.provider));
-            let resolved = registry.resolve(queried, provider_hint);
+            let mut resolved = registry.resolve(queried, provider_hint);
+            // The registry refuses to answer a provider-scoped question with
+            // another vendor's model. That is right when the *user* named the
+            // provider, but the hint above is often ours: when only a model was
+            // named, "what does this id mean" is still a global question, so
+            // retry unhinted rather than substituting the configured provider's
+            // default for the id the user typed.
+            let provider_named_by_user =
+                subcommand_provider.is_some() || top_level_provider.is_some();
+            if !provider_named_by_user && queried.is_some() && resolved.used_fallback {
+                resolved = registry.resolve(queried, None);
+            }
             println!("requested: {}", resolved.requested.unwrap_or_default());
             println!("resolved: {}", resolved.resolved.id);
             println!("provider: {}", resolved.resolved.provider.as_str());
