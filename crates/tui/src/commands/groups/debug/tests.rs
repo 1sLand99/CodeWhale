@@ -1423,3 +1423,66 @@ fn format_tokens_handles_all_scales() {
     assert_eq!(format_tokens(1_000_000), "1.0M");
     assert_eq!(format_tokens(2_500_000), "2.5M");
 }
+
+#[test]
+fn tools_command_is_truthful_before_any_request_snapshot() {
+    let mut app = create_test_app();
+    let result = super::dispatch(&mut app, "tools", None).expect("registered tools command");
+
+    assert!(!result.is_error);
+    assert!(
+        result
+            .message
+            .expect("message")
+            .contains("snapshot unavailable — no model request has been captured")
+    );
+}
+
+#[test]
+fn tools_command_and_compatibility_alias_render_same_exact_snapshot() {
+    let mut app = create_test_app();
+    app.session.last_tool_request_snapshot = Some(
+        crate::tool_inspection::ToolInspectionSnapshot::from_prepared_request(
+            "turn-1",
+            2,
+            Some(&[test_tool("read_file")]),
+        ),
+    );
+
+    let primary = super::dispatch(&mut app, "tools", Some("json")).expect("primary command");
+    let alias =
+        super::dispatch(&mut app, "tool-studio", Some("json")).expect("compatibility alias");
+    let primary = match primary.action.expect("primary pager") {
+        AppAction::OpenTextPager { content, .. } => content,
+        other => panic!("unexpected primary action: {other:?}"),
+    };
+    let alias = match alias.action.expect("alias pager") {
+        AppAction::OpenTextPager { content, .. } => content,
+        other => panic!("unexpected alias action: {other:?}"),
+    };
+
+    assert_eq!(primary, alias);
+    let parsed: serde_json::Value = serde_json::from_str(&primary).expect("valid JSON output");
+    assert_eq!(parsed["turn_id"]["value"], "turn-1");
+    assert_eq!(parsed["step"], 2);
+    assert_eq!(parsed["tool_count"], 1);
+    assert_eq!(parsed["tools"][0]["name"]["value"], "read_file");
+}
+
+#[test]
+fn tools_command_rejects_unknown_formats_without_mutating_state() {
+    let mut app = create_test_app();
+    app.session.last_tool_request_snapshot = Some(
+        crate::tool_inspection::ToolInspectionSnapshot::from_prepared_request(
+            "turn-1",
+            1,
+            Some(&[]),
+        ),
+    );
+    let before = app.session.last_tool_request_snapshot.clone();
+
+    let result = super::dispatch(&mut app, "tools", Some("yaml")).expect("tools command");
+
+    assert!(result.is_error);
+    assert_eq!(app.session.last_tool_request_snapshot, before);
+}

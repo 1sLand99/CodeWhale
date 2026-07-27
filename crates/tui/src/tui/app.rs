@@ -774,6 +774,8 @@ pub struct SessionState {
     /// `/cache inspect` uses this to inspect the same tool schema bytes
     /// that were eligible for the provider's prefix cache.
     pub last_tool_catalog: Option<Vec<Tool>>,
+    /// Exact tool field captured at the latest model request seam.
+    pub last_tool_request_snapshot: Option<crate::tool_inspection::ToolInspectionSnapshot>,
     /// API base URL used by the most recent model request or cache warmup.
     pub last_base_url: Option<String>,
 }
@@ -910,6 +912,7 @@ impl Default for SessionState {
             last_cache_inspection: None,
             last_warmup_key: None,
             last_tool_catalog: None,
+            last_tool_request_snapshot: None,
             last_base_url: None,
         }
     }

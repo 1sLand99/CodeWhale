@@ -159,6 +159,12 @@ pub enum Event {
         route: Option<TurnRoute>,
     },
 
+    /// Bounded tool-field projection from a prepared model-client request.
+    /// Delivery remains unknown; this event is emitted before connection setup.
+    ToolRequestSnapshot {
+        snapshot: crate::tool_inspection::ToolInspectionSnapshot,
+    },
+
     /// The turn is complete (no more tool calls)
     TurnComplete {
         usage: Usage,

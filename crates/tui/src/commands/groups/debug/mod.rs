@@ -6,6 +6,7 @@ mod cache;
 mod change;
 mod preview_request;
 mod tokens;
+mod tool_inspection;
 mod undo;
 
 #[cfg(test)]
@@ -29,6 +30,7 @@ impl CommandGroup for DebugCommands {
                 &PREVIEW_REQUEST_INFO,
                 run_preview_request
             )),
+            Box::new(FunctionCommand::new(&TOOLS_INFO, run_tools)),
             Box::new(FunctionCommand::new(&CHANGE_INFO, run_change)),
             Box::new(FunctionCommand::new(&SYSTEM_INFO, run_system)),
             Box::new(FunctionCommand::new(&CONTEXT_INFO, run_context)),
@@ -71,6 +73,12 @@ static PREVIEW_REQUEST_INFO: CommandInfo = CommandInfo {
     aliases: &["dryrun", "preview_request"],
     usage: "/preview-request [json] [--prompt <text>]",
     description_id: MessageId::CmdPreviewRequestDescription,
+};
+static TOOLS_INFO: CommandInfo = CommandInfo {
+    name: "tools",
+    aliases: &["tool-studio"],
+    usage: "/tools [text|json]",
+    description_id: MessageId::CmdToolsDescription,
 };
 static CHANGE_INFO: CommandInfo = CommandInfo {
     name: "change",
@@ -134,6 +142,9 @@ fn run_cache(app: &mut App, arg: Option<&str>) -> CommandResult {
 fn run_preview_request(app: &mut App, arg: Option<&str>) -> CommandResult {
     run_registered(app, "preview-request", arg)
 }
+fn run_tools(app: &mut App, arg: Option<&str>) -> CommandResult {
+    run_registered(app, "tools", arg)
+}
 fn run_change(app: &mut App, arg: Option<&str>) -> CommandResult {
     run_registered(app, "change", arg)
 }
@@ -169,6 +180,7 @@ pub(in crate::commands) fn dispatch(
         "preview-request" | "preview_request" | "dryrun" => {
             preview_request::preview_request(app, arg)
         }
+        "tools" | "tool-studio" => tool_inspection::tools(app, arg),
         "change" => change::change(app, arg),
         "system" | "xitong" => tokens::system_prompt(app),
         "context" | "ctx" => tokens::context(app, arg),

@@ -707,11 +707,23 @@ impl Engine {
                 temperature: None,
                 top_p: None,
             };
+            let tool_request_snapshot =
+                crate::tool_inspection::ToolInspectionSnapshot::from_prepared_request(
+                    &turn.id,
+                    turn.step,
+                    request.tools.as_deref(),
+                );
 
             // Stream the response. Keep the request around (cloned into the
             // first call) so we can resend it on a transparent retry below
             // when the wire dies before any content was streamed (#103).
             let stream_request = request;
+            let _ = self
+                .tx_event
+                .send(Event::ToolRequestSnapshot {
+                    snapshot: tool_request_snapshot,
+                })
+                .await;
             let stream_result = tokio::select! {
                 biased;
                 () = self.cancel_token.cancelled() => {

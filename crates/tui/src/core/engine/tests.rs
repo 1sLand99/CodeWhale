@@ -3260,6 +3260,162 @@ impl crate::core::model_client::ModelClient for BlockingModelClient {
     }
 }
 
+#[tokio::test]
+async fn tool_request_snapshot_matches_the_exact_mock_request_payload() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn("Done.")]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let context = crate::tools::ToolContext::new(workspace.path().to_path_buf());
+    let mut registry = crate::tools::ToolRegistry::new(context);
+    registry.register(std::sync::Arc::new(crate::tools::file::ReadFileTool));
+    let tools = Some(registry.to_api_tools_with_cache(true));
+    let mut turn = crate::core::turn::TurnContext::new(4);
+
+    let (status, error) = engine
+        .handle_deepseek_turn(
+            &mut turn,
+            Some(&registry),
+            tools,
+            AppMode::Agent,
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+
+    let request = mock.last_request().expect("mock request");
+    let mut events = handle.rx_event.write().await;
+    let snapshot = std::iter::from_fn(|| events.try_recv().ok())
+        .find_map(|event| match event {
+            Event::ToolRequestSnapshot { snapshot } => Some(snapshot),
+            _ => None,
+        })
+        .expect("request snapshot event");
+
+    assert_eq!(snapshot.tools_field_present, request.tools.is_some());
+    assert_eq!(
+        snapshot.tool_count,
+        request.tools.as_ref().map_or(0, Vec::len)
+    );
+    if let Some(request_tool) = request.tools.as_ref().and_then(|tools| tools.first()) {
+        assert_eq!(
+            snapshot.tools.first().expect("projected tool").name.value,
+            request_tool.name
+        );
+    }
+    assert_eq!(snapshot.turn_id.value, turn.id);
+    assert_eq!(snapshot.step, 0);
+    assert!(snapshot.delivery_status.starts_with("unknown"));
+}
+
+async fn snapshot_for_catalog(
+    workspace: &Path,
+    catalog: Option<Vec<crate::models::Tool>>,
+) -> crate::tool_inspection::ToolInspectionSnapshot {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn("Done.")]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace),
+        &Config::default(),
+        client,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(2);
+    let (status, error) = engine
+        .handle_deepseek_turn(&mut turn, None, catalog, AppMode::Agent, Vec::new())
+        .await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    let mut events = handle.rx_event.write().await;
+    std::iter::from_fn(|| events.try_recv().ok())
+        .find_map(|event| match event {
+            Event::ToolRequestSnapshot { snapshot } => Some(snapshot),
+            _ => None,
+        })
+        .expect("request snapshot")
+}
+
+#[tokio::test]
+async fn request_selector_distinguishes_absent_tools_from_present_empty_tools() {
+    let workspace = tempdir().expect("tempdir");
+    let absent = snapshot_for_catalog(workspace.path(), None).await;
+    let deferred_only = crate::models::Tool {
+        tool_type: Some("function".to_string()),
+        name: "deferred_fixture".to_string(),
+        description: "Deferred fixture".to_string(),
+        input_schema: json!({"type": "object"}),
+        allowed_callers: None,
+        defer_loading: Some(true),
+        input_examples: None,
+        strict: None,
+        cache_control: None,
+    };
+    let selected = active_tools_for_request(&[deferred_only], &HashSet::new(), false);
+    let present_empty = crate::tool_inspection::ToolInspectionSnapshot::from_prepared_request(
+        "turn",
+        0,
+        selected.as_deref(),
+    );
+
+    assert!(!absent.tools_field_present);
+    assert_eq!(absent.tool_count, 0);
+    assert!(present_empty.tools_field_present);
+    assert_eq!(present_empty.tool_count, 0);
+    assert_eq!(present_empty.payload_json_bytes, Some(2));
+}
+
+#[tokio::test]
+async fn request_snapshots_advance_to_the_latest_tool_step() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    fs::write(workspace.path().join("README.md"), "fixture\n").expect("write fixture");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::tool_call_turn("call-read", "read_file", r#"{"path":"README.md"}"#),
+        canned::simple_text_turn("Done."),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let context = crate::tools::ToolContext::new(workspace.path().to_path_buf());
+    let mut registry = crate::tools::ToolRegistry::new(context);
+    registry.register(std::sync::Arc::new(crate::tools::file::ReadFileTool));
+    let tools = Some(registry.to_api_tools_with_cache(true));
+    let mut turn = crate::core::turn::TurnContext::new(4);
+
+    let (status, error) = engine
+        .handle_deepseek_turn(
+            &mut turn,
+            Some(&registry),
+            tools,
+            AppMode::Agent,
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    let mut events = handle.rx_event.write().await;
+    let snapshots = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            Event::ToolRequestSnapshot { snapshot } => Some(snapshot),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(snapshots.len(), 2);
+    assert_eq!(snapshots[0].step, 0);
+    assert_eq!(snapshots[1].step, 1);
+    assert_eq!(snapshots[1].turn_id.value, turn.id);
+}
+
 fn deterministic_engine_config(workspace: &Path) -> EngineConfig {
     EngineConfig {
         workspace: workspace.to_path_buf(),
@@ -3614,6 +3770,20 @@ async fn engine_cancellation_drops_active_injected_model_request() {
     tokio::time::timeout(model_turn_event_timeout(), entered.notified())
         .await
         .expect("model request was never entered");
+
+    let mut rx = handle.rx_event.write().await;
+    let pending_snapshot = loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("timed out waiting for pending request snapshot")
+            .expect("engine event");
+        if let Event::ToolRequestSnapshot { snapshot } = event {
+            break snapshot;
+        }
+    };
+    assert!(pending_snapshot.delivery_status.starts_with("unknown"));
+    assert!(pending_snapshot.tools_field_present);
+    drop(rx);
     handle.cancel();
 
     let mut rx = handle.rx_event.write().await;

@@ -181,6 +181,7 @@
     "CmdAttachDescription": "附加图片或视频媒体；文本文件或目录请使用 @path",
     "CmdCacheDescription": "显示最近 N 轮的前缀缓存命中/未命中统计",
     "CmdPreviewRequestDescription": "在不发送的情况下，以脱敏清单形式预览下一个请求",
+    "CmdToolsDescription": "查看最近一次已准备工具请求的有界投影（只读）",
     "CmdChangeDescription": "显示最新的更新日志",
     "CmdChangeHeader": "最新更新日志",
     "CmdChangeTranslationQueued": "下面显示英文发布说明。接下来会请求模型翻译；如果当前提供商不可用，这段英文内容就是备用结果。",

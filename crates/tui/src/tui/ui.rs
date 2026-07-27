@@ -3273,6 +3273,7 @@ async fn run_event_loop(
                         }
                     }
                     EngineEvent::TurnStarted { turn_id, .. } => {
+                        app.session.last_tool_request_snapshot = None;
                         app.ocean_completion_started_at = None;
                         app.ocean_receipt_settle_start = None;
                         app.ocean_turn_history_start = app.history.len();
@@ -3315,6 +3316,9 @@ async fn run_event_loop(
                         app.last_reasoning = None;
                         app.pending_tool_uses.clear();
                         last_status_frame = Instant::now();
+                    }
+                    EngineEvent::ToolRequestSnapshot { snapshot } => {
+                        app.session.last_tool_request_snapshot = Some(snapshot);
                     }
                     EngineEvent::TurnComplete {
                         usage,
@@ -11164,6 +11168,9 @@ async fn apply_command_result(
                 let _ = engine_handle
                     .send(Op::SetGoalStatus { status, clear })
                     .await;
+            }
+            AppAction::OpenTextPager { title, content } => {
+                open_text_pager(app, title, content);
             }
             AppAction::VoiceCapture => {
                 use commands::voice::VoiceCaptureOutcome;

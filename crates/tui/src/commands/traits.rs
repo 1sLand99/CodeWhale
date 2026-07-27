@@ -53,6 +53,7 @@ pub(crate) const ADVANCED_DISCOVERY_COMMANDS: &[&str] = &[
     "system",
     "theme",
     "tokens",
+    "tools",
     "translate",
     "trust",
     "verbose",

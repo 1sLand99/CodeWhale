@@ -122,6 +122,7 @@ mod task_manager;
 mod test_support;
 mod tls;
 mod tool_history_repair;
+mod tool_inspection;
 mod tool_output_receipts;
 mod tools;
 mod tui;

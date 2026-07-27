@@ -98,6 +98,29 @@ MCP tools are dynamic. Successfully connected servers register names such as
 `mcp_<server>_<tool>` from `~/.codewhale/mcp.json`; a failed or disabled server
 must not be presented as an available model tool.
 
+## Inspect the model-client request tool payload
+
+Run `/tools` after a model turn to inspect a bounded projection of the exact
+tool field in the latest prepared model-client request. `/tools json` emits the
+same evidence as bounded machine-readable JSON. Both formats open in a pager;
+they are not copied into transcript history. `/tool-studio` remains a human-
+command compatibility alias; it is not a model tool.
+
+The snapshot distinguishes an absent tool field from a present empty array. It
+reports the exact model-client tool JSON byte count and SHA-256 digest only when
+measurement fits the one-MiB inspection bound; larger payloads stay unavailable.
+Provider adapters may transform, sanitize, or omit those fields while building
+a provider-specific wire body, so `/tools` marks provider delivery and the wire
+payload unavailable. Capture and rendering are bounded: retained schemas,
+descriptions, caller lists, catalog rows, turn IDs, and payload measurement all
+carry explicit truncation, omission, or unavailable receipts. The snapshot stays
+in memory only for the current session and is replaced on each prepared request.
+
+Provider, model, approval, registry provenance, and runtime capability metadata
+are not fields in the request tool schema. `/tools` therefore reports them as
+unavailable instead of joining against mutable state or inferring values. Use
+the separate route and permission receipts for those facts.
+
 ## Modes and permission postures
 
 Modes and permission postures are separate controls:

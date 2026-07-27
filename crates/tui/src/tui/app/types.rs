@@ -821,6 +821,11 @@ pub enum AppAction {
         /// added to the conversation and never sent to a provider.
         hypothetical_prompt: Option<String>,
     },
+    /// Show bounded read-only text without copying it into transcript history.
+    OpenTextPager {
+        title: String,
+        content: String,
+    },
     FetchModels,
     /// Force a Models.dev live-catalog refresh into ProviderLake (#4187).
     RefreshModelsDevCatalog,

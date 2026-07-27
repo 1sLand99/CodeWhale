@@ -181,6 +181,7 @@
     "CmdAttachDescription": "Đính kèm hình ảnh/video; sử dụng @path cho tệp văn bản hoặc thư mục",
     "CmdCacheDescription": "Hiển thị thống kê trúng/trượt của bộ nhớ đệm tiền tố trong N lượt gần nhất",
     "CmdPreviewRequestDescription": "Xem trước yêu cầu tiếp theo dưới dạng bản kê đã ẩn thông tin, không gửi đi",
+    "CmdToolsDescription": "Kiểm tra bản chiếu có giới hạn của yêu cầu công cụ đã chuẩn bị gần nhất (chỉ đọc)",
     "CmdChangeDescription": "Hiển thị thông tin nhật ký thay đổi mới nhất",
     "CmdChangeHeader": "Nhật Ký Thay Đổi Mới Nhất",
     "CmdChangeTranslationQueued": "Ghi chú phát hành bằng tiếng Anh hiển thị bên dưới. Bản dịch sẽ được yêu cầu tiếp theo; nếu nhà cung cấp không khả dụng, văn bản tiếng Anh này sẽ được dùng làm dự phòng.",

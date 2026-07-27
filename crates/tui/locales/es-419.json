@@ -181,6 +181,7 @@
     "CmdAttachDescription": "Adjuntar imagen o video; usa @ruta para archivos de texto o directorios",
     "CmdCacheDescription": "Mostrar estadísticas de aciertos/fallos del caché de prefijo en las últimas N rondas",
     "CmdPreviewRequestDescription": "Previsualiza la próxima solicitud como un manifiesto redactado, sin enviarla",
+    "CmdToolsDescription": "Inspecciona una proyección limitada de la última solicitud de herramientas preparada (solo lectura)",
     "CmdChangeDescription": "Mostrar la entrada más reciente del changelog",
     "CmdChangeHeader": "Changelog más reciente",
     "CmdChangeTranslationQueued": "Las notas de la versión en inglés se muestran abajo. Se solicitará una versión traducida a continuación; si el proveedor no está disponible, este texto en inglés será el fallback.",
