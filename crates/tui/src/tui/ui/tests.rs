@@ -11802,10 +11802,12 @@ fn mental_models_backtracks_to_the_last_first_run_decision() {
     crate::tui::onboarding::back_from_mental_models(&mut app);
     assert_eq!(app.onboarding, OnboardingState::ApiKey);
 
+    // With neither optional step, the last decision before the primer is the
+    // appearance step (#3937), not language.
     app.onboarding = OnboardingState::MentalModels;
     app.onboarding_had_api_key_step = false;
     crate::tui::onboarding::back_from_mental_models(&mut app);
-    assert_eq!(app.onboarding, OnboardingState::Language);
+    assert_eq!(app.onboarding, OnboardingState::Appearance);
 }
 
 // ---- Issue #4763: provider onboarding must never be a trap ----

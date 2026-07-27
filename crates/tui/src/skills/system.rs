@@ -8,7 +8,9 @@ use std::path::Path;
 /// Bundled catalog generation for the default CodeWhale skill pack (#4691).
 ///
 /// Generation 7 adds the explicit-only `help` router (#4698 parity slice).
-const BUNDLED_SKILL_VERSION: &str = "7";
+/// Generation 8 adds the explicit-only `contributor-onboarding` path
+/// requested by @JayBeest (#4227).
+const BUNDLED_SKILL_VERSION: &str = "8";
 
 // ── system & extension (meta) ───────────────────────────────────────────────
 const SKILL_CREATOR_BODY: &str = include_str!("../../assets/skills/skill-creator/SKILL.md");
@@ -47,6 +49,8 @@ const SPREADSHEETS_ALIAS_BODY: &str = include_str!("../../assets/skills/spreadsh
 const BATCH_BODY: &str = include_str!("../../assets/skills/batch/SKILL.md");
 const DEPENDENCY_UPDATE_BODY: &str = include_str!("../../assets/skills/dependency-update/SKILL.md");
 const RELEASE_BODY: &str = include_str!("../../assets/skills/release/SKILL.md");
+const CONTRIBUTOR_ONBOARDING_BODY: &str =
+    include_str!("../../assets/skills/contributor-onboarding/SKILL.md");
 
 // Optional integration (not auto-installed for every user): Feishu body kept for
 // digest/migration helpers only.
@@ -226,6 +230,11 @@ const BUNDLED_SKILLS: &[BundledSkill] = &[
         name: "release",
         body: RELEASE_BODY,
         introduced_in: 5,
+    },
+    BundledSkill {
+        name: "contributor-onboarding",
+        body: CONTRIBUTOR_ONBOARDING_BODY,
+        introduced_in: 8,
     },
 ];
 
@@ -529,6 +538,36 @@ mod tests {
 
         let ver = fs::read_to_string(marker_file(&tmp)).unwrap();
         assert_eq!(ver.trim(), BUNDLED_SKILL_VERSION);
+    }
+
+    /// #4227 (requested by @JayBeest): the contributor sync/gate/digest skill
+    /// ships in generation 8, and its two load-bearing refusals — never move a
+    /// contributor's HEAD, never touch a dirty tree — must survive any later
+    /// edit to the body.
+    #[test]
+    fn contributor_onboarding_ships_at_generation_8_and_keeps_its_refusals() {
+        let skill = BUNDLED_SKILLS
+            .iter()
+            .find(|skill| skill.name == "contributor-onboarding")
+            .expect("contributor-onboarding must be bundled");
+        assert_eq!(skill.introduced_in, 8);
+        assert_eq!(BUNDLED_SKILL_VERSION, "8");
+
+        let body = skill.body;
+        assert!(body.contains("invocation: explicit-only"));
+        // Read-only by default: sync is proposed, never performed.
+        assert!(body.contains("Do not run `git fetch`, `git pull`, `git rebase`"));
+        assert!(body.contains("Do not stash, discard, reset, or commit a dirty tree"));
+        // The gate is quoted from CI rather than paraphrased, and the digest is
+        // built from files rather than generated.
+        assert!(body.contains("cargo clippy --workspace --all-features --locked"));
+        assert!(body.contains(".github/workflows/ci.yml"));
+        assert!(body.contains("Do not call a model provider"));
+        // Provider neutrality: the dogfood step sends nothing anywhere.
+        assert!(body.contains("./target/release/codewhale exec --help"));
+        assert!(body.contains("Never select a provider for them"));
+        // Contributor credit is part of the skill's own contract.
+        assert!(body.contains("@JayBeest"));
     }
 
     #[test]
