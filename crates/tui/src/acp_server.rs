@@ -98,15 +98,22 @@ pub async fn run_acp_server(config: Config, model: String, default_cwd: PathBuf)
                     // and the main task keeps exclusive ownership of stdout.
                     match server.open_prompt_stream(&messages, &cwd).await {
                         Ok(stream) => {
-                            let outcome =
-                                drive_prompt_stream(stream, &session_id, &mut reader, &mut writer)
-                                    .await;
+                            let response_id_policy = server.response_id_policy;
+                            let outcome = drive_prompt_stream(
+                                stream,
+                                &session_id,
+                                response_id_policy,
+                                &mut reader,
+                                &mut writer,
+                            )
+                            .await;
                             match outcome {
                                 Ok(PromptOutcome::Completed(output)) => {
                                     // Chunks were already streamed; record the full
                                     // assistant turn in history for the next prompt.
                                     server.finish_prompt(&session_id, &output);
                                     if let Some(id) = id {
+                                        let id = response_id_policy.response_id(id);
                                         write_jsonrpc_result(
                                             &mut writer,
                                             id,
@@ -117,6 +124,7 @@ pub async fn run_acp_server(config: Config, model: String, default_cwd: PathBuf)
                                 }
                                 Ok(PromptOutcome::Cancelled) => {
                                     if let Some(id) = id {
+                                        let id = response_id_policy.response_id(id);
                                         write_jsonrpc_result(
                                             &mut writer,
                                             id,
@@ -126,17 +134,20 @@ pub async fn run_acp_server(config: Config, model: String, default_cwd: PathBuf)
                                     }
                                 }
                                 Err(err) => {
+                                    let id = id.map(|id| response_id_policy.response_id(id));
                                     write_jsonrpc_error(&mut writer, id, -32603, err.to_string())
                                         .await?;
                                 }
                             }
                         }
                         Err(err) => {
+                            let id = id.map(|id| server.response_id_policy.response_id(id));
                             write_jsonrpc_error(&mut writer, id, -32603, err.to_string()).await?;
                         }
                     }
                 }
                 Err(err) => {
+                    let id = id.map(|id| server.response_id_policy.response_id(id));
                     write_jsonrpc_error(&mut writer, id, err.code, err.message).await?;
                 }
             }
@@ -213,6 +224,7 @@ fn stream_text_chunk(event: &StreamEvent) -> Option<&str> {
 async fn drive_prompt_stream<R, W>(
     mut stream: StreamEventBox,
     session_id: &str,
+    response_id_policy: JsonRpcResponseIdPolicy,
     reader: &mut Lines<R>,
     writer: &mut W,
 ) -> Result<PromptOutcome>
@@ -277,6 +289,7 @@ where
                         // single in-flight turn.
                         if target.is_none() || target == Some(session_id) {
                             if let Some(id) = id {
+                                let id = response_id_policy.response_id(id);
                                 write_jsonrpc_result(writer, id, json!(null)).await?;
                             }
                             // Dropping `stream` on return aborts the provider call.
@@ -284,6 +297,7 @@ where
                         }
                         // Cancel for some other session: acknowledge, keep going.
                         if let Some(id) = id {
+                            let id = response_id_policy.response_id(id);
                             write_jsonrpc_result(writer, id, json!(null)).await?;
                         }
                     }
@@ -291,6 +305,7 @@ where
                         // The turn is single-flight; do not silently drop a
                         // request the client expects a response to.
                         if let Some(id) = id {
+                            let id = response_id_policy.response_id(id);
                             write_jsonrpc_error(
                                 writer,
                                 Some(id),
@@ -1168,9 +1183,15 @@ mod tests {
         let mut reader = lines_from("");
         let mut out = Vec::new();
 
-        let outcome = drive_prompt_stream(stream, "sess_1", &mut reader, &mut out)
-            .await
-            .expect("driver ok");
+        let outcome = drive_prompt_stream(
+            stream,
+            "sess_1",
+            JsonRpcResponseIdPolicy::Preserve,
+            &mut reader,
+            &mut out,
+        )
+        .await
+        .expect("driver ok");
 
         // Full text is accumulated for history...
         assert_eq!(outcome, PromptOutcome::Completed("hello world".to_string()));
@@ -1191,9 +1212,15 @@ mod tests {
         );
         let mut out = Vec::new();
 
-        let outcome = drive_prompt_stream(stream, "sess_1", &mut reader, &mut out)
-            .await
-            .expect("driver ok");
+        let outcome = drive_prompt_stream(
+            stream,
+            "sess_1",
+            JsonRpcResponseIdPolicy::Preserve,
+            &mut reader,
+            &mut out,
+        )
+        .await
+        .expect("driver ok");
 
         assert_eq!(outcome, PromptOutcome::Cancelled);
         // Notification-form cancel (no id) is acknowledged by acting, not writing.
@@ -1210,9 +1237,15 @@ mod tests {
         );
         let mut out = Vec::new();
 
-        let outcome = drive_prompt_stream(stream, "sess_1", &mut reader, &mut out)
-            .await
-            .expect("driver ok");
+        let outcome = drive_prompt_stream(
+            stream,
+            "sess_1",
+            JsonRpcResponseIdPolicy::StringifyNumeric,
+            &mut reader,
+            &mut out,
+        )
+        .await
+        .expect("driver ok");
 
         assert_eq!(outcome, PromptOutcome::Completed("kept".to_string()));
         // The other-session cancel carried an id, so it was acknowledged with null.
@@ -1233,9 +1266,15 @@ mod tests {
             lines_from(r#"{"jsonrpc":"2.0","id":9,"method":"session/new","params":{}}"#);
         let mut out = Vec::new();
 
-        let outcome = drive_prompt_stream(stream, "sess_1", &mut reader, &mut out)
-            .await
-            .expect("driver ok");
+        let outcome = drive_prompt_stream(
+            stream,
+            "sess_1",
+            JsonRpcResponseIdPolicy::StringifyNumeric,
+            &mut reader,
+            &mut out,
+        )
+        .await
+        .expect("driver ok");
 
         assert_eq!(outcome, PromptOutcome::Completed("done".to_string()));
         let lines = parse_lines(out);
