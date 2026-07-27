@@ -14,7 +14,7 @@
     "sources": ["Cargo.toml", "LICENSE", "README.md", "npm/codewhale/package.json", "docs/FLEET.md"]
   },
   "sourceCandidate": {
-    "version": "0.9.1",
+    "version": "0.9.2",
     "providerCount": 36,
     "toolCount": 70,
     "sandboxBackends": [
