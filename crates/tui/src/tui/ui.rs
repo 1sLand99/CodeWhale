@@ -14584,10 +14584,19 @@ async fn handle_view_events(
                 provider,
                 provider_id,
                 api_key,
+                base_url,
             } => {
                 let identity = picker_provider_identity(config, provider, provider_id.as_deref())
                     .map_err(anyhow::Error::msg)?;
-                apply_provider_picker_api_key(app, engine_handle, config, identity, api_key).await;
+                apply_provider_picker_api_key(
+                    app,
+                    engine_handle,
+                    config,
+                    identity,
+                    api_key,
+                    base_url,
+                )
+                .await;
                 refresh_config_view_if_open(app, "provider");
             }
             ViewEvent::ProviderPickerSetupConfirmed {
@@ -14596,6 +14605,7 @@ async fn handle_view_events(
                 api_key,
                 model,
                 context_window,
+                base_url,
             } => {
                 let identity = picker_provider_identity(config, provider, provider_id.as_deref())
                     .map_err(anyhow::Error::msg)?;
@@ -14607,6 +14617,7 @@ async fn handle_view_events(
                     api_key,
                     model,
                     context_window,
+                    base_url,
                 )
                 .await;
                 if completed && app.onboarding == OnboardingState::Provider {
@@ -15428,6 +15439,7 @@ async fn apply_provider_picker_api_key(
     config: &mut Config,
     identity: crate::config::ProviderIdentity,
     api_key: String,
+    base_url: Option<String>,
 ) {
     apply_provider_picker_api_key_with_verifier(
         app,
@@ -15435,6 +15447,7 @@ async fn apply_provider_picker_api_key(
         config,
         identity,
         api_key,
+        base_url,
         &LiveProviderKeyVerifier,
     )
     .await;
@@ -15489,11 +15502,18 @@ async fn apply_provider_picker_api_key_with_verifier(
     config: &mut Config,
     identity: crate::config::ProviderIdentity,
     api_key: String,
+    base_url_override: Option<String>,
     verifier: &dyn ProviderKeyVerifier,
 ) {
     let provider = identity.provider;
     let mut scoped_config = config.clone();
     scoped_config.provider = Some(identity.key.clone());
+    // #4526: a billing route chosen in the wizard is applied to the scoped
+    // clone only, so the key is probed against the endpoint it will be saved
+    // for without touching the on-disk config before the user confirms.
+    if let Some(base_url) = base_url_override.clone() {
+        scoped_config.set_provider_base_url_override(provider, Some(base_url));
+    }
     // #3875: verify the key against the provider before opening the rest of
     // the guided flow. Nothing is persisted until the confirm stage.
     // Resolve the effective route, including compatibility routes whose
@@ -15513,6 +15533,7 @@ async fn apply_provider_picker_api_key_with_verifier(
                     &scoped_config,
                     runtime_status,
                     api_key,
+                    base_url_override,
                 )
                 .map(|picker| {
                     picker
@@ -15576,10 +15597,11 @@ async fn apply_provider_picker_setup_confirmed(
     api_key: String,
     model: String,
     context_window: Option<u32>,
+    base_url: Option<String>,
 ) -> bool {
     use crate::config::{
-        save_api_key_for_identity, save_provider_context_window_for_identity,
-        save_provider_model_for_identity,
+        save_api_key_for_identity, save_provider_base_url_for_identity,
+        save_provider_context_window_for_identity, save_provider_model_for_identity,
     };
 
     let provider = identity.provider;
@@ -15593,6 +15615,23 @@ async fn apply_provider_picker_setup_confirmed(
             ),
         });
         return false;
+    }
+
+    // #4526: the wizard's billing-route choice is written before the key so the
+    // credential is saved onto the route it was verified against. It lands only
+    // in that provider's own `base_url`; failing here aborts before any secret
+    // is persisted rather than leaving a key on the wrong endpoint.
+    if let Some(base_url) = base_url.as_deref() {
+        if let Err(err) = save_provider_base_url_for_identity(&identity, config, base_url) {
+            app.add_message(HistoryCell::System {
+                content: format!(
+                    "Failed to save {} endpoint `{base_url}`: {err}\nProvider unchanged.",
+                    provider.as_str()
+                ),
+            });
+            return false;
+        }
+        config.set_provider_base_url_override(provider, Some(base_url.to_string()));
     }
 
     // Persist key first via the existing comment-preserving path, then pin the
@@ -17503,6 +17542,7 @@ mod provider_key_validation_tests {
             &mut config,
             identity,
             "sk-verified".to_string(),
+            None,
             &verifier,
         )
         .await;
@@ -17555,6 +17595,110 @@ mod provider_key_validation_tests {
         );
     }
 
+    /// #4526: the wizard's StepFun billing-route choice must be the endpoint
+    /// the key is probed against, and it must reach disk only once the user
+    /// confirms — never as a side effect of validation.
+    #[tokio::test]
+    async fn stepfun_plan_route_is_validated_before_the_key_is_persisted() {
+        let config_env = ConfigPathEnvGuard::new();
+        let mut app = create_test_app();
+        let mut engine = mock_engine_handle();
+        let mut config = Config::default();
+        let verifier = MockProviderKeyVerifier::new(Ok(()));
+        let identity = picker_provider_identity(&config, ApiProvider::Stepfun, None)
+            .expect("StepFun identity");
+
+        apply_provider_picker_api_key_with_verifier(
+            &mut app,
+            &mut engine.handle,
+            &mut config,
+            identity,
+            "step-plan-key".to_string(),
+            Some(crate::config::DEFAULT_STEPFUN_PLAN_BASE_URL.to_string()),
+            &verifier,
+        )
+        .await;
+
+        assert_eq!(
+            verifier.calls(),
+            vec![(
+                ApiProvider::Stepfun,
+                "step-plan-key".to_string(),
+                crate::config::DEFAULT_STEPFUN_PLAN_BASE_URL.to_string()
+            )],
+            "the chosen Step Plan endpoint must be the one live-validated"
+        );
+        assert_eq!(
+            config
+                .providers
+                .as_ref()
+                .and_then(|providers| providers.stepfun.base_url.clone()),
+            None,
+            "validation must not mutate the live config"
+        );
+        let saved = std::fs::read_to_string(config_env.config_path()).unwrap_or_default();
+        assert!(
+            !saved.contains("step_plan"),
+            "nothing persisted yet: {saved}"
+        );
+        assert!(!saved.contains("step-plan-key"), "no secret yet: {saved}");
+    }
+
+    /// The confirm stage writes the endpoint into `[providers.stepfun]` and
+    /// leaves every other provider table alone.
+    #[tokio::test]
+    async fn stepfun_setup_confirm_writes_only_the_stepfun_base_url() {
+        let config_env = ConfigPathEnvGuard::new();
+        let mut app = create_test_app();
+        let mut engine = mock_engine_handle();
+        let mut config = Config::default();
+        let identity = picker_provider_identity(&config, ApiProvider::Stepfun, None)
+            .expect("StepFun identity");
+
+        apply_provider_picker_setup_confirmed(
+            &mut app,
+            &mut engine.handle,
+            &mut config,
+            identity,
+            "step-plan-key".to_string(),
+            crate::config::DEFAULT_STEPFUN_MODEL.to_string(),
+            None,
+            Some(crate::config::DEFAULT_STEPFUN_PLAN_BASE_URL.to_string()),
+        )
+        .await;
+
+        let saved = std::fs::read_to_string(config_env.config_path()).expect("config written");
+        let document: toml::Table = toml::from_str(&saved).expect("valid TOML");
+        let providers = document
+            .get("providers")
+            .and_then(toml::Value::as_table)
+            .expect("providers table");
+        assert_eq!(
+            providers
+                .get("stepfun")
+                .and_then(|entry| entry.get("base_url"))
+                .and_then(toml::Value::as_str),
+            Some(crate::config::DEFAULT_STEPFUN_PLAN_BASE_URL)
+        );
+        assert_eq!(
+            providers.keys().collect::<Vec<_>>(),
+            vec!["stepfun"],
+            "the route choice must not touch other provider tables"
+        );
+        assert!(
+            document.get("base_url").is_none(),
+            "the root base_url must stay untouched: {saved}"
+        );
+        assert_eq!(
+            config
+                .providers
+                .as_ref()
+                .and_then(|providers| providers.stepfun.base_url.as_deref()),
+            Some(crate::config::DEFAULT_STEPFUN_PLAN_BASE_URL),
+            "the live config mirrors the persisted endpoint"
+        );
+    }
+
     #[tokio::test]
     async fn replacing_legacy_kimi_import_verifies_and_persists_the_kimi_code_api_key_route() {
         let config_env = ConfigPathEnvGuard::new();
@@ -17588,6 +17732,7 @@ auth_mode = "kimi_oauth"
             &mut config,
             identity.clone(),
             "sk-kimi-supported".to_string(),
+            None,
             &verifier,
         )
         .await;
@@ -17609,6 +17754,7 @@ auth_mode = "kimi_oauth"
             identity,
             "sk-kimi-supported".to_string(),
             crate::config::DEFAULT_KIMI_CODE_MODEL.to_string(),
+            None,
             None,
         )
         .await;
@@ -17663,6 +17809,7 @@ base_url = "https://mock.openrouter.test/v1"
             "sk-confirmed".to_string(),
             model.clone(),
             None,
+            None,
         )
         .await;
 
@@ -17712,6 +17859,7 @@ base_url = "https://mock.openrouter.test/v1"
             &mut config,
             identity,
             "sk-rejected".to_string(),
+            None,
             &verifier,
         )
         .await;
@@ -17769,6 +17917,7 @@ base_url = "https://mock.openrouter.test/v1"
             &mut config,
             identity,
             "rejected-b-key".to_string(),
+            None,
             &verifier,
         )
         .await;
@@ -17816,6 +17965,7 @@ model = "model-b"
             identity,
             "saved-b-key".to_string(),
             "model-b-confirmed".to_string(),
+            None,
             None,
         )
         .await;

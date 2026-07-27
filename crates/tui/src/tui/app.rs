@@ -4158,6 +4158,16 @@ impl App {
         )
     }
 
+    /// Whether onboarding is pointed at StepFun's Step Plan subscription
+    /// endpoint rather than its pay-as-you-go one (#4526).
+    pub fn onboarding_uses_stepfun_plan(&self) -> bool {
+        self.onboarding_provider == crate::config::ApiProvider::Stepfun
+            && crate::pricing::billing_surface_for_route(
+                crate::config::ApiProvider::Stepfun,
+                Some(&self.active_route_base_url),
+            ) == Some(crate::pricing::STEPFUN_PLAN_BILLING_SURFACE)
+    }
+
     pub fn set_active_context_window_override(&mut self, context_window: Option<u32>) {
         self.active_context_window_override = context_window;
         if context_window.is_some() {

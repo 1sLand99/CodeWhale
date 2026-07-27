@@ -44,6 +44,24 @@ pub fn lines(app: &App) -> Vec<Line<'static>> {
             app.tr(MessageId::KimiCodePlanNoImportHint),
             Style::default().fg(palette::TEXT_MUTED),
         )));
+    } else if app.onboarding_uses_stepfun_plan() {
+        // StepFun's two billing tracks take different keys on different
+        // endpoints; say which one this route wants (#4526).
+        lines.push(Line::from(Span::styled(
+            app.tr(MessageId::StepfunPlanApiKeyHint),
+            Style::default().fg(palette::TEXT_MUTED),
+        )));
+        lines.push(Line::from(Span::styled(
+            app.tr(MessageId::StepfunPlanRouteHint)
+                .replace("{route}", crate::config::DEFAULT_STEPFUN_PLAN_BASE_URL),
+            Style::default().fg(palette::TEXT_MUTED),
+        )));
+        if let Some(url) = credential_help.credential_url {
+            lines.push(Line::from(Span::styled(
+                url.to_string(),
+                Style::default().fg(palette::TEXT_MUTED),
+            )));
+        }
     } else if let Some(url) = credential_help.credential_url {
         lines.push(Line::from(Span::styled(
             url.to_string(),
@@ -316,5 +334,40 @@ mod tests {
         assert!(body.contains("does not import Kimi CLI credentials"));
         assert!(!body.contains("https://platform.kimi.ai/console/api-keys"));
         assert!(!body.contains("OAuth"));
+    }
+
+    fn stepfun_onboarding_body(base_url: &str) -> String {
+        let mut app = test_app_with_locale(Locale::En);
+        app.api_provider = ApiProvider::Stepfun;
+        app.onboarding_provider = ApiProvider::Stepfun;
+        app.active_route_base_url = base_url.to_string();
+        app.model = crate::config::DEFAULT_STEPFUN_MODEL.to_string();
+        lines(&app)
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// #4526: StepFun's two billing tracks take different keys. On the Step
+    /// Plan endpoint, say so instead of showing the generic StepFun guidance.
+    #[test]
+    fn stepfun_plan_onboarding_uses_subscription_key_guidance() {
+        let body = stepfun_onboarding_body(crate::config::DEFAULT_STEPFUN_PLAN_BASE_URL);
+        assert!(body.contains("Step Plan"), "got: {body}");
+        assert!(
+            body.contains(crate::config::DEFAULT_STEPFUN_PLAN_BASE_URL),
+            "the plan endpoint must be named: {body}"
+        );
+        assert!(!body.contains("OAuth"));
+    }
+
+    /// The pay-as-you-go route keeps the ordinary credential guidance; the
+    /// plan copy would be wrong there.
+    #[test]
+    fn stepfun_payg_onboarding_keeps_generic_guidance() {
+        let body = stepfun_onboarding_body(crate::config::DEFAULT_STEPFUN_BASE_URL);
+        assert!(!body.contains("Step Plan"), "got: {body}");
+        assert!(!body.contains(crate::config::DEFAULT_STEPFUN_PLAN_BASE_URL));
     }
 }

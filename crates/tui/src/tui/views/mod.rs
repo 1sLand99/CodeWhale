@@ -764,6 +764,9 @@ pub enum ViewEvent {
         provider: crate::config::ApiProvider,
         provider_id: Option<String>,
         api_key: String,
+        /// Endpoint chosen in the wizard's billing-route stage, applied to the
+        /// verification config only — nothing is written until confirm (#4526).
+        base_url: Option<String>,
     },
     /// Emitted by the `/provider` guided setup confirm stage after the user
     /// accepted provider + model. The handler persists the key (and model)
@@ -774,6 +777,9 @@ pub enum ViewEvent {
         api_key: String,
         model: String,
         context_window: Option<u32>,
+        /// Endpoint the key was verified against, persisted to the provider's
+        /// own `base_url` before the key is saved (#4526).
+        base_url: Option<String>,
     },
     /// Emitted by the `/provider` picker after the custom provider form is
     /// completed. The handler persists a named OpenAI-compatible provider
