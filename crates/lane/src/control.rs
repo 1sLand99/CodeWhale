@@ -1928,12 +1928,24 @@ fn lane_one(
 ) -> ControlReceipt {
     let mut record = match registry.load(&target.id) {
         Ok(record) => record,
-        Err(_) => {
+        Err(err)
+            if err
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|source| source.kind() == std::io::ErrorKind::NotFound) =>
+        {
             return ControlReceipt::rejected(
                 descriptor,
                 surface,
                 Some(target.clone()),
                 ControlFailure::not_found(format!("no Lane with id {}", target.id)),
+            );
+        }
+        Err(err) => {
+            return ControlReceipt::failed(
+                descriptor,
+                surface,
+                Some(target),
+                ControlFailure::backend(format!("{err:#}")),
             );
         }
     };
@@ -3194,6 +3206,33 @@ mod tests {
                 assert!(!receipt.retryable);
             }
         }
+    }
+
+    #[test]
+    fn corrupt_lane_records_are_retryable_backend_failures() {
+        let (dir, id) = seeded_registry();
+        let registry = crate::registry::LaneRegistry::open(dir.path()).unwrap();
+        std::fs::write(registry.record_path(&id), b"{not-json").unwrap();
+
+        let receipt = execute_lane_control_in(
+            ControlSurface::Cli,
+            ControlOperation::LaneStatus,
+            Some(&id),
+            Some(dir.path()),
+        );
+
+        assert_eq!(receipt.outcome, LifecycleOutcome::Failed);
+        assert_eq!(
+            receipt.failure.as_ref().map(|failure| failure.kind),
+            Some(ControlFailureKind::Backend)
+        );
+        assert!(receipt.retryable);
+        assert!(
+            receipt
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.message.contains("parse lane record"))
+        );
     }
 
     #[test]

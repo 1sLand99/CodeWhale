@@ -180,9 +180,6 @@ impl LaneRegistry {
 
     pub fn load(&self, id: &str) -> Result<LaneRecord> {
         let path = self.record_path(id);
-        if !path.is_file() {
-            bail!("lane `{id}` not found under {}", self.root.display());
-        }
         let text = fs::read_to_string(&path)
             .with_context(|| format!("read lane record {}", path.display()))?;
         serde_json::from_str(&text).with_context(|| format!("parse lane record {}", path.display()))
