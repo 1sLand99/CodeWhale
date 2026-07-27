@@ -471,6 +471,19 @@ pub fn is_exact_minimax_chat_route(kind: ProviderKind, base_url: &str) -> bool {
             || is_exact_https_route(base_url, "api.minimaxi.com", "v1"))
 }
 
+/// Whether a configured route is one of MiniMax's exact first-party
+/// Anthropic-compatible Messages endpoints.
+///
+/// M3 exposes only adaptive/disabled thinking on these routes; it does not
+/// expose distinct effort tiers. Keep the guard exact so a compatible gateway
+/// cannot inherit first-party effective-state claims from its provider label.
+#[must_use]
+pub fn is_exact_minimax_anthropic_route(kind: ProviderKind, base_url: &str) -> bool {
+    kind == ProviderKind::MinimaxAnthropic
+        && (is_exact_https_route(base_url, "api.minimax.io", "anthropic")
+            || is_exact_https_route(base_url, "api.minimaxi.com", "anthropic"))
+}
+
 /// Return credential help for one concrete provider route.
 ///
 /// This protects non-UI callers such as diagnostics and command surfaces from
@@ -1553,6 +1566,43 @@ mod tests {
         assert!(!is_exact_minimax_chat_route(
             ProviderKind::MinimaxAnthropic,
             DEFAULT_MINIMAX_BASE_URL
+        ));
+    }
+
+    #[test]
+    fn minimax_anthropic_route_matching_is_exact_and_excludes_chat() {
+        for route in [
+            "https://api.minimax.io/anthropic",
+            "https://api.minimaxi.com/anthropic/",
+            "HTTPS://API.MINIMAX.IO/anthropic",
+        ] {
+            assert!(
+                is_exact_minimax_anthropic_route(ProviderKind::MinimaxAnthropic, route),
+                "{route}"
+            );
+        }
+        for neighboring_route in [
+            "http://api.minimax.io/anthropic",
+            "https://api.minimax.io:443/anthropic",
+            "https://api.minimax.io/Anthropic",
+            "https://api.minimax.io/anthropic?preview=1",
+            "https://api.minimax.io/anthropic#fragment",
+            "https://api.minimax.io/anthropic//",
+            "https://api.minimax.io/anthropic/v1/messages",
+            "https://api.minimax.io/v1",
+            "https://gateway.example/anthropic",
+        ] {
+            assert!(
+                !is_exact_minimax_anthropic_route(
+                    ProviderKind::MinimaxAnthropic,
+                    neighboring_route
+                ),
+                "{neighboring_route} must not inherit MiniMax Messages semantics"
+            );
+        }
+        assert!(!is_exact_minimax_anthropic_route(
+            ProviderKind::Minimax,
+            DEFAULT_MINIMAX_ANTHROPIC_BASE_URL
         ));
     }
 

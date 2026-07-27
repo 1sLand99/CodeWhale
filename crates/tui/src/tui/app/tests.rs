@@ -512,6 +512,102 @@ fn minimax_m3_high_and_max_receipts_do_not_claim_tier_granularity() {
 }
 
 #[test]
+fn minimax_anthropic_m3_high_and_max_receipts_match_adaptive_wire_truth() {
+    for (previous, requested, label) in [
+        (ReasoningEffort::Off, ReasoningEffort::High, "high"),
+        (ReasoningEffort::High, ReasoningEffort::Max, "max"),
+    ] {
+        let mut app = App::new(test_options(false), &Config::default());
+        app.api_provider = ApiProvider::MinimaxAnthropic;
+        app.auto_model = false;
+        app.active_route_base_url = crate::config::DEFAULT_MINIMAX_ANTHROPIC_BASE_URL.to_string();
+        app.model = crate::config::DEFAULT_MINIMAX_MODEL.to_string();
+        app.reasoning_effort = previous;
+
+        app.cycle_effort();
+
+        assert_eq!(app.reasoning_effort, requested);
+        assert_eq!(
+            app.reasoning_effort_display_label(),
+            format!("{label}→thinking enabled; granularity unavailable")
+        );
+        let work = app
+            .work_state_snapshot()
+            .expect("Work snapshot")
+            .expect("effort activity creates graph state");
+        let activity = work
+            .graph
+            .expect("Work Graph")
+            .activities
+            .last()
+            .cloned()
+            .expect("effort activity");
+        let crate::work_graph::WorkActivityEvent::ReasoningEffortChanged {
+            effective,
+            provider,
+            endpoint_identity,
+            model,
+            ..
+        } = activity;
+        assert_eq!(
+            effective,
+            crate::work_graph::ReasoningEffortTier::ThinkingEnabledGranularityUnavailable
+        );
+        assert_eq!(provider, "minimax-anthropic");
+        assert_eq!(
+            endpoint_identity.as_deref(),
+            Some(crate::config::DEFAULT_MINIMAX_ANTHROPIC_BASE_URL)
+        );
+        assert_eq!(model.as_deref(), Some(crate::config::DEFAULT_MINIMAX_MODEL));
+    }
+}
+
+#[test]
+fn named_custom_route_displays_and_persists_effective_unavailable() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.set_provider_identity(ApiProvider::Custom, "my-gateway");
+    app.auto_model = false;
+    app.active_route_base_url = "https://gateway.example/v1?api_key=must-not-persist".to_string();
+    app.model = "vendor-model-x".to_string();
+    app.reasoning_effort = ReasoningEffort::High;
+
+    app.cycle_effort();
+
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Max);
+    assert_eq!(
+        app.reasoning_effort_display_label(),
+        "max→effective unavailable"
+    );
+    let work = app
+        .work_state_snapshot()
+        .expect("Work snapshot")
+        .expect("unknown route activity creates valid graph state");
+    let activity = work
+        .graph
+        .expect("Work Graph")
+        .activities
+        .last()
+        .cloned()
+        .expect("effort activity");
+    let crate::work_graph::WorkActivityEvent::ReasoningEffortChanged {
+        effective,
+        provider,
+        endpoint_identity,
+        model,
+        ..
+    } = activity;
+    assert_eq!(
+        effective,
+        crate::work_graph::ReasoningEffortTier::Unavailable
+    );
+    assert_eq!(provider, "my-gateway");
+    let endpoint = endpoint_identity.expect("redacted endpoint provenance");
+    assert!(endpoint.contains("gateway.example"), "{endpoint}");
+    assert!(!endpoint.contains("must-not-persist"), "{endpoint}");
+    assert_eq!(model.as_deref(), Some("vendor-model-x"));
+}
+
+#[test]
 fn zai_gateway_off_and_high_receipts_remain_unavailable() {
     for (previous, requested, label) in [
         (ReasoningEffort::Max, ReasoningEffort::Off, "off"),

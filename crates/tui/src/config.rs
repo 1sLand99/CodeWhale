@@ -7642,6 +7642,23 @@ pub(crate) fn is_exact_minimax_m3_route(
         && model.trim().eq_ignore_ascii_case(DEFAULT_MINIMAX_MODEL)
 }
 
+/// Whether a route is exactly MiniMax-M3 on a first-party Anthropic-compatible
+/// Messages endpoint. The wire supports adaptive/disabled thinking, but no
+/// distinct effort tier.
+#[must_use]
+pub(crate) fn is_exact_minimax_anthropic_m3_route(
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) -> bool {
+    provider == ApiProvider::MinimaxAnthropic
+        && codewhale_config::provider::is_exact_minimax_anthropic_route(
+            codewhale_config::ProviderKind::MinimaxAnthropic,
+            base_url,
+        )
+        && model.trim().eq_ignore_ascii_case(DEFAULT_MINIMAX_MODEL)
+}
+
 #[must_use]
 pub(crate) fn minimax_m3_route_uses_max_completion_tokens(
     provider: ApiProvider,

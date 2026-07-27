@@ -864,6 +864,53 @@ fn restored_zai_gateway_cannot_forge_effective_max() {
 }
 
 #[test]
+fn restored_named_gateway_cannot_forge_effective_max() {
+    let mut snapshot = seeded().into_snapshot();
+    snapshot
+        .activities
+        .push_bounded(WorkActivityEvent::ReasoningEffortChanged {
+            requested: ReasoningEffortTier::Max,
+            effective: ReasoningEffortTier::Max,
+            provider: "my-gateway".to_string(),
+            endpoint_identity: Some("https://gateway.example/v1".to_string()),
+            model: Some("vendor-model-x".to_string()),
+            ts: 10,
+            operation: None,
+        });
+    let wire = serde_json::to_string(&snapshot).expect("serialize forged snapshot");
+    let restored: WorkGraphSnapshot = serde_json::from_str(&wire).expect("restore forged snapshot");
+
+    let report = validate(&restored).expect_err("unknown gateway cannot prove effective max");
+    assert!(report.contains_code(ValidationCode::Structural));
+    assert!(report.violations.iter().any(|violation| {
+        violation
+            .message
+            .contains("impossible for its recorded route")
+    }));
+}
+
+#[test]
+fn restored_named_gateway_accepts_truthful_effective_unavailable() {
+    let mut snapshot = seeded().into_snapshot();
+    snapshot
+        .activities
+        .push_bounded(WorkActivityEvent::ReasoningEffortChanged {
+            requested: ReasoningEffortTier::Max,
+            effective: ReasoningEffortTier::Unavailable,
+            provider: "my-gateway".to_string(),
+            endpoint_identity: Some("https://gateway.example/v1".to_string()),
+            model: Some("vendor-model-x".to_string()),
+            ts: 10,
+            operation: None,
+        });
+    let wire = serde_json::to_string(&snapshot).expect("serialize truthful unknown snapshot");
+    let restored: WorkGraphSnapshot =
+        serde_json::from_str(&wire).expect("restore truthful unknown snapshot");
+
+    validate(&restored).expect("unknown route remains valid when effective truth is unavailable");
+}
+
+#[test]
 fn pre_wg3_proposal_shape_deserializes_with_empty_delta_extensions() {
     let proposal = WorkGraphProposal {
         id: ProposalId::derive(SESSION, "legacy-proposal"),

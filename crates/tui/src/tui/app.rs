@@ -4358,14 +4358,25 @@ impl App {
             }
         } else if self.active_turn.as_ref().is_some_and(|turn| {
             turn.route.as_ref().is_some_and(|route| {
-                matches!(route.provider, ApiProvider::Zai | ApiProvider::Minimax)
-                    && route.receipt.is_none()
+                matches!(
+                    route.provider,
+                    ApiProvider::Zai
+                        | ApiProvider::Minimax
+                        | ApiProvider::MinimaxAnthropic
+                        | ApiProvider::Custom
+                ) && route.receipt.is_none()
             })
         }) || self
             .pending_turn_route
             .as_ref()
             .is_some_and(|(provider, _, _)| {
-                matches!(provider, ApiProvider::Zai | ApiProvider::Minimax)
+                matches!(
+                    provider,
+                    ApiProvider::Zai
+                        | ApiProvider::Minimax
+                        | ApiProvider::MinimaxAnthropic
+                        | ApiProvider::Custom
+                )
             })
         {
             // A route without its immutable endpoint receipt cannot prove

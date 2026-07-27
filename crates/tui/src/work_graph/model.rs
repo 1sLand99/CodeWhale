@@ -167,6 +167,24 @@ pub(crate) fn constrained_effective_reasoning_for_route(
         return Some(Unavailable);
     }
 
+    if provider == ApiProvider::MinimaxAnthropic {
+        if crate::config::is_exact_minimax_anthropic_m3_route(provider, endpoint_identity, model) {
+            return Some(match requested {
+                Off | Auto => requested,
+                _ => ThinkingEnabledGranularityUnavailable,
+            });
+        }
+        return Some(Unavailable);
+    }
+
+    // A named OpenAI-compatible endpoint has no verified reasoning dialect
+    // merely because it has a bounded URL and model string. Until immutable
+    // route provenance carries a validated capability contract, its effective
+    // tier must remain unavailable.
+    if provider == ApiProvider::Custom {
+        return Some(Unavailable);
+    }
+
     if crate::config::is_exact_kimi_code_k3_route(provider, endpoint_identity, model) {
         return Some(match requested {
             Off => Low,

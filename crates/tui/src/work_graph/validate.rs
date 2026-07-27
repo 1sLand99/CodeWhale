@@ -309,15 +309,19 @@ fn check_structural(snapshot: &WorkGraphSnapshot, out: &mut Vec<Violation>) {
                 });
             }
         } else {
-            let constrained =
-                crate::config::ApiProvider::parse(provider).and_then(|api_provider| {
-                    super::model::constrained_effective_reasoning_for_route(
-                        *requested,
-                        api_provider,
-                        endpoint_identity.as_deref().expect("bounded above"),
-                        model.as_deref().expect("bounded above"),
-                    )
-                });
+            let constrained = match crate::config::ApiProvider::parse(provider) {
+                Some(api_provider) => super::model::constrained_effective_reasoning_for_route(
+                    *requested,
+                    api_provider,
+                    endpoint_identity.as_deref().expect("bounded above"),
+                    model.as_deref().expect("bounded above"),
+                ),
+                // Exact named custom-provider ids intentionally do not parse
+                // as a built-in ApiProvider. Bounded strings prove provenance
+                // shape, not a reasoning-control capability, so restore must
+                // fail closed instead of accepting an invented tier.
+                None => Some(super::ReasoningEffortTier::Unavailable),
+            };
             if constrained.is_some_and(|expected| *effective != expected) {
                 out.push(Violation {
                     code: ValidationCode::Structural,
