@@ -2974,6 +2974,64 @@ mod tests {
         }
     }
 
+    /// Key parity proves a pack *has* the subtotal and audited-route lines; it
+    /// does not prove anyone translated them. A pack that copies the English
+    /// string passes every structural gate and still ships English text to a
+    /// Japanese user — and these two lines are the ones that say a money figure
+    /// is incomplete and name the routes it was built from, which is exactly
+    /// the copy a reader must be able to understand (#4318).
+    #[test]
+    fn every_complete_pack_localizes_the_subtotal_and_audited_route_copy() {
+        for locale in Locale::shipped_complete()
+            .iter()
+            .filter(|locale| **locale != Locale::En)
+        {
+            for id in [
+                MessageId::CmdCostReportSubtotal,
+                MessageId::CmdCostReportUnknown,
+                MessageId::CmdCostRoutesHeader,
+                MessageId::CmdCostUnknownValue,
+                MessageId::CmdCostCoverageUnknownLegacy,
+            ] {
+                let localized = tr(*locale, id);
+                let english = tr(Locale::En, id);
+                assert!(
+                    !localized.trim().is_empty(),
+                    "{} has empty copy for {id:?}",
+                    locale.tag()
+                );
+                assert_ne!(
+                    localized,
+                    english,
+                    "{} still ships the English string for {id:?}",
+                    locale.tag()
+                );
+            }
+            // The subtotal headline must still carry its amount, and must not
+            // reuse the complete-total wording — those two states are the whole
+            // point of having separate keys.
+            let subtotal = tr(*locale, MessageId::CmdCostReportSubtotal);
+            assert!(
+                subtotal.contains("{cost}"),
+                "{} subtotal headline lost its amount",
+                locale.tag()
+            );
+            assert_ne!(
+                subtotal,
+                tr(*locale, MessageId::CmdCostReport),
+                "{} cannot distinguish a subtotal from a complete total",
+                locale.tag()
+            );
+            // The unknown headline names no amount at all.
+            let unknown = tr(*locale, MessageId::CmdCostReportUnknown);
+            assert!(
+                !unknown.contains("{cost}"),
+                "{} unknown headline must not interpolate an amount",
+                locale.tag()
+            );
+        }
+    }
+
     /// Both money surfaces must say "estimate". `/tokens` quotes the same total
     /// as `/cost`, so it cannot present it as settled while `/cost` hedges.
     #[test]
