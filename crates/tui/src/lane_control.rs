@@ -266,22 +266,6 @@ impl LaneControlQueue {
         true
     }
 
-    /// Stop the worker thread after it finishes the current submission.
-    ///
-    /// Test-only for now, and deliberately not wired into TUI exit: there is
-    /// no join handle to wait on, so calling it on quit would signal the
-    /// worker without actually letting it finish — an orderly-shutdown claim
-    /// the build could not keep. The worker is a detached thread whose unit of
-    /// work is a bounded registry write, so process exit is what ends it.
-    #[cfg(test)]
-    pub fn shutdown(&self) {
-        let (lock, condvar) = &*self.shared;
-        if let Ok(mut shared) = lock.lock() {
-            shared.shutdown = true;
-        }
-        condvar.notify_all();
-    }
-
     fn run(&self) {
         let (lock, condvar) = &*self.shared;
         loop {
@@ -525,7 +509,7 @@ mod tests {
     fn completing_a_submission_frees_its_in_flight_slot() {
         let (dir, id) = seeded();
         let queue = LaneControlQueue::new();
-        queue.submit(
+        let _ = queue.submit(
             ControlOperation::LaneInterrupt,
             Some(id.as_str()),
             Some(dir.path().to_path_buf()),

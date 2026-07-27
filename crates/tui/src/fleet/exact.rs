@@ -1260,12 +1260,6 @@ impl ExactFleetWorkflow {
         &self.snapshot
     }
 
-    #[must_use]
-    #[cfg(test)]
-    pub(crate) fn preflight(&self) -> &Arc<RoutePreflight> {
-        &self.preflight
-    }
-
     /// The run-scoped roster projected from the snapshot. Installing this on
     /// the spawn runtime is what makes each member's exact provider/model reach
     /// its child client through the existing provider-pin path (#4093/#4193).
