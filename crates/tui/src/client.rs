@@ -196,6 +196,11 @@ pub struct DeepSeekClient {
     /// compiled out of release builds.
     #[cfg(test)]
     test_chat_transport_base_url: Option<String>,
+    /// Messages equivalent of `test_chat_transport_base_url`; keeps exact
+    /// route shaping bound to the semantic endpoint while tests capture on a
+    /// local server.
+    #[cfg(test)]
+    test_messages_transport_base_url: Option<String>,
     pub(super) reasoning_stream_style: Option<String>,
     pub(super) stream_idle_timeout: Duration,
 }
@@ -448,6 +453,8 @@ impl Clone for DeepSeekClient {
             path_suffix: self.path_suffix.clone(),
             #[cfg(test)]
             test_chat_transport_base_url: self.test_chat_transport_base_url.clone(),
+            #[cfg(test)]
+            test_messages_transport_base_url: self.test_messages_transport_base_url.clone(),
             reasoning_stream_style: self.reasoning_stream_style.clone(),
             stream_idle_timeout: self.stream_idle_timeout,
         }
@@ -1103,6 +1110,8 @@ impl DeepSeekClient {
             path_suffix,
             #[cfg(test)]
             test_chat_transport_base_url: None,
+            #[cfg(test)]
+            test_messages_transport_base_url: None,
             reasoning_stream_style,
             stream_idle_timeout,
         })
@@ -1119,6 +1128,17 @@ impl DeepSeekClient {
             return base_url;
         }
         &self.base_url
+    }
+
+    /// Transport destination for a prepared Anthropic-compatible request.
+    /// Production sends the exact prepared endpoint; tests may redirect the
+    /// transport while preserving that immutable endpoint for route shaping.
+    pub(super) fn messages_transport_url(&self, prepared_url: &str) -> String {
+        #[cfg(test)]
+        if let Some(base_url) = self.test_messages_transport_base_url.as_deref() {
+            return anthropic::anthropic_messages_url(base_url);
+        }
+        prepared_url.to_string()
     }
 
     /// Return a request whose tool results are safe to send to an upstream
@@ -1812,7 +1832,13 @@ impl DeepSeekClient {
             "temperature": 0.1,
             "stream": false
         });
-        apply_reasoning_effort(&mut body, Some("off"), self.api_provider);
+        chat::apply_route_reasoning_controls(
+            &mut body,
+            self.api_provider,
+            &self.base_url,
+            &model,
+            Some("off"),
+        );
 
         let response = self.send_json_with_retry(&url, &body).await?;
 
@@ -2821,13 +2847,6 @@ pub(super) fn apply_reasoning_effort(
     effort: Option<&str>,
     provider: ApiProvider,
 ) {
-    if matches!(provider, ApiProvider::Minimax) {
-        // MiniMax's OpenAI-compatible API keeps thinking inside `content`
-        // unless reasoning_split is enabled. Always request the split shape
-        // so private thinking renders as Thinking cells rather than answer
-        // prose.
-        body["reasoning_split"] = json!(true);
-    }
     let Some(effort) = effort else {
         return;
     };
@@ -2904,9 +2923,7 @@ pub(super) fn apply_reasoning_effort(
                     "thinking": false,
                 });
             }
-            ApiProvider::Minimax => {
-                body["thinking"] = json!({ "type": "disabled" });
-            }
+            ApiProvider::Minimax => {}
             ApiProvider::Stepfun => {}
             ApiProvider::Sakana => {}
             ApiProvider::LongCat => {}
@@ -2996,9 +3013,7 @@ pub(super) fn apply_reasoning_effort(
                     "reasoning_effort": "high",
                 });
             }
-            ApiProvider::Minimax => {
-                body["thinking"] = json!({ "type": "adaptive" });
-            }
+            ApiProvider::Minimax => {}
             ApiProvider::Zai => {
                 body["thinking"] = json!({
                     "type": "enabled",
@@ -3074,9 +3089,7 @@ pub(super) fn apply_reasoning_effort(
                     "reasoning_effort": "max",
                 });
             }
-            ApiProvider::Minimax => {
-                body["thinking"] = json!({ "type": "adaptive" });
-            }
+            ApiProvider::Minimax => {}
             ApiProvider::Zai => {
                 body["thinking"] = json!({
                     "type": "enabled",
@@ -3957,20 +3970,30 @@ mod tests {
                 .remove("reasoning_effort");
             assert_eq!(high_without_effort, max_without_effort);
 
-            for requested in ["high", "max"] {
-                let (_, turbo) = capture_zai_chat_request(
-                    base_url,
-                    crate::config::ZAI_GLM_5_TURBO_MODEL,
-                    Some(requested),
-                    streaming,
-                )
-                .await;
-                assert!(turbo.get("reasoning_effort").is_none(), "{turbo}");
-                assert_eq!(
-                    turbo["thinking"],
-                    json!({"type": "enabled", "clear_thinking": false})
-                );
+            for model in [
+                crate::config::ZAI_GLM_5_1_MODEL,
+                crate::config::ZAI_GLM_5_TURBO_MODEL,
+            ] {
+                for requested in ["high", "max"] {
+                    let (_, toggle_only) =
+                        capture_zai_chat_request(base_url, model, Some(requested), streaming).await;
+                    assert!(
+                        toggle_only.get("reasoning_effort").is_none(),
+                        "{model}: {toggle_only}"
+                    );
+                    assert_eq!(
+                        toggle_only["thinking"],
+                        json!({"type": "enabled", "clear_thinking": false}),
+                        "{model}: {toggle_only}"
+                    );
+                }
             }
+
+            let (_, unknown) =
+                capture_zai_chat_request(base_url, "glm-future-unknown", Some("max"), streaming)
+                    .await;
+            assert!(unknown.get("reasoning_effort").is_none(), "{unknown}");
+            assert!(unknown.get("thinking").is_none(), "{unknown}");
         }
 
         let (_, gateway) = capture_zai_chat_request(
@@ -4002,17 +4025,32 @@ mod tests {
             crate::config::DEFAULT_MINIMAX_BASE_URL,
             "https://api.minimaxi.com/v1",
         ] {
-            let (_, body) = capture_minimax_chat_request(
-                base_url,
-                crate::config::DEFAULT_MINIMAX_MODEL,
-                Some("high"),
-                streaming,
-            )
-            .await;
-            assert_eq!(body["max_completion_tokens"], 64, "{base_url}: {body}");
-            assert!(body.get("max_tokens").is_none(), "{base_url}: {body}");
-            assert_eq!(body["reasoning_split"], true);
-            assert_eq!(body["thinking"], json!({"type": "adaptive"}));
+            for (effort, expected_thinking) in [
+                ("off", json!({"type": "disabled"})),
+                ("high", json!({"type": "adaptive"})),
+                ("max", json!({"type": "adaptive"})),
+            ] {
+                let (_, body) = capture_minimax_chat_request(
+                    base_url,
+                    crate::config::DEFAULT_MINIMAX_MODEL,
+                    Some(effort),
+                    streaming,
+                )
+                .await;
+                assert_eq!(
+                    body["max_completion_tokens"], 64,
+                    "{base_url} {effort}: {body}"
+                );
+                assert!(
+                    body.get("max_tokens").is_none(),
+                    "{base_url} {effort}: {body}"
+                );
+                assert_eq!(body["reasoning_split"], true, "{base_url}: {body}");
+                assert_eq!(
+                    body["thinking"], expected_thinking,
+                    "{base_url} {effort}: {body}"
+                );
+            }
         }
 
         for (base_url, model) in [
@@ -4022,13 +4060,26 @@ mod tests {
                 crate::config::DEFAULT_MINIMAX_MODEL,
             ),
         ] {
-            let (_, body) =
-                capture_minimax_chat_request(base_url, model, Some("high"), streaming).await;
-            assert_eq!(body["max_tokens"], 64, "{base_url}: {body}");
-            assert!(
-                body.get("max_completion_tokens").is_none(),
-                "{base_url}: {body}"
-            );
+            for effort in ["off", "high", "max"] {
+                let (_, body) =
+                    capture_minimax_chat_request(base_url, model, Some(effort), streaming).await;
+                assert_eq!(
+                    body["max_tokens"], 64,
+                    "{base_url} {model} {effort}: {body}"
+                );
+                assert!(
+                    body.get("max_completion_tokens").is_none(),
+                    "{base_url} {model} {effort}: {body}"
+                );
+                assert!(
+                    body.get("reasoning_split").is_none(),
+                    "{base_url} {model} {effort}: {body}"
+                );
+                assert!(
+                    body.get("thinking").is_none(),
+                    "{base_url} {model} {effort}: {body}"
+                );
+            }
         }
     }
 
@@ -5884,7 +5935,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = minimax_anthropic_client_with_base_url(format!("{}/anthropic", server.uri()));
+        let mut client = minimax_anthropic_client_with_base_url(
+            crate::config::DEFAULT_MINIMAX_ANTHROPIC_BASE_URL.to_string(),
+        );
+        client.test_messages_transport_base_url = Some(format!("{}/anthropic", server.uri()));
         let response = client
             .create_message(MessageRequest {
                 model: "MiniMax-M3".to_string(),
@@ -6899,9 +6953,15 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_effort_minimax_splits_reasoning_from_content() {
+    fn reasoning_effort_minimax_requires_exact_route_to_split_reasoning() {
         let mut body = json!({});
-        apply_reasoning_effort(&mut body, Some("high"), ApiProvider::Minimax);
+        chat::apply_route_reasoning_controls(
+            &mut body,
+            ApiProvider::Minimax,
+            crate::config::DEFAULT_MINIMAX_BASE_URL,
+            crate::config::DEFAULT_MINIMAX_MODEL,
+            Some("high"),
+        );
         assert_eq!(
             body.get("reasoning_split").and_then(Value::as_bool),
             Some(true)
@@ -6913,7 +6973,13 @@ mod tests {
         assert!(body.get("reasoning_effort").is_none());
 
         let mut body = json!({});
-        apply_reasoning_effort(&mut body, Some("max"), ApiProvider::Minimax);
+        chat::apply_route_reasoning_controls(
+            &mut body,
+            ApiProvider::Minimax,
+            crate::config::DEFAULT_MINIMAX_BASE_URL,
+            crate::config::DEFAULT_MINIMAX_MODEL,
+            Some("max"),
+        );
         assert_eq!(
             body.pointer("/thinking/type").and_then(Value::as_str),
             Some("adaptive")
@@ -6921,7 +6987,13 @@ mod tests {
         assert!(body.get("reasoning_effort").is_none());
 
         let mut body = json!({});
-        apply_reasoning_effort(&mut body, Some("off"), ApiProvider::Minimax);
+        chat::apply_route_reasoning_controls(
+            &mut body,
+            ApiProvider::Minimax,
+            crate::config::DEFAULT_MINIMAX_BASE_URL,
+            crate::config::DEFAULT_MINIMAX_MODEL,
+            Some("off"),
+        );
         assert_eq!(
             body.get("reasoning_split").and_then(Value::as_bool),
             Some(true)
@@ -6932,8 +7004,34 @@ mod tests {
         );
 
         let mut body = json!({});
-        apply_reasoning_effort(&mut body, None, ApiProvider::Minimax);
+        chat::apply_route_reasoning_controls(
+            &mut body,
+            ApiProvider::Minimax,
+            crate::config::DEFAULT_MINIMAX_BASE_URL,
+            crate::config::DEFAULT_MINIMAX_MODEL,
+            None,
+        );
         assert_eq!(body, json!({ "reasoning_split": true }));
+
+        for (base_url, model) in [
+            (
+                "https://gateway.example/v1",
+                crate::config::DEFAULT_MINIMAX_MODEL,
+            ),
+            (crate::config::DEFAULT_MINIMAX_BASE_URL, "MiniMax-M2"),
+        ] {
+            for effort in ["off", "high", "max"] {
+                let mut body = json!({});
+                chat::apply_route_reasoning_controls(
+                    &mut body,
+                    ApiProvider::Minimax,
+                    base_url,
+                    model,
+                    Some(effort),
+                );
+                assert_eq!(body, json!({}), "{base_url} {model} {effort}");
+            }
+        }
     }
 
     #[test]

@@ -1000,6 +1000,51 @@ fn restored_zai_gateway_cannot_forge_effective_max() {
 }
 
 #[test]
+fn restored_zai_toggle_only_and_unknown_models_enforce_effective_truth() {
+    for (model, truthful_effective) in [
+        (
+            crate::config::ZAI_GLM_5_1_MODEL,
+            ReasoningEffortTier::ThinkingEnabledGranularityUnavailable,
+        ),
+        (
+            crate::config::ZAI_GLM_5_TURBO_MODEL,
+            ReasoningEffortTier::ThinkingEnabledGranularityUnavailable,
+        ),
+        ("glm-future-unknown", ReasoningEffortTier::Unavailable),
+    ] {
+        let mut forged = seeded().into_snapshot();
+        forged
+            .activities
+            .push_bounded(WorkActivityEvent::ReasoningEffortChanged {
+                requested: ReasoningEffortTier::Max,
+                effective: ReasoningEffortTier::Max,
+                provider_kind: Some(crate::config::ApiProvider::Zai),
+                provider: "zai".to_string(),
+                endpoint_identity: Some(crate::config::DEFAULT_ZAI_BASE_URL.to_string()),
+                model: Some(model.to_string()),
+                ts: 10,
+                operation: None,
+            });
+        validate(&forged).expect_err("toggle-only/unknown Z.ai route cannot prove max");
+
+        let mut truthful = seeded().into_snapshot();
+        truthful
+            .activities
+            .push_bounded(WorkActivityEvent::ReasoningEffortChanged {
+                requested: ReasoningEffortTier::Max,
+                effective: truthful_effective,
+                provider_kind: Some(crate::config::ApiProvider::Zai),
+                provider: "zai".to_string(),
+                endpoint_identity: Some(crate::config::DEFAULT_ZAI_BASE_URL.to_string()),
+                model: Some(model.to_string()),
+                ts: 10,
+                operation: None,
+            });
+        validate(&truthful).expect("truthful Z.ai effective state restores");
+    }
+}
+
+#[test]
 fn restored_named_gateway_cannot_forge_effective_max() {
     let mut snapshot = seeded().into_snapshot();
     snapshot

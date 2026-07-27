@@ -226,9 +226,15 @@ fn apply_zai_route_reasoning_controls(
             return;
         }
     }
+    if !crate::config::is_exact_known_zai_reasoning_route(provider, base_url, model) {
+        if let Some(object) = body.as_object_mut() {
+            object.remove("thinking");
+        }
+        return;
+    }
     if !is_exact_zai_glm_5_2_route(provider, base_url, model) {
-        // Exact first-party GLM-5-Turbo and older Z.ai models keep only the
-        // generic enabled/disabled thinking control.
+        // Exact first-party GLM-5-Turbo and GLM-5.1 keep only the generic
+        // enabled/disabled thinking control.
         return;
     }
     match effort
@@ -245,10 +251,49 @@ fn apply_zai_route_reasoning_controls(
     }
 }
 
+/// Add MiniMax's Chat-only reasoning controls only when endpoint and model
+/// prove the exact first-party M3 route. A provider label alone is not enough
+/// to send MiniMax-specific fields to a compatible gateway or unknown model.
+fn apply_minimax_route_reasoning_controls(
+    body: &mut Value,
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+    effort: Option<&str>,
+) {
+    if provider != ApiProvider::Minimax {
+        return;
+    }
+    if let Some(object) = body.as_object_mut() {
+        object.remove("reasoning_split");
+        object.remove("thinking");
+    }
+    if !crate::config::is_exact_minimax_m3_route(provider, base_url, model) {
+        return;
+    }
+
+    body["reasoning_split"] = json!(true);
+    match effort
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("off" | "disabled" | "none" | "false") => {
+            body["thinking"] = json!({ "type": "disabled" });
+        }
+        Some(
+            "low" | "minimal" | "medium" | "mid" | "high" | "xhigh" | "max" | "highest"
+            | "ultracode" | "",
+        ) => {
+            body["thinking"] = json!({ "type": "adaptive" });
+        }
+        _ => {}
+    }
+}
+
 /// Final reasoning-control pass shared by streaming and non-streaming Chat
 /// Completions requests. Route-specific shapers run after the generic provider
 /// layer so they can remove fields that are invalid for their exact endpoint.
-fn apply_route_reasoning_controls(
+pub(super) fn apply_route_reasoning_controls(
     body: &mut Value,
     provider: ApiProvider,
     base_url: &str,
@@ -256,6 +301,7 @@ fn apply_route_reasoning_controls(
     effort: Option<&str>,
 ) {
     apply_reasoning_effort(body, effort, provider);
+    apply_minimax_route_reasoning_controls(body, provider, base_url, model, effort);
     apply_inkling_reasoning_effort(body, provider, model, effort);
     apply_openai_reasoning_effort(body, provider, model, effort);
     apply_direct_moonshot_k3_reasoning_effort(body, provider, base_url, model, effort);

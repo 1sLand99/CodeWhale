@@ -156,15 +156,19 @@ pub(crate) fn constrained_effective_reasoning_for_route(
         if !crate::config::is_exact_zai_chat_route(provider, endpoint_identity) {
             return Some(Unavailable);
         }
-        if crate::config::is_exact_zai_glm_5_turbo_route(provider, endpoint_identity, model)
-            && !matches!(requested, Off | Auto)
-        {
-            return Some(ThinkingEnabledGranularityUnavailable);
+        if crate::config::is_exact_zai_glm_5_2_route(provider, endpoint_identity, model) {
+            return Some(match requested {
+                Low | Medium => High,
+                other => other,
+            });
         }
-        return Some(match requested {
-            Low | Medium => High,
-            other => other,
-        });
+        if crate::config::is_exact_known_zai_reasoning_route(provider, endpoint_identity, model) {
+            return Some(match requested {
+                Off | Auto => requested,
+                _ => ThinkingEnabledGranularityUnavailable,
+            });
+        }
+        return Some(Unavailable);
     }
 
     if provider == ApiProvider::Minimax {

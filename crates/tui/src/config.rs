@@ -7625,6 +7625,21 @@ pub(crate) fn is_exact_zai_glm_5_turbo_route(
         && model.trim().eq_ignore_ascii_case(ZAI_GLM_5_TURBO_MODEL)
 }
 
+/// Whether a route is an exact first-party Z.ai model with a verified
+/// reasoning control. GLM-5.2 has tiered effort; GLM-5.1 and GLM-5-Turbo only
+/// expose the generic thinking toggle.
+#[must_use]
+pub(crate) fn is_exact_known_zai_reasoning_route(
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) -> bool {
+    is_exact_zai_glm_5_2_route(provider, base_url, model)
+        || is_exact_zai_glm_5_turbo_route(provider, base_url, model)
+        || (is_exact_zai_chat_route(provider, base_url)
+            && model.trim().eq_ignore_ascii_case(ZAI_GLM_5_1_MODEL))
+}
+
 /// Whether a route is exactly MiniMax-M3 on the first-party OpenAI-compatible
 /// Chat API. Compatible gateways and the Anthropic Messages route retain
 /// their own token-limit dialects.

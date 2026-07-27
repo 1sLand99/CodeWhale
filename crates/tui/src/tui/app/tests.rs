@@ -416,6 +416,70 @@ fn glm_5_turbo_records_enabled_with_granularity_unavailable() {
 }
 
 #[test]
+fn glm_5_1_records_enabled_with_granularity_unavailable() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Zai;
+    app.auto_model = false;
+    app.active_route_base_url = crate::config::DEFAULT_ZAI_BASE_URL.to_string();
+    app.model = crate::config::ZAI_GLM_5_1_MODEL.to_string();
+    app.reasoning_effort = ReasoningEffort::High;
+
+    app.cycle_effort();
+
+    assert_eq!(
+        app.reasoning_effort_display_label(),
+        "max→thinking enabled; granularity unavailable"
+    );
+    let work = app
+        .work_state_snapshot()
+        .expect("Work snapshot")
+        .expect("effort activity creates graph state");
+    let crate::work_graph::WorkActivityEvent::ReasoningEffortChanged { effective, .. } = work
+        .graph
+        .expect("Work Graph")
+        .activities
+        .last()
+        .cloned()
+        .expect("effort activity");
+    assert_eq!(
+        effective,
+        crate::work_graph::ReasoningEffortTier::ThinkingEnabledGranularityUnavailable
+    );
+}
+
+#[test]
+fn unknown_model_on_exact_zai_endpoint_records_effective_unavailable() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Zai;
+    app.auto_model = false;
+    app.active_route_base_url = crate::config::DEFAULT_ZAI_BASE_URL.to_string();
+    app.model = "glm-future-unknown".to_string();
+    app.reasoning_effort = ReasoningEffort::High;
+
+    app.cycle_effort();
+
+    assert_eq!(
+        app.reasoning_effort_display_label(),
+        "max→effective unavailable"
+    );
+    let work = app
+        .work_state_snapshot()
+        .expect("Work snapshot")
+        .expect("effort activity creates graph state");
+    let crate::work_graph::WorkActivityEvent::ReasoningEffortChanged { effective, .. } = work
+        .graph
+        .expect("Work Graph")
+        .activities
+        .last()
+        .cloned()
+        .expect("effort activity");
+    assert_eq!(
+        effective,
+        crate::work_graph::ReasoningEffortTier::Unavailable
+    );
+}
+
+#[test]
 fn compatible_zai_gateway_records_effective_unavailable() {
     let mut app = App::new(test_options(false), &Config::default());
     app.api_provider = ApiProvider::Zai;

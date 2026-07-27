@@ -123,13 +123,19 @@ impl DeepSeekClient {
         // not Anthropic's output_config effort field; native Anthropic routes
         // keep the existing effort mapping.
         let thinking_capable = crate::models::model_supports_reasoning(&model);
-        let is_minimax = self.api_provider == ApiProvider::MinimaxAnthropic;
+        let is_minimax_provider = self.api_provider == ApiProvider::MinimaxAnthropic;
+        let is_minimax = crate::config::is_exact_minimax_anthropic_m3_route(
+            self.api_provider,
+            &self.base_url,
+            &model,
+        );
         let is_deepseek = self.api_provider == ApiProvider::DeepseekAnthropic;
         let effort = request
             .reasoning_effort
             .as_deref()
             .map(|raw| raw.trim().to_ascii_lowercase());
         match effort.as_deref() {
+            _ if is_minimax_provider && !is_minimax => {}
             Some("off" | "disabled" | "none" | "false")
                 if (is_minimax || is_deepseek) && thinking_capable =>
             {
@@ -170,10 +176,11 @@ impl DeepSeekClient {
     }
 
     async fn send_anthropic_request(&self, url: &str, body: &Value) -> Result<reqwest::Response> {
+        let url = self.messages_transport_url(url);
         self.wait_for_rate_limit().await;
         let response = self
             .http_client
-            .post(url)
+            .post(&url)
             .header("Accept", "text/event-stream")
             .json(body)
             .send()
@@ -210,12 +217,13 @@ impl DeepSeekClient {
         url: &str,
         body: &Value,
     ) -> Result<reqwest::Response> {
+        let url = self.messages_transport_url(url);
         let open_req = super::stream_entry::StreamOpenRequest::new(
             super::stream_entry::stream_open_timeout(),
             self.stream_idle_timeout,
         );
         let opened = super::stream_entry::open_sse_response(&open_req, |policy| {
-            let url = url.to_string();
+            let url = url.clone();
             async move {
                 self.wait_for_rate_limit().await;
                 let client = super::stream_entry::client_for_policy(
@@ -699,12 +707,17 @@ mod tests {
     }
 
     fn minimax_test_client() -> DeepSeekClient {
+        minimax_test_client_for(crate::config::DEFAULT_MINIMAX_ANTHROPIC_BASE_URL)
+    }
+
+    fn minimax_test_client_for(base_url: &str) -> DeepSeekClient {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let config = crate::config::Config {
             provider: Some("minimax-anthropic".to_string()),
             providers: Some(crate::config::ProvidersConfig {
                 minimax_anthropic: crate::config::ProviderConfig {
                     api_key: Some("test-key".to_string()),
+                    base_url: Some(base_url.to_string()),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -947,6 +960,34 @@ mod tests {
             enabled_bodies[1].get("thinking"),
             "MiniMax high/max select the same untiered adaptive wire control"
         );
+    }
+
+    #[test]
+    fn minimax_messages_reasoning_controls_require_exact_first_party_m3_route() {
+        for (base_url, model) in [
+            (
+                "https://gateway.example/anthropic",
+                crate::config::DEFAULT_MINIMAX_MODEL,
+            ),
+            (
+                crate::config::DEFAULT_MINIMAX_ANTHROPIC_BASE_URL,
+                "MiniMax-M2",
+            ),
+        ] {
+            let client = minimax_test_client_for(base_url);
+            for effort in ["off", "high", "max"] {
+                let body = client
+                    .build_anthropic_body(&request_with(model, Some(effort), None, None), true);
+                assert!(
+                    body.get("thinking").is_none(),
+                    "{base_url} {model} {effort}: {body}"
+                );
+                assert!(
+                    body.get("output_config").is_none(),
+                    "{base_url} {model} {effort}: {body}"
+                );
+            }
+        }
     }
 
     #[test]
