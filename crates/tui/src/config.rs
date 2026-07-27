@@ -7918,11 +7918,39 @@ pub(crate) fn minimax_m3_route_uses_max_completion_tokens(
     is_exact_minimax_m3_route(provider, base_url, model)
 }
 
-/// Fail closed on known-bad K3 model/endpoint pairings (#4687).
+/// The Kimi Code membership roster, as one fact.
 ///
-/// - Reject Claude Code's `k3[1m]` context hint as a Kimi Code API model id.
-/// - Reject `kimi-k3` on the exact Kimi Code membership endpoint (use `k3`).
-/// - Reject bare `k3` on the exact Moonshot direct platform endpoint (use `kimi-k3`).
+/// The picker offers these ids, `validate_kimi_code_api_model_id` accepts them
+/// on the membership endpoint and rejects them on the direct platform, and the
+/// model picker labels them as plan routes. Those sites previously kept
+/// independent literal lists and had already drifted (`kimi-for-coding` was
+/// missing from the picker label), so the roster lives here and nowhere else.
+pub(crate) const KIMI_CODE_MEMBERSHIP_MODELS: [&str; 3] = [
+    KIMI_CODE_K3_MODEL,
+    DEFAULT_KIMI_CODE_MODEL,
+    KIMI_CODE_HIGHSPEED_MODEL,
+];
+
+/// The Moonshot direct-platform roster, as one fact. Mirror of
+/// [`KIMI_CODE_MEMBERSHIP_MODELS`] for the pay-as-you-go product.
+pub(crate) const MOONSHOT_DIRECT_PLATFORM_MODELS: [&str; 3] = [
+    MOONSHOT_KIMI_K3_MODEL,
+    DEFAULT_MOONSHOT_MODEL,
+    MOONSHOT_KIMI_K2_6_MODEL,
+];
+
+/// Fail closed on known-bad model/endpoint pairings (#4687).
+///
+/// The two canonical endpoints each enforce their explicit model set:
+///
+/// - Exact Kimi Code membership endpoint (api.kimi.com/coding/v1): reject
+///   Claude Code's `k3[1m]` context hint and the known direct-platform ids
+///   (`kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`); the managed roster (`k3`,
+///   `kimi-for-coding`, `kimi-for-coding-highspeed`) is accepted.
+/// - Exact Moonshot direct platform endpoint (api.moonshot.ai/v1): reject the
+///   membership-only ids (`k3`, `kimi-for-coding`,
+///   `kimi-for-coding-highspeed`); they are membership products, not
+///   direct-platform catalog models.
 ///
 /// Custom Moonshot-compatible gateways are left alone: only the two canonical
 /// endpoints enforce the documented model IDs.
@@ -7946,25 +7974,140 @@ pub(crate) fn validate_kimi_code_api_model_id(
                     .to_string(),
             );
         }
-        if model.eq_ignore_ascii_case(MOONSHOT_KIMI_K3_MODEL) {
-            return Err(
-                "Kimi Code membership route (api.kimi.com/coding/v1) does not accept model = \"kimi-k3\". Use model = \"k3\" for this base_url. Direct Moonshot pay-as-you-go uses base_url = \"https://api.moonshot.ai/v1\" with model = \"kimi-k3\"."
-                    .to_string(),
-            );
+        for direct_id in MOONSHOT_DIRECT_PLATFORM_MODELS {
+            if model.eq_ignore_ascii_case(direct_id) {
+                return Err(format!(
+                    "Kimi Code membership route (api.kimi.com/coding/v1) does not accept model = \"{model}\": it is a direct Moonshot platform id. Use a Kimi Code membership model (\"k3\", \"kimi-for-coding\", or \"kimi-for-coding-highspeed\") for this base_url. Direct Moonshot pay-as-you-go uses base_url = \"https://api.moonshot.ai/v1\" with model = \"{direct_id}\"."
+                ));
+            }
         }
         return Ok(());
     }
 
-    if moonshot_base_url_is_exact_direct_platform(base_url)
-        && model.eq_ignore_ascii_case(KIMI_CODE_K3_MODEL)
-    {
-        return Err(
-            "Moonshot direct route (api.moonshot.ai/v1) does not accept bare model = \"k3\". Use model = \"kimi-k3\" for this base_url. Kimi Code membership uses base_url = \"https://api.kimi.com/coding/v1\" with model = \"k3\"."
-                .to_string(),
-        );
+    if moonshot_base_url_is_exact_direct_platform(base_url) {
+        for membership_id in KIMI_CODE_MEMBERSHIP_MODELS {
+            if model.eq_ignore_ascii_case(membership_id) {
+                return Err(format!(
+                    "Moonshot direct route (api.moonshot.ai/v1) does not accept model = \"{model}\": it is a Kimi Code membership model id, not a direct-platform catalog model. Kimi Code membership uses base_url = \"https://api.kimi.com/coding/v1\" with model = \"{membership_id}\"; direct Moonshot pay-as-you-go K3 uses model = \"kimi-k3\"."
+                ));
+            }
+        }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod kimi_code_pairing_tests {
+    use super::*;
+
+    #[test]
+    fn membership_roster_passes_on_kimi_code_endpoint() {
+        for model in [
+            KIMI_CODE_K3_MODEL,
+            DEFAULT_KIMI_CODE_MODEL,
+            KIMI_CODE_HIGHSPEED_MODEL,
+        ] {
+            assert!(
+                validate_kimi_code_api_model_id(
+                    ApiProvider::Moonshot,
+                    DEFAULT_KIMI_CODE_BASE_URL,
+                    model,
+                )
+                .is_ok(),
+                "{model} must be accepted on the exact Kimi Code membership endpoint"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_platform_ids_fail_on_kimi_code_endpoint() {
+        for model in [
+            MOONSHOT_KIMI_K3_MODEL,
+            DEFAULT_MOONSHOT_MODEL,
+            MOONSHOT_KIMI_K2_6_MODEL,
+        ] {
+            let err = validate_kimi_code_api_model_id(
+                ApiProvider::Moonshot,
+                DEFAULT_KIMI_CODE_BASE_URL,
+                model,
+            )
+            .expect_err("direct-platform ids are not Kimi Code membership roster models");
+            assert!(err.contains(model), "{err}");
+            assert!(err.contains("api.moonshot.ai/v1"), "{err}");
+        }
+    }
+
+    #[test]
+    fn membership_ids_fail_on_direct_moonshot_endpoint() {
+        for model in [
+            KIMI_CODE_K3_MODEL,
+            DEFAULT_KIMI_CODE_MODEL,
+            KIMI_CODE_HIGHSPEED_MODEL,
+        ] {
+            let err = validate_kimi_code_api_model_id(
+                ApiProvider::Moonshot,
+                DEFAULT_MOONSHOT_BASE_URL,
+                model,
+            )
+            .expect_err("membership ids are not direct-platform catalog models");
+            assert!(err.contains(model), "{err}");
+            assert!(err.contains("api.kimi.com/coding/v1"), "{err}");
+        }
+    }
+
+    #[test]
+    fn canonical_pairs_pass_and_custom_gateways_are_untouched() {
+        // Canonical pairs pass on both endpoints.
+        for (base_url, model) in [
+            (DEFAULT_KIMI_CODE_BASE_URL, KIMI_CODE_K3_MODEL),
+            (DEFAULT_KIMI_CODE_BASE_URL, DEFAULT_KIMI_CODE_MODEL),
+            (DEFAULT_KIMI_CODE_BASE_URL, KIMI_CODE_HIGHSPEED_MODEL),
+            (DEFAULT_MOONSHOT_BASE_URL, MOONSHOT_KIMI_K3_MODEL),
+            (DEFAULT_MOONSHOT_BASE_URL, DEFAULT_MOONSHOT_MODEL),
+            (DEFAULT_MOONSHOT_BASE_URL, MOONSHOT_KIMI_K2_6_MODEL),
+        ] {
+            assert!(
+                validate_kimi_code_api_model_id(ApiProvider::Moonshot, base_url, model).is_ok(),
+                "{base_url} / {model}"
+            );
+        }
+        // The pre-existing cross-pairings still fail closed.
+        assert!(
+            validate_kimi_code_api_model_id(
+                ApiProvider::Moonshot,
+                DEFAULT_KIMI_CODE_BASE_URL,
+                MOONSHOT_KIMI_K3_MODEL,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_kimi_code_api_model_id(
+                ApiProvider::Moonshot,
+                DEFAULT_MOONSHOT_BASE_URL,
+                KIMI_CODE_K3_MODEL,
+            )
+            .is_err()
+        );
+        // Custom gateways keep their own wire contract, membership ids
+        // included: only the two canonical endpoints enforce pairings.
+        for model in [
+            KIMI_CODE_K3_MODEL,
+            DEFAULT_KIMI_CODE_MODEL,
+            KIMI_CODE_HIGHSPEED_MODEL,
+            MOONSHOT_KIMI_K3_MODEL,
+        ] {
+            assert!(
+                validate_kimi_code_api_model_id(
+                    ApiProvider::Moonshot,
+                    "https://proxy.example/v1",
+                    model,
+                )
+                .is_ok(),
+                "{model} on a custom gateway"
+            );
+        }
+    }
 }
 
 /// Short route label for header/diagnostics without credentials (#4687).
