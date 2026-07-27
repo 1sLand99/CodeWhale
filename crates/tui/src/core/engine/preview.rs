@@ -776,7 +776,14 @@ fn preview_billing_facts(
 /// Stable hash over the exact active tool catalog: name, description, and
 /// schema, in catalog order. Changes when a tool is added, removed,
 /// reordered, or has its schema transformed.
-fn active_tool_catalog_sha256(tools: &[Tool]) -> String {
+///
+/// This is the *single* definition of the active-tool-catalog digest. The
+/// request manifest fills `ToolSurfaceFacts::active_tool_catalog_sha256` from
+/// it, and `crate::tool_inspection` reports the same value for the same
+/// prepared request. Neither surface keeps a digest of its own, so a human
+/// reading `/tools` and a human reading `/request` are looking at the same
+/// accounting object rather than two hashes that can silently diverge.
+pub(crate) fn active_tool_catalog_sha256(tools: &[Tool]) -> String {
     let mut canonical = String::new();
     for tool in tools {
         canonical.push_str(&tool.name);

@@ -73,8 +73,13 @@ pub struct ToolInspectionSnapshot {
     pub rendered_tool_count: usize,
     pub omitted_tool_count: usize,
     pub payload_json_bytes: Option<usize>,
-    pub payload_sha256: Option<String>,
     pub payload_measurement_status: String,
+    /// The active-tool-catalog digest, computed by the *same* function the
+    /// request manifest uses for `active_tool_catalog_sha256`. Absent only when
+    /// the request carried no tools field at all. Covers tool name,
+    /// description, and canonical input schema — not transport-only fields —
+    /// exactly as the manifest does.
+    pub active_tool_catalog_sha256: Option<String>,
     pub unavailable_from_tool_schema: [&'static str; 6],
     pub tools: Vec<ToolProjection>,
 }
@@ -90,8 +95,7 @@ impl ToolInspectionSnapshot {
             .enumerate()
             .map(|(index, tool)| project_tool(index, tool))
             .collect::<Vec<_>>();
-        let (payload_json_bytes, payload_sha256, payload_measurement_status) =
-            measure_payload(tools);
+        let (payload_json_bytes, payload_measurement_status) = measure_payload(tools);
         Self {
             schema_version: 1,
             capture_source: "prepared model-client request",
@@ -103,8 +107,9 @@ impl ToolInspectionSnapshot {
             rendered_tool_count: projected.len(),
             omitted_tool_count: tool_count.saturating_sub(projected.len()),
             payload_json_bytes,
-            payload_sha256,
             payload_measurement_status,
+            active_tool_catalog_sha256: tools
+                .map(crate::core::engine::preview::active_tool_catalog_sha256),
             unavailable_from_tool_schema: [
                 "provider",
                 "model",
@@ -151,8 +156,8 @@ impl ToolInspectionSnapshot {
             self.payload_json_bytes,
         ));
         out.push_str(&format_optional_string(
-            "Model-client tool digest",
-            self.payload_sha256.as_deref(),
+            "Active tool catalog digest (same digest as the request manifest)",
+            self.active_tool_catalog_sha256.as_deref(),
         ));
         out.push_str(
             "Provider-wire tool payload: unavailable (the provider adapter may transform or omit model-client fields)\n",
@@ -265,26 +270,24 @@ fn project_tool(index: usize, tool: &Tool) -> ToolProjection {
     }
 }
 
-fn measure_payload(tools: Option<&[Tool]>) -> (Option<usize>, Option<String>, String) {
+/// Byte accounting only. The digest is deliberately *not* computed here: it is
+/// the request path's [`crate::core::engine::preview::active_tool_catalog_sha256`],
+/// so this projection never defines a second catalog hash.
+fn measure_payload(tools: Option<&[Tool]>) -> (Option<usize>, String) {
     let Some(tools) = tools else {
-        return (None, None, "unavailable (tools field absent)".to_string());
+        return (None, "unavailable (tools field absent)".to_string());
     };
     let mut writer = BoundedWriter::new(MAX_PAYLOAD_MEASUREMENT_BYTES);
     match serde_json::to_writer(&mut writer, tools) {
-        Ok(()) => {
-            let bytes = writer.bytes;
-            (
-                Some(bytes.len()),
-                Some(format!("sha256:{}", crate::hashing::sha256_hex(&bytes))),
-                "exact (within 1048576-byte measurement bound)".to_string(),
-            )
-        }
+        Ok(()) => (
+            Some(writer.bytes.len()),
+            "exact (within 1048576-byte measurement bound)".to_string(),
+        ),
         Err(_) if writer.exceeded => (
-            None,
             None,
             "unavailable (payload exceeds 1048576-byte measurement bound)".to_string(),
         ),
-        Err(_) => (None, None, "unavailable (serialization failed)".to_string()),
+        Err(_) => (None, "unavailable (serialization failed)".to_string()),
     }
 }
 
@@ -430,9 +433,32 @@ mod tests {
         let empty = ToolInspectionSnapshot::from_prepared_request("turn", 1, Some(&[]));
         assert!(!absent.tools_field_present);
         assert_eq!(absent.payload_json_bytes, None);
+        assert!(absent.active_tool_catalog_sha256.is_none());
         assert!(empty.tools_field_present);
         assert_eq!(empty.payload_json_bytes, Some(2));
-        assert!(empty.payload_sha256.is_some());
+        assert!(empty.active_tool_catalog_sha256.is_some());
+    }
+
+    #[test]
+    fn catalog_digest_is_the_request_manifest_digest_not_a_second_definition() {
+        let tools = vec![tool("read_file"), tool("write_file")];
+        let snapshot = ToolInspectionSnapshot::from_prepared_request("turn", 1, Some(&tools));
+
+        // Same prepared request, same accounting object: the value the request
+        // manifest publishes as `active_tool_catalog_sha256`.
+        assert_eq!(
+            snapshot.active_tool_catalog_sha256.as_deref(),
+            Some(crate::core::engine::preview::active_tool_catalog_sha256(&tools).as_str()),
+        );
+
+        // And it is a catalog digest, not an incidental byte hash: reordering
+        // the same tools changes it.
+        let reordered = vec![tools[1].clone(), tools[0].clone()];
+        let reordered = ToolInspectionSnapshot::from_prepared_request("turn", 1, Some(&reordered));
+        assert_ne!(
+            snapshot.active_tool_catalog_sha256,
+            reordered.active_tool_catalog_sha256
+        );
     }
 
     #[test]
@@ -474,6 +500,8 @@ mod tests {
         assert!(snapshot.tools[0].input_schema_json.truncated);
         assert_eq!(snapshot.payload_json_bytes, None);
         assert!(snapshot.payload_measurement_status.contains("exceeds"));
+        // The catalog digest is fixed-width, so it survives the byte bound.
+        assert!(snapshot.active_tool_catalog_sha256.is_some());
         let json = snapshot.render_json().expect("bounded JSON");
         assert!(
             json.len() < 131_072,
