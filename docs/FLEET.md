@@ -41,22 +41,42 @@ logs and adapter logs are stored under `.codewhale/fleet/` and
 
 ### Interactive and persistent status
 
-Codewhale has two similarly named status surfaces with different scopes:
+`/fleet status` and `codewhale fleet status` are the **same** command on two
+surfaces. Both read the durable `.codewhale/fleet.jsonl` ledger for the
+workspace, through one shared control-plane contract, and both report the same
+verb id (`fleet.status`), read-vs-write authority, persistence scope, and
+receipt. When the workspace has no ledger they say so with a typed reason
+(`no_fleet_ledger`) instead of rendering an empty-looking "all clear" — and
+neither creates the ledger as a side effect of reading it.
 
-- In the TUI, `/fleet status` (or `/subagents`) shows the sub-agents attached
-  to the current interactive session. It does not read the persistent Fleet
-  ledger.
-- In a shell, `codewhale fleet status` reads durable Fleet run history from
-  the workspace's `.codewhale/fleet.jsonl` ledger.
+The current interactive session's sub-agents are a **different set**, and now
+have their own name:
+
+- `/fleet workers` (or `/subagents`, or `n`) shows sub-agents attached to the
+  current TUI session. It does not read the persistent ledger.
+- `/fleet list|status|interrupt|resume` and `codewhale fleet
+  list|status|interrupt|resume` act on the durable ledger.
+- `codewhale fleet restart <worker-id>` is CLI-only: it re-leases the task and
+  then drives the manager loop to completion. `/fleet restart` does not
+  silently do a smaller thing — it reports `surface_not_supported` and names
+  the CLI command.
+
+Before v0.9.2, `/fleet status` showed session sub-agents. That reading is gone;
+`/fleet workers` replaces it.
+
+The contract behind this — descriptors, availability reasons, exact-identity
+targets, receipts, typed unknowns, and bounds — is documented in
+[`docs/COMMAND_CONTROL_PLANE.md`](COMMAND_CONTROL_PLANE.md).
 
 ## Authoring agent profiles (`/fleet setup`)
 
 `/fleet setup` (also `/fleet setup edit` / `new`) opens an in-TUI wizard for
 authoring a reusable agent-team profile. Bare `/fleet` and the
 `roster`/`roles`/`profiles`/`party` aliases open the roster (the saved profiles).
-`/fleet status` opens the current-session worker view; `/subagents` is a
-compatibility shortcut for that view. For durable run history, use the shell
-command `codewhale fleet status` described above.
+`/fleet workers` opens the current-session worker view; `/subagents` is a
+compatibility shortcut for that view. For durable run history, use
+`/fleet status` or the shell command `codewhale fleet status` described above —
+they are the same command.
 
 The wizard is progressive: you make one focused choice at a time — a **role**,
 then a **model** (`inherit`, or a concrete model from *any configured
