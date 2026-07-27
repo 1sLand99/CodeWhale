@@ -1205,7 +1205,9 @@ impl DeepSeekClient {
             return Ok(request);
         }
 
-        let candidate = RouteResolver::new()
+        static RESOLVER: OnceLock<RouteResolver> = OnceLock::new();
+        let candidate = RESOLVER
+            .get_or_init(RouteResolver::new)
             .resolve(&RouteRequest {
                 explicit_provider: ApiProvider::OpencodeZen.kind(),
                 model_selector: Some(LogicalModelRef::from(request.model.as_str())),
