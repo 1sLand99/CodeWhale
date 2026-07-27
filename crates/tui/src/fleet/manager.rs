@@ -113,6 +113,21 @@ pub struct FleetExecutorTickReport {
     pub terminals: usize,
 }
 
+/// Typed Fleet control-plane refusals.
+///
+/// These are *state conflicts*, not transient backend faults, and the control
+/// surface classifies them by type. Matching on the message text instead made
+/// the classification depend on prose that any refactor could silently change.
+#[derive(Debug, thiserror::Error)]
+pub enum FleetControlError {
+    /// The exact worker exists (or does not) but has no leased task to cancel.
+    #[error("worker {worker_id} has no running fleet task")]
+    NoActiveTask { worker_id: String },
+    /// No durable run with that exact id in this workspace's ledger.
+    #[error("no fleet run with id {run_id}")]
+    UnknownRun { run_id: String },
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct FleetStatusSnapshot {
     pub runs: usize,
@@ -841,7 +856,10 @@ impl FleetManager {
     pub fn interrupt_worker(&self, worker_id: &str) -> Result<FleetWorkerInspection> {
         let state = self.ledger.rebuild_state()?;
         let Some(task) = active_task_for_worker(&state, worker_id) else {
-            bail!("worker {worker_id} has no running fleet task");
+            return Err(FleetControlError::NoActiveTask {
+                worker_id: worker_id.to_string(),
+            }
+            .into());
         };
         let cancelled = self.ledger.cancel_task_if_active(
             &task.entry.run_id,

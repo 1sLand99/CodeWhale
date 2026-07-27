@@ -531,6 +531,8 @@ enum FleetCommand {
     Init,
     /// Create a run from a task spec and start the foreground manager loop
     Run(FleetRunArgs),
+    /// List durable Fleet runs from this workspace's ledger
+    List,
     /// Show queued/running/completed/failed/stale fleet counts
     Status,
     /// Inspect one worker's status, heartbeat, latest event, and artifacts
@@ -2287,196 +2289,40 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
         FleetAlertAdapterConfig, FleetAlertConfig, FleetAlertDispatcher, FleetAlertEvent,
         FleetEnvSecretResolver,
     };
+    use crate::fleet::control as fleet_control;
     use crate::fleet::executor::FleetExecutor;
     use crate::fleet::manager::{FleetManager, FleetStatusSnapshot, FleetWorkerInspection};
-    use codewhale_protocol::fleet::{
-        FleetAlertEventClass, FleetArtifactKind, FleetRunId, FleetWorkerEventPayload,
-        FleetWorkerStatus,
-    };
+    use codewhale_lane::{ControlOperation, ControlSurface};
+    use codewhale_protocol::fleet::{FleetAlertEventClass, FleetArtifactKind, FleetRunId};
 
-    fn worker_status_label(status: &FleetWorkerStatus) -> &'static str {
-        match status {
-            FleetWorkerStatus::Unknown => "unknown",
-            FleetWorkerStatus::Online => "online",
-            FleetWorkerStatus::Busy => "busy",
-            FleetWorkerStatus::Offline => "offline",
-            FleetWorkerStatus::Unhealthy => "unhealthy",
-            FleetWorkerStatus::Draining => "draining",
-            FleetWorkerStatus::Retired => "retired",
-        }
-    }
-
-    fn artifact_kind_label(kind: &FleetArtifactKind) -> String {
-        match kind {
-            FleetArtifactKind::Log => "log".to_string(),
-            FleetArtifactKind::Patch => "patch".to_string(),
-            FleetArtifactKind::TestResult => "test_result".to_string(),
-            FleetArtifactKind::Report => "report".to_string(),
-            FleetArtifactKind::Checkpoint => "checkpoint".to_string(),
-            FleetArtifactKind::Receipt => "receipt".to_string(),
-            FleetArtifactKind::Other(value) => value.clone(),
-        }
-    }
-
-    fn event_label(payload: &FleetWorkerEventPayload) -> String {
-        match payload {
-            FleetWorkerEventPayload::Queued => "queued".to_string(),
-            FleetWorkerEventPayload::Leased { .. } => "leased".to_string(),
-            FleetWorkerEventPayload::Starting => "starting".to_string(),
-            FleetWorkerEventPayload::Running => "running".to_string(),
-            FleetWorkerEventPayload::ModelWait { model } => model
-                .as_ref()
-                .map(|model| format!("model_wait model={model}"))
-                .unwrap_or_else(|| "model_wait".to_string()),
-            FleetWorkerEventPayload::RunningTool { tool, call_id } => call_id
-                .as_ref()
-                .map(|call_id| format!("running_tool tool={tool} call_id={call_id}"))
-                .unwrap_or_else(|| format!("running_tool tool={tool}")),
-            FleetWorkerEventPayload::WorkflowEvent {
-                workflow_run_id,
-                event,
-            } => event
-                .get("type")
-                .and_then(serde_json::Value::as_str)
-                .map(|kind| format!("workflow_event run_id={workflow_run_id} type={kind}"))
-                .unwrap_or_else(|| format!("workflow_event run_id={workflow_run_id}")),
-            FleetWorkerEventPayload::Heartbeat { .. } => "heartbeat".to_string(),
-            FleetWorkerEventPayload::Artifact(artifact) => {
-                format!("artifact kind={}", artifact_kind_label(&artifact.kind))
-            }
-            FleetWorkerEventPayload::Completed { exit_code, summary } => match (exit_code, summary)
-            {
-                (Some(code), Some(summary)) => format!("completed exit_code={code} {summary}"),
-                (Some(code), None) => format!("completed exit_code={code}"),
-                (None, Some(summary)) => format!("completed {summary}"),
-                (None, None) => "completed".to_string(),
-            },
-            FleetWorkerEventPayload::Failed {
-                reason,
-                recoverable,
-            } => {
-                format!("failed recoverable={recoverable} reason={reason}")
-            }
-            FleetWorkerEventPayload::Cancelled { cancelled_by } => cancelled_by
-                .as_ref()
-                .map(|by| format!("cancelled by={by}"))
-                .unwrap_or_else(|| "cancelled".to_string()),
-            FleetWorkerEventPayload::Interrupted { signal } => signal
-                .as_ref()
-                .map(|signal| format!("interrupted signal={signal}"))
-                .unwrap_or_else(|| "interrupted".to_string()),
-            FleetWorkerEventPayload::Stale { last_heartbeat_at } => last_heartbeat_at
-                .as_ref()
-                .map(|ts| format!("stale last_heartbeat_at={ts}"))
-                .unwrap_or_else(|| "stale".to_string()),
-            FleetWorkerEventPayload::Restarted { restart_count } => {
-                format!("restarted count={restart_count}")
-            }
-            FleetWorkerEventPayload::Escalated { channel, alert_id } => alert_id
-                .as_ref()
-                .map(|alert_id| format!("escalated channel={channel} alert_id={alert_id}"))
-                .unwrap_or_else(|| format!("escalated channel={channel}")),
-        }
-    }
-
+    // Every label and every row below comes from the shared Fleet control
+    // surface, so `codewhale fleet …` and `/fleet …` cannot drift in how they
+    // describe the same durable ledger (#1888, #4022).
     fn print_status(status: &FleetStatusSnapshot) {
-        println!(
-            "fleet: runs={} queued={} running={} completed={} partial={} failed={} restarted={} escalated={} transport_failed={} task_failed={} verifier_failed={} cancelled={} stale={}",
-            status.runs,
-            status.queued,
-            status.running,
-            status.completed,
-            status.partial,
-            status.failed,
-            status.restarted,
-            status.escalated,
-            status.transport_failed,
-            status.task_failed,
-            status.verifier_failed,
-            status.cancelled,
-            status.stale
-        );
-        if !status.workers.is_empty() {
-            println!("workers:");
-            for (worker_id, worker_status) in &status.workers {
-                println!("  {worker_id} {}", worker_status_label(worker_status));
-            }
-        }
+        println!("{}", fleet_control::render_fleet_status_snapshot(status));
     }
 
     fn print_inspection(inspection: &FleetWorkerInspection) {
-        println!("worker: {}", inspection.worker_id);
-        println!("status: {}", worker_status_label(&inspection.status));
-        if let Some(run_id) = &inspection.current_run_id {
-            println!("run: {}", run_id.0);
-        }
-        if let Some(task_id) = &inspection.current_task_id {
-            println!("task: {task_id}");
-        }
-        if let Some(objective) = &inspection.objective {
-            println!("objective: {objective}");
-        }
-        if let Some(role) = &inspection.role {
-            println!("role: {role}");
-        }
-        if let Some(host) = &inspection.host {
-            println!("host: {host}");
-        }
-        if let Some(heartbeat) = &inspection.latest_heartbeat_at {
-            println!("heartbeat: {heartbeat}");
-        }
-        if let Some(event) = &inspection.latest_event {
-            println!(
-                "latest_event: seq={} {}",
-                event.seq,
-                event_label(&event.payload)
-            );
-        }
-        if !inspection.artifacts.is_empty() {
-            println!("artifacts:");
-            for artifact in &inspection.artifacts {
-                println!(
-                    "  {} {}",
-                    artifact_kind_label(&artifact.kind),
-                    artifact.path.display()
-                );
-            }
-        }
-        if let Some(receipt) = &inspection.receipt_summary {
-            println!("receipt: {receipt}");
-        }
-        if let Some(error) = &inspection.last_error {
-            println!("last_error: {error}");
-        }
-        if let Some(alert) = &inspection.alert_state {
-            println!("alert: {alert}");
-        }
+        println!("{}", fleet_control::render_inspection(inspection));
     }
 
     fn print_artifacts(inspection: &FleetWorkerInspection) {
-        if inspection.artifacts.is_empty() {
-            println!("artifacts: none");
-            return;
-        }
-        println!("artifacts:");
-        for artifact in &inspection.artifacts {
-            let size = artifact
-                .size_bytes
-                .map(|size| format!(" size={size}"))
-                .unwrap_or_default();
-            let mime = artifact
-                .mime_type
+        println!("{}", fleet_control::render_artifacts(inspection));
+    }
+
+    /// Print one shared control receipt on the CLI surface.
+    fn emit_fleet_receipt(receipt: &codewhale_lane::ControlReceipt) -> Result<()> {
+        if receipt.is_error() {
+            eprintln!("{}", receipt.render());
+            let detail = receipt
+                .failure
                 .as_ref()
-                .map(|mime| format!(" mime={mime}"))
-                .unwrap_or_default();
-            println!(
-                "  {} {}{}{}",
-                artifact_kind_label(&artifact.kind),
-                artifact.path.display(),
-                size,
-                mime
-            );
+                .map(ToString::to_string)
+                .unwrap_or_else(|| receipt.outcome.as_str().to_string());
+            bail!("{}: {detail}", receipt.operation_id);
         }
+        println!("{}", receipt.render());
+        Ok(())
     }
 
     fn print_logs(workspace: &Path, inspection: &FleetWorkerInspection) -> Result<()> {
@@ -2561,6 +2407,37 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
         config.launch_concurrency_for_provider(provider),
         config.subagent_token_budget_for_provider(provider),
     );
+    // Probe the durable ledger *before* opening the manager: FleetManager::open
+    // creates `.codewhale/fleet.jsonl` as a side effect, so a later probe would
+    // always find a ledger and the CLI would report availability differently
+    // from the slash surface for the same workspace (#4022).
+    let fleet_context = fleet_control::fleet_control_context(workspace);
+    // Probing is not enough on its own: `FleetManager::open` *creates* the
+    // ledger, and it used to run for every subcommand before this match. That
+    // made `codewhale fleet status` in a ledgerless workspace print
+    // "no_fleet_ledger" while simultaneously creating the file it said was
+    // missing — and the next invocation then reported an empty ledger as if a
+    // Fleet had existed all along. Refuse the control verbs here, before the
+    // manager exists, so the CLI and `/fleet` agree and neither surface
+    // conjures the store it is reporting on (#4022).
+    if let Some(operation) = match &args.command {
+        FleetCommand::List => Some(ControlOperation::FleetList),
+        FleetCommand::Status => Some(ControlOperation::FleetStatus),
+        FleetCommand::Interrupt { .. } => Some(ControlOperation::FleetInterrupt),
+        FleetCommand::Resume { .. } => Some(ControlOperation::FleetResume),
+        _ => None,
+    } {
+        let descriptor = operation.descriptor();
+        let availability = descriptor.availability(ControlSurface::Cli, fleet_context);
+        if !availability.is_available() {
+            return emit_fleet_receipt(&codewhale_lane::ControlReceipt::unavailable(
+                descriptor,
+                ControlSurface::Cli,
+                availability,
+            ));
+        }
+    }
+
     // The configured route is the operator: fleet workers without a
     // task/profile model pin inherit the session's active model.
     let manager = FleetManager::open(workspace)?
@@ -2612,10 +2489,22 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
             print_status(&status);
             Ok(())
         }
-        FleetCommand::Status => {
-            print_status(&manager.status()?);
-            Ok(())
-        }
+        FleetCommand::List => emit_fleet_receipt(&fleet_control::execute_fleet_control_with(
+            ControlSurface::Cli,
+            workspace,
+            fleet_context,
+            &manager,
+            ControlOperation::FleetList,
+            None,
+        )),
+        FleetCommand::Status => emit_fleet_receipt(&fleet_control::execute_fleet_control_with(
+            ControlSurface::Cli,
+            workspace,
+            fleet_context,
+            &manager,
+            ControlOperation::FleetStatus,
+            None,
+        )),
         FleetCommand::Inspect { worker_id } => {
             print_inspection(&manager.inspect_worker(&worker_id)?);
             Ok(())
@@ -2630,9 +2519,14 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
             Ok(())
         }
         FleetCommand::Interrupt { worker_id } => {
-            let inspection = manager.interrupt_worker(&worker_id)?;
-            print_inspection(&inspection);
-            Ok(())
+            emit_fleet_receipt(&fleet_control::execute_fleet_control_with(
+                ControlSurface::Cli,
+                workspace,
+                fleet_context,
+                &manager,
+                ControlOperation::FleetInterrupt,
+                Some(&worker_id),
+            ))
         }
         FleetCommand::Restart { worker_id } => {
             let report = manager.restart_worker(&worker_id)?;
@@ -2661,17 +2555,14 @@ async fn run_fleet_command(workspace: &Path, config: &Config, args: FleetArgs) -
             stale_after_seconds,
         } => {
             let manager = manager.with_stale_after(Duration::from_secs(stale_after_seconds.max(1)));
-            let report = manager.resume_run(&FleetRunId::from(run_id))?;
-            println!(
-                "fleet resume: {} reclaimed_stale={} restarted={} failed={} escalated={}",
-                report.run_id.0,
-                report.reclaimed_stale,
-                report.restarted,
-                report.failed,
-                report.escalated
-            );
-            print_status(&report.status);
-            Ok(())
+            emit_fleet_receipt(&fleet_control::execute_fleet_control_with(
+                ControlSurface::Cli,
+                workspace,
+                fleet_context,
+                &manager,
+                ControlOperation::FleetResume,
+                Some(&run_id),
+            ))
         }
         FleetCommand::Stop { all } => {
             if !all {
