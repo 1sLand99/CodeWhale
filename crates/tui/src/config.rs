@@ -2068,10 +2068,19 @@ pub struct SubagentProviderConfig {
 /// its strong tier when the task clearly benefits from deeper reasoning.
 /// Providers without a validated sibling stay on the active model. Default
 /// is `false` (balanced — match the existing routing voice).
+///
+/// `cross_provider` (#4411): Auto routing is scoped to the active provider
+/// unless this persisted opt-in is set to `true`. Without it, neither the
+/// classifier inventory nor the local heuristic may leave the provider the
+/// session is actually configured to use.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct AutoConfig {
     #[serde(default)]
     pub cost_saving: Option<bool>,
+    /// Persisted opt-in for cross-provider Auto routing (`[auto]
+    /// cross_provider = true`). Default `false`: active provider only.
+    #[serde(default)]
+    pub cross_provider: Option<bool>,
     /// Optional explicit auto-router classifier route (`[auto.router]`).
     #[serde(default)]
     pub router: Option<AutoRouterConfig>,
@@ -3581,6 +3590,19 @@ impl Config {
         self.auto
             .as_ref()
             .and_then(|a| a.cost_saving)
+            .unwrap_or(false)
+    }
+
+    /// Return `true` only when `[auto] cross_provider = true` is persisted in
+    /// config (#4411). Auto mode otherwise stays on the active provider: the
+    /// classifier never sees other providers' routes, and the local heuristic
+    /// never selects one. There is no interactive toggle — enabling
+    /// cross-provider Auto is an explicit, durable config edit.
+    #[must_use]
+    pub fn auto_cross_provider(&self) -> bool {
+        self.auto
+            .as_ref()
+            .and_then(|a| a.cross_provider)
             .unwrap_or(false)
     }
 

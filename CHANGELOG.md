@@ -175,6 +175,18 @@ already claimed to.
   presentation only: the persisted keys (`goal_command`, `workflow`,
   `default_model`), their values, scopes, and runtime behavior are unchanged.
 
+- Auto model routing is scoped to the active provider. The classifier
+  inventory no longer discloses other providers' runnable routes (or the fact
+  that their credentials exist), a classifier reply naming another provider is
+  refused, the local heuristic no longer falls back to a different provider
+  when the active one is unusable, and the implicit DeepSeek-flash classifier
+  is skipped for non-DeepSeek sessions. Auto receipts and the model picker
+  hint report the active-provider-only scope instead of "runnable providers".
+  Cross-provider Auto is available only through the persisted `[auto]
+  cross_provider = true` opt-in (an explicit `[auto.router]` route remains its
+  own opt-in for the classifier call). Same-provider strong/fast selection and
+  `[auto] cost_saving` are unchanged.
+
 ## [0.9.1] - 2026-07-24
 
 ### Dogfood follow-ups (2026-07-24)

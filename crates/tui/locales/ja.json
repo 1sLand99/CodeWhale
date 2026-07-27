@@ -162,6 +162,7 @@
     "ConfigActionEdit": "Enter で編集",
     "ConfigActionReadOnly": "読み取り専用",
     "ModelPickerAutoNetworkHint": "ターンごと · 実行可能なプロバイダー · リクエスト＋直近のコンテキスト → DeepSeek / deepseek-v4-flash",
+    "ModelPickerAutoNetworkActiveProviderHint": "ターンごと · アクティブなプロバイダーのみ · リクエスト＋直近のコンテキスト → {provider} / {model}",
     "ModelPickerAutoLocalHint": "ターンごと · ローカル判定 · ルーター送信なし",
     "ModelPickerAutoLastRoute": "前回 {provider} · {model}",
     "AutoRouteSelectedToast": "Auto: {provider} / {model}（{source}）· Ctrl+O: ルート詳細",

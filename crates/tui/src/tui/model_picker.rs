@@ -1124,12 +1124,19 @@ fn push_auto_model_row(rows: &mut Vec<ModelPickerRow>, app: &App, config: &Confi
 
 fn auto_picker_hint(app: &App, config: &Config) -> String {
     let inventory = crate::model_inventory::ModelInventory::from_config(config);
-    let hint_id = if inventory.router_available {
-        MessageId::ModelPickerAutoNetworkHint
-    } else {
-        MessageId::ModelPickerAutoLocalHint
+    // #4411: the classifier only sees other providers under the persisted
+    // `[auto] cross_provider` opt-in, so the default hint says active provider
+    // only and names the classifier route it will actually call.
+    let hint_id = match (inventory.router_available, inventory.cross_provider_auto) {
+        (true, true) => MessageId::ModelPickerAutoNetworkHint,
+        (true, false) => MessageId::ModelPickerAutoNetworkActiveProviderHint,
+        (false, _) => MessageId::ModelPickerAutoLocalHint,
     };
-    let mut hint = app.tr(hint_id).into_owned();
+    let mut hint = app
+        .tr(hint_id)
+        .into_owned()
+        .replace("{provider}", inventory.router_provider.display_name())
+        .replace("{model}", &inventory.router_model);
     if let (Some(provider), Some(model)) = (
         app.last_effective_provider,
         app.last_effective_model.as_deref(),
@@ -2449,13 +2456,30 @@ mod tests {
         let _deepseek =
             crate::test_support::EnvVarGuard::set("DEEPSEEK_API_KEY", "test-router-key");
         let network = auto_picker_hint(&app, &config);
-        assert!(network.contains("runnable providers"), "{network}");
+        // #4411: the default classifier scope is the active provider, and the
+        // hint must not advertise the wider "runnable providers" scope.
+        assert!(network.contains("active provider only"), "{network}");
+        assert!(!network.contains("runnable providers"), "{network}");
         assert!(network.contains("request + recent context"), "{network}");
         assert!(
             network.contains("DeepSeek / deepseek-v4-flash"),
             "{network}"
         );
         assert!(!network.contains("test-router-key"), "{network}");
+
+        let opted_in = Config {
+            auto: Some(crate::config::AutoConfig {
+                cost_saving: None,
+                cross_provider: Some(true),
+                router: None,
+            }),
+            ..config.clone()
+        };
+        let cross_provider = auto_picker_hint(&app, &opted_in);
+        assert!(
+            cross_provider.contains("runnable providers"),
+            "{cross_provider}"
+        );
     }
 
     #[test]

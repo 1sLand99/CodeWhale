@@ -162,6 +162,7 @@
     "ConfigActionEdit": "Enter edita",
     "ConfigActionReadOnly": "somente leitura",
     "ModelPickerAutoNetworkHint": "por turno · provedores executáveis · solicitação + contexto recente → DeepSeek / deepseek-v4-flash",
+    "ModelPickerAutoNetworkActiveProviderHint": "por turno · apenas o provedor ativo · solicitação + contexto recente → {provider} / {model}",
     "ModelPickerAutoLocalHint": "por turno · heurística local · sem solicitação ao roteador",
     "ModelPickerAutoLastRoute": "última {provider} · {model}",
     "AutoRouteSelectedToast": "Auto: {provider} / {model} via {source} · Ctrl+O: detalhes da rota",

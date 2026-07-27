@@ -162,6 +162,7 @@
     "ConfigActionEdit": "按 Enter 编辑",
     "ConfigActionReadOnly": "只读",
     "ModelPickerAutoNetworkHint": "每轮 · 可用提供商 · 请求及近期上下文 → DeepSeek / deepseek-v4-flash",
+    "ModelPickerAutoNetworkActiveProviderHint": "每轮 · 仅当前提供商 · 请求及近期上下文 → {provider} / {model}",
     "ModelPickerAutoLocalHint": "每轮 · 本地启发式 · 不发送路由请求",
     "ModelPickerAutoLastRoute": "上次 {provider} · {model}",
     "AutoRouteSelectedToast": "Auto: {provider} / {model}（{source}）· Ctrl+O：路由详情",
