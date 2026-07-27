@@ -76,6 +76,15 @@ pub struct TaskRequest {
     pub acceptance: Vec<String>,
     /// Explicit tool allowlist; required by the driver for `custom` roles.
     pub allowed_tools: Option<Vec<String>>,
+    /// Host-imposed tool deny list. Deny always wins over allow, including over
+    /// `allowed_tools` and over the role posture.
+    ///
+    /// Deliberately **not** settable from a workflow script: it is how a host
+    /// enforces a ceiling it derived (an exact Fleet member's
+    /// `network_tool = false`, for instance) on the child that actually runs.
+    /// A script that could write it could also clear it.
+    #[serde(default)]
+    pub disallowed_tools: Vec<String>,
     /// Per-call spawn-depth override (driver clamps to its ceiling).
     pub max_depth: Option<u32>,
     /// Explicit token budget: forks an isolated pool on the driver side.
