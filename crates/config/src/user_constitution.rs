@@ -856,7 +856,9 @@ impl UserConstitution {
         }
 
         let mut next = self.clone();
-        let note = note.and_then(non_blank).map(|s| sanitize_untrusted_text(&s));
+        let note = note
+            .and_then(non_blank)
+            .map(|s| sanitize_untrusted_text(&s));
         let mut accepted_ids = Vec::new();
         for id in clause_ids {
             let Some(clause) = next.clauses.iter_mut().find(|clause| &clause.id == id) else {
@@ -948,7 +950,9 @@ impl MigrationRejection {
                  the file was left unchanged"
             ),
             Self::Malformed { error } => {
-                format!("rejected: not a readable constitution ({error}); the file was left unchanged")
+                format!(
+                    "rejected: not a readable constitution ({error}); the file was left unchanged"
+                )
             }
         }
     }
@@ -991,7 +995,8 @@ impl ConstitutionRecommendation {
             UntrustedDraftParse::Invalid(error) => RecommendationParse::Invalid(error),
             UntrustedDraftParse::Empty => RecommendationParse::Empty,
             UntrustedDraftParse::Drafted(draft) => {
-                let clauses: Vec<ConstitutionClause> = draft.ordered_clauses().into_iter().cloned().collect();
+                let clauses: Vec<ConstitutionClause> =
+                    draft.ordered_clauses().into_iter().cloned().collect();
                 let mut rationale: Vec<String> = draft
                     .notes
                     .as_deref()
@@ -1035,7 +1040,10 @@ pub struct Ratification {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RatificationError {
     /// The base moved under the review. Fail closed.
-    StaleBase { reviewed: String, live: String },
+    StaleBase {
+        reviewed: String,
+        live: String,
+    },
     UnknownClause(String),
     AlreadyAccepted(String),
     NothingSelected,
@@ -1650,10 +1658,17 @@ mod tests {
         };
         assert_eq!(receipt.from_version, USER_CONSTITUTION_SCHEMA_VERSION_V1);
         assert_eq!(receipt.to_version, USER_CONSTITUTION_SCHEMA_VERSION);
-        assert_eq!(constitution.schema_version, USER_CONSTITUTION_SCHEMA_VERSION);
+        assert_eq!(
+            constitution.schema_version,
+            USER_CONSTITUTION_SCHEMA_VERSION
+        );
         // v1 carried no clauses, so migration touches no model-facing byte.
         assert!(receipt.is_cache_stable(), "{receipt:?}");
-        assert!(constitution.render_body().contains("Maintainer of CodeWhale."));
+        assert!(
+            constitution
+                .render_body()
+                .contains("Maintainer of CodeWhale.")
+        );
 
         // Deterministic: same bytes in, same outcome out.
         assert_eq!(
@@ -1889,7 +1904,10 @@ mod tests {
     #[test]
     fn ratification_is_explicit_and_changes_the_rendered_law() {
         let base = sample().with_recommendation(&ConstitutionRecommendation {
-            clauses: vec![ConstitutionClause::suggested("c1", "Always show diffs first.")],
+            clauses: vec![ConstitutionClause::suggested(
+                "c1",
+                "Always show diffs first.",
+            )],
             rationale: Vec::new(),
         });
         let digest = base.cache_projection().digest;

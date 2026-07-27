@@ -281,7 +281,11 @@ pub fn render_report(preview: &BasePromptPreview) -> String {
         "Cache-stable prefix: {} bytes, ~{} tokens (estimate)",
         preview.cache_stable.byte_len, preview.cache_stable.approx_tokens
     );
-    let _ = writeln!(out, "Digest of the exact sent bytes: {}", preview.exact_digest);
+    let _ = writeln!(
+        out,
+        "Digest of the exact sent bytes: {}",
+        preview.exact_digest
+    );
     if preview.display_is_exact() {
         out.push_str("Displayed text is byte-exact; nothing needed redaction.\n");
     } else {
@@ -291,7 +295,9 @@ pub fn render_report(preview: &BasePromptPreview) -> String {
             preview.redacted_segments
         );
     }
-    out.push_str("\nNo provider request was made and no tool catalog was expanded to build this preview.\n");
+    out.push_str(
+        "\nNo provider request was made and no tool catalog was expanded to build this preview.\n",
+    );
 
     out.push_str("\nBlocks\n");
     for segment in &preview.segments {
@@ -631,7 +637,10 @@ mod tests {
         assert!(report.contains("No provider request was made"));
         assert!(report.contains("no tool catalog was expanded"));
         assert!(report.contains("Digest of the exact sent bytes"));
-        assert!(report.contains("~"), "token estimate must be marked approximate");
+        assert!(
+            report.contains("~"),
+            "token estimate must be marked approximate"
+        );
     }
 
     #[test]

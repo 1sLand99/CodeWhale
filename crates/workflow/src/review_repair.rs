@@ -172,16 +172,31 @@ pub enum StopReason {
     /// Clean verdict, and either no ratification was required or it was given.
     Verified,
     /// A human explicitly rejected the result.
-    RatificationDeclined { note: String },
+    RatificationDeclined {
+        note: String,
+    },
     /// Clean verdict, waiting on the human the policy requires.
     AwaitingRatification,
-    IterationCeiling { max_iterations: u32 },
-    TimeCeiling { max_wall_clock_secs: u64, elapsed_secs: u64 },
-    ToolCeiling { max_tool_calls: u32, used: u32 },
+    IterationCeiling {
+        max_iterations: u32,
+    },
+    TimeCeiling {
+        max_wall_clock_secs: u64,
+        elapsed_secs: u64,
+    },
+    ToolCeiling {
+        max_tool_calls: u32,
+        used: u32,
+    },
     /// The artifact under review changed underneath the loop.
-    StaleInput { pinned: String, reported: String },
+    StaleInput {
+        pinned: String,
+        reported: String,
+    },
     /// The reviewer could not judge, or its receipt was incomplete.
-    Inconclusive { reason: String },
+    Inconclusive {
+        reason: String,
+    },
 }
 
 impl StopReason {
@@ -503,7 +518,11 @@ impl ReviewRepairLoop {
                 iteration.reviewer.display_line()
             ));
             if let Some(verifier) = iteration.verifier.as_ref() {
-                lines.push(format!("#{} {}", iteration.iteration, verifier.display_line()));
+                lines.push(format!(
+                    "#{} {}",
+                    iteration.iteration,
+                    verifier.display_line()
+                ));
             }
         }
         lines
@@ -600,7 +619,9 @@ mod tests {
             },
             ReviewRepairPolicy::default(),
         );
-        let err = lane.begin_iteration().expect_err("a zero ceiling runs nothing");
+        let err = lane
+            .begin_iteration()
+            .expect_err("a zero ceiling runs nothing");
         assert_eq!(
             err.stop_reason(),
             Some(&StopReason::IterationCeiling { max_iterations: 0 })
@@ -653,7 +674,10 @@ mod tests {
 
     #[test]
     fn stale_input_fails_closed_without_repairing() {
-        let mut lane = loop_with(ReviewRepairBounds::conservative(), ReviewRepairPolicy::default());
+        let mut lane = loop_with(
+            ReviewRepairBounds::conservative(),
+            ReviewRepairPolicy::default(),
+        );
         lane.begin_iteration().expect("first iteration");
 
         let err = lane
@@ -673,7 +697,10 @@ mod tests {
 
     #[test]
     fn clean_verdict_parks_for_human_ratification() {
-        let mut lane = loop_with(ReviewRepairBounds::conservative(), ReviewRepairPolicy::default());
+        let mut lane = loop_with(
+            ReviewRepairBounds::conservative(),
+            ReviewRepairPolicy::default(),
+        );
         lane.begin_iteration().expect("first iteration");
         let stop = lane
             .record_iteration(receipt(1, "digest-a", IterationVerdict::Clean))
@@ -689,7 +716,10 @@ mod tests {
 
     #[test]
     fn declined_ratification_is_not_success() {
-        let mut lane = loop_with(ReviewRepairBounds::conservative(), ReviewRepairPolicy::default());
+        let mut lane = loop_with(
+            ReviewRepairBounds::conservative(),
+            ReviewRepairPolicy::default(),
+        );
         lane.begin_iteration().expect("first iteration");
         lane.record_iteration(receipt(1, "digest-a", IterationVerdict::Clean))
             .expect("recorded");
@@ -743,12 +773,17 @@ mod tests {
 
     #[test]
     fn a_missing_verifier_is_inconclusive_not_a_pass() {
-        let mut lane = loop_with(ReviewRepairBounds::conservative(), ReviewRepairPolicy::default());
+        let mut lane = loop_with(
+            ReviewRepairBounds::conservative(),
+            ReviewRepairPolicy::default(),
+        );
         lane.begin_iteration().expect("first iteration");
         let mut r = receipt(1, "digest-a", IterationVerdict::Clean);
         r.verifier = None;
 
-        let err = lane.record_iteration(r).expect_err("review alone is not verification");
+        let err = lane
+            .record_iteration(r)
+            .expect_err("review alone is not verification");
         assert!(matches!(
             err.stop_reason(),
             Some(StopReason::Inconclusive { .. })
@@ -757,19 +792,30 @@ mod tests {
 
     #[test]
     fn an_incomplete_route_is_refused_without_ending_the_loop() {
-        let mut lane = loop_with(ReviewRepairBounds::conservative(), ReviewRepairPolicy::default());
+        let mut lane = loop_with(
+            ReviewRepairBounds::conservative(),
+            ReviewRepairPolicy::default(),
+        );
         lane.begin_iteration().expect("first iteration");
         let mut r = receipt(1, "digest-a", IterationVerdict::Clean);
         r.reviewer.model = "  ".to_string();
 
-        let err = lane.record_iteration(r).expect_err("a route without a model is a claim");
+        let err = lane
+            .record_iteration(r)
+            .expect_err("a route without a model is a claim");
         assert!(matches!(err, ReviewRepairError::IncompleteReceipt(_)));
-        assert!(lane.stop_reason().is_none(), "the caller may retry with a real receipt");
+        assert!(
+            lane.stop_reason().is_none(),
+            "the caller may retry with a real receipt"
+        );
     }
 
     #[test]
     fn inconclusive_review_stops_instead_of_passing() {
-        let mut lane = loop_with(ReviewRepairBounds::conservative(), ReviewRepairPolicy::default());
+        let mut lane = loop_with(
+            ReviewRepairBounds::conservative(),
+            ReviewRepairPolicy::default(),
+        );
         lane.begin_iteration().expect("first iteration");
         let stop = lane
             .record_iteration(receipt(1, "digest-a", IterationVerdict::Inconclusive))
@@ -779,7 +825,10 @@ mod tests {
 
     #[test]
     fn route_lines_show_exact_routes_and_requested_to_effective_reasoning() {
-        let mut lane = loop_with(ReviewRepairBounds::conservative(), ReviewRepairPolicy::default());
+        let mut lane = loop_with(
+            ReviewRepairBounds::conservative(),
+            ReviewRepairPolicy::default(),
+        );
         lane.begin_iteration().expect("first iteration");
         let mut r = receipt(1, "digest-a", IterationVerdict::Clean);
         r.reviewer.requested_reasoning = "max".to_string();
@@ -791,7 +840,11 @@ mod tests {
         lane.record_iteration(r).expect("recorded");
 
         let lines = lane.route_lines();
-        assert_eq!(lines.len(), 2, "reviewer and verifier both appear: {lines:?}");
+        assert_eq!(
+            lines.len(),
+            2,
+            "reviewer and verifier both appear: {lines:?}"
+        );
         assert!(lines[0].contains("reviewer: zhipu/glm-5.2"));
         assert!(lines[0].contains("max→high"), "{lines:?}");
         assert!(lines[0].contains("routed by router moonshot/kimi-k3"));
@@ -814,7 +867,10 @@ mod tests {
         // #3832 must not grow a fourth Mode or a fourth posture. This module's
         // serialized surface is the check: a loop carries ceilings, routes, and
         // verdicts — never a mode, posture, approval policy, or sandbox setting.
-        let lane = loop_with(ReviewRepairBounds::conservative(), ReviewRepairPolicy::default());
+        let lane = loop_with(
+            ReviewRepairBounds::conservative(),
+            ReviewRepairPolicy::default(),
+        );
         let json = serde_json::to_string(&lane).expect("serialize");
         for forbidden in [
             "mode",

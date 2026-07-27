@@ -333,10 +333,7 @@ fn rollback_text(locale: Locale) -> String {
     };
     match codewhale_config::UserConstitution::rollback_file(&path) {
         Ok(backup) => match locale {
-            Locale::ZhHans => format!(
-                "已从 {} 恢复迁移前的内容。备份已消耗。",
-                backup.display()
-            ),
+            Locale::ZhHans => format!("已从 {} 恢复迁移前的内容。备份已消耗。", backup.display()),
             _ => format!(
                 "Restored the pre-migration constitution from {}. The backup is consumed.",
                 backup.display()
@@ -1469,7 +1466,10 @@ mod tests {
             .message
             .expect("migrate receipt");
         assert!(message.contains("Migrated schema v1"), "{message}");
-        assert!(message.contains("Preserved unknown fields: none"), "{message}");
+        assert!(
+            message.contains("Preserved unknown fields: none"),
+            "{message}"
+        );
         assert!(
             message.contains("the prompt cache survives"),
             "a v1 file carries no clauses, so no model-facing byte moved: {message}"

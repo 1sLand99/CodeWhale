@@ -32,9 +32,9 @@ pub use setup_state::{
 pub use user_constitution::{
     APPROX_BYTES_PER_TOKEN, AutonomyPreference, CacheProjection, ClauseOrigin, ClauseStatus,
     ConstitutionClause, ConstitutionRecommendation, MigrationOutcome, MigrationReceipt,
-    MigrationRejection, Ratification, RatificationError, RecommendationParse, UntrustedDraftParse,
-    USER_CONSTITUTION_SCHEMA_VERSION, USER_CONSTITUTION_SCHEMA_VERSION_V1, UserConstitution,
-    UserConstitutionLoad,
+    MigrationRejection, Ratification, RatificationError, RecommendationParse,
+    USER_CONSTITUTION_SCHEMA_VERSION, USER_CONSTITUTION_SCHEMA_VERSION_V1, UntrustedDraftParse,
+    UserConstitution, UserConstitutionLoad,
 };
 pub use xai_credentials::{
     LEGACY_XAI_OAUTH_FILE_NAME, XAI_OAUTH_GENERATION_PREFIX, XAI_OAUTH_GENERATION_SUFFIX,
