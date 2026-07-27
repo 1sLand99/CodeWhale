@@ -283,6 +283,28 @@ fn classify(
         ApiProvider::Zai => BillingPresentation::Metered,
         ApiProvider::XiaomiMimo => product_billing(product),
 
+        // Moonshot's direct platform is pay-as-you-go metered. Only the exact
+        // Kimi Code membership endpoint bills against subscription quota.
+        //
+        // The endpoint must name one of the two known products outright. A
+        // neighboring Kimi-hosted path, a gateway host, or a shipped default
+        // reached for a route we cannot otherwise explain must not inherit
+        // Moonshot's metered price list.
+        //
+        // Reading the resolved endpoint (not the provider table's `base_url`)
+        // is what makes the imported-token membership route truthful: a Kimi
+        // Code token with no `base_url` in its table still resolves to
+        // api.kimi.com/coding/v1, and calling that metered would put invented
+        // dollars against a membership quota.
+        ApiProvider::Moonshot if crate::config::moonshot_base_url_is_exact_kimi_code(base_url) => {
+            BillingPresentation::Subscription("Kimi Code quota")
+        }
+        ApiProvider::Moonshot
+            if crate::config::moonshot_base_url_is_exact_direct_platform(base_url) =>
+        {
+            BillingPresentation::Metered
+        }
+        ApiProvider::Moonshot => BillingPresentation::Unknown,
         ApiProvider::Xai | ApiProvider::Anthropic => product_billing(product),
         // A named custom route is billed from the identity and endpoint it
         // dispatched on. Without an identity there is no vendor to name, and
@@ -559,6 +581,393 @@ mod tests {
         config
     }
 
+    /// Clear every variable that could otherwise supply a Moonshot endpoint,
+    /// so the resolver has to answer from the config alone.
+    fn moonshot_endpoint_env_lock() -> [crate::test_support::EnvVarGuard; 4] {
+        [
+            crate::test_support::EnvVarGuard::remove("CODEWHALE_BASE_URL"),
+            crate::test_support::EnvVarGuard::remove("DEEPSEEK_BASE_URL"),
+            crate::test_support::EnvVarGuard::remove("MOONSHOT_BASE_URL"),
+            crate::test_support::EnvVarGuard::remove("KIMI_BASE_URL"),
+        ]
+    }
+
+    #[test]
+    fn imported_token_moonshot_without_table_base_url_bills_membership_quota() {
+        let _lock = crate::test_support::lock_test_env();
+        let _env = moonshot_endpoint_env_lock();
+        // An imported Kimi Code token with no `base_url` in its table. The
+        // table field is empty, but the route still resolves to the exact
+        // membership endpoint, so classifying from the raw field would call a
+        // membership quota metered and invent dollars against it.
+        let config = config_with(
+            ApiProvider::Moonshot,
+            ProviderConfig {
+                auth_mode: Some("kimi_oauth".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        assert_eq!(
+            config.base_url_for_route(ApiProvider::Moonshot),
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL
+        );
+
+        let billing = for_route(&config, ApiProvider::Moonshot);
+        assert_eq!(
+            billing,
+            BillingPresentation::Subscription("Kimi Code quota")
+        );
+        assert!(!billing.shows_money());
+
+        let chip = usage_chip(
+            billing,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_KIMI_CODE_MODEL,
+            12.34,
+            CostCurrency::Usd,
+            None,
+        );
+        assert!(!matches!(chip, UsageChip::Money(_)));
+        assert_eq!(
+            format_usage_chip(&chip).as_deref(),
+            Some("usage: Kimi Code quota")
+        );
+        // The label names the membership product, never the credential import
+        // mechanism, and never a dollar figure.
+        assert!(!format_usage_line(&chip).contains("OAuth"));
+        assert!(!format_usage_line(&chip).contains("imported token"));
+        assert!(!format_usage_line(&chip).contains('$'));
+    }
+
+    #[test]
+    fn turn_complete_kimi_code_receipt_accrues_no_dollars() {
+        let _lock = crate::test_support::lock_test_env();
+        let _env = moonshot_endpoint_env_lock();
+        // Pins the exact decision the `EngineEvent::TurnComplete` arm makes:
+        // classify from the event's immutable `base_url` receipt, then accrue
+        // only when the result shows money. The ambient config deliberately
+        // points at a *different* provider to prove the arm cannot re-resolve
+        // its way onto another route's price list.
+        let mut config = config_with(
+            ApiProvider::Deepseek,
+            ProviderConfig {
+                api_key: Some("sk-session-deepseek".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        config.provider = Some("deepseek".to_string());
+
+        let billing = for_dispatched_route(
+            &config,
+            DispatchedRoute {
+                provider: ApiProvider::Moonshot,
+                base_url: "https://api.kimi.com/coding/v1",
+            },
+        );
+        assert_eq!(
+            billing,
+            BillingPresentation::Subscription("Kimi Code quota")
+        );
+        // `shows_money()` is the gate guarding `accrue_session_cost_estimate`.
+        assert!(!billing.shows_money());
+
+        // A missing receipt must not fall back to the session's metered route.
+        let no_receipt = for_dispatched_route(
+            &config,
+            DispatchedRoute {
+                provider: ApiProvider::Moonshot,
+                base_url: "",
+            },
+        );
+        assert_eq!(no_receipt, BillingPresentation::Unknown);
+        assert!(!no_receipt.shows_money());
+    }
+
+    #[test]
+    fn moonshot_ambient_and_dispatch_billing_agree_on_the_resolved_endpoint() {
+        let _lock = crate::test_support::lock_test_env();
+        let _env = moonshot_endpoint_env_lock();
+        let cases = [
+            // (table base_url, auth_mode, expected)
+            (
+                None,
+                Some("kimi_oauth"),
+                BillingPresentation::Subscription("Kimi Code quota"),
+            ),
+            (None, None, BillingPresentation::Metered),
+            (
+                Some("https://api.kimi.com/coding/v1"),
+                None,
+                BillingPresentation::Subscription("Kimi Code quota"),
+            ),
+            (
+                Some("https://api.moonshot.ai/v1"),
+                None,
+                BillingPresentation::Metered,
+            ),
+            (
+                Some("https://proxy.example.test/v1"),
+                None,
+                BillingPresentation::Unknown,
+            ),
+        ];
+        for (base_url, auth_mode, expected) in cases {
+            let config = config_with(
+                ApiProvider::Moonshot,
+                ProviderConfig {
+                    base_url: base_url.map(str::to_string),
+                    auth_mode: auth_mode.map(str::to_string),
+                    ..ProviderConfig::default()
+                },
+            );
+            let resolved = config.base_url_for_route(ApiProvider::Moonshot);
+            let ambient = for_route(&config, ApiProvider::Moonshot);
+            let dispatched = for_dispatched_route(
+                &config,
+                DispatchedRoute {
+                    provider: ApiProvider::Moonshot,
+                    base_url: &resolved,
+                },
+            );
+            assert_eq!(ambient, expected, "{base_url:?}/{auth_mode:?}");
+            assert_eq!(
+                ambient, dispatched,
+                "{base_url:?}/{auth_mode:?} resolved to {resolved}: the pre-dispatch and \
+                 receipt classifications must not be able to disagree"
+            );
+        }
+    }
+
+    #[test]
+    fn moonshot_custom_gateway_is_unknown_not_metered() {
+        let _lock = crate::test_support::lock_test_env();
+        let _env = moonshot_endpoint_env_lock();
+        // A Moonshot-compatible gateway sells its own product on its own
+        // terms. Inheriting Moonshot's metered price list would invent
+        // dollars; inheriting a membership label would invent a quota.
+        for base_url in [
+            "https://proxy.example.test/v1",
+            "https://gateway.internal.test/moonshot/v1",
+        ] {
+            let config = config_with(
+                ApiProvider::Moonshot,
+                ProviderConfig {
+                    base_url: Some(base_url.to_string()),
+                    ..ProviderConfig::default()
+                },
+            );
+            let billing = for_route(&config, ApiProvider::Moonshot);
+            assert_eq!(
+                billing,
+                BillingPresentation::Unknown,
+                "{base_url} must not inherit a Moonshot product"
+            );
+            assert!(!billing.shows_money());
+            let chip = usage_chip(
+                billing,
+                ApiProvider::Moonshot,
+                "kimi-k2.7-code",
+                12.34,
+                CostCurrency::Usd,
+                None,
+            );
+            assert!(!matches!(chip, UsageChip::Money(_)));
+            assert!(!format_usage_line(&chip).contains('$'));
+        }
+    }
+
+    #[test]
+    fn moonshot_direct_platform_stays_metered_with_priced_model() {
+        let config = config_with(
+            ApiProvider::Moonshot,
+            ProviderConfig {
+                base_url: Some("https://api.moonshot.ai/v1".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        let billing = for_route(&config, ApiProvider::Moonshot);
+        assert_eq!(billing, BillingPresentation::Metered);
+        assert!(billing.shows_money());
+        let chip = usage_chip(
+            billing,
+            ApiProvider::Moonshot,
+            "kimi-k2.7-code",
+            0.42,
+            CostCurrency::Usd,
+            None,
+        );
+        assert!(matches!(chip, UsageChip::Money(_)));
+        assert!(format_usage_line(&chip).contains('$'));
+    }
+
+    #[test]
+    fn moonshot_exact_kimi_code_endpoint_is_subscription_quota() {
+        let config = config_with(
+            ApiProvider::Moonshot,
+            ProviderConfig {
+                base_url: Some("https://api.kimi.com/coding/v1".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        let billing = for_route(&config, ApiProvider::Moonshot);
+        assert_eq!(
+            billing,
+            BillingPresentation::Subscription("Kimi Code quota")
+        );
+        assert!(!billing.shows_money());
+        // `kimi-k2.7-code` is priced on the metered route; the subscription
+        // classification must still win over the priced row.
+        let chip = usage_chip(
+            billing,
+            ApiProvider::Moonshot,
+            "kimi-k2.7-code",
+            12.34,
+            CostCurrency::Usd,
+            None,
+        );
+        assert!(!matches!(chip, UsageChip::Money(_)));
+        assert_eq!(
+            chip,
+            UsageChip::Allowance {
+                label: "Kimi Code quota",
+                used_pct: None,
+            }
+        );
+        assert!(!format_usage_line(&chip).contains('$'));
+    }
+
+    #[test]
+    fn moonshot_neighboring_kimi_paths_are_unknown_not_metered() {
+        let _lock = crate::test_support::lock_test_env();
+        let _env = moonshot_endpoint_env_lock();
+        // A Kimi-hosted path that is not the exact membership endpoint names
+        // no product we can stand behind. It must claim neither the Kimi Code
+        // quota nor Moonshot's metered price list — the pre-dispatch and
+        // receipt answers are the same fail-closed Unknown.
+        for base_url in [
+            "https://api.kimi.com/coding/v2",
+            "https://api.kimi.com/v1",
+            "https://api.kimi.com/coding/v1/preview",
+        ] {
+            let config = config_with(
+                ApiProvider::Moonshot,
+                ProviderConfig {
+                    base_url: Some(base_url.to_string()),
+                    ..ProviderConfig::default()
+                },
+            );
+            let billing = for_route(&config, ApiProvider::Moonshot);
+            assert_eq!(
+                billing,
+                BillingPresentation::Unknown,
+                "{base_url} must claim neither Kimi Code quota nor metered dollars"
+            );
+            assert!(!billing.shows_money());
+            assert_eq!(
+                billing,
+                for_dispatched_route(
+                    &config,
+                    DispatchedRoute {
+                        provider: ApiProvider::Moonshot,
+                        base_url,
+                    },
+                )
+            );
+        }
+    }
+
+    /// The second release blocker. `apply_env_overrides` merges
+    /// `MOONSHOT_BASE_URL`/`KIMI_BASE_URL` into the ACTIVE provider's table
+    /// only, so a Moonshot child spawned from (say) a DeepSeek session has an
+    /// empty `[providers.moonshot]` entry no matter what the operator
+    /// exported. Re-reading that config calls a membership route metered;
+    /// the dispatch receipt — the endpoint the child's client was actually
+    /// built with — tells the truth.
+    #[test]
+    fn dispatched_moonshot_receipt_owns_billing_over_any_later_config_state() {
+        let _lock = crate::test_support::lock_test_env();
+        // Env-only endpoint selection: nothing is in the provider table.
+        let _generic = crate::test_support::EnvVarGuard::remove("CODEWHALE_BASE_URL");
+        let _legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_BASE_URL");
+        let _moonshot = crate::test_support::EnvVarGuard::remove("MOONSHOT_BASE_URL");
+        let _kimi = crate::test_support::EnvVarGuard::set(
+            "KIMI_BASE_URL",
+            "https://api.kimi.com/coding/v1",
+        );
+        let config = config_with(ApiProvider::Moonshot, ProviderConfig::default());
+
+        // The pre-dispatch answer resolves the same env-selected endpoint
+        // instead of reading the empty provider table — that blind spot is
+        // what let an imported-token membership route look metered.
+        assert_eq!(
+            for_route(&config, ApiProvider::Moonshot),
+            BillingPresentation::Subscription("Kimi Code quota")
+        );
+
+        // A receipt still wins outright. A turn dispatched on the direct
+        // platform bills metered even though the config resolves to the
+        // membership host now.
+        assert_eq!(
+            for_dispatched_route(
+                &config,
+                DispatchedRoute {
+                    provider: ApiProvider::Moonshot,
+                    base_url: "https://api.moonshot.ai/v1",
+                },
+            ),
+            BillingPresentation::Metered,
+            "the endpoint the turn actually dispatched to owns its billing"
+        );
+        assert_eq!(
+            for_dispatched_route(
+                &config,
+                DispatchedRoute {
+                    provider: ApiProvider::Moonshot,
+                    base_url: "https://api.kimi.com/coding/v1",
+                },
+            ),
+            BillingPresentation::Subscription("Kimi Code quota")
+        );
+    }
+
+    /// A dispatched endpoint must NAME a known product. The exact direct
+    /// platform is metered; a gateway host, a neighboring Kimi path, and a
+    /// blank receipt are all ambiguous and fail closed.
+    #[test]
+    fn dispatched_moonshot_endpoint_must_name_a_known_product() {
+        assert_eq!(
+            for_dispatched_route(
+                &Config::default(),
+                DispatchedRoute {
+                    provider: ApiProvider::Moonshot,
+                    base_url: "https://api.moonshot.ai/v1",
+                },
+            ),
+            BillingPresentation::Metered
+        );
+        for ambiguous in [
+            "",
+            "   ",
+            "https://api.kimi.com/v1",
+            "https://api.kimi.com/coding/v1/preview",
+            "https://gateway.internal.example/v1",
+        ] {
+            let billing = for_dispatched_route(
+                &Config::default(),
+                DispatchedRoute {
+                    provider: ApiProvider::Moonshot,
+                    base_url: ambiguous,
+                },
+            );
+            assert_eq!(
+                billing,
+                BillingPresentation::Unknown,
+                "{ambiguous:?} names no Moonshot product"
+            );
+            assert!(!billing.shows_money());
+        }
+    }
+
     #[test]
     fn codex_oauth_never_claims_api_dollars() {
         assert_eq!(
@@ -577,31 +986,6 @@ mod tests {
             format_usage_chip(&chip).as_deref(),
             Some("usage: Codex OAuth quota")
         );
-        assert!(!format_usage_line(&chip).contains('$'));
-    }
-
-    #[test]
-    fn unsupported_kimi_cli_mode_never_claims_imported_token_billing() {
-        let config = config_with(
-            ApiProvider::Moonshot,
-            ProviderConfig {
-                auth_mode: Some("kimi_oauth".to_string()),
-                ..ProviderConfig::default()
-            },
-        );
-        let billing = for_route(&config, ApiProvider::Moonshot);
-        assert_eq!(billing, BillingPresentation::Metered);
-        let chip = usage_chip(
-            billing,
-            ApiProvider::Moonshot,
-            crate::config::DEFAULT_KIMI_CODE_MODEL,
-            12.34,
-            CostCurrency::Usd,
-            None,
-        );
-        assert_eq!(format_usage_chip(&chip).as_deref(), Some("cost: unknown"));
-        assert!(!format_usage_line(&chip).contains("OAuth"));
-        assert!(!format_usage_line(&chip).contains("imported token"));
         assert!(!format_usage_line(&chip).contains('$'));
     }
 
