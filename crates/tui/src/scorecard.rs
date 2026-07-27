@@ -166,11 +166,21 @@ pub struct Scorecard {
 
 /// One row of input to the scorecard: a turn id, the model that served it, and
 /// the turn's recorded usage.
+///
+/// `billing_surface` is explicit and has no default. The scorecard has two
+/// entry modes, and they must agree: if this fixture mode could silently supply
+/// an official first-party surface, every scorecard test would be asserting
+/// against a route classification that `from_recorded_turns` never invents, and
+/// the fail-closed path would go unexercised in the mode the tests use.
 #[cfg(test)]
 pub struct TurnInput<'a> {
     pub turn_id: String,
     pub created_at: Option<&'a DateTime<Utc>>,
     pub provider: Option<&'a str>,
+    /// The route's recorded billing surface, or `None` when the recording did
+    /// not establish one. `None` must price exactly as it does for a recorded
+    /// turn: unknown, never official.
+    pub billing_surface: Option<&'a str>,
     pub model: String,
     pub usage: &'a Usage,
 }
@@ -396,10 +406,7 @@ impl Scorecard {
             turn_id: &turn.turn_id,
             created_at: turn.created_at,
             provider: turn.provider,
-            // `TurnInput` is a test-only fixture for explicit provider-owned
-            // routes. Production/legacy recordings enter through
-            // `from_recorded_turns` and preserve an actually absent surface.
-            billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
+            billing_surface: turn.billing_surface,
             model: &turn.model,
             usage: turn.usage,
         }))
@@ -747,6 +754,78 @@ mod tests {
         }
     }
 
+    /// The scorecard has two entry modes and they must classify identically.
+    ///
+    /// `from_turns` is the fixture mode used by this test module;
+    /// `from_recorded_turns` is the mode that reads real recordings. The
+    /// fixture mode used to inject `first-party-payg` for every row, which
+    /// meant the whole suite was asserting against a route classification the
+    /// real mode never produces — the fail-closed path was untested precisely
+    /// where it mattered. Neither mode may invent an official surface.
+    #[test]
+    fn both_scorecard_entry_modes_agree_on_an_unestablished_billing_surface() {
+        let sample = usage(10_000, 1_000, 0);
+
+        let fixture = Scorecard::from_turns(&[TurnInput {
+            turn_id: "t1".into(),
+            created_at: None,
+            provider: Some("anthropic"),
+            billing_surface: None,
+            model: "claude-haiku-4-5".into(),
+            usage: &sample,
+        }]);
+        let recorded = Scorecard::from_recorded_turns(&[RecordedTurn {
+            turn_id: "t1".to_string(),
+            created_at: None,
+            model_backed: None,
+            provider: Some("anthropic".to_string()),
+            billing_surface: None,
+            model: "claude-haiku-4-5".to_string(),
+            usage: Some(sample.clone()),
+        }]);
+
+        assert_eq!(fixture.per_turn, recorded.per_turn);
+        assert_eq!(fixture.metrics, recorded.metrics);
+        assert!(
+            fixture.per_turn[0].cost_unpriced,
+            "a route with no established surface must not be priced"
+        );
+        assert_eq!(fixture.per_turn[0].cost_usd, 0.0);
+        assert!(!fixture.metrics.cost_complete);
+        assert_eq!(fixture.metrics.money_metered_turns, 1);
+        assert_eq!(fixture.metrics.unpriced_turns, 1);
+        let summary = fixture.to_summary();
+        assert!(summary.contains("cost_usd: unavailable"), "{summary}");
+        assert!(summary.contains("cost_cny: unavailable"), "{summary}");
+        assert!(
+            !summary.contains('$') && !summary.contains('¥'),
+            "an unpriced-only run must name no amount at all: {summary}"
+        );
+
+        // With the surface actually established, both modes price it — and
+        // still agree.
+        let priced_fixture = Scorecard::from_turns(&[TurnInput {
+            turn_id: "t1".into(),
+            created_at: None,
+            provider: Some("anthropic"),
+            billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
+            model: "claude-haiku-4-5".into(),
+            usage: &sample,
+        }]);
+        let priced_recorded = Scorecard::from_recorded_turns(&[RecordedTurn {
+            turn_id: "t1".to_string(),
+            created_at: None,
+            model_backed: None,
+            provider: Some("anthropic".to_string()),
+            billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+            model: "claude-haiku-4-5".to_string(),
+            usage: Some(sample),
+        }]);
+        assert_eq!(priced_fixture.per_turn, priced_recorded.per_turn);
+        assert!(!priced_fixture.per_turn[0].cost_unpriced);
+        assert!(priced_fixture.metrics.cost_complete);
+    }
+
     #[test]
     fn dual_mode_routes_require_surface_but_intrinsic_routes_override_junk() {
         let usage = usage(10_000, 1_000, 0);
@@ -813,6 +892,7 @@ mod tests {
                 turn_id: "anthropic".into(),
                 created_at: None,
                 provider: Some("anthropic"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "claude-haiku-4-5".into(),
                 usage: &priced,
             },
@@ -820,6 +900,7 @@ mod tests {
                 turn_id: "moonshot".into(),
                 created_at: None,
                 provider: Some("moonshot"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "kimi-k2.7-code".into(),
                 usage: &unpriced_write,
             },
@@ -827,6 +908,7 @@ mod tests {
                 turn_id: "oauth".into(),
                 created_at: None,
                 provider: Some("openai-codex"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "gpt-5.5".into(),
                 usage: &oauth,
             },
@@ -968,6 +1050,7 @@ mod tests {
                 turn_id: "t1".into(),
                 created_at: None,
                 provider: None,
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "unpriced-x".into(),
                 usage: &u1,
             },
@@ -975,6 +1058,7 @@ mod tests {
                 turn_id: "t2".into(),
                 created_at: None,
                 provider: None,
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "unpriced-x".into(),
                 usage: &u2,
             },
@@ -1002,6 +1086,7 @@ mod tests {
                 turn_id: "t1".into(),
                 created_at: None,
                 provider: None,
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "unpriced-x".into(),
                 usage,
             }])
@@ -1059,6 +1144,7 @@ mod tests {
             turn_id: "t1".into(),
             created_at: None,
             provider: Some("openai"),
+            billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
             model: "definitely-not-a-real-model".into(),
             usage: &u,
         }];
@@ -1077,6 +1163,7 @@ mod tests {
                 turn_id: "api".into(),
                 created_at: None,
                 provider: Some("openai"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "gpt-5.5".into(),
                 usage: &u,
             },
@@ -1084,6 +1171,7 @@ mod tests {
                 turn_id: "oauth".into(),
                 created_at: None,
                 provider: Some("openai-codex"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "gpt-5.5".into(),
                 usage: &u,
             },
@@ -1091,6 +1179,7 @@ mod tests {
                 turn_id: "local".into(),
                 created_at: None,
                 provider: Some("ollama"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "gpt-5.5".into(),
                 usage: &u,
             },
@@ -1148,6 +1237,7 @@ mod tests {
                 turn_id: "openai-api".into(),
                 created_at: None,
                 provider: Some("openai"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "gpt-5-codex".into(),
                 usage: &u,
             },
@@ -1155,6 +1245,7 @@ mod tests {
                 turn_id: "foreign-route".into(),
                 created_at: None,
                 provider: Some("ollama"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "gpt-5-codex".into(),
                 usage: &u,
             },
@@ -1181,6 +1272,7 @@ mod tests {
                 turn_id: "documented-no-discount".into(),
                 created_at: None,
                 provider: Some("openai"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "gpt-5.5-pro".into(),
                 usage: &u,
             },
@@ -1188,6 +1280,7 @@ mod tests {
                 turn_id: "missing-cache-rate".into(),
                 created_at: None,
                 provider: Some("meta"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "muse-spark-1.1".into(),
                 usage: &u,
             },
@@ -1217,6 +1310,7 @@ mod tests {
                 turn_id: "sonnet-intro".into(),
                 created_at: Some(&intro_at),
                 provider: Some("anthropic"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: " claude-sonnet-5 ".into(),
                 usage: &u,
             },
@@ -1224,6 +1318,7 @@ mod tests {
                 turn_id: "sonnet-standard".into(),
                 created_at: Some(&standard_at),
                 provider: Some("anthropic"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "claude-sonnet-5".into(),
                 usage: &u,
             },
@@ -1231,6 +1326,7 @@ mod tests {
                 turn_id: "sonnet-missing-time".into(),
                 created_at: None,
                 provider: Some("anthropic"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "claude-sonnet-5".into(),
                 usage: &u,
             },
@@ -1255,6 +1351,7 @@ mod tests {
             turn_id: "zero".into(),
             created_at: None,
             provider: Some("openai"),
+            billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
             model: "gpt-5.5".into(),
             usage: &u,
         }];
@@ -1279,6 +1376,7 @@ mod tests {
             turn_id: "deepseek".into(),
             created_at: None,
             provider: Some("deepseek"),
+            billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
             model: "deepseek-v4-pro".into(),
             usage: &u,
         }];
@@ -1310,6 +1408,7 @@ mod tests {
                 turn_id: (*model).into(),
                 created_at: None,
                 provider: Some("deepseek"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: (*model).into(),
                 usage: &u,
             })
@@ -1342,6 +1441,7 @@ mod tests {
                 turn_id: "chat-alias".into(),
                 created_at: Some(&before_retirement),
                 provider: Some("deepseek"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "deepseek-chat".into(),
                 usage: &u,
             },
@@ -1349,6 +1449,7 @@ mod tests {
                 turn_id: "reasoner-alias".into(),
                 created_at: Some(&before_retirement),
                 provider: Some("deepseek"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "deepseek-reasoner".into(),
                 usage: &u,
             },
@@ -1356,6 +1457,7 @@ mod tests {
                 turn_id: "canonical".into(),
                 created_at: None,
                 provider: Some("deepseek"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: DEEPSEEK_ALIAS_REPLACEMENT.into(),
                 usage: &u,
             },
@@ -1363,6 +1465,7 @@ mod tests {
                 turn_id: "retired-alias".into(),
                 created_at: Some(&at_retirement),
                 provider: Some("deepseek"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "deepseek-chat".into(),
                 usage: &u,
             },
@@ -1370,6 +1473,7 @@ mod tests {
                 turn_id: "undated-alias".into(),
                 created_at: None,
                 provider: Some("deepseek"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "deepseek-reasoner".into(),
                 usage: &u,
             },
@@ -1405,6 +1509,7 @@ mod tests {
                 turn_id: "canonical-direct".into(),
                 created_at: None,
                 provider: Some("arcee"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "trinity-large-thinking".into(),
                 usage: &u,
             },
@@ -1412,6 +1517,7 @@ mod tests {
                 turn_id: "direct-alias".into(),
                 created_at: None,
                 provider: Some("arcee"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "arcee-trinity-large-thinking".into(),
                 usage: &u,
             },
@@ -1419,6 +1525,7 @@ mod tests {
                 turn_id: "openrouter-namespace".into(),
                 created_at: None,
                 provider: Some("arcee"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "arcee-ai/trinity-large-thinking".into(),
                 usage: &u,
             },
@@ -1447,6 +1554,7 @@ mod tests {
                 turn_id: "arcee-mini".into(),
                 created_at: None,
                 provider: Some("arcee"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "trinity-mini".into(),
                 usage: &u,
             },
@@ -1454,6 +1562,7 @@ mod tests {
                 turn_id: "minimax-m2.7".into(),
                 created_at: None,
                 provider: Some("minimax"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "minimax-m2.7".into(),
                 usage: &u,
             },
@@ -1461,6 +1570,7 @@ mod tests {
                 turn_id: "foreign-route".into(),
                 created_at: None,
                 provider: Some("ollama"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "trinity-mini".into(),
                 usage: &u,
             },
@@ -1468,6 +1578,7 @@ mod tests {
                 turn_id: "openai-hosted-deepseek".into(),
                 created_at: None,
                 provider: Some("openai"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "deepseek-v4-pro".into(),
                 usage: &u,
             },
@@ -1475,6 +1586,7 @@ mod tests {
                 turn_id: "openrouter-hosted-zai".into(),
                 created_at: None,
                 provider: Some("openrouter"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "z-ai/glm-5.2".into(),
                 usage: &u,
             },
@@ -1661,6 +1773,7 @@ mod tests {
                 turn_id: "blank".into(),
                 created_at: None,
                 provider: Some("   "),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "gpt-5.5".into(),
                 usage: &u,
             },
@@ -1668,6 +1781,7 @@ mod tests {
                 turn_id: "named-custom".into(),
                 created_at: None,
                 provider: Some("my-openai-proxy"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "gpt-5.5".into(),
                 usage: &u,
             },
@@ -1675,6 +1789,7 @@ mod tests {
                 turn_id: "generic-custom".into(),
                 created_at: None,
                 provider: Some("custom"),
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE),
                 model: "gpt-5.5".into(),
                 usage: &u,
             },
