@@ -336,14 +336,6 @@ impl RouteResolver {
             });
         }
 
-        if require_catalog_match {
-            return Err(RouteError::UnsupportedModelProtocol {
-                provider: provider_id.clone(),
-                model: raw.to_string(),
-                endpoint_key: "unproven".to_string(),
-            });
-        }
-
         // No catalog match. Apply class-specific pass-through rules.
         match class {
             ProviderClass::StrictDirect => {
