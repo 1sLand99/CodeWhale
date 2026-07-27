@@ -1666,6 +1666,84 @@ async fn aggregate_usage_keeps_codex_tokens_without_api_dollar_pricing() -> Resu
     Ok(())
 }
 
+/// An aggregate in which nothing could be priced is unavailable, not zero.
+///
+/// `cost_usd` is a `f64` and an all-unknown run leaves it at `0.0`, so the
+/// only thing standing between a reader and a fabricated "$0.00 spent" is that
+/// the aggregate also reports zero priced turns and incomplete coverage. Those
+/// qualifiers are the contract; this pins them at the aggregate level, which is
+/// where per-turn honesty is most easily lost by summing.
+#[tokio::test]
+async fn aggregate_usage_reports_an_all_unknown_run_as_unavailable_not_zero() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = sample_thread("thr_all_unknown");
+    manager.store.save_thread(&thread)?;
+    let usage = Usage {
+        input_tokens: 10_000,
+        output_tokens: 1_000,
+        ..Usage::default()
+    };
+
+    for (index, surface) in [
+        // Endpoint classified but unplaceable.
+        Some(crate::pricing::UNCLASSIFIED_BILLING_SURFACE),
+        // No endpoint classification at all: a provider name is not evidence
+        // that the official endpoint served the turn.
+        None,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut turn = sample_turn(
+            &thread.id,
+            &format!("turn_unknown_{index}"),
+            RuntimeTurnStatus::Completed,
+        );
+        turn.usage = Some(usage.clone());
+        set_test_turn_route(
+            &mut turn,
+            ApiProvider::Openai,
+            ApiProvider::Openai.as_str(),
+            "gpt-5.5",
+            surface,
+            crate::cost_status::RouteBillingMode::Metered,
+        );
+        manager.store.save_turn(&turn)?;
+    }
+
+    let report = manager
+        .aggregate_usage(None, None, UsageGroupBy::Thread)
+        .await?;
+
+    assert_eq!(report.totals.turns, 2);
+    // Tokens are known and are reported. Only the money is unknown; an unknown
+    // price must not suppress usage that the provider did report.
+    assert_eq!(report.totals.input_tokens, 20_000);
+    assert_eq!(report.totals.priced_turns, 0);
+    assert_eq!(report.totals.unpriced_turns, 2);
+    assert_eq!(report.totals.nonmetered_turns, 0);
+    assert!(
+        !report.totals.cost_complete,
+        "an all-unknown run must never be a complete total"
+    );
+    assert_eq!(
+        report.totals.cost_usd, 0.0,
+        "no spend may be invented for an unpriced run"
+    );
+    assert!(
+        !report.totals.unpriced_reasons.is_empty(),
+        "an unpriced aggregate must say why"
+    );
+    for bucket in &report.buckets {
+        assert_eq!(bucket.priced_turns, 0);
+        assert!(
+            bucket.unpriced_turns > 0,
+            "a bucket cannot report a complete zero either"
+        );
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn aggregate_usage_marks_unknown_cost_as_subtotal_and_keeps_cache_writes() -> Result<()> {
     let manager = test_manager(test_runtime_dir())?;

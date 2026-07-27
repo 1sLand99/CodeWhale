@@ -4400,6 +4400,100 @@ fn apply_loaded_session_resets_unpersisted_telemetry() {
     assert!(app.session.turn_cache_history.is_empty());
 }
 
+/// Loading a session replaces the money *and* the evidence that qualifies it.
+///
+/// Coverage counters describe one specific total. Carrying the live session's
+/// counters across a load would attach them to a different total — the loaded
+/// one — and the result reads as a complete, audited figure that nothing
+/// produced. The reverse is equally wrong: a saved session written before
+/// coverage existed deserializes its counters from `Default`, which is
+/// byte-identical to "complete total covering zero turns", so the load path has
+/// to recognize that shape rather than trust it (#4318).
+#[test]
+fn apply_loaded_session_replaces_cost_coverage_with_the_loaded_total() {
+    let mut app = create_test_app();
+    // Live state from the session being replaced.
+    app.session.cost_priced_turns = 9;
+    app.session.cost_unpriced_turns = 4;
+    app.session.cost_cny_priced_turns = 3;
+    app.session.cost_cny_unpriced_turns = 6;
+    app.session
+        .cost_unpriced_reasons
+        .insert("stale_live_reason".to_string());
+    app.session
+        .cost_unpriced_classes
+        .insert("stale_live_class".to_string());
+    app.session
+        .cost_route_receipts
+        .insert("stale live receipt".to_string());
+    app.session.cost_coverage_unknown_legacy = true;
+
+    let mut session = saved_session_with_messages(vec![text_message("assistant", "ready")]);
+    session.metadata.cost = crate::session_manager::SessionCostSnapshot {
+        session_cost_usd: 2.5,
+        priced_turns: 2,
+        unpriced_turns: 1,
+        cny_priced_turns: 0,
+        cny_unpriced_turns: 3,
+        unpriced_reasons: ["missing_class_price".to_string()].into(),
+        cny_unpriced_reasons: ["currency_not_published".to_string()].into(),
+        unpriced_classes: ["cache_write".to_string()].into(),
+        pricing_provenances: ["models_dev_bundled".to_string()].into(),
+        route_receipts: ["provider=deepseek identity=deepseek model=deepseek-v4-flash".to_string()]
+            .into(),
+        coverage_recorded: true,
+        ..crate::session_manager::SessionCostSnapshot::default()
+    };
+
+    apply_loaded_session(&mut app, &mut Config::default(), &session).expect("restore session");
+
+    assert_eq!(app.session.cost_priced_turns, 2);
+    assert_eq!(app.session.cost_unpriced_turns, 1);
+    assert_eq!(app.session.cost_cny_priced_turns, 0);
+    assert_eq!(app.session.cost_cny_unpriced_turns, 3);
+    assert_eq!(
+        app.session.cost_unpriced_reasons,
+        ["missing_class_price".to_string()].into()
+    );
+    assert_eq!(
+        app.session.cost_unpriced_classes,
+        ["cache_write".to_string()].into()
+    );
+    assert_eq!(app.session.cost_route_receipts.len(), 1);
+    assert!(
+        !app.session
+            .cost_route_receipts
+            .iter()
+            .any(|receipt| receipt.contains("stale live")),
+        "the replaced session's receipts survived the load"
+    );
+    assert!(
+        !app.session.cost_coverage_unknown_legacy,
+        "a coverage-recorded snapshot is not legacy-unknown"
+    );
+
+    // The pre-coverage shape: real money, no coverage evidence, every counter
+    // at its serde default. This must load as unknown, not as complete.
+    let mut legacy_app = create_test_app();
+    legacy_app.session.cost_priced_turns = 9;
+    let mut legacy = saved_session_with_messages(vec![text_message("assistant", "ready")]);
+    legacy.metadata.cost = serde_json::from_value(serde_json::json!({
+        "session_cost_usd": 1.25,
+        "displayed_cost_high_water_usd": 1.25
+    }))
+    .expect("legacy cost snapshot");
+
+    apply_loaded_session(&mut legacy_app, &mut Config::default(), &legacy)
+        .expect("restore legacy session");
+
+    assert_eq!(legacy_app.session.cost_priced_turns, 0);
+    assert_eq!(legacy_app.session.cost_unpriced_turns, 0);
+    assert!(
+        legacy_app.session.cost_coverage_unknown_legacy,
+        "a pre-coverage total must not read as a complete 0-of-0 figure"
+    );
+}
+
 #[tokio::test]
 async fn apply_loaded_session_resets_workspace_runtime_state() {
     let mut app = create_test_app();
