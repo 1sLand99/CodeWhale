@@ -83,9 +83,15 @@ curl -H "x-cron-secret: $CRON_SECRET" "https://codewhale.net/api/cron?task=curat
 
 ## What's where
 
-Pages are bilingual: each `app/[locale]/` page renders both English and
-Chinese from the same file, keyed by the `[locale]` segment (`en` / `zh`,
-see `lib/i18n/config.ts`). Copy changes must update both locales.
+Pages are bilingual by default: each `app/[locale]/` page renders both
+English and Chinese from the same file, keyed by the `[locale]` segment
+(see `lib/i18n/config.ts`). Copy changes must update both locales. The
+v0.9.2 wave adds routed **partial** locales (ja, vi, ko, ru, uk, es, pt-BR):
+their shared chrome (nav/footer/switcher) and home-page copy live in
+`lib/i18n/dictionaries/<code>/` (checked by `npm run check:locales`), and
+everything else falls back to the English copy. Routing, middleware
+detection (`lib/i18n/detect.ts`), sitemap, and hreflang all derive from the
+one registry.
 
 ```
 web/
