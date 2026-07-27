@@ -1406,6 +1406,200 @@ a.body-link:hover { background-size: 100% 6px; color: var(--ink); }
   font-weight: 500;
 }
 
+/* ---------- product: start-here band + shared getting-started steps ---------- */
+
+.product-start {
+  padding-block: clamp(4rem, 8vw, 7rem);
+  border-bottom: 1px solid var(--hairline);
+}
+
+.product-start h2 {
+  max-width: 54rem;
+  font-size: clamp(1.8rem, 3.3vw, 3rem);
+}
+
+.product-start-lede {
+  margin-top: 0.9rem;
+  max-width: 46rem;
+  color: var(--ink-soft);
+  line-height: 1.75;
+}
+
+.product-start-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+  margin-top: 2rem;
+}
+
+.product-start-links a {
+  color: var(--indigo);
+  font-family: var(--font-mono), "JetBrains Mono", monospace;
+  font-size: 0.78rem;
+}
+
+.product-start-links a:hover {
+  color: var(--indigo-deep);
+}
+
+/* Shared step list rendered by <GettingStartedSteps> (homepage band and the
+   /docs/guide page). Light tokens; the docs dark theme re-themes it through
+   the same --hairline/--ink-* vars as the rest of the docs subtree. */
+.gs-steps {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-top: clamp(2rem, 4vw, 3rem);
+  padding: 0;
+  border-top: 1px solid var(--hairline);
+  list-style: none;
+}
+
+.gs-steps li {
+  padding: 1.35rem 1.5rem 1.5rem 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.gs-steps li + li {
+  padding-left: 1.5rem;
+  border-left: 1px solid var(--hairline);
+}
+
+.gs-step-index {
+  color: var(--indigo);
+  font-family: var(--font-mono), "JetBrains Mono", monospace;
+  font-size: 0.68rem;
+}
+
+.gs-steps h3 {
+  margin-top: 1.1rem;
+  font-size: 1.05rem;
+}
+
+.gs-steps p {
+  margin-top: 0.6rem;
+  color: var(--ink-soft);
+  font-size: 0.86rem;
+  line-height: 1.7;
+}
+
+.gs-step-commands {
+  margin-top: 0.9rem;
+  font-size: 0.72rem;
+}
+
+.gs-step-link {
+  display: inline-block;
+  margin-top: 0.9rem;
+  color: var(--indigo);
+  font-family: var(--font-mono), "JetBrains Mono", monospace;
+  font-size: 0.72rem;
+}
+
+.gs-step-link:hover {
+  color: var(--indigo-deep);
+}
+
+/* ---------- a11y: skip link ---------- */
+
+.skip-link {
+  position: absolute;
+  left: 1rem;
+  top: -3.5rem;
+  z-index: 60;
+  padding: 0.55rem 0.9rem;
+  background: var(--ink);
+  color: var(--paper);
+  font-family: var(--font-mono), "JetBrains Mono", monospace;
+  font-size: 0.72rem;
+}
+
+.skip-link:focus-visible {
+  top: 0.5rem;
+  outline: 2px solid var(--indigo);
+  outline-offset: 2px;
+}
+
+/* ---------- honest status badges ---------- */
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid var(--hairline);
+  font-family: var(--font-mono), "JetBrains Mono", monospace;
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.status-badge-dot {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 999px;
+}
+
+.status-badge-experimental .status-badge-dot { background: var(--ochre); }
+.status-badge-preview .status-badge-dot { background: var(--indigo); }
+.status-badge-pending .status-badge-dot { background: var(--ochre); }
+.status-badge-unavailable .status-badge-dot { background: var(--ink-mute); }
+
+/* ---------- session media (real-session surface) ---------- */
+
+.session-media {
+  border: 1px solid var(--hairline);
+}
+
+.session-media video {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: var(--ocean-deep);
+}
+
+.session-media-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.9rem;
+  padding: clamp(1.5rem, 4vw, 2.5rem);
+  border-bottom: 1px solid var(--hairline);
+  background: var(--paper-deep);
+}
+
+.session-media-pending-note {
+  max-width: 44rem;
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.88rem;
+  line-height: 1.7;
+}
+
+.session-media-caption {
+  display: grid;
+  gap: 0.5rem;
+  padding: 1rem 1.25rem;
+  color: var(--ink-soft);
+  font-size: 0.84rem;
+  line-height: 1.6;
+}
+
+.session-media-caption strong {
+  color: var(--ink);
+  font-size: 0.95rem;
+}
+
+.session-media-caption a {
+  color: var(--indigo);
+  font-family: var(--font-mono), "JetBrains Mono", monospace;
+  font-size: 0.72rem;
+}
+
+.session-media-caption a:hover {
+  color: var(--indigo-deep);
+}
+
 .product-boundaries {
   padding-block: clamp(4rem, 8vw, 7rem);
   border-bottom: 1px solid var(--hairline);
@@ -1649,6 +1843,15 @@ a.body-link:hover { background-size: 100% 6px; color: var(--ink); }
     border-left: 0;
   }
 
+  .gs-steps {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .gs-steps li:nth-child(3) {
+    padding-left: 0;
+    border-left: 0;
+  }
+
   .product-boundary-list > div,
   .product-surface-list > div {
     grid-template-columns: 1fr;
@@ -1679,6 +1882,17 @@ a.body-link:hover { background-size: 100% 6px; color: var(--ink); }
   .product-workflow-steps li + li,
   .product-workflow-steps li:nth-child(3) {
     min-height: 0;
+    padding: 1.25rem 0;
+    border-left: 0;
+  }
+
+  .gs-steps {
+    grid-template-columns: 1fr;
+  }
+
+  .gs-steps li,
+  .gs-steps li + li,
+  .gs-steps li:nth-child(3) {
     padding: 1.25rem 0;
     border-left: 0;
   }
