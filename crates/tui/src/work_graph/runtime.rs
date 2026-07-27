@@ -387,6 +387,7 @@ impl WorkRuntime {
         session_id: Option<&str>,
         requested: ReasoningEffortTier,
         effective: ReasoningEffortTier,
+        provider_kind: crate::config::ApiProvider,
         provider: &str,
         endpoint_identity: Option<&str>,
         model: Option<&str>,
@@ -421,6 +422,7 @@ impl WorkRuntime {
                     event: WorkActivityEvent::ReasoningEffortChanged {
                         requested,
                         effective,
+                        provider_kind: Some(provider_kind),
                         provider: provider.to_string(),
                         endpoint_identity: endpoint_identity.map(str::to_string),
                         model: model.map(str::to_string),
@@ -1597,6 +1599,7 @@ mod tests {
                 Some("session"),
                 ReasoningEffortTier::Low,
                 ReasoningEffortTier::High,
+                crate::config::ApiProvider::Moonshot,
                 "moonshot",
                 Some(crate::config::DEFAULT_MOONSHOT_BASE_URL),
                 Some("kimi-k2.5"),
@@ -1620,6 +1623,7 @@ mod tests {
             WorkActivityEvent::ReasoningEffortChanged {
                 requested: ReasoningEffortTier::Low,
                 effective: ReasoningEffortTier::High,
+                provider_kind: Some(crate::config::ApiProvider::Moonshot),
                 provider: "moonshot".to_string(),
                 endpoint_identity: Some(crate::config::DEFAULT_MOONSHOT_BASE_URL.to_string()),
                 model: Some("kimi-k2.5".to_string()),

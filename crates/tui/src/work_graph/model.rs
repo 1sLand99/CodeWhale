@@ -66,6 +66,10 @@ pub enum WorkActivityEvent {
     ReasoningEffortChanged {
         requested: ReasoningEffortTier,
         effective: ReasoningEffortTier,
+        /// Immutable routing kind, distinct from the exact provider identity.
+        /// A custom table may legally use a built-in slug as its identity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_kind: Option<ApiProvider>,
         provider: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         endpoint_identity: Option<String>,
@@ -83,6 +87,8 @@ enum WorkActivityEventWire {
     ReasoningEffortChanged {
         requested: ReasoningEffortTier,
         effective: ReasoningEffortTier,
+        #[serde(default)]
+        provider_kind: Option<ApiProvider>,
         provider: String,
         #[serde(default)]
         endpoint_identity: Option<String>,
@@ -103,6 +109,7 @@ impl<'de> Deserialize<'de> for WorkActivityEvent {
             WorkActivityEventWire::ReasoningEffortChanged {
                 requested,
                 mut effective,
+                provider_kind,
                 provider,
                 endpoint_identity,
                 model,
@@ -111,13 +118,16 @@ impl<'de> Deserialize<'de> for WorkActivityEvent {
             } => {
                 // Pre-provenance snapshots cannot prove what route received
                 // the control. Keep them loadable, but never preserve a
-                // claimed effective tier as if endpoint/model were known.
-                if endpoint_identity.is_none() || model.is_none() {
+                // claimed effective tier as if kind/endpoint/model were known.
+                // In particular, reparsing `provider` is unsafe because a
+                // custom table may legally be named after a built-in slug.
+                if provider_kind.is_none() || endpoint_identity.is_none() || model.is_none() {
                     effective = ReasoningEffortTier::Unavailable;
                 }
                 Ok(Self::ReasoningEffortChanged {
                     requested,
                     effective,
+                    provider_kind,
                     provider,
                     endpoint_identity,
                     model,

@@ -930,13 +930,23 @@ mod tests {
         );
         assert!(body.get("output_config").is_none(), "{body}");
 
-        let body = client
-            .build_anthropic_body(&request_with("MiniMax-M3", Some("high"), None, None), true);
+        let mut enabled_bodies = Vec::new();
+        for effort in ["high", "max"] {
+            let body = client
+                .build_anthropic_body(&request_with("MiniMax-M3", Some(effort), None, None), true);
+            assert_eq!(
+                body.pointer("/thinking/type").and_then(Value::as_str),
+                Some("adaptive"),
+                "{effort}: {body}"
+            );
+            assert!(body.get("output_config").is_none(), "{effort}: {body}");
+            enabled_bodies.push(body);
+        }
         assert_eq!(
-            body.pointer("/thinking/type").and_then(Value::as_str),
-            Some("adaptive")
+            enabled_bodies[0].get("thinking"),
+            enabled_bodies[1].get("thinking"),
+            "MiniMax high/max select the same untiered adaptive wire control"
         );
-        assert!(body.get("output_config").is_none(), "{body}");
     }
 
     #[test]

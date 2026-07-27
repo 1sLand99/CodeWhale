@@ -2315,6 +2315,7 @@ impl App {
             .cycle_next_for_provider(self.api_provider);
         let effective = self.effective_reasoning_effort_for_active_route(requested);
         let route_truth = self.active_reasoning_route_truth();
+        let provider_kind = route_truth.map_or(self.api_provider, |(provider, _, _, _)| provider);
         let provider = route_truth.map_or_else(
             || self.provider_identity_for_persistence().to_string(),
             |(_, provider_identity, _, _)| provider_identity.to_string(),
@@ -2327,6 +2328,7 @@ impl App {
                 self.current_session_id.as_deref(),
                 requested.into(),
                 effective.into(),
+                provider_kind,
                 &provider,
                 endpoint_identity.as_deref(),
                 model.as_deref(),
@@ -4395,7 +4397,7 @@ impl App {
             route.receipt.as_ref().map(|receipt| {
                 (
                     receipt.provider(),
-                    route.provider_identity.as_str(),
+                    receipt.provider_identity(),
                     receipt.endpoint_identity(),
                     receipt.wire_model(),
                 )

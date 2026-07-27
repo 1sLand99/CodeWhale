@@ -346,12 +346,14 @@ fn cycle_effort_updates_effort_status_and_compaction() {
         crate::work_graph::WorkActivityEvent::ReasoningEffortChanged {
             requested,
             effective,
+            provider_kind,
             provider,
             operation,
             ..
         } => {
             assert_eq!(*requested, crate::work_graph::ReasoningEffortTier::High);
             assert_eq!(*effective, crate::work_graph::ReasoningEffortTier::High);
+            assert_eq!(*provider_kind, Some(ApiProvider::Deepseek));
             assert_eq!(provider, "deepseek");
             assert!(operation.is_none());
         }
@@ -544,6 +546,7 @@ fn minimax_anthropic_m3_high_and_max_receipts_match_adaptive_wire_truth() {
             .expect("effort activity");
         let crate::work_graph::WorkActivityEvent::ReasoningEffortChanged {
             effective,
+            provider_kind,
             provider,
             endpoint_identity,
             model,
@@ -553,6 +556,7 @@ fn minimax_anthropic_m3_high_and_max_receipts_match_adaptive_wire_truth() {
             effective,
             crate::work_graph::ReasoningEffortTier::ThinkingEnabledGranularityUnavailable
         );
+        assert_eq!(provider_kind, Some(ApiProvider::MinimaxAnthropic));
         assert_eq!(provider, "minimax-anthropic");
         assert_eq!(
             endpoint_identity.as_deref(),
@@ -591,6 +595,7 @@ fn named_custom_route_displays_and_persists_effective_unavailable() {
         .expect("effort activity");
     let crate::work_graph::WorkActivityEvent::ReasoningEffortChanged {
         effective,
+        provider_kind,
         provider,
         endpoint_identity,
         model,
@@ -600,11 +605,54 @@ fn named_custom_route_displays_and_persists_effective_unavailable() {
         effective,
         crate::work_graph::ReasoningEffortTier::Unavailable
     );
+    assert_eq!(provider_kind, Some(ApiProvider::Custom));
     assert_eq!(provider, "my-gateway");
     let endpoint = endpoint_identity.expect("redacted endpoint provenance");
     assert!(endpoint.contains("gateway.example"), "{endpoint}");
     assert!(!endpoint.contains("must-not-persist"), "{endpoint}");
     assert_eq!(model.as_deref(), Some("vendor-model-x"));
+}
+
+#[test]
+fn custom_routes_named_with_builtin_slugs_retain_custom_kind_and_fail_closed() {
+    for identity in ["openai", "zai"] {
+        let mut app = App::new(test_options(false), &Config::default());
+        app.set_provider_identity(ApiProvider::Custom, identity);
+        app.auto_model = false;
+        app.active_route_base_url = "https://gateway.example/v1".to_string();
+        app.model = "vendor-model-x".to_string();
+        app.reasoning_effort = ReasoningEffort::High;
+
+        app.cycle_effort();
+
+        assert_eq!(
+            app.reasoning_effort_display_label(),
+            "max→effective unavailable"
+        );
+        let work = app
+            .work_state_snapshot()
+            .expect("Work snapshot")
+            .expect("effort activity creates graph state");
+        let activity = work
+            .graph
+            .expect("Work Graph")
+            .activities
+            .last()
+            .cloned()
+            .expect("effort activity");
+        let crate::work_graph::WorkActivityEvent::ReasoningEffortChanged {
+            effective,
+            provider_kind,
+            provider,
+            ..
+        } = activity;
+        assert_eq!(
+            effective,
+            crate::work_graph::ReasoningEffortTier::Unavailable
+        );
+        assert_eq!(provider_kind, Some(ApiProvider::Custom));
+        assert_eq!(provider, identity);
+    }
 }
 
 #[test]
@@ -672,19 +720,19 @@ fn kimi_code_high_and_max_work_receipts_preserve_exact_tiers() {
 }
 
 #[test]
-fn active_turn_zai_receipt_overrides_mutable_config_for_effective_truth() {
+fn active_turn_zai_receipt_overrides_all_mutable_parallel_route_metadata() {
     let mut app = App::new(test_options(false), &Config::default());
     app.api_provider = ApiProvider::Deepseek;
     app.active_route_base_url = crate::config::DEFAULT_DEEPSEEK_BASE_URL.to_string();
     app.model = "deepseek-chat".to_string();
-    app.reasoning_effort = ReasoningEffort::Max;
+    app.reasoning_effort = ReasoningEffort::High;
     app.active_turn = Some(ActiveTurnMetadata {
         turn_id: "turn-zai-receipt".to_string(),
         created_at: chrono::Utc::now(),
         route: Some(crate::core::events::TurnRoute {
             provider: ApiProvider::Zai,
-            provider_identity: "zai".to_string(),
-            model: crate::config::ZAI_GLM_5_TURBO_MODEL.to_string(),
+            provider_identity: "openai".to_string(),
+            model: "mutable-wrong-model".to_string(),
             auto_model: false,
             receipt: Some(crate::route_receipt::TurnRouteReceipt::new(
                 ApiProvider::Zai,
@@ -700,8 +748,35 @@ fn active_turn_zai_receipt_overrides_mutable_config_for_effective_truth() {
 
     assert_eq!(
         app.reasoning_effort_display_label(),
-        "max→thinking enabled; granularity unavailable"
+        "high→thinking enabled; granularity unavailable"
     );
+
+    app.apply_reasoning_effort_cycle();
+    let work = app
+        .work_state_snapshot()
+        .expect("Work snapshot")
+        .expect("effort activity creates graph state");
+    let activity = work
+        .graph
+        .expect("Work Graph")
+        .activities
+        .last()
+        .cloned()
+        .expect("effort activity");
+    let crate::work_graph::WorkActivityEvent::ReasoningEffortChanged {
+        provider_kind,
+        provider,
+        endpoint_identity,
+        model,
+        ..
+    } = activity;
+    assert_eq!(provider_kind, Some(ApiProvider::Zai));
+    assert_eq!(provider, "zai");
+    assert_eq!(
+        endpoint_identity.as_deref(),
+        Some(crate::config::DEFAULT_ZAI_BASE_URL)
+    );
+    assert_eq!(model.as_deref(), Some(crate::config::ZAI_GLM_5_TURBO_MODEL));
 }
 
 #[test]
