@@ -1334,7 +1334,7 @@ fn render_choice_step(
             .split(area);
         (cols[0], cols[1])
     } else {
-        let list_height = (choices.len() as u16 + 1).min(area.height.saturating_sub(1).max(1));
+        let list_height = (choices.len() as u16).min(area.height.saturating_sub(1).max(1));
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(list_height), Constraint::Min(1)])
@@ -1412,7 +1412,7 @@ fn register_choice_hitboxes(
             ])
             .split(area)[0]
     } else {
-        let list_height = (choice_count as u16 + 1).min(area.height.saturating_sub(1).max(1));
+        let list_height = (choice_count as u16).min(area.height.saturating_sub(1).max(1));
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(list_height), Constraint::Min(1)])
@@ -2110,7 +2110,7 @@ mod tests {
 
         // "custom" matches no roster member: no override note anywhere.
         let mut custom_view = FleetSetupView::from_snapshot(snapshot());
-        for _ in 0..7 {
+        for _ in 0..8 {
             custom_view.handle_key(key(KeyCode::Down));
         }
         assert_eq!(custom_view.selected_role(), "custom");
