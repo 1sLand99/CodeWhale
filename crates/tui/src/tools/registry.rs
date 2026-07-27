@@ -2055,6 +2055,7 @@ mod tests {
                     schema_version: 1,
                     owner: "fleet-worker-1".to_string(),
                     authority: ToolMutationAuthority::ScopedWrite,
+                    network_access: None,
                     writable_roots: vec!["src".to_string()],
                     writable_files: Vec::new(),
                     coordination_contracts: Vec::new(),

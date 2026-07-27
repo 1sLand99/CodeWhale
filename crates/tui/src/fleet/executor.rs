@@ -167,6 +167,7 @@ pub(crate) fn authority_envelope_for_worker(
         schema_version: 1,
         owner: spec.worker_id.clone(),
         authority,
+        network_access: Some(spec.runtime_profile.permissions.network),
         writable_roots,
         writable_files,
         coordination_contracts,
@@ -933,10 +934,16 @@ mod tests {
     }
 
     #[test]
-    fn launch_spec_command_uses_projected_prompt_and_read_only_authority() {
+    fn consultant_launch_spec_carries_network_off_with_read_only_authority() {
         let tmp = TempDir::new().unwrap();
-        let task = task("inspect the release candidate");
+        let mut task = task("advise on the release candidate");
+        task.worker.as_mut().unwrap().role = Some("consultant".to_string());
         let launch_spec = launch_spec(&task, tmp.path());
+        assert_eq!(
+            launch_spec.agent_type,
+            crate::tools::subagent::FleetRole::Consultant
+        );
+        assert!(!launch_spec.runtime_profile.permissions.network);
 
         let cmd = build_worker_exec_command_with_launch_spec(
             "codewhale",
@@ -957,6 +964,7 @@ mod tests {
         let authority = ToolAuthorityEnvelope::from_json(&cmd.args[authority_index + 1]).unwrap();
         assert_eq!(authority.owner, "worker-1");
         assert_eq!(authority.authority, ToolMutationAuthority::ReadOnly);
+        assert_eq!(authority.network_access, Some(false));
         assert!(authority.writable_roots.is_empty());
         assert!(authority.writable_files.is_empty());
         assert!(authority.coordination_contracts.is_empty());
@@ -992,6 +1000,7 @@ mod tests {
         let authority = ToolAuthorityEnvelope::from_json(&cmd.args[authority_index + 1]).unwrap();
 
         assert_eq!(authority.authority, ToolMutationAuthority::ScopedWrite);
+        assert_eq!(authority.network_access, Some(true));
         assert_eq!(authority.writable_roots, ["src"]);
         assert!(authority.writable_files.is_empty());
         assert!(authority.coordination_contracts.is_empty());

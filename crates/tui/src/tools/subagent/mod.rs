@@ -1476,7 +1476,19 @@ fn normalize_worker_spec(mut spec: AgentWorkerSpec) -> AgentWorkerSpec {
     if spec.run_id.is_empty() {
         spec.run_id = spec.worker_id.clone();
     }
+    canonicalize_persisted_advisory_role(&mut spec.role);
     spec
+}
+
+fn canonicalize_persisted_advisory_role(role: &mut Option<String>) {
+    if role.as_deref().is_some_and(|role| {
+        matches!(
+            role.trim().to_ascii_lowercase().as_str(),
+            "oracle" | "advisor"
+        )
+    }) {
+        *role = Some(FleetRole::Consultant.as_str().to_string());
+    }
 }
 
 fn worker_coordination_claim(
@@ -3751,6 +3763,8 @@ impl SubAgentManager {
             } else {
                 Some(persisted.allowed_tools)
             };
+            let mut assignment = persisted.assignment;
+            canonicalize_persisted_advisory_role(&mut assignment.role);
             let agent = SubAgent {
                 id: persisted.id.clone(),
                 session_name: persisted
@@ -3763,7 +3777,7 @@ impl SubAgentManager {
                     .unwrap_or_else(|| self.workspace.clone()),
                 agent_type: persisted.agent_type,
                 prompt: persisted.prompt,
-                assignment: persisted.assignment,
+                assignment,
                 model: if persisted.model.is_empty() {
                     "unknown".to_string()
                 } else {
@@ -10564,7 +10578,12 @@ pub(crate) fn configured_model_for_role_or_type(
         }
     };
     if let Some(role) = role.map(str::trim).filter(|role| !role.is_empty()) {
-        push_key(role.to_ascii_lowercase());
+        let normalized = role.to_ascii_lowercase();
+        push_key(
+            migrate_legacy_role_token(&normalized)
+                .unwrap_or(normalized.as_str())
+                .to_string(),
+        );
     }
     push_key(agent_type.as_str().to_string());
     if agent_type.legacy_type_name() != agent_type.as_str() {

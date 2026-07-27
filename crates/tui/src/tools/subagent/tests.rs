@@ -2256,6 +2256,25 @@ fn direct_consultant_aliases_apply_role_reasoning_default_after_inheritance() {
     );
 
     let request = parse_spawn_request(&json!({
+        "prompt": "debug this release failure",
+        "type": "consultant",
+        "thinking": "auto"
+    }))
+    .expect("explicit consultant auto thinking parses");
+    let route = worker_profile_subagent_assignment_route(
+        &stub_runtime(),
+        &ModelRoute::Inherit,
+        request.thinking,
+        &request.prompt,
+        &request.agent_type,
+    );
+    assert_eq!(
+        route.reasoning_effort.as_deref(),
+        Some("max"),
+        "explicit auto must resolve from the child prompt instead of using the consultant high default"
+    );
+
+    let request = parse_spawn_request(&json!({
         "prompt": "give a concise second opinion",
         "type": "consultant",
         "thinking": "low"
@@ -8405,6 +8424,54 @@ fn persisted_non_empty_allowed_tools_loads_as_narrow() {
     );
 }
 
+#[test]
+fn persisted_advisory_assignment_roles_replay_and_repersist_as_consultant() {
+    for alias in ["oracle", "advisor"] {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("subagents.v1.json");
+        let payload = serde_json::json!({
+            "schema_version": SUBAGENT_STATE_SCHEMA_VERSION,
+            "agents": [{
+                "id": format!("agent_{alias}"),
+                "agent_type": alias,
+                "prompt": "give counsel",
+                "assignment": { "objective": "give counsel", "role": alias },
+                "status": "Completed",
+                "result": null,
+                "steps_taken": 0,
+                "duration_ms": 0,
+                "allowed_tools": [],
+                "updated_at_ms": 0
+            }]
+        });
+        std::fs::write(&state_path, payload.to_string()).unwrap();
+
+        let mut manager =
+            SubAgentManager::new(dir.path().to_path_buf(), 5).with_state_path(state_path.clone());
+        manager.load_state().expect("legacy advisory state loads");
+        let result = manager
+            .get_result(&format!("agent_{alias}"))
+            .expect("loaded consultant is visible");
+        assert_eq!(result.agent_type, FleetRole::Consultant);
+        assert_eq!(result.assignment.role.as_deref(), Some("consultant"));
+
+        manager
+            .persist_state()
+            .expect("canonical state persists")
+            .join()
+            .expect("persist thread");
+        let repersisted: Value = serde_json::from_str(
+            &std::fs::read_to_string(&state_path).expect("read canonical state"),
+        )
+        .expect("parse canonical state");
+        assert_eq!(
+            repersisted["agents"][0]["assignment"]["role"],
+            json!("consultant")
+        );
+        assert_eq!(repersisted["agents"][0]["agent_type"], json!("consultant"));
+    }
+}
+
 /// Build a minimal `SubAgentRuntime` for tests that exercise pure runtime
 /// helpers (depth, cancellation, child_runtime). Doesn't construct a real
 /// HTTP client — calls that hit `runtime.client` would fail, but the
@@ -10234,6 +10301,24 @@ fn canonical_consultant_model_override_precedes_compatibility_keys() {
     let model = configured_model_for_role_or_type(&runtime, None, &FleetRole::Consultant)
         .expect("canonical consultant override should resolve");
     assert_eq!(model.as_deref(), Some("deepseek-v4-pro"));
+}
+
+#[test]
+fn raw_advisory_role_prefers_canonical_consultant_model_override() {
+    for alias in ["oracle", "advisor"] {
+        let mut runtime = stub_runtime();
+        runtime
+            .role_models
+            .insert("consultant".to_string(), "deepseek-v4-pro".to_string());
+        runtime
+            .role_models
+            .insert(alias.to_string(), "deepseek-v4-flash".to_string());
+
+        let model =
+            configured_model_for_role_or_type(&runtime, Some(alias), &FleetRole::Consultant)
+                .expect("compatibility input resolves through canonical Consultant");
+        assert_eq!(model.as_deref(), Some("deepseek-v4-pro"), "alias={alias}");
+    }
 }
 
 #[test]

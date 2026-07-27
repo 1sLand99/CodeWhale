@@ -10313,6 +10313,42 @@ fn validate_exec_tool_authority_resume(
     Ok(())
 }
 
+fn exec_network_policy(
+    config: &Config,
+    outer_network_access: Option<bool>,
+) -> Option<crate::network_policy::NetworkPolicyDecider> {
+    // Fleet caps are an outer authority boundary: user configuration may
+    // narrow them further, but it may never widen an explicit network denial.
+    if outer_network_access == Some(false) {
+        return Some(crate::network_policy::NetworkPolicyDecider::new(
+            crate::network_policy::NetworkPolicy {
+                default: crate::network_policy::DecisionToml::Deny,
+                ..crate::network_policy::NetworkPolicy::default()
+            },
+            None,
+        ));
+    }
+    config.network.clone().map(|toml_cfg| {
+        crate::network_policy::NetworkPolicyDecider::with_default_audit(toml_cfg.into_runtime())
+    })
+}
+
+fn apply_fleet_engine_feature_caps(
+    features: &mut crate::features::Features,
+    fleet_authority_active: bool,
+    outer_network_access: Option<bool>,
+) {
+    if fleet_authority_active {
+        features
+            .disable(crate::features::Feature::ShellTool)
+            .disable(crate::features::Feature::Subagents)
+            .disable(crate::features::Feature::Mcp);
+    }
+    if outer_network_access == Some(false) {
+        features.disable(crate::features::Feature::WebSearch);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_exec_agent(
     config: &Config,
@@ -10344,11 +10380,17 @@ async fn run_exec_agent(
     use crate::tui::app::AppMode;
 
     validate_exec_tool_authority_resume(tool_authority_json.as_deref(), resume_session.is_some())?;
-    let fleet_authority_active = tool_authority_json.is_some();
+    let fleet_authority = tool_authority_json
+        .as_deref()
+        .map(crate::tools::spec::ToolAuthorityEnvelope::from_json)
+        .transpose()
+        .map_err(anyhow::Error::msg)?;
+    let fleet_authority_active = fleet_authority.is_some();
+    let outer_network_access = fleet_authority
+        .as_ref()
+        .and_then(|authority| authority.network_access);
 
-    if let Some(raw) = tool_authority_json.as_deref() {
-        let envelope = crate::tools::spec::ToolAuthorityEnvelope::from_json(raw)
-            .map_err(anyhow::Error::msg)?;
+    if let Some(envelope) = fleet_authority {
         crate::tools::spec::install_process_tool_authority(envelope).map_err(anyhow::Error::msg)?;
     }
 
@@ -10421,9 +10463,7 @@ async fn run_exec_agent(
         ..Default::default()
     };
 
-    let network_policy = execution_config.network.clone().map(|toml_cfg| {
-        crate::network_policy::NetworkPolicyDecider::with_default_audit(toml_cfg.into_runtime())
-    });
+    let network_policy = exec_network_policy(&execution_config, outer_network_access);
 
     let lsp_config = (!fleet_authority_active)
         .then(|| {
@@ -10434,12 +10474,11 @@ async fn run_exec_agent(
         })
         .flatten();
     let mut engine_features = execution_config.features();
-    if fleet_authority_active {
-        engine_features
-            .disable(crate::features::Feature::ShellTool)
-            .disable(crate::features::Feature::Subagents)
-            .disable(crate::features::Feature::Mcp);
-    }
+    apply_fleet_engine_feature_caps(
+        &mut engine_features,
+        fleet_authority_active,
+        outer_network_access,
+    );
     let engine_plugin_registry = if fleet_authority_active {
         std::sync::Arc::new(crate::plugins::PluginRegistry::empty(&workspace))
     } else {
@@ -12714,6 +12753,52 @@ mod terminal_mode_tests {
 
     fn parse_cli(args: &[&str]) -> Cli {
         Cli::try_parse_from(args).expect("CLI args should parse")
+    }
+
+    #[test]
+    fn headless_consultant_authority_overrides_network_allow_and_disables_web_search() {
+        let config = Config {
+            network: Some(crate::config::NetworkPolicyToml {
+                default: "allow".to_string(),
+                audit: false,
+                ..crate::config::NetworkPolicyToml::default()
+            }),
+            ..Config::default()
+        };
+        let authority = crate::tools::spec::ToolAuthorityEnvelope {
+            schema_version: 1,
+            owner: "consultant-1".to_string(),
+            authority: crate::tools::spec::ToolMutationAuthority::ReadOnly,
+            network_access: Some(false),
+            writable_roots: Vec::new(),
+            writable_files: Vec::new(),
+            coordination_contracts: Vec::new(),
+        }
+        .normalized()
+        .expect("Consultant authority");
+
+        let policy = exec_network_policy(&config, authority.network_access)
+            .expect("explicit network=false always installs a policy");
+        assert_eq!(
+            policy.evaluate("example.com", "web_search"),
+            crate::network_policy::Decision::Deny,
+            "the permissive user config must not widen Consultant network authority"
+        );
+        let mut features = crate::features::Features::default();
+        features.enable(crate::features::Feature::WebSearch);
+        apply_fleet_engine_feature_caps(&mut features, true, authority.network_access);
+        assert!(!features.enabled(crate::features::Feature::WebSearch));
+
+        let worker_policy = exec_network_policy(&config, Some(true)).expect("configured policy");
+        assert_eq!(
+            worker_policy.evaluate("example.com", "web_search"),
+            crate::network_policy::Decision::Allow,
+            "a network-capable role keeps the configured policy"
+        );
+        let mut worker_features = crate::features::Features::default();
+        worker_features.enable(crate::features::Feature::WebSearch);
+        apply_fleet_engine_feature_caps(&mut worker_features, true, Some(true));
+        assert!(worker_features.enabled(crate::features::Feature::WebSearch));
     }
 
     #[test]

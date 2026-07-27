@@ -159,6 +159,11 @@ pub struct ToolAuthorityEnvelope {
     pub schema_version: u32,
     pub owner: String,
     pub authority: ToolMutationAuthority,
+    /// Optional outer network cap for headless workers. `None` preserves the
+    /// behavior of v1 envelopes written before this field existed; new Fleet
+    /// launches always carry the resolved worker permission explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_access: Option<bool>,
     #[serde(default)]
     pub writable_roots: Vec<String>,
     #[serde(default)]
@@ -1448,6 +1453,7 @@ mod tests {
             schema_version: 1,
             owner: "fleet-worker-1".to_string(),
             authority: ToolMutationAuthority::ScopedWrite,
+            network_access: None,
             writable_roots: roots.iter().map(|value| (*value).to_string()).collect(),
             writable_files: files.iter().map(|value| (*value).to_string()).collect(),
             coordination_contracts: Vec::new(),
@@ -1538,6 +1544,7 @@ mod tests {
             schema_version: 1,
             owner: "read-only-child".to_string(),
             authority: ToolMutationAuthority::ReadOnly,
+            network_access: None,
             writable_roots: Vec::new(),
             writable_files: Vec::new(),
             coordination_contracts: Vec::new(),
@@ -1558,6 +1565,7 @@ mod tests {
                 schema_version: 1,
                 owner: "fleet-worker-child-process".to_string(),
                 authority: ToolMutationAuthority::ReadOnly,
+                network_access: None,
                 writable_roots: Vec::new(),
                 writable_files: Vec::new(),
                 coordination_contracts: Vec::new(),
