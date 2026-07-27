@@ -5831,7 +5831,11 @@ base_url = "https://api.xiaomimimo.com/v1"
         type_filter(&mut view, "thinking");
         assert_eq!(
             visible_row_keys(&view),
-            vec!["show_thinking", "thinking_highlight"]
+            vec![
+                "show_thinking",
+                "thinking_default_expanded",
+                "thinking_highlight"
+            ]
         );
 
         view.clear_filter();
