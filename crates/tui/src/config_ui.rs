@@ -221,6 +221,27 @@ pub enum UiLocale {
     #[serde(rename = "ko")]
     #[schemars(rename = "ko")]
     Ko,
+    #[serde(rename = "ca")]
+    #[schemars(rename = "ca")]
+    Ca,
+    #[serde(rename = "de")]
+    #[schemars(rename = "de")]
+    De,
+    #[serde(rename = "fr")]
+    #[schemars(rename = "fr")]
+    Fr,
+    #[serde(rename = "id")]
+    #[schemars(rename = "id")]
+    Id,
+    #[serde(rename = "hi")]
+    #[schemars(rename = "hi")]
+    Hi,
+    #[serde(rename = "ru")]
+    #[schemars(rename = "ru")]
+    Ru,
+    #[serde(rename = "uk")]
+    #[schemars(rename = "uk")]
+    Uk,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -941,6 +962,13 @@ impl UiLocale {
             Self::Es419 => "es-419",
             Self::Vi => "vi",
             Self::Ko => "ko",
+            Self::Ca => "ca",
+            Self::De => "de",
+            Self::Fr => "fr",
+            Self::Id => "id",
+            Self::Hi => "hi",
+            Self::Ru => "ru",
+            Self::Uk => "uk",
         }
     }
 
@@ -955,6 +983,13 @@ impl UiLocale {
             Some("es-419") => Ok(Self::Es419),
             Some("vi") => Ok(Self::Vi),
             Some("ko") => Ok(Self::Ko),
+            Some("ca") => Ok(Self::Ca),
+            Some("de") => Ok(Self::De),
+            Some("fr") => Ok(Self::Fr),
+            Some("id") => Ok(Self::Id),
+            Some("hi") => Ok(Self::Hi),
+            Some("ru") => Ok(Self::Ru),
+            Some("uk") => Ok(Self::Uk),
             Some(other) => bail!("unsupported locale '{other}'"),
             None => bail!("invalid locale '{value}'"),
         }

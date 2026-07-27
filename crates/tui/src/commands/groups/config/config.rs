@@ -219,6 +219,13 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
             crate::localization::Locale::Es419 => "es-419",
             crate::localization::Locale::Vi => "vi",
             crate::localization::Locale::Ko => "ko",
+            crate::localization::Locale::Ca => "ca",
+            crate::localization::Locale::De => "de",
+            crate::localization::Locale::Fr => "fr",
+            crate::localization::Locale::Id => "id",
+            crate::localization::Locale::Hi => "hi",
+            crate::localization::Locale::Ru => "ru",
+            crate::localization::Locale::Uk => "uk",
         }
     }
     fn density_display(d: crate::tui::app::ComposerDensity) -> &'static str {

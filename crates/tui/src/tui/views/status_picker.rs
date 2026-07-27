@@ -492,13 +492,26 @@ mod tests {
             Locale::PtBr,
             Locale::Es419,
             Locale::Vi,
+            Locale::Ca,
+            Locale::De,
+            Locale::Fr,
+            Locale::Id,
+            Locale::Hi,
+            Locale::Ru,
+            Locale::Uk,
         ] {
             let title = tr(locale, MessageId::StatusPickerTitle);
-            assert!(
-                !title.contains("Status"),
-                "{} leaks English in title: {title}",
-                locale.tag()
-            );
+            if locale == Locale::De {
+                // German "Statuszeile" is the correct native term — "Status"
+                // is a German word, not an English leak.
+                assert_eq!(title, " Statuszeile ");
+            } else {
+                assert!(
+                    !title.contains("Status"),
+                    "{} leaks English in title: {title}",
+                    locale.tag()
+                );
+            }
             let instruction = tr(locale, MessageId::StatusPickerInstruction);
             assert!(
                 !instruction.contains("footer"),

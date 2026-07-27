@@ -5426,7 +5426,8 @@ async fn run_event_loop(
                     // before 1.94. Rewriting as a plain guard + nested `if let`
                     // keeps `cargo install` working on stable.
                     KeyCode::Char(c)
-                        if app.onboarding == OnboardingState::Language && c.is_ascii_digit() =>
+                        if app.onboarding == OnboardingState::Language
+                            && (c.is_ascii_digit() || c.is_ascii_lowercase()) =>
                     {
                         if let Some((_, tag, _, _)) = onboarding::language::LANGUAGE_OPTIONS
                             .iter()
