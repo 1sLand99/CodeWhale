@@ -57,6 +57,7 @@ pub mod live_transcript;
 pub mod markdown_render;
 mod mcp_routing;
 pub(crate) mod mention_completion;
+pub mod menu_style;
 pub mod model_picker;
 pub mod motion;
 pub mod mouse_ui;

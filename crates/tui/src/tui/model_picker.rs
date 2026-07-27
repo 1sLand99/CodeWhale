@@ -40,6 +40,7 @@ use crate::provider_lake::{
 };
 use crate::settings::PinnedModel;
 use crate::tui::app::{App, ReasoningEffort};
+use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, ListDetailLayout, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,
     render_underwater_surface,
@@ -764,15 +765,9 @@ impl ModelPickerView {
                 crate::tui::glyphs::selection_marker(is_selected)
             };
             let label_style = if is_selected && !locked {
-                Style::default()
-                    .fg(palette::SELECTION_TEXT)
-                    .bg(palette::SELECTION_BG)
-                    .add_modifier(Modifier::BOLD)
+                menu_style::selected_row_style()
             } else if is_selected && locked {
-                Style::default()
-                    .fg(palette::TEXT_MUTED)
-                    .bg(palette::SURFACE_ELEVATED)
-                    .add_modifier(Modifier::DIM)
+                menu_style::disabled_selected_row_style()
             } else if locked {
                 Style::default()
                     .fg(palette::TEXT_MUTED)
@@ -781,9 +776,7 @@ impl ModelPickerView {
                 Style::default().fg(palette::TEXT_PRIMARY)
             };
             let hint_style = if is_selected && !locked {
-                Style::default()
-                    .fg(palette::SELECTION_TEXT)
-                    .bg(palette::SELECTION_BG)
+                menu_style::selected_row_bg_style().fg(palette::SELECTION_TEXT)
             } else {
                 Style::default().fg(palette::TEXT_MUTED)
             };

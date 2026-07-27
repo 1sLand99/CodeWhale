@@ -9,6 +9,7 @@ use crate::palette;
 use crate::tools::user_input::{
     UserInputAnswer, UserInputQuestion, UserInputRequest, UserInputResponse,
 };
+use crate::tui::menu_style;
 use crate::tui::views::{ModalKind, ModalView, ViewAction, ViewEvent, render_modal_surface};
 
 fn modal_block(title: &str) -> Block<'static> {
@@ -36,10 +37,7 @@ fn push_option_lines(
     ticked: bool,
 ) {
     let row_style = if selected {
-        Style::default()
-            .fg(palette::SELECTION_TEXT)
-            .bg(palette::SELECTION_BG)
-            .bold()
+        menu_style::selected_row_style()
     } else {
         Style::default().fg(palette::TEXT_PRIMARY)
     };

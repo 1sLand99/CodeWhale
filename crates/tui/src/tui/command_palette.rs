@@ -23,6 +23,7 @@ use crate::skills;
 use crate::tools::spec::ApprovalRequirement;
 use crate::tools::spec::ToolCapability;
 use crate::tools::{ToolContext, ToolRegistryBuilder};
+use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, CommandPaletteAction, ModalKind, ModalView, ViewAction, ViewEvent,
     centered_modal_area, render_modal_footer, render_modal_surface,
@@ -969,10 +970,7 @@ impl ModalView for CommandPaletteView {
                 }
 
                 let style = if is_selected {
-                    Style::default()
-                        .fg(palette::SELECTION_TEXT)
-                        .bg(palette::SELECTION_BG)
-                        .add_modifier(Modifier::BOLD)
+                    menu_style::selected_row_style()
                 } else {
                     Style::default().fg(palette::TEXT_PRIMARY)
                 };
@@ -2040,6 +2038,39 @@ mod tests {
                     "{w}x{h}: row {y} overflows width: {row:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn command_palette_selected_row_uses_shared_selection_style_at_blocker_sizes() {
+        use crate::tui::views::ViewStack;
+        for (w, h) in BLOCKER_SIZES {
+            let area = Rect::new(0, 0, w, h);
+            let mut buf = Buffer::empty(area);
+            let mut stack = ViewStack::new();
+            stack.push(sample_palette_view());
+            stack.render(area, &mut buf);
+
+            // The first entry ("/config") is selected by default; find its row.
+            let selected_y = (0..h)
+                .find(|&y| {
+                    let row: String = (0..w).map(|x| buf[(x, y)].symbol()).collect();
+                    row.contains("/config")
+                })
+                .unwrap_or_else(|| panic!("{w}x{h}: selected entry should render"));
+            let selected_cells = (0..w)
+                .filter(|&x| {
+                    let cell = &buf[(x, selected_y)];
+                    !cell.symbol().trim().is_empty()
+                        && cell.bg == palette::SELECTION_BG
+                        && cell.fg == palette::SELECTION_TEXT
+                })
+                .count();
+            assert!(
+                selected_cells >= "/config".len(),
+                "{w}x{h}: selected row must render with the shared selection style \
+                 (palette::SELECTION_TEXT on palette::SELECTION_BG)"
+            );
         }
     }
 }

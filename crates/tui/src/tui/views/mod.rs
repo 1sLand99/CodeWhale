@@ -25,6 +25,7 @@ use crate::tools::subagent::{
 use crate::tui::app::App;
 use crate::tui::approval::{ElevationOption, ReviewDecision};
 use crate::tui::history::{HistoryCell, SubAgentCell, summarize_tool_output};
+use crate::tui::menu_style;
 use crate::tui::widgets::agent_card::AgentLifecycle;
 
 pub mod fleet_roster;
@@ -3437,10 +3438,7 @@ impl ModalView for ConfigView {
                         truncate_view_text(&label, usize::from(inner.width).saturating_sub(8))
                     ));
                     line.style = if selected {
-                        Style::default()
-                            .fg(palette::SELECTION_TEXT)
-                            .bg(palette::SELECTION_BG)
-                            .bold()
+                        menu_style::selected_row_style()
                     } else {
                         Style::default().fg(palette::TEXT_PRIMARY)
                     };
@@ -3625,10 +3623,7 @@ impl ModalView for ConfigView {
                         row_hitboxes.push((line_y, *idx));
                         let selected = *idx == self.selected;
                         let style = if selected {
-                            Style::default()
-                                .fg(palette::SELECTION_TEXT)
-                                .bg(palette::SELECTION_BG)
-                                .add_modifier(ratatui::style::Modifier::BOLD)
+                            menu_style::selected_row_style()
                         } else {
                             Style::default().fg(palette::TEXT_PRIMARY)
                         };
@@ -3660,7 +3655,7 @@ impl ModalView for ConfigView {
                             ),
                         ]);
                         if selected {
-                            line.style = line.style.bg(palette::SELECTION_BG);
+                            line.style = menu_style::selected_row_bg_style();
                         }
                         lines.push(line);
                     }

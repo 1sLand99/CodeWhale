@@ -36,6 +36,7 @@ use crate::tui::approval::{
     ToolCategory,
 };
 use crate::tui::history::{GenericToolCell, HistoryCell, ToolCell, ToolRun, ToolStatus};
+use crate::tui::menu_style;
 use crate::tui::scrolling::TranscriptLineMeta;
 use crate::tui::ui_text::{grapheme_display_width, text_display_width};
 use crate::tui::underwater::ShellPhase;
@@ -1414,9 +1415,7 @@ impl Renderable for ComposerWidget<'_> {
                 {
                     let is_selected = idx == selected;
                     let style = if is_selected {
-                        Style::default()
-                            .fg(palette::SELECTION_TEXT)
-                            .bg(palette::SELECTION_BG)
+                        menu_style::selected_row_bg_style().fg(palette::SELECTION_TEXT)
                     } else {
                         Style::default().fg(palette::TEXT_MUTED)
                     };
@@ -1464,9 +1463,7 @@ impl Renderable for ComposerWidget<'_> {
             {
                 let is_selected = idx == selected;
                 let style = if is_selected {
-                    Style::default()
-                        .fg(palette::SELECTION_TEXT)
-                        .bg(palette::SELECTION_BG)
+                    menu_style::selected_row_bg_style().fg(palette::SELECTION_TEXT)
                 } else {
                     Style::default().fg(palette::TEXT_MUTED)
                 };
@@ -1531,9 +1528,7 @@ impl Renderable for ComposerWidget<'_> {
             {
                 let is_selected = idx == selected;
                 let sel_style = if is_selected {
-                    Style::default()
-                        .fg(palette::SELECTION_TEXT)
-                        .bg(palette::SELECTION_BG)
+                    menu_style::selected_row_bg_style().fg(palette::SELECTION_TEXT)
                 } else {
                     Style::default().fg(palette::TEXT_MUTED)
                 };
@@ -1548,9 +1543,7 @@ impl Renderable for ComposerWidget<'_> {
 
                 // Description column (muted when not selected, secondary when selected)
                 let desc_style = if is_selected {
-                    Style::default()
-                        .fg(palette::SELECTION_TEXT)
-                        .bg(palette::SELECTION_BG)
+                    menu_style::selected_row_bg_style().fg(palette::SELECTION_TEXT)
                 } else {
                     Style::default().fg(palette::TEXT_DIM)
                 };
@@ -2329,10 +2322,7 @@ fn repo_law_approval_palette() -> ApprovalColors {
 }
 
 fn approval_selected_style() -> Style {
-    Style::default()
-        .fg(palette::SELECTION_TEXT)
-        .bg(palette::SELECTION_BG)
-        .add_modifier(Modifier::BOLD)
+    menu_style::selected_row_style()
 }
 
 fn approval_option_style(is_selected: bool, color: Color) -> Style {
@@ -2928,9 +2918,7 @@ impl Renderable for ElevationWidget<'_> {
         for (i, option) in self.request.options.iter().enumerate() {
             let is_selected = i == self.selected;
             let style = if is_selected {
-                Style::default()
-                    .fg(palette::SELECTION_TEXT)
-                    .bg(palette::SELECTION_BG)
+                menu_style::selected_row_bg_style().fg(palette::SELECTION_TEXT)
             } else {
                 Style::default()
             };

@@ -25,6 +25,7 @@ use crate::skills::audit::{
 use crate::skills::mutation::{ConflictPolicy, SkillMutationRequest, SkillTargetScope};
 use crate::skills::roots::SkillRootKind;
 use crate::tui::app::App;
+use crate::tui::menu_style;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ManagerMode {
@@ -381,10 +382,7 @@ impl SkillsManagerView {
             }
             let selected = idx == self.selected;
             let style = if selected {
-                Style::default()
-                    .fg(palette::SELECTION_TEXT)
-                    .bg(palette::SELECTION_BG)
-                    .add_modifier(Modifier::BOLD)
+                menu_style::selected_row_style()
             } else {
                 Style::default().fg(palette::TEXT_PRIMARY)
             };
