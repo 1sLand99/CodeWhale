@@ -18,6 +18,7 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::palette;
+use crate::tui::menu_style;
 use crate::tui::ocean;
 use crate::tui::views::{ContextMenuAction, ModalKind, ModalView, ViewAction, ViewEvent};
 
@@ -371,13 +372,15 @@ impl ModalView for ContextMenuView {
             }
 
             let selected = idx == self.selected;
-            let row_bg = if selected { soft_accent } else { elevated };
-            let label_fg = if selected {
-                palette::SELECTION_TEXT
-            } else if entry.primary {
-                accent
+            let row_style = if selected {
+                menu_style::selected_row_style()
             } else {
-                palette::TEXT_SOFT
+                let label_fg = if entry.primary {
+                    accent
+                } else {
+                    palette::TEXT_SOFT
+                };
+                Style::default().fg(label_fg).bg(elevated)
             };
             let glyph = if entry.glyph.is_empty() {
                 "·"
@@ -392,10 +395,11 @@ impl ModalView for ContextMenuView {
             let label = trim_to_width(&entry.label, label_budget);
             let pad = label_budget.saturating_sub(UnicodeWidthStr::width(label.as_str()));
             let text = format!(" {glyph} {label}{} {hint} ", " ".repeat(pad));
-            let mut style = Style::default().fg(label_fg).bg(row_bg);
-            if selected || entry.primary {
-                style = style.add_modifier(Modifier::BOLD);
-            }
+            let style = if !selected && entry.primary {
+                row_style.add_modifier(Modifier::BOLD)
+            } else {
+                row_style
+            };
             lines.push(Line::from(Span::styled(text, style)));
         }
 

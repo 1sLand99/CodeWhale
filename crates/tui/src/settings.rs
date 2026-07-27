@@ -302,6 +302,11 @@ pub struct Settings {
     /// Background treatment: `ombre` paints the terminal-native water column;
     /// `flat` preserves all state marks on the theme's plain surface.
     pub ocean_treatment: String,
+    /// Focus-context texture prototype for modal views (#4823): `off`
+    /// (default), `scrim` dims the area outside the focused modal, `grain`
+    /// sprinkles deterministic dots over blank cells there. Static texture,
+    /// never obscures text; unknown values fall back to `off` at render time.
+    pub focus_texture: String,
     /// Ocean Tasks / To-do / Workers rail placement: top, left, or right.
     /// The lower edge remains owned by the composer and phase footer.
     pub work_surface_placement: String,
@@ -518,6 +523,7 @@ impl Default for Settings {
             low_motion: false,
             fancy_animations: true,
             ocean_treatment: "ombre".to_string(),
+            focus_texture: "off".to_string(),
             work_surface_placement: "top".to_string(),
             // Cap, not fixed height: the top strip auto-fits its rows and
             // only grows to this many lines (user request, 2026-07-23).
@@ -1083,6 +1089,15 @@ impl Settings {
                 }
                 self.ocean_treatment = normalized;
             }
+            "focus_texture" | "texture" => {
+                let normalized = value.trim().to_ascii_lowercase();
+                if !matches!(normalized.as_str(), "off" | "scrim" | "grain") {
+                    anyhow::bail!(
+                        "Failed to update setting: invalid focus texture '{value}'. Expected: off, scrim, or grain."
+                    );
+                }
+                self.focus_texture = normalized;
+            }
             "work_surface_placement" | "work_surface" | "work_rail" => {
                 let normalized = value.trim().to_ascii_lowercase();
                 if !matches!(normalized.as_str(), "top" | "left" | "right") {
@@ -1367,6 +1382,7 @@ impl Settings {
         lines.push(format!("  low_motion:         {}", self.low_motion));
         lines.push(format!("  fancy_animations:   {}", self.fancy_animations));
         lines.push(format!("  ocean_treatment:    {}", self.ocean_treatment));
+        lines.push(format!("  focus_texture:      {}", self.focus_texture));
         lines.push(format!(
             "  work_surface:       {}",
             self.work_surface_placement
@@ -1501,6 +1517,10 @@ impl Settings {
             (
                 "ocean_treatment",
                 "Transcript background treatment: ombre/flat (independent of motion)",
+            ),
+            (
+                "focus_texture",
+                "Modal focus-context texture prototype: off/scrim/grain (default off)",
             ),
             (
                 "work_surface_placement",
@@ -2782,6 +2802,22 @@ mod tests {
             torn, 0,
             "{torn} of {reads} concurrent reads saw a truncated or unparseable settings file"
         );
+    }
+
+    #[test]
+    fn focus_texture_defaults_off_and_validates() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.focus_texture, "off");
+
+        settings.set("focus_texture", "scrim").unwrap();
+        assert_eq!(settings.focus_texture, "scrim");
+        settings.set("texture", "grain").unwrap();
+        assert_eq!(settings.focus_texture, "grain");
+        settings.set("focus_texture", " OFF ").unwrap();
+        assert_eq!(settings.focus_texture, "off");
+
+        let err = settings.set("focus_texture", "static").unwrap_err();
+        assert!(err.to_string().contains("off, scrim, or grain"));
     }
 
     #[test]

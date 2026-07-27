@@ -22,6 +22,7 @@ use crate::session_manager::{
     extract_user_prompt, strip_thinking_tags,
 };
 use crate::session_projection::{MAX_PROJECTED_SESSIONS, SessionQuery, SessionSortMode};
+use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, action_footer_lines, render_modal_footer, render_panel_scroll_rail,
     render_underwater_surface,
@@ -976,10 +977,7 @@ fn build_list_lines(
         let mut line = format!("{prefix}{}", format_session_line(session, locale));
         line = truncate(&line, width);
         let style = if idx == selected {
-            Style::default()
-                .fg(palette::SELECTION_TEXT)
-                .bg(palette::SELECTION_BG)
-                .add_modifier(Modifier::BOLD)
+            menu_style::selected_row_style()
         } else {
             Style::default().fg(palette::TEXT_PRIMARY)
         };

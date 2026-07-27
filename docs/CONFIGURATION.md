@@ -1255,6 +1255,16 @@ Common settings keys:
   rail. Side choices fall back to the top layout on narrow terminals and in
   Classic without changing the saved Ocean preference. Set it live with
   `/config work_surface_placement right --save` (or `left` / `top`).
+- `focus_texture` (`off`, `scrim`, or `grain`; default `off`): focus-context
+  texture for modal views. `scrim` dims the already-rendered background
+  outside the focused modal toward the theme surface; `grain` sprinkles
+  sparse dots over blank cells there. The texture is static (no time
+  component, so it is unaffected by `low_motion`), never writes over a cell
+  that carries text, and preserves the 4.5:1 body-text contrast floor
+  wherever both colors are resolvable. It is skipped entirely on frames
+  below the ambient-life minimum size and when the focused modal already
+  covers 90% or more of the frame. Set it live with
+  `/config focus_texture scrim --save`.
 - `mention_menu_limit` (integer, default `128`): maximum number of
   `@`-mention popup candidates retained before the composer renders the
   visible window. The visible rows still depend on terminal height.
@@ -1696,6 +1706,11 @@ If you are upgrading from older releases:
   `[notifications].sound_file` on Windows.
 - `[notifications].sound_file` (path, optional): path to a custom WAV file
   used when `completion_sound = "file"`.
+- `[notifications.event_sound]` (table, optional): opt-in, deterministic
+  per-event sound cues. Keys: `enabled` (bool, default `false`), `events`
+  (array of kebab-case event names, default `["turn-complete",
+  "approval-needed"]`), `min_interval_ms` (int, default `2000`), `quiet`
+  (bool, default `false`). See "Event sound cues" below.
 - `tui.alternate_screen` (string, optional): `auto`, `always`, or `never`. This is retained for config compatibility, but interactive sessions now always use the TUI-owned alternate screen so host terminal scrollback cannot hijack the viewport.
 - `tui.mouse_capture` (bool, optional, default `true` on non-Windows terminals and on Windows Terminal/ConEmu/Cmder when the alternate screen is active; `false` on legacy Windows console and inside JetBrains JediTerm — PyCharm/IDEA/CLion/etc. — where mouse-event escapes leak into the input stream as garbled text, see #878 / #898): enable internal mouse scrolling, transcript selection, right-click context actions, and transcript scrollbar dragging. TUI-owned drag selection copies only transcript text, removes visual wrap-column line breaks from paragraphs, and keeps selection scoped to the transcript pane. Set this to `false` or run with `--no-mouse-capture` for raw terminal selection; set it to `true` or run with `--mouse-capture` to opt in anywhere it's defaulted off. On raw terminal selection, especially on legacy Windows console or when mouse capture is disabled, selection may cross the right sidebar and include visual wraps because the terminal, not the TUI, owns the selection.
 - `tui.terminal_probe_timeout_ms` (int, optional, default `500`): startup terminal-mode probe timeout in milliseconds. Values are clamped to `100..=5000`; timeout emits a warning and aborts startup instead of hanging indefinitely.
@@ -1776,6 +1791,41 @@ Windows users who run inside a known OSC-9 terminal (e.g. WezTerm on Windows) ke
 `completion_sound = "file"` is for Windows users who want a per-application
 completion sound without changing the global Windows sound scheme. It plays the
 configured WAV `sound_file` asynchronously via the native Windows audio API.
+
+#### Event sound cues
+
+`[notifications.event_sound]` is an opt-in, deterministic policy that emits a
+terminal-bell-level cue when specific notification events fire (approval
+prompts, blocked-on-input, sub-agent completion, and so on). It is **off by
+default**; with `enabled = false` nothing is emitted, which is the
+platform-safe no-op fallback.
+
+```toml
+[notifications.event_sound]
+enabled = false                              # default: off (opt-in)
+events = ["turn-complete", "approval-needed"] # default allow-list
+min_interval_ms = 2000                       # per-event rate limit
+quiet = false                                # true silences everything without editing the allow-list
+```
+
+The cue table is fixed — cues are functional BEL-based signals, not
+designed-for-pleasantness audio, and every cue is one or two `\x07` bytes
+(inert on terminals that ignore BEL, so this is a platform-safe no-op
+everywhere):
+
+| Event | Cue |
+|---|---|
+| `turn-complete` | BEL (`\x07`) |
+| `subagent-terminal` | BEL (`\x07`) |
+| `approval-needed` | double BEL (`\x07\x07`) |
+| `input-needed` | BEL (`\x07`) |
+| `elevation-needed` | double BEL (`\x07\x07`) |
+| `model-notify` | BEL (`\x07`) |
+
+Decision order: disabled → quiet mode → event not in `events` → `turn-complete`
+deferred to the `completion_sound` channel when that is active (so the two
+never double-ding) → per-event rate limit (`min_interval_ms` since the last
+play of that event) → play. Unknown strings in `events` are ignored.
 
 #### What a notification can contain
 

@@ -1937,6 +1937,12 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                 crate::tui::ocean::OceanTreatment::parse(&settings.ocean_treatment);
             app.needs_redraw = true;
         }
+        "focus_texture" | "texture" => {
+            app.focus_texture =
+                crate::tui::focus_texture::FocusTextureMode::parse(&settings.focus_texture)
+                    .unwrap_or_default();
+            app.needs_redraw = true;
+        }
         "work_surface_placement" | "work_surface" | "work_rail" => {
             app.work_surface.placement = crate::tui::work_surface::WorkSurfacePlacement::parse(
                 &settings.work_surface_placement,

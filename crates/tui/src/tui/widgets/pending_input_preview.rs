@@ -19,6 +19,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
 use crate::palette;
+use crate::tui::menu_style;
 use crate::tui::widgets::Renderable;
 
 /// Per-item line cap before we collapse the rest into a `…` overflow row.
@@ -257,19 +258,14 @@ fn push_section_header(lines: &mut Vec<Line<'static>>, header: Line<'static>) {
 
 fn push_context_item(lines: &mut Vec<Line<'static>>, item: &ContextPreviewItem, width: u16) {
     let status_style = if item.selected {
-        Style::default()
-            .fg(palette::SELECTION_TEXT)
-            .bg(palette::SELECTION_BG)
-            .add_modifier(Modifier::BOLD)
+        menu_style::selected_row_style()
     } else if item.included {
         Style::default().fg(palette::TEXT_MUTED)
     } else {
         Style::default().fg(palette::STATUS_WARNING)
     };
     let label_style = if item.selected {
-        Style::default()
-            .fg(palette::SELECTION_TEXT)
-            .bg(palette::SELECTION_BG)
+        menu_style::selected_row_bg_style().fg(palette::SELECTION_TEXT)
     } else if item.included {
         Style::default().fg(palette::TEXT_PRIMARY)
     } else {

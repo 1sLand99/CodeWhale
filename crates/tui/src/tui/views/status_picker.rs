@@ -21,6 +21,7 @@ use ratatui::{
 use crate::config::{ApiProvider, StatusItem};
 use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
+use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, centered_modal_area,
     render_modal_footer, render_modal_surface,
@@ -230,29 +231,21 @@ impl ModalView for StatusPickerView {
             let mark = if checked { "[✓]" } else { "[ ]" };
 
             let row_style = if is_cursor {
-                Style::default()
-                    .fg(palette::SELECTION_TEXT)
-                    .bg(palette::SELECTION_BG)
-                    .add_modifier(Modifier::BOLD)
+                menu_style::selected_row_style()
             } else if checked {
                 Style::default().fg(palette::TEXT_PRIMARY)
             } else {
                 Style::default().fg(palette::TEXT_MUTED)
             };
             let hint_style = if is_cursor {
-                Style::default()
-                    .fg(palette::SELECTION_TEXT)
-                    .bg(palette::SELECTION_BG)
+                menu_style::selected_row_bg_style().fg(palette::SELECTION_TEXT)
             } else {
                 Style::default().fg(palette::TEXT_DIM)
             };
             let pointer = crate::tui::glyphs::selection_marker(is_cursor);
 
             if is_cursor {
-                let selected_style = Style::default()
-                    .fg(palette::SELECTION_TEXT)
-                    .bg(palette::SELECTION_BG)
-                    .add_modifier(Modifier::BOLD);
+                let selected_style = menu_style::selected_row_style();
                 let line = status_row_text(pointer, mark, item, content.width as usize);
                 lines.push(Line::from(Span::styled(line, selected_style)));
             } else {

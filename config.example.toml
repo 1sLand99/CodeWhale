@@ -1000,6 +1000,16 @@ default_text_model = "deepseek-ai/deepseek-v4-pro"
 # completion_sound = "beep"
 # sound_file = "E:\\google\\downloads\\notify.wav"
 
+# Opt-in per-event sound cues (#4817): deterministic, terminal-bell level
+# (BEL bytes only — functional signals, platform-safe no-op when the terminal
+# ignores BEL). Off by default. When completion_sound is active, turn-complete
+# is left to that channel so the two never double-ding.
+# [notifications.event_sound]
+# enabled = false                                # master switch, default off
+# events = ["turn-complete", "approval-needed"]  # allow-list; unknown names ignored
+# min_interval_ms = 2000                         # per-event rate limit
+# quiet = false                                  # true silences all event sounds
+
 # ─────────────────────────────────────────────────────────────────────────────────
 # Workspace Snapshots (#137)
 # ─────────────────────────────────────────────────────────────────────────────────

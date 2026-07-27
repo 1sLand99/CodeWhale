@@ -26,6 +26,7 @@ use ratatui::{
 
 use crate::localization::{Locale, MessageId, tr};
 use crate::palette::{SELECTABLE_THEMES, ThemeId, UiTheme};
+use crate::tui::menu_style;
 use crate::tui::settings_picker::{
     PickerNavResult, SettingAvailability, SettingOption, SettingValues, SettingsPickerController,
     SettingsPickerLayout, handle_nav_key,
@@ -344,10 +345,7 @@ impl ModalView for ThemePickerView {
                 .unwrap_or(ThemeId::System);
             let is_selected = visible_idx == selected_visible;
             let row_style = if is_selected {
-                Style::default()
-                    .fg(live.text_body)
-                    .bg(live.selection_bg)
-                    .add_modifier(Modifier::BOLD)
+                menu_style::theme_selected_row_style(&live)
             } else {
                 Style::default().fg(live.text_body)
             };

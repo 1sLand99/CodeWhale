@@ -30,7 +30,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKi
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget, Wrap},
 };
@@ -51,6 +51,7 @@ use crate::provider_readiness::{
     credential_state_for_provider, route_identity_for_model,
 };
 use crate::tui::app::ReasoningEffort;
+use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, EmptyState, ListDetailLayout, ModalKind, ModalView, ViewAction, ViewEvent,
     centered_modal_area, render_modal_footer, render_modal_surface,
@@ -2043,17 +2044,6 @@ impl ProviderPickerView {
             .min(max_start)
     }
 
-    fn selected_row_style(fg: Color) -> Style {
-        Style::default()
-            .fg(fg)
-            .bg(palette::SELECTION_BG)
-            .add_modifier(Modifier::BOLD)
-    }
-
-    fn selected_row_bg_style() -> Style {
-        Style::default().bg(palette::SELECTION_BG)
-    }
-
     fn render_list(&self, area: Rect, buf: &mut Buffer) {
         let enter_action = if !self.selected_route_is_valid() {
             self.tr(MessageId::PickerActionUnavailable)
@@ -2176,12 +2166,12 @@ impl ProviderPickerView {
             let arrow = crate::tui::glyphs::selection_marker(is_selected);
             let active_dot = if is_active { " *" } else { "  " };
             let spacer_style = if is_selected {
-                Self::selected_row_bg_style()
+                menu_style::selected_row_bg_style()
             } else {
                 Style::default()
             };
             let label_style = if is_selected {
-                Self::selected_row_style(palette::SELECTION_TEXT)
+                menu_style::selected_row_style_with_fg(palette::SELECTION_TEXT)
             } else {
                 Style::default().fg(palette::TEXT_PRIMARY)
             };
@@ -2199,7 +2189,7 @@ impl ProviderPickerView {
                 } else {
                     palette::STATUS_WARNING
                 };
-                Self::selected_row_style(hint_fg)
+                menu_style::selected_row_style_with_fg(hint_fg)
             } else if has_usable_auth {
                 Style::default().fg(palette::TEXT_MUTED)
             } else {
@@ -2222,13 +2212,13 @@ impl ProviderPickerView {
                 Span::styled(hint, hint_style),
             ]);
             if is_selected {
-                line.style = Self::selected_row_bg_style();
+                line.style = menu_style::selected_row_bg_style();
                 let target_width = usize::from(layout.list.width);
                 let line_width = line.width();
                 if line_width < target_width {
                     line.spans.push(Span::styled(
                         " ".repeat(target_width - line_width),
-                        Self::selected_row_bg_style(),
+                        menu_style::selected_row_bg_style(),
                     ));
                 }
             }
@@ -2732,7 +2722,7 @@ impl ProviderPickerView {
             let is_selected = idx == self.model_selected_idx;
             let arrow = crate::tui::glyphs::selection_marker(is_selected);
             let label_style = if is_selected {
-                Self::selected_row_style(palette::SELECTION_TEXT)
+                menu_style::selected_row_style_with_fg(palette::SELECTION_TEXT)
             } else {
                 Style::default().fg(palette::TEXT_PRIMARY)
             };
@@ -2753,7 +2743,7 @@ impl ProviderPickerView {
                     Span::styled(
                         format!("  ({default_tag})"),
                         if is_selected {
-                            Self::selected_row_style(palette::TEXT_MUTED)
+                            menu_style::selected_row_style_with_fg(palette::TEXT_MUTED)
                         } else {
                             Style::default().fg(palette::TEXT_MUTED)
                         },
@@ -2761,7 +2751,7 @@ impl ProviderPickerView {
                 },
             ]);
             if is_selected {
-                line.style = Self::selected_row_bg_style();
+                line.style = menu_style::selected_row_bg_style();
             }
             lines.push(line);
         }
@@ -3011,14 +3001,14 @@ impl ProviderPickerView {
         let value = self.custom_form_field_value(field);
         let display = if value.is_empty() { placeholder } else { value };
         let value_style = if selected {
-            Self::selected_row_style(palette::SELECTION_TEXT)
+            menu_style::selected_row_style_with_fg(palette::SELECTION_TEXT)
         } else if value.is_empty() {
             Style::default().fg(palette::TEXT_MUTED)
         } else {
             Style::default().fg(palette::TEXT_PRIMARY)
         };
         let label_style = if selected {
-            Self::selected_row_style(palette::WHALE_INFO)
+            menu_style::selected_row_style_with_fg(palette::WHALE_INFO)
         } else {
             Style::default().fg(palette::TEXT_MUTED)
         };
@@ -3035,7 +3025,7 @@ impl ProviderPickerView {
             ),
         ]);
         if selected {
-            line.style = Self::selected_row_bg_style();
+            line.style = menu_style::selected_row_bg_style();
         }
         Paragraph::new(line).render(area, buf);
     }

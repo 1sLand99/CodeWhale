@@ -47,19 +47,19 @@ pub const WHALE_REASONING_TINT_RGB: (u8, u8, u8) = (24, 36, 52); // #182434
 // Solarized Light palette RGB tuples
 pub const SOLARIZED_BASE03_RGB: (u8, u8, u8) = (0x00, 0x2B, 0x36);
 pub const SOLARIZED_BASE02_RGB: (u8, u8, u8) = (0x07, 0x36, 0x42);
-pub const SOLARIZED_BASE01_RGB: (u8, u8, u8) = (0x58, 0x6E, 0x75);
+pub const SOLARIZED_BASE01_RGB: (u8, u8, u8) = (0x52, 0x66, 0x6D); // lifted for 4.5:1 muted text
 pub const SOLARIZED_BASE00_RGB: (u8, u8, u8) = (0x65, 0x7B, 0x83);
-pub const SOLARIZED_BASE0_RGB: (u8, u8, u8) = (0x83, 0x94, 0x96);
+pub const SOLARIZED_BASE0_RGB: (u8, u8, u8) = (0x72, 0x81, 0x82); // lifted for 3:1 hint text
 pub const SOLARIZED_BASE1_RGB: (u8, u8, u8) = (0x93, 0xA1, 0xA1);
 #[allow(dead_code)]
 pub const SOLARIZED_BASE2_RGB: (u8, u8, u8) = (0xEE, 0xE8, 0xD5);
 pub const SOLARIZED_BASE3_RGB: (u8, u8, u8) = (0xFD, 0xF6, 0xE3);
-pub const SOLARIZED_YELLOW_RGB: (u8, u8, u8) = (0xB5, 0x89, 0x00);
+pub const SOLARIZED_YELLOW_RGB: (u8, u8, u8) = (0xB4, 0x88, 0x00); // lifted for 3:1 on ivory
 pub const SOLARIZED_ORANGE_RGB: (u8, u8, u8) = (0xCB, 0x4B, 0x16);
 pub const SOLARIZED_RED_RGB: (u8, u8, u8) = (0xDC, 0x32, 0x2F);
 pub const SOLARIZED_BLUE_RGB: (u8, u8, u8) = (0x26, 0x8B, 0xD2);
-pub const SOLARIZED_CYAN_RGB: (u8, u8, u8) = (0x2A, 0xA1, 0x98);
-pub const SOLARIZED_GREEN_RGB: (u8, u8, u8) = (0x85, 0x99, 0x00);
+pub const SOLARIZED_CYAN_RGB: (u8, u8, u8) = (0x29, 0x9E, 0x96); // lifted for 3:1 on ivory
+pub const SOLARIZED_GREEN_RGB: (u8, u8, u8) = (0x7F, 0x92, 0x00); // lifted for 3:1 on ivory/diff bg
 pub const SOLARIZED_PANEL_RGB: (u8, u8, u8) = (0xF0, 0xED, 0xE7);
 pub const SOLARIZED_ELEVATED_RGB: (u8, u8, u8) = (0xE4, 0xDF, 0xCF);
 pub const SOLARIZED_SELECT_RGB: (u8, u8, u8) = (0xD6, 0xD2, 0xC9);
@@ -219,10 +219,10 @@ pub const MATRIX_SURFACE_RGB: (u8, u8, u8) = (0, 10, 0); // #000A00
 pub const MATRIX_ELEVATED_RGB: (u8, u8, u8) = (0, 51, 0); // #003300
 pub const MATRIX_SELECTION_RGB: (u8, u8, u8) = (0, 51, 0); // #003300
 pub const MATRIX_TEXT_BODY_RGB: (u8, u8, u8) = (136, 255, 136); // #88FF88
-pub const MATRIX_TEXT_MUTED_RGB: (u8, u8, u8) = (0, 85, 0); // #005500
-pub const MATRIX_TEXT_HINT_RGB: (u8, u8, u8) = (0, 102, 0); // #006600
+pub const MATRIX_TEXT_MUTED_RGB: (u8, u8, u8) = (0, 169, 0); // #00A900, lifted for 4.5:1
+pub const MATRIX_TEXT_HINT_RGB: (u8, u8, u8) = (0, 135, 0); // #008700, lifted for 3:1
 pub const MATRIX_TEXT_SOFT_RGB: (u8, u8, u8) = (221, 255, 221); // #DDFFDD
-pub const MATRIX_TEXT_DIM_RGB: (u8, u8, u8) = (0, 68, 0); // #004400
+pub const MATRIX_TEXT_DIM_RGB: (u8, u8, u8) = (0, 108, 0); // #006C00, lifted for 3:1
 pub const MATRIX_BORDER_RGB: (u8, u8, u8) = (0, 204, 0); // #00CC00
 
 // Semantic colors

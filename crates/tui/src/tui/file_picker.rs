@@ -27,6 +27,7 @@ use ratatui::{
 
 use crate::localization::{Locale, MessageId, tr};
 use crate::palette;
+use crate::tui::menu_style;
 use crate::tui::views::{
     ActionHint, ModalKind, ModalView, ViewAction, ViewEvent, render_modal_footer,
     render_panel_scroll_rail, render_underwater_surface,
@@ -517,9 +518,7 @@ impl ModalView for FilePickerView {
                 let path = &self.candidates[self.filtered[idx]];
                 let selected = idx == self.selected;
                 let style = if selected {
-                    Style::default()
-                        .fg(palette::SELECTION_TEXT)
-                        .bg(palette::SELECTION_BG)
+                    menu_style::selected_row_bg_style().fg(palette::SELECTION_TEXT)
                 } else {
                     Style::default().fg(palette::TEXT_PRIMARY)
                 };
