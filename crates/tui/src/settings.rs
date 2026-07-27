@@ -2634,6 +2634,8 @@ mod tests {
                     std::env::var(CHILD_RESULT_ENV).expect("reader needs a result path"),
                 );
                 let path = Settings::path().expect("resolve the shared settings path");
+                let ready = result.with_extension("ready");
+                std::fs::write(&ready, b"ready").expect("announce that the reader is ready");
                 let deadline = Instant::now() + Duration::from_secs(60);
                 let (mut reads, mut torn) = (0_u64, 0_u64);
                 while !path_exists_for_test(&signal) && Instant::now() < deadline {
@@ -2779,7 +2781,9 @@ mod tests {
 
         let stop = tmp.path().join("reader-stop");
         let result = tmp.path().join("reader-result");
+        let ready = result.with_extension("ready");
         let mut child = spawn_settings_child("reader", tmp.path(), &stop, Some(&result));
+        wait_for_file(&ready, "the settings reader to become ready");
 
         for index in 0..150 {
             Settings::transact(|settings| settings.set("max_history", &(100 + index).to_string()))
