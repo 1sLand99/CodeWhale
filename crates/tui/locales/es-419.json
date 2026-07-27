@@ -291,6 +291,7 @@
     "CmdStructcopyClipboardFailed": "Falló la copia al portapapeles: {error}. No se escribió nada; vuelve a ejecutar con `stdout` para obtener una vista de texto explícita",
     "CmdStructcopyReceiptTooLarge": "Los metadatos del recibo de copia estructural superan el límite de salida de {bytes} bytes; se rechaza la emisión",
     "CmdFleetDescription": "Inspeccionar y configurar workers de Fleet y orquestación",
+    "CmdLaneDescription": "Inspeccionar y controlar Lanes duraderos (Workflows en ejecución)",
     "CmdWorkflowDescription": "Orquestar el trabajo actual como un workflow",
     "CmdHotbarDescription": "Abrir configuración de Hotbar",
     "CmdSetupDescription": "Abrir configuración con constitución primero",

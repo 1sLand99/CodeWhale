@@ -56,6 +56,7 @@ mod fleet;
 mod goal_loop;
 mod hashing;
 mod hooks;
+mod lane_control;
 mod llm_client;
 mod llm_response_cache;
 mod localization;

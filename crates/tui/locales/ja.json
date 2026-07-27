@@ -291,6 +291,7 @@
     "CmdStructcopyClipboardFailed": "クリップボードへのコピーに失敗しました: {error}。何も書き込まれていません。明示的なテキスト表示には `stdout` を付けて再実行してください",
     "CmdStructcopyReceiptTooLarge": "構造化コピーのレシートメタデータが出力上限の{bytes}バイトを超えたため、出力を拒否しました",
     "CmdFleetDescription": "Fleet ワーカーとオーケストレーション状態を確認・設定",
+    "CmdLaneDescription": "永続化された Lane（実行中の Workflow）を確認・制御",
     "CmdWorkflowDescription": "現在の作業をワークフローとして編成する",
     "CmdHotbarDescription": "Hotbar設定を開く",
     "CmdSetupDescription": "憲法ファーストのセットアップを開く",

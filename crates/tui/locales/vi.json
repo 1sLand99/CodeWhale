@@ -291,6 +291,7 @@
     "CmdStructcopyClipboardFailed": "Không thể sao chép vào clipboard: {error}. Không có gì được ghi; chạy lại với `stdout` để xem văn bản rõ ràng",
     "CmdStructcopyReceiptTooLarge": "Siêu dữ liệu biên nhận sao chép cấu trúc vượt quá giới hạn đầu ra {bytes} byte; từ chối xuất dữ liệu",
     "CmdFleetDescription": "Xem và thiết lập worker Fleet cùng trạng thái điều phối",
+    "CmdLaneDescription": "Xem và điều khiển các Lane bền vững (Workflow đang chạy)",
     "CmdWorkflowDescription": "Điều phối công việc hiện tại thành một workflow",
     "CmdHotbarDescription": "Mở thiết lập Hotbar",
     "CmdSetupDescription": "Mở thiết lập ưu tiên hiến pháp",

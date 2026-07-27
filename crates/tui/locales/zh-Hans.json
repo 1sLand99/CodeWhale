@@ -291,6 +291,7 @@
     "CmdStructcopyClipboardFailed": "复制到剪贴板失败：{error}。未写入任何内容；如需显式文本视图，请使用 `stdout` 重新运行",
     "CmdStructcopyReceiptTooLarge": "结构化复制回执元数据超过 {bytes} 字节的输出上限；拒绝输出",
     "CmdFleetDescription": "查看与配置 Fleet 工作节点及编排状态",
+    "CmdLaneDescription": "查看与控制持久化的 Lane（运行中的工作流）",
     "CmdWorkflowDescription": "将当前工作编排为工作流",
     "CmdHotbarDescription": "打开 Hotbar 设置",
     "CmdSetupDescription": "打开以宪法为核心的设置",

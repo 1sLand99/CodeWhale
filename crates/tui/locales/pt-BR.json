@@ -291,6 +291,7 @@
     "CmdStructcopyClipboardFailed": "Falha ao copiar para o clipboard: {error}. Nada foi gravado; execute novamente com `stdout` para uma visualização de texto explícita",
     "CmdStructcopyReceiptTooLarge": "Os metadados do recibo de cópia estrutural excedem o limite de saída de {bytes} bytes; a emissão foi recusada",
     "CmdFleetDescription": "Inspecionar e configurar workers do Fleet e orquestração",
+    "CmdLaneDescription": "Inspecionar e controlar Lanes duráveis (Workflows em execução)",
     "CmdWorkflowDescription": "Orquestrar o trabalho atual como um workflow",
     "CmdHotbarDescription": "Abrir configuração da Hotbar",
     "CmdSetupDescription": "Abrir configuração com constituição primeiro",
