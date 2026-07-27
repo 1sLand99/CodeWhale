@@ -1,9 +1,28 @@
 //! Truthful, bounded inspection of a prepared model-client request's tool field.
 //!
 //! Capture happens at the request-construction seam and retains only a bounded
-//! projection. It never joins against mutable registry, MCP, provider, or
-//! approval state, and it never claims that the prepared request was delivered.
+//! projection. It never claims that the prepared request was delivered.
+//!
+//! Two kinds of fact live here, and they are kept apart on purpose:
+//!
+//! * **Wire facts** come from the prepared request itself — names, schemas,
+//!   descriptions, per-tool transport flags, byte accounting, and the
+//!   active-tool-catalog digest. The digest is not defined here; it is
+//!   [`crate::core::engine::preview::active_tool_catalog_sha256`], the same
+//!   function the request manifest publishes, so `/tools` and `/request` cannot
+//!   report two different hashes of one catalog.
+//! * **Surface facts** come from a [`ToolSurfaceContext`] the engine resolves
+//!   once per turn: flattened registry facts, the MCP pool's resolved server
+//!   attributions, the engine-injected catalog names, and the provider receipt
+//!   taken from the *resolved model client*. When that context is present,
+//!   provenance, MCP server identity, capabilities, approval requirement, and
+//!   model visibility become available and true. When it is absent they stay
+//!   explicitly unknown — the context is optional, never faked.
+//!
+//! What stays unknowable stays unknown regardless: nothing here observes the
+//! provider adapter's wire payload, so it is always reported as unavailable.
 
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 use serde::Serialize;
@@ -46,6 +65,162 @@ pub struct CountOnly {
     pub values: &'static str,
 }
 
+/// One registry tool flattened to the exact facts this projection may report.
+///
+/// The engine fills this from `ToolSpec`, so this module never holds a tool
+/// object and therefore cannot execute one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RegistryFacts {
+    pub name: String,
+    pub description: String,
+    pub model_visible: bool,
+    pub capabilities: Vec<String>,
+    pub approval: String,
+    /// `true` when the tool came from the plugin surface rather than the
+    /// built-in registry builder.
+    pub plugin: bool,
+}
+
+/// Where a tool in the prepared request came from.
+///
+/// `Unknown` is a real answer, not a fallback guess: it means the surface
+/// context resolved no origin for that name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolProvenance {
+    /// Registered by the built-in registry builder.
+    Builtin,
+    /// Loaded from the plugin/tools surface or `config.toml` overrides.
+    Plugin,
+    /// Contributed by the MCP pool, as attributed by the pool itself.
+    Mcp,
+    /// Injected into the request catalog by the engine rather than registered
+    /// (`tool_search` and its legacy spellings, `code_execution`,
+    /// `js_execution`).
+    Synthetic,
+    /// Present in the request with no resolved origin.
+    Unknown,
+}
+
+impl ToolProvenance {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Builtin => "builtin",
+            Self::Plugin => "plugin",
+            Self::Mcp => "mcp",
+            Self::Synthetic => "synthetic",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// A tool's state relative to the request that was prepared for this step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolVisibility {
+    /// In this step's request with its schema included.
+    Active,
+    /// In this step's request, marked deferred (schema loads on demand).
+    Deferred,
+    /// In this step's request, with no transport flag to say which.
+    InRequest,
+    /// Registered and model-visible, but not carried by this step's request.
+    RegistryOnly,
+    /// Registered but not model-visible (hidden compatibility alias).
+    Hidden,
+}
+
+impl ToolVisibility {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Deferred => "deferred",
+            Self::InRequest => "in-request",
+            Self::RegistryOnly => "registry-only",
+            Self::Hidden => "hidden",
+        }
+    }
+
+    /// Whether this state means the tool's bytes are carried by the prepared
+    /// request. The only honest source of this answer is the request itself.
+    #[must_use]
+    pub const fn in_request(self) -> bool {
+        matches!(self, Self::Active | Self::Deferred | Self::InRequest)
+    }
+}
+
+/// Provider/route availability, derived from the resolved model client taken at
+/// the request seam — never from the existence of a tool registry.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ProviderAvailability {
+    /// No client receipt was taken, because no surface context was captured.
+    #[default]
+    Unknown,
+    /// A model client was resolved and this request was built for it.
+    Available { provider: String, model: String },
+    /// The seam was reached with no resolved model client. The reason is a safe
+    /// label, never a URL or credential.
+    Unavailable { reason: String },
+}
+
+impl ProviderAvailability {
+    #[must_use]
+    pub const fn is_available(&self) -> bool {
+        matches!(self, Self::Available { .. })
+    }
+
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Available { .. } => "available",
+            Self::Unavailable { .. } => "unavailable",
+        }
+    }
+}
+
+/// Everything outside the prepared request that this projection is allowed to
+/// report, resolved once per turn by the engine.
+///
+/// Plain data only: no registry, no client, no credentials. Resolving it once
+/// per turn is what keeps the per-step seam from re-locking the MCP pool.
+#[derive(Debug, Clone, Default)]
+pub struct ToolSurfaceContext {
+    /// The real registry, flattened. Sorted by name by the producer.
+    pub registry: Vec<RegistryFacts>,
+    /// Model tool name -> MCP server name, only for names the real pool
+    /// resolved. Absent names stay unknown rather than being split apart.
+    pub mcp_servers: BTreeMap<String, String>,
+    /// Request-catalog names the engine injects rather than registering.
+    pub synthetic_names: Vec<String>,
+    /// Receipt from the resolved model client for this turn.
+    pub provider: ProviderAvailability,
+}
+
+impl ToolSurfaceContext {
+    fn provenance(&self, name: &str) -> ToolProvenance {
+        if let Some(facts) = self.registry.iter().find(|facts| facts.name == name) {
+            if facts.plugin {
+                return ToolProvenance::Plugin;
+            }
+            if self.mcp_servers.contains_key(name) {
+                return ToolProvenance::Mcp;
+            }
+            return ToolProvenance::Builtin;
+        }
+        if self.mcp_servers.contains_key(name) {
+            return ToolProvenance::Mcp;
+        }
+        if self.synthetic_names.iter().any(|entry| entry == name) {
+            return ToolProvenance::Synthetic;
+        }
+        ToolProvenance::Unknown
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ToolProjection {
     pub ordinal: usize,
@@ -58,6 +233,23 @@ pub struct ToolProjection {
     pub input_examples: Evidence<CountOnly>,
     pub strict: Evidence<bool>,
     pub cache_control_type: Evidence<BoundedString>,
+    /// Where this tool came from. Known only when a surface context was
+    /// captured; `ToolProvenance::Unknown` inside `Known` means the context was
+    /// captured and still resolved no origin.
+    pub provenance: Evidence<ToolProvenance>,
+    /// Owning MCP server, only when the real pool attributed this exact model
+    /// tool name.
+    pub mcp_server: Evidence<BoundedString>,
+    /// Declared capabilities from the registry, sorted. Known-and-empty means
+    /// "declares none"; unknown means "not in the registry".
+    pub capabilities: Evidence<BoundedList>,
+    /// Declared approval requirement from the registry.
+    pub approval: Evidence<BoundedString>,
+    /// Registry model visibility. A tool can be registered but hidden.
+    pub model_visible: Evidence<bool>,
+    /// State relative to this prepared request. Always known: the request is
+    /// the evidence.
+    pub visibility: ToolVisibility,
 }
 
 /// Bounded evidence from a prepared model-client request.
@@ -80,22 +272,100 @@ pub struct ToolInspectionSnapshot {
     /// description, and canonical input schema — not transport-only fields —
     /// exactly as the manifest does.
     pub active_tool_catalog_sha256: Option<String>,
-    pub unavailable_from_tool_schema: [&'static str; 6],
+    /// Facts nothing on this path can observe for this request. Shrinks when a
+    /// surface context supplies registry- and client-derived truth; never
+    /// empties, because the provider adapter's wire payload is never visible
+    /// here.
+    pub unavailable_for_this_request: Vec<&'static str>,
+    /// Provider receipt from the resolved model client, or `Unknown` when no
+    /// surface context was captured.
+    pub provider: ProviderAvailability,
+    /// Whether registry-derived facts were captured at all. Absent stays
+    /// distinct from an empty registry.
+    pub registry_facts_present: bool,
+    /// Size of the flattened registry, when it was captured.
+    pub registry_tool_count: Evidence<usize>,
+    /// Registered, model-visible tools this request does *not* carry. Bounded,
+    /// with an explicit omission count.
+    pub registry_only_tools: Evidence<BoundedList>,
     pub tools: Vec<ToolProjection>,
 }
 
 impl ToolInspectionSnapshot {
+    /// Wire facts only. Provenance, attribution, capabilities, approval, and
+    /// provider identity stay explicitly unknown.
     #[must_use]
     pub fn from_prepared_request(turn_id: &str, step: u32, tools: Option<&[Tool]>) -> Self {
+        Self::from_prepared_request_with_surface(turn_id, step, tools, None)
+    }
+
+    /// Wire facts joined against the turn's resolved surface context.
+    ///
+    /// The context is what turns "unavailable" into truth: it is derived from
+    /// the real registry, the real MCP pool's own attribution, the engine's own
+    /// synthetic-name list, and the resolved model client. Passing `None`
+    /// reproduces the wire-only projection exactly.
+    #[must_use]
+    pub fn from_prepared_request_with_surface(
+        turn_id: &str,
+        step: u32,
+        tools: Option<&[Tool]>,
+        surface: Option<&ToolSurfaceContext>,
+    ) -> Self {
         let tool_count = tools.map_or(0, <[Tool]>::len);
         let projected = tools
             .unwrap_or_default()
             .iter()
             .take(MAX_RENDERED_TOOLS)
             .enumerate()
-            .map(|(index, tool)| project_tool(index, tool))
+            .map(|(index, tool)| project_tool(index, tool, surface))
             .collect::<Vec<_>>();
         let (payload_json_bytes, payload_measurement_status) = measure_payload(tools);
+
+        let request_names = tools
+            .unwrap_or_default()
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let registry_only_tools = surface.map_or_else(
+            || unknown("registry facts not captured for this request"),
+            |surface| {
+                let names = surface
+                    .registry
+                    .iter()
+                    .filter(|facts| {
+                        facts.model_visible && !request_names.contains(facts.name.as_str())
+                    })
+                    .map(|facts| facts.name.as_str())
+                    .collect::<Vec<_>>();
+                let rendered = names
+                    .iter()
+                    .take(MAX_RENDERED_TOOLS)
+                    .map(|name| bounded_chars(name, MAX_NAME_CHARS))
+                    .collect::<Vec<_>>();
+                Evidence::Known {
+                    value: BoundedList {
+                        count: names.len(),
+                        omitted: names.len().saturating_sub(rendered.len()),
+                        rendered,
+                    },
+                }
+            },
+        );
+
+        let mut unavailable_for_this_request = vec!["provider_wire_payload"];
+        if surface.is_none() {
+            unavailable_for_this_request.extend([
+                "provider",
+                "model",
+                "approval",
+                "provenance",
+                "capabilities",
+            ]);
+        } else if !surface.is_some_and(|surface| surface.provider.is_available()) {
+            unavailable_for_this_request.extend(["provider", "model"]);
+        }
+
         Self {
             schema_version: 1,
             capture_source: "prepared model-client request",
@@ -110,14 +380,18 @@ impl ToolInspectionSnapshot {
             payload_measurement_status,
             active_tool_catalog_sha256: tools
                 .map(crate::core::engine::preview::active_tool_catalog_sha256),
-            unavailable_from_tool_schema: [
-                "provider",
-                "model",
-                "approval",
-                "provenance",
-                "capabilities",
-                "provider_wire_payload",
-            ],
+            unavailable_for_this_request,
+            provider: surface.map_or(ProviderAvailability::Unknown, |surface| {
+                surface.provider.clone()
+            }),
+            registry_facts_present: surface.is_some(),
+            registry_tool_count: surface.map_or_else(
+                || unknown("registry facts not captured for this request"),
+                |surface| Evidence::Known {
+                    value: surface.registry.len(),
+                },
+            ),
+            registry_only_tools,
             tools: projected,
         }
     }
@@ -162,9 +436,59 @@ impl ToolInspectionSnapshot {
         out.push_str(
             "Provider-wire tool payload: unavailable (the provider adapter may transform or omit model-client fields)\n",
         );
-        out.push_str(
-            "Provider, model, approval, provenance, and capability metadata: unavailable (not carried by the request tool schema)\n",
-        );
+        match &self.provider {
+            ProviderAvailability::Available { provider, model } => out.push_str(&format!(
+                "Provider: {} (resolved model client)\nModel: {}\n",
+                json_string(provider),
+                json_string(model)
+            )),
+            ProviderAvailability::Unavailable { reason } => {
+                out.push_str(&format!("Provider: unavailable ({reason})\n"));
+            }
+            ProviderAvailability::Unknown => {
+                out.push_str("Provider: unknown (no model-client receipt captured)\n");
+            }
+        }
+        out.push_str(&format!(
+            "Registry facts: {}\n",
+            if self.registry_facts_present {
+                "captured"
+            } else {
+                "not captured"
+            }
+        ));
+        match &self.registry_tool_count {
+            Evidence::Known { value } => {
+                out.push_str(&format!("Registered tools: {value}\n"));
+            }
+            Evidence::Unknown { reason } => {
+                out.push_str(&format!("Registered tools: unknown ({reason})\n"));
+            }
+        }
+        match &self.registry_only_tools {
+            Evidence::Known { value } => {
+                let rendered = value
+                    .rendered
+                    .iter()
+                    .map(|entry| entry.value.as_str())
+                    .collect::<Vec<_>>();
+                out.push_str(&format!(
+                    "Model-visible tools not in this request: {}\n  names: {}\n  omitted by render bound: {}\n",
+                    value.count,
+                    serde_json::to_string(&rendered).unwrap_or_else(|_| "unavailable".to_string()),
+                    value.omitted
+                ));
+            }
+            Evidence::Unknown { reason } => {
+                out.push_str(&format!(
+                    "Model-visible tools not in this request: unknown ({reason})\n"
+                ));
+            }
+        }
+        out.push_str(&format!(
+            "Unavailable for this request: {}\n",
+            self.unavailable_for_this_request.join(", ")
+        ));
 
         for tool in &self.tools {
             out.push_str(&format!(
@@ -218,6 +542,41 @@ impl ToolInspectionSnapshot {
                 }
             }
             render_bounded_evidence(&mut out, "cache control type", &tool.cache_control_type);
+            out.push_str(&format!(
+                "   request state: {}\n   in request: {}\n",
+                tool.visibility.label(),
+                yes_no(tool.visibility.in_request())
+            ));
+            match &tool.provenance {
+                Evidence::Known { value } => {
+                    out.push_str(&format!("   provenance: {}\n", value.label()));
+                }
+                Evidence::Unknown { reason } => {
+                    out.push_str(&format!("   provenance: unknown ({reason})\n"));
+                }
+            }
+            render_bounded_evidence(&mut out, "MCP server", &tool.mcp_server);
+            match &tool.capabilities {
+                Evidence::Known { value } => {
+                    let rendered = value
+                        .rendered
+                        .iter()
+                        .map(|entry| entry.value.as_str())
+                        .collect::<Vec<_>>();
+                    out.push_str(&format!(
+                        "   capabilities: {}\n   capabilities count: {}\n   capabilities omitted: {}\n",
+                        serde_json::to_string(&rendered)
+                            .unwrap_or_else(|_| "unavailable".to_string()),
+                        value.count,
+                        value.omitted
+                    ));
+                }
+                Evidence::Unknown { reason } => {
+                    out.push_str(&format!("   capabilities: unknown ({reason})\n"));
+                }
+            }
+            render_bounded_evidence(&mut out, "approval", &tool.approval);
+            render_bool_evidence(&mut out, "model visible", &tool.model_visible);
         }
         out
     }
@@ -227,7 +586,15 @@ impl ToolInspectionSnapshot {
     }
 }
 
-fn project_tool(index: usize, tool: &Tool) -> ToolProjection {
+fn project_tool(index: usize, tool: &Tool, surface: Option<&ToolSurfaceContext>) -> ToolProjection {
+    let facts = surface.and_then(|surface| {
+        surface
+            .registry
+            .iter()
+            .find(|facts| facts.name == tool.name)
+    });
+    let no_surface = "surface context not captured for this request";
+    let not_registered = "tool is not in the registry";
     ToolProjection {
         ordinal: index + 1,
         name: bounded_chars(&tool.name, MAX_NAME_CHARS),
@@ -267,6 +634,63 @@ fn project_tool(index: usize, tool: &Tool) -> ToolProjection {
                 .as_ref()
                 .map(|value| value.cache_type.as_str()),
         ),
+        provenance: surface.map_or_else(
+            || unknown(no_surface),
+            |surface| Evidence::Known {
+                value: surface.provenance(&tool.name),
+            },
+        ),
+        mcp_server: surface.map_or_else(
+            || unknown(no_surface),
+            |surface| {
+                surface.mcp_servers.get(&tool.name).map_or_else(
+                    || unknown("the MCP pool did not attribute this tool name"),
+                    |server| Evidence::Known {
+                        value: bounded_chars(server, MAX_AUXILIARY_CHARS),
+                    },
+                )
+            },
+        ),
+        capabilities: match (surface, facts) {
+            (None, _) => unknown(no_surface),
+            (Some(_), None) => unknown(not_registered),
+            (Some(_), Some(facts)) => {
+                let rendered = facts
+                    .capabilities
+                    .iter()
+                    .take(MAX_ALLOWED_CALLERS)
+                    .map(|value| bounded_chars(value, MAX_ALLOWED_CALLER_CHARS))
+                    .collect::<Vec<_>>();
+                Evidence::Known {
+                    value: BoundedList {
+                        count: facts.capabilities.len(),
+                        omitted: facts.capabilities.len().saturating_sub(rendered.len()),
+                        rendered,
+                    },
+                }
+            }
+        },
+        approval: match (surface, facts) {
+            (None, _) => unknown(no_surface),
+            (Some(_), None) => unknown(not_registered),
+            (Some(_), Some(facts)) => Evidence::Known {
+                value: bounded_chars(&facts.approval, MAX_AUXILIARY_CHARS),
+            },
+        },
+        model_visible: match (surface, facts) {
+            (None, _) => unknown(no_surface),
+            (Some(_), None) => unknown(not_registered),
+            (Some(_), Some(facts)) => Evidence::Known {
+                value: facts.model_visible,
+            },
+        },
+        // Every projected tool is carried by this prepared request; the
+        // transport flag only says whether its schema rides along now.
+        visibility: match tool.defer_loading {
+            Some(true) => ToolVisibility::Deferred,
+            Some(false) => ToolVisibility::Active,
+            None => ToolVisibility::InRequest,
+        },
     }
 }
 
@@ -473,6 +897,246 @@ mod tests {
         assert!(text.contains("Provider-wire tool payload: unavailable"));
     }
 
+    fn facts(name: &str, plugin: bool, model_visible: bool) -> RegistryFacts {
+        RegistryFacts {
+            name: name.to_string(),
+            description: format!("{name} registry description"),
+            model_visible,
+            capabilities: vec!["ReadOnly".to_string()],
+            approval: "Auto".to_string(),
+            plugin,
+        }
+    }
+
+    fn surface() -> ToolSurfaceContext {
+        ToolSurfaceContext {
+            registry: vec![
+                facts("read_file", false, true),
+                facts("plugin_tool", true, true),
+                facts("hidden_alias", false, false),
+                facts("not_sent", false, true),
+            ],
+            mcp_servers: BTreeMap::from([(
+                "mcp_my_server_read_file".to_string(),
+                "my_server".to_string(),
+            )]),
+            synthetic_names: vec!["tool_search".to_string()],
+            provider: ProviderAvailability::Available {
+                provider: "Deepseek".to_string(),
+                model: "deepseek-chat".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn surface_context_turns_provenance_and_attribution_into_truth() {
+        let tools = vec![
+            tool("read_file"),
+            tool("plugin_tool"),
+            tool("mcp_my_server_read_file"),
+            tool("tool_search"),
+            tool("stranger"),
+        ];
+        let surface = surface();
+        let snapshot = ToolInspectionSnapshot::from_prepared_request_with_surface(
+            "turn",
+            1,
+            Some(&tools),
+            Some(&surface),
+        );
+
+        let provenance = |name: &str| {
+            snapshot
+                .tools
+                .iter()
+                .find(|entry| entry.name.value == name)
+                .map(|entry| entry.provenance.clone())
+                .expect("projected tool")
+        };
+        for (name, expected) in [
+            ("read_file", ToolProvenance::Builtin),
+            ("plugin_tool", ToolProvenance::Plugin),
+            ("mcp_my_server_read_file", ToolProvenance::Mcp),
+            ("tool_search", ToolProvenance::Synthetic),
+            // Captured context, no resolved origin: unknown is the answer.
+            ("stranger", ToolProvenance::Unknown),
+        ] {
+            assert_eq!(
+                provenance(name),
+                Evidence::Known { value: expected },
+                "provenance for {name}"
+            );
+        }
+
+        let mcp = snapshot
+            .tools
+            .iter()
+            .find(|entry| entry.name.value == "mcp_my_server_read_file")
+            .expect("mcp tool");
+        // Attribution comes from the pool, not from splitting on `_`.
+        assert_eq!(
+            mcp.mcp_server,
+            Evidence::Known {
+                value: BoundedString {
+                    value: "my_server".to_string(),
+                    truncated: false,
+                }
+            }
+        );
+
+        let read_file = snapshot
+            .tools
+            .iter()
+            .find(|entry| entry.name.value == "read_file")
+            .expect("read_file");
+        assert!(matches!(read_file.capabilities, Evidence::Known { .. }));
+        assert_eq!(
+            read_file.approval,
+            Evidence::Known {
+                value: BoundedString {
+                    value: "Auto".to_string(),
+                    truncated: false,
+                }
+            }
+        );
+        assert_eq!(read_file.model_visible, Evidence::Known { value: true });
+
+        // Unregistered tools stay unknown rather than being reported as "none".
+        let stranger = snapshot
+            .tools
+            .iter()
+            .find(|entry| entry.name.value == "stranger")
+            .expect("stranger");
+        assert!(matches!(stranger.capabilities, Evidence::Unknown { .. }));
+        assert!(matches!(stranger.approval, Evidence::Unknown { .. }));
+
+        // The unavailable set shrinks to what nothing here can observe.
+        assert_eq!(
+            snapshot.unavailable_for_this_request,
+            vec!["provider_wire_payload"]
+        );
+        assert!(snapshot.provider.is_available());
+        assert!(snapshot.registry_facts_present);
+        assert_eq!(snapshot.registry_tool_count, Evidence::Known { value: 4 });
+
+        let text = snapshot.render_text();
+        assert!(text.contains("provenance: synthetic"), "{text}");
+        assert!(text.contains("MCP server: \"my_server\""), "{text}");
+        assert!(text.contains("Provider: \"Deepseek\""), "{text}");
+        assert!(
+            text.contains("Provider-wire tool payload: unavailable"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn registry_only_tools_are_counted_without_expanding_the_projection() {
+        let tools = vec![tool("read_file")];
+        let surface = surface();
+        let snapshot = ToolInspectionSnapshot::from_prepared_request_with_surface(
+            "turn",
+            1,
+            Some(&tools),
+            Some(&surface),
+        );
+
+        // Only the request's tools are projected; the rest are counted.
+        assert_eq!(snapshot.tools.len(), 1);
+        let Evidence::Known { value } = &snapshot.registry_only_tools else {
+            panic!("registry-only tools must be known when facts were captured");
+        };
+        // `hidden_alias` is not model-visible, so it is not a missing tool.
+        assert_eq!(value.count, 2);
+        let rendered = value
+            .rendered
+            .iter()
+            .map(|entry| entry.value.as_str())
+            .collect::<Vec<_>>();
+        // Order follows the registry facts as supplied; the producer sorts.
+        assert_eq!(rendered, vec!["plugin_tool", "not_sent"]);
+
+        // Everything projected is in the request; the request is the evidence.
+        assert!(snapshot.tools.iter().all(|entry| {
+            entry.visibility.in_request() && entry.visibility == ToolVisibility::Active
+        }));
+    }
+
+    #[test]
+    fn absent_surface_keeps_every_registry_derived_field_unknown() {
+        let tools = vec![tool("read_file")];
+        let snapshot = ToolInspectionSnapshot::from_prepared_request("turn", 1, Some(&tools));
+
+        assert_eq!(snapshot.provider, ProviderAvailability::Unknown);
+        assert!(!snapshot.registry_facts_present);
+        assert!(matches!(
+            snapshot.registry_tool_count,
+            Evidence::Unknown { .. }
+        ));
+        assert!(matches!(
+            snapshot.registry_only_tools,
+            Evidence::Unknown { .. }
+        ));
+        assert_eq!(
+            snapshot.unavailable_for_this_request,
+            vec![
+                "provider_wire_payload",
+                "provider",
+                "model",
+                "approval",
+                "provenance",
+                "capabilities",
+            ]
+        );
+        let entry = &snapshot.tools[0];
+        for evidence in [
+            matches!(entry.provenance, Evidence::Unknown { .. }),
+            matches!(entry.mcp_server, Evidence::Unknown { .. }),
+            matches!(entry.capabilities, Evidence::Unknown { .. }),
+            matches!(entry.approval, Evidence::Unknown { .. }),
+            matches!(entry.model_visible, Evidence::Unknown { .. }),
+        ] {
+            assert!(evidence);
+        }
+        // Wire facts are still exact without a surface context.
+        assert!(entry.visibility.in_request());
+        assert!(snapshot.active_tool_catalog_sha256.is_some());
+    }
+
+    #[test]
+    fn provider_receipt_records_an_unresolved_client_without_borrowing_registry_truth() {
+        let tools = vec![tool("read_file")];
+        let surface = ToolSurfaceContext {
+            registry: vec![facts("read_file", false, true)],
+            provider: ProviderAvailability::Unavailable {
+                reason: "no model client resolved for this turn".to_string(),
+            },
+            ..ToolSurfaceContext::default()
+        };
+        let snapshot = ToolInspectionSnapshot::from_prepared_request_with_surface(
+            "turn",
+            1,
+            Some(&tools),
+            Some(&surface),
+        );
+
+        // A full registry does not make a provider available.
+        assert!(!snapshot.provider.is_available());
+        assert_eq!(snapshot.provider.label(), "unavailable");
+        assert!(snapshot.unavailable_for_this_request.contains(&"provider"));
+        // Registry-derived truth is unaffected by the missing client.
+        assert!(
+            !snapshot
+                .unavailable_for_this_request
+                .contains(&"provenance")
+        );
+        assert_eq!(
+            snapshot.tools[0].provenance,
+            Evidence::Known {
+                value: ToolProvenance::Builtin
+            }
+        );
+    }
+
     #[test]
     fn capture_and_rendering_are_bounded_with_explicit_receipts() {
         let mut tools = (0..40)
@@ -503,8 +1167,12 @@ mod tests {
         // The catalog digest is fixed-width, so it survives the byte bound.
         assert!(snapshot.active_tool_catalog_sha256.is_some());
         let json = snapshot.render_json().expect("bounded JSON");
+        // 160 KiB: the per-tool evidence fields (provenance, MCP server,
+        // capabilities, approval, visibility) each carry an explicit reason
+        // string when unresolved, which is the point — the cap moved, the
+        // bound did not disappear.
         assert!(
-            json.len() < 131_072,
+            json.len() < 163_840,
             "projection grew to {} bytes",
             json.len()
         );

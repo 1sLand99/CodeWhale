@@ -3285,6 +3285,7 @@ async fn tool_request_snapshot_matches_the_exact_mock_request_payload() {
             tools,
             AppMode::Agent,
             Vec::new(),
+            None,
         )
         .await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
@@ -3329,7 +3330,7 @@ async fn snapshot_for_catalog(
     );
     let mut turn = crate::core::turn::TurnContext::new(2);
     let (status, error) = engine
-        .handle_deepseek_turn(&mut turn, None, catalog, AppMode::Agent, Vec::new())
+        .handle_deepseek_turn(&mut turn, None, catalog, AppMode::Agent, Vec::new(), None)
         .await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
     let mut events = handle.rx_event.write().await;
@@ -3399,6 +3400,7 @@ async fn request_snapshots_advance_to_the_latest_tool_step() {
             tools,
             AppMode::Agent,
             Vec::new(),
+            None,
         )
         .await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
@@ -3414,6 +3416,135 @@ async fn request_snapshots_advance_to_the_latest_tool_step() {
     assert_eq!(snapshots[0].step, 0);
     assert_eq!(snapshots[1].step, 1);
     assert_eq!(snapshots[1].turn_id.value, turn.id);
+}
+
+#[tokio::test]
+async fn request_snapshot_reports_registry_provenance_for_the_transmitted_catalog() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn("Done.")]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    // Pin `read_file` loaded so this step's request actually carries it; the
+    // point of the test is what a *transmitted* tool is reported as.
+    let mut engine_config = deterministic_engine_config(workspace.path());
+    engine_config.tools_always_load = HashSet::from(["read_file".to_string()]);
+    let (mut engine, handle) =
+        Engine::new_with_model_client(engine_config, &Config::default(), client);
+    let context = crate::tools::ToolContext::new(workspace.path().to_path_buf());
+    let mut registry = crate::tools::ToolRegistry::new(context);
+    registry.register(std::sync::Arc::new(crate::tools::file::ReadFileTool));
+    // `read_file` is a hidden compatibility alias, so `to_api_tools` would hand
+    // the turn an empty catalog and nothing would be transmitted. Hand the
+    // engine an explicit catalog instead: the registry is still the source of
+    // the *facts*, including the fact that this tool is not model-visible.
+    let tools = Some(vec![crate::models::Tool {
+        tool_type: None,
+        name: "read_file".to_string(),
+        description: "Read a file".to_string(),
+        input_schema: json!({"type": "object"}),
+        allowed_callers: Some(vec!["direct".to_string()]),
+        defer_loading: Some(false),
+        input_examples: None,
+        strict: None,
+        cache_control: None,
+    }]);
+
+    // The same surface context `handle_send_message` resolves for a real turn:
+    // real registry facts, real (empty) MCP attribution, the engine's own
+    // synthetic-name list, and the resolved model client's receipt.
+    let synthetic_names = super::tool_catalog::default_synthetic_catalog_tool_names();
+    let surface = crate::tool_inspection::ToolSurfaceContext {
+        registry: registry.registry_facts(&HashSet::new()),
+        mcp_servers: std::collections::BTreeMap::new(),
+        synthetic_names: synthetic_names.clone(),
+        provider: engine.tool_surface_provider_receipt(),
+    };
+
+    let mut turn = crate::core::turn::TurnContext::new(4);
+    let (status, error) = engine
+        .handle_deepseek_turn(
+            &mut turn,
+            Some(&registry),
+            tools,
+            AppMode::Agent,
+            Vec::new(),
+            Some(surface),
+        )
+        .await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+
+    let mut events = handle.rx_event.write().await;
+    let snapshot = std::iter::from_fn(|| events.try_recv().ok())
+        .find_map(|event| match event {
+            Event::ToolRequestSnapshot { snapshot } => Some(snapshot),
+            _ => None,
+        })
+        .expect("request snapshot");
+
+    let transmitted = mock
+        .last_request()
+        .expect("captured request")
+        .tools
+        .unwrap_or_default();
+    assert!(!transmitted.is_empty(), "the turn must carry tools");
+
+    // The digest is the request path's, over what was prepared.
+    assert_eq!(
+        snapshot.active_tool_catalog_sha256.as_deref(),
+        Some(crate::core::engine::preview::active_tool_catalog_sha256(&transmitted).as_str())
+    );
+
+    // Provenance is registry-derived truth, not "unavailable".
+    assert!(snapshot.registry_facts_present);
+    assert!(snapshot.provider.is_available());
+    assert_eq!(
+        snapshot.unavailable_for_this_request,
+        vec!["provider_wire_payload"]
+    );
+
+    let read_file = snapshot
+        .tools
+        .iter()
+        .find(|entry| entry.name.value == "read_file")
+        .expect("read_file projected");
+    assert_eq!(
+        read_file.provenance,
+        crate::tool_inspection::Evidence::Known {
+            value: crate::tool_inspection::ToolProvenance::Builtin
+        }
+    );
+    assert!(matches!(
+        read_file.approval,
+        crate::tool_inspection::Evidence::Known { .. }
+    ));
+    // Registry truth, not an inference from the request: this alias is hidden
+    // from the model catalog even though this catalog carried it explicitly.
+    assert_eq!(
+        read_file.model_visible,
+        crate::tool_inspection::Evidence::Known { value: false }
+    );
+    assert!(read_file.visibility.in_request());
+
+    // Anything the engine injected rather than registered is reported as
+    // synthetic, from the engine's own list — never guessed from the name.
+    for entry in &snapshot.tools {
+        if synthetic_names.contains(&entry.name.value) {
+            assert_eq!(
+                entry.provenance,
+                crate::tool_inspection::Evidence::Known {
+                    value: crate::tool_inspection::ToolProvenance::Synthetic
+                },
+                "'{}' is engine-injected, not registry-backed",
+                entry.name.value
+            );
+            // Not in the registry, so capabilities are unknown, not "none".
+            assert!(matches!(
+                entry.capabilities,
+                crate::tool_inspection::Evidence::Unknown { .. }
+            ));
+        }
+    }
 }
 
 fn deterministic_engine_config(workspace: &Path) -> EngineConfig {
@@ -3661,6 +3792,7 @@ async fn coalesced_raw_read_error_touches_working_set_once() {
                 tools,
                 AppMode::Agent,
                 Vec::new(),
+                None,
             )
             .await;
 
