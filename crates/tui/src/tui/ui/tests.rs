@@ -8802,6 +8802,7 @@ fn subagent_token_usage_updates_live_cost_counter_without_card_change() {
             agent_id: "agent-a".to_string(),
             provider: ApiProvider::Deepseek,
             model: "deepseek-v4-flash".to_string(),
+            billing: None,
             usage: crate::models::Usage {
                 input_tokens: 10_000,
                 output_tokens: 1_000,
@@ -8829,6 +8830,7 @@ fn subagent_token_usage_prices_the_child_route_not_the_parent_route() {
             agent_id: "agent-codex".to_string(),
             provider: ApiProvider::OpenaiCodex,
             model: "gpt-5.5".to_string(),
+            billing: None,
             usage: crate::models::Usage {
                 input_tokens: 10_000,
                 output_tokens: 1_000,
@@ -8850,6 +8852,7 @@ fn subagent_token_usage_is_deduped_by_mailbox_sequence() {
         agent_id: "agent-a".to_string(),
         provider: ApiProvider::Deepseek,
         model: "deepseek-v4-flash".to_string(),
+        billing: None,
         usage: crate::models::Usage {
             input_tokens: 10_000,
             output_tokens: 1_000,
@@ -13113,6 +13116,28 @@ fn shell_wait_without_command_uses_task_id_until_command_metadata_arrives() {
 #[test]
 fn tool_child_usage_metadata_updates_live_cost_counter() {
     let mut app = create_test_app();
+    // An in-process review child publishes no route of its own, so it runs on
+    // the parent turn's client and is billed from the parent's frozen receipt.
+    // Without a receipt there is nothing sound to bill from, so the turn has to
+    // be active for the child to accrue anything.
+    app.active_turn = Some(crate::tui::app::ActiveTurnMetadata {
+        turn_id: "turn-child-usage".to_string(),
+        created_at: chrono::Utc::now(),
+        route: Some(crate::core::events::TurnRoute {
+            provider: ApiProvider::Deepseek,
+            provider_identity: "deepseek".to_string(),
+            model: "deepseek-v4-flash".to_string(),
+            auto_model: false,
+            receipt: None,
+            base_url: crate::config::DEFAULT_DEEPSEEK_BASE_URL.to_string(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
+        }),
+        auto_route_receipt: None,
+        suggestion_authority: None,
+        billing_identity: Some("deepseek".to_string()),
+        billing_product: crate::route_billing::RouteProduct::Unproven,
+        billing_base_url: crate::config::DEFAULT_DEEPSEEK_BASE_URL.to_string(),
+    });
     let result = Ok(crate::tools::spec::ToolResult::success("ok").with_metadata(
         serde_json::json!({
             "child_model": "deepseek-v4-flash",
@@ -17433,6 +17458,7 @@ fn duplicate_mailbox_token_usage_does_not_regress_displayed_cost() {
         agent_id: "agent-x".to_string(),
         provider: ApiProvider::Deepseek,
         model: "deepseek-v4-flash".to_string(),
+        billing: None,
         usage: crate::models::Usage {
             input_tokens: 10_000,
             output_tokens: 1_000,

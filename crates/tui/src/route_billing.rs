@@ -64,6 +64,67 @@ impl BillingPresentation {
     }
 }
 
+/// Serializable mirror of [`BillingPresentation`] for crossing the child →
+/// parent mailbox boundary. `BillingPresentation` borrows a `&'static str`
+/// label, which serde cannot deserialize, so the token-usage envelope carries
+/// this owned form instead. Conversion back recognizes only the labels
+/// [`for_route`] itself produces; an unrecognized free-text label fails
+/// closed to `Unknown` rather than inventing a quota claim.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ChildBillingProvenance {
+    Metered,
+    Subscription { label: String },
+    Local,
+    Unknown,
+}
+
+impl From<BillingPresentation> for ChildBillingProvenance {
+    fn from(billing: BillingPresentation) -> Self {
+        match billing {
+            BillingPresentation::Metered => Self::Metered,
+            BillingPresentation::Subscription(label) => Self::Subscription {
+                label: label.to_string(),
+            },
+            BillingPresentation::Local => Self::Local,
+            BillingPresentation::Unknown => Self::Unknown,
+        }
+    }
+}
+
+impl ChildBillingProvenance {
+    /// Convert back to the presentation form consumed by pricing.
+    #[must_use]
+    pub fn as_billing_presentation(&self) -> BillingPresentation {
+        match self {
+            Self::Metered => BillingPresentation::Metered,
+            Self::Local => BillingPresentation::Local,
+            Self::Unknown => BillingPresentation::Unknown,
+            Self::Subscription { label } => static_subscription_label(label).map_or(
+                BillingPresentation::Unknown,
+                BillingPresentation::Subscription,
+            ),
+        }
+    }
+}
+
+/// The subscription labels [`for_route`] can emit, mapped back to their
+/// static form. Anything else is not a label this process vouches for.
+fn static_subscription_label(label: &str) -> Option<&'static str> {
+    Some(match label {
+        "Codex OAuth quota" => "Codex OAuth quota",
+        "OpenCode Go quota" => "OpenCode Go quota",
+        "Z.ai Coding Plan quota" => "Z.ai Coding Plan quota",
+        "MiMo token plan" => "MiMo token plan",
+        "Kimi Code quota" => "Kimi Code quota",
+        "MiniMax Token Plan quota" => "MiniMax Token Plan quota",
+        "Grok OAuth quota" => "Grok OAuth quota",
+        "Claude OAuth quota" => "Claude OAuth quota",
+        "StepFun Step Plan quota" => "StepFun Step Plan quota",
+        _ => return None,
+    })
+}
+
 /// Immutable, non-secret receipt of the route a request was dispatched on.
 ///
 /// This is what a child/non-active route must be billed from. Re-reading an
@@ -379,31 +440,153 @@ fn is_zai_coding_plan_endpoint(base_url: &str) -> bool {
         .ends_with("/api/coding/paas/v4")
 }
 
-/// Billing for a child route when its full dispatch config is not present in
-/// the completion envelope. Never invent metered dollars for providers that
-/// support subscription/OAuth routes; the parent route remains authoritative
-/// only when the provider is the same.
+/// Billing for a child route. Billing is never guessed from provider
+/// identity:
+///
+/// - `child_provenance` — the child's own route truth, classified by
+///   [`for_dispatched_route`] from the immutable endpoint receipt captured
+///   when its client was built, and carried on the usage envelope — always
+///   wins.
+/// - Without provenance, a child on the parent's provider runs the parent's
+///   exact route (review/verify/rlm children reuse the session client), so
+///   it inherits `parent_billing`.
+/// - Without provenance, a cross-provider child fails closed: local routes
+///   stay `Local`; everything else is `Unknown` — no invented dollars and no
+///   invented subscription labels.
+///
+/// Provider-enum-only child billing.
+///
+/// **Superseded by [`for_child_route_receipt`].** Retained for the
+/// subagent-routing path and its existing coverage, which compare first-party
+/// providers whose identity key is the provider string itself. It must not be
+/// used where a named custom route can appear: every custom route maps to
+/// `ApiProvider::Custom`, so the enum comparison below cannot tell custom
+/// vendor A from custom vendor B.
 #[must_use]
 pub fn for_child_route(
     parent_provider: ApiProvider,
     parent_billing: BillingPresentation,
     child_provider: ApiProvider,
+    child_provenance: Option<BillingPresentation>,
 ) -> BillingPresentation {
+    if let Some(provenance) = child_provenance {
+        return provenance;
+    }
     if child_provider == parent_provider {
         return parent_billing;
     }
     match child_provider {
         ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm => BillingPresentation::Local,
-        ApiProvider::OpencodeGo => BillingPresentation::Subscription("OpenCode Go quota"),
-        ApiProvider::OpenaiCodex
-        | ApiProvider::Xai
-        | ApiProvider::Moonshot
-        | ApiProvider::Anthropic
-        | ApiProvider::XiaomiMimo
-        | ApiProvider::Zai => BillingPresentation::Subscription("provider quota"),
-        ApiProvider::Stepfun | ApiProvider::Custom => BillingPresentation::Unknown,
-        _ => BillingPresentation::Metered,
+        _ => BillingPresentation::Unknown,
     }
+}
+
+/// Identity-aware child billing, from the parent's frozen receipt.
+#[must_use]
+pub fn for_child_route_receipt(
+    parent: ChildParentRoute<'_>,
+    child: ChildRouteClaim<'_>,
+    child_provenance: Option<BillingPresentation>,
+) -> BillingPresentation {
+    if let Some(provenance) = child_provenance {
+        return provenance;
+    }
+    // A child that claims no route at all ran in-process on the parent's own
+    // client (review/verify/rlm critics reuse the session client), so the
+    // parent's frozen receipt *is* its receipt. This is inheritance from an
+    // immutable capture, not from live session state.
+    if !child.named {
+        return parent.billing;
+    }
+    // Same-route inheritance requires the *whole* route to match, not just the
+    // provider enum. Every named custom route maps to `ApiProvider::Custom`,
+    // so an enum comparison would let a child on custom vendor A inherit the
+    // parent's product label from custom vendor B.
+    if child.provider == Some(parent.provider)
+        && child.identity.is_some_and(|key| key == parent.identity)
+    {
+        return parent.billing;
+    }
+    // A child that named a provider string this build cannot parse names no
+    // route we can vouch for. That is not a licence to inherit: Unknown.
+    match child.provider {
+        Some(ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm) => {
+            BillingPresentation::Local
+        }
+        _ => BillingPresentation::Unknown,
+    }
+}
+
+/// Non-secret route facts a child tool must publish alongside its token usage.
+///
+/// Emitted from the child's own dispatched client, so the parent consumer never
+/// has to infer which route ran. Keys are pinned by
+/// `child_route_metadata_round_trips_through_the_consumer` so a producer and
+/// the reader in `tui::tool_routing` cannot drift apart.
+///
+/// `product` is left [`RouteProduct::Unproven`] when the child has no
+/// route-scoped `Config` in reach: that classifies credential-shaped providers
+/// as Unknown, which is the honest answer rather than a guess. A child running
+/// the parent's exact route is recognized by identity and inherits the
+/// parent's frozen receipt instead.
+/// Currently exercised only by
+/// `child_route_metadata_round_trips_through_the_consumer`: no tool producer
+/// emits the keys yet, and the reader in `tui::tool_routing` treats them as
+/// optional. The pairing lives here so a producer and that reader cannot drift
+/// apart when one is wired up.
+#[cfg(test)]
+#[must_use]
+pub fn child_route_metadata(
+    provider: ApiProvider,
+    identity: &str,
+    base_url: &str,
+    product: RouteProduct,
+) -> serde_json::Value {
+    let billing = for_dispatched_receipt(DispatchedReceipt {
+        provider,
+        identity: Some(identity),
+        base_url,
+        product,
+    });
+    serde_json::json!({
+        "child_provider": provider.as_str(),
+        "child_provider_identity": identity,
+        "child_billing": ChildBillingProvenance::from(billing),
+    })
+}
+
+/// The parent turn's frozen receipt, as the only inheritance basis a child may
+/// use.
+///
+/// Deliberately not `app.billing_presentation`: that chip is live session
+/// state, rewritten on every `/provider` switch, so reading it when a child's
+/// usage envelope arrives bills the child against whatever route the session
+/// points at *now*.
+#[derive(Debug, Clone, Copy)]
+pub struct ChildParentRoute<'a> {
+    pub provider: ApiProvider,
+    /// The parent turn's captured identity key.
+    pub identity: &'a str,
+    /// Billing classified from the parent turn's dispatch receipt.
+    pub billing: BillingPresentation,
+}
+
+/// What a child claims about its own route.
+///
+/// `named` distinguishes the two very different silences:
+///
+/// - `named: false` — the child published no route at all, which means it ran
+///   on the parent's own client. Inheriting the parent's frozen receipt is
+///   correct.
+/// - `named: true` with `provider: None` — the child published a provider
+///   string this build cannot parse. It named *some* route, just not one we
+///   recognize, so inheritance would be a guess: Unknown.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChildRouteClaim<'a> {
+    /// Whether the child published any route string at all.
+    pub named: bool,
+    pub provider: Option<ApiProvider>,
+    pub identity: Option<&'a str>,
 }
 
 /// Whether this route may show a dollar amount for the given model.
@@ -1166,8 +1349,20 @@ mod tests {
                 ApiProvider::Deepseek,
                 BillingPresentation::Metered,
                 ApiProvider::OpencodeGo,
+                None,
             ),
-            BillingPresentation::Subscription("OpenCode Go quota")
+            BillingPresentation::Unknown,
+            "provider identity alone must not claim OpenCode Go quota"
+        );
+        assert_eq!(
+            for_child_route(
+                ApiProvider::Deepseek,
+                BillingPresentation::Metered,
+                ApiProvider::OpencodeGo,
+                Some(BillingPresentation::Subscription("OpenCode Go quota")),
+            ),
+            BillingPresentation::Subscription("OpenCode Go quota"),
+            "the child's own route truth is what may claim the quota"
         );
     }
 
@@ -1213,6 +1408,11 @@ mod tests {
 
     #[test]
     fn stepfun_payg_shows_money_but_step_plan_stays_subscription_billed() {
+        // Same reason as the Z.ai default test: the PAYG half asserts against
+        // StepFun's shipped default endpoint.
+        let _lock = crate::test_support::lock_test_env();
+        let _generic = crate::test_support::EnvVarGuard::remove("CODEWHALE_BASE_URL");
+        let _legacy = crate::test_support::EnvVarGuard::remove("DEEPSEEK_BASE_URL");
         let payg_billing = for_route(&Config::default(), ApiProvider::Stepfun);
         assert_eq!(payg_billing, BillingPresentation::Metered);
         let payg_chip = usage_chip(
@@ -1252,6 +1452,7 @@ mod tests {
                 ApiProvider::Deepseek,
                 BillingPresentation::Metered,
                 ApiProvider::Stepfun,
+                None,
             ),
             BillingPresentation::Unknown
         );
@@ -1264,8 +1465,10 @@ mod tests {
                 ApiProvider::Deepseek,
                 BillingPresentation::Metered,
                 ApiProvider::Zai,
+                None,
             ),
-            BillingPresentation::Subscription("provider quota")
+            BillingPresentation::Unknown,
+            "without the child's route truth, fail closed instead of guessing a quota"
         );
     }
 
@@ -1472,14 +1675,28 @@ mod tests {
                 ApiProvider::Deepseek,
                 BillingPresentation::Metered,
                 ApiProvider::Xai,
+                None,
             )
             .shows_money()
         );
+        // Identity alone no longer claims metered dollars either: without the
+        // child's own route truth a cross-provider child fails closed.
+        assert!(
+            !for_child_route(
+                ApiProvider::Deepseek,
+                BillingPresentation::Metered,
+                ApiProvider::Openrouter,
+                None,
+            )
+            .shows_money()
+        );
+        // The child's own metered provenance is what prices the route.
         assert!(
             for_child_route(
                 ApiProvider::Deepseek,
                 BillingPresentation::Metered,
                 ApiProvider::Openrouter,
+                Some(BillingPresentation::Metered),
             )
             .shows_money()
         );
@@ -1940,5 +2157,253 @@ mod tests {
             ),
             BillingPresentation::Unknown
         );
+    }
+
+    #[test]
+    fn same_provider_child_without_provenance_inherits_parent_billing() {
+        assert_eq!(
+            for_child_route(
+                ApiProvider::Moonshot,
+                BillingPresentation::Subscription("Kimi Code quota"),
+                ApiProvider::Moonshot,
+                None,
+            ),
+            BillingPresentation::Subscription("Kimi Code quota")
+        );
+        assert_eq!(
+            for_child_route(
+                ApiProvider::Minimax,
+                BillingPresentation::Metered,
+                ApiProvider::Minimax,
+                None,
+            ),
+            BillingPresentation::Metered
+        );
+    }
+
+    #[test]
+    fn cross_provider_child_without_provenance_fails_closed_unknown() {
+        // Moonshot and MiniMax both run metered AND subscription routes, so
+        // identity alone must never guess either direction.
+        for child in [ApiProvider::Moonshot, ApiProvider::Minimax] {
+            assert_eq!(
+                for_child_route(
+                    ApiProvider::Deepseek,
+                    BillingPresentation::Metered,
+                    child,
+                    None,
+                ),
+                BillingPresentation::Unknown,
+                "{child:?} identity must not guess subscription or metered billing"
+            );
+        }
+        // Local routes are the one identity-derived fact that stays truthful.
+        for child in [ApiProvider::Ollama, ApiProvider::Sglang, ApiProvider::Vllm] {
+            assert_eq!(
+                for_child_route(
+                    ApiProvider::Deepseek,
+                    BillingPresentation::Metered,
+                    child,
+                    None,
+                ),
+                BillingPresentation::Local
+            );
+        }
+    }
+
+    #[test]
+    fn child_provenance_wins_over_parent_route_and_provider_identity() {
+        // Direct-platform Moonshot child under a Kimi Code membership
+        // parent: the child's own metered truth must price the route.
+        assert_eq!(
+            for_child_route(
+                ApiProvider::Moonshot,
+                BillingPresentation::Subscription("Kimi Code quota"),
+                ApiProvider::Moonshot,
+                Some(BillingPresentation::Metered),
+            ),
+            BillingPresentation::Metered
+        );
+        // Membership Moonshot child under a metered parent: quota wins.
+        assert_eq!(
+            for_child_route(
+                ApiProvider::Deepseek,
+                BillingPresentation::Metered,
+                ApiProvider::Moonshot,
+                Some(BillingPresentation::Subscription("Kimi Code quota")),
+            ),
+            BillingPresentation::Subscription("Kimi Code quota")
+        );
+        // MiniMax Token Plan provenance never invents dollars; metered
+        // provenance is allowed to accrue.
+        assert!(
+            !for_child_route(
+                ApiProvider::Deepseek,
+                BillingPresentation::Metered,
+                ApiProvider::Minimax,
+                Some(BillingPresentation::Subscription(
+                    "MiniMax Token Plan quota"
+                )),
+            )
+            .shows_money()
+        );
+        assert!(
+            for_child_route(
+                ApiProvider::Deepseek,
+                BillingPresentation::Metered,
+                ApiProvider::Minimax,
+                Some(BillingPresentation::Metered),
+            )
+            .shows_money()
+        );
+    }
+
+    #[test]
+    fn child_billing_provenance_round_trips_through_serde() {
+        for billing in [
+            BillingPresentation::Metered,
+            BillingPresentation::Subscription("Kimi Code quota"),
+            BillingPresentation::Subscription("MiniMax Token Plan quota"),
+            BillingPresentation::Local,
+            BillingPresentation::Unknown,
+        ] {
+            let provenance = ChildBillingProvenance::from(billing);
+            let json = serde_json::to_string(&provenance).expect("serialize provenance");
+            let back: ChildBillingProvenance =
+                serde_json::from_str(&json).expect("deserialize provenance");
+            assert_eq!(back.as_billing_presentation(), billing);
+        }
+        // An unrecognized free-text label fails closed rather than
+        // inventing a quota claim.
+        assert_eq!(
+            ChildBillingProvenance::Subscription {
+                label: "free lunch".to_string(),
+            }
+            .as_billing_presentation(),
+            BillingPresentation::Unknown
+        );
+    }
+
+    /// Two named custom routes are the same `ApiProvider::Custom`. Identity,
+    /// not the enum, decides whether a child may inherit the parent's product.
+    #[test]
+    fn custom_siblings_do_not_inherit_each_others_product() {
+        let parent = ChildParentRoute {
+            provider: ApiProvider::Custom,
+            identity: "gateway-a",
+            billing: BillingPresentation::Metered,
+        };
+
+        // Same vendor: inheritance is sound.
+        assert_eq!(
+            for_child_route_receipt(
+                parent,
+                ChildRouteClaim {
+                    named: true,
+                    provider: Some(ApiProvider::Custom),
+                    identity: Some("gateway-a"),
+                },
+                None,
+            ),
+            BillingPresentation::Metered
+        );
+
+        // Sibling vendor on the same enum: must not borrow gateway-a's product.
+        assert_eq!(
+            for_child_route_receipt(
+                parent,
+                ChildRouteClaim {
+                    named: true,
+                    provider: Some(ApiProvider::Custom),
+                    identity: Some("gateway-b"),
+                },
+                None,
+            ),
+            BillingPresentation::Unknown
+        );
+    }
+
+    /// A child that names an unparseable provider named *some* route, just not
+    /// one this build knows. That is never a licence to inherit.
+    #[test]
+    fn unparseable_child_provider_is_unknown_not_inherited() {
+        let parent = ChildParentRoute {
+            provider: ApiProvider::Anthropic,
+            identity: "anthropic",
+            billing: BillingPresentation::Subscription("Claude OAuth quota"),
+        };
+        assert_eq!(
+            for_child_route_receipt(
+                parent,
+                ChildRouteClaim {
+                    named: true,
+                    provider: None,
+                    identity: Some("some-future-vendor"),
+                },
+                None,
+            ),
+            BillingPresentation::Unknown
+        );
+        // But a child that claims nothing ran the parent's own client.
+        assert_eq!(
+            for_child_route_receipt(parent, ChildRouteClaim::default(), None),
+            BillingPresentation::Subscription("Claude OAuth quota")
+        );
+    }
+
+    /// The producer's metadata keys are exactly the ones the consumer reads.
+    /// Pins the wire contract that previously had a reader and no producer.
+    #[test]
+    fn child_route_metadata_round_trips_through_the_consumer() {
+        let metadata = child_route_metadata(
+            ApiProvider::Ollama,
+            "ollama",
+            "http://localhost:11434/v1",
+            RouteProduct::Unproven,
+        );
+
+        assert_eq!(metadata["child_provider"], "ollama");
+        assert_eq!(metadata["child_provider_identity"], "ollama");
+        let provenance: ChildBillingProvenance =
+            serde_json::from_value(metadata["child_billing"].clone())
+                .expect("child_billing must deserialize with the consumer's type");
+        assert_eq!(
+            provenance.as_billing_presentation(),
+            BillingPresentation::Local
+        );
+    }
+
+    /// A dispatched-route classification survives the child → parent mailbox
+    /// boundary and still beats provider identity at the consumer.
+    #[test]
+    fn dispatched_receipt_survives_the_child_provenance_boundary() {
+        let _lock = crate::test_support::lock_test_env();
+        let _kimi = crate::test_support::EnvVarGuard::set(
+            "KIMI_BASE_URL",
+            "https://api.kimi.com/coding/v1",
+        );
+        let config = config_with(ApiProvider::Moonshot, ProviderConfig::default());
+        let dispatched = for_dispatched_route(
+            &config,
+            DispatchedRoute {
+                provider: ApiProvider::Moonshot,
+                base_url: "https://api.kimi.com/coding/v1",
+            },
+        );
+        let wire = serde_json::to_string(&ChildBillingProvenance::from(dispatched))
+            .expect("serialize dispatch receipt");
+        let back: ChildBillingProvenance =
+            serde_json::from_str(&wire).expect("deserialize dispatch receipt");
+        let billing = for_child_route(
+            ApiProvider::Deepseek,
+            BillingPresentation::Metered,
+            ApiProvider::Moonshot,
+            Some(back.as_billing_presentation()),
+        );
+        assert_eq!(
+            billing,
+            BillingPresentation::Subscription("Kimi Code quota")
+        );
+        assert!(!billing.shows_money());
     }
 }

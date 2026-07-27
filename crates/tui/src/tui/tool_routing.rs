@@ -419,14 +419,58 @@ fn accrue_child_token_cost_if_any(app: &mut App, result: &Result<ToolResult, Too
         reasoning_replay_tokens: None,
         server_tool_use: None,
     };
-    let provider = metadata
+    let child_provider_str = metadata
         .get("child_provider")
         .or_else(|| metadata.get("resolved_provider"))
+        .and_then(serde_json::Value::as_str);
+    let child_provider = child_provider_str.and_then(crate::config::ApiProvider::parse);
+    let child_identity = metadata
+        .get("child_provider_identity")
         .and_then(serde_json::Value::as_str)
-        .and_then(crate::config::ApiProvider::parse)
-        .unwrap_or(app.api_provider);
-    let billing =
-        crate::route_billing::for_child_route(app.api_provider, app.billing_presentation, provider);
+        // Producers that name a provider but no separate identity are naming a
+        // first-party route, whose identity key is the provider string itself.
+        .or(child_provider_str);
+    // Optional child-resolved route truth, produced from the child's own
+    // dispatch receipt (see `child_route_metadata`). Always wins when present.
+    let child_billing = metadata
+        .get("child_billing")
+        .and_then(|value| {
+            serde_json::from_value::<crate::route_billing::ChildBillingProvenance>(value.clone())
+                .ok()
+        })
+        .map(|provenance| provenance.as_billing_presentation());
+    // Inheritance basis is the parent turn's *frozen* receipt, never the live
+    // `app.billing_presentation` chip: a `/provider` switch between dispatch
+    // and this envelope's arrival must not retro-bill the child.
+    let Some(parent_turn) = app.active_turn.as_ref() else {
+        // No parent receipt and no child provenance: nothing to bill from.
+        return;
+    };
+    let parent_billing =
+        crate::route_billing::for_dispatched_receipt(parent_turn.dispatched_receipt());
+    let parent_identity = parent_turn.billing_identity.as_deref().unwrap_or_default();
+    let parent_provider = parent_turn
+        .route
+        .as_ref()
+        .map_or(app.api_provider, |route| route.provider);
+    let billing = crate::route_billing::for_child_route_receipt(
+        crate::route_billing::ChildParentRoute {
+            provider: parent_provider,
+            identity: parent_identity,
+            billing: parent_billing,
+        },
+        crate::route_billing::ChildRouteClaim {
+            named: child_provider_str.is_some(),
+            provider: child_provider,
+            identity: child_identity,
+        },
+        child_billing,
+    );
+    // Price against the route the child actually named. An unparseable
+    // provider string has already forced `billing` to Unknown above, which
+    // shows no money, so falling back to the parent's provider here only
+    // selects a price list that is never consulted.
+    let provider = child_provider.unwrap_or(parent_provider);
     if let Some(cost) =
         crate::pricing::calculate_turn_cost_estimate_for_route(provider, model, &usage, billing)
     {

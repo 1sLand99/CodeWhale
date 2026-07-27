@@ -2775,6 +2775,7 @@ fn subagent_mailbox_keeps_lifecycle_events_reliable() {
             agent_id: "agent_a".to_string(),
             provider: ApiProvider::Deepseek,
             model: "model".to_string(),
+            billing: None,
             usage: Usage::default(),
         }
     ));
@@ -2862,6 +2863,7 @@ fn subagent_mailbox_never_samples_lifecycle_or_usage_events() {
             agent_id: "agent_a".to_string(),
             provider: ApiProvider::Deepseek,
             model: "model".to_string(),
+            billing: None,
             usage: Usage::default(),
         },
         start,

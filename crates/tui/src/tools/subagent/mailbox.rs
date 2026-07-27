@@ -84,6 +84,13 @@ pub enum MailboxMessage {
         provider: ApiProvider,
         /// Model that produced this usage, used for pricing.
         model: String,
+        /// Billing provenance the child resolved from its own dispatch
+        /// config with the same rules as the parent route resolver. `None`
+        /// when the child had no config to resolve from — consumers must
+        /// then fall back (same-provider inheritance / fail-closed unknown),
+        /// never guess from provider identity.
+        #[serde(default)]
+        billing: Option<crate::route_billing::ChildBillingProvenance>,
         /// Provider usage payload, including cache-hit/cache-miss fields.
         usage: Usage,
     },
@@ -134,12 +141,14 @@ impl MailboxMessage {
         agent_id: impl Into<String>,
         provider: ApiProvider,
         model: impl Into<String>,
+        billing: Option<crate::route_billing::ChildBillingProvenance>,
         usage: Usage,
     ) -> Self {
         Self::TokenUsage {
             agent_id: agent_id.into(),
             provider,
             model: model.into(),
+            billing,
             usage,
         }
     }
@@ -549,6 +558,7 @@ mod tests {
                     agent_id: "a9".into(),
                     provider: ApiProvider::Deepseek,
                     model: "deepseek-v4-flash".into(),
+                    billing: None,
                     usage: Usage {
                         input_tokens: 100,
                         output_tokens: 50,

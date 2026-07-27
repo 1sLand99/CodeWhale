@@ -452,6 +452,7 @@ pub(super) fn handle_subagent_mailbox(app: &mut App, seq: u64, message: &Mailbox
         provider,
         model,
         usage,
+        billing,
         ..
     } = message
     {
@@ -459,10 +460,16 @@ pub(super) fn handle_subagent_mailbox(app: &mut App, seq: u64, message: &Mailbox
         // only provider source used by that projection: configured/default
         // parent routes are not evidence that the child actually used them.
         record_agent_current_activity(app, message);
+        // The child's own route truth (classified at emission from the
+        // endpoint receipt its client was built with) wins; without it, never
+        // guess billing from provider identity.
         let billing = crate::route_billing::for_child_route(
             app.api_provider,
             app.billing_presentation,
             *provider,
+            billing
+                .as_ref()
+                .map(crate::route_billing::ChildBillingProvenance::as_billing_presentation),
         );
         if app.session.subagent_cost_event_seqs.insert(seq)
             && let Some(cost) = crate::pricing::calculate_turn_cost_estimate_for_route(
@@ -1219,6 +1226,7 @@ mod tests {
                 agent_id: "agent_route".to_string(),
                 provider: crate::config::ApiProvider::Openrouter,
                 model: "vendor/model-real".to_string(),
+                billing: None,
                 usage: crate::models::Usage::default(),
             },
         );

@@ -9129,10 +9129,42 @@ async fn run_subagent(
 
         // Report token usage so the parent's cost counter updates live.
         if let Some(mb) = runtime.mailbox.as_ref() {
+            // Attach the child's own route billing, derived from the
+            // immutable dispatch receipt: the provider and base URL the
+            // client this worker actually ran on was built with. It is
+            // deliberately NOT a later ambient `Config` re-read — provider
+            // endpoint variables (`MOONSHOT_BASE_URL`, `KIMI_BASE_URL`, …)
+            // are merged into the *active* provider's table only, so a
+            // cross-provider child's config entry does not describe the
+            // endpoint it dispatched to. An endpoint that names no known
+            // product fails closed to Unknown. `None` when no config was
+            // threaded (legacy/test runtimes); the consumer then falls back
+            // to same-provider inheritance or fail-closed unknown.
+            let billing = runtime.api_config.as_ref().map(|config| {
+                // `runtime.api_config` is this worker's own dispatch-time
+                // route config, so capturing the product from it here is
+                // still receipt truth — not a later ambient re-read.
+                let provider = runtime.client.api_provider();
+                let identity = config.provider_identity_for(provider);
+                crate::route_billing::ChildBillingProvenance::from(
+                    crate::route_billing::for_dispatched_receipt(
+                        crate::route_billing::DispatchedReceipt {
+                            provider,
+                            identity: Some(identity.as_str()),
+                            base_url: runtime.client.base_url(),
+                            product: crate::route_billing::capture_product(
+                                config.as_ref(),
+                                provider,
+                            ),
+                        },
+                    ),
+                )
+            });
             let _ = mb.send(MailboxMessage::token_usage(
                 &agent_id,
                 runtime.client.api_provider(),
                 response.model.clone(),
+                billing,
                 response.usage.clone(),
             ));
         }
