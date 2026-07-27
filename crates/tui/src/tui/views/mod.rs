@@ -687,6 +687,15 @@ pub enum ViewEvent {
     SessionRenamed {
         metadata: crate::session_manager::SessionMetadata,
     },
+    /// A session's archive flag was flipped (#2934 / #4397).
+    ///
+    /// Distinct from `SessionRenamed` so the receipt can say what actually
+    /// happened; reusing rename would report "Renamed session …" for an
+    /// archive, which is exactly the kind of small lie that erodes trust in
+    /// every other receipt.
+    SessionArchived {
+        metadata: crate::session_manager::SessionMetadata,
+    },
     SessionDeleted {
         session_id: String,
         title: String,
@@ -1796,6 +1805,22 @@ impl ConfigView {
                 scope: ConfigScope::Saved,
             },
             ConfigRow {
+                section: ConfigSection::Sidebar,
+                key: "sessions_rail".to_string(),
+                value: settings.sessions_rail.to_string(),
+                editable: true,
+                scope: ConfigScope::Saved,
+            },
+            // Read at startup by `main`, not held on `App`, so the row reflects
+            // the persisted value rather than a live field (#2934).
+            ConfigRow {
+                section: ConfigSection::Sidebar,
+                key: "session_auto_resume".to_string(),
+                value: settings.session_auto_resume.to_string(),
+                editable: true,
+                scope: ConfigScope::Saved,
+            },
+            ConfigRow {
                 section: ConfigSection::History,
                 key: "auto_compact".to_string(),
                 value: settings.auto_compact.to_string(),
@@ -2728,6 +2753,8 @@ fn config_label_message(key: &str) -> Option<MessageId> {
         "sidebar_width" => MessageId::ConfigLabelSidebarWidth,
         "sidebar_focus" => MessageId::ConfigLabelSidebarFocus,
         "context_panel" => MessageId::ConfigLabelContextPanel,
+        "sessions_rail" => MessageId::ConfigLabelSessionsRail,
+        "session_auto_resume" => MessageId::ConfigLabelSessionAutoResume,
         "auto_compact" => MessageId::ConfigLabelAutoCompact,
         "auto_compact_threshold_percent" => MessageId::ConfigLabelAutoCompactThreshold,
         "max_history" => MessageId::ConfigLabelMaxHistory,
@@ -2890,6 +2917,8 @@ fn config_boolean_key(key: &str) -> bool {
             | "paste_burst_detection"
             | "workspace_follow_symlinks"
             | "context_panel"
+            | "sessions_rail"
+            | "session_auto_resume"
             | "auto_compact"
             | "prefer_external_pdftotext"
     )
@@ -5567,6 +5596,8 @@ base_url = "https://api.xiaomimimo.com/v1"
                 "sidebar_width",
                 "sidebar_focus",
                 "context_panel",
+                "sessions_rail",
+                "session_auto_resume",
             ]
         );
         assert_eq!(view.rows[view.selected].key, "work_surface_placement");
@@ -5589,6 +5620,8 @@ base_url = "https://api.xiaomimimo.com/v1"
                 "sidebar_width",
                 "sidebar_focus",
                 "context_panel",
+                "sessions_rail",
+                "session_auto_resume",
             ]
         );
     }

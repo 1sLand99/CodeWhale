@@ -9,14 +9,14 @@ use std::fmt::Write;
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
-use crate::localization::Locale;
+use crate::localization::{Locale, MessageId, tr};
 use crate::tui::app::HuntVerdict;
 
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
     prelude::Widget,
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Paragraph, Wrap},
 };
@@ -190,8 +190,114 @@ fn render_sidebar_panel_stack(
             AutoSidebarPanel::Tasks => render_sidebar_tasks(f, *rect, app),
             AutoSidebarPanel::Agents => render_sidebar_subagents(f, *rect, app),
             AutoSidebarPanel::Context => render_context_panel(f, *rect, app),
+            AutoSidebarPanel::Sessions => render_sidebar_sessions(f, *rect, app),
         }
     }
+}
+
+/// Render the persistent Sessions rail (#2934).
+///
+/// Rows are projected from cached metadata (see
+/// [`crate::tui::sessions_rail`]); this function never reads a session file.
+/// Each row dispatches `/sessions open <id>`, which opens the existing picker
+/// preselected on that session — the rail navigates, the picker owns resume.
+fn render_sidebar_sessions(f: &mut Frame, area: Rect, app: &mut App) {
+    let max_rows = crate::tui::sessions_rail::rows_for_height(area.height);
+    refresh_sessions_rail_cache(app, max_rows);
+
+    let width = usize::from(area.width.saturating_sub(4)).max(1);
+    let locale = app.ui_locale;
+    let Some(cache) = app.sessions_rail_cache.as_ref() else {
+        return;
+    };
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut full_texts: Vec<String> = Vec::new();
+    let mut actions: Vec<Option<SidebarRowAction>> = Vec::new();
+
+    if let Some(error) = cache.error() {
+        lines.push(Line::from(Span::styled(
+            truncate_line_to_width(
+                &tr(locale, MessageId::SessionsRailUnavailable).replace("{error}", error),
+                width,
+            ),
+            Style::default().fg(app.ui_theme.text_dim),
+        )));
+        full_texts.push(error.to_string());
+        actions.push(None);
+    } else if cache.rows().is_empty() {
+        lines.push(Line::from(Span::styled(
+            truncate_line_to_width(&tr(locale, MessageId::SessionsRailEmpty), width),
+            Style::default().fg(app.ui_theme.text_dim),
+        )));
+        full_texts.push(tr(locale, MessageId::SessionsRailEmpty).into_owned());
+        actions.push(None);
+    } else {
+        for row in cache.rows() {
+            let age = crate::tui::session_picker::format_relative_time(&row.updated_at, locale);
+            // The current session is marked with a glyph rather than colour
+            // alone so the distinction survives monochrome terminals and
+            // colour-vision differences.
+            let marker = if row.is_current { "▸ " } else { "  " };
+            let text = format!("{marker}{} · {age}", row.title);
+            let style = if row.is_current {
+                Style::default()
+                    .fg(app.ui_theme.text_body)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(app.ui_theme.text_body)
+            };
+            lines.push(Line::from(Span::styled(
+                truncate_line_to_width(&text, width),
+                style,
+            )));
+            full_texts.push(text);
+            actions.push(Some(SidebarRowAction::Command(
+                crate::tui::sessions_rail::row_command(&row.id),
+            )));
+        }
+    }
+
+    let shown = cache.rows().len();
+    let total = cache.total_in_scope();
+    let footer = if total > shown {
+        tr(locale, MessageId::SessionsRailShowingCount)
+            .replace("{shown}", &shown.to_string())
+            .replace("{total}", &total.to_string())
+    } else {
+        tr(locale, MessageId::SessionsRailBrowseAll).into_owned()
+    };
+    lines.push(Line::from(Span::styled(
+        truncate_line_to_width(&footer, width),
+        Style::default().fg(app.ui_theme.text_dim),
+    )));
+    full_texts.push(footer);
+    actions.push(Some(SidebarRowAction::Command(
+        crate::tui::sessions_rail::browse_all_command().to_string(),
+    )));
+
+    let title = tr(locale, MessageId::SessionsRailTitle).into_owned();
+    render_sidebar_section(f, area, &title, lines, full_texts, actions, app);
+}
+
+/// Refresh the rail cache when it is missing, stale, or computed for a
+/// different workspace/active session.
+fn refresh_sessions_rail_cache(app: &mut App, max_rows: usize) {
+    let now = std::time::Instant::now();
+    let workspace = app.workspace.clone();
+    let current = app.current_session_id.clone();
+    let fresh = app
+        .sessions_rail_cache
+        .as_ref()
+        .is_some_and(|cache| cache.is_fresh(&workspace, current.as_deref(), max_rows, now));
+    if fresh {
+        return;
+    }
+    app.sessions_rail_cache = Some(crate::tui::sessions_rail::load_rail_cache(
+        &workspace,
+        current.as_deref(),
+        max_rows,
+    ));
 }
 
 /// Compute the Auto-mode panel signals. Shared by `render_sidebar_auto` (which
@@ -212,6 +318,7 @@ fn auto_sidebar_state(app: &mut App) -> AutoSidebarState {
             && active_fanout_counts(app).is_none()
             && !foreground_rlm_running(app),
         context_enabled: app.context_panel,
+        sessions_rail_enabled: app.sessions_rail,
     }
 }
 
@@ -226,7 +333,13 @@ pub(crate) fn sidebar_auto_idle(app: &mut App) -> bool {
         return false;
     }
     let state = auto_sidebar_state(app);
-    !state.work_has_content && state.tasks_empty && state.agents_empty && !state.context_enabled
+    !state.work_has_content
+        && state.tasks_empty
+        && state.agents_empty
+        && !state.context_enabled
+        // An enabled rail is durable content: collapsing it away on idle would
+        // hide the very surface the user turned on to browse between sessions.
+        && !state.sessions_rail_enabled
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,6 +348,11 @@ enum AutoSidebarPanel {
     Tasks,
     Agents,
     Context,
+    /// Persistent Sessions rail (#2934). Opt-in via the `sessions_rail`
+    /// setting; unlike the content-gated panels it stays visible while
+    /// enabled, because "there are no sessions yet" is itself the thing a
+    /// browsing surface needs to say.
+    Sessions,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -243,11 +361,15 @@ struct AutoSidebarState {
     tasks_empty: bool,
     agents_empty: bool,
     context_enabled: bool,
+    sessions_rail_enabled: bool,
 }
 
 fn auto_sidebar_panels(state: AutoSidebarState) -> Vec<AutoSidebarPanel> {
-    let nothing_else_active = state.tasks_empty && state.agents_empty && !state.context_enabled;
-    let mut visible = Vec::with_capacity(4);
+    let nothing_else_active = state.tasks_empty
+        && state.agents_empty
+        && !state.context_enabled
+        && !state.sessions_rail_enabled;
+    let mut visible = Vec::with_capacity(5);
 
     if state.work_has_content || nothing_else_active {
         visible.push(AutoSidebarPanel::Work);
@@ -260,6 +382,11 @@ fn auto_sidebar_panels(state: AutoSidebarState) -> Vec<AutoSidebarPanel> {
     }
     if state.context_enabled {
         visible.push(AutoSidebarPanel::Context);
+    }
+    // Last in the stack: the rail is a navigation aid, so live work keeps the
+    // rows above it.
+    if state.sessions_rail_enabled {
+        visible.push(AutoSidebarPanel::Sessions);
     }
 
     visible
@@ -3333,11 +3460,11 @@ mod tests {
         auto_sidebar_panels, background_task_spinner_prefix, cached_agent_activity_is_live,
         context_panel_cost_line, editorial_tool_rows, hotbar_panel_enabled,
         hotbar_panel_hover_texts, hotbar_panel_lines, hotbar_panel_slots, is_hotbar_disabled,
-        normalize_activity_text, render_sidebar, sidebar_agent_rows, sidebar_hover_rows,
-        sidebar_work_summary, sort_sidebar_agent_rows_as_tree, subagent_output_handle,
-        subagent_panel_hover_texts, subagent_panel_lines, subagent_panel_rows,
-        task_panel_hover_texts, task_panel_lines, task_panel_row_sets, task_panel_rows,
-        work_panel_empty_hint, work_panel_hover_texts, work_panel_lines,
+        normalize_activity_text, render_sidebar, sidebar_agent_rows, sidebar_auto_idle,
+        sidebar_hover_rows, sidebar_work_summary, sort_sidebar_agent_rows_as_tree,
+        subagent_output_handle, subagent_panel_hover_texts, subagent_panel_lines,
+        subagent_panel_rows, task_panel_hover_texts, task_panel_lines, task_panel_row_sets,
+        task_panel_rows, work_panel_empty_hint, work_panel_hover_texts, work_panel_lines,
     };
     use crate::config::Config;
     use crate::localization::Locale;
@@ -3518,6 +3645,7 @@ mod tests {
             tasks_empty: false,
             agents_empty: true,
             context_enabled: false,
+            sessions_rail_enabled: false,
         });
 
         assert_eq!(panels, vec![AutoSidebarPanel::Tasks]);
@@ -3530,9 +3658,71 @@ mod tests {
             tasks_empty: true,
             agents_empty: true,
             context_enabled: false,
+            sessions_rail_enabled: false,
         });
 
         assert_eq!(panels, vec![AutoSidebarPanel::Work]);
+    }
+
+    #[test]
+    fn sessions_rail_is_absent_until_the_setting_opts_in() {
+        let without = auto_sidebar_panels(AutoSidebarState {
+            work_has_content: true,
+            tasks_empty: true,
+            agents_empty: true,
+            context_enabled: false,
+            sessions_rail_enabled: false,
+        });
+        assert!(!without.contains(&AutoSidebarPanel::Sessions));
+
+        let with = auto_sidebar_panels(AutoSidebarState {
+            work_has_content: true,
+            tasks_empty: true,
+            agents_empty: true,
+            context_enabled: false,
+            sessions_rail_enabled: true,
+        });
+        assert_eq!(
+            with,
+            vec![AutoSidebarPanel::Work, AutoSidebarPanel::Sessions],
+            "the rail renders last so live work keeps the rows above it"
+        );
+    }
+
+    #[test]
+    fn an_enabled_rail_keeps_the_empty_work_placeholder_from_taking_the_slot() {
+        // With nothing live and the rail on, the rail is the content — the
+        // "one quiet empty state" Work placeholder must not also appear.
+        let panels = auto_sidebar_panels(AutoSidebarState {
+            work_has_content: false,
+            tasks_empty: true,
+            agents_empty: true,
+            context_enabled: false,
+            sessions_rail_enabled: true,
+        });
+
+        assert_eq!(panels, vec![AutoSidebarPanel::Sessions]);
+    }
+
+    #[test]
+    fn an_enabled_rail_prevents_idle_auto_collapse() {
+        let mut app = create_test_app();
+        app.sidebar_focus = SidebarFocus::Auto;
+        // Pin both opt-in panels off: `App::new` reads the developer's real
+        // persisted settings, so the baseline has to be set, not assumed.
+        app.context_panel = false;
+        app.sessions_rail = false;
+
+        assert!(
+            sidebar_auto_idle(&mut app),
+            "an idle session with no rail should still auto-collapse"
+        );
+
+        app.sessions_rail = true;
+        assert!(
+            !sidebar_auto_idle(&mut app),
+            "an enabled rail is durable content and must survive idle collapse"
+        );
     }
 
     #[test]
