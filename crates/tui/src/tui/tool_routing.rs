@@ -394,6 +394,13 @@ fn accrue_child_token_cost_if_any(app: &mut App, result: &Result<ToolResult, Too
     let Some(usage) = crate::cost_status::child_usage_from_metadata(metadata) else {
         return;
     };
+    // `route` is the child's own dispatch receipt, rehydrated from the
+    // complete `child_*` metadata `attach_child_usage_metadata` emits at the
+    // child's wire boundary (review/verify/rlm are the three producers). An
+    // incomplete or legacy payload rehydrates as `RouteBillingMode::Unknown`,
+    // so a child never inherits the live `app.billing_presentation` chip and a
+    // `/provider` switch between dispatch and arrival cannot retro-bill it.
+    //
     // Sub-agent spend lands in the same displayed total as parent turns, so it
     // has to feed the same completeness counters — otherwise `/cost` would call
     // a total complete while an unpriced child turn is missing from it.

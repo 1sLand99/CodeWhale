@@ -109,6 +109,9 @@ pub const KIMI_CODE_MEMBERSHIP_PLAN_CONSOLE_URL: &str =
 /// Official Kimi Code route model id. It is deliberately distinct from
 /// Moonshot's pay-as-you-go `kimi-k3` catalog id.
 pub const KIMI_CODE_K3_MODEL: &str = "k3";
+/// Kimi Code membership high-speed wire model id. Membership route only, not
+/// a direct Moonshot platform catalog model.
+pub const KIMI_CODE_HIGHSPEED_MODEL: &str = "kimi-for-coding-highspeed";
 // The K3 contract constants (`KIMI_CODE_K3_CONTEXT_WINDOW_TOKENS`,
 // `KIMI_K3_CONTEXT_WINDOW_TOKENS`, and the distinct default/direct output
 // limits) live in `crate::models` — the model-facts table, which also compiles

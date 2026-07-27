@@ -1188,6 +1188,8 @@ mod tests {
                 billing_mode: crate::cost_status::RouteBillingMode::Unknown,
                 dispatched_at: chrono::Utc::now(),
             }),
+            base_url: crate::config::DEFAULT_DEEPSEEK_BASE_URL.to_string(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
         }
     }
 
@@ -1534,6 +1536,8 @@ mod tests {
                     billing_mode: crate::cost_status::RouteBillingMode::Unknown,
                     dispatched_at: chrono::Utc::now(),
                 }),
+                base_url: DEEPSEEK_BASE.to_string(),
+                billing_product: crate::route_billing::RouteProduct::Unproven,
             };
             assert!(
                 capture_route_authority(&route).is_none(),

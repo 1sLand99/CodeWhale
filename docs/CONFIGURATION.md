@@ -681,6 +681,19 @@ aliases. When both forms are set the `CODEWHALE_*` value wins; the
 - `CODEWHALE_MODEL` (preferred) / `DEEPSEEK_MODEL` (legacy alias) — default model for the active provider
 - `CODEWHALE_BASE_URL` (preferred) / `DEEPSEEK_BASE_URL` (legacy alias) — base URL for the active provider
 
+`CODEWHALE_BASE_URL` applies to the **active** route only. A request pinned to
+another provider — a subagent or fleet child, a routed tool, the per-turn
+auto-router, a picker preview — resolves its endpoint from that provider's own
+`[providers.<table>]`, then its provider-scoped variable (`MOONSHOT_BASE_URL`,
+`OPENAI_BASE_URL`, …), then that provider's default. It never inherits the
+active session's host, and a custom route with no configured `base_url` fails
+closed on a loopback placeholder rather than borrowing another provider's
+endpoint. The legacy root `base_url` behaves the same way: written in your
+config file it stays shared by the DeepSeek and DeepSeek-CN identities as it
+always has, but a value the environment wrote belongs to the identity it was
+addressed to. A managed-config overlay that supplies or reselects the effective
+route's endpoint takes the generic override away from every route.
+
 Remaining variables:
 
 - `DEEPSEEK_API_KEY`

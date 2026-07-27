@@ -335,7 +335,8 @@ fn known_context_window_for_model(model_lower: &str) -> Option<u32> {
         | "moonshotai/kimi-k2.6:free"
         | "kimi-k2.7-code"
         | "kimi-k2.6"
-        | "kimi-for-coding" => Some(262_144),
+        | "kimi-for-coding"
+        | "kimi-for-coding-highspeed" => Some(262_144),
         "minimax-m2.7"
         | "minimax/minimax-m2.7"
         | "minimax-m2.7-highspeed"
@@ -407,12 +408,15 @@ pub fn max_output_tokens_for_model(model: &str) -> Option<u32> {
         }
         // Kimi K2.7 Code has a 256K context window but its documented default
         // maximum generation is 32K. Keeping those separate prevents the
-        // input budget from collapsing to the 1K emergency floor (#4368).
-        "moonshotai/kimi-k2.7-code"
-        | "moonshotai/kimi-k2.6"
-        | "kimi-k2.7-code"
-        | "kimi-k2.6"
-        | "kimi-for-coding" => Some(32_768),
+        // input budget from collapsing to the 1K emergency floor (#4368). The
+        // direct-platform value matches the provider-reported bundled
+        // catalog. The Kimi Code membership ids (`kimi-for-coding` family)
+        // are deliberately absent here: the membership catalog is the source
+        // of truth for their limits and no client-side output ceiling is
+        // claimed, so they fall back to the generic default.
+        "moonshotai/kimi-k2.7-code" | "moonshotai/kimi-k2.6" | "kimi-k2.7-code" | "kimi-k2.6" => {
+            Some(32_768)
+        }
         "minimax/minimax-m3" | "minimax-m3" => Some(524_288),
         // Alibaba's published limit is 65,536 output tokens; the earlier
         // 262,140 mirrored the context window (data-entry smell flagged by
@@ -935,6 +939,7 @@ mod tests {
         assert!(model_supports_reasoning("kimi-k2.7-code"));
         assert!(model_supports_reasoning("kimi-k2.6"));
         assert!(model_supports_reasoning("kimi-for-coding"));
+        assert!(model_supports_reasoning("kimi-for-coding-highspeed"));
         assert!(model_supports_reasoning("kimi-k2.5"));
     }
 
@@ -1046,6 +1051,25 @@ mod tests {
     }
 
     #[test]
+    fn kimi_code_membership_ids_mirror_their_family_facts() {
+        // The high-speed membership id rides the kimi-for-coding family
+        // context fact (256K) and reasoning support via the same `kimi-`
+        // native-id rule as `kimi-for-coding`. No client-side output ceiling
+        // is claimed for the membership ids — the membership catalog is the
+        // source of truth, so the generic lookup returns None.
+        assert_eq!(
+            context_window_for_model("kimi-for-coding-highspeed"),
+            Some(262_144)
+        );
+        assert_eq!(
+            max_output_tokens_for_model("kimi-for-coding-highspeed"),
+            None
+        );
+        assert_eq!(max_output_tokens_for_model("kimi-for-coding"), None);
+        assert!(model_supports_reasoning("kimi-for-coding-highspeed"));
+    }
+
+    #[test]
     fn bare_provider_model_ids_mirror_vendor_prefixed_rows() {
         // Direct-provider routes (Moonshot, MiniMax, Z.ai) serve bare model
         // ids without the OpenRouter vendor prefix; both spellings must
@@ -1079,7 +1103,7 @@ mod tests {
         );
         assert_eq!(max_output_tokens_for_model("kimi-k2.7-code"), Some(32_768));
         assert_eq!(max_output_tokens_for_model("kimi-k2.6"), Some(32_768));
-        assert_eq!(max_output_tokens_for_model("kimi-for-coding"), Some(32_768));
+        assert_eq!(max_output_tokens_for_model("kimi-for-coding"), None);
         assert_eq!(max_output_tokens_for_model("kimi-k3"), Some(131_072));
         assert_eq!(max_output_tokens_for_model("minimax-m3"), Some(524_288));
         assert_eq!(max_output_tokens_for_model("glm-5.1"), Some(131_072));

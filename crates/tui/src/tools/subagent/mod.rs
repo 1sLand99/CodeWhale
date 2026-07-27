@@ -9395,6 +9395,17 @@ async fn run_subagent(
         // Interactive turns have no runtime owner; their mailbox is the sole
         // delivery path into the TUI cost projection.
         if let Some(mb) = runtime.mailbox.as_ref() {
+            // The child's own route billing travels on `usage_route`: the
+            // client this worker actually ran on froze its provider,
+            // identity, endpoint fingerprint, billing surface and billing
+            // mode at construction (`DeepSeekClient::from_parts`), so the
+            // envelope *is* the child's dispatch receipt. It is deliberately
+            // NOT a later ambient `Config` re-read — provider endpoint
+            // variables (`MOONSHOT_BASE_URL`, `KIMI_BASE_URL`, …) are merged
+            // into the *active* provider's table only, so a cross-provider
+            // child's config entry does not describe the endpoint it
+            // dispatched to. An endpoint/credential that names no known
+            // product froze as Unknown and stays Unknown here.
             let _ = mb.send(MailboxMessage::token_usage(
                 &agent_id,
                 &usage_source_id,

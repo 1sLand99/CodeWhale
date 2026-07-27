@@ -53,6 +53,7 @@ base_url = "https://api.deepseek.com/beta"
 #   kimi-k2.7-code                  — default direct Moonshot/Kimi K2.7 model ID
 #   k3                              — Kimi Code membership K3 API model ID
 #   kimi-for-coding                 — Kimi Code membership K2.7 compatibility ID
+#   kimi-for-coding-highspeed       — Kimi Code membership high-speed roster ID
 #   gpt-4.1                         — default generic OpenAI-compatible model ID
 #   deepseek-ai/deepseek-v4-flash   — default AtlasCloud model ID
 #   deepseek-reasoner               — default Wanjie Ark model ID

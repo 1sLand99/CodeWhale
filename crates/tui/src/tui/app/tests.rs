@@ -811,6 +811,8 @@ fn active_turn_zai_receipt_overrides_all_mutable_parallel_route_metadata() {
                 billing_mode: crate::cost_status::RouteBillingMode::Unknown,
                 dispatched_at: chrono::Utc::now(),
             }),
+            base_url: crate::config::DEFAULT_ZAI_BASE_URL.to_string(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
         auto_route_receipt: None,
         suggestion_authority: None,

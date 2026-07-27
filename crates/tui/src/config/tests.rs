@@ -3841,6 +3841,134 @@ model = "private-openrouter-model"
     Ok(())
 }
 
+/// A session-scoped `[providers.*]` fixture with credentials but no endpoints,
+/// so every base URL in these tests comes from the resolver rather than a file.
+const CROSS_PROVIDER_ROUTE_FIXTURE: &str = r#"api_key = "session-deepseek-key"
+default_text_model = "deepseek-chat"
+
+[providers.moonshot]
+api_key = "moonshot-route-key"
+
+[providers.zai]
+api_key = "zai-route-key"
+
+[providers.minimax]
+api_key = "minimax-route-key"
+"#;
+
+#[test]
+fn generic_base_url_override_never_reaches_pinned_child_routes() -> Result<()> {
+    // #4093-class routing truth: every cross-provider seam (pinned subagent /
+    // fleet child, per-turn auto-router, tool routing, picker preview) clones
+    // the session config and re-points `provider`. The generic endpoint
+    // override belongs to the DeepSeek session that set it and must never
+    // follow a child to another vendor's route.
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let config_path = temp_root.path().join("config.toml");
+    fs::write(&config_path, CROSS_PROVIDER_ROUTE_FIXTURE)?;
+
+    for env_name in ["CODEWHALE_BASE_URL", "DEEPSEEK_BASE_URL"] {
+        let session_host = "https://session-gateway.example.test/v1";
+        let _base = EnvVarGuard::set(env_name, session_host);
+        let config = Config::load(Some(config_path.clone()), None)?;
+
+        // Documented behavior for the active DeepSeek route is unchanged.
+        assert_eq!(config.api_provider(), ApiProvider::Deepseek);
+        assert_eq!(config.deepseek_base_url(), session_host);
+        assert!(config.provider_uses_custom_endpoint(ApiProvider::Deepseek));
+
+        for (provider, expected) in [
+            (ApiProvider::Moonshot, DEFAULT_MOONSHOT_BASE_URL),
+            (ApiProvider::Zai, DEFAULT_ZAI_BASE_URL),
+            (ApiProvider::Minimax, DEFAULT_MINIMAX_BASE_URL),
+        ] {
+            assert_eq!(
+                config.base_url_for_route(provider),
+                expected,
+                "{env_name}: {provider:?} must resolve from its own identity table"
+            );
+            assert!(
+                !config.provider_uses_custom_endpoint(provider),
+                "{env_name}: {provider:?} is on its canonical host, not a custom one"
+            );
+
+            let route = crate::route_runtime::resolve_runtime_route(&config, provider, None)
+                .unwrap_or_else(|err| panic!("{env_name}: {provider:?} child route: {err}"));
+            // The scoped config and the executable candidate must agree, and
+            // neither may name the session host.
+            assert_eq!(route.config.deepseek_base_url(), expected);
+            assert_eq!(route.candidate.endpoint().base_url, expected);
+            assert_ne!(route.candidate.endpoint().base_url, session_host);
+        }
+
+        // An unknown/custom identity fails closed on the loopback placeholder
+        // instead of borrowing the DeepSeek session route.
+        let custom_placeholder = normalize_base_url(
+            codewhale_config::ProviderKind::Custom
+                .provider()
+                .default_base_url(),
+        );
+        assert_eq!(
+            config.base_url_for_route(ApiProvider::Custom),
+            custom_placeholder
+        );
+        assert_ne!(config.base_url_for_route(ApiProvider::Custom), session_host);
+    }
+
+    Ok(())
+}
+
+#[test]
+fn provider_scoped_base_url_env_applies_only_to_its_own_route() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let config_path = temp_root.path().join("config.toml");
+    fs::write(&config_path, CROSS_PROVIDER_ROUTE_FIXTURE)?;
+
+    let moonshot_host = "https://moonshot-gateway.example.test/v1";
+    let _moonshot = EnvVarGuard::set("MOONSHOT_BASE_URL", moonshot_host);
+
+    // Without a generic override the active DeepSeek route keeps its default:
+    // a provider-scoped variable names exactly one provider.
+    let config = Config::load(Some(config_path.clone()), None)?;
+    assert_eq!(config.deepseek_base_url(), DEFAULT_DEEPSEEK_BASE_URL);
+    assert_eq!(
+        config.base_url_for_route(ApiProvider::Zai),
+        DEFAULT_ZAI_BASE_URL
+    );
+    assert_eq!(
+        config.base_url_for_route(ApiProvider::Moonshot),
+        moonshot_host
+    );
+    let route = crate::route_runtime::resolve_runtime_route(&config, ApiProvider::Moonshot, None)
+        .expect("Moonshot child route");
+    assert_eq!(route.candidate.endpoint().base_url, moonshot_host);
+
+    // With both set, each override stays on its own route.
+    let session_host = "https://session-gateway.example.test/v1";
+    let _base = EnvVarGuard::set("CODEWHALE_BASE_URL", session_host);
+    let config = Config::load(Some(config_path), None)?;
+    assert_eq!(config.deepseek_base_url(), session_host);
+    assert_eq!(
+        config.base_url_for_route(ApiProvider::Moonshot),
+        moonshot_host
+    );
+    assert_eq!(
+        config.base_url_for_route(ApiProvider::Zai),
+        DEFAULT_ZAI_BASE_URL
+    );
+    let route = crate::route_runtime::resolve_runtime_route(&config, ApiProvider::Moonshot, None)
+        .expect("Moonshot child route");
+    assert_eq!(route.config.deepseek_base_url(), moonshot_host);
+    assert_eq!(route.candidate.endpoint().base_url, moonshot_host);
+    assert_ne!(route.candidate.endpoint().base_url, session_host);
+
+    Ok(())
+}
+
 #[test]
 fn source_marked_cli_key_can_follow_cli_forwarded_custom_base_url() -> Result<()> {
     let _lock = lock_test_env();
@@ -4057,12 +4185,22 @@ model = "claude-sonnet-5"
     );
     assert_eq!(config.deepseek_api_key()?, "file-openai-key");
 
+    // Anthropic was never the route the environment addressed. Under the
+    // endpoint-ownership receipt the generic override does not follow a
+    // re-pointed config onto another vendor's route — that is the same
+    // mechanism a pinned cross-provider child is resolved through, and it must
+    // not be able to dispatch Anthropic traffic at the DeepSeek session's
+    // gateway. Anthropic therefore resolves its own canonical endpoint, and
+    // because it is no longer on an env-selected host its file-owned key is a
+    // legitimate route-bound credential rather than one following a foreign
+    // host.
     config.provider = Some("anthropic".to_string());
-    assert_eq!(
+    assert_eq!(config.deepseek_base_url(), DEFAULT_ANTHROPIC_BASE_URL);
+    assert_ne!(
         config.deepseek_base_url(),
         "https://env-gateway.example.test/v1"
     );
-    assert!(config.deepseek_api_key().is_err());
+    assert_eq!(config.deepseek_api_key()?, "stale-anthropic-file-key");
 
     config.provider = Some("openrouter".to_string());
     assert!(
@@ -8706,7 +8844,7 @@ fn provider_capability_deepseek_v4_pro_has_1m_window_and_thinking() {
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     assert!(cap.cache_telemetry_supported);
     assert_eq!(
@@ -8725,7 +8863,7 @@ fn provider_capability_deepseek_anthropic_uses_messages_payload() {
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
     assert_eq!(
@@ -8745,7 +8883,7 @@ fn provider_capability_openmodel_uses_messages_payload() {
     );
     assert_eq!(
         cap.max_output,
-        crate::models::max_output_tokens_for_model(DEFAULT_OPENMODEL_MODEL).unwrap_or(64_000)
+        Some(crate::models::max_output_tokens_for_model(DEFAULT_OPENMODEL_MODEL).unwrap_or(64_000))
     );
     assert!(!cap.cache_telemetry_supported);
     assert_eq!(
@@ -8762,7 +8900,7 @@ fn provider_capability_deepseek_v4_flash_has_1m_window_and_thinking() {
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     assert!(cap.cache_telemetry_supported);
 }
@@ -8774,7 +8912,7 @@ fn provider_capability_deepseek_chat_alias_has_v4_flash_caps_and_metadata() {
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     assert!(cap.cache_telemetry_supported);
 
@@ -8795,7 +8933,7 @@ fn provider_capability_deepseek_reasoner_alias_has_v4_flash_caps_and_metadata() 
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     assert!(cap.cache_telemetry_supported);
 
@@ -8820,7 +8958,7 @@ fn provider_capability_nvidia_nim_v4_pro_maps_correctly() {
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     assert!(cap.cache_telemetry_supported);
     assert_eq!(
@@ -8836,7 +8974,7 @@ fn provider_capability_nvidia_nim_v4_flash_maps_correctly() {
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     assert!(cap.cache_telemetry_supported);
 }
@@ -8848,7 +8986,7 @@ fn provider_capability_openrouter_v4_pro_has_thinking_no_cache() {
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     // OpenRouter does not return DeepSeek prompt-cache telemetry.
     assert!(!cap.cache_telemetry_supported);
@@ -8867,7 +9005,7 @@ fn provider_capability_openai_codex_uses_responses_payload() {
         cap.context_window,
         OPENAI_CODEX_EFFECTIVE_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 4096);
+    assert_eq!(cap.max_output, Some(4096));
     assert!(cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
     assert_eq!(cap.request_payload_mode, RequestPayloadMode::Responses);
@@ -8912,7 +9050,7 @@ fn provider_capability_openrouter_recent_large_models_are_reasoning_aware() {
         let cap = provider_capability(ApiProvider::Openrouter, model);
 
         assert_eq!(cap.context_window, expected_window);
-        assert_eq!(cap.max_output, expected_output);
+        assert_eq!(cap.max_output, Some(expected_output));
         assert!(cap.thinking_supported);
         assert!(!cap.cache_telemetry_supported);
         assert_eq!(
@@ -8946,7 +9084,7 @@ fn openrouter_nemotron_ultra_aliases_resolve_to_live_id() {
 fn provider_capability_arcee_direct_models_use_api_docs_shape() {
     let thinking_cap = provider_capability(ApiProvider::Arcee, DEFAULT_ARCEE_MODEL);
     assert_eq!(thinking_cap.context_window, 262_144);
-    assert_eq!(thinking_cap.max_output, 262_144);
+    assert_eq!(thinking_cap.max_output, Some(262_144));
     assert!(thinking_cap.thinking_supported);
     assert!(!thinking_cap.cache_telemetry_supported);
     assert_eq!(
@@ -8956,14 +9094,14 @@ fn provider_capability_arcee_direct_models_use_api_docs_shape() {
 
     let preview = provider_capability(ApiProvider::Arcee, ARCEE_TRINITY_LARGE_PREVIEW_MODEL);
     assert_eq!(preview.context_window, 262_144);
-    assert_eq!(preview.max_output, 4096);
+    assert_eq!(preview.max_output, None);
     assert!(!preview.thinking_supported);
 
     let mini = provider_capability(ApiProvider::Arcee, ARCEE_TRINITY_MINI_MODEL);
     assert_eq!(mini.context_window, 128_000);
-    // ProviderCapability carries a mandatory request fallback; model metadata
-    // itself deliberately keeps Trinity Mini's upstream output limit unknown.
-    assert_eq!(mini.max_output, 4096);
+    // Trinity Mini's upstream output limit is unknown, and ProviderCapability
+    // now says so instead of fabricating a 4K request fallback.
+    assert_eq!(mini.max_output, None);
     assert_eq!(
         crate::models::max_output_tokens_for_model(ARCEE_TRINITY_MINI_MODEL),
         None
@@ -8994,7 +9132,7 @@ fn provider_capability_marks_exact_inkling_route_as_reasoning() {
 fn provider_capability_xiaomi_mimo_has_thinking_no_cache() {
     let cap = provider_capability(ApiProvider::XiaomiMimo, DEFAULT_XIAOMI_MIMO_MODEL);
     assert_eq!(cap.context_window, 1_000_000);
-    assert_eq!(cap.max_output, 131_072);
+    assert_eq!(cap.max_output, Some(131_072));
     assert!(cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
     assert_eq!(
@@ -9004,7 +9142,7 @@ fn provider_capability_xiaomi_mimo_has_thinking_no_cache() {
 
     let omni = provider_capability(ApiProvider::XiaomiMimo, XIAOMI_MIMO_V2_5_OMNI_MODEL);
     assert_eq!(omni.context_window, 1_000_000);
-    assert_eq!(omni.max_output, 131_072);
+    assert_eq!(omni.max_output, Some(131_072));
     assert!(omni.thinking_supported);
     assert!(!omni.cache_telemetry_supported);
 }
@@ -9016,7 +9154,7 @@ fn provider_capability_novita_v4_pro_has_thinking_no_cache() {
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
 }
@@ -9028,7 +9166,7 @@ fn provider_capability_fireworks_v4_pro_has_thinking_no_cache() {
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
 }
@@ -9040,7 +9178,7 @@ fn provider_capability_siliconflow_v4_pro_has_thinking_no_cache() {
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
     assert_eq!(
@@ -9056,7 +9194,7 @@ fn provider_capability_sglang_v4_pro_has_thinking_no_cache() {
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
 }
@@ -9068,7 +9206,7 @@ fn provider_capability_openai_custom_model_is_chat_completions_without_thinking(
         cap.context_window,
         crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 4096);
+    assert_eq!(cap.max_output, None);
     assert!(!cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
     assert_eq!(
@@ -9087,7 +9225,7 @@ fn provider_capability_atlascloud_v4_model_resolves_model_metadata() {
         cap.context_window,
         crate::models::DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 384_000);
+    assert_eq!(cap.max_output, Some(384_000));
     assert!(cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
     assert_eq!(
@@ -9100,12 +9238,42 @@ fn provider_capability_atlascloud_v4_model_resolves_model_metadata() {
 fn provider_capability_moonshot_default_model_resolves_kimi_metadata() {
     let cap = provider_capability(ApiProvider::Moonshot, DEFAULT_MOONSHOT_MODEL);
     assert_eq!(cap.context_window, 262_144);
-    assert_eq!(cap.max_output, 32_768);
+    assert_eq!(cap.max_output, Some(32_768));
     assert!(cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
     assert_eq!(
         cap.request_payload_mode,
         RequestPayloadMode::ChatCompletions
+    );
+}
+
+#[test]
+fn provider_capability_kimi_membership_ids_report_unknown_output_ceiling() {
+    // The `kimi-for-coding` family is membership-only: the membership catalog
+    // owns its output limits, so the static matrix must say "unknown" rather
+    // than fabricating a ceiling. A placeholder here is not cosmetic — it
+    // becomes a hard request clamp in `route_budget`.
+    for model in ["kimi-for-coding", "kimi-for-coding-highspeed"] {
+        let cap = provider_capability(ApiProvider::Moonshot, model);
+        assert_eq!(cap.context_window, 262_144, "{model}");
+        assert_eq!(cap.max_output, None, "{model}");
+        assert!(cap.thinking_supported, "{model}");
+
+        // Unknown is *omitted* on the wire, never serialized as a number.
+        let json = serde_json::to_value(&cap).expect("capability serializes");
+        assert!(
+            json.get("max_output").is_none(),
+            "{model}: unknown output ceiling must not be serialized: {json}"
+        );
+        let round_tripped: ProviderCapability =
+            serde_json::from_value(json).expect("capability round-trips with an absent max_output");
+        assert_eq!(round_tripped, cap, "{model}");
+    }
+
+    // The direct-platform K2.7 Code route does publish 32K, and keeps it.
+    assert_eq!(
+        provider_capability(ApiProvider::Moonshot, "kimi-k2.7-code").max_output,
+        Some(32_768)
     );
 }
 
@@ -9116,7 +9284,7 @@ fn provider_capability_zai_defaults_to_5_2_and_tracks_5_1_and_turbo() {
     assert_eq!(default.resolved_model, DEFAULT_ZAI_MODEL);
     assert_eq!(default.resolved_model, ZAI_GLM_5_2_MODEL);
     assert_eq!(default.context_window, 1_000_000);
-    assert_eq!(default.max_output, 131_072);
+    assert_eq!(default.max_output, Some(131_072));
     assert!(default.thinking_supported);
     assert!(!default.cache_telemetry_supported);
 
@@ -9124,7 +9292,7 @@ fn provider_capability_zai_defaults_to_5_2_and_tracks_5_1_and_turbo() {
     let v51 = provider_capability(ApiProvider::Zai, ZAI_GLM_5_1_MODEL);
     assert_eq!(v51.resolved_model, ZAI_GLM_5_1_MODEL);
     assert_eq!(v51.context_window, 202_752);
-    assert_eq!(v51.max_output, 131_072);
+    assert_eq!(v51.max_output, Some(131_072));
     assert!(v51.thinking_supported);
 
     // GLM-5-Turbo is the faster sub-agent sibling.
@@ -9136,7 +9304,7 @@ fn provider_capability_zai_defaults_to_5_2_and_tracks_5_1_and_turbo() {
 fn provider_capability_minimax_direct_models_use_api_docs_shape() {
     let m3 = provider_capability(ApiProvider::Minimax, DEFAULT_MINIMAX_MODEL);
     assert_eq!(m3.context_window, 1_000_000);
-    assert_eq!(m3.max_output, 524_288);
+    assert_eq!(m3.max_output, Some(524_288));
     assert!(m3.thinking_supported);
     assert!(!m3.cache_telemetry_supported);
     assert_eq!(m3.request_payload_mode, RequestPayloadMode::ChatCompletions);
@@ -9181,7 +9349,7 @@ fn provider_capability_wanjie_ark_reasoner_has_thinking_no_cache() {
         cap.context_window,
         crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 4096);
+    assert_eq!(cap.max_output, None);
     assert!(cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
     assert_eq!(
@@ -9199,7 +9367,7 @@ fn provider_capability_ollama_deepseek_tag_uses_deepseek_heuristic() {
         cap.context_window,
         crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 4096);
+    assert_eq!(cap.max_output, None);
     assert!(!cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
     assert_eq!(
@@ -9212,7 +9380,7 @@ fn provider_capability_ollama_deepseek_tag_uses_deepseek_heuristic() {
 fn provider_capability_ollama_unknown_model_falls_back_to_8192() {
     let cap = provider_capability(ApiProvider::Ollama, "llama3.2:3b");
     assert_eq!(cap.context_window, 8192);
-    assert_eq!(cap.max_output, 4096);
+    assert_eq!(cap.max_output, None);
     assert!(!cap.thinking_supported);
     assert!(!cap.cache_telemetry_supported);
     assert_eq!(
@@ -9228,7 +9396,7 @@ fn provider_capability_non_v4_model_has_smaller_window() {
         cap.context_window,
         crate::models::LEGACY_DEEPSEEK_CONTEXT_WINDOW_TOKENS
     );
-    assert_eq!(cap.max_output, 4096);
+    assert_eq!(cap.max_output, None);
     assert!(!cap.thinking_supported);
 }
 
@@ -10337,6 +10505,263 @@ fn cli_model_flag_selects_kimi_k3_on_the_moonshot_platform_route() -> Result<()>
     Ok(())
 }
 
+// === Identity-owned endpoint resolution (provider-truth regressions) ===
+//
+// Every test here is offline and env-locked. No credential is invented and no
+// provider is contacted: the assertions are about which host string a route
+// resolves to, and about the classifications derived from it.
+
+/// A managed-config guard pointing at a path that does not exist, so an
+/// operator-installed managed file on the developer's machine cannot leak into
+/// these route assertions.
+fn no_managed_config(root: &std::path::Path) -> EnvVarGuard {
+    EnvVarGuard::set(
+        "DEEPSEEK_MANAGED_CONFIG_PATH",
+        root.join("absent-managed.toml"),
+    )
+}
+
+fn custom_placeholder_base_url() -> String {
+    normalize_base_url(
+        codewhale_config::ProviderKind::Custom
+            .provider()
+            .default_base_url(),
+    )
+}
+
+#[test]
+fn env_owned_deepseek_root_base_url_does_not_reach_the_deepseek_cn_sibling() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let _managed = no_managed_config(temp_root.path());
+    let config_path = temp_root.path().join("config.toml");
+    fs::write(&config_path, "provider = \"deepseek\"\n")?;
+    let _base = EnvVarGuard::set("CODEWHALE_BASE_URL", "https://env-gateway.example.test/v1");
+
+    let config = Config::load(Some(config_path), None)?;
+
+    // The env override owns the route it was addressed to.
+    assert_eq!(config.api_provider(), ApiProvider::Deepseek);
+    assert_eq!(
+        config.deepseek_base_url(),
+        "https://env-gateway.example.test/v1"
+    );
+    assert!(config.provider_uses_custom_endpoint(ApiProvider::Deepseek));
+
+    // The sibling identity shares the same legacy root field but is a
+    // different route: it must fall through to its own canonical endpoint.
+    assert_eq!(
+        config.base_url_for_route(ApiProvider::DeepseekCN),
+        DEFAULT_DEEPSEEKCN_BASE_URL
+    );
+    assert!(!config.provider_uses_custom_endpoint(ApiProvider::DeepseekCN));
+    assert!(!config.model_ids_pass_through_for_provider(ApiProvider::DeepseekCN));
+    Ok(())
+}
+
+#[test]
+fn env_owned_deepseek_cn_root_base_url_does_not_reach_the_deepseek_sibling() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let _managed = no_managed_config(temp_root.path());
+    let config_path = temp_root.path().join("config.toml");
+    fs::write(&config_path, "provider = \"deepseek-cn\"\n")?;
+    let _base = EnvVarGuard::set(
+        "DEEPSEEK_BASE_URL",
+        "https://cn-env-gateway.example.test/v1",
+    );
+
+    let config = Config::load(Some(config_path), None)?;
+
+    assert_eq!(config.api_provider(), ApiProvider::DeepseekCN);
+    assert_eq!(
+        config.deepseek_base_url(),
+        "https://cn-env-gateway.example.test/v1"
+    );
+    assert!(config.provider_uses_custom_endpoint(ApiProvider::DeepseekCN));
+
+    assert_eq!(
+        config.base_url_for_route(ApiProvider::Deepseek),
+        DEFAULT_DEEPSEEK_BASE_URL
+    );
+    assert!(!config.provider_uses_custom_endpoint(ApiProvider::Deepseek));
+    Ok(())
+}
+
+#[test]
+fn file_owned_legacy_root_base_url_stays_shared_by_both_deepseek_identities() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let _managed = no_managed_config(temp_root.path());
+    let config_path = temp_root.path().join("config.toml");
+    fs::write(
+        &config_path,
+        "provider = \"deepseek\"\nbase_url = \"https://file-gateway.example.test/v1\"\n",
+    )?;
+
+    let config = Config::load(Some(config_path), None)?;
+
+    // No environment write, so the root field is the user's own. Both
+    // identities keep reading it, exactly as they always have.
+    for provider in [ApiProvider::Deepseek, ApiProvider::DeepseekCN] {
+        assert_eq!(
+            config.base_url_for_route(provider),
+            "https://file-gateway.example.test/v1",
+            "{provider:?} must keep the file-owned legacy root endpoint"
+        );
+        assert!(config.provider_uses_custom_endpoint(provider));
+    }
+    Ok(())
+}
+
+#[test]
+fn managed_overlay_keeps_pinned_children_off_the_ambient_generic_host() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let config_path = temp_root.path().join("config.toml");
+    let managed_path = temp_root.path().join("managed.toml");
+    fs::write(&config_path, "provider = \"deepseek\"\n")?;
+    fs::write(
+        &managed_path,
+        "provider = \"openrouter\"\n\n[providers.openrouter]\nbase_url = \"https://managed-gateway.example.test/v1\"\n",
+    )?;
+    let _managed = EnvVarGuard::set("DEEPSEEK_MANAGED_CONFIG_PATH", &managed_path);
+    let _base = EnvVarGuard::set("CODEWHALE_BASE_URL", "https://env-gateway.example.test/v1");
+
+    let config = Config::load(Some(config_path), None)?;
+
+    // Managed routing is authoritative for the active route.
+    assert_eq!(config.api_provider(), ApiProvider::Openrouter);
+    assert_eq!(
+        config.deepseek_base_url(),
+        "https://managed-gateway.example.test/v1"
+    );
+
+    // The receipt must say "nobody owns the generic override" rather than
+    // being cleared: a cleared receipt reads as "never met the environment
+    // layer" and re-enables the generic fallback for every pinned child.
+    assert_eq!(config.base_url_env_receipt, BaseUrlEnvReceipt::NoOwner);
+    assert_eq!(config.root_base_url_owner, BaseUrlEnvReceipt::NoOwner);
+    for provider in [
+        ApiProvider::Moonshot,
+        ApiProvider::Zai,
+        ApiProvider::Minimax,
+        ApiProvider::Deepseek,
+        ApiProvider::DeepseekCN,
+    ] {
+        assert_eq!(
+            config.base_url_for_route(provider),
+            provider.default_base_url(),
+            "{provider:?} must not borrow the ambient generic host under managed routing"
+        );
+        assert!(!config.provider_uses_custom_endpoint(provider));
+    }
+    Ok(())
+}
+
+#[test]
+fn named_custom_children_resolve_by_identity_not_by_the_active_custom_route() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let _managed = no_managed_config(temp_root.path());
+    let config_path = temp_root.path().join("config.toml");
+    fs::write(
+        &config_path,
+        r#"provider = "acme"
+
+[providers.acme]
+base_url = "https://acme.example.test/v1"
+model = "acme-1"
+
+[providers.beta]
+base_url = "https://beta.example.test/v1"
+model = "beta-1"
+"#,
+    )?;
+
+    let config = Config::load(Some(config_path), None)?;
+
+    assert_eq!(config.api_provider(), ApiProvider::Custom);
+    assert_eq!(config.deepseek_base_url(), "https://acme.example.test/v1");
+    // A pinned child of the other named custom table resolves its own host.
+    assert_eq!(
+        config.base_url_for_route_identity(ApiProvider::Custom, "beta"),
+        "https://beta.example.test/v1"
+    );
+    assert!(config.custom_identity_is_resolvable("beta"));
+    Ok(())
+}
+
+#[test]
+fn missing_custom_identity_fails_closed_instead_of_reading_the_active_custom() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let _managed = no_managed_config(temp_root.path());
+    let config_path = temp_root.path().join("config.toml");
+    fs::write(
+        &config_path,
+        r#"provider = "acme"
+
+[providers.acme]
+base_url = "https://acme.example.test/v1"
+model = "acme-1"
+"#,
+    )?;
+
+    let config = Config::load(Some(config_path), None)?;
+    let placeholder = custom_placeholder_base_url();
+
+    // A removed/renamed table, an empty identity, and the literal `custom`
+    // key on a config that is not the legacy root-literal route all fail
+    // closed to the descriptor placeholder — never to the active custom host.
+    for identity in ["ghost", "", "   ", "custom"] {
+        let resolved = config.base_url_for_route_identity(ApiProvider::Custom, identity);
+        assert_eq!(
+            resolved, placeholder,
+            "identity {identity:?} must not resolve to the active custom endpoint"
+        );
+        assert_ne!(resolved, "https://acme.example.test/v1");
+        assert!(!config.custom_identity_is_resolvable(identity));
+    }
+    Ok(())
+}
+
+#[test]
+fn legacy_literal_custom_root_endpoint_belongs_only_to_the_literal_identity() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let _managed = no_managed_config(temp_root.path());
+    let config_path = temp_root.path().join("config.toml");
+    fs::write(
+        &config_path,
+        r#"provider = "custom"
+base_url = "https://legacy-root.example.test/v1"
+default_text_model = "legacy-1"
+"#,
+    )?;
+
+    let config = Config::load(Some(config_path), None)?;
+
+    assert!(config.uses_legacy_literal_custom_route());
+    assert_eq!(
+        config.base_url_for_route_identity(ApiProvider::Custom, "custom"),
+        "https://legacy-root.example.test/v1"
+    );
+    // A differently named custom child must not inherit the legacy root.
+    assert_eq!(
+        config.base_url_for_route_identity(ApiProvider::Custom, "acme"),
+        custom_placeholder_base_url()
+    );
+    Ok(())
+}
+
 /// The bare `k3` id belongs to the Kimi Code coding-plan endpoint. A config
 /// that selects it there must resolve, and must be labelled as the membership
 /// product rather than the direct platform one (v0.9.1 kimi-k3 dogfood report).
@@ -10417,4 +10842,96 @@ fn k3_and_kimi_k3_never_cross_products_and_fail_visibly() {
         DEFAULT_KIMI_CODE_BASE_URL,
         KIMI_CODE_K3_MODEL
     ));
+}
+
+#[test]
+fn dispatch_endpoint_and_billing_receipts_agree_for_every_resolved_route() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let _managed = no_managed_config(temp_root.path());
+    let config_path = temp_root.path().join("config.toml");
+    fs::write(&config_path, "provider = \"deepseek\"\n")?;
+    let _base = EnvVarGuard::set("CODEWHALE_BASE_URL", "https://env-gateway.example.test/v1");
+
+    let config = Config::load(Some(config_path), None)?;
+
+    // `for_route` reads the ambient config; `for_dispatched_route` reads the
+    // endpoint the client is actually built from. After the resolver became
+    // identity-aware these must not be able to disagree for the active route.
+    let provider = config.api_provider();
+    let resolved = config.deepseek_base_url();
+    assert_eq!(
+        crate::route_billing::for_route(&config, provider),
+        crate::route_billing::for_dispatched_route(
+            &config,
+            crate::route_billing::DispatchedRoute {
+                provider,
+                base_url: &resolved,
+            },
+        )
+    );
+
+    // A pinned cross-provider child bills from its own resolved endpoint,
+    // which is its canonical host — not the session's env-selected gateway.
+    for child in [ApiProvider::DeepseekCN, ApiProvider::Moonshot] {
+        let child_base = config.base_url_for_route(child);
+        assert_eq!(child_base, child.default_base_url(), "{child:?}");
+        assert_eq!(
+            crate::route_billing::for_dispatched_route(
+                &config,
+                crate::route_billing::DispatchedRoute {
+                    provider: child,
+                    base_url: &child_base,
+                },
+            ),
+            crate::route_billing::for_route(&config, child),
+            "{child:?} ambient and dispatch billing receipts must agree"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn readiness_and_inventory_classify_the_resolved_route_not_the_session_host() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let _managed = no_managed_config(temp_root.path());
+    let config_path = temp_root.path().join("config.toml");
+    fs::write(&config_path, "provider = \"deepseek\"\n")?;
+    let _base = EnvVarGuard::set("CODEWHALE_BASE_URL", "http://127.0.0.1:11434/v1");
+
+    let config = Config::load(Some(config_path), None)?;
+
+    // Readiness: the active route is on a local custom host and classifies as
+    // keyless-local; the sibling identity is still the canonical hosted
+    // endpoint and must not inherit that classification.
+    assert_eq!(
+        crate::provider_readiness::credential_state_for_provider(&config, ApiProvider::Deepseek),
+        crate::provider_readiness::CredentialState::Local
+    );
+    assert_ne!(
+        crate::provider_readiness::credential_state_for_provider(&config, ApiProvider::DeepseekCN),
+        crate::provider_readiness::CredentialState::Local
+    );
+
+    // Inventory: the runtime route the picker/inventory reads is built by
+    // re-pointing a clone of this config, so it must resolve the sibling's own
+    // canonical endpoint.
+    let route = crate::route_runtime::resolve_runtime_route(&config, ApiProvider::DeepseekCN, None)
+        .expect("deepseek-cn runtime route");
+    assert_eq!(
+        route.candidate.endpoint().base_url,
+        DEFAULT_DEEPSEEKCN_BASE_URL
+    );
+    assert_eq!(
+        route.config.deepseek_base_url(),
+        DEFAULT_DEEPSEEKCN_BASE_URL
+    );
+
+    // And a canonical/default endpoint is never reported as custom.
+    assert!(!config.provider_uses_custom_endpoint(ApiProvider::DeepseekCN));
+    assert!(config.provider_uses_custom_endpoint(ApiProvider::Deepseek));
+    Ok(())
 }

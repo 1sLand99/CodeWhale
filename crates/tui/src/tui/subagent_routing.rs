@@ -458,6 +458,12 @@ pub(super) fn handle_subagent_mailbox_for_turn(
         // only provider source used by that projection: configured/default
         // parent routes are not evidence that the child actually used them.
         record_agent_current_activity(app, message);
+        // The child's own route truth always wins and is never guessed from
+        // provider identity: `route` is the immutable envelope its client was
+        // frozen with at construction, so its billing mode, billing surface
+        // and endpoint fingerprint are the child's dispatch receipt. A child
+        // whose route froze as Unknown stays Unknown.
+        //
         // Sub-agent spend joins the parent total, so it also joins the
         // completeness counters `/cost` reports against that total.
         if app

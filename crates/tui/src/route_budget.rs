@@ -71,6 +71,78 @@ pub(crate) fn effective_max_output_tokens(model: &str) -> u32 {
     }
 }
 
+/// Conservative request ceiling for a model the static catalogue does not
+/// describe at all.
+///
+/// An absent compatibility cap is not evidence of a large ceiling. Remote
+/// OpenAI-compatible routes serving an unrecognized wire alias frequently
+/// publish a much lower `max_tokens` maximum and reject anything above it, so
+/// an uncatalogued id keeps this floor rather than inheriting the full
+/// [`API_MAX_OUTPUT_TOKENS`] request cap.
+const UNCATALOGUED_COMPAT_MAX_OUTPUT_TOKENS: u32 = 8_192;
+
+/// Why a route's compatibility output ceiling has the value it does.
+///
+/// Carried so a clamp is always attributable: "unknown" is only allowed to
+/// mean "no clamp" when a route *truthfully publishes no ceiling*, never when
+/// the catalogue simply has no row for the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutputCeilingSource {
+    /// The static catalogue publishes an exact/conservative ceiling.
+    Documented(u32),
+    /// The route is known to publish no output maximum we can stand behind
+    /// (Kimi Code membership ids, operator-owned self-hosted engines). Unknown
+    /// stays unknown and nothing is clamped.
+    RouteDeclaredUnknown,
+    /// The catalogue has no row for this model. Fail closed to a conservative
+    /// ceiling rather than treating absence as permission.
+    Uncatalogued(u32),
+}
+
+impl OutputCeilingSource {
+    /// The ceiling to intersect a requested cap with, if any.
+    #[must_use]
+    pub(crate) const fn clamp_tokens(self) -> Option<u32> {
+        match self {
+            Self::Documented(tokens) | Self::Uncatalogued(tokens) => Some(tokens),
+            Self::RouteDeclaredUnknown => None,
+        }
+    }
+}
+
+/// Whether an absent compatibility ceiling is a *declared* unknown for this
+/// route, rather than a gap in the catalogue.
+///
+/// Deliberately an allowlist. Everything not named here is uncatalogued and
+/// gets the conservative ceiling.
+#[must_use]
+fn route_declares_unknown_output_ceiling(provider: ApiProvider, model: &str) -> bool {
+    match provider {
+        // Operator-owned engines: the local server, not this process, owns the
+        // output ceiling, and it is routinely far above any catalogue row.
+        ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm => true,
+        // Kimi Code membership ids publish their limits in the membership
+        // catalog rather than the static model catalogue.
+        ApiProvider::Moonshot => crate::config::is_kimi_code_membership_model(model),
+        _ => false,
+    }
+}
+
+/// Resolve the compatibility output ceiling for a route, with its provenance.
+#[must_use]
+pub(crate) fn output_ceiling_source(provider: ApiProvider, model: &str) -> OutputCeilingSource {
+    provider_capability(provider, model).max_output.map_or_else(
+        || {
+            if route_declares_unknown_output_ceiling(provider, model) {
+                OutputCeilingSource::RouteDeclaredUnknown
+            } else {
+                OutputCeilingSource::Uncatalogued(UNCATALOGUED_COMPAT_MAX_OUTPUT_TOKENS)
+            }
+        },
+        OutputCeilingSource::Documented,
+    )
+}
+
 /// Effective request output cap for a fully resolved provider/model route.
 #[must_use]
 pub(crate) fn effective_max_output_tokens_for_route(
@@ -79,22 +151,18 @@ pub(crate) fn effective_max_output_tokens_for_route(
     route_limits: Option<RouteLimits>,
 ) -> u32 {
     let requested_cap = effective_max_output_tokens(model);
-    let compatibility_cap = provider_capability(provider, model).max_output;
+    let compatibility_cap = output_ceiling_source(provider, model).clamp_tokens();
     let route_cap = route_output_limit_tokens(route_limits);
-    // Arbitrary wire aliases on self-hosted engines cannot appear in the
-    // static model catalogue. When that is the only reason the compatibility
-    // cap fell back to 4K, a concrete route limit is the stronger fact. Known
-    // model and hosted-provider caps remain authoritative and are still
-    // intersected with any route maximum.
-    let cap = if provider.is_self_hosted()
-        && crate::models::max_output_tokens_for_model(model).is_none()
-        && let Some(route_cap) = route_cap
-    {
-        requested_cap.min(route_cap)
-    } else {
-        let cap = requested_cap.min(compatibility_cap);
-        route_cap.map_or(cap, |route_cap| cap.min(route_cap))
-    };
+    // Unknown means unknown only where a route *declares* it: membership ids
+    // such as the `kimi-for-coding` family, and operator-owned self-hosted
+    // engines. For those there is nothing to clamp against and the requested
+    // cap stands. A model the catalogue simply has no row for is not the same
+    // fact — absence is not permission, so it keeps a conservative ceiling
+    // (see `output_ceiling_source`). Only a concrete route/offering maximum
+    // narrows it further; known compatibility caps stay authoritative and are
+    // still intersected with any route maximum.
+    let cap = compatibility_cap.map_or(requested_cap, |compat| requested_cap.min(compat));
+    let cap = route_cap.map_or(cap, |route_cap| cap.min(route_cap));
     let Some(window) = route_limits
         .and_then(|limits| limits.context_tokens)
         .and_then(|tokens| u32::try_from(tokens).ok())
@@ -168,6 +236,55 @@ pub(crate) fn auto_compact_default_for_route(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Absence of a catalogue row is not evidence of a large ceiling. An
+    /// unrecognized wire alias on a remote OpenAI-compatible route keeps the
+    /// conservative compatibility ceiling, with an attributable source.
+    #[test]
+    fn uncatalogued_remote_model_keeps_a_conservative_ceiling() {
+        let source = output_ceiling_source(ApiProvider::Openai, "totally-unknown-alias-v9");
+        assert_eq!(
+            source,
+            OutputCeilingSource::Uncatalogued(UNCATALOGUED_COMPAT_MAX_OUTPUT_TOKENS)
+        );
+        assert_eq!(
+            source.clamp_tokens(),
+            Some(UNCATALOGUED_COMPAT_MAX_OUTPUT_TOKENS)
+        );
+        assert!(
+            effective_max_output_tokens_for_route(
+                ApiProvider::Openai,
+                "totally-unknown-alias-v9",
+                None
+            ) <= UNCATALOGUED_COMPAT_MAX_OUTPUT_TOKENS
+        );
+    }
+
+    /// Routes that *declare* an unknown ceiling still avoid the clamp.
+    #[test]
+    fn route_declared_unknown_ceilings_are_not_clamped() {
+        for (provider, model) in [
+            (ApiProvider::Moonshot, "kimi-for-coding"),
+            (ApiProvider::Moonshot, "kimi-for-coding-highspeed"),
+            (ApiProvider::Ollama, "some-local-build"),
+        ] {
+            assert_eq!(
+                output_ceiling_source(provider, model),
+                OutputCeilingSource::RouteDeclaredUnknown,
+                "{provider:?}/{model} must declare its unknown ceiling"
+            );
+            assert_eq!(output_ceiling_source(provider, model).clamp_tokens(), None);
+        }
+        // Bare `k3` is a membership id, but unlike the `kimi-for-coding`
+        // family the K3 quickstart documents its output maximum, and the model
+        // catalogue carries it. A documented ceiling is authoritative — the
+        // membership allowlist only covers ids the catalogue has nothing to
+        // say about, and must not turn a real fact back into an unknown.
+        assert_eq!(
+            output_ceiling_source(ApiProvider::Moonshot, "k3"),
+            OutputCeilingSource::Documented(131_072)
+        );
+    }
 
     #[test]
     fn codex_missing_route_metadata_uses_provider_context_floor() {
@@ -267,8 +384,8 @@ mod tests {
                 "arbitrary-local-wire-alias",
                 None,
             ),
-            4_096,
-            "missing route facts must retain the conservative fallback"
+            65_536,
+            "an unknown compatibility cap must not clamp; only the requested cap applies"
         );
         assert_eq!(
             effective_max_output_tokens_for_route(
@@ -281,6 +398,84 @@ mod tests {
             ),
             32_768,
             "known model caps must remain authoritative on self-hosted routes"
+        );
+    }
+
+    /// #4368 follow-up: the Kimi Code membership ids deliberately have no
+    /// static output cap (the membership catalog owns their limits). The old
+    /// generic `unwrap_or(4096)` in `provider_capability` turned that unknown
+    /// into a hard 4K clamp here, silently truncating every offline membership
+    /// turn. Unknown must mean "no compatibility clamp".
+    #[test]
+    fn kimi_membership_unknown_output_cap_does_not_clamp_to_4k() {
+        let _lock = crate::test_support::lock_test_env();
+        let _codewhale = crate::test_support::EnvVarGuard::remove("CODEWHALE_MAX_OUTPUT_TOKENS");
+        let _deepseek = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
+
+        for model in ["kimi-for-coding", "kimi-for-coding-highspeed"] {
+            assert_eq!(
+                provider_capability(ApiProvider::Moonshot, model).max_output,
+                None,
+                "{model}: membership output ceiling must stay unknown, not a placeholder"
+            );
+
+            let cap = effective_max_output_tokens_for_route(ApiProvider::Moonshot, model, None);
+            assert_eq!(
+                cap,
+                effective_max_output_tokens(model),
+                "{model}: unknown compatibility cap must leave the requested cap intact"
+            );
+            assert_ne!(cap, 4_096, "{model}: must not inherit the old 4K fallback");
+            // No invented sentinel ceiling either.
+            assert_ne!(cap, u32::MAX);
+            assert_ne!(cap, 32_768);
+        }
+    }
+
+    /// A concrete membership offering limit is still authoritative — "unknown
+    /// means no clamp" must not become "never clamp".
+    #[test]
+    fn kimi_membership_route_limit_still_caps_output() {
+        let _lock = crate::test_support::lock_test_env();
+        let _codewhale = crate::test_support::EnvVarGuard::remove("CODEWHALE_MAX_OUTPUT_TOKENS");
+        let _deepseek = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
+
+        let limits = RouteLimits {
+            context_tokens: Some(262_144),
+            output_tokens: Some(16_384),
+            ..RouteLimits::default()
+        };
+        assert_eq!(
+            effective_max_output_tokens_for_route(
+                ApiProvider::Moonshot,
+                "kimi-for-coding",
+                Some(limits),
+            ),
+            16_384
+        );
+    }
+
+    /// GLM and MiniMax publish real output ceilings; those stay authoritative
+    /// so relaxing the unknown case cannot leak into known routes.
+    #[test]
+    fn known_glm_and_minimax_output_caps_remain_authoritative() {
+        let _lock = crate::test_support::lock_test_env();
+        let _codewhale = crate::test_support::EnvVarGuard::remove("CODEWHALE_MAX_OUTPUT_TOKENS");
+        let _deepseek = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
+
+        // GLM 5.2: 1M window, documented 131K output. The requested cap is the
+        // 65,536 API ceiling, so the known cap is above it and does not bind —
+        // what matters is that the capability is *known*.
+        let glm = provider_capability(ApiProvider::Zai, "glm-5.2");
+        assert_eq!(glm.max_output, Some(131_072));
+
+        let minimax = provider_capability(ApiProvider::Minimax, "minimax-m3");
+        assert_eq!(minimax.max_output, Some(524_288));
+
+        // A known cap below the requested cap must still clamp.
+        assert_eq!(
+            effective_max_output_tokens_for_route(ApiProvider::Moonshot, "kimi-k2.7-code", None),
+            32_768,
         );
     }
 }

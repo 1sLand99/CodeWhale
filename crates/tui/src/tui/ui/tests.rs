@@ -87,6 +87,8 @@ fn completed_turn_cost_receipt_uses_the_captured_effective_route() {
                 billing_mode: crate::cost_status::RouteBillingMode::Metered,
                 dispatched_at: chrono::Utc::now(),
             }),
+            base_url: ApiProvider::Deepseek.default_base_url().to_string(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
         auto_route_receipt: None,
         suggestion_authority: None,
@@ -7643,6 +7645,8 @@ fn turn_liveness_recovers_stalled_in_progress_turn() {
                 billing_mode: crate::cost_status::RouteBillingMode::Metered,
                 dispatched_at: chrono::Utc::now(),
             }),
+            base_url: String::new(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
         auto_route_receipt: None,
         suggestion_authority: None,
@@ -7692,6 +7696,8 @@ fn engine_event_disconnect_recovers_live_turn_immediately() {
                 billing_mode: crate::cost_status::RouteBillingMode::Metered,
                 dispatched_at: chrono::Utc::now(),
             }),
+            base_url: String::new(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
         auto_route_receipt: None,
         suggestion_authority: None,
@@ -7765,6 +7771,8 @@ fn engine_event_disconnect_cleans_cancelled_turn_metadata() {
                 billing_mode: crate::cost_status::RouteBillingMode::Metered,
                 dispatched_at: chrono::Utc::now(),
             }),
+            base_url: String::new(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
         auto_route_receipt: None,
         suggestion_authority: None,
@@ -10223,6 +10231,8 @@ fn turn_started_route_is_captured_before_cancel_suppression() {
                 billing_mode: crate::cost_status::RouteBillingMode::Metered,
                 dispatched_at: created_at.clone(),
             }),
+            base_url: String::new(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
     };
 
@@ -10285,6 +10295,8 @@ fn turn_started_suggestion_authority_comes_from_the_route_receipt_not_config() {
                 billing_mode: crate::cost_status::RouteBillingMode::Unknown,
                 dispatched_at: chrono::Utc::now(),
             }),
+            base_url: String::new(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
     };
 
@@ -10325,6 +10337,8 @@ fn turn_started_without_a_route_receipt_captures_no_suggestion_authority() {
                 billing_mode: crate::cost_status::RouteBillingMode::Unknown,
                 dispatched_at: chrono::Utc::now(),
             }),
+            base_url: String::new(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
     };
 
@@ -10359,6 +10373,8 @@ fn engine_error_health_accounting_uses_active_turn_route() {
                 billing_mode: crate::cost_status::RouteBillingMode::Metered,
                 dispatched_at: chrono::Utc::now(),
             }),
+            base_url: String::new(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
         }),
     };
     capture_turn_started_metadata(&mut app, &event);
@@ -13425,6 +13441,37 @@ fn shell_wait_without_command_uses_task_id_until_command_metadata_arrives() {
 #[test]
 fn legacy_child_usage_metadata_fails_closed_without_parent_route_fallback() {
     let mut app = create_test_app();
+    // An in-process review child publishes no route of its own, so it runs on
+    // the parent turn's client and is billed from the parent's frozen receipt.
+    // Without a receipt there is nothing sound to bill from, so the turn has to
+    // be active for the child to accrue anything.
+    app.active_turn = Some(crate::tui::app::ActiveTurnMetadata {
+        turn_id: "turn-child-usage".to_string(),
+        created_at: chrono::Utc::now(),
+        route: Some(crate::core::events::TurnRoute {
+            provider: ApiProvider::Deepseek,
+            provider_identity: "deepseek".to_string(),
+            model: "deepseek-v4-flash".to_string(),
+            auto_model: false,
+            receipt: None,
+            // The parent turn is a fully dispatched, metered route. Even so,
+            // a child that publishes no route receipt of its own must not
+            // borrow it: the fail-closed answer is Unknown, reported as
+            // missing spend rather than silently inherited.
+            billing: Some(crate::core::events::RouteBillingEnvelope {
+                billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
+                endpoint_fingerprint: crate::cost_status::endpoint_fingerprint(
+                    crate::config::DEFAULT_DEEPSEEK_BASE_URL,
+                ),
+                billing_mode: crate::cost_status::RouteBillingMode::Metered,
+                dispatched_at: chrono::Utc::now(),
+            }),
+            base_url: crate::config::DEFAULT_DEEPSEEK_BASE_URL.to_string(),
+            billing_product: crate::route_billing::RouteProduct::Unproven,
+        }),
+        auto_route_receipt: None,
+        suggestion_authority: None,
+    });
     let result = Ok(crate::tools::spec::ToolResult::success("ok").with_metadata(
         serde_json::json!({
             "child_model": "deepseek-v4-flash",

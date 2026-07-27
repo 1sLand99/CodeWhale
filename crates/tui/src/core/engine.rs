@@ -3607,6 +3607,17 @@ impl Engine {
         let route_limits = crate::route_budget::known_route_limits(route.candidate.limits());
         let route_capabilities = route.candidate.capabilities();
         let route_api_config = route.config.clone();
+        // Freeze the billing receipt here, while `route` is still the single
+        // authority for this turn: `route.config` is the identity-scoped
+        // Config the client is being built from, and `route.candidate` names
+        // the endpoint it will call. After `install_resolved_runtime_route`
+        // consumes `route`, the only sound source for these facts is this
+        // receipt — an ambient `Config` read at TurnStarted or TurnComplete
+        // would follow a later provider switch, auto-router hop, or custom
+        // table change onto the wrong vendor.
+        let dispatched_base_url = route.candidate.endpoint().base_url.clone();
+        let dispatched_product =
+            crate::route_billing::capture_product(&route.config, effective_provider);
         if let Err(err) = self.install_resolved_runtime_route(route) {
             let _ = self
                 .tx_event
@@ -3711,6 +3722,10 @@ impl Engine {
             // A start is not a dispatch. The billing envelope is attached
             // below, on the route held for the wire boundary only.
             billing: None,
+            // The classification receipt, by contrast, is frozen here at the
+            // client-freeze boundary and is readable from `TurnStarted` on.
+            base_url: dispatched_base_url,
+            billing_product: dispatched_product,
         };
         // Billing provenance follows the *route* that was installed for this
         // turn, which is authoritative even when a test or embedder injected the
@@ -3726,8 +3741,20 @@ impl Engine {
             )
             .map(str::to_string),
             endpoint_fingerprint: route_base_url.and_then(crate::cost_status::endpoint_fingerprint),
-            billing_mode: crate::route_billing::for_route(&self.api_config, effective_provider)
-                .into(),
+            // Classified from this turn's own frozen receipt, not from a
+            // second ambient `for_route` read. Both halves of the route then
+            // answer from the same captured endpoint + credential product, so
+            // the envelope stamped on the wire and the receipt carried on
+            // `TurnRoute` cannot disagree about how this turn bills.
+            billing_mode: crate::route_billing::for_dispatched_receipt(
+                crate::route_billing::DispatchedReceipt {
+                    provider: effective_provider,
+                    identity: Some(turn_route.provider_identity.as_str()),
+                    base_url: turn_route.base_url.as_str(),
+                    product: turn_route.billing_product,
+                },
+            )
+            .into(),
             // Provisional. Replaced with the true wire-boundary instant
             // when `handle_deepseek_turn` emits `Event::RouteDispatched`.
             dispatched_at: turn_started_at,

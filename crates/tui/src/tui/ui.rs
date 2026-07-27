@@ -3653,6 +3653,16 @@ async fn run_event_loop(
 
                         // Update session cost, and record what the total does
                         // *not* cover so `/cost` can stay honest about it.
+                        //
+                        // `cost_audit` above came from `cost_envelope()`, i.e.
+                        // the billing envelope stamped at the wire boundary
+                        // and classified from this turn's frozen receipt. It
+                        // is `None` for a route that was never dispatched, and
+                        // a route whose receipt named no product classified as
+                        // Unknown — either way nothing accrues. A `/provider`
+                        // or custom-table switch since dispatch cannot
+                        // retro-bill this turn onto another route, because no
+                        // ambient `Config` is read here at all.
                         let turn_cost = cost_audit.as_ref().and_then(|audit| audit.estimate);
                         if let Some(audit) = cost_audit.as_ref() {
                             app.record_turn_cost_audit(audit);

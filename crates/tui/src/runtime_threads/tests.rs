@@ -3239,6 +3239,8 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
                     billing_mode: crate::cost_status::RouteBillingMode::Metered,
                     dispatched_at,
                 }),
+                base_url: ApiProvider::Stepfun.default_base_url().to_string(),
+                billing_product: crate::route_billing::RouteProduct::Unproven,
             },
         })
         .await?;

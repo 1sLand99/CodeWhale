@@ -56,12 +56,46 @@ pub struct TurnRoute {
     /// boundary, and delivered on `RouteDispatched`. Consumers that price a
     /// turn must treat `None` as *unknown*, never as a zero-cost turn.
     pub billing: Option<RouteBillingEnvelope>,
+    /// Endpoint this turn's client was frozen against, verbatim.
+    ///
+    /// [`crate::route_receipt::TurnRouteReceipt`] deliberately keeps only a
+    /// redacted endpoint identity, which billing cannot classify from, so the
+    /// non-secret URL travels here. Captured from the resolved route candidate
+    /// at the client-freeze boundary, before any ambient selection state can
+    /// move. Empty only when no endpoint was captured, which bills Unknown
+    /// rather than guessing.
+    pub base_url: String,
+    /// Credential/pay-mode product truth captured from the route-scoped config
+    /// at the same instant.
+    ///
+    /// Together with `provider_identity` and `base_url` this is a complete
+    /// [`crate::route_billing::DispatchedReceipt`]: every fact billing needs,
+    /// frozen at the client-freeze boundary. Consumers must classify from
+    /// these fields and must never re-read an ambient `Config` after the turn
+    /// starts — by `TurnComplete` a provider switch, an auto-router hop, or a
+    /// `/provider` change can have moved it elsewhere.
+    pub billing_product: crate::route_billing::RouteProduct,
 }
 
 /// Dispatch-time billing evidence. Separate from [`TurnRoute`] so the type
 /// system — not a convention — enforces that no caller can read a billing
 /// surface, endpoint fingerprint, or dispatch instant off a route that was
 /// only *planned*.
+///
+/// This is deliberately *not* the same thing as the classification receipt
+/// carried by [`TurnRoute::base_url`] / [`TurnRoute::billing_product`], and
+/// the two are not merged. They are captured at different instants and answer
+/// different questions:
+///
+/// - `base_url` + `billing_product` + `provider_identity` are frozen at the
+///   **client-freeze** boundary and answer *which route is this and how does
+///   it bill* — a [`crate::route_billing::DispatchedReceipt`]. They must be
+///   readable from `TurnStarted` onward so a child turn arriving mid-flight
+///   can be billed against the parent's frozen route.
+/// - This envelope is stamped at the **wire** boundary and answers *what was
+///   actually put on the wire, when*. A planned-but-unsent route has no
+///   metering surface and no dispatch instant, so it must be structurally
+///   absent rather than defaulted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteBillingEnvelope {
     pub billing_surface: Option<String>,
