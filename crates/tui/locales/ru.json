@@ -260,6 +260,7 @@
     "CmdQueueIndexPositive": "Индекс должен быть положительным числом",
     "CmdQueueIndexMin": "Индекс должен быть >= 1",
     "CmdRelayDescription": "Создать эстафету сессии (接力) для нового треда",
+    "CmdRemoteControlDescription": "Продолжить именно этот сеанс из веб-аккаунта Codewhale",
     "CmdRenameDescription": "Переименовать текущую сессию",
     "CmdRestoreDescription": "Откатить рабочую область к прежнему снимку до/после хода. Без аргумента — список недавних снимков.",
     "CmdRetryDescription": "Повторить последний запрос",
