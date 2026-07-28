@@ -1792,15 +1792,16 @@ body:has(.product-home) .site-github-link {
 }
 
 @media (max-width: 520px) {
-  body:has(.product-home) .site-nav-inner {
+  .site-nav-inner {
     gap: 0.5rem;
   }
 
-  body:has(.product-home) .site-nav-actions {
+  .site-nav-actions {
+    min-width: 0;
     gap: 0.35rem;
   }
 
-  body:has(.product-home) .site-nav-actions select {
+  .site-nav-actions select {
     width: 8rem;
     min-width: 0;
   }
