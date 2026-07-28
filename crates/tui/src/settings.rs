@@ -874,7 +874,9 @@ impl Settings {
         }
         // VS Code (TERM_PROGRAM=vscode, #1356), Ghostty (#1445), and a few
         // VTE terminals (#1470) produce visible flicker at 120 FPS. Cap their
-        // redraw rate without changing motion semantics or model text pacing.
+        // redraw rate. VS Code's xterm.js renderer also needs decorative
+        // motion disabled: the underwater chrome added substantially more
+        // independently moving cells than the original #1356 fix covered.
         // Ghostty may report
         // either TERM_PROGRAM=Ghostty/ghostty or TERM=xterm-ghostty.
         // Like NO_ANIMATIONS above, this unconditionally overrides any
@@ -892,6 +894,10 @@ impl Settings {
             || std::env::var_os("TERMINATOR_UUID").is_some_and(|v| !v.is_empty());
         if term_constrains_frame_rate || vte_env_constrains_frame_rate {
             self.constrained_frame_rate = true;
+        }
+        if term_program == "vscode" {
+            self.low_motion = true;
+            self.fancy_animations = false;
         }
 
         // Termius (TERM_PROGRAM=Termius) and SSH sessions exhibit the
@@ -3701,7 +3707,7 @@ mod tests {
     }
 
     #[test]
-    fn vscode_caps_redraws_without_disabling_motion_or_text_cadence() {
+    fn vscode_uses_calm_rendering_without_changing_text_cadence() {
         let _g = term_program_test_guard();
         let prev = std::env::var_os("TERM_PROGRAM");
         // SAFETY: serialised by the guard.
@@ -3711,8 +3717,11 @@ mod tests {
         let mut settings = animated_settings();
         assert!(!settings.low_motion, "default is animated");
         settings.apply_env_overrides();
-        assert!(!settings.low_motion);
-        assert!(settings.fancy_animations);
+        assert!(
+            settings.low_motion,
+            "TERM_PROGRAM=vscode must disable decorative motion"
+        );
+        assert!(!settings.fancy_animations);
         assert!(
             settings.constrained_frame_rate,
             "TERM_PROGRAM=vscode should cap redraws without changing animation semantics"
