@@ -266,7 +266,7 @@ codewhale doctor`;
             <p className="mt-3 text-sm text-ink-soft leading-relaxed">
               {isZh ? (
                 <>
-                  新会话默认以 Act 模式打开。输入区空闲时，按{" "}
+                  新会话使用你选择的默认模式（未修改则为 Act）。输入区空闲时，按{" "}
                   <kbd className="font-mono text-xs px-1 hairline-t hairline-b hairline-l hairline-r">Tab</kbd>{" "}
                   循环 Plan → Act → Operate；按{" "}
                   <kbd className="font-mono text-xs px-1 hairline-t hairline-b hairline-l hairline-r">Shift+Tab</kbd>{" "}
