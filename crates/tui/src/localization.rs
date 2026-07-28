@@ -3341,7 +3341,7 @@ mod tests {
     }
 
     #[test]
-    fn zh_hans_constitution_copy_uses_functional_terms() {
+    fn zh_hans_constitution_copy_uses_charter_term() {
         let messages = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
             locale_json_source(Locale::ZhHans),
         )
@@ -3361,7 +3361,7 @@ mod tests {
 
         let setup_intro = tr(Locale::ZhHans, MessageId::SetupStepConstitutionWhy);
         assert!(setup_intro.contains("Codewhale"));
-        assert!(setup_intro.contains("协作准则"));
+        assert!(setup_intro.contains("宪章"));
         assert!(!setup_intro.contains("代码"));
         let welcome = tr(Locale::ZhHans, MessageId::OnboardWelcomeLead);
         assert!(welcome.contains("Codewhale"));

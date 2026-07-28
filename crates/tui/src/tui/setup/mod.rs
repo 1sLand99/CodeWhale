@@ -3924,7 +3924,7 @@ enum DraftProvenance {
 fn ratification_preview_title(locale: Locale) -> &'static str {
     match locale {
         Locale::Ja => "ユーザー憲法 - 批准前の草案",
-        Locale::ZhHans => "用户协作准则 — 确认前草案",
+        Locale::ZhHans => "用户宪章 — 确认前草案",
         Locale::ZhHant => "使用者憲法 - 批准前草案",
         Locale::PtBr => "Constituição do Usuário - Rascunho para Ratificação",
         Locale::Es419 => "Constitución del Usuario - Borrador para Ratificación",
@@ -3956,7 +3956,7 @@ fn constitution_ratification_text(
         .render_block(None)
         .unwrap_or_else(|| match locale {
             Locale::Ja => "構造化された憲法は空です。".to_string(),
-            Locale::ZhHans => "结构化协作准则为空。".to_string(),
+            Locale::ZhHans => "结构化宪章为空。".to_string(),
             Locale::ZhHant => "結構化憲法為空。".to_string(),
             Locale::PtBr => "A constituição estruturada está vazia.".to_string(),
             Locale::Es419 => "La constitución estructurada está vacía.".to_string(),
@@ -4021,22 +4021,21 @@ fn constitution_ratification_text(
                 ),
                 DraftProvenance::Guided => "由你的引导式答案确定性生成。".to_string(),
                 DraftProvenance::Existing => {
-                    "你现有的协作准则，读取自 constitution.json——原样展示，未做任何修改。"
-                        .to_string()
+                    "你现有的宪章，读取自 constitution.json——原样展示，未做任何修改。".to_string()
                 }
             };
             let ratify_how = match provenance {
                 DraftProvenance::Existing => {
-                    "这已是你当前使用的协作准则。关闭此预览后按 K 保留并完成检查点——文件不会被修改。\
+                    "这已是你当前使用的宪章。关闭此预览后按 K 保留并完成检查点——文件不会被修改。\
                      之后可随时用 /constitution 或 /setup 修改。"
                 }
                 _ => {
-                    "未经你确认，任何内容都不会成为协作准则。关闭此预览后按 G 确认并保存；\
+                    "未经你确认，任何内容都不会成为宪章。关闭此预览后按 G 确认并保存；\
                      之后可随时用 /constitution 或 /setup 修改。"
                 }
             };
             format!(
-                "CODEWHALE · 用户协作准则\n{RULE}\n\n{drafted_by}\n\n\
+                "CODEWHALE · 用户宪章\n{RULE}\n\n{drafted_by}\n\n\
                  这是 Codewhale 与你协作时长期遵循的偏好和规则。内容应保持简短、便于执行，以持久原则为主，并可随时调整。\
                  它界定协作方式与行为边界，而不是替你决定每一种情况；它让协作跨会话延续——但它不是记忆，只保留原则，不保留历史。\n\n\
                  {rendered}\n\n\
@@ -4635,7 +4634,7 @@ fn model_draft_invitation_line(locale: Locale, model_label: &str) -> String {
 fn keep_existing_invitation_line(locale: Locale) -> &'static str {
     match locale {
         Locale::Ja => "K 既存の憲法を保持 - 確認して保持、ファイルは変更しません。",
-        Locale::ZhHans => "K 保留现有协作准则——先查看，再保留，文件不变。",
+        Locale::ZhHans => "K 保留现有宪章——先查看，再保留，文件不变。",
         Locale::ZhHant => "K 保留現有憲法 - 先查看，再保留，檔案不變。",
         Locale::PtBr => "K Manter constituição existente - revise, mantenha, arquivo inalterado.",
         Locale::Es419 => {
@@ -4744,7 +4743,7 @@ pub(crate) fn model_draft_ready_message(locale: Locale, model_label: &str) -> St
             "{model_label} があなたの憲法を起草しました。プレビューを確認してから G で批准してください。"
         ),
         Locale::ZhHans => {
-            format!("{model_label} 已生成你的协作准则草案。请查看预览，然后按 G 确认。")
+            format!("{model_label} 已生成你的宪章草案。请查看预览，然后按 G 确认。")
         }
         Locale::ZhHant => format!("{model_label} 已起草你的憲法。請查看預覽，然後按 G 批准。"),
         Locale::PtBr => format!(
@@ -5295,7 +5294,7 @@ mod tests {
                 "Simplified Chinese setup copy should avoid {literal_metaphor}: {visible_copy}"
             );
         }
-        assert!(visible_copy.contains("协作准则"));
+        assert!(visible_copy.contains("宪章"));
         assert!(visible_copy.contains("自定义准则"));
         assert!(visible_copy.contains("可选策略"));
         assert!(visible_copy.contains("Codewhale"));
