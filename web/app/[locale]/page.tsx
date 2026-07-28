@@ -7,6 +7,7 @@ import { getFacts } from "@/lib/facts";
 import { fill, getHome } from "@/lib/i18n/dictionaries";
 
 const REPO = "https://github.com/Hmbown/CodeWhale";
+const CAPTURED_SESSION_VERSION = "0.9.1";
 
 // Revalidate against source-proven runtime facts without giving up static edge
 // caching. `getFacts()` rejects legacy or older KV snapshots.
@@ -71,16 +72,13 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
   return (
     <div className="product-home">
       <section className="product-hero">
-        <div className="product-current" aria-hidden="true" />
-        <div className="product-life" aria-hidden="true">
-          <span className="product-life-fish product-life-fish-a" />
-          <span className="product-life-fish product-life-fish-b" />
-          <span className="product-life-fish product-life-fish-c" />
-          <span className="product-life-jelly product-life-jelly-a" />
-          <span className="product-life-jelly product-life-jelly-b" />
-        </div>
         <div className="product-container product-hero-grid">
           <div className="product-hero-copy">
+            <div className="product-hero-brandline">
+              <Whale size={34} />
+              <span>Codewhale</span>
+              <em>{facts.license ?? "MIT"}</em>
+            </div>
             <p className="product-kicker">
               {isZh ? "数据与代码如海" : foreign ? d.kicker : "An ocean of data and code"}
             </p>
@@ -130,7 +128,11 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
                 copiedLabel={isZh ? "已复制 ✓" : foreign ? d.copied : "Copied ✓"}
               />
             </div>
-            <p className="product-facts">
+            <p
+              className="product-facts"
+              data-source-state={sourceIsPublished ? "published release" : "source candidate"}
+              data-source-state-label={sourceIsPublished ? d.publishedRelease : d.figcaptionSourceCandidate}
+            >
               {publishedRelease
                 ? isZh
                   ? `最新发布 ${publishedRelease.tag}`
@@ -160,14 +162,21 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
           </div>
 
           <figure className="product-shot">
+            <div className="product-shot-toolbar">
+              <span>
+                <Whale size={20} />
+                Codewhale TUI
+              </span>
+              <span>v{CAPTURED_SESSION_VERSION}</span>
+            </div>
             <Image
               src="/codewhale-tui.png"
               alt={
                 isZh
-                  ? `Codewhale v${sourceVersion} 的全新终端会话，使用本地 Ollama 路由且没有空的 Work 栏`
+                  ? `Codewhale v${CAPTURED_SESSION_VERSION} 的全新终端会话，使用本地 Ollama 路由且没有空的 Work 栏`
                   : foreign
-                    ? fill(d.screenshotAlt, { version: sourceVersion })
-                    : `Fresh Codewhale v${sourceVersion} terminal session using a local Ollama route, with no empty Work bar`
+                    ? fill(d.screenshotAlt, { version: CAPTURED_SESSION_VERSION })
+                    : `Fresh Codewhale v${CAPTURED_SESSION_VERSION} terminal session using a local Ollama route, with no empty Work bar`
               }
               width={1280}
               height={720}
@@ -176,13 +185,13 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
             />
             <figcaption>
               {isZh
-                ? `v${sourceVersion} ${sourceIsPublished ? "已发布版" : "源码候选"} · 本地 Ollama 路由 · Plan / Act / Operate`
+                ? `v${CAPTURED_SESSION_VERSION} 已发布版 · 本地 Ollama 路由 · Plan / Act / Operate`
                 : foreign
                   ? fill(d.figcaption, {
-                      version: sourceVersion,
-                      state: sourceIsPublished ? d.publishedRelease : d.figcaptionSourceCandidate,
+                      version: CAPTURED_SESSION_VERSION,
+                      state: d.publishedRelease,
                     })
-                  : `v${sourceVersion} ${sourceIsPublished ? "published release" : "source candidate"} · local Ollama route · Plan / Act / Operate`}
+                  : `v${CAPTURED_SESSION_VERSION} published release · local Ollama route · Plan / Act / Operate`}
             </figcaption>
           </figure>
         </div>
@@ -370,7 +379,6 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
       <section className="product-community">
         <div className="product-container product-community-grid">
           <div className="product-community-illustration" aria-hidden="true">
-            <span />
             <Whale size={180} />
           </div>
           <div>

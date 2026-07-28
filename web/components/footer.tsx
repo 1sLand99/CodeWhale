@@ -74,7 +74,7 @@ export function Footer({ locale = "en" }: { locale?: Locale }) {
       <div className="site-footer-main">
         <div className="site-footer-brand">
           <Link href={homeHref} className="site-wordmark site-wordmark-footer">
-            <Whale size={31} className="text-current" />
+            <Whale size={31} />
             <span>Codewhale</span>
           </Link>
           <p>{tagline}</p>
