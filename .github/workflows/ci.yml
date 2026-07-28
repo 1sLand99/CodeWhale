@@ -241,6 +241,12 @@ jobs:
       - name: Check provider registry drift
         if: needs.changes.outputs.heavy == 'true'
         run: python3 scripts/check-provider-registry.py
+      # Clippy above runs without `--all-targets`, so it cannot see dead code
+      # that only tests keep alive. This ratchet covers that blind spot by
+      # refusing to let the `#[allow(dead_code)]` total rise (#4785).
+      - name: Check dead-code budget
+        if: needs.changes.outputs.heavy == 'true'
+        run: python3 scripts/check-dead-code-budget.py
       - name: Check README translations stay in sync
         if: github.event_name != 'schedule'
         run: python3 scripts/check-readme-translations.py

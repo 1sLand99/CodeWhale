@@ -14,7 +14,7 @@ path = "src/main.rs"
 # Short-form convenience alias — forwards to `codewhale` silently.
 [[bin]]
 name = "codew"
-path = "src/bin/codew_legacy_shim.rs"
+path = "src/bin/codew.rs"
 
 [dependencies]
 anyhow.workspace = true
