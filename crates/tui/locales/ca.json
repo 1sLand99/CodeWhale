@@ -260,6 +260,7 @@
     "CmdQueueIndexPositive": "L'índex ha de ser un número positiu",
     "CmdQueueIndexMin": "L'índex ha de ser >= 1",
     "CmdRelayDescription": "Crea un relay de sessió (接力) per a un fil nou",
+    "CmdRemoteControlDescription": "Reprèn aquesta sessió exacta des del teu compte web de Codewhale",
     "CmdRenameDescription": "Reanomena la sessió actual",
     "CmdRestoreDescription": "Reverteix l'espai de treball a una instantània anterior pre/post-torn. Sense argument, llista les instantànies recents.",
     "CmdRetryDescription": "Reintenta l'última petició",

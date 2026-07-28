@@ -260,6 +260,7 @@
     "CmdQueueIndexPositive": "Індекс має бути додатним числом",
     "CmdQueueIndexMin": "Індекс має бути >= 1",
     "CmdRelayDescription": "Створити релей сеансу (接力) для нового ланцюжка",
+    "CmdRemoteControlDescription": "Продовжити саме цей сеанс із веб-акаунта Codewhale",
     "CmdRenameDescription": "Перейменувати поточний сеанс",
     "CmdRestoreDescription": "Відкотити робочу область до попереднього знімка до/після кроку. Без аргумента — показує останні знімки.",
     "CmdRetryDescription": "Повторити останній запит",

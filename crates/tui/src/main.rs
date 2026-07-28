@@ -88,6 +88,7 @@ mod provider_lake;
 mod provider_readiness;
 mod purge;
 mod regex_cache;
+mod remote_control;
 mod remote_setup;
 pub mod repl;
 mod repo_law;
@@ -242,6 +243,10 @@ struct Cli {
     /// Skip onboarding screens
     #[arg(long)]
     skip_onboarding: bool,
+
+    /// Start account-owned web remote control for this interactive session.
+    #[arg(long, hide = true)]
+    remote_control: bool,
 
     /// Start a fresh session, ignoring any crash-recovery checkpoint
     #[arg(long = "fresh")]
@@ -8947,6 +8952,11 @@ async fn run_interactive_with_notice(
     startup_notice: Option<String>,
     plugin_registry: std::sync::Arc<crate::plugins::PluginRegistry>,
 ) -> Result<()> {
+    let initial_input = if cli.remote_control {
+        Some(tui::InitialInput::RemoteControl)
+    } else {
+        initial_input
+    };
     let workspace = cli
         .workspace
         .clone()
@@ -12800,6 +12810,12 @@ mod terminal_mode_tests {
         worker_features.enable(crate::features::Feature::WebSearch);
         apply_fleet_engine_feature_caps(&mut worker_features, true, Some(true));
         assert!(worker_features.enabled(crate::features::Feature::WebSearch));
+    }
+
+    #[test]
+    fn hidden_remote_control_flag_starts_the_interactive_handoff() {
+        let cli = parse_cli(&["codewhale-tui", "--remote-control"]);
+        assert!(cli.remote_control);
     }
 
     #[test]
