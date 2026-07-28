@@ -4475,6 +4475,7 @@ fn active_tool_status_label_summarizes_live_tool_group() {
             owner_agent_name: None,
             started_at: app.turn_started_at,
             duration_ms: None,
+            stale_elapsed_since_output_ms: None,
             source: ExecSource::Assistant,
             interaction: None,
             output_summary: None,
@@ -4505,6 +4506,41 @@ fn active_tool_status_label_summarizes_live_tool_group() {
 }
 
 #[test]
+fn refresh_shell_exec_live_output_finalizes_restored_missing_shell_job() {
+    let mut app = create_test_app();
+    app.push_history_cell(HistoryCell::Tool(ToolCell::Exec(ExecCell {
+        command: "cargo test --workspace".to_string(),
+        status: ToolStatus::Running,
+        output: None,
+        live_output: Some("last captured output".to_string()),
+        shell_task_id: Some("shell_detached".to_string()),
+        owner_agent_id: None,
+        owner_agent_name: None,
+        started_at: None,
+        duration_ms: Some(1_234),
+        stale_elapsed_since_output_ms: None,
+        source: ExecSource::Assistant,
+        interaction: None,
+        output_summary: None,
+    })));
+
+    let changed = refresh_shell_exec_live_output(&mut app);
+
+    assert!(changed, "detached shell exec should be finalized");
+    let HistoryCell::Tool(ToolCell::Exec(exec)) = &app.history[0] else {
+        panic!("expected exec cell");
+    };
+    assert_eq!(exec.status, ToolStatus::Failed);
+    assert!(exec.live_output.is_none());
+    assert!(
+        exec.output
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no longer attached")
+    );
+}
+
+#[test]
 fn shell_live_output_update_matches_exact_task_id_only() {
     let mut app = create_test_app();
     app.push_history_cell(HistoryCell::Tool(ToolCell::Exec(ExecCell {
@@ -4516,7 +4552,8 @@ fn shell_live_output_update_matches_exact_task_id_only() {
         owner_agent_id: None,
         owner_agent_name: None,
         started_at: None,
-        duration_ms: None,
+        duration_ms: Some(111),
+        stale_elapsed_since_output_ms: None,
         source: ExecSource::Assistant,
         interaction: None,
         output_summary: None,
@@ -4531,12 +4568,35 @@ fn shell_live_output_update_matches_exact_task_id_only() {
         owner_agent_name: None,
         started_at: None,
         duration_ms: None,
+        stale_elapsed_since_output_ms: None,
         source: ExecSource::Assistant,
         interaction: None,
         output_summary: None,
     })));
 
     let mut jobs = std::collections::HashMap::new();
+    jobs.insert(
+        "shell_a".to_string(),
+        ShellJobSnapshot {
+            id: "shell_a".to_string(),
+            job_id: "shell_a".to_string(),
+            command: "cargo test --workspace".to_string(),
+            cwd: PathBuf::from("/tmp/repo"),
+            status: ShellStatus::Running,
+            exit_code: None,
+            elapsed_ms: 111,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            stdout_len: 0,
+            stderr_len: 0,
+            stdin_available: false,
+            stale: false,
+            elapsed_since_output_ms: None,
+            linked_task_id: None,
+            owner_agent_id: None,
+            owner_agent_name: None,
+        },
+    );
     jobs.insert(
         "shell_b".to_string(),
         ShellJobSnapshot {
@@ -4561,16 +4621,88 @@ fn shell_live_output_update_matches_exact_task_id_only() {
     );
 
     assert!(shell_exec_live_update(&app, 0, &jobs).is_none());
-    let (_task_id, status, output, duration, finalized) =
+    let (_task_id, status, output, duration, finalized, stale_elapsed_since_output_ms) =
         shell_exec_live_update(&app, 1, &jobs).expect("matching task id updates");
 
     assert_eq!(status, ToolStatus::Running);
     assert_eq!(duration, 777);
     assert!(!finalized);
+    assert_eq!(stale_elapsed_since_output_ms, None);
     assert_eq!(
         output.as_deref(),
         Some("stdout tail\n\n\nSTDERR:\nstderr tail\n")
     );
+}
+
+#[test]
+fn shell_live_output_update_marks_stale_running_job_static() {
+    let mut app = create_test_app();
+    app.push_history_cell(HistoryCell::Tool(ToolCell::Exec(ExecCell {
+        command: "cargo test --workspace".to_string(),
+        status: ToolStatus::Running,
+        output: None,
+        live_output: Some("previous output".to_string()),
+        shell_task_id: Some("shell_stale".to_string()),
+        owner_agent_id: None,
+        owner_agent_name: None,
+        started_at: Some(Instant::now() - Duration::from_secs(90)),
+        duration_ms: Some(90_000),
+        stale_elapsed_since_output_ms: None,
+        source: ExecSource::Assistant,
+        interaction: None,
+        output_summary: None,
+    })));
+
+    let mut jobs = std::collections::HashMap::new();
+    jobs.insert(
+        "shell_stale".to_string(),
+        ShellJobSnapshot {
+            id: "shell_stale".to_string(),
+            job_id: "shell_stale".to_string(),
+            command: "cargo test --workspace".to_string(),
+            cwd: PathBuf::from("/tmp/repo"),
+            status: ShellStatus::Running,
+            exit_code: None,
+            elapsed_ms: 90_000,
+            stdout_tail: "still working\n".to_string(),
+            stderr_tail: String::new(),
+            stdout_len: 14,
+            stderr_len: 0,
+            stdin_available: false,
+            stale: true,
+            elapsed_since_output_ms: Some(61_000),
+            linked_task_id: None,
+            owner_agent_id: None,
+            owner_agent_name: None,
+        },
+    );
+
+    let (_task_id, status, output, duration, finalized, stale_elapsed_since_output_ms) =
+        shell_exec_live_update(&app, 0, &jobs).expect("stale shell updates");
+
+    assert_eq!(status, ToolStatus::Running);
+    assert_eq!(duration, 90_000);
+    assert!(!finalized);
+    assert_eq!(stale_elapsed_since_output_ms, Some(61_000));
+    assert_eq!(output.as_deref(), Some("still working\n"));
+
+    let HistoryCell::Tool(ToolCell::Exec(exec)) =
+        app.cell_at_virtual_index_mut(0).expect("exec cell")
+    else {
+        panic!("expected exec cell");
+    };
+    exec.status = status;
+    exec.duration_ms = Some(duration);
+    exec.live_output = output;
+    exec.stale_elapsed_since_output_ms = stale_elapsed_since_output_ms;
+
+    let header_text = exec.lines_with_motion(80, false)[0]
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert!(header_text.contains("running · stale · no output 1m 01s"));
+    assert!(!header_text.contains("running ("));
 }
 
 #[test]
@@ -4586,6 +4718,7 @@ fn shell_live_output_update_finalizes_background_exec_output() {
         owner_agent_name: None,
         started_at: None,
         duration_ms: None,
+        stale_elapsed_since_output_ms: None,
         source: ExecSource::Assistant,
         interaction: None,
         output_summary: None,
@@ -4615,12 +4748,13 @@ fn shell_live_output_update_finalizes_background_exec_output() {
         },
     );
 
-    let (task_id, status, output, duration, finalized) =
+    let (task_id, status, output, duration, finalized, stale_elapsed_since_output_ms) =
         shell_exec_live_update(&app, 0, &jobs).expect("completed shell updates");
     assert_eq!(task_id, "shell_a");
     assert_eq!(status, ToolStatus::Success);
     assert_eq!(duration, 999);
     assert!(finalized);
+    assert_eq!(stale_elapsed_since_output_ms, None);
     assert_eq!(
         output.as_deref(),
         Some("final stdout\n\n\nSTDERR:\nfinal stderr\n")
@@ -4663,6 +4797,7 @@ fn shell_live_output_update_skips_finalized_exec_cell() {
         owner_agent_name: None,
         started_at: None,
         duration_ms: Some(10),
+        stale_elapsed_since_output_ms: None,
         source: ExecSource::Assistant,
         interaction: None,
         output_summary: None,
@@ -4712,6 +4847,7 @@ fn active_tool_status_label_strips_shell_wrappers_from_ci_polling() {
             owner_agent_name: None,
             started_at: app.turn_started_at,
             duration_ms: None,
+            stale_elapsed_since_output_ms: None,
             source: ExecSource::Assistant,
             interaction: None,
             output_summary: None,
@@ -11721,6 +11857,7 @@ fn spillover_pager_uses_session_artifact_for_specialized_bash_cell() {
         owner_agent_name: None,
         started_at: None,
         duration_ms: None,
+        stale_elapsed_since_output_ms: None,
         source: ExecSource::Assistant,
         interaction: None,
         output_summary: None,
@@ -11786,6 +11923,7 @@ fn terminal_pause_has_live_owner_only_for_running_exec_cells() {
             owner_agent_name: None,
             started_at: Some(Instant::now()),
             duration_ms: None,
+            stale_elapsed_since_output_ms: None,
             source: ExecSource::Assistant,
             interaction: Some("interactive".to_string()),
             output_summary: None,
@@ -14827,6 +14965,7 @@ fn turn_inspector_renders_overview_sections_for_active_turn() {
             owner_agent_name: None,
             started_at: None,
             duration_ms: Some(2400),
+            stale_elapsed_since_output_ms: None,
             source: ExecSource::Assistant,
             interaction: None,
             output_summary: None,
@@ -14986,6 +15125,7 @@ fn turn_inspector_timeline_numbers_semantic_entries_and_checkpoint_actions() {
             owner_agent_name: None,
             started_at: None,
             duration_ms: Some(1250),
+            stale_elapsed_since_output_ms: None,
             source: ExecSource::Assistant,
             interaction: None,
             output_summary: None,
@@ -15147,6 +15287,7 @@ fn turn_handoff_markdown_renders_compact_sections_for_active_turn() {
             owner_agent_name: None,
             started_at: None,
             duration_ms: Some(2400),
+            stale_elapsed_since_output_ms: None,
             source: ExecSource::Assistant,
             interaction: None,
             output_summary: None,

@@ -4325,6 +4325,7 @@ mod tests {
             owner_agent_name: None,
             started_at: None,
             duration_ms: None,
+            stale_elapsed_since_output_ms: None,
             source: ExecSource::User,
             interaction: None,
             output_summary: None,

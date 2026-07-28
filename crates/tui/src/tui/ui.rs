@@ -146,7 +146,7 @@ use super::approval::{
     ApprovalMode, ApprovalRequest, ApprovalView, ElevationRequest, ElevationView, ReviewDecision,
 };
 use super::history::{
-    HistoryCell, ToolCell, ToolStatus, history_cells_from_message, summarize_tool_output,
+    ExecCell, HistoryCell, ToolCell, ToolStatus, history_cells_from_message, summarize_tool_output,
 };
 use super::slash_menu::{
     apply_slash_menu_selection, partial_inline_skill_mention_at_cursor,
@@ -2132,14 +2132,16 @@ fn refresh_shell_exec_live_output(app: &mut App) -> bool {
             .map(|job| (job.id.clone(), job))
             .collect::<std::collections::HashMap<_, _>>()
     };
-    if jobs.is_empty() {
-        return false;
-    }
-
     let mut changed = false;
     for index in 0..app.virtual_cell_count() {
-        let Some((task_id, next_status, next_live, next_duration, finalized)) =
-            shell_exec_live_update(app, index, &jobs)
+        let Some((
+            task_id,
+            next_status,
+            next_live,
+            next_duration,
+            finalized,
+            stale_elapsed_since_output_ms,
+        )) = shell_exec_live_update(app, index, &jobs)
         else {
             continue;
         };
@@ -2152,6 +2154,7 @@ fn refresh_shell_exec_live_output(app: &mut App) -> bool {
         }
         exec.status = next_status;
         exec.duration_ms = Some(next_duration);
+        exec.stale_elapsed_since_output_ms = stale_elapsed_since_output_ms;
         if finalized {
             exec.output = next_live;
             exec.output_summary = exec
@@ -2159,6 +2162,7 @@ fn refresh_shell_exec_live_output(app: &mut App) -> bool {
                 .as_deref()
                 .map(super::history::summarize_tool_output);
             exec.live_output = None;
+            exec.stale_elapsed_since_output_ms = None;
         } else {
             exec.live_output = next_live;
         }
@@ -2171,7 +2175,7 @@ fn shell_exec_live_update(
     app: &App,
     index: usize,
     jobs: &std::collections::HashMap<String, ShellJobSnapshot>,
-) -> Option<(String, ToolStatus, Option<String>, u64, bool)> {
+) -> Option<(String, ToolStatus, Option<String>, u64, bool, Option<u64>)> {
     let HistoryCell::Tool(ToolCell::Exec(exec)) = app.cell_at_virtual_index(index)? else {
         return None;
     };
@@ -2179,13 +2183,28 @@ fn shell_exec_live_update(
         return None;
     }
     let task_id = exec.shell_task_id.as_deref()?;
-    let job = jobs.get(task_id)?;
+    let Some(job) = jobs.get(task_id) else {
+        return Some((
+            task_id.to_string(),
+            ToolStatus::Failed,
+            detached_shell_job_output(task_id, exec),
+            exec.duration_ms.unwrap_or_default(),
+            true,
+            None,
+        ));
+    };
     let next_status = shell_job_tool_status(&job.status);
     let next_live = shell_job_live_output(job).or_else(|| exec.live_output.clone());
     let finalized = !matches!(job.status, ShellStatus::Running);
+    let stale_elapsed_since_output_ms = if matches!(job.status, ShellStatus::Running) && job.stale {
+        Some(job.elapsed_since_output_ms.unwrap_or(0))
+    } else {
+        None
+    };
     if exec.status == next_status
         && exec.live_output == next_live
         && exec.duration_ms == Some(job.elapsed_ms)
+        && exec.stale_elapsed_since_output_ms == stale_elapsed_since_output_ms
     {
         return None;
     }
@@ -2195,7 +2214,19 @@ fn shell_exec_live_update(
         next_live,
         job.elapsed_ms,
         finalized,
+        stale_elapsed_since_output_ms,
     ))
+}
+
+fn detached_shell_job_output(task_id: &str, exec: &ExecCell) -> Option<String> {
+    let mut output = exec.live_output.clone().unwrap_or_default();
+    if !output.trim().is_empty() {
+        output.push_str("\n\n");
+    }
+    output.push_str(&format!(
+        "Shell job `{task_id}` is no longer attached to this TUI session."
+    ));
+    Some(output)
 }
 
 fn shell_job_tool_status(status: &ShellStatus) -> ToolStatus {

@@ -763,6 +763,7 @@ pub struct ExecCell {
     pub owner_agent_name: Option<String>,
     pub started_at: Option<Instant>,
     pub duration_ms: Option<u64>,
+    pub stale_elapsed_since_output_ms: Option<u64>,
     pub source: ExecSource,
     pub interaction: Option<String>,
     /// Cached output summary — avoids re-parsing JSON every frame.
@@ -799,13 +800,18 @@ impl ExecCell {
                 .as_deref()
                 .or(Some(command_summary.as_str()))
         };
+        let stale_status = self
+            .stale_elapsed_since_output_ms
+            .map(stale_shell_status_label);
         lines.push(render_tool_header_with_summary(
             "Shell",
             header_summary,
-            tool_status_label(self.status),
+            stale_status
+                .as_deref()
+                .unwrap_or_else(|| tool_status_label(self.status)),
             self.status,
             self.started_at,
-            low_motion,
+            low_motion || stale_status.is_some(),
         ));
 
         // Foreground shell waits block the turn but do not need a verbose
@@ -2298,6 +2304,13 @@ pub(crate) fn running_status_label_with_elapsed(elapsed_secs: u64) -> String {
     } else {
         format!("running ({elapsed_secs}s)")
     }
+}
+
+pub(crate) fn stale_shell_status_label(elapsed_since_output_ms: u64) -> String {
+    format!(
+        "running · stale · no output {}",
+        crate::elapsed::format_elapsed_ms(elapsed_since_output_ms)
+    )
 }
 
 fn render_card_detail_line(
