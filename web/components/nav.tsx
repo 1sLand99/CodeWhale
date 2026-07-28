@@ -48,7 +48,7 @@ export function Nav({ locale = "en" }: { locale?: Locale }) {
     <header className="site-nav">
       <div className="site-nav-inner">
         <Link href={homeHref} className="site-wordmark" aria-label="Codewhale home">
-          <Whale size={31} className="text-current" />
+          <Whale size={31} />
           <span>Codewhale</span>
         </Link>
 

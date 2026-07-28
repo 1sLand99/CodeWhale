@@ -76,8 +76,8 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
           <div className="product-hero-copy">
             <div className="product-hero-brandline">
               <Whale size={34} />
-              <span>{isZh ? "Codewhale 本地运行时" : "Codewhale local runtime"}</span>
-              <em>{isZh ? "开源" : "Open source"}</em>
+              <span>Codewhale</span>
+              <em>{facts.license ?? "MIT"}</em>
             </div>
             <p className="product-kicker">
               {isZh ? "数据与代码如海" : foreign ? d.kicker : "An ocean of data and code"}
@@ -164,9 +164,9 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
             <div className="product-shot-toolbar">
               <span>
                 <Whale size={20} />
-                {isZh ? "终端会话" : "Terminal session"}
+                Codewhale TUI
               </span>
-              <span>v{CAPTURED_SESSION_VERSION} · {isZh ? "已发布" : "published"}</span>
+              <span>v{CAPTURED_SESSION_VERSION}</span>
             </div>
             <Image
               src="/codewhale-tui.png"

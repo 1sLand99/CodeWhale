@@ -313,8 +313,6 @@ mark.search-highlight {
   letter-spacing: -0.03em;
 }
 
-.site-wordmark svg { color: var(--signal-gold); }
-
 .site-nav-actions {
   display: flex;
   align-items: center;
@@ -377,7 +375,6 @@ mark.search-highlight {
 
 .site-wordmark-footer,
 .site-wordmark-footer span { color: var(--stage-text); }
-.site-wordmark-footer svg { color: var(--signal-gold); }
 .site-footer-brand p { max-width: 30rem; margin-top: 0.8rem; color: rgb(var(--c-stage-soft) / 0.62); font-size: 0.86rem; line-height: 1.6; }
 
 .site-footer-links {
@@ -1072,10 +1069,6 @@ a.body-link:hover { background-size: 100% 6px; color: var(--ink); }
   font-weight: 600;
 }
 
-.product-hero-brandline svg {
-  color: var(--signal-gold);
-}
-
 .product-hero-brandline em {
   margin-left: 0.25rem;
   padding: 0.2rem 0.48rem;
@@ -1222,10 +1215,6 @@ a.body-link:hover { background-size: 100% 6px; color: var(--ink); }
   color: var(--stage-text);
 }
 
-.product-shot-toolbar svg {
-  color: var(--signal-gold);
-}
-
 .product-shot img {
   display: block;
   width: 100%;
@@ -1259,10 +1248,6 @@ body:has(.product-home) .site-nav-actions button,
 body:has(.product-home) .site-nav-actions select,
 body:has(.product-home) .site-github-link {
   border-color: rgba(106, 174, 242, 0.3);
-}
-
-body:has(.product-home) .site-wordmark svg {
-  color: var(--signal-gold);
 }
 
 .product-proof {

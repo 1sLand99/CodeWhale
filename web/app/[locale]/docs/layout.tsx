@@ -22,7 +22,7 @@ export default async function DocsLayout({
         <div className="portal-current" aria-hidden="true" />
         <div className="portal-container docs-portal-hero-inner">
           <div className="portal-mark">
-            <Whale size={28} className="text-current" />
+            <Whale size={28} />
             <span>{isZh ? "Codewhale 文档" : "Codewhale documentation"}</span>
           </div>
           <h1>{isZh ? "查找准确的使用说明。" : "Find the guidance you need."}</h1>
