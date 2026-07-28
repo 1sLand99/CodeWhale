@@ -413,7 +413,7 @@ impl LlmError {
     /// Constructs an `LlmError` from HTTP status code and response body.
     ///
     /// Performs heuristic classification based on:
-    /// - Status code (429 = rate limit, 401/403 = auth, 5xx = server error)
+    /// - Status code (429 = rate limit, 401/403 = auth, 499/5xx = transient upstream error)
     /// - Response body keywords (`context_length`, `content_policy`, safety, etc.)
     pub fn from_http_response(status: u16, body: &str) -> Self {
         match status {
@@ -472,7 +472,12 @@ impl LlmError {
                     }
                 }
             }
-            500..=599 => LlmError::ServerError {
+            // Several OpenAI-compatible gateways use nginx's non-standard
+            // 499 for an upstream request that was cancelled before response
+            // streaming began. At this boundary no response body stream has
+            // been exposed, so it is eligible for the same bounded retry
+            // policy as a 5xx gateway failure.
+            499..=599 => LlmError::ServerError {
                 status,
                 message: body.to_string(),
             },
@@ -781,7 +786,7 @@ impl From<serde_json::Error> for LlmError {
 /// - `exponential_base`: 2.0
 /// - `jitter`: true (adds randomness to prevent thundering herd)
 /// - `jitter_factor`: 0.1 (10% variation)
-/// - `retryable_status_codes`: [429, 500, 502, 503, 504]
+/// - `retryable_status_codes`: [429, 499, 500, 502, 503, 504]
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
     /// Whether retry logic is enabled
@@ -831,7 +836,7 @@ impl Default for RetryConfig {
             jitter: true,
             jitter_factor: 0.1,
             respect_retry_after: true,
-            retryable_status_codes: vec![429, 500, 502, 503, 504],
+            retryable_status_codes: vec![429, 499, 500, 502, 503, 504],
             request_timeout: 120.0,
             total_timeout: 0.0, // No total timeout by default
         }
@@ -1253,6 +1258,7 @@ mod tests {
         let config = RetryConfig::default();
 
         assert!(config.is_retryable_status(429)); // Rate limit
+        assert!(config.is_retryable_status(499)); // Upstream request cancelled
         assert!(config.is_retryable_status(500)); // Internal server error
         assert!(config.is_retryable_status(502)); // Bad gateway
         assert!(config.is_retryable_status(503)); // Service unavailable
@@ -1315,6 +1321,10 @@ mod tests {
         assert!(matches!(err, LlmError::AuthenticationError(_)));
 
         // Server errors
+        let err = LlmError::from_http_response(499, "upstream request cancelled");
+        assert!(matches!(err, LlmError::ServerError { status: 499, .. }));
+        assert!(err.is_retryable());
+
         let err = LlmError::from_http_response(500, "internal server error");
         assert!(matches!(err, LlmError::ServerError { status: 500, .. }));
 
