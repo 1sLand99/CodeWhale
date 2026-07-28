@@ -2025,8 +2025,9 @@ fn reject_settings_lock_symlink(lock_path: &Path) -> Result<()> {
 /// A direct `fs::write` truncates first, so any concurrent reader — another
 /// Codewhale process, an editor, a `cat` — can observe a half-written file and
 /// parse it as truncated TOML, silently losing every key past the tear. A
-/// same-directory temp file plus `rename` makes the swap atomic for readers:
-/// they see either the whole previous file or the whole new one.
+/// same-directory temp file plus the platform's replace primitive makes the
+/// swap atomic for readers: they see either the whole previous file or the
+/// whole new one.
 ///
 /// The temp file inherits the existing file's permission bits when there is one
 /// (so a user who tightened `settings.toml` keeps that), and is created
@@ -2063,9 +2064,63 @@ fn atomically_replace_settings_file(path: &Path, body: &[u8]) -> Result<()> {
             .with_context(|| format!("Failed to set permissions for {}", path.display()))?;
     }
 
+    #[cfg(windows)]
+    if path.exists() {
+        // `tempfile::persist` uses MoveFileExW on Windows. Under concurrent
+        // reads that can expose a partially replaced destination. ReplaceFileW
+        // is the native existing-file replacement operation and also preserves
+        // the destination's ACLs and attributes.
+        let mut temporary = tmp.into_temp_path();
+        replace_existing_settings_file(path, &temporary)
+            .with_context(|| format!("Failed to write settings to {}", path.display()))?;
+        // ReplaceFileW consumed the temporary pathname. Do not ask TempPath to
+        // clean up that now-nonexistent source when it drops.
+        temporary.disable_cleanup(true);
+        return Ok(());
+    }
+
     tmp.persist(path)
         .map_err(|error| error.error)
         .with_context(|| format!("Failed to write settings to {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn replace_existing_settings_file(path: &Path, replacement: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_TEMPORARY, ReplaceFileW, SetFileAttributesW,
+    };
+
+    fn wide_path(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+
+    let path_wide = wide_path(path);
+    let replacement_wide = wide_path(replacement);
+    unsafe {
+        // NamedTempFile marks its source with the temporary caching hint.
+        // Clear it before publication, matching tempfile's persistence path.
+        if SetFileAttributesW(replacement_wide.as_ptr(), FILE_ATTRIBUTE_NORMAL) == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        if ReplaceFileW(
+            path_wide.as_ptr(),
+            replacement_wide.as_ptr(),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+        ) == 0
+        {
+            let error = std::io::Error::last_os_error();
+            // Restore the hint so TempPath retains its normal cleanup behavior
+            // when replacement fails and the source still exists.
+            let _ = SetFileAttributesW(replacement_wide.as_ptr(), FILE_ATTRIBUTE_TEMPORARY);
+            return Err(error);
+        }
+    }
     Ok(())
 }
 
@@ -2652,9 +2707,30 @@ mod tests {
                 );
                 let path = Settings::path().expect("resolve the shared settings path");
                 let ready = result.with_extension("ready");
-                std::fs::write(&ready, b"ready").expect("announce that the reader is ready");
                 let deadline = Instant::now() + Duration::from_secs(60);
                 let (mut reads, mut torn) = (0_u64, 0_u64);
+
+                // A ready marker must mean that the reader has actually run.
+                // On Windows the child can otherwise create the marker, lose
+                // its time slice, and perform no reads before the parent
+                // completes every write and signals it to stop.
+                loop {
+                    assert!(
+                        Instant::now() < deadline,
+                        "reader did not observe the seeded settings file"
+                    );
+                    match std::fs::read_to_string(&path) {
+                        Ok(raw)
+                            if !raw.is_empty() && toml::from_str::<toml::Value>(&raw).is_ok() =>
+                        {
+                            reads += 1;
+                            break;
+                        }
+                        Ok(_) | Err(_) => std::thread::yield_now(),
+                    }
+                }
+                std::fs::write(&ready, b"ready").expect("announce that the reader is ready");
+
                 while !path_exists_for_test(&signal) && Instant::now() < deadline {
                     let Ok(raw) = std::fs::read_to_string(&path) else {
                         // The file legitimately does not exist yet.
