@@ -10,6 +10,7 @@ use super::spec::{
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use std::borrow::Cow;
 #[cfg(feature = "pdf")]
 use std::fmt::Display;
 use std::fs;
@@ -850,6 +851,9 @@ impl ToolSpec for EditFileTool {
                 "search and replace are identical, no change intended",
             ));
         }
+        if search.is_empty() {
+            return Err(ToolError::invalid_input("search must not be empty"));
+        }
         if let Some(reason) = edit_payload_looks_corrupted(search, replace) {
             return Err(ToolError::invalid_input(format!(
                 "edit_file refused corrupted payload: {reason}. Recovery: re-read the file and retry with a complete replace (or use apply_patch for brace-heavy multi-line edits)."
@@ -863,23 +867,44 @@ impl ToolSpec for EditFileTool {
             ToolError::execution_failed(format!("Failed to read {}: {}", file_path.display(), e))
         })?;
 
-        let count = contents.matches(search).count();
-        let (updated, count, fuzz_kind) = if count == 0 {
+        // Models provide LF newlines even when the file on disk uses CRLF.
+        // Match in a newline-normalized view, while retaining the sparse
+        // positions where CR bytes were removed so only the original span is
+        // replaced and the rest of the file stays byte-for-byte untouched.
+        let (normalized_contents, crlf_positions) = normalize_crlf_with_positions(&contents);
+        let normalized_search = normalize_crlf(search);
+        let mut exact_ranges = normalized_contents
+            .match_indices(normalized_search.as_ref())
+            .map(|(start, matched)| (start, start + matched.len()));
+        let first_exact_match = exact_ranges
+            .next()
+            .map(|range| map_normalized_range(range, crlf_positions.as_deref()));
+        let exact_count = usize::from(first_exact_match.is_some()) + exact_ranges.count();
+
+        let ((match_start, match_end), fuzz_kind) = if exact_count == 0 {
             // First fallback: tolerate indentation differences.
-            let indent_matches = leading_whitespace_fuzzy_matches(&contents, search);
+            let indent_matches = map_normalized_ranges(
+                leading_whitespace_fuzzy_matches(
+                    normalized_contents.as_ref(),
+                    normalized_search.as_ref(),
+                ),
+                crlf_positions.as_deref(),
+            );
             match indent_matches.as_slice() {
-                [(start, end)] => {
-                    let mut updated = contents.clone();
-                    updated.replace_range(*start..*end, replace);
-                    (updated, 1, Some("indentation"))
-                }
+                [(start, end)] => ((*start, *end), Some("indentation")),
                 [] => {
                     // Second fallback: tolerate typographic-punctuation
                     // drift (smart quotes, em-dashes, NBSP). Picks up the
                     // copy-paste failure mode where a browser/chat client
                     // silently substituted Unicode punctuation in for the
                     // ASCII the file actually contains.
-                    let punct_matches = punctuation_normalized_matches(&contents, search);
+                    let punct_matches = map_normalized_ranges(
+                        punctuation_normalized_matches(
+                            normalized_contents.as_ref(),
+                            normalized_search.as_ref(),
+                        ),
+                        crlf_positions.as_deref(),
+                    );
                     match punct_matches.as_slice() {
                         [] => {
                             return Err(ToolError::execution_failed(format!(
@@ -887,11 +912,7 @@ impl ToolSpec for EditFileTool {
                                 file_path.display(),
                             )));
                         }
-                        [(start, end)] => {
-                            let mut updated = contents.clone();
-                            updated.replace_range(*start..*end, replace);
-                            (updated, 1, Some("punctuation"))
-                        }
+                        [(start, end)] => ((*start, *end), Some("punctuation")),
                         _ => {
                             return Err(ToolError::execution_failed(format!(
                                 "edit_file search is non-unique after punctuation normalization: matched {} locations in {}. Recovery: call read_file with path=\"{path_str}\" and retry with surrounding lines that make the search unique.",
@@ -909,20 +930,37 @@ impl ToolSpec for EditFileTool {
                     )));
                 }
             }
-        } else if count > 1 {
+        } else if exact_count > 1 {
             return Err(ToolError::execution_failed(format!(
-                "edit_file search is non-unique: matched {count} locations in {}. \
+                "edit_file search is non-unique: matched {} locations in {}. \
                  Recovery: call read_file with path=\"{path_str}\" and retry with surrounding lines that make the search unique.",
+                exact_count,
                 file_path.display()
             )));
         } else {
-            (contents.replace(search, replace), count, None)
+            let Some((start, end)) = first_exact_match else {
+                return Err(ToolError::execution_failed(
+                    "edit_file internal range accounting failed — refusing write",
+                ));
+            };
+            let fuzz_kind = (&contents[start..end] != search).then_some("line endings");
+            ((start, end), fuzz_kind)
         };
+
+        let effective_replace =
+            normalize_replacement_line_endings(replace, crlf_positions.is_some());
+        let mut updated = contents.clone();
+        updated.replace_range(match_start..match_end, &effective_replace);
+        if updated == contents {
+            return Err(ToolError::invalid_input(
+                "search and replace resolve to identical file contents after line-ending normalization, no change intended",
+            ));
+        }
 
         // Fidelity: the intended replace text must appear in the updated buffer
         // (empty replace is a valid deletion). Catches host/tool bridges that
         // claim success after mangling the payload.
-        if !replace.is_empty() && !updated.contains(replace) {
+        if !effective_replace.is_empty() && !updated.contains(&effective_replace) {
             return Err(ToolError::execution_failed(
                 "edit_file internal fidelity check failed: replace text missing from updated buffer — refusing write",
             ));
@@ -940,10 +978,11 @@ impl ToolSpec for EditFileTool {
             Some("punctuation") => {
                 " (fuzzy punctuation match — typographic quotes/dashes normalized)"
             }
+            Some("line endings") => " (CRLF/LF-normalized match)",
             Some(other) => other,
             None => "",
         };
-        let summary = format!("Replaced {count} occurrence in {display}{fuzz_note}");
+        let summary = format!("Replaced 1 occurrence in {display}{fuzz_note}");
         let body = if diff.is_empty() {
             format!("{summary}\n(no textual changes)")
         } else {
@@ -1031,6 +1070,78 @@ fn edit_payload_looks_corrupted(search: &str, replace: &str) -> Option<&'static 
     }
 
     None
+}
+
+/// Normalize Windows CRLF pairs to LF while retaining the normalized byte
+/// positions where a `\r` was removed. Lone carriage returns are preserved.
+/// Inputs without CRLF are borrowed and use identity offsets.
+///
+/// A normalized boundary maps back to the original by adding the number of
+/// removed CR bytes strictly before it. At the normalized newline itself that
+/// excludes the current CR, so the start maps to `\r`; after the newline (or
+/// at EOF) it includes that CR and spans the full pair.
+fn normalize_crlf(input: &str) -> Cow<'_, str> {
+    if input.contains("\r\n") {
+        Cow::Owned(input.replace("\r\n", "\n"))
+    } else {
+        Cow::Borrowed(input)
+    }
+}
+
+fn normalize_crlf_with_positions(input: &str) -> (Cow<'_, str>, Option<Vec<usize>>) {
+    if !input.contains("\r\n") {
+        return (Cow::Borrowed(input), None);
+    }
+
+    let mut normalized = String::with_capacity(input.len());
+    let mut crlf_positions = Vec::new();
+    let mut chars = input.char_indices().peekable();
+
+    while let Some((_, ch)) = chars.next() {
+        if ch == '\r' && matches!(chars.peek(), Some((_, '\n'))) {
+            let _ = chars.next();
+            crlf_positions.push(normalized.len());
+            normalized.push('\n');
+            continue;
+        }
+
+        normalized.push(ch);
+    }
+
+    (Cow::Owned(normalized), Some(crlf_positions))
+}
+
+fn map_normalized_range(
+    (start, end): (usize, usize),
+    crlf_positions: Option<&[usize]>,
+) -> (usize, usize) {
+    let Some(crlf_positions) = crlf_positions else {
+        return (start, end);
+    };
+    let map_boundary =
+        |offset| offset + crlf_positions.partition_point(|position| *position < offset);
+    (map_boundary(start), map_boundary(end))
+}
+
+fn map_normalized_ranges(
+    ranges: impl IntoIterator<Item = (usize, usize)>,
+    crlf_positions: Option<&[usize]>,
+) -> Vec<(usize, usize)> {
+    ranges
+        .into_iter()
+        .map(|range| map_normalized_range(range, crlf_positions))
+        .collect()
+}
+
+/// Convert model-provided replacement newlines to the base file's convention.
+/// Fold CRLF first so an already-CRLF payload never becomes `\r\r\n`.
+fn normalize_replacement_line_endings(replace: &str, use_crlf: bool) -> String {
+    let lf = replace.replace("\r\n", "\n");
+    if use_crlf {
+        lf.replace('\n', "\r\n")
+    } else {
+        lf
+    }
 }
 
 fn strip_line_leading_whitespace_with_map(input: &str) -> (String, Vec<usize>) {
@@ -2301,6 +2412,237 @@ mod tests {
         // Verify edit was applied
         let edited = fs::read_to_string(&test_file).expect("read");
         assert_eq!(edited, "hi world");
+    }
+
+    #[tokio::test]
+    async fn edit_file_matches_lf_search_in_crlf_file_and_preserves_crlf() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let test_file = tmp.path().join("crlf.py");
+        fs::write(
+            &test_file,
+            b"def greet(name):\r\n    print(name)\r\n\r\ndef add(a, b):\r\n    return a + b\r\n",
+        )
+        .expect("write");
+        read_before_edit(&ctx, "crlf.py").await;
+
+        let result = EditFileTool
+            .execute(
+                json!({
+                    "path": "crlf.py",
+                    "search": "def add(a, b):\n    return a + b",
+                    "replace": "def add(a, b):\n    return a * b",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("LF model input should edit a CRLF file");
+
+        assert!(result.success, "{}", result.content);
+        assert_eq!(
+            fs::read(&test_file).expect("read"),
+            b"def greet(name):\r\n    print(name)\r\n\r\ndef add(a, b):\r\n    return a * b\r\n",
+        );
+    }
+
+    #[test]
+    fn edit_file_sparse_crlf_positions_map_utf8_range_through_eof() {
+        let original = "前\r\n尾";
+        let (normalized, crlf_positions) = normalize_crlf_with_positions(original);
+
+        assert_eq!(normalized, "前\n尾");
+        assert_eq!(crlf_positions.as_deref(), Some(&[3][..]));
+        assert_eq!(
+            map_normalized_range((0, normalized.len()), crlf_positions.as_deref()),
+            (0, original.len()),
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_file_maps_utf8_crlf_match_ending_at_eof() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let test_file = tmp.path().join("utf8-eof-crlf.txt");
+        fs::write(&test_file, "前\r\n尾").expect("write");
+        read_before_edit(&ctx, "utf8-eof-crlf.txt").await;
+
+        EditFileTool
+            .execute(
+                json!({
+                    "path": "utf8-eof-crlf.txt",
+                    "search": "前\n尾",
+                    "replace": "始\n终",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("UTF-8 CRLF match should map through EOF");
+
+        assert_eq!(fs::read(&test_file).expect("read"), "始\r\n终".as_bytes(),);
+    }
+
+    #[tokio::test]
+    async fn edit_file_normalizes_multiline_replacement_for_single_line_crlf_match() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let test_file = tmp.path().join("single-line-crlf.txt");
+        fs::write(&test_file, b"alpha\r\nomega\r\n").expect("write");
+        read_before_edit(&ctx, "single-line-crlf.txt").await;
+
+        EditFileTool
+            .execute(
+                json!({
+                    "path": "single-line-crlf.txt",
+                    "search": "omega",
+                    "replace": "beta\ngamma",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("replacement should follow the file's CRLF style");
+
+        assert_eq!(
+            fs::read(&test_file).expect("read"),
+            b"alpha\r\nbeta\r\ngamma\r\n",
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_file_normalizes_crlf_and_mixed_replacement_for_lf_file() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let test_file = tmp.path().join("lf.txt");
+        fs::write(&test_file, b"alpha\nomega\n").expect("write");
+        read_before_edit(&ctx, "lf.txt").await;
+
+        EditFileTool
+            .execute(
+                json!({
+                    "path": "lf.txt",
+                    "search": "omega",
+                    "replace": "beta\r\ngamma\nfinal",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("replacement should follow the file's LF style");
+
+        assert_eq!(
+            fs::read(&test_file).expect("read"),
+            b"alpha\nbeta\ngamma\nfinal\n",
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_file_rejects_logical_duplicate_across_lf_and_crlf() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let test_file = tmp.path().join("mixed.txt");
+        let original = b"same\nblock\r\nsame\r\nblock\r\n";
+        fs::write(&test_file, original).expect("write");
+        read_before_edit(&ctx, "mixed.txt").await;
+
+        let error = EditFileTool
+            .execute(
+                json!({
+                    "path": "mixed.txt",
+                    "search": "same\nblock",
+                    "replace": "changed",
+                }),
+                &ctx,
+            )
+            .await
+            .expect_err("logical duplicates must remain non-unique");
+
+        assert!(error.to_string().contains("matched 2"), "{error}");
+        assert_eq!(fs::read(&test_file).expect("read"), original);
+    }
+
+    #[tokio::test]
+    async fn edit_file_combines_crlf_and_indentation_fuzzy_matching() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let test_file = tmp.path().join("fuzzy-crlf.txt");
+        fs::write(&test_file, "前言\r\n    数据 = 1\r\n").expect("write");
+        read_before_edit(&ctx, "fuzzy-crlf.txt").await;
+
+        let result = EditFileTool
+            .execute(
+                json!({
+                    "path": "fuzzy-crlf.txt",
+                    "search": "前言\n        数据 = 1",
+                    "replace": "前言\n    数据 = 2",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("indentation fallback should compose with CRLF normalization");
+
+        assert!(
+            result.content.contains("fuzzy indentation match"),
+            "{}",
+            result.content
+        );
+        assert_eq!(
+            fs::read(&test_file).expect("read"),
+            "前言\r\n    数据 = 2\r\n".as_bytes(),
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_file_combines_crlf_and_punctuation_fuzzy_matching() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let test_file = tmp.path().join("punctuation-crlf.txt");
+        fs::write(&test_file, "前言\r\n数据 \"x\"\r\n").expect("write");
+        read_before_edit(&ctx, "punctuation-crlf.txt").await;
+
+        let result = EditFileTool
+            .execute(
+                json!({
+                    "path": "punctuation-crlf.txt",
+                    "search": "前言\n数据 \u{201C}x\u{201D}",
+                    "replace": "前言\r\n数据 y\n下一行",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("punctuation fallback should compose with CRLF normalization");
+
+        assert!(
+            result.content.contains("fuzzy punctuation match"),
+            "{}",
+            result.content
+        );
+        assert_eq!(
+            fs::read(&test_file).expect("read"),
+            "前言\r\n数据 y\r\n下一行\r\n".as_bytes(),
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_file_rejects_line_ending_normalized_noop() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let test_file = tmp.path().join("noop-crlf.txt");
+        let original = b"alpha\r\nbeta\r\n";
+        fs::write(&test_file, original).expect("write");
+        read_before_edit(&ctx, "noop-crlf.txt").await;
+
+        let error = EditFileTool
+            .execute(
+                json!({
+                    "path": "noop-crlf.txt",
+                    "search": "alpha\nbeta",
+                    "replace": "alpha\r\nbeta",
+                }),
+                &ctx,
+            )
+            .await
+            .expect_err("normalized no-op should be rejected");
+
+        assert!(error.to_string().contains("no change intended"), "{error}");
+        assert_eq!(fs::read(&test_file).expect("read"), original);
     }
 
     #[tokio::test]

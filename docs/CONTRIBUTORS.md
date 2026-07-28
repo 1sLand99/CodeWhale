@@ -51,6 +51,8 @@ notes, and relevant issue/PR comments.
 - **[Fred Leitz / fleitz](https://github.com/fleitz)** — required
   source-candidate credit for the canonical `Bash` no-`cwd` workspace fix and
   regression in PR #4673 (issue #4674)
+- **[LmeSzinc](https://github.com/LmeSzinc)** — the Windows CRLF `edit_file`
+  reproduction, root-cause analysis, and affected-code anchors in issue #4764
 
 </details>
 

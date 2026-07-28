@@ -31,4 +31,4 @@ export const RELEASE_CONTRIBUTORS: string[] = [
 ];
 
 /** Contributors who helped with reports, reproductions, and verification. */
-export const RELEASE_HELPERS: string[] = ["@fleitz"];
+export const RELEASE_HELPERS: string[] = ["@fleitz", "@LmeSzinc"];
