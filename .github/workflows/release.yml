@@ -243,6 +243,8 @@ jobs:
           file: infra/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          provenance: mode=max
+          sbom: true
           build-args: |
             DEEPSEEK_BUILD_SHA=${{ needs.resolve.outputs.sha }}
           tags: ${{ steps.meta.outputs.tags }}
