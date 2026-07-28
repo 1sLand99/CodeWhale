@@ -131,6 +131,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
             <p
               className="product-facts"
               data-source-state={sourceIsPublished ? "published release" : "source candidate"}
+              data-source-state-label={sourceIsPublished ? d.publishedRelease : d.figcaptionSourceCandidate}
             >
               {publishedRelease
                 ? isZh
