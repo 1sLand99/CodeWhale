@@ -72,11 +72,13 @@ describe("sitemap and hreflang preservation", () => {
 
   it("keeps per-locale alternate pairs for every indexed route", () => {
     expect(sitemap).toContain("alternates");
-    expect(sitemap).toContain("en: `${SITE_URL}/en${path}`");
-    expect(sitemap).toContain("zh: `${SITE_URL}/zh${path}`");
-    // Route generation is driven by the shipped locale set, never hardcoded.
+    // Both the routes and their hreflang alternates are generated from the
+    // canonical locale registry, never hardcoded per locale — asserting the
+    // literal `en:` / `zh:` pairs would forbid exactly that generalization.
     expect(sitemap).toContain("locales.map");
-    expect(locales).toEqual(["en", "zh"]);
+    expect(sitemap).toContain("locales.map((l) => [l, `${SITE_URL}/${l}${path}`])");
+    expect(locales).toContain("en");
+    expect(locales).toContain("zh");
   });
 
   it("keeps the new docs pages on the shared metadata helper", () => {

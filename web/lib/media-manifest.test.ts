@@ -27,7 +27,14 @@ import {
   REDUCED_MOTION_POLICY,
   type MediaAsset,
 } from "./media-manifest";
-import { locales } from "./i18n/config";
+import { ALL_LOCALES } from "./i18n/config";
+
+// Captions are required for locales that ship a complete pack, not for every
+// routed locale: `locales` also includes `partial` locales, which route with an
+// English-fallback pack. Promising a caption track per routed locale would be a
+// claim the recording cannot meet, and the manifest exists to keep those claims
+// honest.
+const shippedLocales = ALL_LOCALES.filter((l) => l.status === "shipped").map((l) => l.code);
 
 const webRoot = new URL("../", import.meta.url);
 const repoRoot = new URL("../../", import.meta.url);
@@ -89,7 +96,7 @@ describe("media manifest integrity", () => {
     expect(MEDIA_BUDGETS.video.height).toBe(MEDIA_BUDGETS.poster.height);
     expect(MEDIA_BUDGETS.video.maxDurationSeconds).toBeLessThanOrEqual(120);
     expect(MEDIA_BUDGETS.gifFallback.maxBytes).toBeGreaterThan(0);
-    for (const locale of locales) {
+    for (const locale of shippedLocales) {
       expect(MEDIA_BUDGETS.captionLocales).toContain(locale);
     }
   });
