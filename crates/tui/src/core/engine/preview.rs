@@ -1319,17 +1319,41 @@ mod tests {
         auto_model: bool,
         prompt: &str,
     ) -> crate::turn_route_plan::PlannedTurnRoute {
+        plan_with_reasoning(
+            config,
+            identity,
+            provider,
+            model,
+            auto_model,
+            if auto_model {
+                crate::tui::app::ReasoningEffort::Auto
+            } else {
+                crate::tui::app::ReasoningEffort::High
+            },
+            prompt,
+        )
+        .await
+    }
+
+    /// `plan_for` with the requested reasoning tier under test control. The
+    /// exact-route matrix needs `off` to observe a route that normalizes it
+    /// (direct Moonshot K3 sends `low`).
+    async fn plan_with_reasoning(
+        config: &crate::config::Config,
+        identity: &crate::config::ProviderIdentity,
+        provider: ApiProvider,
+        model: &str,
+        auto_model: bool,
+        reasoning_effort: crate::tui::app::ReasoningEffort,
+        prompt: &str,
+    ) -> crate::turn_route_plan::PlannedTurnRoute {
         crate::turn_route_plan::plan_turn_route(crate::turn_route_plan::TurnRoutePlanRequest {
             route_config: config,
             app_route_identity: identity,
             api_provider: provider,
             app_model: model,
             auto_model,
-            reasoning_effort: if auto_model {
-                crate::tui::app::ReasoningEffort::Auto
-            } else {
-                crate::tui::app::ReasoningEffort::High
-            },
+            reasoning_effort,
             mode: AppMode::Agent,
             content: prompt,
             display_text: prompt,
@@ -1427,6 +1451,15 @@ mod tests {
         }
     }
 
+    /// Session-section labels the default `inputs()` fixture hard-codes to the
+    /// DeepSeek route. The exact-route matrix must report the model and
+    /// reasoning tier the user actually asked that route for.
+    #[derive(Default)]
+    struct PreviewSessionOverrides {
+        requested_model: Option<String>,
+        requested_reasoning: Option<String>,
+    }
+
     async fn assert_preview_matches_first_wire_body(
         engine: &mut Engine,
         server: &wiremock::MockServer,
@@ -1437,12 +1470,19 @@ mod tests {
         translation_enabled: bool,
         show_thinking: bool,
         verbosity: Option<String>,
-    ) -> serde_json::Value {
+        overrides: PreviewSessionOverrides,
+    ) -> (RequestManifest, serde_json::Value) {
         let production_route = planned.route.clone();
         let compaction = planned.compaction.clone();
         let reasoning_effort = planned.effective_reasoning_effort.clone();
         let reasoning_effort_auto = planned.auto_controls_reasoning;
         let mut preview_inputs = inputs(false, Some(planned), prompt);
+        if let Some(requested_model) = overrides.requested_model {
+            preview_inputs.requested_model = requested_model;
+        }
+        if let Some(requested_reasoning) = overrides.requested_reasoning {
+            preview_inputs.requested_reasoning = requested_reasoning;
+        }
         let next = preview_inputs.next_turn.as_mut().expect("planned preview");
         next.prompt_context = NextTurnPromptContext::for_planned_turn(
             production_route.identity.provider,
@@ -1503,7 +1543,7 @@ mod tests {
             preview_hash, first_wire_hash,
             "preview hash must match the body captured at the HTTP boundary"
         );
-        first_wire_body
+        (manifest, first_wire_body)
     }
 
     #[tokio::test]
@@ -1558,7 +1598,7 @@ mod tests {
 
         let prompt = "inspect the request with live Work state";
         let planned = plan(&config, &identity, false, prompt).await;
-        let first_wire_body = assert_preview_matches_first_wire_body(
+        let (_, first_wire_body) = assert_preview_matches_first_wire_body(
             &mut engine,
             &server,
             planned,
@@ -1568,6 +1608,7 @@ mod tests {
             false,
             false,
             None,
+            PreviewSessionOverrides::default(),
         )
         .await;
         let body_text = first_wire_body.to_string();
@@ -1715,6 +1756,7 @@ mod tests {
             true,
             true,
             Some("concise".to_string()),
+            PreviewSessionOverrides::default(),
         )
         .await;
     }
@@ -1751,7 +1793,7 @@ mod tests {
         );
         let prompt = "answer only this new question\n\nCodewhale paused custom slash command context:\nThe user is not resuming that paused command.";
         let planned = plan(&config, &identity, false, prompt).await;
-        let first_wire_body = assert_preview_matches_first_wire_body(
+        let (_, first_wire_body) = assert_preview_matches_first_wire_body(
             &mut engine,
             &server,
             planned,
@@ -1761,6 +1803,7 @@ mod tests {
             false,
             false,
             None,
+            PreviewSessionOverrides::default(),
         )
         .await;
         assert!(
@@ -1816,7 +1859,7 @@ mod tests {
             prompt,
         )
         .await;
-        let first_wire_body = assert_preview_matches_first_wire_body(
+        let (_, first_wire_body) = assert_preview_matches_first_wire_body(
             &mut engine,
             &server,
             planned,
@@ -1826,12 +1869,676 @@ mod tests {
             false,
             false,
             None,
+            PreviewSessionOverrides::default(),
         )
         .await;
 
         assert!(first_wire_body.get("system").is_some());
         assert!(first_wire_body.get("messages").is_some());
         assert!(first_wire_body.get("input").is_none());
+    }
+
+    // ---------------------------------------------------------------------
+    // #4707 — provider-free exact-route request/receipt matrix.
+    //
+    // The four route wire-truths are already pinned at the client boundary
+    // (`client.rs`, `client/chat.rs`). What was missing is the *join*: that the
+    // manifest a user reads from `/preview-request` describes the very bytes
+    // those routes put on the wire. Each case below runs the production
+    // planner, previews, then sends one turn through a local capture server
+    // with the semantic endpoint left exact, and asserts the manifest against
+    // the captured body — hash, sizes, route facts, and the requested→effective
+    // reasoning triple.
+    // ---------------------------------------------------------------------
+
+    /// One exact provider route in the matrix.
+    struct MatrixRoute {
+        /// Test-facing name; also the failure-message prefix.
+        name: &'static str,
+        provider: ApiProvider,
+        provider_key: &'static str,
+        base_url: &'static str,
+        model: &'static str,
+        requested_reasoning: crate::tui::app::ReasoningEffort,
+        requested_reasoning_label: &'static str,
+        /// Reasoning-control keys the manifest must report, in receipt order.
+        expect_control_keys: &'static [&'static str],
+        /// Effort actually on the wire — `None` when the route publishes a
+        /// thinking toggle with no granularity. Never a fabricated tier.
+        expect_wire_effort: Option<&'static str>,
+        expect_wire_effort_source: Option<&'static str>,
+        /// The output-cap key this route writes, and the one it must not.
+        expect_output_cap_key: &'static str,
+        expect_absent_output_cap_key: &'static str,
+    }
+
+    fn glm_5_2_zai_coding() -> MatrixRoute {
+        MatrixRoute {
+            name: "GLM-5.2 @ Z.ai coding",
+            provider: ApiProvider::Zai,
+            provider_key: "zai",
+            base_url: crate::config::DEFAULT_ZAI_BASE_URL,
+            model: crate::config::ZAI_GLM_5_2_MODEL,
+            requested_reasoning: crate::tui::app::ReasoningEffort::High,
+            requested_reasoning_label: "high",
+            expect_control_keys: &["reasoning_effort", "thinking"],
+            expect_wire_effort: Some("high"),
+            expect_wire_effort_source: Some("reasoning_effort"),
+            expect_output_cap_key: "max_tokens",
+            expect_absent_output_cap_key: "max_completion_tokens",
+        }
+    }
+
+    fn glm_5_turbo_zai() -> MatrixRoute {
+        MatrixRoute {
+            name: "GLM-5-Turbo @ Z.ai",
+            provider: ApiProvider::Zai,
+            provider_key: "zai",
+            base_url: crate::config::DEFAULT_ZAI_BASE_URL,
+            model: crate::config::ZAI_GLM_5_TURBO_MODEL,
+            requested_reasoning: crate::tui::app::ReasoningEffort::High,
+            requested_reasoning_label: "high",
+            // No invented granularity: the toggle ships, the tier does not.
+            expect_control_keys: &["thinking"],
+            expect_wire_effort: None,
+            expect_wire_effort_source: None,
+            expect_output_cap_key: "max_tokens",
+            expect_absent_output_cap_key: "max_completion_tokens",
+        }
+    }
+
+    fn kimi_k3_moonshot_direct() -> MatrixRoute {
+        MatrixRoute {
+            name: "kimi-k3 @ api.moonshot.ai",
+            provider: ApiProvider::Moonshot,
+            provider_key: "moonshot",
+            base_url: crate::config::DEFAULT_MOONSHOT_BASE_URL,
+            model: crate::config::MOONSHOT_KIMI_K3_MODEL,
+            // The visible normalization: `off` is not a tier this route has.
+            requested_reasoning: crate::tui::app::ReasoningEffort::Off,
+            requested_reasoning_label: "off",
+            expect_control_keys: &["reasoning_effort"],
+            expect_wire_effort: Some("low"),
+            expect_wire_effort_source: Some("reasoning_effort"),
+            expect_output_cap_key: "max_completion_tokens",
+            expect_absent_output_cap_key: "max_tokens",
+        }
+    }
+
+    fn k3_kimi_code() -> MatrixRoute {
+        MatrixRoute {
+            name: "k3 @ api.kimi.com/coding/v1",
+            provider: ApiProvider::Moonshot,
+            provider_key: "moonshot",
+            base_url: crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            model: crate::config::KIMI_CODE_K3_MODEL,
+            requested_reasoning: crate::tui::app::ReasoningEffort::Off,
+            requested_reasoning_label: "off",
+            expect_control_keys: &["thinking"],
+            expect_wire_effort: Some("low"),
+            expect_wire_effort_source: Some("thinking.effort"),
+            expect_output_cap_key: "max_tokens",
+            expect_absent_output_cap_key: "max_completion_tokens",
+        }
+    }
+
+    fn minimax_m3() -> MatrixRoute {
+        MatrixRoute {
+            name: "MiniMax-M3 @ api.minimax.io",
+            provider: ApiProvider::Minimax,
+            provider_key: "minimax",
+            base_url: crate::config::DEFAULT_MINIMAX_BASE_URL,
+            model: crate::config::DEFAULT_MINIMAX_MODEL,
+            requested_reasoning: crate::tui::app::ReasoningEffort::High,
+            requested_reasoning_label: "high",
+            expect_control_keys: &["thinking", "reasoning_split"],
+            expect_wire_effort: None,
+            expect_wire_effort_source: None,
+            expect_output_cap_key: "max_completion_tokens",
+            expect_absent_output_cap_key: "max_tokens",
+        }
+    }
+
+    fn matrix_routes() -> Vec<MatrixRoute> {
+        vec![
+            glm_5_2_zai_coding(),
+            glm_5_turbo_zai(),
+            kimi_k3_moonshot_direct(),
+            k3_kimi_code(),
+            minimax_m3(),
+        ]
+    }
+
+    fn matrix_config(route: &MatrixRoute) -> crate::config::Config {
+        let entry = crate::config::ProviderConfig {
+            api_key: Some(format!("sk-test-{}-matrix-key", route.provider_key)),
+            base_url: Some(route.base_url.to_string()),
+            model: Some(route.model.to_string()),
+            ..crate::config::ProviderConfig::default()
+        };
+        let mut providers = crate::config::ProvidersConfig::default();
+        match route.provider {
+            ApiProvider::Zai => providers.zai = entry,
+            ApiProvider::Moonshot => providers.moonshot = entry,
+            ApiProvider::Minimax => providers.minimax = entry,
+            other => panic!("{}: unhandled matrix provider {other:?}", route.name),
+        }
+        crate::config::Config {
+            provider: Some(route.provider_key.to_string()),
+            providers: Some(providers),
+            ..crate::config::Config::default()
+        }
+    }
+
+    fn matrix_identity(route: &MatrixRoute) -> crate::config::ProviderIdentity {
+        crate::config::ProviderIdentity {
+            provider: route.provider,
+            key: route.provider_key.to_string(),
+            exact_id: None,
+        }
+    }
+
+    /// Plan the exact route through production, then redirect only the
+    /// *transport* at the local capture server. The endpoint identity the
+    /// route shaper reads is untouched, so the captured body is the body
+    /// `api.z.ai` / `api.moonshot.ai` / `api.kimi.com` / `api.minimax.io`
+    /// would have received.
+    async fn matrix_planned_route(
+        route: &MatrixRoute,
+        config: &crate::config::Config,
+        transport_base_url: Option<&str>,
+        prompt: &str,
+    ) -> crate::turn_route_plan::PlannedTurnRoute {
+        let identity = matrix_identity(route);
+        let mut planned = plan_with_reasoning(
+            config,
+            &identity,
+            route.provider,
+            route.model,
+            false,
+            route.requested_reasoning,
+            prompt,
+        )
+        .await;
+        if let Some(transport_base_url) = transport_base_url {
+            let validated = planned
+                .route
+                .clone()
+                .validate()
+                .expect("the matrix route validates into a concrete client");
+            let mut client = validated.client.clone();
+            client.set_test_chat_transport_base_url(transport_base_url.to_string());
+            planned.route = crate::route_runtime::ValidatedRuntimeRoute {
+                client,
+                ..validated
+            }
+            .into_resolved();
+        }
+        planned
+    }
+
+    /// Non-system messages on a Chat Completions body — the manifest counts
+    /// the system region separately, so `message_count` must exclude it.
+    fn non_system_message_count(body: &serde_json::Value) -> usize {
+        body.get("messages")
+            .and_then(serde_json::Value::as_array)
+            .map(|messages| {
+                messages
+                    .iter()
+                    .filter(|message| {
+                        message.get("role").and_then(serde_json::Value::as_str) != Some("system")
+                    })
+                    .count()
+            })
+            .unwrap_or_default()
+    }
+
+    async fn assert_matrix_route(route: &MatrixRoute) {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let name = route.name;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string("data: [DONE]\n\n"),
+            )
+            .mount(&server)
+            .await;
+
+        let config = matrix_config(route);
+        let (mut engine, _tmp) = wire_preview_engine(&config);
+        let prompt = "inspect the exact next request for this route";
+        let uri = server.uri();
+        let planned = matrix_planned_route(route, &config, Some(uri.as_str()), prompt).await;
+        let planned_provider = planned.route.identity.provider;
+        let planned_base_url = planned.route.candidate.endpoint().base_url.clone();
+        let planned_model = planned.route.model.clone();
+        let expected_wire_model = crate::config::wire_model_for_provider_route(
+            planned_provider,
+            &planned_base_url,
+            &planned_model,
+        );
+        assert_eq!(
+            planned_base_url.trim_end_matches('/'),
+            route.base_url.trim_end_matches('/'),
+            "{name}: the planner must keep the exact configured endpoint"
+        );
+
+        let (manifest, body) = assert_preview_matches_first_wire_body(
+            &mut engine,
+            &server,
+            planned,
+            prompt,
+            None,
+            GoalStatus::Active,
+            false,
+            false,
+            None,
+            PreviewSessionOverrides {
+                requested_model: Some(route.model.to_string()),
+                requested_reasoning: Some(route.requested_reasoning_label.to_string()),
+            },
+        )
+        .await;
+
+        // --- Route facts -------------------------------------------------
+        let facts = manifest
+            .route
+            .exact()
+            .expect("a configured fixed route is exact");
+        assert_eq!(facts.provider_id.as_str(), route.provider_key, "{name}");
+        assert_eq!(facts.wire_model.as_str(), expected_wire_model, "{name}");
+        assert_eq!(facts.dialect, "chat-completions", "{name}");
+        assert_eq!(facts.routing_source, "active-fixed-route", "{name}");
+        assert_eq!(
+            body.get("model").and_then(serde_json::Value::as_str),
+            Some(expected_wire_model.as_str()),
+            "{name}: the manifest's wire model must be the model on the wire: {body}"
+        );
+
+        // --- Body identity, byte accounting, and size estimates ----------
+        let facts_body = manifest.body.exact().expect("a prompted body is exact");
+        let canonical = crate::client::canonical_json(&body);
+        assert_eq!(
+            facts_body.body_sha256,
+            crate::hashing::sha256_hex(canonical.as_bytes()),
+            "{name}: manifest body hash must equal the captured wire body hash"
+        );
+        assert_eq!(
+            facts_body.body_canonical_json_bytes,
+            canonical.len(),
+            "{name}: canonical body size must describe the captured body"
+        );
+        assert_eq!(
+            facts_body.system_canonical_json_bytes
+                + facts_body.tool_schema_canonical_json_bytes
+                + facts_body.message_canonical_json_bytes
+                + facts_body.framing_canonical_json_bytes,
+            facts_body.body_canonical_json_bytes,
+            "{name}: the four accounting classes must sum to the body"
+        );
+        assert!(
+            facts_body.system_canonical_json_bytes > 0,
+            "{name}: this route sends a system region"
+        );
+        assert!(
+            facts_body.tool_schema_canonical_json_bytes > 0,
+            "{name}: this route sends tool schemas"
+        );
+        assert!(
+            facts_body.message_canonical_json_bytes > 0,
+            "{name}: this route sends messages"
+        );
+        assert_eq!(
+            facts_body.message_count,
+            non_system_message_count(&body),
+            "{name}: message_count counts the non-system messages on the wire"
+        );
+        assert!(
+            facts_body.tool_result_canonical_json_bytes <= facts_body.message_canonical_json_bytes,
+            "{name}: tool results are a subset of messages"
+        );
+        assert!(
+            facts_body.attachment_canonical_json_bytes <= facts_body.message_canonical_json_bytes,
+            "{name}: attachments are a subset of messages"
+        );
+        assert_eq!(
+            facts_body.tool_schema_wire_sha256,
+            body.get("tools").map(|tools| {
+                crate::hashing::sha256_hex(crate::client::canonical_json(tools).as_bytes())
+            }),
+            "{name}: the tool-schema digest must be over the schemas on the wire"
+        );
+        assert!(
+            facts_body.estimates.system > 0 && facts_body.estimates.tool_schemas > 0,
+            "{name}: per-class estimates are derived from the same wire regions"
+        );
+        assert!(
+            facts_body.estimates.total_conservative > 0,
+            "{name}: a whole-body estimate is available"
+        );
+
+        // --- Output cap: exactly the key this route writes ----------------
+        let wire_cap = body
+            .get(route.expect_output_cap_key)
+            .and_then(serde_json::Value::as_u64);
+        assert!(
+            wire_cap.is_some(),
+            "{name}: expected `{}` on the wire: {body}",
+            route.expect_output_cap_key
+        );
+        assert!(
+            body.get(route.expect_absent_output_cap_key).is_none(),
+            "{name}: `{}` must not be on the wire: {body}",
+            route.expect_absent_output_cap_key
+        );
+        assert_eq!(
+            facts_body.wire_output_cap_tokens, wire_cap,
+            "{name}: the reported output cap is the one literally on the wire"
+        );
+
+        // --- requested → effective reasoning ------------------------------
+        assert_eq!(
+            manifest.session.requested_model.as_str(),
+            route.model,
+            "{name}"
+        );
+        assert_eq!(
+            manifest.session.requested_reasoning.as_str(),
+            route.requested_reasoning_label,
+            "{name}"
+        );
+        assert_eq!(
+            facts_body.reasoning_resolution,
+            ReasoningResolution::Explicit,
+            "{name}: a fixed route with an explicitly requested tier"
+        );
+        assert_eq!(
+            facts_body.reasoning_wire_control_keys, route.expect_control_keys,
+            "{name}: reasoning-control keys, against the captured body {body}"
+        );
+        assert_eq!(
+            facts_body
+                .reasoning_wire_effort
+                .as_ref()
+                .map(|effort| effort.as_str()),
+            route.expect_wire_effort,
+            "{name}: wire effort, against the captured body {body}"
+        );
+        assert_eq!(
+            facts_body.reasoning_wire_effort_source.as_deref(),
+            route.expect_wire_effort_source,
+            "{name}"
+        );
+        // Every reported control key is genuinely present on the wire, and the
+        // reported effort is genuinely readable at the reported key path.
+        for key in &facts_body.reasoning_wire_control_keys {
+            assert!(
+                body.get(key).is_some(),
+                "{name}: reported control key `{key}` is not on the wire: {body}"
+            );
+        }
+        match (
+            facts_body.reasoning_wire_effort_source.as_deref(),
+            route.expect_wire_effort,
+        ) {
+            (Some("reasoning_effort"), Some(effort)) => assert_eq!(
+                body.get("reasoning_effort")
+                    .and_then(serde_json::Value::as_str),
+                Some(effort),
+                "{name}: {body}"
+            ),
+            (Some(path), Some(effort)) => {
+                let pointer = format!("/{}", path.replace('.', "/"));
+                assert_eq!(
+                    body.pointer(&pointer).and_then(serde_json::Value::as_str),
+                    Some(effort),
+                    "{name}: {body}"
+                );
+            }
+            (None, None) => assert!(
+                body.get("reasoning_effort").is_none(),
+                "{name}: no effort was reported, so none may be on the wire: {body}"
+            ),
+            (source, effort) => panic!("{name}: inconsistent effort receipt {source:?}/{effort:?}"),
+        }
+
+        // --- Provider-authoritative usage ---------------------------------
+        // A preview describes a request that has not been sent. Unknown stays
+        // unknown; it never becomes a zero.
+        assert!(
+            matches!(
+                &facts_body.provider_reported_usage,
+                Availability::Unavailable(unavailable)
+                    if unavailable.reason == UnavailableReason::ProviderRequestNotExecuted
+            ),
+            "{name}: preview must not claim provider usage"
+        );
+        let json = manifest.to_json();
+        assert!(
+            !json.contains("\"input_tokens\""),
+            "{name}: no fabricated usage counters reach the surface:\n{json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn matrix_glm_5_2_zai_coding_preview_matches_the_first_wire_body() {
+        assert_matrix_route(&glm_5_2_zai_coding()).await;
+    }
+
+    #[tokio::test]
+    async fn matrix_glm_5_turbo_zai_preview_matches_the_first_wire_body() {
+        assert_matrix_route(&glm_5_turbo_zai()).await;
+    }
+
+    #[tokio::test]
+    async fn matrix_kimi_k3_moonshot_direct_preview_matches_the_first_wire_body() {
+        assert_matrix_route(&kimi_k3_moonshot_direct()).await;
+    }
+
+    #[tokio::test]
+    async fn matrix_k3_kimi_code_preview_matches_the_first_wire_body() {
+        assert_matrix_route(&k3_kimi_code()).await;
+    }
+
+    #[tokio::test]
+    async fn matrix_minimax_m3_preview_matches_the_first_wire_body() {
+        assert_matrix_route(&minimax_m3()).await;
+    }
+
+    /// The active tool-catalog hash is a *catalog identity*, not a wire fact:
+    /// the same catalog under the same posture must hash the same on every
+    /// route, however differently each dialect then shapes those schemas.
+    /// (Unit-level membership/order/schema sensitivity is pinned by
+    /// `active_catalog_hash_tracks_membership_order_and_schema`.)
+    #[tokio::test]
+    async fn matrix_routes_share_one_active_tool_catalog_hash() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let prompt = "describe the shared tool catalog";
+        let mut observed: Vec<(&'static str, usize, String, String)> = Vec::new();
+
+        for route in matrix_routes() {
+            let config = matrix_config(&route);
+            let (mut engine, _handle) = Engine::new(
+                EngineConfig {
+                    workspace: workspace.path().to_path_buf(),
+                    max_steps: 1,
+                    snapshots_enabled: false,
+                    terminal_chrome_enabled: false,
+                    ..Default::default()
+                },
+                &config,
+            );
+            engine.config.features.disable(Feature::Mcp);
+            engine.config.subagents_enabled = false;
+
+            let planned = matrix_planned_route(&route, &config, None, prompt).await;
+            let manifest = engine
+                .build_request_manifest(inputs(false, Some(planned), prompt))
+                .await;
+            let tools = manifest
+                .tools
+                .exact()
+                .expect("MCP is off, so the tool surface is exact");
+            assert!(
+                tools.standard_and_full_surfaces_collapsed,
+                "{}: this fixture's catalog fits both budgets, so the surface \
+                 budget label cannot change catalog membership",
+                route.name
+            );
+            observed.push((
+                route.name,
+                tools.active_tool_count,
+                tools.active_tool_catalog_sha256.clone(),
+                tools.tool_surface_budget.clone(),
+            ));
+        }
+
+        assert_eq!(observed.len(), 5, "every matrix route is represented");
+        let (first_name, first_count, first_hash, _) = observed[0].clone();
+        for (name, count, hash, _) in &observed {
+            assert_eq!(
+                *count, first_count,
+                "{name} vs {first_name}: the matrix fixture holds the tool surface constant"
+            );
+            assert_eq!(
+                hash, &first_hash,
+                "{name} vs {first_name}: one catalog must hash to one identity across routes"
+            );
+        }
+
+        // …and the routes really are distinct in capability posture: the shared
+        // hash is a genuine cross-route agreement, not five copies of one
+        // route. GLM-5.2 publishes a `Full` tool surface budget while
+        // GLM-5-Turbo publishes `Standard`, and the catalog identity is
+        // unchanged by that difference.
+        let budgets: std::collections::BTreeSet<&str> = observed
+            .iter()
+            .map(|(_, _, _, budget)| budget.as_str())
+            .collect();
+        assert!(
+            budgets.len() > 1,
+            "the matrix spans routes with different surface budgets: {budgets:?}"
+        );
+    }
+
+    /// Provider-authoritative usage is never a preview fact, and it is never a
+    /// zero standing in for "not measured". It becomes knowable only when a
+    /// response reports it, through the same `parse_usage` seam the turn loop
+    /// uses.
+    #[tokio::test]
+    async fn provider_reported_usage_is_unavailable_until_a_response_reports_it() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let usage = json!({"prompt_tokens": 137, "completion_tokens": 24, "total_tokens": 161});
+        let stream = format!(
+            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            json!({
+                "choices": [{"index": 0, "delta": {"content": "ok"}}],
+            }),
+            json!({
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "usage": usage,
+            })
+        );
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(stream),
+            )
+            .mount(&server)
+            .await;
+
+        let mut config = deepseek_config();
+        config
+            .providers
+            .as_mut()
+            .expect("providers")
+            .deepseek
+            .base_url = Some(server.uri());
+        let identity = deepseek_identity();
+        let (mut engine, _tmp) = wire_preview_engine(&config);
+
+        let prompt = "count the tokens this turn will report";
+        let planned = plan(&config, &identity, false, prompt).await;
+        let production_route = planned.route.clone();
+        let compaction = planned.compaction.clone();
+        let reasoning_effort = planned.effective_reasoning_effort.clone();
+        let reasoning_effort_auto = planned.auto_controls_reasoning;
+
+        let manifest = engine
+            .build_request_manifest(inputs(false, Some(planned), prompt))
+            .await;
+        let body = manifest.body.exact().expect("a prompted body is exact");
+        assert!(
+            matches!(
+                &body.provider_reported_usage,
+                Availability::Unavailable(unavailable)
+                    if unavailable.reason == UnavailableReason::ProviderRequestNotExecuted
+            ),
+            "no request occurred, so there is nothing the provider reported"
+        );
+        assert_eq!(
+            engine.session.total_usage.input_tokens, 0,
+            "and nothing has been recorded yet"
+        );
+        assert_eq!(engine.session.total_usage.output_tokens, 0);
+
+        let _ = engine
+            .handle_send_message(
+                prompt.to_string(),
+                AppMode::Agent,
+                production_route,
+                compaction,
+                None,
+                None,
+                GoalStatus::Active,
+                reasoning_effort,
+                reasoning_effort_auto,
+                false,
+                false,
+                false,
+                false,
+                crate::tui::approval::ApprovalMode::Suggest,
+                false,
+                false,
+                None,
+                Vec::new(),
+                None,
+                None,
+                UserInputProvenance::ExternalUser,
+            )
+            .await;
+
+        // The completed turn's counts are exactly what `parse_usage` reads off
+        // the reported usage object — no rounding, no substituted estimate.
+        let parsed = crate::client::parse_usage(Some(&usage));
+        assert_eq!(u64::from(parsed.input_tokens), 137);
+        assert_eq!(u64::from(parsed.output_tokens), 24);
+        assert_eq!(
+            (
+                engine.session.total_usage.input_tokens,
+                engine.session.total_usage.output_tokens
+            ),
+            (
+                u64::from(parsed.input_tokens),
+                u64::from(parsed.output_tokens)
+            ),
+            "the turn records the provider-authoritative counts, not an estimate"
+        );
+        let reported = crate::request_manifest::ProviderReportedUsage {
+            input_tokens: engine.session.total_usage.input_tokens,
+            output_tokens: engine.session.total_usage.output_tokens,
+        };
+        assert_eq!(reported.input_tokens, 137);
+        assert_eq!(reported.output_tokens, 24);
     }
 
     /// A fixed route with a hypothetical prompt describes the next turn

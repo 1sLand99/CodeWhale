@@ -1151,6 +1151,18 @@ impl DeepSeekClient {
         &self.base_url
     }
 
+    /// Redirect Chat Completions *transport* to a local capture server while
+    /// the semantic route (`base_url`, model, endpoint identity) stays exact.
+    ///
+    /// Test-only, and compiled out of release builds. Route shaping reads
+    /// [`Self::base_url`], so an exact-route matrix can capture the real
+    /// first-turn body for `api.z.ai`, `api.moonshot.ai`, `api.kimi.com`, or
+    /// `api.minimax.io` without ever making a live provider call.
+    #[cfg(test)]
+    pub(crate) fn set_test_chat_transport_base_url(&mut self, base_url: String) {
+        self.test_chat_transport_base_url = Some(base_url);
+    }
+
     /// Transport destination for a prepared Anthropic-compatible request.
     /// Production sends the exact prepared endpoint; tests may redirect the
     /// transport while preserving that immutable endpoint for route shaping.
