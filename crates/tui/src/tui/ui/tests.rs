@@ -4621,8 +4621,14 @@ fn shell_live_output_update_matches_exact_task_id_only() {
     );
 
     assert!(shell_exec_live_update(&app, 0, &jobs).is_none());
-    let (_task_id, status, output, duration, finalized, stale_elapsed_since_output_ms) =
-        shell_exec_live_update(&app, 1, &jobs).expect("matching task id updates");
+    let ShellExecLiveUpdate {
+        task_id: _,
+        status,
+        output,
+        duration_ms: duration,
+        finalized,
+        stale_elapsed_since_output_ms,
+    } = shell_exec_live_update(&app, 1, &jobs).expect("matching task id updates");
 
     assert_eq!(status, ToolStatus::Running);
     assert_eq!(duration, 777);
@@ -4677,8 +4683,14 @@ fn shell_live_output_update_marks_stale_running_job_static() {
         },
     );
 
-    let (_task_id, status, output, duration, finalized, stale_elapsed_since_output_ms) =
-        shell_exec_live_update(&app, 0, &jobs).expect("stale shell updates");
+    let ShellExecLiveUpdate {
+        task_id: _,
+        status,
+        output,
+        duration_ms: duration,
+        finalized,
+        stale_elapsed_since_output_ms,
+    } = shell_exec_live_update(&app, 0, &jobs).expect("stale shell updates");
 
     assert_eq!(status, ToolStatus::Running);
     assert_eq!(duration, 90_000);
@@ -4748,8 +4760,14 @@ fn shell_live_output_update_finalizes_background_exec_output() {
         },
     );
 
-    let (task_id, status, output, duration, finalized, stale_elapsed_since_output_ms) =
-        shell_exec_live_update(&app, 0, &jobs).expect("completed shell updates");
+    let ShellExecLiveUpdate {
+        task_id,
+        status,
+        output,
+        duration_ms: duration,
+        finalized,
+        stale_elapsed_since_output_ms,
+    } = shell_exec_live_update(&app, 0, &jobs).expect("completed shell updates");
     assert_eq!(task_id, "shell_a");
     assert_eq!(status, ToolStatus::Success);
     assert_eq!(duration, 999);

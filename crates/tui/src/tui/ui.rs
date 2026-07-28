@@ -2134,14 +2134,14 @@ fn refresh_shell_exec_live_output(app: &mut App) -> bool {
     };
     let mut changed = false;
     for index in 0..app.virtual_cell_count() {
-        let Some((
+        let Some(ShellExecLiveUpdate {
             task_id,
-            next_status,
-            next_live,
-            next_duration,
+            status: next_status,
+            output: next_live,
+            duration_ms: next_duration,
             finalized,
             stale_elapsed_since_output_ms,
-        )) = shell_exec_live_update(app, index, &jobs)
+        }) = shell_exec_live_update(app, index, &jobs)
         else {
             continue;
         };
@@ -2171,11 +2171,20 @@ fn refresh_shell_exec_live_output(app: &mut App) -> bool {
     changed
 }
 
+struct ShellExecLiveUpdate {
+    task_id: String,
+    status: ToolStatus,
+    output: Option<String>,
+    duration_ms: u64,
+    finalized: bool,
+    stale_elapsed_since_output_ms: Option<u64>,
+}
+
 fn shell_exec_live_update(
     app: &App,
     index: usize,
     jobs: &std::collections::HashMap<String, ShellJobSnapshot>,
-) -> Option<(String, ToolStatus, Option<String>, u64, bool, Option<u64>)> {
+) -> Option<ShellExecLiveUpdate> {
     let HistoryCell::Tool(ToolCell::Exec(exec)) = app.cell_at_virtual_index(index)? else {
         return None;
     };
@@ -2184,14 +2193,14 @@ fn shell_exec_live_update(
     }
     let task_id = exec.shell_task_id.as_deref()?;
     let Some(job) = jobs.get(task_id) else {
-        return Some((
-            task_id.to_string(),
-            ToolStatus::Failed,
-            detached_shell_job_output(task_id, exec),
-            exec.duration_ms.unwrap_or_default(),
-            true,
-            None,
-        ));
+        return Some(ShellExecLiveUpdate {
+            task_id: task_id.to_string(),
+            status: ToolStatus::Failed,
+            output: detached_shell_job_output(task_id, exec),
+            duration_ms: exec.duration_ms.unwrap_or_default(),
+            finalized: true,
+            stale_elapsed_since_output_ms: None,
+        });
     };
     let next_status = shell_job_tool_status(&job.status);
     let next_live = shell_job_live_output(job).or_else(|| exec.live_output.clone());
@@ -2208,14 +2217,14 @@ fn shell_exec_live_update(
     {
         return None;
     }
-    Some((
-        task_id.to_string(),
-        next_status,
-        next_live,
-        job.elapsed_ms,
+    Some(ShellExecLiveUpdate {
+        task_id: task_id.to_string(),
+        status: next_status,
+        output: next_live,
+        duration_ms: job.elapsed_ms,
         finalized,
         stale_elapsed_since_output_ms,
-    ))
+    })
 }
 
 fn detached_shell_job_output(task_id: &str, exec: &ExecCell) -> Option<String> {
