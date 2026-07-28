@@ -376,7 +376,7 @@ pub struct Settings {
     /// session directly; resume remains available in-session.
     #[serde(default)]
     pub launch_screen: bool,
-    /// Default mode: "agent" or "plan". Legacy permission
+    /// Default mode: "agent" (Act), "plan", or "operate". Legacy permission
     /// shorthands are accepted for migration but never advertised as modes.
     pub default_mode: String,
     /// Sidebar width as percentage of terminal width
