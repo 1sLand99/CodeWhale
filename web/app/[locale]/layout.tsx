@@ -48,10 +48,10 @@ export async function generateMetadata({ params }: { params: Promise<{ locale: s
     locale,
     title: isZh
       ? "Codewhale — 潜入数据与代码的深海，让你不必亲自下潜"
-      : "Codewhale — Dive into the deep of data and code so you don't have to.",
+      : "Codewhale — Dive into the deep so you don't have to.",
     description: isZh
       ? "数据与代码如海。Codewhale 是给你杠杆的终端智能体——读取、修改、验证，让普通人也能用 LLM 把东西做出来。运行在你自己的机器上；Rust 编写，MIT 许可。"
-      : "We are entering a world with an ocean of data and code. Codewhale dives into the deep so you don't have to — a terminal agent that gives ordinary people the leverage of LLMs to build things. Runs on your machine. Rust, MIT.",
+      : "Codewhale dives into the deep so you don't have to — a terminal agent that gives ordinary people the leverage of LLMs to build things. Runs on your machine. Rust, MIT.",
   });
 }
 
