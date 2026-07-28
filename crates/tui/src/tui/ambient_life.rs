@@ -327,7 +327,7 @@ fn build_frame_marks(
     }
 
     // --- Jellyfish: a pulsing dome with lagging tentacles ---
-    // Two dome rows (arc + scalloped skirt) over a row of swaying
+    // Two dome rows (arc + bell rim) over a row of swaying
     // tentacles. The dome opens and closes on a slow floor-bounded sin²;
     // the tentacles repeat the pulse ~350 ms later and sway out of phase
     // with each other — the lag is what sells "jellyfish". Rich/Normal get
@@ -557,12 +557,19 @@ const LEAD_FISH_LEFT: &str = "<o><";
 /// ascii_safe tier needs no fallback mapping for them (len == width).
 ///
 /// Full dome (Rich/Normal), two rows with an open/closed pulse pair: a
-/// rounded arc over a scalloped skirt.
+/// rounded arc over the bell's rim.
+///
+/// The skirt is the bell's lower rim and nothing else: it carries the pulse by
+/// flaring (`\` `/`) and contracting (`(` `)`), the way a real bell swims. It
+/// holds no interior glyphs on purpose — an earlier pair put marks inside the
+/// rim (`(v_v)` / `(v.v)`), which read as two eyes and a mouth. The motion the
+/// silhouette is meant to sell lives in the tentacle row below, not in the
+/// skirt.
 const JELLY_DOME_TOP_FRAMES: &[&str] = &[".-~-.", ".'-.'"];
-const JELLY_DOME_SKIRT_FRAMES: &[&str] = &["(v_v)", "(v.v)"];
+const JELLY_DOME_SKIRT_FRAMES: &[&str] = &["\\___/", "(___)"];
 /// Compact dome for the Sparse (narrow) tier: same two-row read at 3 cells.
 const JELLY_DOME_TOP_COMPACT: &[&str] = &[".-.", "'.'"];
-const JELLY_DOME_SKIRT_COMPACT: &[&str] = &["(v)", "(-)"];
+const JELLY_DOME_SKIRT_COMPACT: &[&str] = &["\\_/", "(_)"];
 /// Tentacle sway frames (all width-1). Each column runs the same table with
 /// a phase offset so the trio lags instead of strobing in sync.
 const JELLY_TENTACLE_FRAMES: &[&str] = &["|", ":", "|", "."];
