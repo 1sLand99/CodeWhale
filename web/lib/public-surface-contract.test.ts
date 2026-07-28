@@ -82,9 +82,10 @@ type PublicSurfaceMatrix = {
   screenshot: {
     readme: string;
     website: string;
-    sourceVersion: string;
-    sourceCommit: string;
+    sourceVersion: string | null;
+    sourceCommit: string | null;
     terminal: string;
+    capture: string;
     sources: string[];
   };
   [key: string]: unknown;
@@ -135,18 +136,18 @@ describe("public surface contracts", () => {
     expect(matrix.latestPublishedRelease).not.toHaveProperty("toolCount");
     expect(matrix.surfaces).not.toHaveProperty("stable");
     expect(matrix.surfaces.availableInSourceCandidate).toContain("Web client");
-    // A real screenshot may truthfully lag the source candidate until the
-    // release's visual capture is refreshed. It must identify the version it
-    // actually shows and may never claim a version newer than the candidate.
+    // A capture may identify an exact build or explicitly remain an unversioned
+    // current session. Never infer release provenance from pixels alone.
     const screenshotSourceVersion = matrix.screenshot.sourceVersion;
-    expect(screenshotSourceVersion).not.toBeNull();
-    if (screenshotSourceVersion === null) {
-      throw new Error("the public screenshot must identify its source version");
+    if (screenshotSourceVersion !== null) {
+      expect(comparableVersion(screenshotSourceVersion)).toBeLessThanOrEqual(
+        comparableVersion(matrix.sourceCandidate.version),
+      );
+      expect(matrix.screenshot.sourceCommit).toMatch(/^[0-9a-f]{40}$/);
+    } else {
+      expect(matrix.screenshot.sourceCommit).toBeNull();
+      expect(matrix.screenshot.capture).toContain("no published-release or exact-candidate claim");
     }
-    expect(comparableVersion(screenshotSourceVersion)).toBeLessThanOrEqual(
-      comparableVersion(matrix.sourceCandidate.version),
-    );
-    expect(matrix.screenshot.sourceCommit).toMatch(/^[0-9a-f]{40}$/);
   });
 
   it("backs product and install claims with package and documentation content", () => {
@@ -503,15 +504,15 @@ done
     const digest = (image: Buffer) => createHash("sha256").update(image).digest("hex");
 
     expect(digest(readmeImage)).toBe(digest(websiteImage));
-    expect(pngDimensions(readmeImage)).toEqual([1280, 720]);
+    expect(pngDimensions(readmeImage)).toEqual([1562, 1256]);
     expect(statSync(new URL(matrix.screenshot.readme, root)).size).toBeLessThan(500_000);
-    expect(matrix.screenshot.terminal).toBe("120x32");
+    expect(matrix.screenshot.terminal).toBe("unrecorded");
 
     const readme = text("README.md");
     const homepage = text("web/app/[locale]/page.tsx");
     expect(readme).toContain("assets/screenshot.png");
     expect(homepage).toContain('src="/codewhale-tui.png"');
-    expect(homepage).toContain("with no empty Work bar");
+    expect(homepage).toContain("Current Codewhale session");
   });
 
   it("keeps reduced motion static without hiding the reasoning trace", () => {

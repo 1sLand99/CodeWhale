@@ -2927,7 +2927,7 @@ fn config_hint_for_key(key: &str) -> &'static str {
             "fill the model reasoning background; the dashed rail remains visible when off"
         }
         "synchronized_output" => "auto | on | off; terminal redraw pacing, not model speed",
-        "default_mode" => "agent | plan",
+        "default_mode" => "act (agent) | plan | operate",
         "sidebar_width" => "10..=50",
         "sidebar_focus" => "auto | work | tasks | agents | context | hidden",
         "max_history" => "integer (0 allowed)",
@@ -3009,7 +3009,7 @@ fn config_choice_values(key: &str, provider: ApiProvider) -> Option<Vec<String>>
         "approval_mode" => vec!["ask", "auto-review", "full-access", "never"],
         "permission_posture" => vec!["ask", "auto-review", "full-access"],
         "approval_policy" => vec!["use-tui-default", "ask", "auto-review", "never"],
-        "default_mode" => vec!["agent", "plan"],
+        "default_mode" => vec!["agent", "plan", "operate"],
         "reasoning_effort" if provider == ApiProvider::OpenaiCodex => {
             vec!["default", "low", "medium", "high", "xhigh"]
         }
@@ -3081,8 +3081,7 @@ fn canonical_config_choice(key: &str, value: &str) -> String {
         },
         "default_mode" => match normalized.as_str() {
             "plan" => "plan".to_string(),
-            // Old saved Operate/YOLO values are represented by the safe
-            // startup workspace; permission posture is shown separately.
+            "operate" | "operation" | "ops" => "operate".to_string(),
             _ => "agent".to_string(),
         },
         "locale" => normalize_configured_locale(value)
@@ -3103,8 +3102,9 @@ fn config_choice_label(locale: Locale, key: &str, value: &str) -> String {
         ("approval_policy", "use-tui-default") => "Use TUI permission default".to_string(),
         ("approval_mode" | "permission_posture", "full-access") => "Full Access".to_string(),
         ("approval_mode" | "approval_policy", "never") => "Never".to_string(),
-        ("default_mode", "agent") => "Agent".to_string(),
+        ("default_mode", "agent") => "Act".to_string(),
         ("default_mode", "plan") => "Plan (read only)".to_string(),
+        ("default_mode", "operate") => "Operate".to_string(),
         ("work_surface_placement", "top") => "Top".to_string(),
         ("work_surface_placement", "left") => "Left sidebar".to_string(),
         ("work_surface_placement", "right") => "Right sidebar".to_string(),
@@ -3155,6 +3155,9 @@ fn config_choice_detail(locale: Locale, key: &str, value: &str) -> Cow<'static, 
         }
         ("default_mode", "agent") => "Start ready to collaborate and use tools.",
         ("default_mode", "plan") => "Start in a read-only planning workspace.",
+        ("default_mode", "operate") => {
+            "Start as a coordinator that delegates work to bounded workers."
+        }
         ("work_surface_placement", "top") => "Show Tasks, To-do, and Workers above the transcript.",
         ("work_surface_placement", "left") => {
             "Show Tasks, To-do, and Workers in a left sidebar when the terminal is wide enough."
@@ -6119,17 +6122,23 @@ base_url = "https://api.xiaomimimo.com/v1"
         let edit = view.editing.as_ref().expect("choice editor");
         assert_eq!(
             edit.choices.as_deref(),
-            Some(&["agent".to_string(), "plan".to_string()][..])
+            Some(
+                &[
+                    "agent".to_string(),
+                    "plan".to_string(),
+                    "operate".to_string(),
+                ][..]
+            )
         );
         assert!(
             edit.choices
                 .as_ref()
                 .expect("startup choices")
                 .iter()
-                .all(|choice| choice != "operate" && choice != "yolo")
+                .all(|choice| choice != "yolo")
         );
 
-        let _ = view.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+        let _ = view.handle_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE));
         let apply = view.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         match apply {
             ViewAction::Emit(ViewEvent::ConfigUpdated {
@@ -6138,11 +6147,21 @@ base_url = "https://api.xiaomimimo.com/v1"
                 persist,
             }) => {
                 assert_eq!(key, "default_mode");
-                assert_eq!(value, "plan");
+                assert_eq!(value, "operate");
                 assert!(persist);
             }
             other => panic!("expected startup choice update, got {other:?}"),
         }
+
+        assert_eq!(
+            canonical_config_choice("default_mode", "Operate"),
+            "operate"
+        );
+        assert_eq!(
+            config_choice_label(Locale::En, "default_mode", "operate"),
+            "Operate"
+        );
+        assert!(!config_choice_detail(Locale::En, "default_mode", "operate").is_empty());
     }
 
     #[test]

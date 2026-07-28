@@ -7,7 +7,6 @@ import { getFacts } from "@/lib/facts";
 import { fill, getHome } from "@/lib/i18n/dictionaries";
 
 const REPO = "https://github.com/Hmbown/CodeWhale";
-const CAPTURED_SESSION_VERSION = "0.9.1";
 
 // Revalidate against source-proven runtime facts without giving up static edge
 // caching. `getFacts()` rejects legacy or older KV snapshots.
@@ -167,31 +166,24 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
                 <Whale size={20} />
                 Codewhale TUI
               </span>
-              <span>v{CAPTURED_SESSION_VERSION}</span>
+              <span>{isZh ? "当前会话" : "Current session"}</span>
             </div>
             <Image
               src="/codewhale-tui.png"
               alt={
                 isZh
-                  ? `Codewhale v${CAPTURED_SESSION_VERSION} 的全新终端会话，使用本地 Ollama 路由且没有空的 Work 栏`
-                  : foreign
-                    ? fill(d.screenshotAlt, { version: CAPTURED_SESSION_VERSION })
-                    : `Fresh Codewhale v${CAPTURED_SESSION_VERSION} terminal session using a local Ollama route, with no empty Work bar`
+                  ? "Codewhale 当前终端会话，显示 Operate 模式、鲸鱼、输入区和状态栏"
+                  : "Current Codewhale terminal session showing Operate mode, the whale, composer, and footer"
               }
-              width={1280}
-              height={720}
+              width={1562}
+              height={1256}
               sizes="(max-width: 900px) calc(100vw - 2rem), 58vw"
               priority
             />
             <figcaption>
               {isZh
-                ? `v${CAPTURED_SESSION_VERSION} 已发布版 · 本地 Ollama 路由 · Plan / Act / Operate`
-                : foreign
-                  ? fill(d.figcaption, {
-                      version: CAPTURED_SESSION_VERSION,
-                      state: d.publishedRelease,
-                    })
-                  : `v${CAPTURED_SESSION_VERSION} published release · local Ollama route · Plan / Act / Operate`}
+                ? "当前 Codewhale 会话 · Operate 模式 · Ask 权限姿态"
+                : "Current Codewhale session · Operate mode · Ask permission posture"}
             </figcaption>
           </figure>
         </div>
