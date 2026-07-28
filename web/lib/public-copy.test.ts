@@ -77,7 +77,11 @@ describe("public website copy contracts", () => {
     expect(modes).toContain("same permission posture, sandbox, and safety rules as Act");
     expect(faq).toContain("delegation is not mandatory");
     expect(modeCopy).not.toContain("executable work is dispatched to background Fleet workers");
-    expect(install).toContain("New sessions open in Act mode by default");
+    expect(install).toContain("New sessions use your selected default mode (Act unless you changed it)");
+    expect(install).toContain("GETTING_STARTED_STEPS");
+    expect(install).not.toContain("① Get an API key");
+    expect(install).not.toContain('href={isZh ? "/zh/faq" : "/faq"}');
+    expect(install).not.toContain('href={isZh ? "/zh/roadmap" : "/roadmap"}');
   });
 
   it("keeps source-candidate facts separate from published install facts", () => {
