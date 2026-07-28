@@ -14,7 +14,10 @@
 //!
 //! Design notes live in `README.md` next to this module.
 
-#![allow(dead_code)]
+// Each test binary `#[path]`-includes this harness and uses a different
+// subset of it, so a re-export unused by one binary (e.g. `Color`) is
+// expected — same reason as `dead_code`.
+#![allow(dead_code, unused_imports)]
 
 pub mod frame;
 pub mod harness;

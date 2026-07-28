@@ -3762,7 +3762,11 @@ fn real_tool_lifecycle_crosses_work_status_resize_and_scroll_in_a_unix_pty() -> 
         );
         let done_row = visible_row_with_text(frame, "✓ done").expect("done phase row");
         let done_color = foreground_at_text(frame, done_row, "done");
-        assert_ne!(done_color, qa_harness::Color::Default, "done lost ANSI role");
+        assert_ne!(
+            done_color,
+            qa_harness::Color::Default,
+            "done lost ANSI role"
+        );
         assert_ne!(
             done_color,
             live_colors.expect("live colors").0,
