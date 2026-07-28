@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Seal } from "@/components/seal";
 import { InstallCodeBlock } from "@/components/install-code-block";
 import { InstallBinary } from "@/components/install-binary";
+import { GETTING_STARTED_STEPS } from "@/lib/content/getting-started";
 import { getFacts } from "@/lib/facts";
 import { buildPageMetadata } from "@/lib/page-meta";
 
@@ -26,11 +27,7 @@ const NPM_INSTALL = `npm install -g codewhale`;
 const CARGO_INSTALL = `cargo install codewhale-cli --locked
 cargo install codewhale-tui --locked`;
 const FIRST_RUN = `codewhale`;
-
 const UPDATE = `codewhale update`;
-
-const SET_KEY_BASH = `export DEEPSEEK_API_KEY=sk-...`;
-const SET_KEY_AUTH = `codewhale auth set --provider deepseek --api-key sk-...`;
 
 const RELEASE_DOWNLOAD = `# Download your platform archive:
 https://github.com/Hmbown/CodeWhale/releases/latest`;
@@ -89,6 +86,8 @@ export default async function InstallPage({ params }: { params: Promise<{ locale
   const facts = await getFacts();
   const publishedRelease = facts.latestPublishedRelease;
   const sourceIsPublished = publishedRelease?.version === facts.version;
+  const firstSession = GETTING_STARTED_STEPS.find((step) => step.id === "first-session")!;
+  const connectProvider = GETTING_STARTED_STEPS.find((step) => step.id === "connect-provider")!;
   const verify = `codewhale --version${
     publishedRelease ? `   # latest published: ${publishedRelease.version}` : ""
   }
@@ -223,40 +222,40 @@ codewhale doctor`;
         <ol className="space-y-6 max-w-2xl">
           <li>
             <div className="font-display text-lg mb-2">
-              {isZh ? "① 获取 API 密钥" : "① Get an API key"}
+              {isZh ? `① ${firstSession.title.zh}` : `① ${firstSession.title.en}`}
             </div>
             <p className="text-sm text-ink-soft leading-relaxed">
-              {isZh ? (
-                <>
-                  在{" "}
-                  <a href="https://platform.deepseek.com" className="body-link">
-                    platform.deepseek.com
-                  </a>{" "}
-                  注册并创建密钥，格式为 <code className="inline">sk-...</code>。
-                </>
-              ) : (
-                <>
-                  Sign up at{" "}
-                  <a href="https://platform.deepseek.com" className="body-link">
-                    platform.deepseek.com
-                  </a>{" "}
-                  and create a key (format: <code className="inline">sk-...</code>).
-                </>
-              )}
+              {isZh ? firstSession.body.zh : firstSession.body.en}
             </p>
+            <div className="mt-2">
+              <InstallCodeBlock
+                cmd={firstSession.commands.join("\n")}
+                copyLabel={copyLabel}
+                copiedLabel={copiedLabel}
+              />
+            </div>
           </li>
 
           <li>
             <div className="font-display text-lg mb-2">
-              {isZh ? "② 设置密钥" : "② Set the key"}
+              {isZh ? `② ${connectProvider.title.zh}` : `② ${connectProvider.title.en}`}
             </div>
-            <div className="space-y-2">
-              <InstallCodeBlock cmd={SET_KEY_BASH} copyLabel={copyLabel} copiedLabel={copiedLabel} />
-              <p className="text-xs text-ink-mute">
-                {isZh ? "或保存到 ~/.codewhale/config.toml：" : "Or persist it to ~/.codewhale/config.toml:"}
-              </p>
-              <InstallCodeBlock cmd={SET_KEY_AUTH} copyLabel={copyLabel} copiedLabel={copiedLabel} />
+            <p className="text-sm text-ink-soft leading-relaxed">
+              {isZh ? connectProvider.body.zh : connectProvider.body.en}
+            </p>
+            <div className="mt-2">
+              <InstallCodeBlock
+                cmd={connectProvider.commands.join("\n")}
+                copyLabel={copyLabel}
+                copiedLabel={copiedLabel}
+              />
             </div>
+            <Link
+              href={`/${locale}${connectProvider.link.href}`}
+              className="body-link mt-2 inline-block text-sm"
+            >
+              {isZh ? connectProvider.link.label.zh : connectProvider.link.label.en} →
+            </Link>
           </li>
 
           <li>
@@ -267,7 +266,7 @@ codewhale doctor`;
             <p className="mt-3 text-sm text-ink-soft leading-relaxed">
               {isZh ? (
                 <>
-                  新会话默认以 Act 模式打开。输入区空闲时，按{" "}
+                  新会话使用你选择的默认模式（未修改则为 Act）。输入区空闲时，按{" "}
                   <kbd className="font-mono text-xs px-1 hairline-t hairline-b hairline-l hairline-r">Tab</kbd>{" "}
                   循环 Plan → Act → Operate；按{" "}
                   <kbd className="font-mono text-xs px-1 hairline-t hairline-b hairline-l hairline-r">Shift+Tab</kbd>{" "}
@@ -277,7 +276,7 @@ codewhale doctor`;
                 </>
               ) : (
                 <>
-                  New sessions open in Act mode by default. When the composer is idle, press{" "}
+                  New sessions use your selected default mode (Act unless you changed it). When the composer is idle, press{" "}
                   <kbd className="font-mono text-xs px-1 hairline-t hairline-b hairline-l hairline-r">Tab</kbd>{" "}
                   to cycle Plan → Act → Operate; press{" "}
                   <kbd className="font-mono text-xs px-1 hairline-t hairline-b hairline-l hairline-r">Shift+Tab</kbd>{" "}
@@ -627,7 +626,7 @@ codewhale doctor`;
               </span>
             </Link>
             <Link
-              href={isZh ? "/zh/faq" : "/faq"}
+              href={`/${locale}/faq`}
               className="p-6 hover:bg-paper-deep transition-colors"
             >
               <div className="font-display text-xl mb-2">FAQ</div>
@@ -639,7 +638,7 @@ codewhale doctor`;
               </span>
             </Link>
             <Link
-              href={isZh ? "/zh/roadmap" : "/roadmap"}
+              href={`/${locale}/roadmap`}
               className="p-6 hover:bg-paper-deep transition-colors"
             >
               <div className="font-display text-xl mb-2">Roadmap</div>
