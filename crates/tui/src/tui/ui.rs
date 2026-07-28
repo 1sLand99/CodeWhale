@@ -13281,12 +13281,7 @@ async fn submit_or_steer_message(
 }
 
 fn reject_local_input_while_remote(app: &mut App, input: &str) -> bool {
-    if !app.remote_control.blocks_local_input()
-        || input
-            .split_whitespace()
-            .next()
-            .is_some_and(|value| matches!(value, "/rc" | "/remote-control"))
-    {
+    if !app.remote_control.blocks_local_input() || is_remote_control_command(input) {
         return false;
     }
     app.input = input.to_string();
@@ -13296,6 +13291,12 @@ fn reject_local_input_while_remote(app: &mut App, input: &str) -> bool {
     app.status_message = Some(status.clone());
     app.push_status_toast(status, StatusToastLevel::Warning, Some(6_000));
     true
+}
+
+fn is_remote_control_command(input: &str) -> bool {
+    input.split_whitespace().next().is_some_and(|value| {
+        value.eq_ignore_ascii_case("/rc") || value.eq_ignore_ascii_case("/remote-control")
+    })
 }
 
 fn restore_failed_immediate_submit(app: &mut App, message: QueuedMessage, error: &anyhow::Error) {

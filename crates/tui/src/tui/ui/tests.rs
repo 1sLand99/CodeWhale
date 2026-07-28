@@ -37,6 +37,24 @@ use unicode_width::UnicodeWidthStr;
 use crate::tui::selection::{SelectionAutoscroll, TranscriptSelectionPoint};
 use tempfile::TempDir;
 
+#[test]
+fn remote_control_escape_commands_match_dispatcher_case_rules() {
+    for input in [
+        "/rc stop",
+        "/RC stop",
+        "/Rc status",
+        "/remote-control stop",
+        "/REMOTE-CONTROL status",
+    ] {
+        assert!(
+            is_remote_control_command(input),
+            "remote control command must remain available during a web-owned lease: {input}"
+        );
+    }
+    assert!(!is_remote_control_command("/run continue"));
+    assert!(!is_remote_control_command("continue locally"));
+}
+
 fn test_mailbox_route(
     provider: ApiProvider,
     model: &str,
