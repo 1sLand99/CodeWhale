@@ -1,3 +1,4 @@
+import { PRODUCT_TERMS } from "@/lib/content/vocabulary";
 import { buildPageMetadata } from "@/lib/page-meta";
 
 export async function generateMetadata({ params }: { params: Promise<{ locale: string }> }) {
@@ -19,19 +20,10 @@ export default async function FleetPage({ params }: { params: Promise<{ locale: 
   const bodyClass = isZh
     ? "text-ink-soft leading-[1.9] tracking-wide"
     : "text-ink-soft leading-relaxed";
-  const vocabulary = isZh
-    ? [
-        { term: "Fleet", definition: "谁来做工作：配置好的 worker、角色、模型、主机和信任边界。" },
-        { term: "Workflow", definition: "工作按什么顺序进行：阶段、门禁、预算、回放和汇总。" },
-        { term: "Lane", definition: "一个正在运行的 Workflow 实例及其实时进度。" },
-        { term: "Runtime", definition: "Lane 在哪里、如何执行：本地或远程进程、提供商路由、沙箱和 API 边界。" },
-      ]
-    : [
-        { term: "Fleet", definition: "Who does the work: the configured workers, roles, models, hosts, and trust boundaries." },
-        { term: "Workflow", definition: "What order the work follows: phases, gates, budgets, replay, and fan-in." },
-        { term: "Lane", definition: "One running Workflow instance and its live progress." },
-        { term: "Runtime", definition: "Where and how a Lane executes: local or remote process, provider route, sandbox, and API boundary." },
-      ];
+  const vocabulary = PRODUCT_TERMS.map((row) => ({
+    term: row.term,
+    definition: isZh ? row.long.zh : row.long.en,
+  }));
 
   return (
     <section className="space-y-10">

@@ -9,14 +9,18 @@ import { Whale } from "./whale";
 
 const EN_LINKS = [
   { href: "/en/docs", label: "Docs" },
+  { href: "/en/docs/guide", label: "Start" },
   { href: "/en/install", label: "Install" },
+  { href: "/en/faq", label: "FAQ" },
   { href: "/en/community", label: "Community" },
   { href: "/en/contribute", label: "Contribute" },
 ];
 
 const ZH_LINKS = [
   { href: "/zh/docs", label: "文档" },
+  { href: "/zh/docs/guide", label: "指引" },
   { href: "/zh/install", label: "安装" },
+  { href: "/zh/faq", label: "常见问题" },
   { href: "/zh/community", label: "社区" },
   { href: "/zh/contribute", label: "贡献" },
 ];

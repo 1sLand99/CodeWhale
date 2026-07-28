@@ -14,18 +14,26 @@ export function Footer({ locale = "en" }: { locale?: Locale }) {
   const product = isZh
     ? [
         { label: "文档", href: "/zh/docs" },
+        { label: "新手指引", href: "/zh/docs/guide" },
         { label: "安装", href: "/zh/install" },
         { label: "模型", href: "/zh/models" },
         { label: "运行时", href: "/zh/runtime" },
+        { label: "常见问题", href: "/zh/faq" },
       ]
     : locale === "en"
       ? [
           { label: "Docs", href: "/en/docs" },
+          { label: "Getting started", href: "/en/docs/guide" },
           { label: "Install", href: "/en/install" },
           { label: "Models", href: "/en/models" },
           { label: "Runtime", href: "/en/runtime" },
+          { label: "FAQ", href: "/en/faq" },
         ]
       : [
+          // No `footerGuide`/`footerFaq` keys exist in the chrome dictionaries,
+          // so the dictionary-driven locales keep main's link set rather than
+          // linking English-only labels. Adding them is a locale-parity change,
+          // not a rebase resolution.
           { label: chrome.footerDocs, href: `/${locale}/docs` },
           { label: chrome.footerInstall, href: `/${locale}/install` },
           { label: chrome.footerModels, href: `/${locale}/models` },

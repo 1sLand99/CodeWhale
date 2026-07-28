@@ -1,0 +1,117 @@
+/**
+ * getting-started.ts — the canonical new-user path for codewhale.net.
+ *
+ * Four steps, in order: install → first offline session → provider connection
+ * → first Fleet workflow. Both the homepage band and the /docs/guide page
+ * render from this module, so the path reads identically everywhere.
+ *
+ * TRUTH CONTRACT:
+ *   - Step copy must match documented behavior in docs/GUIDE.md, docs/MODES.md,
+ *     docs/PROVIDERS.md, and docs/FLEET.md. The runtime launches without any
+ *     API key (constitution-first setup); model replies require a provider —
+ *     hosted key or a keyless loopback route. Do not imply otherwise.
+ *   - `href` values are locale-relative (no locale prefix); consumers render
+ *     `/${locale}${href}` and the tests assert every target route exists.
+ *
+ * EXTENSION PATH FOR NEW LOCALES: add the locale key to each `{ en, zh }`
+ * pair; commands stay locale-agnostic shell.
+ */
+
+import type { LocalizedText } from "./vocabulary";
+
+export interface GuideStep {
+  id: "install" | "first-session" | "connect-provider" | "fleet-workflow";
+  title: LocalizedText;
+  body: LocalizedText;
+  /** Locale-agnostic shell commands shown for the step (may be empty). */
+  commands: string[];
+  /** Deeper-reading link; href is locale-relative. */
+  link: { href: string; label: LocalizedText };
+}
+
+export const GETTING_STARTED_STEPS: GuideStep[] = [
+  {
+    id: "install",
+    title: { en: "Install Codewhale", zh: "安装 Codewhale" },
+    body: {
+      en: "One npm command installs the dispatcher and the terminal runtime. Cargo, prebuilt archives, Docker, Nix, and China mirrors are documented alternatives; every channel serves published releases only.",
+      zh: "一条 npm 命令即可安装调度器和终端运行时。Cargo、预编译包、Docker、Nix 和中国镜像是有文档的备选渠道；所有渠道只提供已发布版本。",
+    },
+    commands: ["npm install -g codewhale", "codewhale doctor"],
+    link: {
+      href: "/install",
+      label: { en: "Full install guide", zh: "完整安装指南" },
+    },
+  },
+  {
+    id: "first-session",
+    title: { en: "Open a first session — no key needed", zh: "打开第一个会话——无需密钥" },
+    body: {
+      en: "The runtime launches without any API key: a short constitution-first setup (language, provider readiness, runtime posture, your constitution), then the full interface. Explore in Plan mode — it is always read-only. Model replies need a provider; that is the next step.",
+      zh: "运行时无需任何 API 密钥即可启动：先走过一段简短的宪法优先设置（语言、提供商就绪情况、运行姿态、你的宪法），然后进入完整界面。在 Plan 模式中探索——它始终只读。模型回复需要提供商；这正是下一步。",
+    },
+    commands: ["codewhale"],
+    link: {
+      href: "/docs/vocabulary",
+      label: { en: "Learn the product nouns first", zh: "先了解产品名词" },
+    },
+  },
+  {
+    id: "connect-provider",
+    title: { en: "Connect a provider", zh: "连接提供商" },
+    body: {
+      en: "Pick any supported route — a hosted key, a gateway, or a keyless local runtime such as Ollama, vLLM, or SGLang for fully local inference. Provider and model stay explicit; requested and effective reasoning plus routing source are separate provenance fields, and unavailable values stay unavailable.",
+      zh: "任选一条受支持的路由——托管密钥、网关，或 Ollama、vLLM、SGLang 等免密钥本地运行时（推理完全在本地）。Provider 与模型始终明确；请求与实际思考档位及路由来源是分开的来源字段，暂不可用的值保持暂不可用。",
+    },
+    commands: ["codewhale auth set --provider deepseek"],
+    link: {
+      href: "/models",
+      label: { en: "Providers and models", zh: "提供商与模型" },
+    },
+  },
+  {
+    id: "fleet-workflow",
+    title: { en: "Run a first Fleet workflow", zh: "运行第一个 Fleet Workflow" },
+    body: {
+      en: "When work needs durable workers, ordered phases, or receipts, author a reusable agent-team profile and launch a run. Fleet state lives in the workspace ledger and survives restarts; ordinary single tasks need none of this.",
+      zh: "当工作需要持久 worker、有序阶段或收据时，编写可复用的 agent 团队档案并启动运行。Fleet 状态保存在工作区台账中，重启后依然存活；普通的单一任务不需要这些。",
+    },
+    commands: ["codewhale fleet init", "codewhale fleet run tasks.json --max-workers 4"],
+    link: {
+      href: "/docs/fleet",
+      label: { en: "Fleet and Workflow docs", zh: "Fleet 与 Workflow 文档" },
+    },
+  },
+];
+
+/**
+ * Where to go after the path — discovery links rendered at the end of the
+ * /docs/guide page. Hooks are first-class here on purpose: they are the
+ * supported extension point a new user should find without digging.
+ */
+export const GUIDE_NEXT_LINKS: { href: string; label: LocalizedText; note: LocalizedText }[] = [
+  {
+    href: "/docs/hooks",
+    label: { en: "Hooks", zh: "钩子" },
+    note: {
+      en: "React to lifecycle events — before and after tool calls, on turn end, on session events — with project-local trust rules.",
+      zh: "借助项目级信任规则，响应生命周期事件——工具调用前后、回合结束、会话事件。",
+    },
+  },
+  {
+    href: "/docs/modes",
+    label: { en: "Modes and permission postures", zh: "模式与权限姿态" },
+    note: {
+      en: "Plan / Act / Operate and Ask / Auto-Review / Full Access, exactly as the runtime enforces them.",
+      zh: "Plan / Act / Operate 与 Ask / Auto-Review / Full Access，与运行时实际执行的一致。",
+    },
+  },
+  {
+    href: "/docs",
+    label: { en: "Documentation hub", zh: "文档中心" },
+    note: {
+      en: "Every topic, searchable, each page citing its source document in the repository.",
+      zh: "所有主题均可搜索，每个页面都注明仓库中的源文档。",
+    },
+  },
+];

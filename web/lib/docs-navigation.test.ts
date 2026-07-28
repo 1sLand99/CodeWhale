@@ -28,8 +28,15 @@ describe("docsTopicIsCurrent", () => {
     expect(docTopicIsExternal(topic("providers"))).toBe(false);
   });
 
+  it("routes the guide to its dedicated docs page in either locale", () => {
+    expect(docTopicHref(topic("guide"), "en")).toBe("/en/docs/guide");
+    expect(docsTopicIsCurrent(topic("guide"), "en", "/en/docs/guide")).toBe(true);
+    expect(docsTopicIsCurrent(topic("guide"), "zh", "/zh/docs/guide/")).toBe(true);
+    expect(docTopicIsExternal(topic("guide"))).toBe(false);
+  });
+
   it("never marks source-document links as local pages", () => {
-    expect(docsTopicIsCurrent(topic("guide"), "en", "/en/docs/guide")).toBe(false);
+    expect(docsTopicIsCurrent(topic("contribution"), "en", "/en/docs/contribution")).toBe(false);
   });
 
   it("routes former link-out topics to their dedicated docs pages", () => {
