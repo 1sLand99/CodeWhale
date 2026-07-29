@@ -362,6 +362,13 @@ jobs:
       - name: Run tests
         if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch')
         run: cargo test --workspace --all-features --locked
+      - name: Run isolated Skills Manager PTY acceptance
+        # This real-PTY scenario is deterministic in a fresh process (10/10
+        # locally) but can inherit event starvation after the full qa_pty
+        # suite on loaded Linux runners. Keep the assertion intact and run it
+        # separately on Unix after the workspace suite has released its PTYs.
+        if: needs.changes.outputs.heavy == 'true' && matrix.os != 'windows-latest' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch')
+        run: cargo test -p codewhale-tui --test qa_pty skills_opens_manager_owned_then_compatible -- --ignored --exact
       - name: Lockfile drift guard
         if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch')
         run: git diff --exit-code -- Cargo.lock
