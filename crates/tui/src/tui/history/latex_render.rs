@@ -42,12 +42,12 @@ fn find_math_end(text: &str) -> Option<(usize, bool)> {
             }
         }
     } else if b.starts_with(b"$") && !b.starts_with(b"$$") {
-        for i in 1..b.len() {
-            if b[i] == b'{' {
+        for (j, &byte) in b[1..].iter().enumerate() {
+            if byte == b'{' {
                 continue;
             }
-            if b[i] == b'$' {
-                return Some((i, false));
+            if byte == b'$' {
+                return Some((j + 1, false));
             }
         }
     } else if b.starts_with(b"\\[") {
@@ -75,8 +75,6 @@ fn math_delim_offset(text: &str) -> usize {
     let b = text.as_bytes();
     if b.starts_with(b"$$") || b.starts_with(b"\\[") || b.starts_with(b"\\(") {
         2
-    } else if b.starts_with(b"$") {
-        1
     } else {
         1
     }
@@ -91,9 +89,9 @@ pub fn render_latex_in_text(text: &str) -> String {
             let offset = math_delim_offset(remaining);
             let inner = &remaining[offset..end];
             result.push_str(&render_latex_to_string(inner));
-            let close_len: usize = if remaining.as_bytes().get(end..end + 2) == Some(b"\\]") {
-                2
-            } else if remaining.as_bytes().get(end..end + 2) == Some(b"$$") {
+            let close_len: usize = if remaining.as_bytes().get(end..end + 2) == Some(b"\\]")
+                || remaining.as_bytes().get(end..end + 2) == Some(b"$$")
+            {
                 2
             } else if remaining.as_bytes().get(end..end + 1) == Some(b"$") {
                 1
@@ -174,10 +172,10 @@ fn render_latex_to_string(latex: &str) -> String {
                         skip_limits(&mut chars);
                     }
                     "iint" => {
-                        out.push_str("\u{222c}");
+                        out.push('\u{222c}');
                     }
                     "iiint" => {
-                        out.push_str("\u{222d}");
+                        out.push('\u{222d}');
                     }
                     "oint" => {
                         out.push('\u{222e}');
