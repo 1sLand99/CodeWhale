@@ -289,6 +289,11 @@ pub struct Settings {
     /// Context-window percentage that triggers pre-send auto-compaction when
     /// `auto_compact` is enabled. The hard token floor still applies.
     pub auto_compact_threshold_percent: f64,
+    /// Whether the persisted settings file expressed an auto-compaction
+    /// preference. Runtime defaults must not be written back as user intent
+    /// when an unrelated setting is saved.
+    #[serde(skip)]
+    pub(crate) auto_compact_explicit: bool,
     /// Reduce status noise and collapse details more aggressively
     pub calm_mode: bool,
     /// Dense tool-run collapse mode: compact, expanded, or calm.
@@ -522,6 +527,7 @@ impl Default for Settings {
             // making long-session continuity the default runtime behavior.
             auto_compact: false,
             auto_compact_threshold_percent: 80.0,
+            auto_compact_explicit: false,
             // #4095: default presentation is compact/calm; verbose detail is opt-in.
             calm_mode: true,
             tool_collapse_mode: "compact".to_string(),
@@ -768,6 +774,9 @@ impl Settings {
             // leaving the default `auto_compact = false`, silently turning the
             // requested trigger into a no-op. Preserve an explicit boolean
             // opt-out, but make threshold-only files effective on load.
+            s.auto_compact_explicit = parsed_document
+                .as_ref()
+                .is_some_and(auto_compact_explicitly_configured_in_document);
             if parsed_document.as_ref().is_some_and(|document| {
                 document.as_table().is_some_and(|table| {
                     !table.contains_key("auto_compact")
@@ -873,6 +882,10 @@ fn auto_compact_explicitly_configured_from_candidates(
     let Ok(value) = toml::from_str::<toml::Value>(&content) else {
         return false;
     };
+    auto_compact_explicitly_configured_in_document(&value)
+}
+
+fn auto_compact_explicitly_configured_in_document(value: &toml::Value) -> bool {
     value.as_table().is_some_and(|table| {
         table.contains_key("auto_compact")
             || table.contains_key("auto_compact_threshold")
@@ -1063,7 +1076,16 @@ impl Settings {
             })?;
         }
 
-        let serialized = toml::to_string_pretty(self).context("Failed to serialize settings")?;
+        let mut serialized =
+            toml::to_string_pretty(self).context("Failed to serialize settings")?;
+        if !self.auto_compact_explicit {
+            let mut document = serialized
+                .parse::<toml_edit::DocumentMut>()
+                .context("Failed to prepare settings for persistence")?;
+            document.remove("auto_compact");
+            document.remove("auto_compact_threshold_percent");
+            serialized = document.to_string();
+        }
         let body = if path.exists() {
             let raw = std::fs::read_to_string(path)
                 .with_context(|| format!("Failed to read settings at {}", path.display()))?;
@@ -1088,11 +1110,13 @@ impl Settings {
         match key {
             "auto_compact" | "compact" => {
                 self.auto_compact = parse_bool(value)?;
+                self.auto_compact_explicit = true;
             }
             "auto_compact_threshold" | "auto_compact_threshold_percent" => {
                 self.auto_compact_threshold_percent =
                     parse_percent_setting("auto_compact_threshold_percent", value)?;
                 self.auto_compact = true;
+                self.auto_compact_explicit = true;
             }
             "calm_mode" | "calm" => {
                 self.calm_mode = parse_bool(value)?;
@@ -3137,6 +3161,7 @@ mod tests {
         // `auto_compact`.
         assert!(!settings.auto_compact);
         assert_eq!(settings.auto_compact_threshold_percent, 80.0);
+        assert!(!settings.auto_compact_explicit);
     }
 
     #[test]
@@ -3144,8 +3169,48 @@ mod tests {
         let mut settings = Settings::default();
         settings.set("auto_compact", "on").expect("enable");
         assert!(settings.auto_compact);
+        assert!(settings.auto_compact_explicit);
         settings.set("auto_compact", "off").expect("disable");
         assert!(!settings.auto_compact);
+    }
+
+    #[test]
+    fn unrelated_save_does_not_materialize_implicit_auto_compact_defaults() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("settings.toml");
+        let mut settings = Settings::default();
+        settings.calm_mode = false;
+
+        settings.save_to_path(&path).expect("save settings");
+
+        let body = std::fs::read_to_string(&path).expect("read settings");
+        let document = toml::from_str::<toml::Value>(&body).expect("parse settings");
+        assert!(!auto_compact_explicitly_configured_in_document(&document));
+        let reloaded = Settings::load_persisted_from_candidates(Some(path), None, None)
+            .expect("reload settings");
+        assert!(!reloaded.auto_compact_explicit);
+        assert!(!reloaded.auto_compact);
+        assert!(!reloaded.calm_mode);
+    }
+
+    #[test]
+    fn explicit_auto_compact_off_survives_save_and_reload() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("settings.toml");
+        let mut settings = Settings::default();
+        settings.set("auto_compact", "off").expect("disable");
+
+        settings.save_to_path(&path).expect("save settings");
+
+        assert!(auto_compact_explicitly_configured_from_candidates((
+            Some(path.clone()),
+            None,
+            None,
+        )));
+        let reloaded = Settings::load_persisted_from_candidates(Some(path), None, None)
+            .expect("reload settings");
+        assert!(reloaded.auto_compact_explicit);
+        assert!(!reloaded.auto_compact);
     }
 
     #[test]
@@ -3156,6 +3221,7 @@ mod tests {
             .expect("threshold");
         assert!(settings.auto_compact, "a threshold expresses enable intent");
         assert_eq!(settings.auto_compact_threshold_percent, 65.0);
+        assert!(settings.auto_compact_explicit);
         assert!(settings.set("auto_compact_threshold", "9").is_err());
         assert!(settings.set("auto_compact_threshold", "101").is_err());
     }
@@ -3170,6 +3236,7 @@ mod tests {
             .expect("load threshold-only settings");
 
         assert!(loaded.auto_compact);
+        assert!(loaded.auto_compact_explicit);
         assert_eq!(loaded.auto_compact_threshold_percent, 65.0);
         assert!(auto_compact_explicitly_configured_from_candidates((
             Some(path),
@@ -3192,6 +3259,7 @@ mod tests {
             .expect("load explicit opt-out");
 
         assert!(!loaded.auto_compact);
+        assert!(loaded.auto_compact_explicit);
         assert!(auto_compact_explicitly_configured_from_candidates((
             Some(path),
             None,
