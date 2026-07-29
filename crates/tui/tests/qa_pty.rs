@@ -26,6 +26,7 @@ use unicode_width::UnicodeWidthStr;
 
 const BOOT_TIMEOUT: Duration = Duration::from_secs(15);
 const KEY_TIMEOUT: Duration = Duration::from_secs(5);
+const SKILL_SCAN_TIMEOUT: Duration = Duration::from_secs(15);
 const COMPOSER_READY_TEXT: &str = "Write a task";
 static QA_PTY_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1888,12 +1889,14 @@ fn skills_opens_manager_owned_then_compatible() -> anyhow::Result<()> {
         "default manager must stay zero-network:\n{owned_dump}"
     );
 
-    // Toggle to compatible scan so external roots appear.
-    // The initial owned scan may paint its first results before it relinquishes
-    // input ownership. PTY silence is not enough evidence of readiness: wait
-    // for the manager's own rendered status before sending the `c` mutation.
+    // Toggle to compatible scan so external roots appear. The mode change runs
+    // a bounded filesystem audit synchronously; on cold Linux CI filesystems,
+    // hashing the bundled skill tree can legitimately take longer than an
+    // ordinary key response. Wait for the explicit mode receipt with the scan
+    // budget, then use the ordinary interaction budget for the rendered row.
     h.wait_for_text("scan=owned   import-target=global   idle", KEY_TIMEOUT)?;
     h.send(keys::key::ch('c'))?;
+    h.wait_for_text("scan=compatible", SKILL_SCAN_TIMEOUT)?;
     h.wait_for_text("workspace-beta", KEY_TIMEOUT)?;
     let compat = h.frame();
     let compat_dump = compat.debug_dump();
