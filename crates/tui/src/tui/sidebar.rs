@@ -1639,7 +1639,7 @@ fn background_task_spinner_prefix(
     motion_policy: MotionPolicy,
     animation_elapsed_ms: u128,
 ) -> Option<&'static str> {
-    if task.status != "running" {
+    if task.status != "running" || task.stale {
         return None;
     }
     let elapsed_ms = task.duration_ms.unwrap_or_default();
@@ -4986,6 +4986,7 @@ mod tests {
                     owner_agent_name: None,
                     started_at: None,
                     duration_ms: Some(ACTIVE_TOOL_STALE_RUNNING_ROW_TTL.as_millis() as u64 + 1),
+                    stale_elapsed_since_output_ms: None,
                     source: ExecSource::Assistant,
                     interaction: None,
                     output_summary: None,
@@ -5023,6 +5024,7 @@ mod tests {
                 owner_agent_name: None,
                 started_at: Some(std::time::Instant::now()),
                 duration_ms: None,
+                stale_elapsed_since_output_ms: None,
                 source: ExecSource::Assistant,
                 interaction: None,
                 output_summary: None,
@@ -5176,6 +5178,27 @@ mod tests {
             ),
             Some(crate::tui::spinner::BRAILLE_SPINNER_FRAMES[1])
         );
+    }
+
+    #[test]
+    fn background_task_spinner_is_hidden_for_stale_running_task() {
+        let full = MotionPolicy::from_settings(false, true, false);
+        let task = TaskPanelEntry {
+            id: "shell_stale".to_string(),
+            status: "running".to_string(),
+            prompt_summary: "shell: cargo test".to_string(),
+            duration_ms: Some(LIVE_MARKER_DELAY_MS),
+            kind: TaskPanelEntryKind::Background,
+            stale: true,
+            elapsed_since_output_ms: Some(61_000),
+            owner_agent_id: None,
+            owner_agent_name: None,
+            current_tool: None,
+            role: None,
+            files_touched: 0,
+        };
+
+        assert_eq!(background_task_spinner_prefix(&task, full, 0), None);
     }
 
     #[test]
@@ -5581,6 +5604,7 @@ mod tests {
                 owner_agent_name: None,
                 started_at: Some(Instant::now()),
                 duration_ms: None,
+                stale_elapsed_since_output_ms: None,
                 source: ExecSource::Assistant,
                 interaction: None,
                 output_summary: None,
@@ -6109,6 +6133,7 @@ mod tests {
                 owner_agent_name: None,
                 started_at: None,
                 duration_ms: Some(15_000),
+                stale_elapsed_since_output_ms: None,
                 source: ExecSource::Assistant,
                 interaction: None,
                 output_summary: Some("2 checks pending".to_string()),
@@ -6154,6 +6179,7 @@ mod tests {
             owner_agent_name: None,
             started_at: None,
             duration_ms: Some(1_250),
+            stale_elapsed_since_output_ms: None,
             source: ExecSource::Assistant,
             interaction: None,
             output_summary: Some("test failed".to_string()),
@@ -6187,6 +6213,7 @@ mod tests {
             owner_agent_name: None,
             started_at: None,
             duration_ms: Some(1_250),
+            stale_elapsed_since_output_ms: None,
             source: ExecSource::Assistant,
             interaction: None,
             output_summary: None,
