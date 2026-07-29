@@ -19,6 +19,7 @@ describe("matchLocaleTag", () => {
     expect(matchLocaleTag("ja-JP")).toBe("ja");
     expect(matchLocaleTag("ko-KR")).toBe("ko");
     expect(matchLocaleTag("vi-VN")).toBe("vi");
+    expect(matchLocaleTag("id-ID")).toBe("id");
   });
 
   it("routes pt to the only shipped Portuguese variant", () => {

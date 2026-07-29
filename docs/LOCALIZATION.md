@@ -82,7 +82,7 @@ fallback, never a dictionary key on screen.
 | French | `fr` | **planned** | #4788 — TUI pack shipped in v0.9.2; website next wave. |
 | German | `de` | **planned** | #4788 — TUI pack shipped in v0.9.2; website next wave. |
 | Catalan | `ca` | **planned** | #4749/#4788 — TUI pack shipped in v0.9.2; website next wave. |
-| Indonesian | `id` | **planned** | #4789 — TUI pack shipped in v0.9.2; website next wave. |
+| Indonesian | `id` | **partial** | #4789. Same scope as Japanese. |
 | Hindi | `hi` | **planned** | #4790 — TUI pack shipped in v0.9.2; website next wave. |
 | Arabic | `ar` | **deferred** | RTL candidate. Deferred until layout/typography QA exists (bidirectional text, mirrored chrome, number formatting). |
 

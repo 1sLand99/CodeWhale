@@ -31,7 +31,7 @@ function flattenStrings(dict: object): Record<string, string> {
 describe("website dictionaries", () => {
   it("cover exactly the v0.9.2 partial locales", () => {
     expect([...DICTIONARY_LOCALES].sort()).toEqual(
-      ["es", "ja", "ko", "pt-BR", "ru", "uk", "vi"].sort(),
+      ["es", "id", "ja", "ko", "pt-BR", "ru", "uk", "vi"].sort(),
     );
   });
 
