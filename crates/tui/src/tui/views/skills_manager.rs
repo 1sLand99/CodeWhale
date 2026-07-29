@@ -20,7 +20,7 @@ use crate::palette;
 use crate::skills::audit::{
     AuditedSkill, AuditedSkillId, DigestState, IntegrityState, ParserState, PrecedenceState,
     ProvenanceState, SkillActionKind, SkillAuditMode, SkillAuditSnapshot, SkillSourceKind,
-    TrustState, scan_with_configured,
+    TrustState, expand_owned_scan_to_compatible, scan_with_configured,
 };
 use crate::skills::mutation::{ConflictPolicy, SkillMutationRequest, SkillTargetScope};
 use crate::skills::roots::SkillRootKind;
@@ -151,18 +151,30 @@ impl SkillsManagerView {
     }
 
     fn toggle_mode(&mut self, app: &App) {
-        self.mode = match self.mode {
+        let next_mode = match self.mode {
             ManagerMode::OwnedOnly => ManagerMode::Compatible,
             ManagerMode::Compatible => ManagerMode::OwnedOnly,
         };
-        let snap = scan_with_configured(
-            &app.workspace,
-            crate::config::effective_home_dir().as_deref(),
-            Some(&app.skills_dir),
-            self.mode.audit_mode(),
-            None,
-        );
         let focus = self.selected_skill().map(|s| s.id.clone());
+        let home = crate::config::effective_home_dir();
+        let snap = if self.mode == ManagerMode::OwnedOnly {
+            expand_owned_scan_to_compatible(
+                &app.workspace,
+                home.as_deref(),
+                Some(&app.skills_dir),
+                &self.skills,
+                None,
+            )
+        } else {
+            scan_with_configured(
+                &app.workspace,
+                home.as_deref(),
+                Some(&app.skills_dir),
+                next_mode.audit_mode(),
+                None,
+            )
+        };
+        self.mode = next_mode;
         self.skills = snap.skills;
         self.pending = None;
         self.detail_scroll = 0;
