@@ -15,7 +15,7 @@ Customer-visible copy also follows the [Codewhale voice and terminal
 charter](VOICE.md); commands, key names, and glyphs remain code-owned around
 localized prose.
 
-Last updated: 2026-07-27 (v0.9.2 wave).
+Last updated: 2026-07-29 (v0.9.2 wave).
 Source-of-truth README: `README.md` (English, post-#3087).
 
 ## Status legend
@@ -38,23 +38,23 @@ only at exact raw key parity with it, enforced by
 `crates/tui/src/localization.rs`. See `crates/tui/locales/AGENTS.md` for the
 authoring contract.
 
-| Locale | File | Keys vs `en.json` (1153) | Status | Notes |
+| Locale | File | Keys vs `en.json` (1248) | Status | Notes |
 |--------|------|--------------------------|--------|-------|
-| English | `en.json` | 1153/1153 | **shipped** | Reference pack. |
-| Japanese | `ja.json` | 1153/1153 | **shipped** | Complete. |
-| Simplified Chinese | `zh-Hans.json` | 1153/1153 | **shipped** | Complete. |
-| Traditional Chinese | `zh-Hant.json` | 483/1153 | **partial** | Setup core only; missing keys fall back to English at runtime. Deliberate scope per #4057. |
-| Brazilian Portuguese | `pt-BR.json` | 1153/1153 | **shipped** | Complete. |
-| Latin American Spanish | `es-419.json` | 1153/1153 | **shipped** | Complete. Note the website tracks `es` — the shipped TUI pack is Latin American Spanish, not `es-ES`. |
-| Vietnamese | `vi.json` | 1153/1153 | **shipped** | Complete. |
-| Korean | `ko.json` | 1153/1153 | **shipped** | Complete. |
-| Catalan | `ca.json` | 1153/1153 | **shipped** | Complete (#4749/#4788). Awaiting native-speaker review. |
-| German | `de.json` | 1153/1153 | **shipped** | Complete (#4788). Awaiting native-speaker review. |
-| French | `fr.json` | 1153/1153 | **shipped** | Complete (#4788). Awaiting native-speaker review. |
-| Indonesian | `id.json` | 1153/1153 | **shipped** | Complete (#4789). Awaiting native-speaker review. |
-| Hindi | `hi.json` | 1153/1153 | **shipped** | Complete (#4790). Devanagari shaping spike: `docs/evidence/v092-devanagari-terminal-shaping.md` — code-level guarantees only; terminal visual QA and native review still open. |
-| Russian | `ru.json` | 1153/1153 | **shipped** | Complete (#3092). Cyrillic script fixtures guard against mixed-language copy. Awaiting native-speaker review. |
-| Ukrainian | `uk.json` | 1153/1153 | **shipped** | Complete (#4791). Cyrillic script fixtures keep it distinct from Russian (no ы/э/ъ; і/ї/є/ґ present). Awaiting native-speaker review. |
+| English | `en.json` | 1248/1248 | **shipped** | Reference pack. |
+| Japanese | `ja.json` | 1248/1248 | **shipped** | Complete. |
+| Simplified Chinese | `zh-Hans.json` | 1248/1248 | **shipped** | Complete. |
+| Traditional Chinese | `zh-Hant.json` | 499/1248 | **partial** | Setup core only; missing keys fall back to English at runtime. Deliberate scope per #4057. |
+| Brazilian Portuguese | `pt-BR.json` | 1248/1248 | **shipped** | Complete. |
+| Latin American Spanish | `es-419.json` | 1248/1248 | **shipped** | Complete. Note the website tracks `es` — the shipped TUI pack is Latin American Spanish, not `es-ES`. |
+| Vietnamese | `vi.json` | 1248/1248 | **shipped** | Complete. |
+| Korean | `ko.json` | 1248/1248 | **shipped** | Complete. |
+| Catalan | `ca.json` | 1248/1248 | **shipped** | Complete (#4749/#4788). Awaiting native-speaker review. |
+| German | `de.json` | 1248/1248 | **shipped** | Complete (#4788). Awaiting native-speaker review. |
+| French | `fr.json` | 1248/1248 | **shipped** | Complete (#4788). Awaiting native-speaker review. |
+| Indonesian | `id.json` | 1248/1248 | **shipped** | Complete (#4789). Awaiting native-speaker review. |
+| Hindi | `hi.json` | 1248/1248 | **shipped** | Complete (#4790). Devanagari shaping spike: `docs/evidence/v092-devanagari-terminal-shaping.md` — code-level guarantees only; terminal visual QA and native review still open. |
+| Russian | `ru.json` | 1248/1248 | **shipped** | Complete (#3092). Cyrillic script fixtures guard against mixed-language copy. Awaiting native-speaker review. |
+| Ukrainian | `uk.json` | 1248/1248 | **shipped** | Complete (#4791). Cyrillic script fixtures keep it distinct from Russian (no ы/э/ъ; і/ї/є/ґ present). Awaiting native-speaker review. |
 
 ## Website locales
 
@@ -104,6 +104,7 @@ filling in a page is a dictionary edit, not plumbing.
 | Brazilian Portuguese | `README.pt-BR.md` | **shipped** | Same |
 | Russian | `README.ru.md` | **shipped** | Same (#3092). Awaiting native-speaker review. |
 | Ukrainian | `README.uk.md` | **shipped** | Same (#4791). Awaiting native-speaker review. |
+| Indonesian | `README.id.md` | **shipped** | Same (#4789). Awaiting native-speaker review. |
 
 ## Drift checks
 
