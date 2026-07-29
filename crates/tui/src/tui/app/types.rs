@@ -58,13 +58,15 @@ pub enum AppMode {
 
 /// Reasoning-effort tier, mirrored across DeepSeek and Codex effort pickers.
 ///
-/// The config file accepts all five string values for forward-compat with
+/// The config file accepts all six string values for forward-compat with
 /// providers that expose the full spectrum; DeepSeek currently collapses
 /// `Low`/`Medium` → `high`. OpenAI Codex normalizes inherited DeepSeek-only
 /// `Off` to `Low` and displays/sends `Max` as `xhigh` at the provider
 /// boundary. The default keyboard cycler walks the three DeepSeek-distinct
 /// tiers: `Off` → `High` → `Max` → `Off`; provider-aware callers should use
-/// [`ReasoningEffort::cycle_next_for_provider`].
+/// [`ReasoningEffort::cycle_next_for_provider`]. Auto routing has no concrete
+/// provider yet, so [`ReasoningEffort::cycle_next_for_auto_model`] retains the
+/// full provider-neutral preference vocabulary until dispatch.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum ReasoningEffort {
     Off,
@@ -342,6 +344,20 @@ impl ReasoningEffort {
             Self::High => Self::Max,
             Self::Max => Self::Low,
             Self::Off | Self::Auto => Self::Low,
+        }
+    }
+
+    /// Cycle the unresolved auto-model preference without applying any
+    /// provider's normalization rules prematurely.
+    #[must_use]
+    pub fn cycle_next_for_auto_model(self) -> Self {
+        match self {
+            Self::Auto => Self::Off,
+            Self::Off => Self::Low,
+            Self::Low => Self::Medium,
+            Self::Medium => Self::High,
+            Self::High => Self::Max,
+            Self::Max => Self::Auto,
         }
     }
 }

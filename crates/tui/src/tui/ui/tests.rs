@@ -199,19 +199,27 @@ fn ctrl_t_key_event_reaches_reasoning_effort_cycle() {
 #[test]
 fn ctrl_t_cycles_reasoning_effort_under_auto_model() {
     let mut app = create_test_app();
+    app.api_provider = ApiProvider::Deepseek;
     app.auto_model = true;
     app.reasoning_effort = ReasoningEffort::Auto;
 
-    assert!(handle_reasoning_effort_key(
-        &mut app,
-        &KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
-    ));
-    assert_eq!(app.reasoning_effort, ReasoningEffort::Off);
-    assert!(
-        app.status_message
-            .as_deref()
-            .is_some_and(|message| message.contains("Reasoning effort: off"))
-    );
+    for expected in [
+        ReasoningEffort::Off,
+        ReasoningEffort::Low,
+        ReasoningEffort::Medium,
+        ReasoningEffort::High,
+        ReasoningEffort::Max,
+        ReasoningEffort::Auto,
+    ] {
+        assert!(handle_reasoning_effort_key(
+            &mut app,
+            &KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+        ));
+        assert_eq!(app.reasoning_effort, expected);
+        assert!(app.status_message.as_deref().is_some_and(|message| {
+            message.contains(&format!("Reasoning effort: {}", expected.short_label()))
+        }));
+    }
 }
 
 #[test]
@@ -8365,11 +8373,11 @@ fn hotbar_bound_reasoning_action_updates_auto_model_preference() {
         dispatch_hotbar_slot(&mut app, &config, 1).expect("reasoning slot dispatch"),
         Some(HotbarDispatch::AppAction(AppAction::UpdateCompaction(_)))
     ));
-    assert_eq!(app.reasoning_effort, ReasoningEffort::High);
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
     assert!(
         app.status_message
             .as_deref()
-            .is_some_and(|message| message.contains("Reasoning effort: high"))
+            .is_some_and(|message| message.contains("Reasoning effort: low"))
     );
     assert!(app.needs_redraw);
 }
@@ -15037,6 +15045,34 @@ fn app_new_restores_saved_reasoning_effort_for_auto_model() {
 }
 
 #[test]
+fn app_new_auto_model_preserves_explicit_config_reasoning() {
+    let _guard = ConfigPathEnvGuard::new();
+    let settings = crate::settings::Settings {
+        default_model: Some("auto".to_string()),
+        reasoning_effort: None,
+        ..Default::default()
+    };
+    settings.save().expect("save settings");
+
+    let options = TuiOptions {
+        model: "deepseek-v4-pro".to_string(),
+        start_in_agent_mode: true,
+        skip_onboarding: false,
+        ..crate::test_support::test_tui_options(PathBuf::from("."))
+    };
+    let config = Config {
+        reasoning_effort: Some("medium".to_string()),
+        ..Config::default()
+    };
+
+    let app = App::new(options, &config);
+
+    assert!(app.auto_model);
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Medium);
+    assert!(app.reasoning_effort_explicit);
+}
+
+#[test]
 fn app_new_auto_model_without_saved_reasoning_keeps_auto_default() {
     let _guard = ConfigPathEnvGuard::new();
     let settings = crate::settings::Settings {
@@ -15058,6 +15094,36 @@ fn app_new_auto_model_without_saved_reasoning_keeps_auto_default() {
     assert!(app.auto_model);
     assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
     assert_eq!(app.reasoning_effort_display_label(), "auto");
+}
+
+#[test]
+fn app_new_auto_model_ignores_reasoning_inferred_from_legacy_alias() {
+    let _guard = ConfigPathEnvGuard::new();
+    let settings = crate::settings::Settings {
+        default_model: Some("auto".to_string()),
+        reasoning_effort: None,
+        ..Default::default()
+    };
+    settings.save().expect("save settings");
+
+    let options = TuiOptions {
+        model: "deepseek-v4-pro".to_string(),
+        start_in_agent_mode: true,
+        skip_onboarding: false,
+        ..crate::test_support::test_tui_options(PathBuf::from("."))
+    };
+    let config = Config {
+        reasoning_effort: Some("high".to_string()),
+        reasoning_effort_inferred_from_legacy_alias: true,
+        migrated_deepseek_model_alias: Some("deepseek-reasoner".to_string()),
+        ..Config::default()
+    };
+
+    let app = App::new(options, &config);
+
+    assert!(app.auto_model);
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
+    assert!(!app.reasoning_effort_explicit);
 }
 
 #[tokio::test]

@@ -2455,7 +2455,7 @@ impl App {
         }
     }
 
-    /// Cycle reasoning-effort through the active provider's distinct tiers.
+    /// Cycle reasoning-effort through the active route's distinct tiers.
     ///
     /// Typed for the same reason as [`Self::select_mode`]: a bool could not tell
     /// the hotbar whether the turn lock refused the action or the provider
@@ -2473,14 +2473,19 @@ impl App {
         }
     }
 
-    /// Advance reasoning effort to the next tier for the active provider and
+    /// Advance reasoning effort to the next tier for the active route and
     /// surface the change: set a status message and refresh the compaction
-    /// budget. Shared by the Ctrl+T shortcut (`cycle_effort`) and the hotbar
+    /// budget. Auto routing retains the full provider-neutral vocabulary until
+    /// dispatch; a concrete provider uses its distinct supported tiers. Shared
+    /// by the Ctrl+T shortcut (`cycle_effort`) and the hotbar
     /// `reasoning.cycle` action so the two paths cannot drift.
     pub(crate) fn apply_reasoning_effort_cycle(&mut self) {
-        let requested = self
-            .reasoning_effort
-            .cycle_next_for_provider(self.api_provider);
+        let requested = if self.auto_model {
+            self.reasoning_effort.cycle_next_for_auto_model()
+        } else {
+            self.reasoning_effort
+                .cycle_next_for_provider(self.api_provider)
+        };
         let effective = self.effective_reasoning_effort_for_active_route(requested);
         let route_truth = self.active_reasoning_route_truth();
         let provider_kind = route_truth.map_or(self.api_provider, |(provider, _, _, _)| provider);
