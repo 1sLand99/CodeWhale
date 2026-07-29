@@ -22,6 +22,7 @@ mod archived_context;
 mod checklist;
 mod constants;
 mod file_mutation;
+mod latex_render;
 mod message;
 mod plan;
 mod thinking;

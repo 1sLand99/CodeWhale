@@ -68,8 +68,10 @@ pub(super) fn render_message_with_copy_metadata_for_palette(
     let prefix_width_u16 = u16::try_from(prefix_width.saturating_add(2)).unwrap_or(u16::MAX);
     let content_width = usize::from(width.saturating_sub(prefix_width_u16).max(1));
     let mut lines = Vec::new();
+    // Pre-process $...$ and $$...$$ LaTeX math expressions into Unicode
+    let content_rendered = super::latex_render::render_latex_in_text(content);
     let rendered = markdown_render::render_markdown_tagged_with_palette(
-        content,
+        &content_rendered,
         content_width as u16,
         body_style,
         palette_mode,
@@ -112,8 +114,10 @@ pub(crate) fn update_streaming_message_render(
     let prefix_width = UnicodeWidthStr::width(prefix);
     let prefix_width_u16 = u16::try_from(prefix_width.saturating_add(2)).unwrap_or(u16::MAX);
     let content_width = width.saturating_sub(prefix_width_u16).max(1);
+    // Pre-process $...$ and $$...$$ LaTeX math expressions into Unicode
+    let content = super::latex_render::render_latex_in_text(content);
     let delta = cache.update(
-        content,
+        &content,
         content_width,
         body_style,
         palette_mode,
@@ -229,7 +233,9 @@ pub(super) fn render_plain_message(
     let prefix_width = UnicodeWidthStr::width(prefix);
     let prefix_width_u16 = u16::try_from(prefix_width.saturating_add(2)).unwrap_or(u16::MAX);
     let content_width = width.saturating_sub(prefix_width_u16).max(1);
-    let rendered = markdown_render::render_plain_text(content, content_width, body_style);
+    // Pre-process $...$ and $$...$$ LaTeX math expressions into Unicode
+    let content_rendered = super::latex_render::render_latex_in_text(content);
+    let rendered = markdown_render::render_plain_text(&content_rendered, content_width, body_style);
     let mut lines = Vec::with_capacity(rendered.len());
 
     for (idx, line) in rendered.into_iter().enumerate() {
