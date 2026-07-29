@@ -22,11 +22,11 @@ mod archived_context;
 mod checklist;
 mod constants;
 mod file_mutation;
+mod latex_render;
 mod message;
 mod plan;
 mod thinking;
 mod tool_output;
-mod latex_render;
 mod tool_run;
 
 use archived_context::{parse_archived_context, render_archived_context};
