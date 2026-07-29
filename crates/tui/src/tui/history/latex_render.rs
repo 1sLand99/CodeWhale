@@ -1,27 +1,25 @@
 //! LaTeX math expression rendering for the TUI transcript.
 //! Renders `$...$` (inline) and `$$...$$` (display) math expressions using
 //! Unicode approximations for terminal display.
-#![allow(dead_code)]
-use ratatui::style::{Color, Modifier, Style};
 use std::sync::OnceLock;
-fn math_style() -> Style {
-    Style::default()
-        .fg(Color::Rgb(80, 180, 230))
-        .add_modifier(Modifier::ITALIC)
-}
-fn math_display_style() -> Style {
-    Style::default()
-        .fg(Color::Rgb(60, 160, 220))
-        .add_modifier(Modifier::BOLD)
+
+fn is_escaped(bytes: &[u8], idx: usize) -> bool {
+    let mut slashes = 0;
+    let mut cursor = idx;
+    while cursor > 0 && bytes[cursor - 1] == b'\\' {
+        slashes += 1;
+        cursor -= 1;
+    }
+    slashes % 2 == 1
 }
 /// Private: find the start of math delimiter ($, $$, \(, \[) in text.
 fn find_math_start(text: &str) -> Option<usize> {
     let b = text.as_bytes();
     for (idx, &byte) in b.iter().enumerate() {
-        if byte == b'$' {
+        if byte == b'$' && !is_escaped(b, idx) {
             return Some(idx);
         }
-        if byte == b'\\' && idx + 1 < b.len() {
+        if byte == b'\\' && !is_escaped(b, idx) && idx + 1 < b.len() {
             if b[idx + 1] == b'(' || b[idx + 1] == b'[' {
                 return Some(idx);
             }
@@ -37,7 +35,7 @@ fn find_math_end(text: &str) -> Option<(usize, bool)> {
             if b[i] == b'{' {
                 continue;
             }
-            if b[i..].starts_with(b"$$") {
+            if b[i..].starts_with(b"$$") && !is_escaped(b, i) {
                 return Some((i, true));
             }
         }
@@ -46,8 +44,15 @@ fn find_math_end(text: &str) -> Option<(usize, bool)> {
             if byte == b'{' {
                 continue;
             }
-            if byte == b'$' {
-                return Some((j + 1, false));
+            let i = j + 1;
+            if byte == b'$'
+                && !is_escaped(b, i)
+                && !b
+                    .get(i.wrapping_sub(1))
+                    .is_some_and(u8::is_ascii_whitespace)
+                && !b.get(i + 1).is_some_and(u8::is_ascii_digit)
+            {
+                return Some((i, false));
             }
         }
     } else if b.starts_with(b"\\[") {
@@ -55,7 +60,7 @@ fn find_math_end(text: &str) -> Option<(usize, bool)> {
             if b[i] == b'{' {
                 continue;
             }
-            if b[i..].starts_with(b"\\]") {
+            if b[i..].starts_with(b"\\]") && !is_escaped(b, i) {
                 return Some((i, true));
             }
         }
@@ -64,7 +69,7 @@ fn find_math_end(text: &str) -> Option<(usize, bool)> {
             if b[i] == b'{' {
                 continue;
             }
-            if b[i..].starts_with(b"\\)") {
+            if b[i..].starts_with(b"\\)") && !is_escaped(b, i) {
                 return Some((i, false));
             }
         }
@@ -79,8 +84,7 @@ fn math_delim_offset(text: &str) -> usize {
         1
     }
 }
-/// Replace math delimiters with plain Unicode, preserving everything else.
-pub fn render_latex_in_text(text: &str) -> String {
+fn render_math_segment(text: &str) -> String {
     let mut result = String::new();
     let mut i = 0;
     while i < text.len() {
@@ -89,14 +93,13 @@ pub fn render_latex_in_text(text: &str) -> String {
             let offset = math_delim_offset(remaining);
             let inner = &remaining[offset..end];
             result.push_str(&render_latex_to_string(inner));
-            let close_len: usize = if remaining.as_bytes().get(end..end + 2) == Some(b"\\]")
-                || remaining.as_bytes().get(end..end + 2) == Some(b"$$")
+            let close_len: usize = if remaining[end..].starts_with("\\]")
+                || remaining[end..].starts_with("$$")
+                || remaining[end..].starts_with("\\)")
             {
                 2
             } else if remaining.as_bytes().get(end..end + 1) == Some(b"$") {
                 1
-            } else if remaining.as_bytes().get(end..end + 2) == Some(b"\\)") {
-                2
             } else {
                 0
             };
@@ -118,6 +121,69 @@ pub fn render_latex_in_text(text: &str) -> String {
         }
     }
     result
+}
+
+/// Replace math delimiters with plain Unicode while preserving Markdown code.
+pub fn render_latex_in_text(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut cursor = 0;
+
+    while cursor < text.len() {
+        let Some(tick_offset) = text[cursor..].find('`') else {
+            result.push_str(&render_math_segment(&text[cursor..]));
+            break;
+        };
+        let tick_start = cursor + tick_offset;
+        result.push_str(&render_math_segment(&text[cursor..tick_start]));
+
+        let tick_count = text[tick_start..]
+            .bytes()
+            .take_while(|byte| *byte == b'`')
+            .count();
+        let delimiter = "`".repeat(tick_count);
+        let content_start = tick_start + tick_count;
+        if let Some(close_offset) = text[content_start..].find(&delimiter) {
+            let code_end = content_start + close_offset + tick_count;
+            result.push_str(&text[tick_start..code_end]);
+            cursor = code_end;
+        } else {
+            result.push_str(&text[tick_start..]);
+            break;
+        }
+    }
+
+    result
+}
+
+fn render_styled_symbol(
+    command: &str,
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    out: &mut String,
+) {
+    let argument = read_braced(chars);
+    let rendered = match (command, argument.as_str()) {
+        ("mathbb", "R") => Some("ℝ"),
+        ("mathbb", "C") => Some("ℂ"),
+        ("mathbb", "N") => Some("ℕ"),
+        ("mathbb", "Q") => Some("ℚ"),
+        ("mathbb", "Z") => Some("ℤ"),
+        ("mathbb", "P") => Some("ℙ"),
+        ("mathbb", "H") => Some("ℍ"),
+        ("mathbb", "F") => Some("𝔽"),
+        ("mathcal", "L") => Some("ℒ"),
+        ("mathcal", "H") => Some("ℋ"),
+        ("mathcal", "R") => Some("ℛ"),
+        _ => None,
+    };
+    if let Some(symbol) = rendered {
+        out.push_str(symbol);
+    } else {
+        out.push('\\');
+        out.push_str(command);
+        out.push('{');
+        out.push_str(&argument);
+        out.push('}');
+    }
 }
 fn render_latex_to_string(latex: &str) -> String {
     let mut out = String::new();
@@ -149,6 +215,7 @@ fn render_latex_to_string(latex: &str) -> String {
                     continue;
                 }
                 match cmd.as_str() {
+                    "mathbb" | "mathcal" => render_styled_symbol(&cmd, &mut chars, &mut out),
                     "frac" => {
                         let n = render_latex_to_string(&read_braced(&mut chars));
                         let d = render_latex_to_string(&read_braced(&mut chars));
@@ -161,15 +228,12 @@ fn render_latex_to_string(latex: &str) -> String {
                     }
                     "sum" => {
                         out.push('\u{2211}');
-                        skip_limits(&mut chars);
                     }
                     "prod" => {
                         out.push('\u{220f}');
-                        skip_limits(&mut chars);
                     }
                     "int" => {
                         out.push('\u{222b}');
-                        skip_limits(&mut chars);
                     }
                     "iint" => {
                         out.push('\u{222c}');
@@ -182,7 +246,6 @@ fn render_latex_to_string(latex: &str) -> String {
                     }
                     "lim" => {
                         out.push_str("lim");
-                        skip_limits(&mut chars);
                     }
                     "sin" | "cos" | "tan" | "cot" | "sec" | "csc" | "log" | "ln" | "lg" | "exp"
                     | "det" | "dim" | "ker" | "hom" | "max" | "min" | "sup" | "inf" | "arg"
@@ -202,6 +265,14 @@ fn render_latex_to_string(latex: &str) -> String {
                     _ => {
                         if let Some(u) = SYMBOLS.get_or_init(build_symbols).get(cmd.as_str()) {
                             out.push_str(u);
+                        } else {
+                            out.push('\\');
+                            out.push_str(&cmd);
+                            if chars.peek() == Some(&'{') {
+                                out.push('{');
+                                out.push_str(&read_braced(&mut chars));
+                                out.push('}');
+                            }
                         }
                     }
                 }
@@ -290,16 +361,6 @@ fn read_optional_sqrt_root(chars: &mut std::iter::Peekable<std::str::Chars>) -> 
         s
     } else {
         String::new()
-    }
-}
-fn skip_limits(chars: &mut std::iter::Peekable<std::str::Chars>) {
-    if chars.peek() == Some(&'_') {
-        chars.next();
-        let _ = read_optional_arg(chars);
-    }
-    if chars.peek() == Some(&'^') {
-        chars.next();
-        let _ = read_optional_arg(chars);
     }
 }
 fn append_superscript(s: &str, out: &mut String) {
@@ -473,31 +534,9 @@ fn build_symbols() -> SymbolMap {
     ] {
         m.insert(k, v);
     }
-    for (k, v) in [
-        ("mathbb{R}", "\u{211d}"),
-        ("mathbb{C}", "\u{2102}"),
-        ("mathbb{N}", "\u{2115}"),
-        ("mathbb{Q}", "\u{211a}"),
-        ("mathbb{Z}", "\u{2124}"),
-        ("mathbb{P}", "\u{2119}"),
-        ("mathbb{H}", "\u{210d}"),
-        ("mathbb{F}", "\u{1d53b}"),
-    ] {
-        m.insert(k, v);
-    }
-    for (k, v) in [
-        ("mathcal{L}", "\u{2112}"),
-        ("mathcal{H}", "\u{210b}"),
-        ("mathcal{R}", "\u{211b}"),
-    ] {
-        m.insert(k, v);
-    }
     m
 }
 static SYMBOLS: OnceLock<SymbolMap> = OnceLock::new();
-pub fn lookup_symbol(cmd: &str) -> Option<&'static str> {
-    SYMBOLS.get_or_init(build_symbols).get(cmd).copied()
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,5 +565,24 @@ mod tests {
     fn test_display_bracket() {
         let r = render_latex_in_text(r"text \[x^2\] more");
         assert_eq!(r, "text x\u{00b2} more");
+    }
+    #[test]
+    fn preserves_currency() {
+        assert_eq!(render_latex_in_text("cost $5 and $10"), "cost $5 and $10");
+    }
+    #[test]
+    fn preserves_markdown_code() {
+        assert_eq!(render_latex_in_text("`$x^2$` and $y^2$"), "`$x^2$` and y²");
+        assert_eq!(
+            render_latex_in_text("```sh\necho $HOME\n```"),
+            "```sh\necho $HOME\n```"
+        );
+    }
+    #[test]
+    fn preserves_escaped_dollars_and_unknown_commands() {
+        assert_eq!(
+            render_latex_in_text(r"cost \$5 and $\operatorname{foo}$"),
+            r"cost \$5 and \operatorname{foo}"
+        );
     }
 }
