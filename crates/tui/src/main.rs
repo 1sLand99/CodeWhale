@@ -8616,9 +8616,7 @@ fn preserve_interrupted_checkpoint_for_explicit_resume(launch_workspace: &Path) 
     };
 
     let session_workspace = newest.session.metadata.workspace.clone();
-    if !saved_session_is_newer(&manager, &newest.session) {
-        let _ = manager.save_session(&newest.session);
-    }
+    // #4479: removed save_session call — checkpoint should not be auto-promoted to session
     if newest.source == session_manager::CheckpointSource::Legacy {
         let _ = manager.clear_legacy_checkpoint();
     }
