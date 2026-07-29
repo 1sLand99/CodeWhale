@@ -2465,7 +2465,7 @@ fn foreground_rlm_running(app: &App) -> bool {
     })
 }
 
-fn sidebar_agent_rows(app: &App) -> Vec<SidebarAgentRow> {
+pub(crate) fn sidebar_agent_rows(app: &App) -> Vec<SidebarAgentRow> {
     let cached_ids: std::collections::HashSet<&str> = app
         .subagent_cache
         .iter()
