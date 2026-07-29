@@ -8182,19 +8182,26 @@ fn build_session_snapshot(app: &mut App, manager: &SessionManager) -> Result<Sav
             format!("automatic session snapshot skipped while Work state is busy: {err}")
         })?,
     };
-    let existing_id = app.current_session_id.as_ref().ok_or_else(|| {
-        "Cannot build session snapshot: no active session id. "
-            .to_string()
-    })?;
-    let mut session = create_saved_session_with_id_and_mode(
-        existing_id.clone(),
-        &app.api_messages,
-        &model,
-        &app.workspace,
-        u64::from(app.session.total_tokens),
-        app.system_prompt.as_ref(),
-        Some(app.mode.as_setting()),
-    );
+    let mut session = if let Some(existing_id) = app.current_session_id.as_ref() {
+        create_saved_session_with_id_and_mode(
+            existing_id.clone(),
+            &app.api_messages,
+            &model,
+            &app.workspace,
+            u64::from(app.session.total_tokens),
+            app.system_prompt.as_ref(),
+            Some(app.mode.as_setting()),
+        )
+    } else {
+        create_saved_session_with_mode(
+            &app.api_messages,
+            &model,
+            &app.workspace,
+            u64::from(app.session.total_tokens),
+            app.system_prompt.as_ref(),
+            Some(app.mode.as_setting()),
+        )
+    };
     if let Some(cached) = app
         .current_session_metadata
         .as_ref()
