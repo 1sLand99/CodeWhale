@@ -2396,10 +2396,13 @@ mod tests {
         app.model = "deepseek-v4-pro".to_string();
         app.auto_model = false;
         app.reasoning_effort = ReasoningEffort::Max;
+        app.reasoning_effort_preference = None;
         app.api_provider = crate::config::ApiProvider::Deepseek;
         app.model_ids_passthrough = false;
         app.provider_models.clear();
         app.enabled_provider_models.clear();
+        app.pinned_models.clear();
+        app.model_picker_memory = None;
         (app, config, (env_guards, lock))
     }
 
