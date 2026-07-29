@@ -1100,19 +1100,18 @@ impl ViewStack {
         // texture can never overwrite it. `Off` (the default) leaves the
         // buffer untouched, keeping output byte-identical to the
         // pre-prototype path.
-        if self.focus_texture != FocusTextureMode::Off {
-            if let (Some(focus), Some(theme)) =
+        if self.focus_texture != FocusTextureMode::Off
+            && let (Some(focus), Some(theme)) =
                 (self.top_occupied_region(area), self.focus_texture_theme)
-            {
-                crate::tui::focus_texture::apply_focus_texture(
-                    area,
-                    buf,
-                    focus,
-                    &theme,
-                    self.focus_texture,
-                    crate::tui::color_compat::ascii_safe_enabled(),
-                );
-            }
+        {
+            crate::tui::focus_texture::apply_focus_texture(
+                area,
+                buf,
+                focus,
+                &theme,
+                self.focus_texture,
+                crate::tui::color_compat::ascii_safe_enabled(),
+            );
         }
         // Dim each view's own occupied region rather than the whole frame, so
         // an inline modal (the approval prompt) leaves the transcript above it
@@ -1562,6 +1561,30 @@ impl ConfigView {
                 scope: ConfigScope::Saved,
             },
             ConfigRow {
+                section: ConfigSection::Provider,
+                key: "context_window".to_string(),
+                value: config
+                    .context_window_for_provider_config(app.api_provider)
+                    .map_or_else(|| "(not set)".to_string(), |tokens| tokens.to_string()),
+                editable: false,
+                scope: ConfigScope::Saved,
+            },
+            ConfigRow {
+                section: ConfigSection::Provider,
+                key: "effective_context_window".to_string(),
+                value: format!(
+                    "{} tokens · {}",
+                    crate::route_budget::route_context_window_tokens(
+                        app.api_provider,
+                        app.effective_model_for_budget(),
+                        app.active_route_limits,
+                    ),
+                    app.active_context_window_source.label()
+                ),
+                editable: false,
+                scope: ConfigScope::Session,
+            },
+            ConfigRow {
                 section: ConfigSection::Model,
                 key: "model".to_string(),
                 value: format!(
@@ -1893,6 +1916,18 @@ impl ConfigView {
                 value: format!("{:.0}", settings.auto_compact_threshold_percent),
                 editable: true,
                 scope: ConfigScope::Saved,
+            },
+            ConfigRow {
+                section: ConfigSection::History,
+                key: "effective_auto_compact".to_string(),
+                value: format!(
+                    "{} · {:.0}% · {} tokens",
+                    if app.auto_compact { "on" } else { "off" },
+                    app.auto_compact_threshold_percent,
+                    app.compact_threshold
+                ),
+                editable: false,
+                scope: ConfigScope::Session,
             },
             ConfigRow {
                 section: ConfigSection::History,
@@ -2913,6 +2948,12 @@ fn config_hint_for_key(key: &str) -> &'static str {
         "base_url" => "global DeepSeek/root fallback; e.g. https://api.deepseek.com/beta",
         "provider_url" => {
             "current provider endpoint; Xiaomi: token-plan | pay-as-you-go | custom URL"
+        }
+        "context_window" => {
+            "provider override in config.toml; e.g. 262144 to cap a 1M model to 256K"
+        }
+        "effective_context_window" => {
+            "resolved token window and source used by compaction, pressure, and preflight budgets"
         }
         "cost_currency" => "usd | cny",
         "calm_mode" => "quietens transcript chrome and tool detail; independent of live motion",
@@ -5110,6 +5151,9 @@ mod tests {
         const DIAGNOSTIC_ONLY: &[&str] = &[
             "fast_model",
             "default_model",
+            "context_window",
+            "effective_context_window",
+            "effective_auto_compact",
             "external_credentials.openai-codex",
             "external_credentials.xai",
         ];
@@ -5737,6 +5781,65 @@ base_url = "https://api.xiaomimimo.com/v1"
         for (key, _) in Settings::available_settings() {
             assert!(keys.contains(key), "missing native config row for {key}");
         }
+    }
+
+    #[test]
+    fn config_view_exposes_effective_auto_compaction_policy() {
+        let mut app = create_test_app();
+        app.auto_compact = true;
+        app.auto_compact_threshold_percent = 65.0;
+        app.compact_threshold = 123_456;
+
+        let view = ConfigView::new_for_app(&app);
+        let row = view
+            .rows
+            .iter()
+            .find(|row| row.key == "effective_auto_compact")
+            .expect("effective auto-compaction row");
+
+        assert_eq!(row.value, "on · 65% · 123456 tokens");
+        assert!(!row.editable);
+        assert_eq!(row.scope, ConfigScope::Session);
+    }
+
+    #[test]
+    fn config_view_exposes_configured_and_effective_context_window() {
+        let temp = tempfile::tempdir().expect("config fixture");
+        let config_path = temp.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+provider = "moonshot"
+[providers.moonshot]
+model = "kimi-k3"
+context_window = 262144
+"#,
+        )
+        .expect("config");
+        let mut app = create_test_app();
+        app.config_path = Some(config_path);
+        app.api_provider = crate::config::ApiProvider::Moonshot;
+        app.model = "kimi-k3".to_string();
+        app.active_route_limits = Some(codewhale_config::route::RouteLimits {
+            context_tokens: Some(262_144),
+            ..Default::default()
+        });
+        app.active_context_window_source = crate::route_runtime::ContextWindowSource::Configured;
+
+        let view = ConfigView::new_for_app(&app);
+        let configured = view
+            .rows
+            .iter()
+            .find(|row| row.key == "context_window")
+            .expect("configured context row");
+        let effective = view
+            .rows
+            .iter()
+            .find(|row| row.key == "effective_context_window")
+            .expect("effective context row");
+
+        assert_eq!(configured.value, "262144");
+        assert_eq!(effective.value, "262144 tokens · configured");
     }
 
     #[test]

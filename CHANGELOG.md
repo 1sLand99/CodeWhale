@@ -43,6 +43,17 @@ already claimed to.
 
 ### Added
 
+- `/permissions` now lists the active user permission-rule source, each rule's
+  effective matcher and global/repository scope, and whether that scope applies
+  in the current workspace. `/permissions remove <number>` previews deletion
+  and requires a snapshot-bound confirmation token, so a concurrent edit
+  cannot move a different rule under the confirmed index. Appends and removals
+  share one adjacent lock, preserve unrelated TOML formatting and comments,
+  atomically replace `permissions.toml`, and reload the live user ruleset
+  without clearing session-only approvals. `/config ask-rules` remains a
+  compatibility entry; rule creation, glob/directory rules, and deny
+  persistence remain out of scope (#1186, PR #4960 by @greyfreedom).
+
 - `/preview-request` (aliases `/dryrun` and `/preview_request`) is a human-only,
   provider-free inspection of the next primary turn. Production dispatch and
   preview share one prepared-request seam across Chat Completions, Anthropic
@@ -146,6 +157,33 @@ already claimed to.
   (#4520, PR #4610 by @XhesicaFrost; harvested with co-authorship).
 
 ### Fixed
+
+- Auto model routing now preserves the user's requested reasoning effort
+  through startup, provider/model changes, session restore, the picker,
+  Ctrl+T, and Hotbar actions. The tier is normalized only after the concrete
+  provider route is known instead of being silently replaced by Auto
+  (#4941, PR #4961 by @nightt5879).
+
+- Auto-compaction now defaults on for every known model context window,
+  including Kimi K3's 1,048,576-token routes. Persisting only an
+  `auto_compact_threshold` or `auto_compact_threshold_percent` now counts as
+  opt-in intent, while an explicit `auto_compact = false` remains authoritative.
+  `/config` reports the effective state, percentage, and computed token trigger.
+
+- Per-provider `context_window` overrides are now documented and visible in
+  `/config`, provider setup help, diagnostics, and the example configuration.
+  The effective override consistently drives preflight budgeting, the context
+  meter, and compaction; this lets a user cap a 1M Kimi route to 256K when their
+  Coding Plan tier has the smaller window.
+
+- Agent Details now projects status, model, elapsed time, and step counts from
+  the same row snapshot as the primary agents list, eliminating contradictory
+  worker state between the two surfaces.
+
+- Composer submission and its hints now share one state machine. Portable
+  terminals use Enter to queue during a running turn and Enter again to steer;
+  Ctrl/Cmd+Enter is accepted only when an enhanced terminal reports it and is
+  no longer advertised as universally available.
 
 - `edit_file` now matches LF-only model search text against CRLF files,
   preserves the file's line-ending style for replacement text, and still
@@ -299,9 +337,11 @@ already claimed to.
 Thank you to the contributors whose code, reports, and reviews shaped v0.9.2:
 
 - [@greyfreedom](https://github.com/greyfreedom) — exact repository-scoped
-  allow grants and cross-platform path semantics (PR #4761).
+  allow grants and cross-platform path semantics (PR #4761), plus safe
+  permission-rule listing and snapshot-bound removal (PR #4960).
 - [@nightt5879](https://github.com/nightt5879) — off-event-loop clipboard
-  writes and complete locale exposure in settings.
+  writes, complete locale exposure in settings, and reasoning-effort
+  preservation across automatic model routing (PR #4961).
 - [@XhesicaFrost](https://github.com/XhesicaFrost) — the configurable
   session-token header (PR #4610) and context-menu hover alignment (PR #4897).
 - [@cyq1017](https://github.com/cyq1017) — the hooks configuration/executor

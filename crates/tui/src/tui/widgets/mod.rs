@@ -1180,70 +1180,73 @@ impl Renderable for ComposerWidget<'_> {
                 )))
             } else if !input_text.trim().is_empty() {
                 // Live disambiguation for #345: when there's content in the
-                // composer, show what `Enter` will do RIGHT NOW so the user
-                // never has to guess between Immediate / QueueFollowUp /
-                // Queue. Ctrl+Enter is the separate, stable steer gesture.
-                use crate::tui::app::SubmitDisposition;
-                let queue_count = self.app.queued_message_count();
-                let (label, color) = match self.app.decide_submit_disposition() {
-                    SubmitDisposition::Immediate => {
-                        if queue_count > 0 {
-                            (
-                                Some(format!("↵ send ({queue_count} queued)")),
-                                palette::WHALE_INFO,
-                            )
-                        } else {
-                            (None, palette::TEXT_MUTED)
-                        }
-                    }
-                    SubmitDisposition::Queue => {
-                        if self.app.offline_mode {
-                            // #3927: an explicitly chosen offline session keeps
-                            // naming its one recovery command, not just its
-                            // queue behavior.
-                            let label = if self.app.onboarding_explore_offline {
-                                "↵ offline queue · /provider connects".to_string()
-                            } else {
-                                "↵ offline queue".to_string()
-                            };
-                            (Some(label), palette::STATUS_WARNING)
-                        } else if self.app.mode == crate::tui::app::AppMode::Operate {
-                            // Enter queues while busy; Ctrl+Enter explicitly
-                            // steers. Ctrl+G/Ctrl+S only stash drafts (#440).
-                            let label = if queue_count > 0 {
-                                format!(
-                                    "↵ queue task ({} waiting) · Ctrl+↵ steer",
-                                    queue_count.saturating_add(1)
-                                )
-                            } else {
-                                "↵ queue task · Ctrl+↵ steer".to_string()
-                            };
-                            (Some(label), palette::WHALE_INFO)
-                        } else {
-                            let label = if queue_count > 0 {
-                                format!(
-                                    "↵ queue ({} waiting) · Ctrl+↵ steer",
-                                    queue_count.saturating_add(1)
-                                )
-                            } else {
-                                "↵ queue · Ctrl+↵ steer".to_string()
-                            };
-                            (Some(label), palette::TEXT_MUTED)
-                        }
-                    }
-                    // Steer is reached via Ctrl+Enter only.
-                    SubmitDisposition::Steer => {
-                        (Some("↵ steering".to_string()), palette::WHALE_INFO)
-                    }
-                    SubmitDisposition::QueueFollowUp => (
-                        Some(if self.app.mode == crate::tui::app::AppMode::Operate {
-                            "↵ queued task · Ctrl+↵ steer".to_string()
-                        } else {
-                            "↵ queued · Ctrl+↵ steer".to_string()
-                        }),
-                        palette::TEXT_MUTED,
-                    ),
+                // composer, show what portable bare Enter will do RIGHT NOW.
+                use crate::tui::app::{
+                    ComposerSubmitAction, ComposerSubmitChord, SubmitDisposition,
                 };
+                let queue_count = self.app.queued_message_count();
+                let (label, color) =
+                    match self.app.decide_composer_submit(ComposerSubmitChord::Enter) {
+                        ComposerSubmitAction::Submit(SubmitDisposition::Immediate) => {
+                            if queue_count > 0 {
+                                (
+                                    Some(format!("↵ send ({queue_count} queued)")),
+                                    palette::WHALE_INFO,
+                                )
+                            } else {
+                                (None, palette::TEXT_MUTED)
+                            }
+                        }
+                        ComposerSubmitAction::Submit(SubmitDisposition::Queue) => {
+                            if self.app.offline_mode {
+                                // #3927: an explicitly chosen offline session keeps
+                                // naming its one recovery command, not just its
+                                // queue behavior.
+                                let label = if self.app.onboarding_explore_offline {
+                                    "↵ offline queue · /provider connects".to_string()
+                                } else {
+                                    "↵ offline queue".to_string()
+                                };
+                                (Some(label), palette::STATUS_WARNING)
+                            } else if self.app.mode == crate::tui::app::AppMode::Operate {
+                                let label = if queue_count > 0 {
+                                    format!(
+                                        "↵ queue task ({} waiting) · then ↵ steer",
+                                        queue_count.saturating_add(1)
+                                    )
+                                } else {
+                                    "↵ queue task · then ↵ steer".to_string()
+                                };
+                                (Some(label), palette::WHALE_INFO)
+                            } else {
+                                let label = if queue_count > 0 {
+                                    format!(
+                                        "↵ queue ({} waiting) · then ↵ steer",
+                                        queue_count.saturating_add(1)
+                                    )
+                                } else {
+                                    "↵ queue · then ↵ steer".to_string()
+                                };
+                                (Some(label), palette::TEXT_MUTED)
+                            }
+                        }
+                        ComposerSubmitAction::Submit(SubmitDisposition::Steer) => {
+                            (Some("↵ steering".to_string()), palette::WHALE_INFO)
+                        }
+                        ComposerSubmitAction::Submit(SubmitDisposition::QueueFollowUp) => (
+                            Some(if self.app.mode == crate::tui::app::AppMode::Operate {
+                                "↵ queued task · then ↵ steer".to_string()
+                            } else {
+                                "↵ queued · then ↵ steer".to_string()
+                            }),
+                            palette::TEXT_MUTED,
+                        ),
+                        ComposerSubmitAction::SendQueuedNow => (
+                            Some("↵ steer queued message".to_string()),
+                            palette::WHALE_INFO,
+                        ),
+                        ComposerSubmitAction::Noop => (None, palette::TEXT_MUTED),
+                    };
                 label.map(|text| {
                     Line::from(vec![Span::styled(
                         format!(" {text} "),

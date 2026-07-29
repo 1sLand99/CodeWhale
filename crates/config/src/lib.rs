@@ -67,6 +67,7 @@ pub use external_credentials::{
     quote_os_path, resolve_external_credential_path,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -380,6 +381,64 @@ pub struct ProvidersToml {
 pub struct PermissionsToml {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<ToolAskRule>,
+}
+
+/// On-disk state of the active sibling `permissions.toml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionsFileState {
+    /// No sibling permission file exists.
+    Missing,
+    /// The sibling permission file exists but contains no TOML content.
+    Empty,
+    /// The sibling permission file contains a parsed TOML document.
+    Present,
+}
+
+/// A parsed, read-only view of the active sibling `permissions.toml`.
+///
+/// Removal tokens bind a displayed rule index to the exact file bytes that
+/// produced this snapshot. A later editor must present the rule again when
+/// another process changed the file instead of deleting whichever rule moved
+/// into the old index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionsSnapshot {
+    path: PathBuf,
+    file_state: PermissionsFileState,
+    permissions: PermissionsToml,
+    removal_tokens: Vec<String>,
+}
+
+impl PermissionsSnapshot {
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    #[must_use]
+    pub fn file_exists(&self) -> bool {
+        self.file_state != PermissionsFileState::Missing
+    }
+
+    #[must_use]
+    pub fn file_state(&self) -> PermissionsFileState {
+        self.file_state
+    }
+
+    #[must_use]
+    pub fn permissions(&self) -> &PermissionsToml {
+        &self.permissions
+    }
+
+    #[must_use]
+    pub fn rules(&self) -> &[ToolAskRule] {
+        &self.permissions.rules
+    }
+
+    /// Return the opaque confirmation token for a zero-based rule index.
+    #[must_use]
+    pub fn removal_token(&self, index: usize) -> Option<&str> {
+        self.removal_tokens.get(index).map(String::as_str)
+    }
 }
 
 impl PermissionsToml {
@@ -4046,61 +4105,35 @@ impl ConfigStore {
         }
 
         let path = checked_permissions_path_for_config_path(&self.path)?;
-        let raw = if checked_path_exists(&path)? {
-            read_checked_permissions_file(&path)?
-        } else {
-            String::new()
-        };
-        let mut permissions = if raw.trim().is_empty() {
-            PermissionsToml::default()
-        } else {
-            toml::from_str(&raw).map_err(|_| {
-                anyhow::anyhow!(
-                    "failed to parse permissions at {}; file contents were omitted",
-                    quote_os_path(&path)
-                )
-            })?
-        };
-        let mut document = if raw.trim().is_empty() {
-            toml_edit::DocumentMut::new()
-        } else {
-            raw.parse::<toml_edit::DocumentMut>().map_err(|_| {
-                anyhow::anyhow!(
-                    "failed to edit permissions at {}; file contents were omitted",
-                    quote_os_path(&path)
-                )
-            })?
-        };
+        let (added, persisted) = config_document::with_config_write_lock(&path, |path| {
+            let (_, raw, mut permissions) = read_permissions_state(path)?;
+            let mut document = parse_permissions_document(path, &raw)?;
 
-        if !document.contains_key("rules") {
-            document["rules"] = toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new());
-        }
-        let rules_item = document
-            .get_mut("rules")
-            .expect("rules entry was inserted above");
-
-        let mut added = 0;
-        for rule in rules {
-            if permissions.rules.contains(rule) {
-                continue;
+            if !document.contains_key("rules") {
+                document["rules"] = toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new());
             }
-            append_permission_rule(rules_item, rule)?;
-            permissions.rules.push(rule.clone());
-            added += 1;
-        }
-        if added == 0 {
-            self.permissions = permissions;
-            return Ok(0);
-        }
+            let rules_item = document
+                .get_mut("rules")
+                .expect("rules entry was inserted above");
 
-        let body = document.to_string();
-        let persisted: PermissionsToml = toml::from_str(&body).map_err(|_| {
-            anyhow::anyhow!(
-                "generated invalid permissions document for {}; file contents were omitted",
-                quote_os_path(&path)
-            )
+            let mut added = 0;
+            for rule in rules {
+                if permissions.rules.contains(rule) {
+                    continue;
+                }
+                append_permission_rule(rules_item, rule)?;
+                permissions.rules.push(rule.clone());
+                added += 1;
+            }
+            if added == 0 {
+                return Ok((0, permissions));
+            }
+
+            let body = document.to_string();
+            let persisted = parse_generated_permissions(path, &body)?;
+            write_permissions_atomic(path, body.as_bytes())?;
+            Ok((added, persisted))
         })?;
-        write_permissions_atomic(&path, body.as_bytes())?;
         self.permissions = persisted;
         Ok(added)
     }
@@ -4686,6 +4719,92 @@ pub fn resolve_permissions_path(config_path: Option<PathBuf>) -> Result<PathBuf>
     checked_permissions_path_for_config_path(&resolve_config_path(config_path)?)
 }
 
+/// Load the active sibling permission rules with confirmation tokens suitable
+/// for a later compare-and-remove operation.
+pub fn load_permissions_snapshot(config_path: Option<PathBuf>) -> Result<PermissionsSnapshot> {
+    let path = resolve_permissions_path(config_path)?;
+    let (file_exists, raw, permissions) = read_permissions_state(&path)?;
+    let file_state = if !file_exists {
+        PermissionsFileState::Missing
+    } else if raw.is_empty() {
+        PermissionsFileState::Empty
+    } else {
+        PermissionsFileState::Present
+    };
+    let removal_tokens = (0..permissions.rules.len())
+        .map(|index| permission_removal_token(&path, &raw, index))
+        .collect();
+    Ok(PermissionsSnapshot {
+        path,
+        file_state,
+        permissions,
+        removal_tokens,
+    })
+}
+
+/// Remove one zero-based permission rule if `expected_token` still describes
+/// that exact index in the current file.
+///
+/// The file is re-read only after acquiring the same adjacent lock used by
+/// append operations. This makes the token check and atomic replacement one
+/// transaction, preventing stale list views from deleting a different rule.
+pub fn remove_permission_rule(
+    config_path: Option<PathBuf>,
+    index: usize,
+    expected_token: &str,
+) -> Result<ToolAskRule> {
+    let path = resolve_permissions_path(config_path)?;
+    config_document::with_config_write_lock(&path, |path| {
+        let (file_exists, raw, permissions) = read_permissions_state(path)?;
+        if !file_exists {
+            bail!(
+                "permissions changed after they were listed; reload {} and retry",
+                quote_os_path(path)
+            );
+        }
+        let rule = permissions.rules.get(index).cloned().with_context(|| {
+            format!(
+                "permission rule {} no longer exists in {}; list rules again",
+                index + 1,
+                quote_os_path(path)
+            )
+        })?;
+        let current_token = permission_removal_token(path, &raw, index);
+        if current_token != expected_token {
+            bail!(
+                "permissions changed after they were listed; reload {} and retry",
+                quote_os_path(path)
+            );
+        }
+
+        let mut document = parse_permissions_document(path, &raw)?;
+        let rules_item = document.get_mut("rules").with_context(|| {
+            format!(
+                "permissions at {} no longer contain a rules array",
+                quote_os_path(path)
+            )
+        })?;
+        let orphaned_header = remove_permission_rule_item(rules_item, index)?;
+        if let Some(header) = orphaned_header {
+            let trailing = format!(
+                "{header}{}",
+                document.trailing().as_str().unwrap_or_default()
+            );
+            document.set_trailing(trailing);
+        }
+        let body = document.to_string();
+        let persisted = parse_generated_permissions(path, &body)?;
+        if persisted.rules.len() + 1 != permissions.rules.len() {
+            bail!(
+                "refusing inconsistent permission removal at {}",
+                quote_os_path(path)
+            );
+        }
+        write_permissions_atomic(path, body.as_bytes())?;
+        Ok(rule)
+    })
+}
+
 /// Read a resolved `permissions.toml` path using the same checked/no-follow
 /// path handling as config loading.
 pub fn read_permissions_file(path: &Path) -> Result<String> {
@@ -4694,17 +4813,67 @@ pub fn read_permissions_file(path: &Path) -> Result<String> {
 
 fn load_sibling_permissions(config_path: &Path) -> Result<PermissionsToml> {
     let permissions_path = checked_permissions_path_for_config_path(config_path)?;
-    if !checked_path_exists(&permissions_path)? {
-        return Ok(PermissionsToml::default());
-    }
+    let (_, _, permissions) = read_permissions_state(&permissions_path)?;
+    Ok(permissions)
+}
 
-    let raw = read_checked_permissions_file(&permissions_path)?;
-    toml::from_str(&raw).map_err(|_| {
+fn read_permissions_state(path: &Path) -> Result<(bool, String, PermissionsToml)> {
+    let file_exists = checked_path_exists(path)?;
+    let raw = if file_exists {
+        read_checked_permissions_file(path)?
+    } else {
+        String::new()
+    };
+    let permissions = if raw.trim().is_empty() {
+        PermissionsToml::default()
+    } else {
+        toml::from_str(&raw).map_err(|_| {
+            anyhow::anyhow!(
+                "failed to parse permissions at {}; file contents were omitted",
+                quote_os_path(path)
+            )
+        })?
+    };
+    Ok((file_exists, raw, permissions))
+}
+
+fn parse_permissions_document(path: &Path, raw: &str) -> Result<toml_edit::DocumentMut> {
+    if raw.trim().is_empty() {
+        Ok(toml_edit::DocumentMut::new())
+    } else {
+        raw.parse::<toml_edit::DocumentMut>().map_err(|_| {
+            anyhow::anyhow!(
+                "failed to edit permissions at {}; file contents were omitted",
+                quote_os_path(path)
+            )
+        })
+    }
+}
+
+fn parse_generated_permissions(path: &Path, body: &str) -> Result<PermissionsToml> {
+    toml::from_str(body).map_err(|_| {
         anyhow::anyhow!(
-            "failed to parse permissions at {}; file contents were omitted",
-            quote_os_path(&permissions_path)
+            "generated invalid permissions document for {}; file contents were omitted",
+            quote_os_path(path)
         )
     })
+}
+
+fn permission_removal_token(path: &Path, raw: &str, index: usize) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"codewhale-permission-removal-v1\0");
+    hasher.update(quote_os_path(path).as_bytes());
+    hasher.update(b"\0");
+    hasher.update(index.to_le_bytes());
+    hasher.update(b"\0");
+    hasher.update(raw.as_bytes());
+    let digest = hasher.finalize();
+    let mut token = String::with_capacity(24);
+    for byte in &digest[..12] {
+        use std::fmt::Write as _;
+        let _ = write!(&mut token, "{byte:02x}");
+    }
+    token
 }
 
 fn append_permission_rule(item: &mut toml_edit::Item, rule: &ToolAskRule) -> Result<()> {
@@ -4721,6 +4890,52 @@ fn append_permission_rule(item: &mut toml_edit::Item, rule: &ToolAskRule) -> Res
                 rule,
             )));
             Ok(())
+        }
+        _ => bail!("`rules` in permissions.toml must be an array"),
+    }
+}
+
+fn remove_permission_rule_item(item: &mut toml_edit::Item, index: usize) -> Result<Option<String>> {
+    match item {
+        toml_edit::Item::ArrayOfTables(rules) => {
+            if index >= rules.len() {
+                bail!("permission rule index changed before removal");
+            }
+            let file_header = if index == 0 {
+                rules
+                    .get(index)
+                    .and_then(|rule| rule.decor().prefix())
+                    .and_then(toml_edit::RawString::as_str)
+                    .map(str::to_owned)
+            } else {
+                None
+            };
+            rules.remove(index);
+            if let Some(header) = file_header.as_deref()
+                && let Some(next_rule) = rules.get_mut(0)
+            {
+                let next_prefix = next_rule
+                    .decor()
+                    .prefix()
+                    .and_then(toml_edit::RawString::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                next_rule
+                    .decor_mut()
+                    .set_prefix(format!("{header}{next_prefix}"));
+                return Ok(None);
+            }
+            Ok(file_header)
+        }
+        toml_edit::Item::Value(value) => {
+            let Some(rules) = value.as_array_mut() else {
+                bail!("`rules` in permissions.toml must be an array");
+            };
+            if index >= rules.len() {
+                bail!("permission rule index changed before removal");
+            }
+            rules.remove(index);
+            Ok(None)
         }
         _ => bail!("`rules` in permissions.toml must be an array"),
     }

@@ -1448,6 +1448,9 @@ If you are upgrading from older releases:
   registry isolation, or AppContainer isolation until those are implemented.
 - `permissions.toml` (sibling file, optional): typed permission rule records
   loaded next to `config.toml`, for example `~/.codewhale/permissions.toml`.
+  This active user file is the only permission-rule source today; project
+  config overlays do not load a project-local `permissions.toml`. A rule's
+  optional `workspace` field is its repository scope, not a second source.
   Manually authored `[[rules]]` entries accept `tool`, optional `command` or
   `path`, optional absolute `workspace`, optional `command_exact = true`, and
   optional `action = "deny" | "ask" | "allow"`; omitted `action` defaults to
@@ -1482,9 +1485,28 @@ If you are upgrading from older releases:
   of a specific path to ask, allow, or deny, but the approval UI does not save
   `read_file` rules. Commands classified as requiring approval or dangerous,
   critical approval cards, and repo-law prompts cannot save allow grants and
-  continue to require review. The UI is not a policy editor: it does not save
-  deny rules, edit or delete rules, expand globs, or create broad
-  directory/recursive rules.
+  continue to require review.
+
+  `/permissions` (or `/permissions list`) is the narrow rule-management
+  surface. It lists each numbered rule with the active user-file source, its
+  exact effective matcher (tool-wide, command prefix, exact command, or exact
+  normalized path), global or repository scope, and whether that scope
+  applies in the current workspace. `/config ask-rules` remains a compatibility
+  entry to the same list.
+
+  Deletion is review-gated: `/permissions remove <number>` only previews the
+  selected rule and prints a confirmation command. That command carries an
+  opaque token bound to the exact file bytes and rule index; if another writer
+  changes `permissions.toml`, confirmation fails instead of deleting a rule
+  that moved into the old position. Confirmed removal and approval-card appends
+  share the adjacent `permissions.toml.lock`, preserve unrelated TOML comments
+  and formatting, and atomically replace the file. The running TUI reloads the
+  user ruleset without clearing session-only approvals.
+
+  This editor intentionally does not create or rewrite rules, persist deny
+  choices from approval cards, expand globs, or create broad
+  directory/recursive rules. Author those supported exact/prefix records
+  manually when needed.
 - `[[hotbar]]` (array of tables, optional): user-owned 1-8 slot bindings for
   the TUI hotbar. Each entry has `slot`, `action`, and optional `label`.
   Omitting `hotbar` uses the built-in default eight slots. Setting

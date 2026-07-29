@@ -180,11 +180,6 @@ pub const KEYBINDINGS: &[KeybindingEntry] = &[
         section: KeybindingSection::Submission,
     },
     KeybindingEntry {
-        chord: "Ctrl+Enter / Cmd+Enter",
-        description_id: crate::localization::MessageId::KbSteerCurrentTurn,
-        section: KeybindingSection::Submission,
-    },
-    KeybindingEntry {
         chord: "Esc",
         description_id: crate::localization::MessageId::KbCloseMenu,
         section: KeybindingSection::Submission,
@@ -402,9 +397,11 @@ mod tests {
             chord_for(crate::localization::MessageId::KbInsertNewline),
             "Ctrl+J / Alt+Enter / Shift+Enter"
         );
-        assert_eq!(
-            chord_for(crate::localization::MessageId::KbSteerCurrentTurn),
-            "Ctrl+Enter / Cmd+Enter"
+        assert!(
+            KEYBINDINGS
+                .iter()
+                .all(|entry| !entry.chord.contains("Ctrl+Enter")
+                    && !entry.chord.contains("Cmd+Enter"))
         );
         assert_eq!(
             chord_for(crate::localization::MessageId::KbStashDraft),
@@ -685,10 +682,9 @@ mod tests {
         );
     }
 
-    /// The running-turn contract has exactly three composer gestures, and each
-    /// one is advertised for exactly one of them: Enter sends or queues,
-    /// Ctrl+Enter steers, and the newline chords stay newlines. Nothing else
-    /// may claim any of those verbs.
+    /// Only chords distinguishable by the baseline terminal protocol may be
+    /// advertised. Enter sends or queues (then sends a queued message now),
+    /// while the newline chords stay newlines.
     #[test]
     fn running_turn_verbs_belong_to_one_chord_each() {
         let entry_for = |id| {
@@ -702,23 +698,15 @@ mod tests {
             entry_for(crate::localization::MessageId::KbSendDraft).chord,
             "Enter"
         );
-        assert_eq!(
-            entry_for(crate::localization::MessageId::KbSteerCurrentTurn).chord,
-            "Ctrl+Enter / Cmd+Enter"
+        assert!(
+            KEYBINDINGS
+                .iter()
+                .all(|entry| !entry.chord.contains("Ctrl+Enter")
+                    && !entry.chord.contains("Cmd+Enter"))
         );
         assert_eq!(
             entry_for(crate::localization::MessageId::KbInsertNewline).chord,
             "Ctrl+J / Alt+Enter / Shift+Enter"
-        );
-
-        let steer_copy = crate::localization::tr(
-            crate::localization::Locale::En,
-            crate::localization::MessageId::KbSteerCurrentTurn,
-        )
-        .to_ascii_lowercase();
-        assert!(
-            steer_copy.contains("steer"),
-            "the steer chord must say it steers: {steer_copy:?}"
         );
 
         let newline_copy = crate::localization::tr(

@@ -271,8 +271,160 @@ fn reasoning_effort_display_label_uses_codex_xhigh() {
     assert_eq!(app.reasoning_effort_display_label(), "xhigh");
 
     app.reasoning_effort = ReasoningEffort::Auto;
-    app.last_effective_reasoning_effort = Some(ReasoningEffort::Max);
+    app.last_effective_reasoning_effort =
+        Some(EffectiveReasoningEffort::Tier(ReasoningEffort::Max));
     assert_eq!(app.reasoning_effort_display_label(), "auto: xhigh");
+}
+
+#[test]
+fn fixed_auto_reasoning_label_preserves_untiered_effective_receipt() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Zai;
+    app.auto_model = false;
+    app.model = crate::config::ZAI_GLM_5_TURBO_MODEL.to_string();
+    app.active_route_base_url = crate::config::DEFAULT_ZAI_BASE_URL.to_string();
+    app.reasoning_effort = ReasoningEffort::Auto;
+    app.last_effective_reasoning_effort =
+        Some(EffectiveReasoningEffort::ThinkingEnabledGranularityUnavailable);
+
+    assert_eq!(
+        app.reasoning_effort_display_label(),
+        "auto→thinking enabled; granularity unavailable"
+    );
+}
+
+#[test]
+fn cache_replay_keeps_untiered_reasoning_enabled() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Zai;
+    app.auto_model = false;
+    app.model = crate::config::ZAI_GLM_5_TURBO_MODEL.to_string();
+    app.reasoning_effort = ReasoningEffort::Auto;
+    app.last_effective_reasoning_effort =
+        Some(EffectiveReasoningEffort::ThinkingEnabledGranularityUnavailable);
+
+    assert_eq!(
+        app.reasoning_effort_api_value_for_replay(
+            ApiProvider::Zai,
+            crate::config::DEFAULT_ZAI_BASE_URL,
+            crate::config::ZAI_GLM_5_TURBO_MODEL,
+        ),
+        Some("high")
+    );
+
+    app.api_provider = ApiProvider::Minimax;
+    app.model = crate::config::DEFAULT_MINIMAX_MODEL.to_string();
+    assert_eq!(
+        app.reasoning_effort_api_value_for_replay(
+            ApiProvider::Minimax,
+            crate::config::DEFAULT_MINIMAX_BASE_URL,
+            crate::config::DEFAULT_MINIMAX_MODEL,
+        ),
+        Some("high")
+    );
+
+    app.last_effective_reasoning_effort = Some(EffectiveReasoningEffort::Unavailable);
+    assert_eq!(
+        app.reasoning_effort_api_value_for_replay(
+            ApiProvider::Zai,
+            crate::config::DEFAULT_ZAI_BASE_URL,
+            crate::config::ZAI_GLM_5_TURBO_MODEL,
+        ),
+        None
+    );
+}
+
+#[test]
+fn cache_replay_normalizes_reasoning_against_the_concrete_auto_route() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Deepseek;
+    app.model = "auto".to_string();
+    app.auto_model = true;
+
+    app.reasoning_effort = ReasoningEffort::Off;
+    assert_eq!(
+        app.reasoning_effort_api_value_for_replay(
+            ApiProvider::OpenaiCodex,
+            crate::config::DEFAULT_OPENAI_CODEX_BASE_URL,
+            crate::config::DEFAULT_OPENAI_CODEX_MODEL,
+        ),
+        Some("low"),
+        "Codex must apply its Off-to-Low floor even when DeepSeek is configured"
+    );
+
+    app.reasoning_effort = ReasoningEffort::Medium;
+    assert_eq!(
+        app.reasoning_effort_api_value_for_replay(
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            crate::config::KIMI_CODE_K3_MODEL,
+        ),
+        Some("medium"),
+        "Kimi Code K3 must retain its exact-route Medium tier"
+    );
+}
+
+#[test]
+fn cache_replay_target_uses_the_last_completed_auto_route() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.model = "auto".to_string();
+    app.auto_model = true;
+    app.last_effective_provider = Some(ApiProvider::OpenaiCodex);
+    app.last_effective_provider_identity = Some(ApiProvider::OpenaiCodex.as_str().to_string());
+    app.last_effective_model = Some(crate::config::DEFAULT_OPENAI_CODEX_MODEL.to_string());
+    app.session.last_base_url = Some(crate::config::DEFAULT_OPENAI_CODEX_BASE_URL.to_string());
+    app.push_turn_cache_record(TurnCacheRecord {
+        provider: Some(ApiProvider::OpenaiCodex),
+        provider_identity: Some(ApiProvider::OpenaiCodex.as_str().to_string()),
+        model: Some(crate::config::DEFAULT_OPENAI_CODEX_MODEL.to_string()),
+        auto_model: true,
+        input_tokens: 1,
+        output_tokens: 1,
+        cache_hit_tokens: None,
+        cache_miss_tokens: None,
+        cache_write_tokens: None,
+        reasoning_tokens: None,
+        cost_audit: None,
+        reasoning_replay_tokens: None,
+        recorded_at: std::time::Instant::now(),
+    });
+
+    let target = app
+        .cache_replay_target()
+        .expect("completed Auto route must be replayable");
+
+    assert_eq!(target.provider, ApiProvider::OpenaiCodex);
+    assert_eq!(target.provider_identity, ApiProvider::OpenaiCodex.as_str());
+    assert_eq!(
+        target.provider_id.as_deref(),
+        Some(ApiProvider::OpenaiCodex.as_str())
+    );
+    assert_eq!(target.model, crate::config::DEFAULT_OPENAI_CODEX_MODEL);
+    assert_eq!(
+        target.base_url.as_deref(),
+        Some(crate::config::DEFAULT_OPENAI_CODEX_BASE_URL)
+    );
+
+    // A restored Auto session has no turn ring or raw endpoint. Once warmup
+    // safely re-resolves that route, its exact key becomes sufficient
+    // endpoint evidence for a following inspect.
+    app.session.turn_cache_history.clear();
+    app.session.last_base_url = None;
+    app.session.last_warmup_key = Some(CacheWarmupKey {
+        provider: ApiProvider::OpenaiCodex.as_str().to_string(),
+        model: crate::config::DEFAULT_OPENAI_CODEX_MODEL.to_string(),
+        base_url: crate::config::DEFAULT_OPENAI_CODEX_BASE_URL.to_string(),
+        static_prefix_hash: "static".to_string(),
+        tool_catalog_hash: "tools".to_string(),
+        project_pack_hash: "project".to_string(),
+        skills_hash: "skills".to_string(),
+    });
+    assert_eq!(
+        app.cache_replay_target()
+            .and_then(|target| target.base_url)
+            .as_deref(),
+        Some(crate::config::DEFAULT_OPENAI_CODEX_BASE_URL)
+    );
 }
 
 #[test]
@@ -324,7 +476,7 @@ fn cycle_effort_updates_effort_status_and_compaction() {
     app.cycle_effort();
 
     assert_eq!(app.reasoning_effort, ReasoningEffort::High);
-    assert!(app.reasoning_effort_explicit);
+    assert_eq!(app.reasoning_effort_preference, Some(ReasoningEffort::High));
     assert_eq!(
         app.status_message.as_deref(),
         Some("Reasoning effort: high"),
@@ -1016,12 +1168,55 @@ fn set_model_selection_normalizes_codex_fixed_model_effort() {
     let mut app = App::new(test_options(false), &Config::default());
     app.api_provider = ApiProvider::OpenaiCodex;
     app.reasoning_effort = ReasoningEffort::Off;
+    app.reasoning_effort_preference = Some(ReasoningEffort::Off);
 
     app.set_model_selection("gpt-5.5-codex".to_string());
 
     assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
+    assert_eq!(app.reasoning_effort_preference, Some(ReasoningEffort::Off));
     assert!(!app.auto_model);
     assert_eq!(app.reasoning_effort_display_label(), "low");
+}
+
+#[test]
+fn auto_model_selection_preserves_only_explicit_reasoning_effort() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.reasoning_effort = ReasoningEffort::Max;
+    app.reasoning_effort_preference = None;
+
+    app.set_model_selection("auto".to_string());
+
+    assert!(app.auto_model);
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
+    assert_eq!(app.reasoning_effort_preference, None);
+
+    for (provider, requested, normalized) in [
+        (
+            ApiProvider::Deepseek,
+            ReasoningEffort::Low,
+            ReasoningEffort::High,
+        ),
+        (
+            ApiProvider::OpenaiCodex,
+            ReasoningEffort::Off,
+            ReasoningEffort::Low,
+        ),
+    ] {
+        app.api_provider = provider;
+        app.auto_model = false;
+        app.model = "fixed-model".to_string();
+        app.reasoning_effort = normalized;
+        app.reasoning_effort_preference = Some(requested);
+
+        app.set_model_selection("auto".to_string());
+
+        assert_eq!(app.reasoning_effort, requested, "{provider:?}");
+        assert_eq!(
+            app.reasoning_effort_preference,
+            Some(requested),
+            "{provider:?}"
+        );
+    }
 }
 
 #[test]
@@ -1058,6 +1253,11 @@ fn app_new_normalizes_saved_codex_reasoning_effort() {
 
         assert_eq!(app.api_provider, ApiProvider::OpenaiCodex);
         assert_eq!(app.reasoning_effort, expected, "raw setting {raw}");
+        assert_eq!(
+            app.reasoning_effort_preference,
+            Some(ReasoningEffort::from_setting(raw)),
+            "raw setting {raw}"
+        );
         assert_eq!(app.reasoning_effort_display_label(), display);
     }
 }
@@ -4370,6 +4570,60 @@ fn submit_disposition_offline_busy_queues() {
 }
 
 #[test]
+fn composer_submit_state_by_chord_matrix() {
+    use super::{ComposerSubmitAction, ComposerSubmitChord};
+
+    let mut app = App::new(test_options(false), &Config::default());
+    app.input = "hello".to_string();
+    assert_eq!(
+        app.decide_composer_submit(ComposerSubmitChord::Enter),
+        ComposerSubmitAction::Submit(SubmitDisposition::Immediate)
+    );
+    assert_eq!(
+        app.decide_composer_submit(ComposerSubmitChord::CtrlEnter),
+        ComposerSubmitAction::Submit(SubmitDisposition::Immediate)
+    );
+
+    app.is_loading = true;
+    assert_eq!(
+        app.decide_composer_submit(ComposerSubmitChord::Enter),
+        ComposerSubmitAction::Submit(SubmitDisposition::Queue)
+    );
+    assert_eq!(
+        app.decide_composer_submit(ComposerSubmitChord::CtrlEnter),
+        ComposerSubmitAction::Submit(SubmitDisposition::Steer)
+    );
+
+    app.streaming_message_index = Some(0);
+    assert_eq!(
+        app.decide_composer_submit(ComposerSubmitChord::Enter),
+        ComposerSubmitAction::Submit(SubmitDisposition::Queue)
+    );
+    assert_eq!(
+        app.decide_composer_submit(ComposerSubmitChord::CtrlEnter),
+        ComposerSubmitAction::Submit(SubmitDisposition::Steer)
+    );
+
+    app.queue_message(QueuedMessage::new("older queued".to_string(), None));
+    app.input.clear();
+    assert_eq!(
+        app.decide_composer_submit(ComposerSubmitChord::Enter),
+        ComposerSubmitAction::SendQueuedNow
+    );
+    assert_eq!(
+        app.decide_composer_submit(ComposerSubmitChord::CtrlEnter),
+        ComposerSubmitAction::SendQueuedNow
+    );
+
+    app.input = "offline follow-up".to_string();
+    app.offline_mode = true;
+    assert_eq!(
+        app.decide_composer_submit(ComposerSubmitChord::CtrlEnter),
+        ComposerSubmitAction::Submit(SubmitDisposition::Queue)
+    );
+}
+
+#[test]
 fn bare_enter_while_streaming_stays_queue_not_steer() {
     let mut app = App::new(test_options(false), &Config::default());
     // Busy + streaming: every bare Enter queues. Steer is Ctrl+Enter only.
@@ -5713,6 +5967,35 @@ async fn rapid_thinking_selections_persist_the_last_one() {
             .as_deref(),
         Some(expected),
         "the tier the session ended on must be the tier on disk"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fixed_route_thinking_cycle_persists_raw_preference() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let _env = sealed_settings_home(tmp.path());
+    let _writes = crate::tui::startup_defaults::allow_writes_in_tests();
+
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Moonshot;
+    app.auto_model = false;
+    app.active_route_base_url = crate::config::DEFAULT_MOONSHOT_BASE_URL.to_string();
+    app.model = crate::config::MOONSHOT_KIMI_K3_MODEL.to_string();
+    app.reasoning_effort = ReasoningEffort::Max;
+
+    app.apply_reasoning_effort_cycle();
+    app.startup_defaults.flush();
+
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Off);
+    assert_eq!(app.reasoning_effort_preference, Some(ReasoningEffort::Off));
+    assert_eq!(
+        Settings::load()
+            .expect("reload")
+            .reasoning_effort
+            .as_deref(),
+        Some("off"),
+        "the always-thinking route may execute Low, but the raw Off preference must survive restart"
     );
 }
 

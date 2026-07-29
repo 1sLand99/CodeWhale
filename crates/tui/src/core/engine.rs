@@ -2143,6 +2143,9 @@ impl Engine {
                             )))
                             .await;
                     }
+                    Op::SetPermissionRuleset { ruleset } => {
+                        self.config.exec_policy_engine.set_ruleset(ruleset);
+                    }
                     Op::SetStreamChunkTimeout { timeout_secs } => {
                         self.config.stream_chunk_timeout = Duration::from_secs(timeout_secs);
                         let _ = self
@@ -2616,6 +2619,7 @@ impl Engine {
     /// including a *clone* of the working set with the hypothetical message
     /// already observed. That is what makes the previewed block byte-identical
     /// to the real one without a single write.
+    #[allow(clippy::too_many_arguments)]
     fn turn_metadata_block_from_snapshot(
         &self,
         _routed_model: &str,
@@ -2706,6 +2710,7 @@ impl Engine {
     /// [`Self::user_text_message_with_turn_metadata_for_route_and_provenance`];
     /// only the source of the turn-metadata inputs differs. See
     /// [`Self::turn_metadata_block_from_snapshot`].
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn user_text_message_from_snapshot(
         &self,
         text: String,
@@ -3264,6 +3269,7 @@ impl Engine {
     /// every `.await` in this function, and would leave it installed
     /// permanently if the task were cancelled or panicked between the two
     /// writes.
+    #[allow(clippy::too_many_arguments)]
     async fn build_turn_tool_registry_and_catalog(
         &mut self,
         input_policy: &TurnAuthority,

@@ -778,9 +778,9 @@ impl Respond for SteeringResponder {
             self.steer_requests.fetch_add(1, Ordering::SeqCst);
             return sse_response(text_sse(DEEPSEEK_TEST_MODEL, "steering-applied"));
         }
-        if raw.contains("direct steering from ctrl-enter") {
+        if raw.contains("portable steering from enter") {
             self.steer_requests.fetch_add(1, Ordering::SeqCst);
-            return sse_response(text_sse(DEEPSEEK_TEST_MODEL, "direct-steering-applied"));
+            return sse_response(text_sse(DEEPSEEK_TEST_MODEL, "portable-steering-applied"));
         }
         if raw.contains("initial slow turn") {
             self.initial_requests.fetch_add(1, Ordering::SeqCst);
@@ -868,7 +868,7 @@ async fn release_empty_enter_promotes_queued_follow_up() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn release_ctrl_enter_steers_running_turn() -> Result<()> {
+async fn release_enter_queue_then_enter_steers_running_turn() -> Result<()> {
     let _guard = RELEASE_RUNTIME_QA_LOCK.lock().await;
     let server = MockServer::start().await;
     mount_models(&server, &[DEEPSEEK_TEST_MODEL]).await;
@@ -901,14 +901,14 @@ async fn release_ctrl_enter_steers_running_turn() -> Result<()> {
     tui.send(keys::key::alt_enter())?;
     tui.send(keys::key::text("busy-ctrl-j-line"))?;
     tui.send(keys::key::ctrl_j())?;
-    tui.send(keys::key::text("direct steering from ctrl-enter"))?;
-    tui.wait_for_text("direct steering from ctrl-enter", Duration::from_secs(3))?;
+    tui.send(keys::key::text("portable steering from enter"))?;
+    tui.wait_for_text("portable steering from enter", Duration::from_secs(3))?;
     let frame = tui.frame();
     let rows = [
         "busy-shift-line",
         "busy-alt-line",
         "busy-ctrl-j-line",
-        "direct steering from ctrl-enter",
+        "portable steering from enter",
     ]
     .map(|line| {
         frame
@@ -921,14 +921,21 @@ async fn release_ctrl_enter_steers_running_turn() -> Result<()> {
         "newline chords must stay newlines during a running turn:\n{}",
         frame.debug_dump()
     );
-    tui.wait_for_text("Ctrl+↵ steer", Duration::from_secs(3))?;
+    tui.wait_for_text("then ↵ steer", Duration::from_secs(3))?;
     let steer_started = Instant::now();
-    tui.send(keys::key::ctrl_enter())?;
+    // The first portable Enter queues the completed draft. The queued preview
+    // uses the already-visible "then Enter" contract; the second Enter
+    // promotes it into the active turn even when a multiline preview consumes
+    // the compact control row.
+    tui.send(keys::key::enter())?;
+    std::thread::sleep(PASTE_GUARD_SETTLE);
+    tui.pump();
+    tui.send(keys::key::enter())?;
     wait_for_counter(&mut tui, &steer_requests, 1, INTERACTION_TIMEOUT)?;
-    tui.wait_for_text("direct-steering-applied", INTERACTION_TIMEOUT)?;
+    tui.wait_for_text("portable-steering-applied", INTERACTION_TIMEOUT)?;
     assert!(
         steer_started.elapsed() < Duration::from_secs(10),
-        "Ctrl+Enter steering was not incorporated promptly"
+        "two-Enter steering was not incorporated promptly"
     );
 
     let _ = tui.shutdown();
@@ -1042,7 +1049,7 @@ async fn release_queued_follow_ups_dispatch_exactly_once_and_in_order() -> Resul
     let first_marker = markers.first().expect("queue matrix has a marker");
     tui.send(keys::key::text(first_marker))?;
     tui.wait_for_text(first_marker, Duration::from_secs(3))?;
-    tui.wait_for_text("Ctrl+↵ steer", Duration::from_secs(3))?;
+    tui.wait_for_text("then ↵ steer", Duration::from_secs(3))?;
 
     // While the turn is running the composer must advertise queueing, and it
     // must not advertise the stash chords as a way to send (#440 / #3758).

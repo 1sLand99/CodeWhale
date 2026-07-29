@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::tui::app::App;
+use crate::tui::app::{App, ComposerSubmitChord};
 
 const COMPOSER_ARROW_SCROLL_LINES: usize = 3;
 
@@ -174,7 +174,29 @@ pub(crate) fn is_composer_newline_key(key: KeyEvent) -> bool {
 }
 
 pub(crate) fn is_forced_submit_key(key: KeyEvent) -> bool {
-    matches!(key.code, KeyCode::Enter) && key.modifiers.contains(KeyModifiers::CONTROL)
+    matches!(
+        composer_submit_chord(key),
+        Some(ComposerSubmitChord::CtrlEnter)
+    )
+}
+
+pub(crate) fn composer_submit_chord(key: KeyEvent) -> Option<ComposerSubmitChord> {
+    if !matches!(key.code, KeyCode::Enter) {
+        return None;
+    }
+    if key.modifiers.contains(KeyModifiers::ALT)
+        || (key.modifiers.contains(KeyModifiers::SHIFT)
+            && !key.modifiers.contains(KeyModifiers::CONTROL))
+    {
+        return None;
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        Some(ComposerSubmitChord::CtrlEnter)
+    } else if key.modifiers == KeyModifiers::NONE {
+        Some(ComposerSubmitChord::Enter)
+    } else {
+        None
+    }
 }
 
 pub(crate) fn handle_history_search_key(app: &mut App, key: KeyEvent) {

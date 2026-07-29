@@ -1577,6 +1577,7 @@ async fn run_async_main(
                     .filter(|value| !value.is_empty())
                 {
                     config.reasoning_effort = normalize_cli_reasoning_effort(reasoning_arg)?;
+                    config.reasoning_effort_inferred_from_legacy_alias = false;
                 }
                 let prompt = join_prompt_parts(&args.prompt);
                 let resume_session_id = resolve_exec_resume_session_id(&args, &workspace)?;
@@ -7001,8 +7002,29 @@ fn effective_config_profile(cli: &Cli) -> Option<String> {
 fn load_config_from_cli_with_effective_profile(cli: &Cli) -> Result<(Config, Option<String>)> {
     let profile = effective_config_profile(cli);
     let mut config = Config::load(cli.config.clone(), profile.as_deref())?;
+    // Config loading is shared by diagnostics and mutating runtimes. Read the
+    // saved preference without migrating or creating state here; interactive
+    // startup performs any permitted migration later through `Settings::load`.
+    if let Ok(settings) = crate::settings::Settings::load_read_only() {
+        apply_saved_reasoning_preference(&mut config, &settings);
+    }
     cli.feature_toggles.apply(&mut config)?;
     Ok((config, profile))
+}
+
+/// Apply the same reasoning-preference precedence as interactive `App`
+/// construction to non-TUI runtimes.
+///
+/// `/model` and the config editor persist this preference in `settings.toml`.
+/// Exec, review, workflow, ACP, and runtime-thread launches all begin with a
+/// `Config`, so copying the saved value here keeps those entry points from
+/// silently falling back to a route classifier or an older config.toml value.
+fn apply_saved_reasoning_preference(config: &mut Config, settings: &crate::settings::Settings) {
+    let Some(reasoning_effort) = settings.reasoning_effort.as_ref() else {
+        return;
+    };
+    config.reasoning_effort = Some(reasoning_effort.clone());
+    config.reasoning_effort_inferred_from_legacy_alias = false;
 }
 
 fn read_api_key_from_stdin() -> Result<String> {
@@ -9111,6 +9133,11 @@ struct CliAutoRoute {
     provider: crate::config::ApiProvider,
     model: String,
     reasoning_effort: Option<crate::tui::app::ReasoningEffort>,
+    /// Whether the runtime should continue resolving reasoning per prompt.
+    ///
+    /// This is independent from `auto_model`: an Auto model can carry a fixed
+    /// saved effort, while a fixed Fleet model can still request Auto effort.
+    auto_controls_reasoning: bool,
     auto_model: bool,
 }
 
@@ -9136,23 +9163,6 @@ fn cli_reasoning_effort_value_for_prompt(
         effort
     };
     cli_reasoning_effort_value(config, model, resolved)
-}
-
-/// Whether a CLI launch is an Auto *reasoning* request.
-///
-/// Auto reasoning and Auto model are independent decisions. A Fleet worker
-/// subprocess launches with `--model <exact> --reasoning-effort auto`: the
-/// model is pinned (so `auto_model` is false) while the reasoning tier is
-/// still Auto. Reading the flag off `auto_model` alone therefore mislabels
-/// exactly the launch shape the exact-Fleet path uses.
-const fn cli_reasoning_is_auto(
-    reasoning_effort: Option<crate::tui::app::ReasoningEffort>,
-    auto_model: bool,
-) -> bool {
-    matches!(
-        reasoning_effort,
-        Some(crate::tui::app::ReasoningEffort::Auto)
-    ) || auto_model
 }
 
 fn normalize_cli_reasoning_effort(value: &str) -> Result<Option<String>> {
@@ -9193,19 +9203,31 @@ async fn resolve_cli_auto_route(
         let selection =
             model_routing::resolve_auto_route_with_inventory(config, prompt, "", "auto", "auto")
                 .await?;
+        let preference = config
+            .reasoning_effort()
+            .filter(|_| config.reasoning_effort_is_explicit())
+            .map(crate::tui::app::ReasoningEffort::from_setting);
+        let (reasoning_effort, auto_controls_reasoning) =
+            model_routing::resolve_auto_model_reasoning(preference, selection.reasoning_effort);
         Ok(CliAutoRoute {
             provider: selection.provider,
             model: selection.model,
-            reasoning_effort: selection.reasoning_effort,
+            reasoning_effort,
+            auto_controls_reasoning,
             auto_model: true,
         })
     } else {
         if let Some(selection) = model_routing::resolve_explicit_route_with_inventory(config, model)
         {
+            let auto_controls_reasoning = matches!(
+                selection.reasoning_effort,
+                Some(crate::tui::app::ReasoningEffort::Auto)
+            );
             return Ok(CliAutoRoute {
                 provider: selection.provider,
                 model: selection.model,
                 reasoning_effort: selection.reasoning_effort,
+                auto_controls_reasoning,
                 auto_model: false,
             });
         }
@@ -9231,12 +9253,17 @@ async fn resolve_cli_auto_route(
         // call, which (for example) prevented vllm + Qwen3 users from
         // disabling thinking via `reasoning_effort = "off"` and caused
         // 30+ second SSE idle timeouts on trivial prompts.
+        let reasoning_effort = config
+            .reasoning_effort()
+            .map(crate::tui::app::ReasoningEffort::from_setting);
         Ok(CliAutoRoute {
             provider: config.api_provider(),
             model: model.to_string(),
-            reasoning_effort: config
-                .reasoning_effort()
-                .map(crate::tui::app::ReasoningEffort::from_setting),
+            auto_controls_reasoning: matches!(
+                reasoning_effort,
+                Some(crate::tui::app::ReasoningEffort::Auto)
+            ),
+            reasoning_effort,
             auto_model: false,
         })
     }
@@ -9249,12 +9276,17 @@ async fn resolve_cli_exec_route(
     force_configured_route: bool,
 ) -> Result<CliAutoRoute> {
     if force_configured_route && !model.trim().eq_ignore_ascii_case("auto") {
+        let reasoning_effort = config
+            .reasoning_effort()
+            .map(crate::tui::app::ReasoningEffort::from_setting);
         return Ok(CliAutoRoute {
             provider: config.api_provider(),
             model: model.to_string(),
-            reasoning_effort: config
-                .reasoning_effort()
-                .map(crate::tui::app::ReasoningEffort::from_setting),
+            auto_controls_reasoning: matches!(
+                reasoning_effort,
+                Some(crate::tui::app::ReasoningEffort::Auto)
+            ),
+            reasoning_effort,
             auto_model: false,
         });
     }
@@ -9951,7 +9983,7 @@ async fn build_direct_workflow_tool(
     // raw AND non-auto: the runtime carried the literal string `"auto"` while
     // nothing was allowed to resolve it. Auto is a reasoning decision, not a
     // model decision — it does not require `--model auto`.
-    let reasoning_effort_auto = cli_reasoning_is_auto(route.reasoning_effort, route.auto_model);
+    let reasoning_effort_auto = route.auto_controls_reasoning;
     let reasoning_effort = route
         .reasoning_effort
         .and_then(|effort| cli_reasoning_effort_value(config, &route.model, effort));
@@ -10439,7 +10471,7 @@ async fn run_exec_agent(
     // here, so deriving the auto flag from it left this path both raw and
     // non-auto: the literal string `"auto"` travelled to the engine while the
     // receipt claimed no Auto was in play.
-    let reasoning_effort_auto = cli_reasoning_is_auto(route.reasoning_effort, auto_model);
+    let reasoning_effort_auto = route.auto_controls_reasoning;
     // Resolve Auto against this run's prompt at the CLI boundary, exactly like
     // `run_one_shot`/`run_one_shot_json` and the interactive launch path do,
     // so the tier the engine (and the receipt below) sees is concrete.
@@ -13005,6 +13037,7 @@ mod terminal_mode_tests {
             provider: crate::config::ApiProvider::Vllm,
             model: "offline-test-model".to_string(),
             reasoning_effort: None,
+            auto_controls_reasoning: false,
             auto_model: false,
         };
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(64);
@@ -13215,6 +13248,37 @@ mod terminal_mode_tests {
         assert!(message.contains("/setup"));
     }
 
+    #[tokio::test]
+    async fn cli_auto_model_honors_a_fixed_reasoning_preference() {
+        let config = Config {
+            provider: Some("vllm".to_string()),
+            reasoning_effort: Some("low".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                vllm: crate::config::ProviderConfig {
+                    base_url: Some("http://127.0.0.1:18190/v1".to_string()),
+                    model: Some("local-auto-model".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let route = resolve_cli_auto_route(&config, "auto", "debug a failing test")
+            .await
+            .expect("Auto model route");
+
+        assert!(route.auto_model);
+        assert_eq!(
+            route.reasoning_effort,
+            Some(crate::tui::app::ReasoningEffort::Low)
+        );
+        assert!(
+            !route.auto_controls_reasoning,
+            "a fixed saved tier must not be replaced per prompt"
+        );
+    }
+
     #[test]
     fn cli_route_execution_config_stamps_routed_model_into_provider_slot() {
         let mut providers = crate::config::ProvidersConfig::default();
@@ -13228,6 +13292,7 @@ mod terminal_mode_tests {
             provider: crate::config::ApiProvider::Deepseek,
             model: "deepseek-v4-flash".to_string(),
             reasoning_effort: None,
+            auto_controls_reasoning: true,
             auto_model: true,
         };
 
@@ -13258,6 +13323,7 @@ mod terminal_mode_tests {
             provider: crate::config::ApiProvider::Custom,
             model: "routed-legacy-model".to_string(),
             reasoning_effort: None,
+            auto_controls_reasoning: false,
             auto_model: false,
         };
 
@@ -13823,24 +13889,47 @@ mod terminal_mode_tests {
         );
     }
 
-    /// The exact shape a Fleet worker subprocess launches with:
-    /// `codewhale exec --model <exact> --reasoning-effort auto`. The model is
-    /// pinned, so `auto_model` is false — but the run is still an Auto
-    /// *reasoning* request and must be labelled and resolved as one.
     #[test]
-    fn a_fixed_model_exec_with_reasoning_auto_is_still_an_auto_reasoning_run() {
+    fn cli_route_tracks_auto_reasoning_independently_from_auto_model() {
         use crate::tui::app::ReasoningEffort;
 
-        assert!(
-            cli_reasoning_is_auto(Some(ReasoningEffort::Auto), false),
-            "--model <exact> --reasoning-effort auto is an Auto reasoning run"
-        );
-        assert!(
-            cli_reasoning_is_auto(None, true),
-            "an Auto model route keeps its historic Auto labelling"
-        );
-        assert!(!cli_reasoning_is_auto(Some(ReasoningEffort::High), false));
-        assert!(!cli_reasoning_is_auto(None, false));
+        let fixed_model_auto_reasoning = CliAutoRoute {
+            provider: crate::config::ApiProvider::Deepseek,
+            model: crate::config::DEFAULT_TEXT_MODEL.to_string(),
+            reasoning_effort: Some(ReasoningEffort::Auto),
+            auto_controls_reasoning: true,
+            auto_model: false,
+        };
+        let auto_model_fixed_reasoning = CliAutoRoute {
+            provider: crate::config::ApiProvider::OpenaiCodex,
+            model: crate::config::DEFAULT_OPENAI_CODEX_MODEL.to_string(),
+            reasoning_effort: Some(ReasoningEffort::High),
+            auto_controls_reasoning: false,
+            auto_model: true,
+        };
+
+        assert!(fixed_model_auto_reasoning.auto_controls_reasoning);
+        assert!(!fixed_model_auto_reasoning.auto_model);
+        assert!(!auto_model_fixed_reasoning.auto_controls_reasoning);
+        assert!(auto_model_fixed_reasoning.auto_model);
+    }
+
+    #[test]
+    fn saved_reasoning_preference_overrides_config_for_non_tui_runtimes() {
+        let mut config = Config {
+            reasoning_effort: Some("max".to_string()),
+            reasoning_effort_inferred_from_legacy_alias: true,
+            ..Default::default()
+        };
+        let settings = crate::settings::Settings {
+            reasoning_effort: Some("low".to_string()),
+            ..Default::default()
+        };
+
+        apply_saved_reasoning_preference(&mut config, &settings);
+
+        assert_eq!(config.reasoning_effort(), Some("low"));
+        assert!(config.reasoning_effort_is_explicit());
     }
 
     /// `run_exec_agent` must hand the engine a concrete tier, never the literal

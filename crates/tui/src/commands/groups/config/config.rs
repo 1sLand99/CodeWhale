@@ -25,7 +25,6 @@ use crate::tui::app::{
 use crate::tui::approval::ApprovalMode;
 use crate::tui::ui::{SidebarRenderState, sidebar_render_state};
 use anyhow::Result;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 /// Open the interactive config editor.
@@ -56,7 +55,7 @@ pub fn show_config(_app: &mut App, arg: Option<&str>) -> CommandResult {
 /// - `/config` (no args) — opens the schemaui-driven TUI editor.
 /// - `/config tui` / `/config web` / `/config native` — open a specific
 ///   editor mode (web requires the `web` build feature).
-/// - `/config ask-rules` — shows configured ask-only permission rules.
+/// - `/config ask-rules` — compatibility entry for `/permissions`.
 /// - `/config <key>` — shows the current value of a setting.
 /// - `/config <key> <value>` — sets a runtime value (session only, add --save to persist).
 pub fn config_command(app: &mut App, arg: Option<&str>) -> CommandResult {
@@ -74,7 +73,7 @@ pub fn config_command(app: &mut App, arg: Option<&str>) -> CommandResult {
     let first_word = raw_words.next();
     if first_word.is_some_and(is_ask_rules_config_token) {
         let rest = raw_words.next().unwrap_or("").trim();
-        return configured_ask_rules_command(app, rest);
+        return super::permissions::permissions_command(app, Some(rest));
     }
     if first_word.is_some_and(|token| token.eq_ignore_ascii_case("subagents")) {
         let rest = raw_words.next().unwrap_or("").trim();
@@ -204,6 +203,12 @@ fn config_preset_command(app: &mut App, rest: &str) -> CommandResult {
 }
 
 /// Show the current value of a single setting.
+fn config_context_window_override(app: &App) -> Option<u32> {
+    let mut config = Config::load(app.config_path.clone(), app.config_profile.as_deref()).ok()?;
+    config.provider = Some(app.provider_identity_for_persistence().to_string());
+    config.context_window_for_provider_config(app.api_provider)
+}
+
 fn show_single_setting(app: &App, key: &str) -> CommandResult {
     let key = key.to_lowercase();
     if let Some(subagent_key) = key.strip_prefix("subagents.") {
@@ -282,6 +287,17 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
             };
             Some(config.deepseek_base_url())
         }
+        "context_window" | "context_window_tokens" => Some(format!(
+            "{} (effective {} from {})",
+            config_context_window_override(app)
+                .map_or_else(|| "not set".to_string(), |tokens| tokens.to_string()),
+            crate::route_budget::route_context_window_tokens(
+                app.api_provider,
+                app.effective_model_for_budget(),
+                app.active_route_limits,
+            ),
+            app.active_context_window_source.label(),
+        )),
         "stream_chunk_timeout_secs" => Some(app.stream_chunk_timeout_secs.to_string()),
         "locale" | "language" => Some(locale_display(app.ui_locale).to_string()),
         "theme" | "ui_theme" => {
@@ -623,32 +639,6 @@ fn approval_mode_config_value(mode: ApprovalMode) -> &'static str {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PermissionsFileStatus {
-    Missing,
-    Empty,
-    Present,
-    Malformed,
-}
-
-impl PermissionsFileStatus {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Missing => "missing",
-            Self::Empty => "empty",
-            Self::Present => "present",
-            Self::Malformed => "malformed",
-        }
-    }
-
-    fn exists_label(self) -> &'static str {
-        match self {
-            Self::Missing => "no",
-            Self::Empty | Self::Present | Self::Malformed => "yes",
-        }
-    }
-}
-
 fn is_ask_rules_config_token(token: &str) -> bool {
     matches!(
         token.to_ascii_lowercase().as_str(),
@@ -660,145 +650,6 @@ fn is_ask_rules_config_token(token: &str) -> bool {
             | "permission_rules"
             | "permissions"
     )
-}
-
-fn configured_ask_rules_command(app: &App, raw: &str) -> CommandResult {
-    match raw.to_ascii_lowercase().as_str() {
-        "" | "list" | "status" => configured_ask_rules(app),
-        _ => CommandResult::error(
-            "Usage: /config ask-rules [list|status] (read-only; does not edit permissions.toml)",
-        ),
-    }
-}
-
-fn configured_ask_rules(app: &App) -> CommandResult {
-    let permissions_path = match codewhale_config::resolve_permissions_path(app.config_path.clone())
-    {
-        Ok(path) => path,
-        Err(err) => {
-            return CommandResult::error(format!("Failed to resolve permissions.toml path: {err}"));
-        }
-    };
-    let status = match permissions_file_status(&permissions_path) {
-        Ok(status) => status,
-        Err(err) => return CommandResult::error(err),
-    };
-    let mut rules = Vec::new();
-    let mut parse_error = None;
-
-    let status = match status {
-        PermissionsFileStatus::Missing | PermissionsFileStatus::Empty => status,
-        PermissionsFileStatus::Present => {
-            match codewhale_config::read_permissions_file(&permissions_path) {
-                Ok(raw) => match toml::from_str::<codewhale_config::PermissionsToml>(&raw) {
-                    Ok(permissions) => {
-                        rules = permissions.rules;
-                        PermissionsFileStatus::Present
-                    }
-                    Err(err) => {
-                        parse_error = Some(err.to_string());
-                        PermissionsFileStatus::Malformed
-                    }
-                },
-                Err(err) => {
-                    return CommandResult::error(format!(
-                        "Failed to read permissions.toml at {}\n\
-Permissions path: {}\n\
-File exists: {}\n\
-File status: {}\n\
-Rule count: unavailable\n\
-Read error: permissions.toml at {} could not be read: {err}",
-                        permissions_path.display(),
-                        permissions_path.display(),
-                        status.exists_label(),
-                        status.label(),
-                        permissions_path.display()
-                    ));
-                }
-            }
-        }
-        PermissionsFileStatus::Malformed => PermissionsFileStatus::Malformed,
-    };
-
-    let output =
-        format_configured_ask_rules(&permissions_path, status, &rules, parse_error.as_deref());
-    if parse_error.is_some() {
-        CommandResult::error(output)
-    } else {
-        CommandResult::message(output)
-    }
-}
-
-fn permissions_file_status(path: &Path) -> Result<PermissionsFileStatus, String> {
-    match std::fs::metadata(path) {
-        Ok(metadata) if metadata.len() == 0 => Ok(PermissionsFileStatus::Empty),
-        Ok(_) => Ok(PermissionsFileStatus::Present),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(PermissionsFileStatus::Missing),
-        Err(err) => Err(format!(
-            "Failed to inspect permissions.toml at {}: {err}",
-            path.display()
-        )),
-    }
-}
-
-fn format_configured_ask_rules(
-    permissions_path: &Path,
-    status: PermissionsFileStatus,
-    rules: &[codewhale_config::ToolAskRule],
-    parse_error: Option<&str>,
-) -> String {
-    let mut lines = Vec::new();
-    lines.push("Configured ask rules".to_string());
-    lines.push(format!("Permissions path: {}", permissions_path.display()));
-    lines.push(format!("File exists: {}", status.exists_label()));
-    lines.push(format!("File status: {}", status.label()));
-    if parse_error.is_some() {
-        lines.push("Rule count: unavailable".to_string());
-    } else {
-        lines.push(format!("Rule count: {}", rules.len()));
-    }
-
-    if let Some(err) = parse_error {
-        lines.push(format!(
-            "Parse error: permissions.toml at {} could not be parsed: {err}",
-            permissions_path.display()
-        ));
-        return lines.join("\n");
-    }
-
-    if rules.is_empty() {
-        lines.push("No ask rules configured.".to_string());
-        return lines.join("\n");
-    }
-
-    lines.push("# | action | tool | command | path".to_string());
-    for (index, rule) in rules.iter().enumerate() {
-        lines.push(format!(
-            "{} | {} | {} | {} | {}",
-            index + 1,
-            format_rule_action(rule.action),
-            format_rule_field(Some(&rule.tool)),
-            format_rule_field(rule.command.as_deref()),
-            format_rule_field(rule.path.as_deref())
-        ));
-    }
-    lines.join("\n")
-}
-
-fn format_rule_action(action: codewhale_execpolicy::PermissionAction) -> &'static str {
-    match action {
-        codewhale_execpolicy::PermissionAction::Allow => "allow",
-        codewhale_execpolicy::PermissionAction::Ask => "ask",
-        codewhale_execpolicy::PermissionAction::Deny => "deny",
-    }
-}
-
-fn format_rule_field(value: Option<&str>) -> String {
-    match value {
-        Some("") => "\"\"".to_string(),
-        Some(value) => value.replace('\n', "\\n").replace('\r', "\\r"),
-        None => "(any)".to_string(),
-    }
 }
 
 fn config_editability_audit(app: &App) -> CommandResult {
@@ -936,6 +787,29 @@ fn config_editability_audit(app: &App) -> CommandResult {
             "persisted restart",
             "/config provider_url <url> --save",
             "Writes the active provider table; model clients read it on startup.",
+        ),
+        (
+            "providers.<active>.context_window",
+            config_context_window_override(app)
+                .map_or_else(|| "(unset)".to_string(), |tokens| tokens.to_string()),
+            "persisted restart",
+            "edit [providers.<active>] context_window = <tokens>",
+            "Overrides compaction, context-pressure, header, and preflight input budgets; use 262144 to cap a 1M route to 256K.",
+        ),
+        (
+            "effective_context_window",
+            format!(
+                "{} ({})",
+                crate::route_budget::route_context_window_tokens(
+                    app.api_provider,
+                    app.effective_model_for_budget(),
+                    app.active_route_limits,
+                ),
+                app.active_context_window_source.label(),
+            ),
+            "runtime",
+            "/config context_window",
+            "The shared resolved window used by every active-route budget surface.",
         ),
         (
             "mcp_config_path",
@@ -1529,14 +1403,15 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             // Support "/model auto" — auto-select model based on request complexity
             if value.trim().eq_ignore_ascii_case("auto") {
                 app.set_model_selection("auto".to_string());
-                app.reasoning_effort = ReasoningEffort::Auto;
-                app.last_effective_reasoning_effort = None;
                 app.update_model_compaction_budget();
                 app.session.last_prompt_tokens = None;
                 app.session.last_completion_tokens = None;
                 app.session.last_output_throughput = None;
                 return CommandResult::with_message_and_action(
-                    "model = auto (auto-select model and thinking per turn)".to_string(),
+                    format!(
+                        "model = auto (auto-select model per turn; thinking = {})",
+                        app.reasoning_effort_display_label()
+                    ),
                     AppAction::UpdateCompaction(app.compaction_config()),
                 );
             }
@@ -1928,6 +1803,13 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             app.auto_compact_user_configured = true;
             action = Some(AppAction::UpdateCompaction(app.compaction_config()));
         }
+        "auto_compact_threshold" | "auto_compact_threshold_percent" => {
+            app.auto_compact = true;
+            app.auto_compact_user_configured = true;
+            app.auto_compact_threshold_percent = settings.auto_compact_threshold_percent;
+            app.update_model_compaction_budget();
+            action = Some(AppAction::UpdateCompaction(app.compaction_config()));
+        }
         "calm_mode" | "calm" => {
             app.calm_mode = settings.calm_mode;
             app.mark_history_updated();
@@ -2131,10 +2013,6 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             ) && let Some(ref model) = settings.default_model
             {
                 app.set_model_selection(model.clone());
-                if app.auto_model {
-                    app.reasoning_effort = ReasoningEffort::Auto;
-                    app.last_effective_reasoning_effort = None;
-                }
                 app.update_model_compaction_budget();
                 app.session.last_prompt_tokens = None;
                 app.session.last_completion_tokens = None;
@@ -2143,16 +2021,26 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             }
         }
         "reasoning_effort" | "effort" => {
-            app.reasoning_effort = if app.auto_model {
-                ReasoningEffort::Auto
-            } else {
-                settings
-                    .reasoning_effort
-                    .as_deref()
-                    .map_or_else(ReasoningEffort::default, |value| {
-                        ReasoningEffort::from_setting_for_provider(value, app.api_provider)
-                    })
-            };
+            app.reasoning_effort_preference = settings
+                .reasoning_effort
+                .as_deref()
+                .map(ReasoningEffort::from_setting);
+            app.reasoning_effort = app.reasoning_effort_preference.map_or_else(
+                || {
+                    if app.auto_model {
+                        ReasoningEffort::Auto
+                    } else {
+                        ReasoningEffort::default()
+                    }
+                },
+                |requested| {
+                    if app.auto_model {
+                        requested
+                    } else {
+                        requested.normalize_for_provider(app.api_provider)
+                    }
+                },
+            );
             app.last_effective_reasoning_effort = None;
             app.update_model_compaction_budget();
             action = Some(AppAction::UpdateCompaction(app.compaction_config()));
@@ -2808,174 +2696,6 @@ mod tests {
     }
 
     #[test]
-    fn config_command_ask_rules_reports_missing_permissions_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.toml");
-        let permissions_path =
-            codewhale_config::resolve_permissions_path(Some(config_path.clone())).unwrap();
-        let mut app = create_test_app();
-        app.config_path = Some(config_path);
-
-        let result = config_command(&mut app, Some("ask-rules"));
-        let msg = result.message.unwrap();
-
-        assert!(!result.is_error);
-        assert!(msg.contains("Configured ask rules"));
-        assert!(msg.contains(&format!("Permissions path: {}", permissions_path.display())));
-        assert!(msg.contains("File exists: no"));
-        assert!(msg.contains("File status: missing"));
-        assert!(msg.contains("Rule count: 0"));
-        assert!(msg.contains("No ask rules configured."));
-    }
-
-    #[test]
-    fn config_command_ask_rules_reports_empty_permissions_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.toml");
-        let permissions_path =
-            codewhale_config::resolve_permissions_path(Some(config_path.clone())).unwrap();
-        fs::write(&permissions_path, "").unwrap();
-        let mut app = create_test_app();
-        app.config_path = Some(config_path);
-
-        let result = config_command(&mut app, Some("ask_rules"));
-        let msg = result.message.unwrap();
-
-        assert!(!result.is_error);
-        assert!(msg.contains(&format!("Permissions path: {}", permissions_path.display())));
-        assert!(msg.contains("File exists: yes"));
-        assert!(msg.contains("File status: empty"));
-        assert!(msg.contains("Rule count: 0"));
-        assert!(msg.contains("No ask rules configured."));
-    }
-
-    #[test]
-    fn config_command_ask_rules_lists_loaded_rules() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.toml");
-        let permissions_path =
-            codewhale_config::resolve_permissions_path(Some(config_path.clone())).unwrap();
-        fs::write(
-            &permissions_path,
-            r#"
-[[rules]]
-tool = "exec_shell"
-command = "cargo test"
-
-[[rules]]
-tool = "edit_file"
-path = "src/a.rs"
-action = "allow"
-
-[[rules]]
-tool = "read_file"
-path = "secrets/api_key.txt"
-action = "deny"
-"#,
-        )
-        .unwrap();
-        let mut app = create_test_app();
-        app.config_path = Some(config_path);
-
-        let result = config_command(&mut app, Some("permissions status"));
-        let msg = result.message.unwrap();
-
-        assert!(!result.is_error);
-        assert!(msg.contains(&format!("Permissions path: {}", permissions_path.display())));
-        assert!(msg.contains("File exists: yes"));
-        assert!(msg.contains("File status: present"));
-        assert!(msg.contains("Rule count: 3"));
-        assert!(msg.contains("# | action | tool | command | path"));
-        assert!(msg.contains("1 | ask | exec_shell | cargo test | (any)"));
-        assert!(msg.contains("2 | allow | edit_file | (any) | src/a.rs"));
-        assert!(msg.contains("3 | deny | read_file | (any) | secrets/api_key.txt"));
-    }
-
-    #[test]
-    fn config_command_ask_rules_reports_malformed_permissions_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.toml");
-        let permissions_path =
-            codewhale_config::resolve_permissions_path(Some(config_path.clone())).unwrap();
-        fs::write(
-            &permissions_path,
-            r#"
-[[rules]]
-tool =
-"#,
-        )
-        .unwrap();
-        let mut app = create_test_app();
-        app.config_path = Some(config_path);
-
-        let result = config_command(&mut app, Some("ask-rules"));
-        let msg = result.message.unwrap();
-
-        assert!(result.is_error);
-        assert!(msg.contains("Error: Configured ask rules"));
-        assert!(msg.contains(&format!("Permissions path: {}", permissions_path.display())));
-        assert!(msg.contains("File exists: yes"));
-        assert!(msg.contains("File status: malformed"));
-        assert!(msg.contains("Rule count: unavailable"));
-        assert!(msg.contains("Parse error: permissions.toml"));
-        assert!(msg.contains(&permissions_path.display().to_string()));
-    }
-
-    #[test]
-    fn config_command_ask_rules_output_format_is_stable() {
-        let mut allow_rule = codewhale_config::ToolAskRule::file_path("edit_file", r"src\a.rs");
-        allow_rule.action = codewhale_execpolicy::PermissionAction::Allow;
-        let mut deny_rule =
-            codewhale_config::ToolAskRule::file_path("read_file", "secrets/api_key.txt");
-        deny_rule.action = codewhale_execpolicy::PermissionAction::Deny;
-        let rules = vec![
-            codewhale_config::ToolAskRule::exec_shell("cargo test"),
-            allow_rule,
-            deny_rule,
-        ];
-
-        let output = format_configured_ask_rules(
-            Path::new("permissions.toml"),
-            PermissionsFileStatus::Present,
-            &rules,
-            None,
-        );
-
-        assert_eq!(
-            output,
-            "Configured ask rules\n\
-Permissions path: permissions.toml\n\
-File exists: yes\n\
-File status: present\n\
-Rule count: 3\n\
-# | action | tool | command | path\n\
-1 | ask | exec_shell | cargo test | (any)\n\
-2 | allow | edit_file | (any) | src\\a.rs\n\
-3 | deny | read_file | (any) | secrets/api_key.txt"
-        );
-    }
-
-    #[test]
-    fn config_command_ask_rules_parse_error_output_format_is_stable() {
-        let output = format_configured_ask_rules(
-            Path::new("permissions.toml"),
-            PermissionsFileStatus::Malformed,
-            &[],
-            Some("expected a string"),
-        );
-
-        assert_eq!(
-            output,
-            "Configured ask rules\n\
-Permissions path: permissions.toml\n\
-File exists: yes\n\
-File status: malformed\n\
-Rule count: unavailable\n\
-Parse error: permissions.toml at permissions.toml could not be parsed: expected a string"
-        );
-    }
-
-    #[test]
     fn config_preset_calm_applies_bundle_to_session_and_keeps_evidence() {
         let mut app = create_test_app();
         app.calm_mode = false;
@@ -3259,18 +2979,63 @@ Parse error: permissions.toml at permissions.toml could not be parsed: expected 
     }
 
     #[test]
-    fn config_model_auto_enables_auto_thinking() {
+    fn config_model_auto_preserves_explicit_thinking() {
         let mut app = create_test_app();
         app.reasoning_effort = ReasoningEffort::Off;
+        app.reasoning_effort_preference = Some(ReasoningEffort::Off);
 
         let result = config_command(&mut app, Some("model auto"));
 
         assert!(result.message.is_some());
         assert!(app.auto_model);
         assert_eq!(app.model, "auto");
-        assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
+        assert_eq!(app.reasoning_effort, ReasoningEffort::Off);
+        assert!(
+            result
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("thinking = off"))
+        );
         assert!(app.last_effective_model.is_none());
         assert!(app.last_effective_reasoning_effort.is_none());
+    }
+
+    #[test]
+    fn config_model_auto_releases_implicit_fixed_model_thinking() {
+        let mut app = create_test_app();
+        app.reasoning_effort = ReasoningEffort::Max;
+        app.reasoning_effort_preference = None;
+
+        let result = config_command(&mut app, Some("model auto"));
+
+        assert!(result.message.is_some());
+        assert!(app.auto_model);
+        assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
+        assert_eq!(app.reasoning_effort_preference, None);
+        assert!(
+            result
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("thinking = auto"))
+        );
+    }
+
+    #[test]
+    fn config_reasoning_effort_applies_while_model_routing_is_auto() {
+        let mut app = create_test_app();
+        app.set_model_selection("auto".to_string());
+        app.reasoning_effort = ReasoningEffort::Auto;
+        app.reasoning_effort_preference = None;
+
+        let result = set_config_value(&mut app, "reasoning_effort", "low", false);
+
+        assert!(!result.is_error);
+        assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
+        assert_eq!(app.reasoning_effort_preference, Some(ReasoningEffort::Low));
+        assert!(matches!(
+            result.action,
+            Some(AppAction::UpdateCompaction(_))
+        ));
     }
 
     #[test]
@@ -3331,6 +3096,7 @@ Parse error: permissions.toml at permissions.toml could not be parsed: expected 
         let result = set_config_value(&mut app, "reasoning_effort", "off", false);
 
         assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
+        assert_eq!(app.reasoning_effort_preference, Some(ReasoningEffort::Off));
         assert_eq!(
             result.message.as_deref(),
             Some("reasoning_effort = low (session only, add --save to persist)")
@@ -3848,6 +3614,9 @@ max_concurrent = 4
         assert!(msg.contains("subagents.enabled | false | runtime+persisted"));
         assert!(msg.contains("subagents.max_concurrent | 4 | runtime+persisted"));
         assert!(msg.contains("base_url | https://api.from-config.local/v1 | persisted restart"));
+        assert!(msg.contains("providers.<active>.context_window | (unset) | persisted restart"));
+        assert!(msg.contains("effective_context_window |"), "{msg}");
+        assert!(msg.contains("| runtime | /config context_window"), "{msg}");
         assert!(msg.contains("instructions | configured | file-only restart"));
         assert!(msg.contains("network | unset | file-only"));
 
@@ -3858,6 +3627,45 @@ max_concurrent = 4
         assert!(
             plan_msg.contains("effective_permissions | Read Only | runtime"),
             "{plan_msg}"
+        );
+    }
+
+    #[test]
+    fn config_context_window_query_shows_override_and_effective_source() {
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-context-window-query-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&temp_root).unwrap();
+        let _guard = EnvGuard::new(&temp_root);
+        let config_path = temp_root.join("custom-config.toml");
+        fs::write(
+            &config_path,
+            r#"
+provider = "moonshot"
+[providers.moonshot]
+model = "kimi-k3"
+context_window = 262144
+"#,
+        )
+        .unwrap();
+        let mut app = create_test_app();
+        app.config_path = Some(config_path);
+        app.api_provider = ApiProvider::Moonshot;
+        app.model = "kimi-k3".to_string();
+        app.active_route_limits = Some(codewhale_config::route::RouteLimits {
+            context_tokens: Some(262_144),
+            ..Default::default()
+        });
+        app.active_context_window_source = crate::route_runtime::ContextWindowSource::Configured;
+
+        let result = config_command(&mut app, Some("context_window"));
+        let message = result.message.expect("context window message");
+
+        assert!(!result.is_error, "{message}");
+        assert!(
+            message.contains("262144 (effective 262144 from configured)"),
+            "{message}"
         );
     }
 
@@ -4447,6 +4255,34 @@ max_concurrent = 4
         assert!(result.message.is_some());
         let msg = result.message.unwrap();
         assert!(msg.contains("(session only"));
+    }
+
+    #[test]
+    fn config_threshold_enables_and_updates_live_auto_compaction() {
+        let _lock = lock_test_env();
+        let mut app = create_test_app();
+        app.auto_compact = false;
+        app.auto_compact_user_configured = false;
+
+        let result = config_command(&mut app, Some("auto_compact_threshold_percent 65"));
+
+        assert!(!result.is_error, "{:?}", result.message);
+        assert!(app.auto_compact);
+        assert!(app.auto_compact_user_configured);
+        assert_eq!(app.auto_compact_threshold_percent, 65.0);
+        assert_eq!(
+            app.compact_threshold,
+            crate::route_budget::compaction_threshold_for_route_at_percent(
+                app.api_provider,
+                app.effective_model_for_budget(),
+                app.active_route_limits,
+                65.0,
+            )
+        );
+        assert!(matches!(
+            result.action,
+            Some(AppAction::UpdateCompaction(_))
+        ));
     }
 
     #[test]

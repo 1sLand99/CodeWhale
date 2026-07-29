@@ -38,7 +38,6 @@ pub const DIRECT_KIMI_K3_MAX_OUTPUT_TOKENS: u32 = 1_048_576;
 pub const DEFAULT_COMPACTION_TOKEN_THRESHOLD: usize = 102_400;
 #[cfg(test)]
 const COMPACTION_THRESHOLD_PERCENT: u32 = 80;
-pub const DEFAULT_AUTO_COMPACT_MAX_CONTEXT_WINDOW_TOKENS: u32 = DEEPSEEK_V4_CONTEXT_WINDOW_TOKENS;
 
 // === Core Message Types ===
 
@@ -632,13 +631,12 @@ pub fn compaction_threshold_for_model_at_percent(model: &str, percent: f64) -> u
 }
 
 /// Whether auto-compaction should be enabled when the user did not explicitly
-/// configure it. v0.8.64 defaults automatic continuity on for known model
-/// windows up to the V4 1M class while keeping unknown model ids opt-in.
+/// configure it. Known model windows default automatic continuity on; an
+/// explicit `auto_compact = false` remains authoritative at the call sites.
 #[must_use]
 #[cfg(test)]
 pub fn auto_compact_default_for_model(model: &str) -> bool {
-    context_window_for_model(model)
-        .is_some_and(|window| window <= DEFAULT_AUTO_COMPACT_MAX_CONTEXT_WINDOW_TOKENS)
+    context_window_for_model(model).is_some()
 }
 
 // === Streaming Structures ===

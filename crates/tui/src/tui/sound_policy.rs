@@ -229,10 +229,10 @@ impl EventSoundPolicy {
             return SoundDecision::Suppress(SuppressReason::TurnCompleteHandledByCompletionSound);
         }
         let slot = &mut self.last_played_ms[event.index()];
-        if let Some(last) = *slot {
-            if now_ms.saturating_sub(last) < self.min_interval_ms {
-                return SoundDecision::Suppress(SuppressReason::RateLimited);
-            }
+        if let Some(last) = *slot
+            && now_ms.saturating_sub(last) < self.min_interval_ms
+        {
+            return SoundDecision::Suppress(SuppressReason::RateLimited);
         }
         *slot = Some(now_ms);
         SoundDecision::Play(cue_for(event))

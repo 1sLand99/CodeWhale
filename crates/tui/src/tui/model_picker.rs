@@ -72,7 +72,16 @@ const CODEX_PICKER_EFFORTS: &[ReasoningEffort] = &[
     ReasoningEffort::High,
     ReasoningEffort::Max,
 ];
-const AUTO_MODEL_PICKER_EFFORTS: &[ReasoningEffort] = &[ReasoningEffort::Auto];
+/// Auto model routing has no concrete provider dialect yet, so retain the
+/// complete preference vocabulary and defer normalization to dispatch.
+const AUTO_MODEL_PICKER_EFFORTS: &[ReasoningEffort] = &[
+    ReasoningEffort::Auto,
+    ReasoningEffort::Off,
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::Max,
+];
 
 /// `/model` catalog views (#4115).
 ///
@@ -171,7 +180,13 @@ pub struct ModelPickerView {
     /// instead of being misclassified as "unchanged".
     previous_model: String,
     initial_provider: ApiProvider,
+    /// Raw preference before the picker opened. An absent explicit preference
+    /// is represented by Auto so applying a visible fixed-route tier is still
+    /// recognized as an intentional picker choice.
     initial_effort: ReasoningEffort,
+    /// Working raw preference. Model-row navigation only changes how this is
+    /// projected into the visible route-specific effort rows.
+    selected_effort_request: ReasoningEffort,
     active_accepts_custom_model_ids: bool,
     query: String,
     /// Working selection (separate from the initial values so we can offer a
@@ -274,7 +289,12 @@ impl ModelPickerView {
         }
         let selected_model_idx = selected_model_idx.unwrap_or(0);
 
-        let initial_effort = app.reasoning_effort;
+        let initial_effort = app
+            .reasoning_effort_preference
+            .unwrap_or(ReasoningEffort::Auto);
+        let selected_effort_request = app
+            .reasoning_effort_preference
+            .unwrap_or(app.reasoning_effort);
         let effort_rows = picker_efforts_for_route(
             app.api_provider,
             &config.deepseek_base_url(),
@@ -282,7 +302,7 @@ impl ModelPickerView {
             app.auto_model,
         );
         let normalized = normalize_picker_effort(
-            initial_effort,
+            selected_effort_request,
             app.api_provider,
             &config.deepseek_base_url(),
             &initial_model,
@@ -305,6 +325,7 @@ impl ModelPickerView {
             previous_model,
             initial_provider: app.api_provider,
             initial_effort,
+            selected_effort_request,
             active_accepts_custom_model_ids: app.accepts_custom_model_ids(),
             query: String::new(),
             selected_model_idx,
@@ -346,9 +367,8 @@ impl ModelPickerView {
                 .iter()
                 .position(|row| row.id == remembered_id);
             if let Some(position) = position {
-                let effort = self.resolved_effort();
                 self.selected_model_idx = position;
-                self.select_effort_for_current_model(effort);
+                self.select_effort_for_current_model();
             }
         }
         self.clamp_model_selection();
@@ -500,9 +520,6 @@ impl ModelPickerView {
     }
 
     fn resolved_effort(&self) -> ReasoningEffort {
-        if self.resolved_model().trim().eq_ignore_ascii_case("auto") {
-            return ReasoningEffort::Auto;
-        }
         let efforts = self.current_efforts();
         efforts[self
             .selected_effort_idx
@@ -599,20 +616,24 @@ impl ModelPickerView {
     }
 
     fn update_query(&mut self, next: String) {
-        let effort = self.resolved_effort();
         self.query = next;
         self.selected_model_idx = 0;
         self.clamp_model_selection();
-        self.select_effort_for_current_model(effort);
+        self.select_effort_for_current_model();
     }
 
-    fn select_effort_for_current_model(&mut self, effort: ReasoningEffort) {
+    fn select_effort_for_current_model(&mut self) {
         let provider = self.resolved_provider().unwrap_or(self.initial_provider);
         let model = self.resolved_model();
         let model_is_auto = model.trim().eq_ignore_ascii_case("auto");
         let base_url = self.resolved_base_url_for_provider(provider, &model);
-        let normalized =
-            normalize_picker_effort(effort, provider, &base_url, &model, model_is_auto);
+        let normalized = normalize_picker_effort(
+            self.selected_effort_request,
+            provider,
+            &base_url,
+            &model,
+            model_is_auto,
+        );
         self.selected_effort_idx =
             picker_efforts_for_route(provider, &base_url, &model, model_is_auto)
                 .iter()
@@ -626,15 +647,15 @@ impl ModelPickerView {
         match self.focus {
             Pane::Model => {
                 if self.selected_model_idx > 0 {
-                    let effort = self.resolved_effort();
                     self.selected_model_idx -= 1;
-                    self.select_effort_for_current_model(effort);
+                    self.select_effort_for_current_model();
                     return true;
                 }
             }
             Pane::Effort => {
                 if self.selected_effort_idx > 0 {
                     self.selected_effort_idx -= 1;
+                    self.selected_effort_request = self.resolved_effort();
                     return true;
                 }
             }
@@ -647,9 +668,8 @@ impl ModelPickerView {
             Pane::Model => {
                 let max = self.model_row_count().saturating_sub(1);
                 if self.selected_model_idx < max {
-                    let effort = self.resolved_effort();
                     self.selected_model_idx += 1;
-                    self.select_effort_for_current_model(effort);
+                    self.select_effort_for_current_model();
                     return true;
                 }
             }
@@ -657,6 +677,7 @@ impl ModelPickerView {
                 let max = self.current_efforts().len().saturating_sub(1);
                 if self.selected_effort_idx < max {
                     self.selected_effort_idx += 1;
+                    self.selected_effort_request = self.resolved_effort();
                     return true;
                 }
             }
@@ -673,10 +694,9 @@ impl ModelPickerView {
 
     fn toggle_view(&mut self) {
         self.view = self.view.next();
-        let effort = self.resolved_effort();
         self.selected_model_idx = 0;
         self.clamp_model_selection();
-        self.select_effort_for_current_model(effort);
+        self.select_effort_for_current_model();
     }
 
     fn build_event(&self) -> ViewEvent {
@@ -688,7 +708,7 @@ impl ModelPickerView {
             model: self.resolved_model(),
             provider,
             provider_id,
-            effort: self.resolved_effort(),
+            effort: self.selected_effort_request,
             previous_model: self.previous_model.clone(),
             previous_effort: self.initial_effort,
         }
@@ -1907,23 +1927,25 @@ impl ModalView for ModelPickerView {
             KeyCode::Home => {
                 match self.focus {
                     Pane::Model => {
-                        let effort = self.resolved_effort();
                         self.selected_model_idx = 0;
-                        self.select_effort_for_current_model(effort);
+                        self.select_effort_for_current_model();
                     }
-                    Pane::Effort => self.selected_effort_idx = 0,
+                    Pane::Effort => {
+                        self.selected_effort_idx = 0;
+                        self.selected_effort_request = self.resolved_effort();
+                    }
                 }
                 ViewAction::None
             }
             KeyCode::End => {
                 match self.focus {
                     Pane::Model => {
-                        let effort = self.resolved_effort();
                         self.selected_model_idx = self.model_row_count().saturating_sub(1);
-                        self.select_effort_for_current_model(effort);
+                        self.select_effort_for_current_model();
                     }
                     Pane::Effort => {
                         self.selected_effort_idx = self.current_efforts().len().saturating_sub(1);
+                        self.selected_effort_request = self.resolved_effort();
                     }
                 }
                 ViewAction::None
@@ -1978,13 +2000,13 @@ impl ModalView for ModelPickerView {
                 self.focus = pane;
                 match pane {
                     Pane::Model => {
-                        let effort = self.resolved_effort();
                         self.selected_model_idx = idx.min(self.model_row_count().saturating_sub(1));
-                        self.select_effort_for_current_model(effort);
+                        self.select_effort_for_current_model();
                     }
                     Pane::Effort => {
                         self.selected_effort_idx =
                             idx.min(self.current_efforts().len().saturating_sub(1));
+                        self.selected_effort_request = self.resolved_effort();
                     }
                 }
                 self.last_mouse_selected = Some((pane, idx));
@@ -2266,11 +2288,12 @@ fn normalize_picker_effort(
     wire_model: &str,
     model_is_auto: bool,
 ) -> ReasoningEffort {
-    if model_is_auto {
-        return ReasoningEffort::Auto;
-    }
-    let normalized = effort.normalize_for_route(provider, base_url, wire_model);
-    let efforts = picker_efforts_for_route(provider, base_url, wire_model, false);
+    let normalized = if model_is_auto {
+        effort
+    } else {
+        effort.normalize_for_route(provider, base_url, wire_model)
+    };
+    let efforts = picker_efforts_for_route(provider, base_url, wire_model, model_is_auto);
     if efforts.contains(&normalized) {
         return normalized;
     }
@@ -2307,10 +2330,7 @@ fn default_picker_effort_idx(
     wire_model: &str,
     model_is_auto: bool,
 ) -> usize {
-    if model_is_auto {
-        return 0;
-    }
-    let efforts = picker_efforts_for_route(provider, base_url, wire_model, false);
+    let efforts = picker_efforts_for_route(provider, base_url, wire_model, model_is_auto);
     let default_effort = default_picker_effort(provider, &efforts);
     efforts
         .iter()
@@ -2376,10 +2396,13 @@ mod tests {
         app.model = "deepseek-v4-pro".to_string();
         app.auto_model = false;
         app.reasoning_effort = ReasoningEffort::Max;
+        app.reasoning_effort_preference = None;
         app.api_provider = crate::config::ApiProvider::Deepseek;
         app.model_ids_passthrough = false;
         app.provider_models.clear();
         app.enabled_provider_models.clear();
+        app.pinned_models.clear();
+        app.model_picker_memory = None;
         (app, config, (env_guards, lock))
     }
 
@@ -3298,16 +3321,82 @@ mod tests {
     }
 
     #[test]
-    fn picker_auto_model_forces_auto_effort_on_apply() {
+    fn picker_auto_model_preserves_explicit_effort_on_apply() {
         let (mut app, config, _lock) = create_test_app();
         app.model = "auto".to_string();
         app.auto_model = true;
-        app.reasoning_effort = ReasoningEffort::Off;
+        app.reasoning_effort = ReasoningEffort::Low;
+        app.reasoning_effort_preference = Some(ReasoningEffort::Low);
 
         let view = ModelPickerView::new(&app, &config);
 
         assert_eq!(view.resolved_model(), "auto");
-        assert_eq!(view.resolved_effort(), ReasoningEffort::Auto);
+        assert_eq!(view.resolved_effort(), ReasoningEffort::Low);
+        assert_eq!(view.current_efforts(), AUTO_MODEL_PICKER_EFFORTS);
+    }
+
+    #[test]
+    fn picker_model_navigation_preserves_raw_effort_request() {
+        let (mut app, config, _lock) = create_test_app();
+        app.api_provider = crate::config::ApiProvider::Deepseek;
+        app.model = "deepseek-v4-pro".to_string();
+        app.auto_model = false;
+        app.reasoning_effort = ReasoningEffort::High;
+        app.reasoning_effort_preference = Some(ReasoningEffort::Low);
+
+        let mut view = ModelPickerView::new(&app, &config);
+        assert_eq!(view.initial_effort, ReasoningEffort::Low);
+        assert_eq!(
+            view.resolved_effort(),
+            ReasoningEffort::High,
+            "the fixed route still previews its normalized tier"
+        );
+
+        view.selected_model_idx = view
+            .visible_model_rows()
+            .iter()
+            .position(|row| row.id == "auto")
+            .expect("Auto row");
+        view.select_effort_for_current_model();
+
+        assert_eq!(view.resolved_effort(), ReasoningEffort::Low);
+        assert!(matches!(
+            view.build_event(),
+            ViewEvent::ModelPickerApplied {
+                effort: ReasoningEffort::Low,
+                previous_effort: ReasoningEffort::Low,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn picker_auto_row_commits_visible_implicit_effort() {
+        let (mut app, config, _lock) = create_test_app();
+        app.api_provider = crate::config::ApiProvider::Deepseek;
+        app.model = "deepseek-v4-pro".to_string();
+        app.auto_model = false;
+        app.reasoning_effort = ReasoningEffort::High;
+        app.reasoning_effort_preference = None;
+
+        let mut view = ModelPickerView::new(&app, &config);
+        assert_eq!(view.initial_effort, ReasoningEffort::Auto);
+        view.selected_model_idx = view
+            .visible_model_rows()
+            .iter()
+            .position(|row| row.id == "auto")
+            .expect("Auto row");
+        view.select_effort_for_current_model();
+
+        assert_eq!(view.resolved_effort(), ReasoningEffort::High);
+        assert!(matches!(
+            view.build_event(),
+            ViewEvent::ModelPickerApplied {
+                effort: ReasoningEffort::High,
+                previous_effort: ReasoningEffort::Auto,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -4357,6 +4446,7 @@ mod tests {
         let (mut app, mut config, _lock) = create_test_app();
         config.api_key = Some("deepseek-picker-test-key".to_string());
         app.reasoning_effort = ReasoningEffort::High;
+        app.reasoning_effort_preference = Some(ReasoningEffort::High);
         app.model = "deepseek-v4-pro".to_string();
         app.auto_model = false;
         app.enable_provider_model("deepseek", "deepseek-v4-flash");

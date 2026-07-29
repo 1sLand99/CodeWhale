@@ -124,16 +124,19 @@ pub(crate) fn safe_agent_display_name(app: &App, agent_id: &str) -> String {
 }
 
 pub(crate) fn project_agent_details(app: &App, agent_id: &str) -> Option<AgentDetailsProjection> {
+    // The Agents sidebar is the primary worker surface. Consume its exact row
+    // projection so status precedence, model, elapsed time, and steps cannot
+    // diverge between the row and the popup opened from it.
+    let surface_row = crate::tui::sidebar::sidebar_agent_rows(app)
+        .into_iter()
+        .find(|row| row.id == agent_id)?;
     let agent = app
         .subagent_cache
         .iter()
         .find(|agent| agent.agent_id == agent_id);
     let meta = app.agent_progress_meta.get(agent_id);
-    if agent.is_none() && meta.is_none() && !app.agent_progress.contains_key(agent_id) {
-        return None;
-    }
 
-    let display_name = safe_agent_display_name(app, agent_id);
+    let display_name = safe_child_value(app, &surface_row.name).unwrap_or_else(|| "Agent".into());
     let mut lines = Vec::new();
 
     if let Some(agent) = agent {
@@ -148,18 +151,21 @@ pub(crate) fn project_agent_details(app: &App, agent_id: &str) -> Option<AgentDe
         lines.push(format!("Parent: {}", safe_parent_from_meta(app, meta)));
     }
 
-    let status = typed_status(agent, meta);
-    let steps = agent.map_or(0, |agent| agent.steps_taken);
-    let mut state = vec![activity_status_label(status).to_string()];
-    if let Some(agent) = agent {
+    let mut state = vec![surface_row.status.clone()];
+    if let Some(duration_ms) = surface_row.duration_ms {
         state.push(format!(
             "elapsed {}",
-            crate::elapsed::format_elapsed_ms(agent.duration_ms)
+            crate::elapsed::format_elapsed_ms(duration_ms)
         ));
     }
     state.push(format!(
-        "{steps} {}",
-        if steps == 1 { "step" } else { "steps" }
+        "{} {}",
+        surface_row.steps_taken,
+        if surface_row.steps_taken == 1 {
+            "step"
+        } else {
+            "steps"
+        }
     ));
     lines.push(format!("State: {}", state.join(" · ")));
 
@@ -168,10 +174,7 @@ pub(crate) fn project_agent_details(app: &App, agent_id: &str) -> Option<AgentDe
     {
         push_safe_line(app, &mut lines, "Provider", provider);
     }
-    let model = meta
-        .and_then(|meta| meta.resolved_model.as_deref())
-        .or_else(|| agent.map(|agent| agent.model.as_str()));
-    if let Some(model) = model {
+    if let Some(model) = surface_row.model.as_deref() {
         push_safe_line(app, &mut lines, "Model", model);
     }
 
@@ -365,30 +368,6 @@ fn safe_parent_from_meta(app: &App, meta: Option<&AgentProgressMeta>) -> String 
         }
         Some(_) => "parent agent".to_string(),
         None => "primary session".to_string(),
-    }
-}
-
-fn typed_status(
-    agent: Option<&SubAgentResult>,
-    meta: Option<&AgentProgressMeta>,
-) -> AgentCurrentActivityStatus {
-    if let Some(status) = meta
-        .and_then(|meta| meta.current_activity.as_ref())
-        .map(|activity| activity.status)
-    {
-        return status;
-    }
-    if let Some(status) = agent.and_then(|agent| agent.worker_status) {
-        return status.into();
-    }
-    match agent.map(|agent| &agent.status) {
-        Some(SubAgentStatus::Running) | None => AgentCurrentActivityStatus::Running,
-        Some(SubAgentStatus::Completed) => AgentCurrentActivityStatus::Done,
-        Some(SubAgentStatus::Interrupted(_)) => AgentCurrentActivityStatus::Interrupted,
-        Some(SubAgentStatus::Failed(_) | SubAgentStatus::BudgetExhausted) => {
-            AgentCurrentActivityStatus::Failed
-        }
-        Some(SubAgentStatus::Cancelled) => AgentCurrentActivityStatus::Canceled,
     }
 }
 
@@ -587,7 +566,7 @@ mod tests {
             AgentWorkerStatus::RunningTool,
             None,
         );
-        assert!(running.contains("State: running tool · elapsed 2s · 2 steps"));
+        assert!(running.contains("State: tool · elapsed 2s · 2 steps"));
         assert!(running.contains("Current: running tool · read_file · step 2"));
         assert!(!running.contains("Provider:"));
 
@@ -596,7 +575,7 @@ mod tests {
             AgentWorkerStatus::WaitingForUser,
             Some("Which path should I use?"),
         );
-        assert!(waiting.contains("State: waiting for input"));
+        assert!(waiting.contains("State: waiting"));
         assert!(waiting.contains("Pending question: Which path should I use?"));
 
         let failed = body_for(
@@ -612,8 +591,55 @@ mod tests {
             AgentWorkerStatus::Completed,
             Some("all checks passed"),
         );
-        assert!(completed.contains("State: completed"));
+        assert!(completed.contains("State: done"));
         assert!(completed.contains("Summary: all checks passed"));
+    }
+
+    #[test]
+    fn details_projection_matches_primary_agents_row() {
+        let tmp = tempdir().expect("tempdir");
+        let mut app = test_app(tmp.path().to_path_buf());
+        let agent_id = "agent_row_agreement";
+        let mut child = agent(
+            agent_id,
+            SubAgentStatus::Failed("stale failure".to_string()),
+        );
+        child.model = "kimi-k3".to_string();
+        child.steps_taken = 7;
+        child.duration_ms = 61_000;
+        app.subagent_cache.push(child);
+        app.agent_progress_meta.insert(
+            agent_id.to_string(),
+            AgentProgressMeta {
+                current_activity: Some(AgentCurrentActivity::bounded(
+                    AgentCurrentActivityStatus::RunningTool,
+                    Some("checking tests".to_string()),
+                    Some("cargo test".to_string()),
+                    Some(7),
+                )),
+                resolved_model: Some("stale-meta-model".to_string()),
+                ..AgentProgressMeta::default()
+            },
+        );
+
+        let row = crate::tui::sidebar::sidebar_agent_rows(&app)
+            .into_iter()
+            .find(|row| row.id == agent_id)
+            .expect("primary agents row");
+        let details = project_agent_details(&app, agent_id).expect("details projection");
+
+        assert_eq!(row.status, "tool");
+        assert_eq!(row.steps_taken, 7);
+        assert_eq!(row.model.as_deref(), Some("kimi-k3"));
+        assert_eq!(row.duration_ms, Some(61_000));
+        assert!(details.body.contains(&format!(
+            "State: {} · elapsed {} · {} steps",
+            row.status,
+            crate::elapsed::format_elapsed_ms(row.duration_ms.expect("duration")),
+            row.steps_taken
+        )));
+        assert!(details.body.contains("Model: kimi-k3"));
+        assert!(!details.body.contains("stale-meta-model"));
     }
 
     #[test]

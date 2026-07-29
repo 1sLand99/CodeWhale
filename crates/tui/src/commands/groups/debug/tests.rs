@@ -560,6 +560,50 @@ fn cache_inspect_json_reports_tool_catalog_hash_and_layer_sizes() {
     assert!(tool_layer["token_estimate"].as_u64().unwrap() > 0);
 }
 
+#[test]
+fn cache_inspect_json_keys_auto_replay_to_the_last_concrete_route() {
+    let mut app = create_test_app();
+    app.model = "auto".to_string();
+    app.auto_model = true;
+    app.reasoning_effort = crate::tui::app::ReasoningEffort::Off;
+    app.last_effective_provider = Some(crate::config::ApiProvider::OpenaiCodex);
+    app.last_effective_provider_identity =
+        Some(crate::config::ApiProvider::OpenaiCodex.as_str().to_string());
+    app.last_effective_model = Some(crate::config::DEFAULT_OPENAI_CODEX_MODEL.to_string());
+    app.session.last_base_url = Some(crate::config::DEFAULT_OPENAI_CODEX_BASE_URL.to_string());
+    app.push_turn_cache_record(TurnCacheRecord {
+        provider: Some(crate::config::ApiProvider::OpenaiCodex),
+        provider_identity: Some(crate::config::ApiProvider::OpenaiCodex.as_str().to_string()),
+        model: Some(crate::config::DEFAULT_OPENAI_CODEX_MODEL.to_string()),
+        auto_model: true,
+        input_tokens: 1,
+        output_tokens: 1,
+        cache_hit_tokens: None,
+        cache_miss_tokens: None,
+        cache_write_tokens: None,
+        reasoning_tokens: None,
+        cost_audit: None,
+        reasoning_replay_tokens: None,
+        recorded_at: Instant::now(),
+    });
+
+    let message = cache(&mut app, Some("inspect --json"))
+        .message
+        .expect("inspect json output");
+    let parsed: serde_json::Value = serde_json::from_str(&message).expect("valid json");
+    let key = &parsed["current_warmup_key"];
+
+    assert_eq!(
+        key["provider"],
+        crate::config::ApiProvider::OpenaiCodex.as_str()
+    );
+    assert_eq!(key["model"], crate::config::DEFAULT_OPENAI_CODEX_MODEL);
+    assert_eq!(
+        key["base_url"],
+        crate::config::DEFAULT_OPENAI_CODEX_BASE_URL
+    );
+}
+
 fn warmup_key(model: &str, static_hash: &str) -> CacheWarmupKey {
     CacheWarmupKey {
         provider: "Deepseek".to_string(),
