@@ -26,6 +26,7 @@ mod message;
 mod plan;
 mod thinking;
 mod tool_output;
+mod latex_render;
 mod tool_run;
 
 use archived_context::{parse_archived_context, render_archived_context};
