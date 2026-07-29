@@ -4806,7 +4806,11 @@ impl RuntimeThreadManager {
         let mut thread_config = cfg_snapshot.clone();
         thread_config.scope_to_provider_identity(&identity);
         let verbosity = thread_config.verbosity.clone();
-        let (route, reasoning_effort) = if auto_model {
+        let reasoning_preference = thread_config
+            .reasoning_effort()
+            .filter(|_| thread_config.reasoning_effort_is_explicit())
+            .map(crate::tui::app::ReasoningEffort::from_setting);
+        let (route, reasoning_effort, auto_controls_reasoning) = if auto_model {
             let selection = crate::model_routing::resolve_auto_route_with_inventory(
                 &thread_config,
                 &prompt,
@@ -4820,7 +4824,12 @@ impl RuntimeThreadManager {
                 selection.provider,
                 Some(&selection.model),
             )?;
-            let reasoning_effort = selection.reasoning_effort.map(|effort| {
+            let (selected_reasoning, auto_controls_reasoning) =
+                crate::model_routing::resolve_auto_model_reasoning(
+                    reasoning_preference,
+                    selection.reasoning_effort,
+                );
+            let reasoning_effort = selected_reasoning.map(|effort| {
                 effort
                     .normalize_for_route(
                         route.identity.provider,
@@ -4830,7 +4839,7 @@ impl RuntimeThreadManager {
                     .as_setting()
                     .to_string()
             });
-            (route, reasoning_effort)
+            (route, reasoning_effort, auto_controls_reasoning)
         } else {
             (
                 resolve_runtime_thread_route_for_identity(
@@ -4839,6 +4848,7 @@ impl RuntimeThreadManager {
                     Some(&requested_model),
                 )?,
                 None,
+                false,
             )
         };
         let route = if client_preflight_required {
@@ -4925,7 +4935,7 @@ impl RuntimeThreadManager {
             goal_token_budget: None,
             goal_status: crate::tools::goal::GoalStatus::Active,
             reasoning_effort,
-            reasoning_effort_auto: auto_model,
+            reasoning_effort_auto: auto_controls_reasoning,
             auto_model,
             allow_shell,
             trust_mode,
