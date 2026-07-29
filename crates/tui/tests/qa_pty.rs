@@ -265,7 +265,7 @@ fn visible_row_with_text(frame: &qa_harness::Frame, needle: &str) -> Option<u16>
     (0..frame.rows()).find(|&row| frame.row(row).contains(needle))
 }
 
-fn foreground_at_text(frame: &qa_harness::Frame, row: u16, needle: &str) -> vt100::Color {
+fn foreground_at_text(frame: &qa_harness::Frame, row: u16, needle: &str) -> qa_harness::Color {
     let col = frame
         .find_text_in_row(row, needle)
         .unwrap_or_else(|| panic!("{needle:?} missing from row {row}: {:?}", frame.row(row)));
@@ -309,7 +309,7 @@ fn assert_control_grammar(
     mode: &str,
     permission: &str,
     placeholder: &str,
-) -> (vt100::Color, vt100::Color) {
+) -> (qa_harness::Color, qa_harness::Color) {
     let dump = frame.debug_dump();
     let header = frame.row(0);
     assert!(
@@ -2689,8 +2689,8 @@ fn work_surface_file_mutation_modes_are_truthful_in_real_pty_frames() -> anyhow:
                     visible_row_with_text(h.frame(), "DIFF-NEW-SENTINEL").expect("added line row");
                 let old_color = foreground_at_text(h.frame(), old_row, "DIFF-OLD-SENTINEL");
                 let new_color = foreground_at_text(h.frame(), new_row, "DIFF-NEW-SENTINEL");
-                assert_ne!(old_color, vt100::Color::Default);
-                assert_ne!(new_color, vt100::Color::Default);
+                assert_ne!(old_color, qa_harness::Color::Default);
+                assert_ne!(new_color, qa_harness::Color::Default);
                 assert_ne!(old_color, new_color, "added/deleted ANSI roles collapsed");
             }
             "summary" => {
@@ -3201,7 +3201,7 @@ fn release_semantic_read_fifo(
     })
 }
 
-fn whale_ansi_signature(frame: &qa_harness::Frame) -> Vec<vt100::Color> {
+fn whale_ansi_signature(frame: &qa_harness::Frame) -> Vec<qa_harness::Color> {
     const WHALE_BACK: &str = "▗▄▄▄▄▄▄▄▄▄▄▄▖";
     let (row, mut col) = frame
         .find_text(WHALE_BACK)
@@ -3218,7 +3218,7 @@ fn whale_ansi_signature(frame: &qa_harness::Frame) -> Vec<vt100::Color> {
         .collect()
 }
 
-fn colored_foreground(frame: &qa_harness::Frame, needle: &str) -> vt100::Color {
+fn colored_foreground(frame: &qa_harness::Frame, needle: &str) -> qa_harness::Color {
     let (row, col) = frame
         .find_text(needle)
         .unwrap_or_else(|| panic!("{needle:?} missing:\n{}", frame.debug_dump()));
@@ -3228,7 +3228,7 @@ fn colored_foreground(frame: &qa_harness::Frame, needle: &str) -> vt100::Color {
         .0;
     assert_ne!(
         foreground,
-        vt100::Color::Default,
+        qa_harness::Color::Default,
         "{needle:?} lost its semantic foreground:\n{}",
         frame.debug_dump()
     );
@@ -3343,7 +3343,7 @@ fn assert_running_tool_lifecycle_frame(
     frame: &qa_harness::Frame,
     cols: u16,
     rows: u16,
-) -> (vt100::Color, vt100::Color) {
+) -> (qa_harness::Color, qa_harness::Color) {
     assert_real_pty_frame_geometry(frame, cols, rows);
     let dump = frame.debug_dump();
     assert!(
@@ -3378,7 +3378,7 @@ fn assert_running_tool_lifecycle_frame(
     let tool_running = foreground_at_text(frame, tool_row, "running");
     assert_ne!(
         tool_running,
-        vt100::Color::Default,
+        qa_harness::Color::Default,
         "Bash running state lost its semantic foreground:\n{dump}"
     );
     (colored_foreground(frame, "using tool"), tool_running)
@@ -3610,7 +3610,7 @@ fn real_tool_lifecycle_crosses_work_status_resize_and_scroll_in_a_unix_pty() -> 
     assert!(
         initial_whale
             .iter()
-            .any(|color| *color != vt100::Color::Default),
+            .any(|color| *color != qa_harness::Color::Default),
         "idle BlueWhale lost its ANSI ink:\n{}",
         h.frame().debug_dump()
     );
@@ -3648,7 +3648,7 @@ fn real_tool_lifecycle_crosses_work_status_resize_and_scroll_in_a_unix_pty() -> 
         assert!(
             whale_ansi_signature(frame)
                 .iter()
-                .any(|color| *color != vt100::Color::Default),
+                .any(|color| *color != qa_harness::Color::Default),
             "BlueWhale ANSI ink missing at {cols}x{rows}:\n{}",
             frame.debug_dump()
         );
@@ -3762,7 +3762,11 @@ fn real_tool_lifecycle_crosses_work_status_resize_and_scroll_in_a_unix_pty() -> 
         );
         let done_row = visible_row_with_text(frame, "✓ done").expect("done phase row");
         let done_color = foreground_at_text(frame, done_row, "done");
-        assert_ne!(done_color, vt100::Color::Default, "done lost ANSI role");
+        assert_ne!(
+            done_color,
+            qa_harness::Color::Default,
+            "done lost ANSI role"
+        );
         assert_ne!(
             done_color,
             live_colors.expect("live colors").0,
