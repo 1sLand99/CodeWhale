@@ -10936,7 +10936,7 @@ async fn apply_model_picker_choice(
         app.reasoning_effort = ReasoningEffort::Auto;
     }
     if live_effort_changed || preference_changed {
-        app.last_effective_reasoning_effort = None;
+        app.invalidate_route_receipts_for_reasoning_change();
     }
     if model_changed || live_effort_changed || preference_changed {
         app.update_model_compaction_budget();
@@ -11062,7 +11062,7 @@ async fn apply_picker_effort_choice(
         app.reasoning_effort_preference = Some(effort);
     }
     if selection_changed {
-        app.last_effective_reasoning_effort = None;
+        app.invalidate_route_receipts_for_reasoning_change();
         app.update_model_compaction_budget();
     }
 

@@ -428,6 +428,73 @@ fn cache_replay_target_uses_the_last_completed_auto_route() {
 }
 
 #[test]
+fn auto_reasoning_change_invalidates_the_previous_route_and_receipt() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Deepseek;
+    app.model = "auto".to_string();
+    app.auto_model = true;
+    app.reasoning_effort = ReasoningEffort::Low;
+    app.reasoning_effort_preference = Some(ReasoningEffort::Low);
+    app.last_effective_provider = Some(ApiProvider::OpenaiCodex);
+    app.last_effective_provider_identity = Some(ApiProvider::OpenaiCodex.as_str().to_string());
+    app.last_effective_model = Some(crate::config::DEFAULT_OPENAI_CODEX_MODEL.to_string());
+    app.last_auto_route_receipt = Some(crate::model_routing::AutoRouteReceipt {
+        tier: crate::model_routing::AutoRouteTier::Strong,
+        pair: crate::model_routing::AutoRoutePair {
+            strong: crate::config::DEFAULT_OPENAI_CODEX_MODEL.to_string(),
+            fast: None,
+        },
+        scope: crate::model_routing::AutoRouteScope::ResolvedProvider,
+        data_path: crate::model_routing::AutoRouteDataPath::LocalHeuristic,
+        reason: crate::model_routing::AutoRouteReason::LocalHeuristic(
+            crate::model_routing::AutoRouteHeuristicReason::ComplexRequest,
+        ),
+    });
+    app.last_effective_reasoning_effort =
+        Some(EffectiveReasoningEffort::Tier(ReasoningEffort::Max));
+
+    assert!(
+        app.cache_replay_target().is_some(),
+        "the completed route is replayable before its classifier input changes"
+    );
+
+    app.cycle_effort();
+
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Medium);
+    assert_eq!(
+        app.status_message.as_deref(),
+        Some("Reasoning effort: med"),
+        "the change must describe the new unresolved request, not the old Codex receipt"
+    );
+    assert_eq!(app.last_effective_reasoning_effort, None);
+    assert_eq!(app.last_effective_provider, None);
+    assert_eq!(app.last_effective_provider_identity, None);
+    assert_eq!(app.last_effective_model, None);
+    assert_eq!(app.last_auto_route_receipt, None);
+    assert!(
+        app.cache_replay_target().is_none(),
+        "cache replay must wait for a route accepted under the new reasoning request"
+    );
+
+    let work = app
+        .work_state_snapshot()
+        .expect("Work snapshot")
+        .expect("effort activity creates graph state");
+    let crate::work_graph::WorkActivityEvent::ReasoningEffortChanged { effective, .. } = work
+        .graph
+        .expect("Work Graph")
+        .activities
+        .last()
+        .cloned()
+        .expect("effort activity");
+    assert_eq!(
+        effective,
+        crate::work_graph::ReasoningEffortTier::Medium,
+        "the activity receipt must not reuse the previous turn's effective tier"
+    );
+}
+
+#[test]
 fn mode_and_thinking_are_locked_while_a_turn_is_running() {
     // #2982: while a turn is in flight, user-initiated mode/thinking changes
     // are refused with a concise message instead of shifting the surface the

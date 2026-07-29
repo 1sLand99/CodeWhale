@@ -2058,6 +2058,24 @@ impl App {
         self.last_pinned_prefix_hash = None;
     }
 
+    /// Invalidate facts that were accepted under the previous reasoning
+    /// request.
+    ///
+    /// A fixed model keeps the same concrete route when its reasoning tier
+    /// changes, so only its effective-reasoning receipt becomes stale. Under
+    /// Auto, reasoning is one of the classifier inputs; the previous concrete
+    /// provider/model route therefore cannot be replayed or displayed as the
+    /// route for the new request.
+    pub(crate) fn invalidate_route_receipts_for_reasoning_change(&mut self) {
+        self.last_effective_reasoning_effort = None;
+        if self.auto_model {
+            self.last_effective_model = None;
+            self.last_effective_provider = None;
+            self.last_effective_provider_identity = None;
+            self.last_auto_route_receipt = None;
+        }
+    }
+
     pub fn tr(&self, id: MessageId) -> Cow<'static, str> {
         tr(self.ui_locale, id)
     }
@@ -2518,7 +2536,7 @@ impl App {
         }
         self.reasoning_effort = requested;
         self.reasoning_effort_preference = Some(requested);
-        self.last_effective_reasoning_effort = None;
+        self.invalidate_route_receipts_for_reasoning_change();
         // Same persistence owner as the model/effort pickers, so Ctrl+T and the
         // hotbar `reasoning.cycle` action restore on restart exactly like a
         // picker selection does. Only the *requested* tier is persisted — the
@@ -4726,7 +4744,7 @@ impl App {
             self.reasoning_effort
                 .normalize_for_route(provider, base_url, wire_model)
         };
-        self.last_effective_reasoning_effort = None;
+        self.invalidate_route_receipts_for_reasoning_change();
     }
 
     pub fn effective_model_for_budget(&self) -> &str {
@@ -4801,6 +4819,7 @@ impl App {
         if self.auto_model
             && !auto_route_has_receipt
             && self.last_auto_route_receipt.is_some()
+            && requested == self.reasoning_effort
             && let Some(effective) = self.last_effective_reasoning_effort
         {
             // Once a concrete Auto route has been accepted, its normalized
@@ -4809,7 +4828,8 @@ impl App {
             // of what the completed turn received.
             return effective;
         }
-        if requested == ReasoningEffort::Auto
+        if requested == self.reasoning_effort
+            && requested == ReasoningEffort::Auto
             && let Some(effective) = self.last_effective_reasoning_effort
         {
             // The accepted route receipt is already the strongest available

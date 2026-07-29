@@ -922,7 +922,7 @@ fn reload_runtime_config(app: &mut App, config: &mut Config) -> Result<()> {
     } else {
         requested.normalize_for_provider(app.api_provider)
     };
-    app.last_effective_reasoning_effort = None;
+    app.invalidate_route_receipts_for_reasoning_change();
     app.update_model_compaction_budget();
     app.mcp_config_path = reloaded.mcp_config_path();
     app.skills_dir = reloaded.skills_dir();
@@ -956,7 +956,7 @@ fn apply_reasoning_effort(
     };
     app.reasoning_effort = effective;
     app.reasoning_effort_preference = Some(requested);
-    app.last_effective_reasoning_effort = None;
+    app.invalidate_route_receipts_for_reasoning_change();
     app.update_model_compaction_budget();
     if persist {
         crate::config_persistence::persist_root_string_key(
