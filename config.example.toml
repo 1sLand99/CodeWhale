@@ -511,8 +511,11 @@ max_subagents = 10 # optional (1-20)
 # model = "k3"                              # Kimi Code K3 wire ID
 # K3 membership off -> enabled/low; dispatched auto selects a concrete tier.
 # Only an omitted reasoning setting leaves the provider default in control.
-# context_window = 1048576                   # only for Allegretto+ plans with 1M access
-# Omit context_window for Codewhale's safe 262144-token K3 baseline.
+# Moderato plans are capped at 262144; Allegretto and above unlock up to 1048576.
+# context_window = 262144                    # manually cap k3 to the Moderato/256K window
+# context_window = 1048576                   # Allegretto+ only; do not claim an unavailable entitlement
+# Alternatively use model = "k3-256k" with context_window = 262144 for the fixed 256K route.
+# Omit context_window to keep Codewhale's safe 262144-token bare-k3 baseline.
 # `k3[1m]` is a Claude Code-only convention, not an API model ID; Codewhale rejects it.
 # Kimi Code K2.7 remains available to all members as model = "kimi-for-coding".
 # Kimi OAuth is not supported. Legacy auth_mode = "kimi_oauth" fails closed

@@ -1562,6 +1562,30 @@ impl ConfigView {
                 scope: ConfigScope::Saved,
             },
             ConfigRow {
+                section: ConfigSection::Provider,
+                key: "context_window".to_string(),
+                value: config
+                    .context_window_for_provider_config(app.api_provider)
+                    .map_or_else(|| "(not set)".to_string(), |tokens| tokens.to_string()),
+                editable: false,
+                scope: ConfigScope::Saved,
+            },
+            ConfigRow {
+                section: ConfigSection::Provider,
+                key: "effective_context_window".to_string(),
+                value: format!(
+                    "{} tokens · {}",
+                    crate::route_budget::route_context_window_tokens(
+                        app.api_provider,
+                        app.effective_model_for_budget(),
+                        app.active_route_limits,
+                    ),
+                    app.active_context_window_source.label()
+                ),
+                editable: false,
+                scope: ConfigScope::Session,
+            },
+            ConfigRow {
                 section: ConfigSection::Model,
                 key: "model".to_string(),
                 value: format!(
@@ -2925,6 +2949,12 @@ fn config_hint_for_key(key: &str) -> &'static str {
         "base_url" => "global DeepSeek/root fallback; e.g. https://api.deepseek.com/beta",
         "provider_url" => {
             "current provider endpoint; Xiaomi: token-plan | pay-as-you-go | custom URL"
+        }
+        "context_window" => {
+            "provider override in config.toml; e.g. 262144 to cap a 1M model to 256K"
+        }
+        "effective_context_window" => {
+            "resolved token window and source used by compaction, pressure, and preflight budgets"
         }
         "cost_currency" => "usd | cny",
         "calm_mode" => "quietens transcript chrome and tool detail; independent of live motion",
@@ -5122,6 +5152,9 @@ mod tests {
         const DIAGNOSTIC_ONLY: &[&str] = &[
             "fast_model",
             "default_model",
+            "context_window",
+            "effective_context_window",
+            "effective_auto_compact",
             "external_credentials.openai-codex",
             "external_credentials.xai",
         ];
@@ -5768,6 +5801,46 @@ base_url = "https://api.xiaomimimo.com/v1"
         assert_eq!(row.value, "on · 65% · 123456 tokens");
         assert!(!row.editable);
         assert_eq!(row.scope, ConfigScope::Session);
+    }
+
+    #[test]
+    fn config_view_exposes_configured_and_effective_context_window() {
+        let temp = tempfile::tempdir().expect("config fixture");
+        let config_path = temp.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+provider = "moonshot"
+[providers.moonshot]
+model = "kimi-k3"
+context_window = 262144
+"#,
+        )
+        .expect("config");
+        let mut app = create_test_app();
+        app.config_path = Some(config_path);
+        app.api_provider = crate::config::ApiProvider::Moonshot;
+        app.model = "kimi-k3".to_string();
+        app.active_route_limits = Some(codewhale_config::route::RouteLimits {
+            context_tokens: Some(262_144),
+            ..Default::default()
+        });
+        app.active_context_window_source = crate::route_runtime::ContextWindowSource::Configured;
+
+        let view = ConfigView::new_for_app(&app);
+        let configured = view
+            .rows
+            .iter()
+            .find(|row| row.key == "context_window")
+            .expect("configured context row");
+        let effective = view
+            .rows
+            .iter()
+            .find(|row| row.key == "effective_context_window")
+            .expect("effective context row");
+
+        assert_eq!(configured.value, "262144");
+        assert_eq!(effective.value, "262144 tokens · configured");
     }
 
     #[test]

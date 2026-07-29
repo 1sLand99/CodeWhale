@@ -204,6 +204,12 @@ fn config_preset_command(app: &mut App, rest: &str) -> CommandResult {
 }
 
 /// Show the current value of a single setting.
+fn config_context_window_override(app: &App) -> Option<u32> {
+    let mut config = Config::load(app.config_path.clone(), app.config_profile.as_deref()).ok()?;
+    config.provider = Some(app.provider_identity_for_persistence().to_string());
+    config.context_window_for_provider_config(app.api_provider)
+}
+
 fn show_single_setting(app: &App, key: &str) -> CommandResult {
     let key = key.to_lowercase();
     if let Some(subagent_key) = key.strip_prefix("subagents.") {
@@ -282,6 +288,17 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
             };
             Some(config.deepseek_base_url())
         }
+        "context_window" | "context_window_tokens" => Some(format!(
+            "{} (effective {} from {})",
+            config_context_window_override(app)
+                .map_or_else(|| "not set".to_string(), |tokens| tokens.to_string()),
+            crate::route_budget::route_context_window_tokens(
+                app.api_provider,
+                app.effective_model_for_budget(),
+                app.active_route_limits,
+            ),
+            app.active_context_window_source.label(),
+        )),
         "stream_chunk_timeout_secs" => Some(app.stream_chunk_timeout_secs.to_string()),
         "locale" | "language" => Some(locale_display(app.ui_locale).to_string()),
         "theme" | "ui_theme" => {
@@ -936,6 +953,29 @@ fn config_editability_audit(app: &App) -> CommandResult {
             "persisted restart",
             "/config provider_url <url> --save",
             "Writes the active provider table; model clients read it on startup.",
+        ),
+        (
+            "providers.<active>.context_window",
+            config_context_window_override(app)
+                .map_or_else(|| "(unset)".to_string(), |tokens| tokens.to_string()),
+            "persisted restart",
+            "edit [providers.<active>] context_window = <tokens>",
+            "Overrides compaction, context-pressure, header, and preflight input budgets; use 262144 to cap a 1M route to 256K.",
+        ),
+        (
+            "effective_context_window",
+            format!(
+                "{} ({})",
+                crate::route_budget::route_context_window_tokens(
+                    app.api_provider,
+                    app.effective_model_for_budget(),
+                    app.active_route_limits,
+                ),
+                app.active_context_window_source.label(),
+            ),
+            "runtime",
+            "/config context_window",
+            "The shared resolved window used by every active-route budget surface.",
         ),
         (
             "mcp_config_path",
@@ -3855,6 +3895,9 @@ max_concurrent = 4
         assert!(msg.contains("subagents.enabled | false | runtime+persisted"));
         assert!(msg.contains("subagents.max_concurrent | 4 | runtime+persisted"));
         assert!(msg.contains("base_url | https://api.from-config.local/v1 | persisted restart"));
+        assert!(msg.contains("providers.<active>.context_window | (unset) | persisted restart"));
+        assert!(msg.contains("effective_context_window |"), "{msg}");
+        assert!(msg.contains("| runtime | /config context_window"), "{msg}");
         assert!(msg.contains("instructions | configured | file-only restart"));
         assert!(msg.contains("network | unset | file-only"));
 
@@ -3865,6 +3908,45 @@ max_concurrent = 4
         assert!(
             plan_msg.contains("effective_permissions | Read Only | runtime"),
             "{plan_msg}"
+        );
+    }
+
+    #[test]
+    fn config_context_window_query_shows_override_and_effective_source() {
+        let temp_root = env::temp_dir().join(format!(
+            "codewhale-context-window-query-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&temp_root).unwrap();
+        let _guard = EnvGuard::new(&temp_root);
+        let config_path = temp_root.join("custom-config.toml");
+        fs::write(
+            &config_path,
+            r#"
+provider = "moonshot"
+[providers.moonshot]
+model = "kimi-k3"
+context_window = 262144
+"#,
+        )
+        .unwrap();
+        let mut app = create_test_app();
+        app.config_path = Some(config_path);
+        app.api_provider = ApiProvider::Moonshot;
+        app.model = "kimi-k3".to_string();
+        app.active_route_limits = Some(codewhale_config::route::RouteLimits {
+            context_tokens: Some(262_144),
+            ..Default::default()
+        });
+        app.active_context_window_source = crate::route_runtime::ContextWindowSource::Configured;
+
+        let result = config_command(&mut app, Some("context_window"));
+        let message = result.message.expect("context window message");
+
+        assert!(!result.is_error, "{message}");
+        assert!(
+            message.contains("262144 (effective 262144 from configured)"),
+            "{message}"
         );
     }
 

@@ -6513,6 +6513,83 @@ fn auto_routed_turn_compaction_uses_selected_route_not_stale_app_route() {
     }
 }
 
+#[test]
+fn context_override_drives_compaction_meter_and_preflight_budget() {
+    let config = Config {
+        provider: Some("moonshot".to_string()),
+        providers: Some(ProvidersConfig {
+            moonshot: ProviderConfig {
+                model: Some("kimi-k3".to_string()),
+                context_window: Some(262_144),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        ..Config::default()
+    };
+    let route = resolve_runtime_route(&config, ApiProvider::Moonshot, Some("kimi-k3"))
+        .expect("resolve configured 256K route");
+    let override_limits = crate::route_budget::known_route_limits(route.candidate.limits())
+        .expect("configured route limits");
+    assert_eq!(
+        config.context_window_for_provider_config(ApiProvider::Moonshot),
+        Some(262_144)
+    );
+
+    let mut app = create_test_app();
+    app.api_provider = ApiProvider::Moonshot;
+    app.model = "kimi-k3".to_string();
+    app.auto_model = false;
+    app.auto_compact_threshold_percent = 80.0;
+    app.active_route_limits = Some(override_limits);
+    app.active_context_window_source = crate::route_runtime::ContextWindowSource::Configured;
+    app.update_model_compaction_budget();
+
+    let compaction = app.compaction_config();
+    assert_eq!(compaction.effective_context_window, Some(262_144));
+    assert_eq!(
+        compaction.token_threshold,
+        crate::route_budget::compaction_threshold_for_route_at_percent(
+            ApiProvider::Moonshot,
+            "kimi-k3",
+            Some(override_limits),
+            80.0,
+        )
+    );
+    assert!(
+        compaction.token_threshold
+            < crate::route_budget::compaction_threshold_for_route_at_percent(
+                ApiProvider::Moonshot,
+                "kimi-k3",
+                None,
+                80.0,
+            )
+    );
+
+    app.api_messages = vec![Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::Text {
+            text: "context ".repeat(2_000),
+            cache_control: None,
+        }],
+    }];
+    let (_, meter_window, _) = context_usage_snapshot(&app).expect("context meter");
+    assert_eq!(meter_window, 262_144);
+
+    let override_budget = crate::route_budget::route_context_budget(
+        ApiProvider::Moonshot,
+        "kimi-k3",
+        Some(override_limits),
+        0,
+    )
+    .expect("override preflight budget");
+    let catalog_budget =
+        crate::route_budget::route_context_budget(ApiProvider::Moonshot, "kimi-k3", None, 0)
+            .expect("catalog preflight budget");
+    assert_eq!(override_budget.window_tokens, 262_144);
+    assert!(override_budget.input_budget_ceiling < catalog_budget.input_budget_ceiling);
+}
+
 #[cfg(not(windows))]
 fn write_message_submit_hook(dir: &TempDir, name: &str, body: &str) -> String {
     let path = dir.path().join(name);

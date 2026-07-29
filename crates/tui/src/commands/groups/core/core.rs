@@ -47,6 +47,11 @@ pub fn help(app: &mut App, topic: Option<&str>) -> CommandResult {
                     visible_aliases.join(", ")
                 );
             }
+            if cmd.name == "config" {
+                help.push_str(
+                    "\n\n  Provider context window: set `context_window = 262144` under the active `[providers.<name>]` table to cap a 1M model to 256K. Use `/config context_window` to inspect the configured and effective values.",
+                );
+            }
             return CommandResult::message(help);
         }
 
@@ -829,6 +834,8 @@ mod tests {
         assert!(msg.contains("config"));
         assert!(msg.contains("Inspect and change settings"));
         assert!(msg.contains("Usage: /config"));
+        assert!(msg.contains("context_window = 262144"));
+        assert!(msg.contains("/config context_window"));
     }
 
     #[test]
