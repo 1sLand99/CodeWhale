@@ -8471,7 +8471,7 @@ fn persist_recovery_snapshot(app: &mut App) {
             app.current_session_id = Some(session.metadata.id.clone());
         }
         if let Err(err) =
-            persist_with_pending_work_boundary(app, PersistRequest::SessionSnapshot(session))
+            persist_with_pending_work_boundary(app, PersistRequest::SaveCheckpoint { session })
         {
             app.status_message = Some(format!(
                 "Work update is pending: recovery snapshot could not be queued ({err})"

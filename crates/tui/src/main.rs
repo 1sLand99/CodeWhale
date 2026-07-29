@@ -8616,10 +8616,11 @@ fn preserve_interrupted_checkpoint_for_explicit_resume(launch_workspace: &Path) 
     };
 
     let session_workspace = newest.session.metadata.workspace.clone();
-    if !saved_session_is_newer(&manager, &newest.session) {
-        let _ = manager.save_session(&newest.session);
-    }
+    // #4479: removed save_session call — checkpoint should not be auto-promoted to session
     if newest.source == session_manager::CheckpointSource::Legacy {
+        // Migrate legacy single-slot checkpoint to per-session format
+        // before clearing the legacy file, or the data is unrecoverable.
+        let _ = manager.save_checkpoint(&newest.session);
         let _ = manager.clear_legacy_checkpoint();
     }
 
@@ -16277,9 +16278,13 @@ mod setup_helper_tests {
                 "normal launch must leave the per-session checkpoint in place \
                  (it may belong to a live session; `--continue` consumes it)"
             );
+            // #4479: checkpoint is no longer promoted to session file.
             assert!(
-                manager.load_session(&session_id).is_ok(),
-                "normal launch should keep an explicit resume target"
+                manager
+                    .load_session_checkpoint(&session_id)
+                    .expect("load checkpoint")
+                    .is_some(),
+                "checkpoint stays in checkpoints/ for --continue"
             );
         });
     }
@@ -16318,9 +16323,13 @@ mod setup_helper_tests {
                     .is_none(),
                 "normal launch should consume the legacy single-slot checkpoint"
             );
+            // #4479: checkpoint is no longer promoted to session file.
             assert!(
-                manager.load_session(&session_id).is_ok(),
-                "normal launch should keep an explicit resume target"
+                manager
+                    .load_session_checkpoint(&session_id)
+                    .expect("load checkpoint")
+                    .is_some(),
+                "checkpoint stays in checkpoints/ for --continue"
             );
         });
     }
