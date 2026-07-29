@@ -7002,7 +7002,10 @@ fn effective_config_profile(cli: &Cli) -> Option<String> {
 fn load_config_from_cli_with_effective_profile(cli: &Cli) -> Result<(Config, Option<String>)> {
     let profile = effective_config_profile(cli);
     let mut config = Config::load(cli.config.clone(), profile.as_deref())?;
-    if let Ok(settings) = crate::settings::Settings::load_persisted() {
+    // Config loading is shared by diagnostics and mutating runtimes. Read the
+    // saved preference without migrating or creating state here; interactive
+    // startup performs any permitted migration later through `Settings::load`.
+    if let Ok(settings) = crate::settings::Settings::load_read_only() {
         apply_saved_reasoning_preference(&mut config, &settings);
     }
     cli.feature_toggles.apply(&mut config)?;
