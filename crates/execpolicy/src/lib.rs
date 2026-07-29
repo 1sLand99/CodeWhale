@@ -110,7 +110,8 @@ pub struct ToolAskRule {
     /// cannot silently authorize a later invocation with extra arguments.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub command_exact: bool,
-    /// Optional file path pattern to match against.
+    /// Optional workspace-relative file path matched exactly after
+    /// normalization.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// Optional absolute workspace root that limits this rule to one repo.
@@ -345,6 +346,15 @@ impl ExecPolicyEngine {
     pub fn add_ruleset(&mut self, ruleset: Ruleset) {
         self.rulesets.push(ruleset);
         self.rulesets.sort_by_key(|r| r.layer);
+    }
+
+    /// Replace the ruleset at one priority layer without clearing approvals
+    /// remembered for the current session.
+    pub fn set_ruleset(&mut self, ruleset: Ruleset) {
+        self.rulesets
+            .retain(|existing| existing.layer != ruleset.layer);
+        self.rulesets.push(ruleset);
+        self.rulesets.sort_by_key(|existing| existing.layer);
     }
 
     /// Resolve the effective trusted/denied prefix sets by merging all rulesets.
@@ -1159,6 +1169,26 @@ mod tests {
             decision.reason(),
             "Command blocked by denied prefix rule 'git status'"
         );
+    }
+
+    #[test]
+    fn replacing_ruleset_preserves_session_approvals_and_updates_policy() {
+        let mut engine = ExecPolicyEngine::with_rulesets(vec![Ruleset::user(
+            vec!["cargo test".to_string()],
+            vec![],
+        )]);
+        engine.remember_session_approval("exec_shell:cargo test".to_string());
+        let mut deny = ToolAskRule::exec_shell("cargo test");
+        deny.action = PermissionAction::Deny;
+
+        engine.set_ruleset(Ruleset::user(vec![], vec![]).with_ask_rules(vec![deny]));
+
+        assert!(engine.is_session_approved("exec_shell:cargo test"));
+        let decision = engine
+            .check(ctx("cargo test", AskForApproval::UnlessTrusted))
+            .expect("updated policy decision");
+        assert!(!decision.allow);
+        assert_eq!(decision.matched_action, Some(PermissionAction::Deny));
     }
 
     #[test]

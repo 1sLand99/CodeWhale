@@ -11732,6 +11732,29 @@ async fn apply_command_result(
                 config.approval_policy = policy;
                 sync_mode_update(app, engine_handle).await;
             }
+            AppAction::PermissionRulesChanged => {
+                match codewhale_config::load_permissions_snapshot(app.config_path.clone()) {
+                    Ok(snapshot) => {
+                        let ruleset = snapshot.permissions().ruleset();
+                        config.exec_policy_engine.set_ruleset(ruleset.clone());
+                        if let Err(error) = engine_handle
+                            .send(Op::SetPermissionRuleset { ruleset })
+                            .await
+                        {
+                            app.status_message = Some(
+                                tr(app.ui_locale, MessageId::PermissionsOperationFailed)
+                                    .replace("{error}", &error.to_string()),
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        app.status_message = Some(
+                            tr(app.ui_locale, MessageId::PermissionsOperationFailed)
+                                .replace("{error}", &format!("{error:#}")),
+                        );
+                    }
+                }
+            }
             AppAction::PluginRegistryChanged => {
                 let _ = engine_handle.send(Op::Shutdown).await;
                 *engine_handle = spawn_tui_engine(build_engine_config(app, config), config);
