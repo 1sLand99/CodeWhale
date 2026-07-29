@@ -1889,6 +1889,10 @@ fn skills_opens_manager_owned_then_compatible() -> anyhow::Result<()> {
     );
 
     // Toggle to compatible scan so external roots appear.
+    // The initial owned scan may paint its first results before it relinquishes
+    // input ownership. Wait for that scan to become idle so the `c` event is
+    // not truthfully ignored as an in-flight mutation.
+    h.wait_for_idle(Duration::from_millis(300), Duration::from_secs(2))?;
     h.send(keys::key::ch('c'))?;
     h.wait_for_text("workspace-beta", KEY_TIMEOUT)?;
     let compat = h.frame();
