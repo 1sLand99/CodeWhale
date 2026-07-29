@@ -91,6 +91,23 @@ pub(crate) enum EffectiveReasoningEffort {
     Unavailable,
 }
 
+/// Exact provider/model route whose prompt can be inspected or replayed.
+///
+/// Auto-model sessions keep `model == "auto"` as the user's selection, so
+/// cache operations must carry the last concrete route separately. The base
+/// URL is absent after restoring an older session because saved Auto receipts
+/// intentionally do not persist raw endpoints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CacheReplayTarget {
+    pub(crate) provider: ApiProvider,
+    pub(crate) provider_identity: String,
+    /// Additive exact provider id used by persisted-route resolution.
+    /// `None` is meaningful for the legacy root-level `custom` route.
+    pub(crate) provider_id: Option<String>,
+    pub(crate) model: String,
+    pub(crate) base_url: Option<String>,
+}
+
 impl EffectiveReasoningEffort {
     /// Reconstruct a safe request tier for cache replay and inspection.
     ///

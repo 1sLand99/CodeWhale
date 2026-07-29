@@ -304,21 +304,126 @@ fn cache_replay_keeps_untiered_reasoning_enabled() {
         Some(EffectiveReasoningEffort::ThinkingEnabledGranularityUnavailable);
 
     assert_eq!(
-        app.reasoning_effort_api_value_for_replay(crate::config::DEFAULT_ZAI_BASE_URL),
+        app.reasoning_effort_api_value_for_replay(
+            ApiProvider::Zai,
+            crate::config::DEFAULT_ZAI_BASE_URL,
+            crate::config::ZAI_GLM_5_TURBO_MODEL,
+        ),
         Some("high")
     );
 
     app.api_provider = ApiProvider::Minimax;
     app.model = crate::config::DEFAULT_MINIMAX_MODEL.to_string();
     assert_eq!(
-        app.reasoning_effort_api_value_for_replay(crate::config::DEFAULT_MINIMAX_BASE_URL),
+        app.reasoning_effort_api_value_for_replay(
+            ApiProvider::Minimax,
+            crate::config::DEFAULT_MINIMAX_BASE_URL,
+            crate::config::DEFAULT_MINIMAX_MODEL,
+        ),
         Some("high")
     );
 
     app.last_effective_reasoning_effort = Some(EffectiveReasoningEffort::Unavailable);
     assert_eq!(
-        app.reasoning_effort_api_value_for_replay(crate::config::DEFAULT_ZAI_BASE_URL),
+        app.reasoning_effort_api_value_for_replay(
+            ApiProvider::Zai,
+            crate::config::DEFAULT_ZAI_BASE_URL,
+            crate::config::ZAI_GLM_5_TURBO_MODEL,
+        ),
         None
+    );
+}
+
+#[test]
+fn cache_replay_normalizes_reasoning_against_the_concrete_auto_route() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Deepseek;
+    app.model = "auto".to_string();
+    app.auto_model = true;
+
+    app.reasoning_effort = ReasoningEffort::Off;
+    assert_eq!(
+        app.reasoning_effort_api_value_for_replay(
+            ApiProvider::OpenaiCodex,
+            crate::config::DEFAULT_OPENAI_CODEX_BASE_URL,
+            crate::config::DEFAULT_OPENAI_CODEX_MODEL,
+        ),
+        Some("low"),
+        "Codex must apply its Off-to-Low floor even when DeepSeek is configured"
+    );
+
+    app.reasoning_effort = ReasoningEffort::Medium;
+    assert_eq!(
+        app.reasoning_effort_api_value_for_replay(
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            crate::config::KIMI_CODE_K3_MODEL,
+        ),
+        Some("medium"),
+        "Kimi Code K3 must retain its exact-route Medium tier"
+    );
+}
+
+#[test]
+fn cache_replay_target_uses_the_last_completed_auto_route() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.model = "auto".to_string();
+    app.auto_model = true;
+    app.last_effective_provider = Some(ApiProvider::OpenaiCodex);
+    app.last_effective_provider_identity = Some(ApiProvider::OpenaiCodex.as_str().to_string());
+    app.last_effective_model = Some(crate::config::DEFAULT_OPENAI_CODEX_MODEL.to_string());
+    app.session.last_base_url = Some(crate::config::DEFAULT_OPENAI_CODEX_BASE_URL.to_string());
+    app.push_turn_cache_record(TurnCacheRecord {
+        provider: Some(ApiProvider::OpenaiCodex),
+        provider_identity: Some(ApiProvider::OpenaiCodex.as_str().to_string()),
+        model: Some(crate::config::DEFAULT_OPENAI_CODEX_MODEL.to_string()),
+        auto_model: true,
+        input_tokens: 1,
+        output_tokens: 1,
+        cache_hit_tokens: None,
+        cache_miss_tokens: None,
+        cache_write_tokens: None,
+        reasoning_tokens: None,
+        cost_audit: None,
+        reasoning_replay_tokens: None,
+        recorded_at: std::time::Instant::now(),
+    });
+
+    let target = app
+        .cache_replay_target()
+        .expect("completed Auto route must be replayable");
+
+    assert_eq!(target.provider, ApiProvider::OpenaiCodex);
+    assert_eq!(target.provider_identity, ApiProvider::OpenaiCodex.as_str());
+    assert_eq!(
+        target.provider_id.as_deref(),
+        Some(ApiProvider::OpenaiCodex.as_str())
+    );
+    assert_eq!(target.model, crate::config::DEFAULT_OPENAI_CODEX_MODEL);
+    assert_eq!(
+        target.base_url.as_deref(),
+        Some(crate::config::DEFAULT_OPENAI_CODEX_BASE_URL)
+    );
+
+    // A restored Auto session has no turn ring or raw endpoint. Once warmup
+    // safely re-resolves that route, its exact key becomes sufficient
+    // endpoint evidence for a following inspect.
+    app.session.turn_cache_history.clear();
+    app.session.last_base_url = None;
+    app.session.last_warmup_key = Some(CacheWarmupKey {
+        provider: ApiProvider::OpenaiCodex.as_str().to_string(),
+        model: crate::config::DEFAULT_OPENAI_CODEX_MODEL.to_string(),
+        base_url: crate::config::DEFAULT_OPENAI_CODEX_BASE_URL.to_string(),
+        static_prefix_hash: "static".to_string(),
+        tool_catalog_hash: "tools".to_string(),
+        project_pack_hash: "project".to_string(),
+        skills_hash: "skills".to_string(),
+    });
+    assert_eq!(
+        app.cache_replay_target()
+            .and_then(|target| target.base_url)
+            .as_deref(),
+        Some(crate::config::DEFAULT_OPENAI_CODEX_BASE_URL)
     );
 }
 

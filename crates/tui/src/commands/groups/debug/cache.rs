@@ -48,16 +48,18 @@ fn format_cache_inspect(app: &mut App, verbose: bool, json_mode: bool) -> String
         return "cache inspect: --json and --verbose cannot be combined".to_string();
     }
 
-    let replay_base_url = app
-        .session
-        .last_base_url
-        .as_deref()
-        .unwrap_or(&app.active_route_base_url);
+    let Some(target) = app.cache_replay_target() else {
+        return "cache inspect: Auto has no concrete route yet; send a turn first".to_string();
+    };
+    let Some(replay_base_url) = target.base_url.as_deref() else {
+        return "cache inspect: the restored Auto route has no captured endpoint; send a turn first"
+            .to_string();
+    };
     let reasoning_effort = app
-        .reasoning_effort_api_value_for_replay(replay_base_url)
+        .reasoning_effort_api_value_for_replay(target.provider, replay_base_url, &target.model)
         .map(str::to_string);
     let request = MessageRequest {
-        model: app.model.clone(),
+        model: target.model.clone(),
         messages: app.api_messages.clone(),
         max_tokens: 0,
         system: app.system_prompt.clone(),
@@ -73,9 +75,9 @@ fn format_cache_inspect(app: &mut App, verbose: bool, json_mode: bool) -> String
     let inspection = inspect_prompt_for_request(&request);
     let previous = app.session.last_cache_inspection.as_ref();
     let current_warmup_key = CacheWarmupKey::from_inspection(
-        &format!("{:?}", app.api_provider),
-        &app.model,
-        app.session.last_base_url.as_deref().unwrap_or_default(),
+        &target.provider_identity,
+        &target.model,
+        replay_base_url,
         &inspection,
     );
     let warmup_status =

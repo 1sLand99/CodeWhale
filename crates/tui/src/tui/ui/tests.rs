@@ -2831,6 +2831,89 @@ fn create_test_app() -> App {
 }
 
 #[test]
+fn cache_warmup_resolves_the_last_concrete_auto_route() {
+    let config = Config {
+        provider: Some("deepseek".to_string()),
+        providers: Some(ProvidersConfig {
+            vllm: ProviderConfig {
+                base_url: Some("http://127.0.0.1:18191/v1".to_string()),
+                model: Some("auto-cache-model".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut app = create_test_app();
+    app.model = "auto".to_string();
+    app.auto_model = true;
+    app.last_effective_provider = Some(ApiProvider::Vllm);
+    app.last_effective_provider_identity = Some(ApiProvider::Vllm.as_str().to_string());
+    app.last_effective_model = Some("auto-cache-model".to_string());
+
+    let route = resolve_cache_replay_route(&app, &config).expect("last Auto route should resolve");
+
+    assert_eq!(route.identity.provider, ApiProvider::Vllm);
+    assert_eq!(route.identity.key, ApiProvider::Vllm.as_str());
+    assert_eq!(route.model, "auto-cache-model");
+    assert_eq!(
+        route.candidate.endpoint().base_url,
+        "http://127.0.0.1:18191/v1"
+    );
+
+    app.last_effective_provider_identity = Some(ApiProvider::Openrouter.as_str().to_string());
+    let error = resolve_cache_replay_route(&app, &config)
+        .expect_err("a mismatched persisted identity must fail closed");
+    assert!(
+        error.to_string().contains("route identity"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[test]
+fn cache_warmup_rejects_an_auto_route_whose_endpoint_changed() {
+    let config = Config {
+        provider: Some("deepseek".to_string()),
+        providers: Some(ProvidersConfig {
+            vllm: ProviderConfig {
+                base_url: Some("http://127.0.0.1:18192/v1".to_string()),
+                model: Some("auto-cache-model".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut app = create_test_app();
+    app.model = "auto".to_string();
+    app.auto_model = true;
+    app.last_effective_provider = Some(ApiProvider::Vllm);
+    app.last_effective_provider_identity = Some(ApiProvider::Vllm.as_str().to_string());
+    app.last_effective_model = Some("auto-cache-model".to_string());
+    app.session.last_base_url = Some("http://127.0.0.1:18191/v1".to_string());
+    app.push_turn_cache_record(crate::tui::app::TurnCacheRecord {
+        provider: Some(ApiProvider::Vllm),
+        provider_identity: Some(ApiProvider::Vllm.as_str().to_string()),
+        model: Some("auto-cache-model".to_string()),
+        auto_model: true,
+        input_tokens: 1,
+        output_tokens: 1,
+        cache_hit_tokens: None,
+        cache_miss_tokens: None,
+        cache_write_tokens: None,
+        reasoning_tokens: None,
+        cost_audit: None,
+        reasoning_replay_tokens: None,
+        recorded_at: Instant::now(),
+    });
+
+    let error = resolve_cache_replay_route(&app, &config)
+        .expect_err("changed endpoint must invalidate cache replay");
+
+    assert!(error.to_string().contains("endpoint changed"), "{error:#}");
+}
+
+#[test]
 fn hotbar_setup_save_persists_bindings_to_config_path() {
     let tmp = TempDir::new().expect("config tempdir");
     let config_path = tmp.path().join("config.toml");

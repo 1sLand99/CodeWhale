@@ -7821,14 +7821,63 @@ async fn fetch_available_models(config: &Config) -> Result<Vec<String>> {
     Ok(ids)
 }
 
-async fn run_cache_warmup(app: &App, config: &Config) -> Result<(Usage, String, PromptInspection)> {
-    let client = DeepSeekClient::new(config)?;
-    let base_url = client.base_url().to_string();
+#[derive(Debug)]
+struct CacheWarmupOutcome {
+    usage: Usage,
+    provider_identity: String,
+    model: String,
+    base_url: String,
+    inspection: PromptInspection,
+}
+
+fn resolve_cache_replay_route(
+    app: &App,
+    config: &Config,
+) -> Result<crate::route_runtime::ResolvedRuntimeRoute> {
+    let target = app.cache_replay_target().ok_or_else(|| {
+        anyhow::anyhow!("Auto has no concrete route yet; send a turn before warming its cache")
+    })?;
+    let identity = config
+        .resolve_persisted_provider_identity(
+            Some(target.provider.as_str()),
+            target.provider_id.as_deref(),
+        )
+        .map_err(anyhow::Error::msg)?;
+    if identity.provider != target.provider || identity.key != target.provider_identity {
+        anyhow::bail!(
+            "saved cache route identity `{}` now resolves as {}/{} instead of {}/{}; send a new turn before warming",
+            target.provider_identity,
+            identity.provider.as_str(),
+            identity.key,
+            target.provider.as_str(),
+            target.provider_identity
+        );
+    }
+    let route = resolve_runtime_route_for_identity(config, &identity, Some(&target.model))
+        .map_err(anyhow::Error::msg)?;
+    if let Some(previous_base_url) = target.base_url.as_deref() {
+        let previous_endpoint = crate::route_receipt::endpoint_identity(previous_base_url);
+        let current_endpoint =
+            crate::route_receipt::endpoint_identity(&route.candidate.endpoint().base_url);
+        if previous_endpoint != current_endpoint {
+            anyhow::bail!(
+                "the cache route endpoint changed since the last turn; send a new turn before warming"
+            );
+        }
+    }
+    Ok(route)
+}
+
+async fn run_cache_warmup(app: &App, config: &Config) -> Result<CacheWarmupOutcome> {
+    let route = resolve_cache_replay_route(app, config)?
+        .validate()
+        .map_err(anyhow::Error::msg)?;
+    let base_url = route.client.base_url().to_string();
     let reasoning_effort = app
-        .reasoning_effort_api_value_for_replay(&base_url)
+        .reasoning_effort_api_value_for_replay(route.identity.provider, &base_url, &route.model)
         .map(str::to_string);
     let request = MessageRequest {
-        model: app.model.clone(),
+        model: route.model.clone(),
         messages: app.api_messages.clone(),
         max_tokens: 1024,
         system: app.system_prompt.clone(),
@@ -7844,8 +7893,15 @@ async fn run_cache_warmup(app: &App, config: &Config) -> Result<(Usage, String, 
     let warmup = build_cache_warmup_request(&request);
     let inspection = inspect_prompt_for_request(&warmup);
     let response =
-        tokio::time::timeout(Duration::from_secs(45), client.create_message(warmup)).await??;
-    Ok((response.usage, base_url, inspection))
+        tokio::time::timeout(Duration::from_secs(45), route.client.create_message(warmup))
+            .await??;
+    Ok(CacheWarmupOutcome {
+        usage: response.usage,
+        provider_identity: route.identity.key,
+        model: route.model,
+        base_url,
+        inspection,
+    })
 }
 
 /// One-shot "draft my constitution" call against the user's first configured
@@ -11915,15 +11971,15 @@ async fn apply_command_result(
             AppAction::CacheWarmup => {
                 app.status_message = Some("Warming prompt cache...".to_string());
                 match run_cache_warmup(app, config).await {
-                    Ok((usage, base_url, inspection)) => {
-                        app.session.last_base_url = Some(base_url.clone());
+                    Ok(outcome) => {
+                        app.session.last_base_url = Some(outcome.base_url.clone());
                         app.session.last_warmup_key = Some(CacheWarmupKey::from_inspection(
-                            &format!("{:?}", app.api_provider),
-                            &app.model,
-                            &base_url,
-                            &inspection,
+                            &outcome.provider_identity,
+                            &outcome.model,
+                            &outcome.base_url,
+                            &outcome.inspection,
                         ));
-                        let mut message = format_helpers::cache_warmup_result(&usage);
+                        let mut message = format_helpers::cache_warmup_result(&outcome.usage);
                         if let Some(key) = app.session.last_warmup_key.as_ref() {
                             message.push_str(&format!("\nWarmup key: {}", key.hash_short()));
                         }

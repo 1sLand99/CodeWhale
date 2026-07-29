@@ -67,12 +67,12 @@ pub(crate) use composer::{
     MAX_SUBMITTED_INPUT_CHARS, next_grapheme_boundary, prev_grapheme_boundary,
 };
 pub use status::{StatusToast, StatusToastLevel};
-pub(crate) use types::EffectiveReasoningEffort;
 pub use types::{
     ApiKeyError, AppAction, AppMode, ComposerDensity, InitialInput, McpUiAction, QueuedMessage,
     ReasoningEffort, SettingSelection, ShellJobAction, SubmitDisposition, TaskPanelEntry,
     TaskPanelEntryKind, ToolCollapseMode, ToolDetailRecord, TranscriptSpacing, TuiOptions, VimMode,
 };
+pub(crate) use types::{CacheReplayTarget, EffectiveReasoningEffort};
 
 // === Types ===
 
@@ -4905,12 +4905,112 @@ impl App {
         Self::reasoning_effort_resolution_label(requested, effective, self.api_provider)
     }
 
+    /// Return the concrete provider/model route whose current prompt may be
+    /// inspected or replayed.
+    ///
+    /// For a fixed selection, the active route is authoritative. For Auto,
+    /// `self.model` is only the selector sentinel, so the latest completed
+    /// turn supplies provider/model/endpoint truth. A restored Auto session
+    /// retains provider/model but not a raw endpoint; warmup may re-resolve
+    /// that route from live config, while inspect fails honestly until a new
+    /// turn captures the endpoint.
+    #[must_use]
+    pub(crate) fn cache_replay_target(&self) -> Option<CacheReplayTarget> {
+        if !self.auto_model {
+            let model = self.model.trim();
+            if model.is_empty() || model.eq_ignore_ascii_case("auto") {
+                return None;
+            }
+            let base_url = (!self.active_route_base_url.trim().is_empty())
+                .then(|| self.active_route_base_url.clone());
+            return Some(CacheReplayTarget {
+                provider: self.api_provider,
+                provider_identity: self.provider_identity_for_persistence().to_string(),
+                provider_id: self.provider_id_for_persistence().map(str::to_string),
+                model: model.to_string(),
+                base_url,
+            });
+        }
+
+        let provider = self.last_effective_provider?;
+        let model = self.last_effective_model.as_deref()?.trim();
+        if model.is_empty() || model.eq_ignore_ascii_case("auto") {
+            return None;
+        }
+        let provider_identity = self
+            .last_effective_provider_identity
+            .as_deref()
+            .map(str::trim)
+            .filter(|identity| !identity.is_empty())
+            .map(str::to_string)
+            .or_else(|| (provider != ApiProvider::Custom).then(|| provider.as_str().to_string()))?;
+        let provider_id = if provider != ApiProvider::Custom {
+            Some(provider.as_str().to_string())
+        } else if !provider_identity.eq_ignore_ascii_case(ApiProvider::Custom.as_str()) {
+            Some(provider_identity.clone())
+        } else if self.api_provider == ApiProvider::Custom
+            && self
+                .provider_identity_for_persistence()
+                .eq_ignore_ascii_case(&provider_identity)
+        {
+            self.provider_id_for_persistence().map(str::to_string)
+        } else {
+            None
+        };
+
+        let latest_matches_route = self
+            .session
+            .turn_cache_history
+            .back()
+            .is_some_and(|record| {
+                record.auto_model
+                    && record.provider == Some(provider)
+                    && record
+                        .model
+                        .as_deref()
+                        .is_some_and(|record_model| record_model.eq_ignore_ascii_case(model))
+                    && record
+                        .provider_identity
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|identity| !identity.is_empty())
+                        .map_or(provider != ApiProvider::Custom, |identity| {
+                            identity == provider_identity
+                        })
+            });
+        let warmup_base_url = self
+            .session
+            .last_warmup_key
+            .as_ref()
+            .filter(|key| {
+                key.provider == provider_identity
+                    && key.model.eq_ignore_ascii_case(model)
+                    && !key.base_url.trim().is_empty()
+            })
+            .map(|key| key.base_url.clone());
+        let base_url = latest_matches_route
+            .then(|| self.session.last_base_url.clone())
+            .flatten()
+            .or(warmup_base_url)
+            .filter(|base_url| !base_url.trim().is_empty());
+
+        Some(CacheReplayTarget {
+            provider,
+            provider_identity,
+            provider_id,
+            model: model.to_string(),
+            base_url,
+        })
+    }
+
     /// Provider-facing effort used when replaying the current prompt for cache
-    /// inspection or warmup.
+    /// inspection or warmup on one exact route.
     #[must_use]
     pub(crate) fn reasoning_effort_api_value_for_replay(
         &self,
+        provider: ApiProvider,
         base_url: &str,
+        model: &str,
     ) -> Option<&'static str> {
         let requested = if self.reasoning_effort == ReasoningEffort::Auto {
             self.last_effective_reasoning_effort?
@@ -4918,7 +5018,7 @@ impl App {
         } else {
             self.reasoning_effort
         };
-        requested.api_value_for_route(self.api_provider, base_url, &self.model)
+        requested.api_value_for_route(provider, base_url, model)
     }
 
     pub fn compaction_config(&self) -> CompactionConfig {
