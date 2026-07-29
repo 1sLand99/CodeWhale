@@ -1928,6 +1928,13 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             app.auto_compact_user_configured = true;
             action = Some(AppAction::UpdateCompaction(app.compaction_config()));
         }
+        "auto_compact_threshold" | "auto_compact_threshold_percent" => {
+            app.auto_compact = true;
+            app.auto_compact_user_configured = true;
+            app.auto_compact_threshold_percent = settings.auto_compact_threshold_percent;
+            app.update_model_compaction_budget();
+            action = Some(AppAction::UpdateCompaction(app.compaction_config()));
+        }
         "calm_mode" | "calm" => {
             app.calm_mode = settings.calm_mode;
             app.mark_history_updated();
@@ -4447,6 +4454,34 @@ max_concurrent = 4
         assert!(result.message.is_some());
         let msg = result.message.unwrap();
         assert!(msg.contains("(session only"));
+    }
+
+    #[test]
+    fn config_threshold_enables_and_updates_live_auto_compaction() {
+        let _lock = lock_test_env();
+        let mut app = create_test_app();
+        app.auto_compact = false;
+        app.auto_compact_user_configured = false;
+
+        let result = config_command(&mut app, Some("auto_compact_threshold_percent 65"));
+
+        assert!(!result.is_error, "{:?}", result.message);
+        assert!(app.auto_compact);
+        assert!(app.auto_compact_user_configured);
+        assert_eq!(app.auto_compact_threshold_percent, 65.0);
+        assert_eq!(
+            app.compact_threshold,
+            crate::route_budget::compaction_threshold_for_route_at_percent(
+                app.api_provider,
+                app.effective_model_for_budget(),
+                app.active_route_limits,
+                65.0,
+            )
+        );
+        assert!(matches!(
+            result.action,
+            Some(AppAction::UpdateCompaction(_))
+        ));
     }
 
     #[test]

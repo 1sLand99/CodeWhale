@@ -1896,6 +1896,18 @@ impl ConfigView {
             },
             ConfigRow {
                 section: ConfigSection::History,
+                key: "effective_auto_compact".to_string(),
+                value: format!(
+                    "{} · {:.0}% · {} tokens",
+                    if app.auto_compact { "on" } else { "off" },
+                    app.auto_compact_threshold_percent,
+                    app.compact_threshold
+                ),
+                editable: false,
+                scope: ConfigScope::Session,
+            },
+            ConfigRow {
+                section: ConfigSection::History,
                 key: "max_history".to_string(),
                 value: settings.max_input_history.to_string(),
                 editable: true,
@@ -5737,6 +5749,25 @@ base_url = "https://api.xiaomimimo.com/v1"
         for (key, _) in Settings::available_settings() {
             assert!(keys.contains(key), "missing native config row for {key}");
         }
+    }
+
+    #[test]
+    fn config_view_exposes_effective_auto_compaction_policy() {
+        let mut app = create_test_app();
+        app.auto_compact = true;
+        app.auto_compact_threshold_percent = 65.0;
+        app.compact_threshold = 123_456;
+
+        let view = ConfigView::new_for_app(&app);
+        let row = view
+            .rows
+            .iter()
+            .find(|row| row.key == "effective_auto_compact")
+            .expect("effective auto-compaction row");
+
+        assert_eq!(row.value, "on · 65% · 123456 tokens");
+        assert!(!row.editable);
+        assert_eq!(row.scope, ConfigScope::Session);
     }
 
     #[test]

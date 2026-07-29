@@ -752,6 +752,7 @@ impl Settings {
         } else {
             let content = std::fs::read_to_string(&read_path)
                 .with_context(|| format!("Failed to read settings from {}", read_path.display()))?;
+            let parsed_document = toml::from_str::<toml::Value>(&content).ok();
             let mut s: Settings = match toml::from_str(&content) {
                 Ok(s) => s,
                 Err(e) => {
@@ -762,6 +763,20 @@ impl Settings {
                     Self::default()
                 }
             };
+            // A persisted threshold is itself an explicit request for
+            // auto-compaction. Older versions accepted this setting while
+            // leaving the default `auto_compact = false`, silently turning the
+            // requested trigger into a no-op. Preserve an explicit boolean
+            // opt-out, but make threshold-only files effective on load.
+            if parsed_document.as_ref().is_some_and(|document| {
+                document.as_table().is_some_and(|table| {
+                    !table.contains_key("auto_compact")
+                        && (table.contains_key("auto_compact_threshold")
+                            || table.contains_key("auto_compact_threshold_percent"))
+                })
+            }) {
+                s.auto_compact = true;
+            }
             // "yolo" used to bundle two independent choices: Agent mode and
             // unrestricted approvals.  Keep that behavior on upgrade, but
             // store/show the two choices explicitly so Settings does not claim
@@ -828,8 +843,10 @@ impl Settings {
         self.legacy_yolo_default
     }
 
-    /// Whether the user explicitly persisted an `auto_compact` preference.
-    /// When absent, callers may choose a model-aware default.
+    /// Whether the user explicitly persisted an auto-compaction preference.
+    /// A threshold is intent to enable compaction unless an explicit boolean
+    /// says otherwise. When all three keys are absent, callers may choose a
+    /// model-aware default.
     pub fn auto_compact_explicitly_configured() -> bool {
         let candidates = settings_path_candidates();
         #[cfg(test)]
@@ -856,9 +873,11 @@ fn auto_compact_explicitly_configured_from_candidates(
     let Ok(value) = toml::from_str::<toml::Value>(&content) else {
         return false;
     };
-    value
-        .as_table()
-        .is_some_and(|table| table.contains_key("auto_compact"))
+    value.as_table().is_some_and(|table| {
+        table.contains_key("auto_compact")
+            || table.contains_key("auto_compact_threshold")
+            || table.contains_key("auto_compact_threshold_percent")
+    })
 }
 
 impl Settings {
@@ -1073,6 +1092,7 @@ impl Settings {
             "auto_compact_threshold" | "auto_compact_threshold_percent" => {
                 self.auto_compact_threshold_percent =
                     parse_percent_setting("auto_compact_threshold_percent", value)?;
+                self.auto_compact = true;
             }
             "calm_mode" | "calm" => {
                 self.calm_mode = parse_bool(value)?;
@@ -1521,7 +1541,7 @@ impl Settings {
             ),
             (
                 "auto_compact_threshold_percent",
-                "Auto-compact trigger threshold percent when auto_compact is on: 10-100 (default 80)",
+                "Auto-compact trigger threshold percent: 10-100 (default 80; setting it enables auto-compaction unless auto_compact=false is explicit)",
             ),
             ("calm_mode", "Calmer UI defaults: on/off"),
             (
@@ -3134,9 +3154,49 @@ mod tests {
         settings
             .set("auto_compact_threshold", "65%")
             .expect("threshold");
+        assert!(settings.auto_compact, "a threshold expresses enable intent");
         assert_eq!(settings.auto_compact_threshold_percent, 65.0);
         assert!(settings.set("auto_compact_threshold", "9").is_err());
         assert!(settings.set("auto_compact_threshold", "101").is_err());
+    }
+
+    #[test]
+    fn threshold_only_persisted_config_enables_auto_compaction() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("settings.toml");
+        std::fs::write(&path, "auto_compact_threshold_percent = 65\n").expect("settings");
+
+        let loaded = Settings::load_persisted_from_candidates(Some(path.clone()), None, None)
+            .expect("load threshold-only settings");
+
+        assert!(loaded.auto_compact);
+        assert_eq!(loaded.auto_compact_threshold_percent, 65.0);
+        assert!(auto_compact_explicitly_configured_from_candidates((
+            Some(path),
+            None,
+            None,
+        )));
+    }
+
+    #[test]
+    fn explicit_auto_compact_off_overrides_a_persisted_threshold() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("settings.toml");
+        std::fs::write(
+            &path,
+            "auto_compact = false\nauto_compact_threshold_percent = 65\n",
+        )
+        .expect("settings");
+
+        let loaded = Settings::load_persisted_from_candidates(Some(path.clone()), None, None)
+            .expect("load explicit opt-out");
+
+        assert!(!loaded.auto_compact);
+        assert!(auto_compact_explicitly_configured_from_candidates((
+            Some(path),
+            None,
+            None,
+        )));
     }
 
     #[test]

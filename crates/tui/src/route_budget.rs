@@ -2,10 +2,7 @@ use codewhale_config::route::RouteLimits;
 
 use crate::config::{ApiProvider, provider_capability};
 use crate::context_budget::ContextBudget;
-use crate::models::{
-    DEFAULT_AUTO_COMPACT_MAX_CONTEXT_WINDOW_TOKENS, DEFAULT_COMPACTION_TOKEN_THRESHOLD,
-    context_window_for_model,
-};
+use crate::models::{DEFAULT_COMPACTION_TOKEN_THRESHOLD, context_window_for_model};
 
 /// Output room reserved by the internal budget for large-context reasoning
 /// models. This is deliberately larger than the ordinary API request cap so
@@ -229,8 +226,10 @@ pub(crate) fn auto_compact_default_for_route(
     model: &str,
     route_limits: Option<RouteLimits>,
 ) -> bool {
-    route_context_window_tokens(provider, model, route_limits)
-        <= DEFAULT_AUTO_COMPACT_MAX_CONTEXT_WINDOW_TOKENS
+    // Every resolved route has either concrete offering limits or a
+    // conservative provider/model fallback. Large windows need continuity too;
+    // their size is not a reason to disable compaction entirely.
+    route_context_window_tokens(provider, model, route_limits) > 0
 }
 
 #[cfg(test)]
@@ -325,6 +324,15 @@ mod tests {
             ),
             589_466
         );
+    }
+
+    #[test]
+    fn kimi_k3_defaults_auto_compaction_on() {
+        assert!(auto_compact_default_for_route(
+            ApiProvider::Moonshot,
+            "kimi-k3",
+            None,
+        ));
     }
 
     #[test]
