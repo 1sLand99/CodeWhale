@@ -652,7 +652,7 @@ mod tests {
                             crate::config::DEEPSEEK_ALIAS_REPLACEMENT
                         );
                         app.reasoning_effort = crate::tui::app::ReasoningEffort::Max;
-                        app.reasoning_effort_explicit = false;
+                        app.reasoning_effort_preference = None;
                         app.apply_provider_switch_reasoning_effort(
                             provider,
                             official_base_url,
@@ -705,7 +705,7 @@ mod tests {
             "deepseek-reasoner"
         );
         app.reasoning_effort = crate::tui::app::ReasoningEffort::Max;
-        app.reasoning_effort_explicit = false;
+        app.reasoning_effort_preference = None;
         app.apply_provider_switch_reasoning_effort(
             provider,
             "https://models.example/v1",
@@ -717,7 +717,7 @@ mod tests {
             "custom endpoint owns alias semantics"
         );
 
-        app.reasoning_effort_explicit = true;
+        app.reasoning_effort_preference = Some(crate::tui::app::ReasoningEffort::Max);
         app.apply_provider_switch_reasoning_effort(
             provider,
             crate::config::DEFAULT_DEEPSEEK_BASE_URL,

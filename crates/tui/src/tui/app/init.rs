@@ -336,6 +336,9 @@ impl App {
             .reasoning_effort
             .as_deref()
             .or_else(|| config.reasoning_effort());
+        let reasoning_effort_preference = configured_reasoning_effort
+            .filter(|_| reasoning_effort_explicit)
+            .map(ReasoningEffort::from_setting);
         let threshold_model = if auto_model {
             DEFAULT_TEXT_MODEL
         } else {
@@ -356,22 +359,29 @@ impl App {
                 active_route_limits,
             )
         };
-        let mut reasoning_effort = configured_reasoning_effort.map_or_else(
-            || {
-                if auto_model {
-                    ReasoningEffort::Auto
-                } else {
-                    ReasoningEffort::default()
-                }
-            },
-            |setting| {
-                if auto_model {
-                    ReasoningEffort::from_setting(setting)
-                } else {
-                    ReasoningEffort::from_setting_for_provider(setting, provider)
-                }
-            },
-        );
+        let mut reasoning_effort = if auto_model && !reasoning_effort_explicit {
+            // A retired fixed-model alias can infer a compatibility effort in
+            // Config. That is route metadata, not an explicit user preference,
+            // so it must not silently constrain unresolved auto routing.
+            ReasoningEffort::Auto
+        } else {
+            configured_reasoning_effort.map_or_else(
+                || {
+                    if auto_model {
+                        ReasoningEffort::Auto
+                    } else {
+                        ReasoningEffort::default()
+                    }
+                },
+                |setting| {
+                    if auto_model {
+                        ReasoningEffort::from_setting(setting)
+                    } else {
+                        ReasoningEffort::from_setting_for_provider(setting, provider)
+                    }
+                },
+            )
+        };
         if !auto_model
             && !reasoning_effort_explicit
             && let Some(effort) = crate::config::legacy_deepseek_alias_effort_for_route(
@@ -627,7 +637,7 @@ impl App {
             active_context_window_override,
             pending_provider_switch: None,
             reasoning_effort,
-            reasoning_effort_explicit,
+            reasoning_effort_preference,
             last_effective_reasoning_effort: None,
             workspace,
             // #4022: the worker thread is spawned lazily on first submit, so

@@ -67,13 +67,13 @@ pub(crate) use composer::{
     MAX_SUBMITTED_INPUT_CHARS, next_grapheme_boundary, prev_grapheme_boundary,
 };
 pub use status::{StatusToast, StatusToastLevel};
-pub(crate) use types::EffectiveReasoningEffort;
 pub use types::{
     ApiKeyError, AppAction, AppMode, ComposerDensity, ComposerSubmitAction, ComposerSubmitChord,
     InitialInput, McpUiAction, QueuedMessage, ReasoningEffort, SettingSelection, ShellJobAction,
     SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind, ToolCollapseMode, ToolDetailRecord,
     TranscriptSpacing, TuiOptions, VimMode,
 };
+pub(crate) use types::{CacheReplayTarget, EffectiveReasoningEffort};
 
 // === Types ===
 
@@ -1208,14 +1208,16 @@ pub struct App {
     /// Pending provider transition for transactional rollback when the next
     /// auth failure indicates the new provider cannot be used.
     pub pending_provider_switch: Option<PendingProviderSwitch>,
-    /// Current reasoning-effort tier for DeepSeek thinking mode.
-    /// Cycled via Shift+Tab; initialized from config at startup.
+    /// Current live reasoning-effort selection. Route changes may normalize
+    /// this value; the raw user choice remains in
+    /// [`Self::reasoning_effort_preference`].
     pub reasoning_effort: ReasoningEffort,
-    /// Whether the current effort came from an explicit user setting rather
-    /// than compatibility inference from a retiring model alias.
-    pub(crate) reasoning_effort_explicit: bool,
-    /// Last concrete thinking tier chosen while `reasoning_effort` is auto.
-    pub last_effective_reasoning_effort: Option<ReasoningEffort>,
+    /// Raw explicit user preference, before any fixed provider/model route
+    /// normalizes it. `None` means the current live tier is an implicit route
+    /// default or compatibility inference and must not constrain Auto routing.
+    pub(crate) reasoning_effort_preference: Option<ReasoningEffort>,
+    /// Last effective thinking receipt for the most recently accepted route.
+    pub(crate) last_effective_reasoning_effort: Option<EffectiveReasoningEffort>,
     pub workspace: PathBuf,
     /// Off-event-loop worker for durable Lane control writes. `/lane interrupt`
     /// submits here instead of tearing down a Runtime on the composer thread
@@ -2456,7 +2458,7 @@ impl App {
         }
     }
 
-    /// Cycle reasoning-effort through the active provider's distinct tiers.
+    /// Cycle reasoning-effort through the active route's distinct tiers.
     ///
     /// Typed for the same reason as [`Self::select_mode`]: a bool could not tell
     /// the hotbar whether the turn lock refused the action or the provider
@@ -2474,14 +2476,19 @@ impl App {
         }
     }
 
-    /// Advance reasoning effort to the next tier for the active provider and
+    /// Advance reasoning effort to the next tier for the active route and
     /// surface the change: set a status message and refresh the compaction
-    /// budget. Shared by the Ctrl+T shortcut (`cycle_effort`) and the hotbar
+    /// budget. Auto routing retains the full provider-neutral vocabulary until
+    /// dispatch; a concrete provider uses its distinct supported tiers. Shared
+    /// by the Ctrl+T shortcut (`cycle_effort`) and the hotbar
     /// `reasoning.cycle` action so the two paths cannot drift.
     pub(crate) fn apply_reasoning_effort_cycle(&mut self) {
-        let requested = self
-            .reasoning_effort
-            .cycle_next_for_provider(self.api_provider);
+        let requested = if self.auto_model {
+            self.reasoning_effort.cycle_next_for_auto_model()
+        } else {
+            self.reasoning_effort
+                .cycle_next_for_provider(self.api_provider)
+        };
         let effective = self.effective_reasoning_effort_for_active_route(requested);
         let route_truth = self.active_reasoning_route_truth();
         let provider_kind = route_truth.map_or(self.api_provider, |(provider, _, _, _)| provider);
@@ -2510,23 +2517,14 @@ impl App {
             return;
         }
         self.reasoning_effort = requested;
-        self.reasoning_effort_explicit = true;
+        self.reasoning_effort_preference = Some(requested);
         self.last_effective_reasoning_effort = None;
         // Same persistence owner as the model/effort pickers, so Ctrl+T and the
         // hotbar `reasoning.cycle` action restore on restart exactly like a
         // picker selection does. Only the *requested* tier is persisted — the
         // effective tier is a per-turn route fact, not a user preference.
-        let persisted_effort = if self.auto_model {
-            requested.as_setting()
-        } else {
-            requested.as_setting_for_route(
-                self.api_provider,
-                &self.active_route_base_url,
-                &self.model,
-            )
-        };
         self.startup_defaults.spawn(
-            crate::tui::startup_defaults::StartupDefaults::reasoning_effort(persisted_effort),
+            crate::tui::startup_defaults::StartupDefaults::reasoning_effort(requested.as_setting()),
         );
         self.update_model_compaction_budget();
         self.status_message = Some(format!(
@@ -4608,13 +4606,18 @@ impl App {
         self.last_auto_route_receipt = None;
         self.pending_auto_route_receipt = None;
         self.last_effective_reasoning_effort = None;
-        // Auto model routing is independent from the requested reasoning
-        // tier. Keep that preference intact so session restore and model
-        // changes cannot silently replace a persisted fixed tier with Auto.
-        if !auto_model {
+        // Auto model routing is independent from an explicitly requested raw
+        // reasoning tier. Never reuse the route-normalized live value here:
+        // fixed DeepSeek can collapse low→high and Codex off→low.
+        if auto_model {
             self.reasoning_effort = self
-                .reasoning_effort
-                .normalize_for_provider(self.api_provider);
+                .reasoning_effort_preference
+                .unwrap_or(ReasoningEffort::Auto);
+        } else {
+            let requested = self
+                .reasoning_effort_preference
+                .unwrap_or(self.reasoning_effort);
+            self.reasoning_effort = requested.normalize_for_provider(self.api_provider);
         }
     }
 
@@ -4659,6 +4662,7 @@ impl App {
             provider_identity,
             model: model.clone(),
             receipt: receipt.clone(),
+            effective_reasoning_effort: self.last_effective_reasoning_effort.map(Into::into),
         })
     }
 
@@ -4713,9 +4717,8 @@ impl App {
         let inferred = model_override.and_then(|model| {
             crate::config::legacy_deepseek_alias_effort_for_route(provider, base_url, model)
         });
-        self.reasoning_effort = if self.reasoning_effort_explicit {
-            self.reasoning_effort
-                .normalize_for_route(provider, base_url, wire_model)
+        self.reasoning_effort = if let Some(requested) = self.reasoning_effort_preference {
+            requested.normalize_for_route(provider, base_url, wire_model)
         } else if let Some(effort) = inferred {
             ReasoningEffort::from_setting(effort)
                 .normalize_for_route(provider, base_url, wire_model)
@@ -4795,9 +4798,27 @@ impl App {
             .as_ref()
             .and_then(|turn| turn.route.as_ref())
             .is_some_and(|route| route.receipt.is_some());
+        if self.auto_model
+            && !auto_route_has_receipt
+            && self.last_auto_route_receipt.is_some()
+            && let Some(effective) = self.last_effective_reasoning_effort
+        {
+            // Once a concrete Auto route has been accepted, its normalized
+            // tier remains the display authority until the model or requested
+            // effort changes. The configured classifier route is not evidence
+            // of what the completed turn received.
+            return effective;
+        }
+        if requested == ReasoningEffort::Auto
+            && let Some(effective) = self.last_effective_reasoning_effort
+        {
+            // The accepted route receipt is already the strongest available
+            // truth. Preserve enabled-but-untiered and unavailable states
+            // instead of forcing them through the tier-only projection.
+            return effective;
+        }
         let effective = if requested == ReasoningEffort::Auto {
-            self.last_effective_reasoning_effort
-                .unwrap_or(ReasoningEffort::Auto)
+            ReasoningEffort::Auto
         } else if self.auto_model && !auto_route_has_receipt {
             // The configured provider is only the classifier's starting
             // point, not the route that will receive the request.
@@ -4911,6 +4932,122 @@ impl App {
         let requested = self.reasoning_effort;
         let effective = self.effective_reasoning_effort_for_active_route(requested);
         Self::reasoning_effort_resolution_label(requested, effective, self.api_provider)
+    }
+
+    /// Return the concrete provider/model route whose current prompt may be
+    /// inspected or replayed.
+    ///
+    /// For a fixed selection, the active route is authoritative. For Auto,
+    /// `self.model` is only the selector sentinel, so the latest completed
+    /// turn supplies provider/model/endpoint truth. A restored Auto session
+    /// retains provider/model but not a raw endpoint; warmup may re-resolve
+    /// that route from live config, while inspect fails honestly until a new
+    /// turn captures the endpoint.
+    #[must_use]
+    pub(crate) fn cache_replay_target(&self) -> Option<CacheReplayTarget> {
+        if !self.auto_model {
+            let model = self.model.trim();
+            if model.is_empty() || model.eq_ignore_ascii_case("auto") {
+                return None;
+            }
+            let base_url = (!self.active_route_base_url.trim().is_empty())
+                .then(|| self.active_route_base_url.clone());
+            return Some(CacheReplayTarget {
+                provider: self.api_provider,
+                provider_identity: self.provider_identity_for_persistence().to_string(),
+                provider_id: self.provider_id_for_persistence().map(str::to_string),
+                model: model.to_string(),
+                base_url,
+            });
+        }
+
+        let provider = self.last_effective_provider?;
+        let model = self.last_effective_model.as_deref()?.trim();
+        if model.is_empty() || model.eq_ignore_ascii_case("auto") {
+            return None;
+        }
+        let provider_identity = self
+            .last_effective_provider_identity
+            .as_deref()
+            .map(str::trim)
+            .filter(|identity| !identity.is_empty())
+            .map(str::to_string)
+            .or_else(|| (provider != ApiProvider::Custom).then(|| provider.as_str().to_string()))?;
+        let provider_id = if provider != ApiProvider::Custom {
+            Some(provider.as_str().to_string())
+        } else if !provider_identity.eq_ignore_ascii_case(ApiProvider::Custom.as_str()) {
+            Some(provider_identity.clone())
+        } else if self.api_provider == ApiProvider::Custom
+            && self
+                .provider_identity_for_persistence()
+                .eq_ignore_ascii_case(&provider_identity)
+        {
+            self.provider_id_for_persistence().map(str::to_string)
+        } else {
+            None
+        };
+
+        let latest_matches_route = self
+            .session
+            .turn_cache_history
+            .back()
+            .is_some_and(|record| {
+                record.auto_model
+                    && record.provider == Some(provider)
+                    && record
+                        .model
+                        .as_deref()
+                        .is_some_and(|record_model| record_model.eq_ignore_ascii_case(model))
+                    && record
+                        .provider_identity
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|identity| !identity.is_empty())
+                        .map_or(provider != ApiProvider::Custom, |identity| {
+                            identity == provider_identity
+                        })
+            });
+        let warmup_base_url = self
+            .session
+            .last_warmup_key
+            .as_ref()
+            .filter(|key| {
+                key.provider == provider_identity
+                    && key.model.eq_ignore_ascii_case(model)
+                    && !key.base_url.trim().is_empty()
+            })
+            .map(|key| key.base_url.clone());
+        let base_url = latest_matches_route
+            .then(|| self.session.last_base_url.clone())
+            .flatten()
+            .or(warmup_base_url)
+            .filter(|base_url| !base_url.trim().is_empty());
+
+        Some(CacheReplayTarget {
+            provider,
+            provider_identity,
+            provider_id,
+            model: model.to_string(),
+            base_url,
+        })
+    }
+
+    /// Provider-facing effort used when replaying the current prompt for cache
+    /// inspection or warmup on one exact route.
+    #[must_use]
+    pub(crate) fn reasoning_effort_api_value_for_replay(
+        &self,
+        provider: ApiProvider,
+        base_url: &str,
+        model: &str,
+    ) -> Option<&'static str> {
+        let requested = if self.reasoning_effort == ReasoningEffort::Auto {
+            self.last_effective_reasoning_effort?
+                .request_tier_for_replay()?
+        } else {
+            self.reasoning_effort
+        };
+        requested.api_value_for_route(provider, base_url, model)
     }
 
     pub fn compaction_config(&self) -> CompactionConfig {

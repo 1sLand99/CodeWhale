@@ -58,13 +58,15 @@ pub enum AppMode {
 
 /// Reasoning-effort tier, mirrored across DeepSeek and Codex effort pickers.
 ///
-/// The config file accepts all five string values for forward-compat with
+/// The config file accepts all six string values for forward-compat with
 /// providers that expose the full spectrum; DeepSeek currently collapses
 /// `Low`/`Medium` → `high`. OpenAI Codex normalizes inherited DeepSeek-only
 /// `Off` to `Low` and displays/sends `Max` as `xhigh` at the provider
 /// boundary. The default keyboard cycler walks the three DeepSeek-distinct
 /// tiers: `Off` → `High` → `Max` → `Off`; provider-aware callers should use
-/// [`ReasoningEffort::cycle_next_for_provider`].
+/// [`ReasoningEffort::cycle_next_for_provider`]. Auto routing has no concrete
+/// provider yet, so [`ReasoningEffort::cycle_next_for_auto_model`] retains the
+/// full provider-neutral preference vocabulary until dispatch.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum ReasoningEffort {
     Off,
@@ -87,6 +89,39 @@ pub(crate) enum EffectiveReasoningEffort {
     Tier(ReasoningEffort),
     ThinkingEnabledGranularityUnavailable,
     Unavailable,
+}
+
+/// Exact provider/model route whose prompt can be inspected or replayed.
+///
+/// Auto-model sessions keep `model == "auto"` as the user's selection, so
+/// cache operations must carry the last concrete route separately. The base
+/// URL is absent after restoring an older session because saved Auto receipts
+/// intentionally do not persist raw endpoints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CacheReplayTarget {
+    pub(crate) provider: ApiProvider,
+    pub(crate) provider_identity: String,
+    /// Additive exact provider id used by persisted-route resolution.
+    /// `None` is meaningful for the legacy root-level `custom` route.
+    pub(crate) provider_id: Option<String>,
+    pub(crate) model: String,
+    pub(crate) base_url: Option<String>,
+}
+
+impl EffectiveReasoningEffort {
+    /// Reconstruct a safe request tier for cache replay and inspection.
+    ///
+    /// Routes with an enabled-but-untiered receipt collapse every non-Off
+    /// request to the same wire toggle, so High is the canonical value that
+    /// keeps reasoning enabled without claiming a granular effective tier.
+    #[must_use]
+    pub(crate) const fn request_tier_for_replay(self) -> Option<ReasoningEffort> {
+        match self {
+            Self::Tier(tier) => Some(tier),
+            Self::ThinkingEnabledGranularityUnavailable => Some(ReasoningEffort::High),
+            Self::Unavailable => None,
+        }
+    }
 }
 
 impl From<EffectiveReasoningEffort> for crate::work_graph::ReasoningEffortTier {
@@ -332,6 +367,20 @@ impl ReasoningEffort {
             Self::High => Self::Max,
             Self::Max => Self::Low,
             Self::Off | Self::Auto => Self::Low,
+        }
+    }
+
+    /// Cycle the unresolved auto-model preference without applying any
+    /// provider's normalization rules prematurely.
+    #[must_use]
+    pub fn cycle_next_for_auto_model(self) -> Self {
+        match self {
+            Self::Auto => Self::Off,
+            Self::Off => Self::Low,
+            Self::Low => Self::Medium,
+            Self::Medium => Self::High,
+            Self::High => Self::Max,
+            Self::Max => Self::Auto,
         }
     }
 }

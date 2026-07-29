@@ -14,6 +14,7 @@ use crate::tools::plan::PlanSnapshot;
 use crate::tools::todo::TodoListSnapshot;
 use crate::tui::file_mention::ContextReference;
 use crate::utils::write_atomic;
+use crate::work_graph::ReasoningEffortTier;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -455,6 +456,11 @@ pub(crate) struct SavedAutoRouteReceipt {
     pub(crate) provider_identity: String,
     pub(crate) model: String,
     pub(crate) receipt: AutoRouteReceipt,
+    /// Canonical effective reasoning receipt for the selected route, including
+    /// routes where a concrete tier cannot be proven. Optional so older
+    /// sessions remain loadable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) effective_reasoning_effort: Option<ReasoningEffortTier>,
 }
 
 /// A saved session containing full conversation history

@@ -138,10 +138,11 @@ use super::key_actions;
 
 use super::app::{
     ActiveTurnMetadata, AgentCurrentActivity, AgentCurrentActivityStatus, App, AppAction, AppMode,
-    ComposerSubmitAction, ComposerSubmitChord, HuntVerdict, OnboardingState, PendingProviderSwitch,
-    QueuedMessage, ReasoningEffort, SidebarFocus, StatusToast, StatusToastLevel, SubmitDisposition,
-    TaskPanelEntry, TaskPanelEntryKind, ToolEvidence, TuiOptions, bound_agent_activity_text,
-    looks_like_slash_command_input, shell_command_from_bang_input,
+    ComposerSubmitAction, ComposerSubmitChord, EffectiveReasoningEffort, HuntVerdict,
+    OnboardingState, PendingProviderSwitch, QueuedMessage, ReasoningEffort, SidebarFocus,
+    StatusToast, StatusToastLevel, SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind,
+    ToolEvidence, TuiOptions, bound_agent_activity_text, looks_like_slash_command_input,
+    shell_command_from_bang_input,
 };
 use super::approval::{
     ApprovalMode, ApprovalRequest, ApprovalView, ElevationRequest, ElevationView, ReviewDecision,
@@ -7819,20 +7820,63 @@ async fn fetch_available_models(config: &Config) -> Result<Vec<String>> {
     Ok(ids)
 }
 
-async fn run_cache_warmup(app: &App, config: &Config) -> Result<(Usage, String, PromptInspection)> {
-    let client = DeepSeekClient::new(config)?;
-    let base_url = client.base_url().to_string();
-    let reasoning_effort = if app.reasoning_effort == ReasoningEffort::Auto {
-        app.last_effective_reasoning_effort
-            .and_then(|effort| effort.api_value_for_route(app.api_provider, &base_url, &app.model))
-            .map(str::to_string)
-    } else {
-        app.reasoning_effort
-            .api_value_for_route(app.api_provider, &base_url, &app.model)
-            .map(str::to_string)
-    };
+#[derive(Debug)]
+struct CacheWarmupOutcome {
+    usage: Usage,
+    provider_identity: String,
+    model: String,
+    base_url: String,
+    inspection: PromptInspection,
+}
+
+fn resolve_cache_replay_route(
+    app: &App,
+    config: &Config,
+) -> Result<crate::route_runtime::ResolvedRuntimeRoute> {
+    let target = app.cache_replay_target().ok_or_else(|| {
+        anyhow::anyhow!("Auto has no concrete route yet; send a turn before warming its cache")
+    })?;
+    let identity = config
+        .resolve_persisted_provider_identity(
+            Some(target.provider.as_str()),
+            target.provider_id.as_deref(),
+        )
+        .map_err(anyhow::Error::msg)?;
+    if identity.provider != target.provider || identity.key != target.provider_identity {
+        anyhow::bail!(
+            "saved cache route identity `{}` now resolves as {}/{} instead of {}/{}; send a new turn before warming",
+            target.provider_identity,
+            identity.provider.as_str(),
+            identity.key,
+            target.provider.as_str(),
+            target.provider_identity
+        );
+    }
+    let route = resolve_runtime_route_for_identity(config, &identity, Some(&target.model))
+        .map_err(anyhow::Error::msg)?;
+    if let Some(previous_base_url) = target.base_url.as_deref() {
+        let previous_endpoint = crate::route_receipt::endpoint_identity(previous_base_url);
+        let current_endpoint =
+            crate::route_receipt::endpoint_identity(&route.candidate.endpoint().base_url);
+        if previous_endpoint != current_endpoint {
+            anyhow::bail!(
+                "the cache route endpoint changed since the last turn; send a new turn before warming"
+            );
+        }
+    }
+    Ok(route)
+}
+
+async fn run_cache_warmup(app: &App, config: &Config) -> Result<CacheWarmupOutcome> {
+    let route = resolve_cache_replay_route(app, config)?
+        .validate()
+        .map_err(anyhow::Error::msg)?;
+    let base_url = route.client.base_url().to_string();
+    let reasoning_effort = app
+        .reasoning_effort_api_value_for_replay(route.identity.provider, &base_url, &route.model)
+        .map(str::to_string);
     let request = MessageRequest {
-        model: app.model.clone(),
+        model: route.model.clone(),
         messages: app.api_messages.clone(),
         max_tokens: 1024,
         system: app.system_prompt.clone(),
@@ -7848,8 +7892,15 @@ async fn run_cache_warmup(app: &App, config: &Config) -> Result<(Usage, String, 
     let warmup = build_cache_warmup_request(&request);
     let inspection = inspect_prompt_for_request(&warmup);
     let response =
-        tokio::time::timeout(Duration::from_secs(45), client.create_message(warmup)).await??;
-    Ok((response.usage, base_url, inspection))
+        tokio::time::timeout(Duration::from_secs(45), route.client.create_message(warmup))
+            .await??;
+    Ok(CacheWarmupOutcome {
+        usage: response.usage,
+        provider_identity: route.identity.key,
+        model: route.model,
+        base_url,
+        inspection,
+    })
 }
 
 /// One-shot "draft my constitution" call against the user's first configured
@@ -9811,8 +9862,24 @@ struct UserDispatchOutcome {
     effective_model: String,
     effective_provider_identity: String,
     effective_provider_label: String,
-    selected_reasoning_effort: Option<ReasoningEffort>,
+    effective_reasoning_effort: EffectiveReasoningEffort,
     auto_selection: Option<crate::model_routing::AutoRouteSelection>,
+}
+
+fn reasoning_effort_receipt_for_route(
+    tier: ReasoningEffort,
+    provider: ApiProvider,
+    endpoint_identity: &str,
+    model: &str,
+) -> EffectiveReasoningEffort {
+    crate::work_graph::constrained_effective_reasoning_for_route(
+        tier.into(),
+        provider,
+        endpoint_identity,
+        model,
+    )
+    .map(Into::into)
+    .unwrap_or(EffectiveReasoningEffort::Tier(tier))
 }
 
 #[cfg(test)]
@@ -10119,9 +10186,16 @@ async fn run_prepared_dispatch(
     recovery: DispatchRecovery,
 ) -> Result<()> {
     // Unit tests that intentionally omit the production completion mailbox
-    // apply the result inline. Production always enters through
-    // `start_user_dispatch`, which reserves a mailbox permit first.
-    let apply = spawned_dispatch_inner(prepare, recovery, engine_handle.clone()).await;
+    // apply the result inline. Run the owned async phase as a task just like
+    // production does so its large future is polled from a clean executor
+    // stack instead of nesting under the test helper's call chain.
+    let apply = tokio::spawn(spawned_dispatch_inner(
+        prepare,
+        recovery,
+        engine_handle.clone(),
+    ))
+    .await
+    .map_err(|err| anyhow::anyhow!("dispatch task was lost: {err}"))?;
     apply(app, engine_handle, config)
 }
 
@@ -10179,6 +10253,19 @@ async fn spawned_dispatch_inner(
         auto_selection,
         routing_source: _,
     } = planned;
+    let effective_reasoning_tier = selected_reasoning_effort
+        .unwrap_or(prepare.reasoning_effort)
+        .normalize_for_route(
+            effective_provider,
+            &turn_route.candidate.endpoint().base_url,
+            &turn_route.model,
+        );
+    let effective_reasoning_receipt = reasoning_effort_receipt_for_route(
+        effective_reasoning_tier,
+        effective_provider,
+        &turn_route.candidate.endpoint().base_url,
+        &turn_route.model,
+    );
 
     if let Err(err) = engine_handle
         .send(Op::SendMessage {
@@ -10217,7 +10304,7 @@ async fn spawned_dispatch_inner(
             effective_model,
             effective_provider_identity,
             effective_provider_label,
-            selected_reasoning_effort,
+            effective_reasoning_effort: effective_reasoning_receipt,
             auto_selection,
         },
     )
@@ -10255,7 +10342,7 @@ fn build_dispatch_success_closure(
             );
             app.scroll_to_bottom();
 
-            app.last_effective_reasoning_effort = outcome.selected_reasoning_effort;
+            app.last_effective_reasoning_effort = Some(outcome.effective_reasoning_effort);
             if prepare.auto_model {
                 app.last_effective_model = Some(outcome.effective_model.clone());
                 app.last_effective_provider = Some(outcome.effective_provider);
@@ -10732,7 +10819,7 @@ async fn apply_model_picker_choice(
     model: String,
     target_provider: Option<ApiProvider>,
     target_provider_id: Option<String>,
-    mut effort: crate::tui::app::ReasoningEffort,
+    effort: crate::tui::app::ReasoningEffort,
     previous_model: String,
     previous_effort: crate::tui::app::ReasoningEffort,
 ) {
@@ -10748,6 +10835,8 @@ async fn apply_model_picker_choice(
         target_provider.as_str().to_string()
     };
     let model_is_auto = model.trim().eq_ignore_ascii_case("auto");
+    let preserve_auto_effort =
+        app.reasoning_effort_preference.is_some() || effort != previous_effort;
     if target_provider != app.api_provider
         || target_identity != app.provider_identity_for_persistence()
     {
@@ -10766,11 +10855,6 @@ async fn apply_model_picker_choice(
             return;
         }
         if !model_is_auto {
-            effort = effort.normalize_for_route(
-                app.api_provider,
-                &app.active_route_base_url,
-                &app.model,
-            );
             apply_picker_effort_choice(app, engine_handle, effort, previous_effort).await;
             return;
         }
@@ -10823,11 +10907,12 @@ async fn apply_model_picker_choice(
         };
     }
 
-    if !model_is_auto {
-        effort = effort.normalize_for_route(app.api_provider, &route_base_url, &resolved_model);
-    }
+    let effective_effort = if model_is_auto {
+        effort
+    } else {
+        effort.normalize_for_route(app.api_provider, &route_base_url, &resolved_model)
+    };
     let effort_changed = effort != previous_effort;
-    let live_effort_changed = effort != app.reasoning_effort;
 
     if model_changed {
         app.set_model_selection(resolved_model.clone());
@@ -10837,14 +10922,23 @@ async fn apply_model_picker_choice(
         app.enable_provider_model(&provider_identity, &resolved_model);
         app.clear_model_scoped_telemetry();
     }
-    if live_effort_changed {
-        app.reasoning_effort = effort;
+    let preference_changed = if model_is_auto && !preserve_auto_effort {
+        app.reasoning_effort_preference.take().is_some()
+    } else {
+        let changed = app.reasoning_effort_preference != Some(effort);
+        app.reasoning_effort_preference = Some(effort);
+        changed
+    };
+    let live_effort_changed = effective_effort != app.reasoning_effort;
+    if !model_is_auto || preserve_auto_effort {
+        app.reasoning_effort = effective_effort;
+    } else {
+        app.reasoning_effort = ReasoningEffort::Auto;
+    }
+    if live_effort_changed || preference_changed {
         app.last_effective_reasoning_effort = None;
     }
-    if effort_changed {
-        app.reasoning_effort_explicit = true;
-    }
-    if model_changed || effort_changed {
+    if model_changed || live_effort_changed || preference_changed {
         app.update_model_compaction_budget();
     }
 
@@ -10862,17 +10956,16 @@ async fn apply_model_picker_choice(
     ) {
         update = update.with_default_model(resolved_model.as_str());
     }
-    let persisted_effort = if model_is_auto {
-        effort.as_setting()
-    } else {
-        effort.as_setting_for_route(app.api_provider, &route_base_url, &resolved_model)
-    };
-    update = update
-        .with_provider_model(
-            app.provider_identity_for_persistence(),
-            resolved_model.as_str(),
-        )
-        .with_reasoning_effort(persisted_effort);
+    update = update.with_provider_model(
+        app.provider_identity_for_persistence(),
+        resolved_model.as_str(),
+    );
+    if !model_is_auto || preserve_auto_effort {
+        // Settings own the raw global preference. Route normalization belongs
+        // to the concrete live request and must not erase a tier before the
+        // user returns to Auto routing.
+        update = update.with_reasoning_effort(effort.as_setting());
+    }
     // Applied synchronously: the setup receipt below is only honest if we know
     // the write landed. Going through the app-owned writer means any queued
     // mode/thinking selection the user made first is applied first, so this
@@ -10898,10 +10991,11 @@ async fn apply_model_picker_choice(
         resolved_model.clone()
     };
     let previous_effort_summary = previous_effort.display_label_for_provider(app.api_provider);
-    let effort_summary = if effort == ReasoningEffort::Auto {
+    let applied_effort = app.reasoning_effort;
+    let effort_summary = if applied_effort == ReasoningEffort::Auto {
         "auto (per-turn thinking)".to_string()
     } else {
-        effort
+        applied_effort
             .display_label_for_provider(app.api_provider)
             .to_string()
     };
@@ -10947,40 +11041,40 @@ async fn apply_model_picker_choice(
 async fn apply_picker_effort_choice(
     app: &mut App,
     engine_handle: &EngineHandle,
-    mut effort: ReasoningEffort,
+    effort: ReasoningEffort,
     previous_effort: ReasoningEffort,
 ) {
     if app.reject_setting_change_while_busy(crate::localization::MessageId::SettingSubjectThinking)
     {
         return;
     }
-    if !app.auto_model {
-        effort =
-            effort.normalize_for_route(app.api_provider, &app.active_route_base_url, &app.model);
-    }
-    let changed = effort != previous_effort;
+    let effective_effort = if app.auto_model {
+        effort
+    } else {
+        effort.normalize_for_route(app.api_provider, &app.active_route_base_url, &app.model)
+    };
+    let live_changed = effective_effort != app.reasoning_effort;
+    let preference_changed = app.reasoning_effort_preference != Some(effort);
+    let selection_changed = effort != previous_effort || live_changed;
 
-    if changed {
-        app.reasoning_effort = effort;
-        app.reasoning_effort_explicit = true;
+    if live_changed || preference_changed {
+        app.reasoning_effort = effective_effort;
+        app.reasoning_effort_preference = Some(effort);
+    }
+    if selection_changed {
         app.last_effective_reasoning_effort = None;
         app.update_model_compaction_budget();
     }
 
-    let persisted_effort = if app.auto_model {
-        effort.as_setting()
-    } else {
-        effort.as_setting_for_route(app.api_provider, &app.active_route_base_url, &app.model)
-    };
     let persist_warning = app
         .startup_defaults
         .apply_blocking(
-            crate::tui::startup_defaults::StartupDefaults::reasoning_effort(persisted_effort),
+            crate::tui::startup_defaults::StartupDefaults::reasoning_effort(effort.as_setting()),
         )
         .err()
         .map(|err| format!(" (not persisted: {err})"));
 
-    if changed {
+    if live_changed {
         apply_model_and_compaction_update(
             engine_handle,
             app.compaction_config(),
@@ -10991,7 +11085,7 @@ async fn apply_picker_effort_choice(
     }
 
     let persisted = persist_warning.is_none();
-    let mut summary = if changed {
+    let mut summary = if selection_changed {
         format!(
             "Thinking: {} → {} · model {}",
             previous_effort.display_label_for_provider(app.api_provider),
@@ -11135,8 +11229,8 @@ async fn switch_provider(
         .filter(|chain| chain.providers().len() > 1);
     app.last_fallback_reason = None;
     app.model_ids_passthrough = config.model_ids_pass_through();
-    app.apply_provider_switch_reasoning_effort(target, &new_base_url, model_override.as_deref());
     app.set_model_selection(new_model.clone());
+    app.apply_provider_switch_reasoning_effort(target, &new_base_url, model_override.as_deref());
     app.set_active_context_window_override(config.context_window_for_provider_config(target));
     app.set_active_route_resolution(new_base_url.clone(), route_limits, context_window_source);
     if model_override.is_some() {
@@ -11298,10 +11392,8 @@ async fn apply_provider_fallback_switch(
     let new_endpoint = display_base_url_host(&new_base_url);
     let cache_scope_changed = previous_provider != target || previous_model != new_model;
     app.model_ids_passthrough = config.model_ids_pass_through();
-    app.reasoning_effort =
-        app.reasoning_effort
-            .normalize_for_route(target, &new_base_url, &new_model);
     app.set_model_selection(new_model.clone());
+    app.apply_provider_switch_reasoning_effort(target, &new_base_url, None);
     app.set_active_context_window_override(config.context_window_for_provider_config(target));
     app.set_active_route_resolution(
         new_base_url.clone(),
@@ -11903,15 +11995,15 @@ async fn apply_command_result(
             AppAction::CacheWarmup => {
                 app.status_message = Some("Warming prompt cache...".to_string());
                 match run_cache_warmup(app, config).await {
-                    Ok((usage, base_url, inspection)) => {
-                        app.session.last_base_url = Some(base_url.clone());
+                    Ok(outcome) => {
+                        app.session.last_base_url = Some(outcome.base_url.clone());
                         app.session.last_warmup_key = Some(CacheWarmupKey::from_inspection(
-                            &format!("{:?}", app.api_provider),
-                            &app.model,
-                            &base_url,
-                            &inspection,
+                            &outcome.provider_identity,
+                            &outcome.model,
+                            &outcome.base_url,
+                            &outcome.inspection,
                         ));
-                        let mut message = format_helpers::cache_warmup_result(&usage);
+                        let mut message = format_helpers::cache_warmup_result(&outcome.usage);
                         if let Some(key) = app.session.last_warmup_key.as_ref() {
                             message.push_str(&format!("\nWarmup key: {}", key.hash_short()));
                         }
@@ -11976,7 +12068,12 @@ async fn apply_command_result(
                 } else {
                     app.model.clone()
                 };
-                let previous_effort = app.reasoning_effort;
+                // Hotbar route actions do not carry an effort choice. Preserve
+                // the raw global preference instead of feeding a fixed
+                // route's normalized live tier back through the picker path.
+                let previous_effort = app
+                    .reasoning_effort_preference
+                    .unwrap_or(app.reasoning_effort);
                 apply_model_picker_choice(
                     app,
                     engine_handle,
@@ -16646,14 +16743,10 @@ fn apply_loaded_session(
     app.sync_context_references_from_session(&session.context_references, &message_to_cell);
     app.mark_history_updated();
     app.viewport.transcript_selection.clear();
-    let requested_reasoning_effort = app.reasoning_effort;
     restore_loaded_session_provider(app, config, provider_identity);
-    if session.metadata.model.trim().eq_ignore_ascii_case("auto") {
-        // Session records do not own a reasoning preference. Provider restore
-        // must not normalize the global requested tier before an auto route
-        // has selected its concrete provider/model.
-        app.reasoning_effort = requested_reasoning_effort;
-    }
+    // Session records do not own a reasoning preference. `set_model_selection`
+    // restores the raw explicit global preference for Auto (or releases an
+    // implicit fixed-route default) instead of reusing normalized live state.
     app.set_model_selection(session.metadata.model.clone());
     if app.auto_model
         && let Some(saved) = session.last_auto_route.as_ref()
@@ -16664,14 +16757,15 @@ fn apply_loaded_session(
         app.last_effective_provider_identity = Some(saved.provider_identity.clone());
         app.last_effective_model = Some(saved.model.clone());
         app.last_auto_route_receipt = Some(saved.receipt.clone());
+        app.last_effective_reasoning_effort = saved.effective_reasoning_effort.map(Into::into);
     }
     resolve_loaded_session_route(app, config);
     if !app.auto_model {
-        app.reasoning_effort = app.reasoning_effort.normalize_for_route(
-            app.api_provider,
-            &app.active_route_base_url,
-            &app.model,
-        );
+        let requested = app
+            .reasoning_effort_preference
+            .unwrap_or(app.reasoning_effort);
+        app.reasoning_effort =
+            requested.normalize_for_route(app.api_provider, &app.active_route_base_url, &app.model);
     }
     app.provider_models.insert(
         app.provider_identity_for_persistence().to_string(),
@@ -16830,11 +16924,11 @@ fn restore_loaded_session_provider(app: &mut App, config: &mut Config, identity:
     app.last_fallback_reason = None;
     app.model_ids_passthrough = config.model_ids_pass_through();
     if !app.auto_model {
-        app.reasoning_effort = app.reasoning_effort.normalize_for_route(
-            provider,
-            &config.deepseek_base_url(),
-            &app.model,
-        );
+        let requested = app
+            .reasoning_effort_preference
+            .unwrap_or(app.reasoning_effort);
+        app.reasoning_effort =
+            requested.normalize_for_route(provider, &config.deepseek_base_url(), &app.model);
     }
     app.set_active_context_window_override(config.context_window_for_provider_config(provider));
     app.active_route_limits = app.context_window_override_limits();

@@ -532,6 +532,28 @@ pub(crate) fn normalize_auto_route_effort_for_provider(
     }
 }
 
+/// Select the reasoning request that accompanies an Auto-model route.
+///
+/// Model routing and reasoning routing are independent. An explicit fixed
+/// preference wins over the classifier's suggestion; an absent preference or
+/// explicit `Auto` keeps reasoning under per-prompt control.
+#[must_use]
+pub(crate) fn resolve_auto_model_reasoning(
+    preference: Option<ReasoningEffort>,
+    routed: Option<ReasoningEffort>,
+) -> (Option<ReasoningEffort>, bool) {
+    match preference {
+        Some(
+            effort @ (ReasoningEffort::Off
+            | ReasoningEffort::Low
+            | ReasoningEffort::Medium
+            | ReasoningEffort::High
+            | ReasoningEffort::Max),
+        ) => (Some(effort), false),
+        None | Some(ReasoningEffort::Auto) => (routed, true),
+    }
+}
+
 /// Route-aware equivalent of [`normalize_auto_route_effort_for_provider`].
 /// The inventory knows the selected provider/model, and the route resolver
 /// supplies the endpoint needed to distinguish Kimi Code's official bare-K3
@@ -1171,6 +1193,22 @@ fn truncate_for_auto_router(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_model_reasoning_keeps_model_and_thinking_choices_independent() {
+        assert_eq!(
+            resolve_auto_model_reasoning(Some(ReasoningEffort::Low), Some(ReasoningEffort::Max)),
+            (Some(ReasoningEffort::Low), false)
+        );
+        assert_eq!(
+            resolve_auto_model_reasoning(Some(ReasoningEffort::Auto), Some(ReasoningEffort::Max)),
+            (Some(ReasoningEffort::Max), true)
+        );
+        assert_eq!(
+            resolve_auto_model_reasoning(None, Some(ReasoningEffort::High)),
+            (Some(ReasoningEffort::High), true)
+        );
+    }
 
     #[test]
     fn auto_model_heuristic_chinese_keywords_route_to_pro() {
