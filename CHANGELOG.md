@@ -147,6 +147,27 @@ already claimed to.
 
 ### Fixed
 
+- Auto-compaction now defaults on for every known model context window,
+  including Kimi K3's 1,048,576-token routes. Persisting only an
+  `auto_compact_threshold` or `auto_compact_threshold_percent` now counts as
+  opt-in intent, while an explicit `auto_compact = false` remains authoritative.
+  `/config` reports the effective state, percentage, and computed token trigger.
+
+- Per-provider `context_window` overrides are now documented and visible in
+  `/config`, provider setup help, diagnostics, and the example configuration.
+  The effective override consistently drives preflight budgeting, the context
+  meter, and compaction; this lets a user cap a 1M Kimi route to 256K when their
+  Coding Plan tier has the smaller window.
+
+- Agent Details now projects status, model, elapsed time, and step counts from
+  the same row snapshot as the primary agents list, eliminating contradictory
+  worker state between the two surfaces.
+
+- Composer submission and its hints now share one state machine. Portable
+  terminals use Enter to queue during a running turn and Enter again to steer;
+  Ctrl/Cmd+Enter is accepted only when an enhanced terminal reports it and is
+  no longer advertised as universally available.
+
 - `edit_file` now matches LF-only model search text against CRLF files,
   preserves the file's line-ending style for replacement text, and still
   rejects newline-normalized duplicate matches as non-unique (#4764).
