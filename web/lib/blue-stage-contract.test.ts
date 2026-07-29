@@ -44,4 +44,15 @@ describe("Blue Stage public-surface contract", () => {
     expect(CSS).toMatch(/\.portal-button-primary[\s\S]*background: var\(--indigo-deep\)/);
     expect(CSS).toMatch(/\.nav-link::after[\s\S]*background: var\(--indigo\)/);
   });
+
+  it("keeps the shared mobile navigation inside a 390px viewport", () => {
+    const mobile = CSS.split("@media (max-width: 520px)")[1];
+
+    expect(mobile).toMatch(/\.site-nav-inner\s*\{\s*gap:\s*0\.5rem/);
+    expect(mobile).toMatch(/\.site-nav-actions\s*\{[\s\S]*?min-width:\s*0/);
+    expect(mobile).toMatch(
+      /\.site-nav-actions select\s*\{[\s\S]*?width:\s*8rem;[\s\S]*?min-width:\s*0/,
+    );
+    expect(mobile).not.toMatch(/body:has\(\.product-home\) \.site-nav-actions select/);
+  });
 });
