@@ -8618,6 +8618,9 @@ fn preserve_interrupted_checkpoint_for_explicit_resume(launch_workspace: &Path) 
     let session_workspace = newest.session.metadata.workspace.clone();
     // #4479: removed save_session call — checkpoint should not be auto-promoted to session
     if newest.source == session_manager::CheckpointSource::Legacy {
+        // Migrate legacy single-slot checkpoint to per-session format
+        // before clearing the legacy file, or the data is unrecoverable.
+        let _ = manager.save_checkpoint(&newest.session);
         let _ = manager.clear_legacy_checkpoint();
     }
 
