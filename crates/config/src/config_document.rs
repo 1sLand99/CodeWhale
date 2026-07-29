@@ -167,7 +167,10 @@ pub fn unset_config_document_value(
     Ok(removed)
 }
 
-fn with_config_write_lock<T>(path: &Path, operation: impl FnOnce(&Path) -> Result<T>) -> Result<T> {
+pub(crate) fn with_config_write_lock<T>(
+    path: &Path,
+    operation: impl FnOnce(&Path) -> Result<T>,
+) -> Result<T> {
     let path = prepare_config_path(path)?;
     let lock_path = adjacent_lock_path(&path)?;
     super::reject_path_symlink(&lock_path)?;

@@ -221,6 +221,12 @@ pub enum Op {
     /// Update auto-compaction settings
     SetCompaction { config: CompactionConfig },
 
+    /// Replace the live user permission rules without clearing session-only
+    /// approvals.
+    SetPermissionRuleset {
+        ruleset: codewhale_execpolicy::Ruleset,
+    },
+
     /// Update the SSE idle timeout used for subsequent streamed turns.
     SetStreamChunkTimeout { timeout_secs: u64 },
 

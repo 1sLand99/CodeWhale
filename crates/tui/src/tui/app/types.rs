@@ -828,6 +828,9 @@ pub enum AppAction {
     ApprovalPolicyPersisted {
         policy: Option<String>,
     },
+    /// Reload the active user permission rules after `/permissions` safely
+    /// removes one from the sibling `permissions.toml`.
+    PermissionRulesChanged,
     /// Rebuild the engine's Skill/MCP catalogue from the App's newly replaced
     /// immutable plugin snapshot after trust, enable, revoke, or reload.
     PluginRegistryChanged,

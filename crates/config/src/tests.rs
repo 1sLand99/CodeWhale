@@ -877,6 +877,175 @@ fn config_store_secures_persisted_permissions_file() {
     assert_eq!(mode, 0o600);
 }
 
+#[test]
+fn permission_snapshot_removes_array_table_rule_without_reformatting_neighbors() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_path = dir.path().join(CONFIG_FILE_NAME);
+    let permissions_path = dir.path().join(PERMISSIONS_FILE_NAME);
+    fs::write(
+        &permissions_path,
+        r#"# operator-owned header
+[[rules]]
+tool = "exec_shell"
+command = "cargo check"
+
+# remove only this record
+[[rules]]
+tool = "exec_shell"
+command = "cargo test"
+action = "deny"
+
+# keep this record and comment
+[[rules]]
+tool = "edit_file"
+path = "src/lib.rs"
+action = "allow"
+"#,
+    )
+    .expect("write permissions");
+
+    let snapshot =
+        load_permissions_snapshot(Some(config_path.clone())).expect("load permission snapshot");
+    assert!(snapshot.file_exists());
+    assert_eq!(
+        snapshot.path().canonicalize().expect("snapshot path"),
+        permissions_path.canonicalize().expect("permissions path")
+    );
+    assert_eq!(snapshot.rules().len(), 3);
+    let token = snapshot
+        .removal_token(1)
+        .expect("middle rule token")
+        .to_string();
+
+    let removed =
+        remove_permission_rule(Some(config_path.clone()), 1, &token).expect("remove middle rule");
+    assert_eq!(removed.command.as_deref(), Some("cargo test"));
+    assert_eq!(removed.action, PermissionAction::Deny);
+
+    let body = fs::read_to_string(&permissions_path).expect("read permissions");
+    assert!(body.contains("# operator-owned header"));
+    assert!(body.contains("# keep this record and comment"));
+    assert!(!body.contains("cargo test"));
+    assert!(body.contains("command = \"cargo check\""));
+    assert!(body.contains("path = \"src/lib.rs\""));
+    let parsed: PermissionsToml = toml::from_str(&body).expect("parse edited permissions");
+    assert_eq!(
+        parsed.rules,
+        vec![ToolAskRule::exec_shell("cargo check"), {
+            let mut rule = ToolAskRule::file_path("edit_file", "src/lib.rs");
+            rule.action = PermissionAction::Allow;
+            rule
+        },]
+    );
+
+    let reloaded =
+        load_permissions_snapshot(Some(config_path)).expect("reload permission snapshot");
+    assert_eq!(reloaded.rules(), parsed.rules);
+}
+
+#[test]
+fn permission_snapshot_removes_inline_array_rule() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_path = dir.path().join(CONFIG_FILE_NAME);
+    let permissions_path = dir.path().join(PERMISSIONS_FILE_NAME);
+    fs::write(
+        &permissions_path,
+        "# inline style stays inline\nrules = [\n  { tool = \"exec_shell\", command = \"cargo check\" },\n  { tool = \"write_file\", path = \"README.md\", action = \"allow\" },\n]\n",
+    )
+    .expect("write permissions");
+
+    let snapshot =
+        load_permissions_snapshot(Some(config_path.clone())).expect("load permission snapshot");
+    let token = snapshot
+        .removal_token(0)
+        .expect("first rule token")
+        .to_string();
+    let removed = remove_permission_rule(Some(config_path), 0, &token).expect("remove inline rule");
+
+    assert_eq!(removed.command.as_deref(), Some("cargo check"));
+    let body = fs::read_to_string(&permissions_path).expect("read permissions");
+    assert!(body.contains("# inline style stays inline"));
+    assert!(body.contains("rules = ["));
+    assert!(!body.contains("cargo check"));
+    let parsed: PermissionsToml = toml::from_str(&body).expect("parse inline permissions");
+    assert_eq!(parsed.rules.len(), 1);
+    assert_eq!(parsed.rules[0].path.as_deref(), Some("README.md"));
+}
+
+#[test]
+fn permission_removal_preserves_file_header_when_first_array_table_is_removed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_path = dir.path().join(CONFIG_FILE_NAME);
+    let permissions_path = dir.path().join(PERMISSIONS_FILE_NAME);
+    fs::write(
+        &permissions_path,
+        concat!(
+            "# keep this file-level explanation\n",
+            "[[rules]]\n",
+            "tool = \"exec_shell\"\n",
+            "command = \"cargo check\"\n\n",
+            "[[rules]]\n",
+            "tool = \"exec_shell\"\n",
+            "command = \"cargo test\"\n",
+        ),
+    )
+    .expect("write permissions");
+    let snapshot =
+        load_permissions_snapshot(Some(config_path.clone())).expect("load permission snapshot");
+    let token = snapshot
+        .removal_token(0)
+        .expect("first rule token")
+        .to_string();
+
+    remove_permission_rule(Some(config_path), 0, &token).expect("remove first rule");
+
+    let body = fs::read_to_string(&permissions_path).expect("read permissions");
+    assert!(body.contains("# keep this file-level explanation"));
+    assert!(!body.contains("cargo check"));
+    assert!(body.contains("cargo test"));
+}
+
+#[test]
+fn permission_removal_rejects_stale_snapshot_without_writing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_path = dir.path().join(CONFIG_FILE_NAME);
+    let permissions_path = dir.path().join(PERMISSIONS_FILE_NAME);
+    fs::write(
+        &permissions_path,
+        "[[rules]]\ntool = \"exec_shell\"\ncommand = \"cargo check\"\n",
+    )
+    .expect("write permissions");
+
+    let snapshot =
+        load_permissions_snapshot(Some(config_path.clone())).expect("load permission snapshot");
+    let token = snapshot
+        .removal_token(0)
+        .expect("first rule token")
+        .to_string();
+    let changed = concat!(
+        "[[rules]]\n",
+        "tool = \"read_file\"\n",
+        "path = \"README.md\"\n\n",
+        "[[rules]]\n",
+        "tool = \"exec_shell\"\n",
+        "command = \"cargo check\"\n",
+    );
+    fs::write(&permissions_path, changed).expect("write concurrent permissions update");
+
+    let error =
+        remove_permission_rule(Some(config_path), 0, &token).expect_err("stale removal must fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("permissions changed after they were listed")
+    );
+    assert_eq!(
+        fs::read_to_string(&permissions_path).expect("read unchanged permissions"),
+        changed
+    );
+}
+
 struct EnvGuard {
     deepseek_api_key: Option<OsString>,
     deepseek_base_url: Option<OsString>,
@@ -3210,6 +3379,38 @@ fn append_ask_rules_rejects_symlinked_permissions_file() {
     assert_eq!(
         fs::read_to_string(&outside).expect("read outside permissions"),
         ""
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn remove_permission_rule_rejects_symlinked_permissions_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_path = dir.path().join(CONFIG_FILE_NAME);
+    let outside = dir.path().join("outside-permissions.toml");
+    let permissions_path = dir.path().join(PERMISSIONS_FILE_NAME);
+    fs::write(
+        &permissions_path,
+        "[[rules]]\ntool = \"exec_shell\"\ncommand = \"cargo test\"\n",
+    )
+    .expect("write permissions");
+    let snapshot =
+        load_permissions_snapshot(Some(config_path.clone())).expect("load permission snapshot");
+    let token = snapshot
+        .removal_token(0)
+        .expect("first rule token")
+        .to_string();
+    fs::rename(&permissions_path, &outside).expect("move permissions outside");
+    std::os::unix::fs::symlink(&outside, &permissions_path).expect("symlink permissions");
+
+    let err = remove_permission_rule(Some(config_path), 0, &token)
+        .expect_err("symlink permissions should fail");
+
+    assert!(format!("{err:#}").contains("must not be a symlink"));
+    assert!(
+        fs::read_to_string(&outside)
+            .expect("read outside permissions")
+            .contains("cargo test")
     );
 }
 

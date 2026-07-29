@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `/permissions` now lists the active user permission-rule source, each rule's
+  effective matcher and global/repository scope, and whether that scope applies
+  in the current workspace. `/permissions remove <number>` previews deletion
+  and requires a snapshot-bound confirmation token, so a concurrent edit
+  cannot move a different rule under the confirmed index. Appends and removals
+  share one adjacent lock, preserve unrelated TOML formatting and comments,
+  atomically replace `permissions.toml`, and reload the live user ruleset
+  without clearing session-only approvals. `/config ask-rules` remains a
+  compatibility entry; rule creation, glob/directory rules, and deny
+  persistence remain out of scope (#1186).
+
 ## [0.9.2] - 2026-07-27
 
 This is the Codewhale v0.9.2 source candidate. It is not a published release

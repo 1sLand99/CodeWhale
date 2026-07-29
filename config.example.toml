@@ -193,20 +193,30 @@ sandbox_mode = "workspace-write" # read-only | workspace-write | danger-full-acc
 # config.toml. Each `[[rules]]` entry accepts `tool`, optional `command`
 # or `path`, optional absolute `workspace`, optional `command_exact = true`,
 # and an `action` field: `"deny"`, `"ask"` (default), or `"allow"`.
-# Deny always wins over ask, which wins over allow.  Globs, broad directory
-# rules, and a rule editor/deleter UI are future work.
+# Deny always wins over ask, which wins over allow. The active user's sibling
+# file is the only rule source today; project config overlays do not load a
+# project-local permissions.toml. `workspace` is a repo scope, not a source.
+# Globs and broad directory rules remain future work.
 #
 # In supported approval cards, press `S` to allow once and save an exact ask
 # rule. Eligible safe calls also offer `P` / "Always allow this exact rule in
 # this repo", which saves an exact `allow` rule scoped to the current absolute
 # workspace. Dangerous/critical calls and repo-law prompts cannot save allow
-# grants. The UI still does not save deny rules or provide editing/deletion:
+# grants. The approval UI still does not save deny rules:
 #   exec_shell  -> exact approved command string
 #   write_file  -> exact workspace-relative target path
 #   edit_file   -> exact workspace-relative target path
 #   apply_patch -> one exact workspace-relative path per validated touched file
 # `read_file` rules can be written manually, but the approval UI does not save
 # them.
+#
+# `/permissions list` shows the active source, effective matcher, repo/global
+# scope, and whether each rule applies in the current workspace.
+# `/permissions remove <number>` previews a deletion and prints a confirmation
+# command bound to the current file snapshot. If the file changes first, the
+# confirmation fails safely. Removal preserves unrelated comments/formatting,
+# uses the same lock as approval-card appends, and atomically replaces the file.
+# `/config ask-rules` remains a compatibility entry to the same list.
 #
 # Example ~/.codewhale/permissions.toml:
 #

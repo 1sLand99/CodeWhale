@@ -2143,6 +2143,9 @@ impl Engine {
                             )))
                             .await;
                     }
+                    Op::SetPermissionRuleset { ruleset } => {
+                        self.config.exec_policy_engine.set_ruleset(ruleset);
+                    }
                     Op::SetStreamChunkTimeout { timeout_secs } => {
                         self.config.stream_chunk_timeout = Duration::from_secs(timeout_secs);
                         let _ = self
