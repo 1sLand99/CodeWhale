@@ -1829,6 +1829,7 @@ fn cancelled_bang_shell_settles_transcript_card() -> anyhow::Result<()> {
 /// Bare `/skills` opens the unified Skills Manager (owned-only, zero network).
 /// Compatible roots (e.g. `.agents/skills`) appear only after toggling scan mode.
 #[test]
+#[ignore = "runs in its own CI process to avoid PTY event interference from the full suite"]
 fn skills_opens_manager_owned_then_compatible() -> anyhow::Result<()> {
     let _guard = qa_pty_test_lock();
     let ws = make_sealed_workspace()?;
