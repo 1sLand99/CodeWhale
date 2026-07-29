@@ -1,0 +1,60 @@
+import type { HomeDict } from "../types";
+
+export const home: HomeDict = {
+  kicker: "Lautan data dan kode",
+  heroTitleA: "Menyelam ke kedalaman",
+  heroTitleB: "agar Anda tidak perlu melakukannya.",
+  heroIntro:
+    "Codewhale memberikan kemampuan LLM kepada siapa saja untuk membangun sesuatu. Di terminal, Codewhale membaca repositori, mengedit berkas, menjalankan pemeriksaan, dan meninggalkan tanda terima — tanpa menganggap Anda sudah mahir berkode. Berjalan di mesin Anda sendiri.",
+  install: "Instalasi",
+  docs: "Dokumentasi",
+  copy: "Salin",
+  copied: "Tersalin ✓",
+  latestRelease: "Rilis terbaru {tag}",
+  releaseUnavailable: "Status rilis tidak tersedia",
+  currentSource: "Sumber saat ini",
+  sourceCandidate: "Kandidat sumber",
+  providerRoutes: "{count} rute penyedia",
+  screenshotAlt:
+    "Sesi terminal Codewhale v{version} baru menggunakan rute Ollama lokal, tanpa bilah Work kosong",
+  figcaption: "v{version} {state} · rute Ollama lokal · Plan / Act / Operate",
+  publishedRelease: "rilis terpublikasi",
+  figcaptionSourceCandidate: "kandidat sumber",
+  proofHeading: "Terminal shell bawah air. Netral model. Mengutamakan lokal.",
+  proofBody:
+    "Bawa model di-host, gateway, atau lokal yang sudah Anda gunakan. Codewhale berjalan di mesin Anda dan memperlakukan model sebagai komponen yang dapat dipilih—bukan sebagai produk. Mode Plan / Act / Operate dan postur izin yang eksplisit menjaga penyelaman mendalam tetap dalam kendali Anda.",
+  workflowHeading: "Dari tugas hingga perubahan terverifikasi.",
+  workflow: [
+    ["Inspeksi", "Baca repositori, instruksinya, dan tugas."],
+    ["Act", "Edit berkas melalui batasan persetujuan yang eksplisit."],
+    ["Verifikasi", "Jalankan pemeriksaan dan periksa hasilnya."],
+    ["Lapor", "Tinggalkan tanda terima kerja yang ringkas dan tahan lama."],
+  ],
+  receiptAria: "Contoh tanda terima kerja",
+  boundariesHeadingA: "Model Anda.",
+  boundariesHeadingB: "Batasan Anda.",
+  boundariesBody:
+    "Pilih model, mode kerja, dan postur izin secara eksplisit. Biaya yang tidak diketahui tetap tidak diketahui, dan tampilan pratinjau tetap diberi label demikian.",
+  hostedGatewayLocal: "Model di-host, gateway, dan lokal",
+  planActOperateDesc: "Perencanaan baca-saja hingga pengoperasian otonom",
+  askAutoReviewDesc: "Pilih postur izin untuk pekerjaan tersebut",
+  tuiExecWebDesc: "Antarmuka runtime interaktif dan headless",
+  surfacesHeading: "Gunakan runtime di mana pekerjaan dilakukan.",
+  surfaces: [
+    ["TUI", "Pekerjaan terminal interaktif"],
+    ["codewhale exec", "Skrip dan CI"],
+    ["Klien Web", "Klien browser berbasis loopback-only"],
+    ["Runtime API + MCP", "Integrasi lokal"],
+    ["Fleet", "Pekerjaan multi-agent tahan lama"],
+  ],
+  runtimeLink: "Lihat antarmuka runtime dan catatan stabilitas →",
+  installBandHeading: "Mulai dengan satu perintah.",
+  binaries: "Biner",
+  chinaMirrors: "Mirror Tiongkok",
+  installGuideLink: "Baca panduan instalasi →",
+  communityHeading: "Dibuat secara terbuka",
+  communityBody:
+    "Berlisensi MIT dan dibentuk oleh kontributor di seluruh runtime, penyedia, platform, dokumentasi, dan pengujian.",
+  communityLinksAria: "Tautan komunitas",
+  contribute: "Kontribusi",
+};

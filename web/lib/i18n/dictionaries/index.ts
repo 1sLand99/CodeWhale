@@ -25,6 +25,8 @@ import { chrome as esChrome } from "./es/chrome";
 import { home as esHome } from "./es/home";
 import { chrome as ptBrChrome } from "./pt-BR/chrome";
 import { home as ptBrHome } from "./pt-BR/home";
+import { chrome as idChrome } from "./id/chrome";
+import { home as idHome } from "./id/home";
 
 const CHROME: Record<string, ChromeDict> = {
   ja: jaChrome,
@@ -34,6 +36,7 @@ const CHROME: Record<string, ChromeDict> = {
   uk: ukChrome,
   es: esChrome,
   "pt-BR": ptBrChrome,
+  id: idChrome,
 };
 
 const HOME: Record<string, HomeDict> = {
@@ -44,6 +47,7 @@ const HOME: Record<string, HomeDict> = {
   uk: ukHome,
   es: esHome,
   "pt-BR": ptBrHome,
+  id: idHome,
 };
 
 /** Locales with a dictionary (English and Chinese stay inline in the
