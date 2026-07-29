@@ -30,7 +30,7 @@ describe("locale registry (single canonical taxonomy)", () => {
   });
 
   it("ships the v0.9.2 website wave as partial with visible status", () => {
-    for (const code of ["ja", "vi", "ko", "ru", "uk", "es", "pt-BR"]) {
+    for (const code of ["ja", "vi", "ko", "ru", "uk", "es", "pt-BR", "id"]) {
       expect(isValidLocale(code)).toBe(true);
       expect(isPartialLocale(code)).toBe(true);
     }

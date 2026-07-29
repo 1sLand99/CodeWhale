@@ -113,8 +113,8 @@ export const ALL_LOCALES: LocaleEntry[] = [
   {
     code: "id",
     label: "Bahasa Indonesia",
-    status: "planned",
-    note: "#4789 — TUI pack shipped in v0.9.2; website next wave",
+    status: "partial",
+    note: "#4789 — chrome + home localized; page bodies fall back to English",
   },
   {
     code: "hi",
