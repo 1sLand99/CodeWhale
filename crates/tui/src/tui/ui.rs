@@ -16260,6 +16260,7 @@ async fn apply_provider_picker_api_key_with_verifier(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_provider_picker_setup_confirmed(
     app: &mut App,
     engine_handle: &mut EngineHandle,

@@ -382,6 +382,7 @@ impl WorkRuntime {
     /// identity only; there is no field capable of carrying reasoning text.
     /// When live operations exist, the most recently updated one receives the
     /// historical link. Later terminalization does not invalidate that link.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_reasoning_effort_change(
         &self,
         session_id: Option<&str>,

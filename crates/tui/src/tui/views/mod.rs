@@ -1100,19 +1100,18 @@ impl ViewStack {
         // texture can never overwrite it. `Off` (the default) leaves the
         // buffer untouched, keeping output byte-identical to the
         // pre-prototype path.
-        if self.focus_texture != FocusTextureMode::Off {
-            if let (Some(focus), Some(theme)) =
+        if self.focus_texture != FocusTextureMode::Off
+            && let (Some(focus), Some(theme)) =
                 (self.top_occupied_region(area), self.focus_texture_theme)
-            {
-                crate::tui::focus_texture::apply_focus_texture(
-                    area,
-                    buf,
-                    focus,
-                    &theme,
-                    self.focus_texture,
-                    crate::tui::color_compat::ascii_safe_enabled(),
-                );
-            }
+        {
+            crate::tui::focus_texture::apply_focus_texture(
+                area,
+                buf,
+                focus,
+                &theme,
+                self.focus_texture,
+                crate::tui::color_compat::ascii_safe_enabled(),
+            );
         }
         // Dim each view's own occupied region rather than the whole frame, so
         // an inline modal (the approval prompt) leaves the transcript above it

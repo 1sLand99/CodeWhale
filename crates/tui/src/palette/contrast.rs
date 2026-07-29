@@ -276,16 +276,16 @@ pub fn theme_contrast_violations(theme: &UiTheme) -> Vec<ThemeContrastViolation>
     let mut check = |pair: &'static str, fg: Color, bg: Color, floor: f32| {
         // An unresolvable side means the terminal owns the color: skip the
         // pair rather than recording a pass we cannot substantiate.
-        if let Some(ratio) = contrast_ratio(fg, bg) {
-            if ratio < floor {
-                violations.push(ThemeContrastViolation {
-                    pair,
-                    fg,
-                    bg,
-                    ratio,
-                    floor,
-                });
-            }
+        if let Some(ratio) = contrast_ratio(fg, bg)
+            && ratio < floor
+        {
+            violations.push(ThemeContrastViolation {
+                pair,
+                fg,
+                bg,
+                ratio,
+                floor,
+            });
         }
     };
     macro_rules! audit {

@@ -937,6 +937,7 @@ fn auto_route_pair(
     AutoRoutePair { strong, fast }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn auto_route_inventory_recommendation(
     config: &Config,
     inventory: &ModelInventory,
