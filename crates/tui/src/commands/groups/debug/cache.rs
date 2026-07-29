@@ -50,6 +50,7 @@ fn format_cache_inspect(app: &mut App, verbose: bool, json_mode: bool) -> String
 
     let reasoning_effort = if app.reasoning_effort == crate::tui::app::ReasoningEffort::Auto {
         app.last_effective_reasoning_effort
+            .and_then(crate::tui::app::EffectiveReasoningEffort::tier)
             .and_then(|effort| effort.api_value_for_provider(app.api_provider))
             .map(str::to_string)
     } else {

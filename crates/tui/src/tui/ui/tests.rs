@@ -5970,6 +5970,8 @@ async fn auto_dispatch_keeps_last_and_pending_receipts_aligned() {
     let _zai = crate::test_support::EnvVarGuard::set("ZAI_API_KEY", "zai-test-key");
     let mut app = create_test_app();
     app.set_provider_identity(ApiProvider::Zai, "zai");
+    app.reasoning_effort = ReasoningEffort::Low;
+    app.reasoning_effort_explicit = true;
     app.set_model_selection("auto".to_string());
     let config = Config {
         provider: Some("zai".to_string()),
@@ -6002,6 +6004,15 @@ async fn auto_dispatch_keeps_last_and_pending_receipts_aligned() {
             .as_ref()
             .map(|receipt| receipt.tier),
         Some(crate::model_routing::AutoRouteTier::Fast)
+    );
+    assert_eq!(
+        app.last_effective_reasoning_effort,
+        Some(EffectiveReasoningEffort::ThinkingEnabledGranularityUnavailable),
+        "the post-turn receipt must retain exact route capability constraints"
+    );
+    assert_eq!(
+        app.reasoning_effort_display_label(),
+        "low→thinking enabled; granularity unavailable"
     );
 }
 
@@ -14827,8 +14838,10 @@ fn apply_loaded_session_restores_auto_model_mode() {
     let mut app = create_test_app();
     app.set_model_selection("deepseek-v4-pro".to_string());
     app.reasoning_effort = ReasoningEffort::Low;
+    app.reasoning_effort_explicit = true;
     app.last_effective_model = Some("deepseek-v4-flash".to_string());
-    app.last_effective_reasoning_effort = Some(ReasoningEffort::Low);
+    app.last_effective_reasoning_effort =
+        Some(EffectiveReasoningEffort::Tier(ReasoningEffort::Low));
     let mut session = saved_session_with_messages(vec![
         text_message("user", "hello"),
         text_message("assistant", "hi"),
@@ -14849,6 +14862,25 @@ fn apply_loaded_session_restores_auto_model_mode() {
     assert_eq!(app.last_effective_reasoning_effort, None);
     assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
     assert_eq!(app.effective_model_for_budget(), DEFAULT_TEXT_MODEL);
+}
+
+#[test]
+fn apply_loaded_auto_session_releases_implicit_fixed_model_thinking() {
+    let mut app = create_test_app();
+    app.set_model_selection("deepseek-v4-pro".to_string());
+    app.reasoning_effort = ReasoningEffort::Max;
+    app.reasoning_effort_explicit = false;
+    let mut session = saved_session_with_messages(vec![
+        text_message("user", "hello"),
+        text_message("assistant", "hi"),
+    ]);
+    session.metadata.model = "auto".to_string();
+
+    apply_loaded_session(&mut app, &mut Config::default(), &session).expect("restore auto session");
+
+    assert!(app.auto_model);
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
+    assert!(!app.reasoning_effort_explicit);
 }
 
 #[test]
@@ -14874,11 +14906,28 @@ fn auto_route_receipt_survives_session_snapshot_and_restore() {
     app.last_effective_provider_identity = Some("zai".to_string());
     app.last_effective_model = Some(crate::config::ZAI_GLM_5_2_MODEL.to_string());
     app.last_auto_route_receipt = Some(receipt.clone());
+    app.last_effective_reasoning_effort =
+        Some(EffectiveReasoningEffort::Tier(ReasoningEffort::High));
     app.api_messages
         .push(text_message("user", "inspect this route"));
 
     let snapshot = build_session_snapshot(&mut app, &manager).expect("session snapshot");
     let serialized = serde_json::to_string(&snapshot).expect("serialize session");
+    let mut legacy_json: serde_json::Value =
+        serde_json::from_str(&serialized).expect("parse session json");
+    legacy_json["last_auto_route"]
+        .as_object_mut()
+        .expect("Auto route object")
+        .remove("effective_reasoning_effort");
+    let legacy: SavedSession =
+        serde_json::from_value(legacy_json).expect("deserialize legacy Auto route");
+    assert_eq!(
+        legacy
+            .last_auto_route
+            .as_ref()
+            .and_then(|route| route.effective_reasoning_effort),
+        None
+    );
     let persisted: SavedSession = serde_json::from_str(&serialized).expect("deserialize session");
     let saved = persisted
         .last_auto_route
@@ -14888,6 +14937,10 @@ fn auto_route_receipt_survives_session_snapshot_and_restore() {
     assert_eq!(saved.provider_identity, "zai");
     assert_eq!(saved.model, crate::config::ZAI_GLM_5_2_MODEL);
     assert_eq!(saved.receipt, receipt);
+    assert_eq!(
+        saved.effective_reasoning_effort,
+        Some(crate::work_graph::ReasoningEffortTier::High)
+    );
 
     let mut restored_app = create_test_app();
     apply_loaded_session(&mut restored_app, &mut Config::default(), &persisted)
@@ -14904,6 +14957,11 @@ fn auto_route_receipt_survives_session_snapshot_and_restore() {
         Some(crate::config::ZAI_GLM_5_2_MODEL)
     );
     assert_eq!(restored_app.last_auto_route_receipt, Some(receipt));
+    assert_eq!(
+        restored_app.last_effective_reasoning_effort,
+        Some(EffectiveReasoningEffort::Tier(ReasoningEffort::High))
+    );
+    assert_eq!(restored_app.reasoning_effort_display_label(), "auto: high");
 }
 
 #[test]
@@ -15058,6 +15116,44 @@ async fn model_picker_persists_model_and_reasoning_effort() {
     assert!(provider_model_result.contains("auth=key saved · not checked"));
     assert!(provider_model_result.contains("health=attemptable"));
     assert!(!provider_model_result.contains("test-key"));
+}
+
+#[tokio::test]
+async fn model_picker_auto_releases_implicit_fixed_model_thinking() {
+    let _guard = SettingsHomeGuard::new();
+    let mut app = create_test_app();
+    app.set_model_selection("deepseek-v4-pro".to_string());
+    app.reasoning_effort = ReasoningEffort::Max;
+    app.reasoning_effort_explicit = false;
+    let mut engine = mock_engine_handle();
+    let mut config = Config {
+        api_key: Some("test-key".to_string()),
+        ..Default::default()
+    };
+
+    apply_model_picker_choice(
+        &mut app,
+        &mut engine.handle,
+        &mut config,
+        "auto".to_string(),
+        None,
+        None,
+        ReasoningEffort::Max,
+        "deepseek-v4-pro".to_string(),
+        ReasoningEffort::Max,
+    )
+    .await;
+
+    assert!(app.auto_model);
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
+    assert!(!app.reasoning_effort_explicit);
+    assert_eq!(
+        crate::settings::Settings::load()
+            .expect("load settings")
+            .reasoning_effort
+            .as_deref(),
+        None
+    );
 }
 
 #[tokio::test]

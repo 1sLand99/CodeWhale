@@ -1213,8 +1213,8 @@ pub struct App {
     /// Whether the current effort came from an explicit user setting rather
     /// than compatibility inference from a retiring model alias.
     pub(crate) reasoning_effort_explicit: bool,
-    /// Last concrete thinking tier chosen while `reasoning_effort` is auto.
-    pub last_effective_reasoning_effort: Option<ReasoningEffort>,
+    /// Last effective thinking receipt for the most recently accepted route.
+    pub(crate) last_effective_reasoning_effort: Option<EffectiveReasoningEffort>,
     pub workspace: PathBuf,
     /// Off-event-loop worker for durable Lane control writes. `/lane interrupt`
     /// submits here instead of tearing down a Runtime on the composer thread
@@ -4579,10 +4579,14 @@ impl App {
         self.last_auto_route_receipt = None;
         self.pending_auto_route_receipt = None;
         self.last_effective_reasoning_effort = None;
-        // Auto model routing is independent from the requested reasoning
-        // tier. Keep that preference intact so session restore and model
-        // changes cannot silently replace a persisted fixed tier with Auto.
-        if !auto_model {
+        // Auto model routing is independent from an explicitly requested
+        // reasoning tier. An implicit fixed-model default is route-local,
+        // though, so entering Auto must hand reasoning back to the router.
+        if auto_model {
+            if !self.reasoning_effort_explicit {
+                self.reasoning_effort = ReasoningEffort::Auto;
+            }
+        } else {
             self.reasoning_effort = self
                 .reasoning_effort
                 .normalize_for_provider(self.api_provider);
@@ -4630,6 +4634,7 @@ impl App {
             provider_identity,
             model: model.clone(),
             receipt: receipt.clone(),
+            effective_reasoning_effort: self.last_effective_reasoning_effort.map(Into::into),
         })
     }
 
@@ -4766,8 +4771,20 @@ impl App {
             .as_ref()
             .and_then(|turn| turn.route.as_ref())
             .is_some_and(|route| route.receipt.is_some());
+        if self.auto_model
+            && !auto_route_has_receipt
+            && self.last_auto_route_receipt.is_some()
+            && let Some(effective) = self.last_effective_reasoning_effort
+        {
+            // Once a concrete Auto route has been accepted, its normalized
+            // tier remains the display authority until the model or requested
+            // effort changes. The configured classifier route is not evidence
+            // of what the completed turn received.
+            return effective;
+        }
         let effective = if requested == ReasoningEffort::Auto {
             self.last_effective_reasoning_effort
+                .and_then(EffectiveReasoningEffort::tier)
                 .unwrap_or(ReasoningEffort::Auto)
         } else if self.auto_model && !auto_route_has_receipt {
             // The configured provider is only the classifier's starting

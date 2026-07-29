@@ -271,7 +271,8 @@ fn reasoning_effort_display_label_uses_codex_xhigh() {
     assert_eq!(app.reasoning_effort_display_label(), "xhigh");
 
     app.reasoning_effort = ReasoningEffort::Auto;
-    app.last_effective_reasoning_effort = Some(ReasoningEffort::Max);
+    app.last_effective_reasoning_effort =
+        Some(EffectiveReasoningEffort::Tier(ReasoningEffort::Max));
     assert_eq!(app.reasoning_effort_display_label(), "auto: xhigh");
 }
 
@@ -1022,6 +1023,27 @@ fn set_model_selection_normalizes_codex_fixed_model_effort() {
     assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
     assert!(!app.auto_model);
     assert_eq!(app.reasoning_effort_display_label(), "low");
+}
+
+#[test]
+fn auto_model_selection_preserves_only_explicit_reasoning_effort() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.reasoning_effort = ReasoningEffort::Max;
+    app.reasoning_effort_explicit = false;
+
+    app.set_model_selection("auto".to_string());
+
+    assert!(app.auto_model);
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
+    assert!(!app.reasoning_effort_explicit);
+
+    app.set_model_selection("deepseek-v4-pro".to_string());
+    app.reasoning_effort = ReasoningEffort::Low;
+    app.reasoning_effort_explicit = true;
+    app.set_model_selection("auto".to_string());
+
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
+    assert!(app.reasoning_effort_explicit);
 }
 
 #[test]

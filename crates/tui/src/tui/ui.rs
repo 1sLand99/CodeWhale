@@ -138,9 +138,9 @@ use super::key_actions;
 
 use super::app::{
     ActiveTurnMetadata, AgentCurrentActivity, AgentCurrentActivityStatus, App, AppAction, AppMode,
-    HuntVerdict, OnboardingState, PendingProviderSwitch, QueuedMessage, ReasoningEffort,
-    SidebarFocus, StatusToast, StatusToastLevel, SubmitDisposition, TaskPanelEntry,
-    TaskPanelEntryKind, ToolEvidence, TuiOptions, bound_agent_activity_text,
+    EffectiveReasoningEffort, HuntVerdict, OnboardingState, PendingProviderSwitch, QueuedMessage,
+    ReasoningEffort, SidebarFocus, StatusToast, StatusToastLevel, SubmitDisposition,
+    TaskPanelEntry, TaskPanelEntryKind, ToolEvidence, TuiOptions, bound_agent_activity_text,
     looks_like_slash_command_input, shell_command_from_bang_input,
 };
 use super::approval::{
@@ -7826,6 +7826,7 @@ async fn run_cache_warmup(app: &App, config: &Config) -> Result<(Usage, String, 
     let base_url = client.base_url().to_string();
     let reasoning_effort = if app.reasoning_effort == ReasoningEffort::Auto {
         app.last_effective_reasoning_effort
+            .and_then(EffectiveReasoningEffort::tier)
             .and_then(|effort| effort.api_value_for_route(app.api_provider, &base_url, &app.model))
             .map(str::to_string)
     } else {
@@ -9813,8 +9814,24 @@ struct UserDispatchOutcome {
     effective_model: String,
     effective_provider_identity: String,
     effective_provider_label: String,
-    selected_reasoning_effort: Option<ReasoningEffort>,
+    effective_reasoning_effort: EffectiveReasoningEffort,
     auto_selection: Option<crate::model_routing::AutoRouteSelection>,
+}
+
+fn reasoning_effort_receipt_for_route(
+    tier: ReasoningEffort,
+    provider: ApiProvider,
+    endpoint_identity: &str,
+    model: &str,
+) -> EffectiveReasoningEffort {
+    crate::work_graph::constrained_effective_reasoning_for_route(
+        tier.into(),
+        provider,
+        endpoint_identity,
+        model,
+    )
+    .map(Into::into)
+    .unwrap_or(EffectiveReasoningEffort::Tier(tier))
 }
 
 #[cfg(test)]
@@ -10121,9 +10138,16 @@ async fn run_prepared_dispatch(
     recovery: DispatchRecovery,
 ) -> Result<()> {
     // Unit tests that intentionally omit the production completion mailbox
-    // apply the result inline. Production always enters through
-    // `start_user_dispatch`, which reserves a mailbox permit first.
-    let apply = spawned_dispatch_inner(prepare, recovery, engine_handle.clone()).await;
+    // apply the result inline. Run the owned async phase as a task just like
+    // production does so its large future is polled from a clean executor
+    // stack instead of nesting under the test helper's call chain.
+    let apply = tokio::spawn(spawned_dispatch_inner(
+        prepare,
+        recovery,
+        engine_handle.clone(),
+    ))
+    .await
+    .map_err(|err| anyhow::anyhow!("dispatch task was lost: {err}"))?;
     apply(app, engine_handle, config)
 }
 
@@ -10181,6 +10205,19 @@ async fn spawned_dispatch_inner(
         auto_selection,
         routing_source: _,
     } = planned;
+    let effective_reasoning_tier = selected_reasoning_effort
+        .unwrap_or(prepare.reasoning_effort)
+        .normalize_for_route(
+            effective_provider,
+            &turn_route.candidate.endpoint().base_url,
+            &turn_route.model,
+        );
+    let effective_reasoning_receipt = reasoning_effort_receipt_for_route(
+        effective_reasoning_tier,
+        effective_provider,
+        &turn_route.candidate.endpoint().base_url,
+        &turn_route.model,
+    );
 
     if let Err(err) = engine_handle
         .send(Op::SendMessage {
@@ -10219,7 +10256,7 @@ async fn spawned_dispatch_inner(
             effective_model,
             effective_provider_identity,
             effective_provider_label,
-            selected_reasoning_effort,
+            effective_reasoning_effort: effective_reasoning_receipt,
             auto_selection,
         },
     )
@@ -10257,7 +10294,7 @@ fn build_dispatch_success_closure(
             );
             app.scroll_to_bottom();
 
-            app.last_effective_reasoning_effort = outcome.selected_reasoning_effort;
+            app.last_effective_reasoning_effort = Some(outcome.effective_reasoning_effort);
             if prepare.auto_model {
                 app.last_effective_model = Some(outcome.effective_model.clone());
                 app.last_effective_provider = Some(outcome.effective_provider);
@@ -10750,6 +10787,7 @@ async fn apply_model_picker_choice(
         target_provider.as_str().to_string()
     };
     let model_is_auto = model.trim().eq_ignore_ascii_case("auto");
+    let preserve_auto_effort = app.reasoning_effort_explicit || effort != previous_effort;
     if target_provider != app.api_provider
         || target_identity != app.provider_identity_for_persistence()
     {
@@ -10839,7 +10877,7 @@ async fn apply_model_picker_choice(
         app.enable_provider_model(&provider_identity, &resolved_model);
         app.clear_model_scoped_telemetry();
     }
-    if live_effort_changed {
+    if live_effort_changed && (!model_is_auto || preserve_auto_effort) {
         app.reasoning_effort = effort;
         app.last_effective_reasoning_effort = None;
     }
@@ -10864,17 +10902,18 @@ async fn apply_model_picker_choice(
     ) {
         update = update.with_default_model(resolved_model.as_str());
     }
-    let persisted_effort = if model_is_auto {
-        effort.as_setting()
-    } else {
-        effort.as_setting_for_route(app.api_provider, &route_base_url, &resolved_model)
-    };
-    update = update
-        .with_provider_model(
-            app.provider_identity_for_persistence(),
-            resolved_model.as_str(),
-        )
-        .with_reasoning_effort(persisted_effort);
+    update = update.with_provider_model(
+        app.provider_identity_for_persistence(),
+        resolved_model.as_str(),
+    );
+    if !model_is_auto || preserve_auto_effort {
+        let persisted_effort = if model_is_auto {
+            app.reasoning_effort.as_setting()
+        } else {
+            effort.as_setting_for_route(app.api_provider, &route_base_url, &resolved_model)
+        };
+        update = update.with_reasoning_effort(persisted_effort);
+    }
     // Applied synchronously: the setup receipt below is only honest if we know
     // the write landed. Going through the app-owned writer means any queued
     // mode/thinking selection the user made first is applied first, so this
@@ -10900,10 +10939,11 @@ async fn apply_model_picker_choice(
         resolved_model.clone()
     };
     let previous_effort_summary = previous_effort.display_label_for_provider(app.api_provider);
-    let effort_summary = if effort == ReasoningEffort::Auto {
+    let applied_effort = app.reasoning_effort;
+    let effort_summary = if applied_effort == ReasoningEffort::Auto {
         "auto (per-turn thinking)".to_string()
     } else {
-        effort
+        applied_effort
             .display_label_for_provider(app.api_provider)
             .to_string()
     };
@@ -16604,13 +16644,16 @@ fn apply_loaded_session(
     app.sync_context_references_from_session(&session.context_references, &message_to_cell);
     app.mark_history_updated();
     app.viewport.transcript_selection.clear();
-    let requested_reasoning_effort = app.reasoning_effort;
+    let requested_reasoning_effort = app
+        .reasoning_effort_explicit
+        .then_some(app.reasoning_effort);
     restore_loaded_session_provider(app, config, provider_identity);
     if session.metadata.model.trim().eq_ignore_ascii_case("auto") {
         // Session records do not own a reasoning preference. Provider restore
-        // must not normalize the global requested tier before an auto route
-        // has selected its concrete provider/model.
-        app.reasoning_effort = requested_reasoning_effort;
+        // must not normalize an explicit global requested tier before an auto
+        // route has selected its concrete provider/model. An implicit
+        // fixed-route default returns to per-turn Auto reasoning.
+        app.reasoning_effort = requested_reasoning_effort.unwrap_or(ReasoningEffort::Auto);
     }
     app.set_model_selection(session.metadata.model.clone());
     if app.auto_model
@@ -16622,6 +16665,7 @@ fn apply_loaded_session(
         app.last_effective_provider_identity = Some(saved.provider_identity.clone());
         app.last_effective_model = Some(saved.model.clone());
         app.last_auto_route_receipt = Some(saved.receipt.clone());
+        app.last_effective_reasoning_effort = saved.effective_reasoning_effort.map(Into::into);
     }
     resolve_loaded_session_route(app, config);
     if !app.auto_model {

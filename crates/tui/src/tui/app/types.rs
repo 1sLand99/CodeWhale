@@ -89,6 +89,16 @@ pub(crate) enum EffectiveReasoningEffort {
     Unavailable,
 }
 
+impl EffectiveReasoningEffort {
+    #[must_use]
+    pub(crate) const fn tier(self) -> Option<ReasoningEffort> {
+        match self {
+            Self::Tier(tier) => Some(tier),
+            Self::ThinkingEnabledGranularityUnavailable | Self::Unavailable => None,
+        }
+    }
+}
+
 impl From<EffectiveReasoningEffort> for crate::work_graph::ReasoningEffortTier {
     fn from(value: EffectiveReasoningEffort) -> Self {
         match value {

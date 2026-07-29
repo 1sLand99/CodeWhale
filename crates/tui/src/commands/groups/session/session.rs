@@ -538,6 +538,8 @@ mod tests {
         app.last_effective_provider_identity = Some("zai".to_string());
         app.last_effective_model = Some(crate::config::ZAI_GLM_5_TURBO_MODEL.to_string());
         app.last_auto_route_receipt = Some(receipt.clone());
+        app.last_effective_reasoning_effort =
+            Some(crate::tui::app::EffectiveReasoningEffort::ThinkingEnabledGranularityUnavailable);
 
         let result = save(&mut app, Some(save_path.to_str().unwrap()));
 
@@ -549,6 +551,10 @@ mod tests {
         assert_eq!(route.provider_identity, "zai");
         assert_eq!(route.model, crate::config::ZAI_GLM_5_TURBO_MODEL);
         assert_eq!(route.receipt, receipt);
+        assert_eq!(
+            route.effective_reasoning_effort,
+            Some(crate::work_graph::ReasoningEffortTier::ThinkingEnabledGranularityUnavailable)
+        );
     }
 
     #[test]
@@ -1044,7 +1050,9 @@ mod tests {
         let mut saved_app = create_test_app_with_tmpdir(&tmpdir);
         saved_app.set_model_selection("auto".to_string());
         saved_app.last_effective_model = Some("deepseek-v4-flash".to_string());
-        saved_app.last_effective_reasoning_effort = Some(ReasoningEffort::Low);
+        saved_app.last_effective_reasoning_effort = Some(
+            crate::tui::app::EffectiveReasoningEffort::Tier(ReasoningEffort::Low),
+        );
         let save_path = tmpdir.path().join("auto_model.json");
         save(&mut saved_app, Some(save_path.to_str().unwrap()));
 
