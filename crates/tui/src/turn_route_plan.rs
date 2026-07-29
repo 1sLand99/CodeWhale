@@ -96,6 +96,18 @@ impl TurnRoutingSource {
     }
 }
 
+fn reasoning_effort_for_route_selection(
+    auto_model: bool,
+    provider: ApiProvider,
+    effort: ReasoningEffort,
+) -> &'static str {
+    if auto_model {
+        effort.as_setting()
+    } else {
+        effort.as_setting_for_provider(provider)
+    }
+}
+
 /// Resolve the route for one turn.
 ///
 /// This is *the* route planner (#1004). `spawned_dispatch_inner` calls it to
@@ -121,9 +133,11 @@ pub(crate) async fn plan_turn_route(
                 request.auto_router_context,
                 request.mode.as_setting(),
                 if request.auto_model { "auto" } else { "fixed" },
-                request
-                    .reasoning_effort
-                    .as_setting_for_provider(request.api_provider),
+                reasoning_effort_for_route_selection(
+                    request.auto_model,
+                    request.api_provider,
+                    request.reasoning_effort,
+                ),
                 request.allow_auto_router_response_cache,
             )
             .await
@@ -203,8 +217,11 @@ pub(crate) async fn plan_turn_route(
         ..Default::default()
     };
 
-    let auto_controls_reasoning =
-        request.auto_model || request.reasoning_effort == ReasoningEffort::Auto;
+    // Model selection and reasoning selection are independent. A fixed
+    // reasoning preference survives auto model routing and is normalized
+    // against the concrete route below; only an explicit `auto` delegates the
+    // tier to the classifier/heuristic.
+    let auto_controls_reasoning = request.reasoning_effort == ReasoningEffort::Auto;
     let selected_reasoning_effort = if auto_controls_reasoning {
         Some(
             auto_selection
@@ -246,4 +263,75 @@ pub(crate) async fn plan_turn_route(
         auto_selection,
         routing_source,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::DEFAULT_TEXT_MODEL;
+
+    fn deepseek_identity() -> ProviderIdentity {
+        ProviderIdentity {
+            provider: ApiProvider::Deepseek,
+            key: ApiProvider::Deepseek.as_str().to_string(),
+            exact_id: None,
+        }
+    }
+
+    #[test]
+    fn auto_model_route_selection_keeps_raw_reasoning_preference() {
+        assert_eq!(
+            reasoning_effort_for_route_selection(
+                true,
+                ApiProvider::OpenaiCodex,
+                ReasoningEffort::Off,
+            ),
+            "off"
+        );
+        assert_eq!(
+            reasoning_effort_for_route_selection(
+                false,
+                ApiProvider::OpenaiCodex,
+                ReasoningEffort::Off,
+            ),
+            "low"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_model_route_respects_fixed_reasoning_preference() {
+        let config = Config::default();
+        let identity = deepseek_identity();
+
+        let planned = plan_turn_route(TurnRoutePlanRequest {
+            route_config: &config,
+            app_route_identity: &identity,
+            api_provider: ApiProvider::Deepseek,
+            app_model: DEFAULT_TEXT_MODEL,
+            auto_model: true,
+            reasoning_effort: ReasoningEffort::Low,
+            mode: AppMode::Agent,
+            content: "explain this function",
+            display_text: "explain this function",
+            auto_router_context: "",
+            should_auto_resolve: false,
+            allow_auto_router_response_cache: false,
+            preflight_required: false,
+            auto_compact_user_configured: false,
+            auto_compact: true,
+            auto_compact_threshold_percent: 80.0,
+        })
+        .await
+        .expect("plan auto-model turn");
+
+        assert_eq!(
+            planned.routing_source,
+            TurnRoutingSource::AutoLocalHeuristic
+        );
+        assert!(!planned.auto_controls_reasoning);
+        assert_eq!(planned.selected_reasoning_effort, None);
+        // DeepSeek collapses low to high, but only after the concrete route is
+        // known; the App keeps the unresolved preference as Low.
+        assert_eq!(planned.effective_reasoning_effort.as_deref(), Some("high"));
+    }
 }

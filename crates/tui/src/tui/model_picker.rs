@@ -72,7 +72,16 @@ const CODEX_PICKER_EFFORTS: &[ReasoningEffort] = &[
     ReasoningEffort::High,
     ReasoningEffort::Max,
 ];
-const AUTO_MODEL_PICKER_EFFORTS: &[ReasoningEffort] = &[ReasoningEffort::Auto];
+/// Auto model routing has no concrete provider dialect yet, so retain the
+/// complete preference vocabulary and defer normalization to dispatch.
+const AUTO_MODEL_PICKER_EFFORTS: &[ReasoningEffort] = &[
+    ReasoningEffort::Auto,
+    ReasoningEffort::Off,
+    ReasoningEffort::Low,
+    ReasoningEffort::Medium,
+    ReasoningEffort::High,
+    ReasoningEffort::Max,
+];
 
 /// `/model` catalog views (#4115).
 ///
@@ -500,9 +509,6 @@ impl ModelPickerView {
     }
 
     fn resolved_effort(&self) -> ReasoningEffort {
-        if self.resolved_model().trim().eq_ignore_ascii_case("auto") {
-            return ReasoningEffort::Auto;
-        }
         let efforts = self.current_efforts();
         efforts[self
             .selected_effort_idx
@@ -2266,11 +2272,12 @@ fn normalize_picker_effort(
     wire_model: &str,
     model_is_auto: bool,
 ) -> ReasoningEffort {
-    if model_is_auto {
-        return ReasoningEffort::Auto;
-    }
-    let normalized = effort.normalize_for_route(provider, base_url, wire_model);
-    let efforts = picker_efforts_for_route(provider, base_url, wire_model, false);
+    let normalized = if model_is_auto {
+        effort
+    } else {
+        effort.normalize_for_route(provider, base_url, wire_model)
+    };
+    let efforts = picker_efforts_for_route(provider, base_url, wire_model, model_is_auto);
     if efforts.contains(&normalized) {
         return normalized;
     }
@@ -2307,10 +2314,7 @@ fn default_picker_effort_idx(
     wire_model: &str,
     model_is_auto: bool,
 ) -> usize {
-    if model_is_auto {
-        return 0;
-    }
-    let efforts = picker_efforts_for_route(provider, base_url, wire_model, false);
+    let efforts = picker_efforts_for_route(provider, base_url, wire_model, model_is_auto);
     let default_effort = default_picker_effort(provider, &efforts);
     efforts
         .iter()
@@ -3298,16 +3302,17 @@ mod tests {
     }
 
     #[test]
-    fn picker_auto_model_forces_auto_effort_on_apply() {
+    fn picker_auto_model_preserves_explicit_effort_on_apply() {
         let (mut app, config, _lock) = create_test_app();
         app.model = "auto".to_string();
         app.auto_model = true;
-        app.reasoning_effort = ReasoningEffort::Off;
+        app.reasoning_effort = ReasoningEffort::Low;
 
         let view = ModelPickerView::new(&app, &config);
 
         assert_eq!(view.resolved_model(), "auto");
-        assert_eq!(view.resolved_effort(), ReasoningEffort::Auto);
+        assert_eq!(view.resolved_effort(), ReasoningEffort::Low);
+        assert_eq!(view.current_efforts(), AUTO_MODEL_PICKER_EFFORTS);
     }
 
     #[test]

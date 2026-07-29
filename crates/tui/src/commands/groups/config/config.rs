@@ -1529,14 +1529,15 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             // Support "/model auto" — auto-select model based on request complexity
             if value.trim().eq_ignore_ascii_case("auto") {
                 app.set_model_selection("auto".to_string());
-                app.reasoning_effort = ReasoningEffort::Auto;
-                app.last_effective_reasoning_effort = None;
                 app.update_model_compaction_budget();
                 app.session.last_prompt_tokens = None;
                 app.session.last_completion_tokens = None;
                 app.session.last_output_throughput = None;
                 return CommandResult::with_message_and_action(
-                    "model = auto (auto-select model and thinking per turn)".to_string(),
+                    format!(
+                        "model = auto (auto-select model per turn; thinking = {})",
+                        app.reasoning_effort_display_label()
+                    ),
                     AppAction::UpdateCompaction(app.compaction_config()),
                 );
             }
@@ -2131,10 +2132,6 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             ) && let Some(ref model) = settings.default_model
             {
                 app.set_model_selection(model.clone());
-                if app.auto_model {
-                    app.reasoning_effort = ReasoningEffort::Auto;
-                    app.last_effective_reasoning_effort = None;
-                }
                 app.update_model_compaction_budget();
                 app.session.last_prompt_tokens = None;
                 app.session.last_completion_tokens = None;
@@ -2143,16 +2140,23 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             }
         }
         "reasoning_effort" | "effort" => {
-            app.reasoning_effort = if app.auto_model {
-                ReasoningEffort::Auto
-            } else {
-                settings
-                    .reasoning_effort
-                    .as_deref()
-                    .map_or_else(ReasoningEffort::default, |value| {
+            app.reasoning_effort = settings.reasoning_effort.as_deref().map_or_else(
+                || {
+                    if app.auto_model {
+                        ReasoningEffort::Auto
+                    } else {
+                        ReasoningEffort::default()
+                    }
+                },
+                |value| {
+                    if app.auto_model {
+                        ReasoningEffort::from_setting(value)
+                    } else {
                         ReasoningEffort::from_setting_for_provider(value, app.api_provider)
-                    })
-            };
+                    }
+                },
+            );
+            app.reasoning_effort_explicit = settings.reasoning_effort.is_some();
             app.last_effective_reasoning_effort = None;
             app.update_model_compaction_budget();
             action = Some(AppAction::UpdateCompaction(app.compaction_config()));
@@ -3259,7 +3263,7 @@ Parse error: permissions.toml at permissions.toml could not be parsed: expected 
     }
 
     #[test]
-    fn config_model_auto_enables_auto_thinking() {
+    fn config_model_auto_preserves_explicit_thinking() {
         let mut app = create_test_app();
         app.reasoning_effort = ReasoningEffort::Off;
 
@@ -3268,9 +3272,33 @@ Parse error: permissions.toml at permissions.toml could not be parsed: expected 
         assert!(result.message.is_some());
         assert!(app.auto_model);
         assert_eq!(app.model, "auto");
-        assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
+        assert_eq!(app.reasoning_effort, ReasoningEffort::Off);
+        assert!(
+            result
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("thinking = off"))
+        );
         assert!(app.last_effective_model.is_none());
         assert!(app.last_effective_reasoning_effort.is_none());
+    }
+
+    #[test]
+    fn config_reasoning_effort_applies_while_model_routing_is_auto() {
+        let mut app = create_test_app();
+        app.set_model_selection("auto".to_string());
+        app.reasoning_effort = ReasoningEffort::Auto;
+        app.reasoning_effort_explicit = false;
+
+        let result = set_config_value(&mut app, "reasoning_effort", "low", false);
+
+        assert!(!result.is_error);
+        assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
+        assert!(app.reasoning_effort_explicit);
+        assert!(matches!(
+            result.action,
+            Some(AppAction::UpdateCompaction(_))
+        ));
     }
 
     #[test]
