@@ -676,7 +676,7 @@ pub struct QueuedMessage {
 
 /// How a freshly-typed user input should be sent.
 ///
-/// Picked by [`App::decide_submit_disposition`] when the user hits Enter on a
+/// Picked by [`App::decide_composer_submit`] when the user submits a
 /// non-empty composer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubmitDisposition {
@@ -684,13 +684,28 @@ pub enum SubmitDisposition {
     Immediate,
     /// Park on `queued_messages` (offline, or engine busy — #382).
     Queue,
-    /// Explicit steer via Ctrl+Enter (#382). Not returned by `decide_submit_disposition`.
-    #[allow(dead_code)]
+    /// Amend the active turn immediately (#382).
     Steer,
     /// Park on `queued_messages` for dispatch after TurnComplete.
     /// Legacy path; #382 unified busy states under `Queue`.
     #[allow(dead_code)]
     QueueFollowUp,
+}
+
+/// Enter-shaped gestures understood by the composer state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposerSubmitChord {
+    Enter,
+    CtrlEnter,
+}
+
+/// The complete result of resolving a submit gesture against composer state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposerSubmitAction {
+    Submit(SubmitDisposition),
+    /// Promote the oldest already-queued message into the active turn.
+    SendQueuedNow,
+    Noop,
 }
 
 /// Detailed tool payload attached to a history cell.

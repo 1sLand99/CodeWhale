@@ -138,9 +138,9 @@ use super::key_actions;
 
 use super::app::{
     ActiveTurnMetadata, AgentCurrentActivity, AgentCurrentActivityStatus, App, AppAction, AppMode,
-    HuntVerdict, OnboardingState, PendingProviderSwitch, QueuedMessage, ReasoningEffort,
-    SidebarFocus, StatusToast, StatusToastLevel, SubmitDisposition, TaskPanelEntry,
-    TaskPanelEntryKind, ToolEvidence, TuiOptions, bound_agent_activity_text,
+    ComposerSubmitAction, ComposerSubmitChord, HuntVerdict, OnboardingState, PendingProviderSwitch,
+    QueuedMessage, ReasoningEffort, SidebarFocus, StatusToast, StatusToastLevel, SubmitDisposition,
+    TaskPanelEntry, TaskPanelEntryKind, ToolEvidence, TuiOptions, bound_agent_activity_text,
     looks_like_slash_command_input, shell_command_from_bang_input,
 };
 use super::approval::{
@@ -6523,6 +6523,20 @@ async fn run_event_loop(
                 }
                 continue;
             }
+
+            // A second, empty Enter after queueing is the portable steer
+            // gesture. Handle it before transcript/detail Enter shortcuts so
+            // it can never open an unrelated overlay instead (#382).
+            if matches!(key.code, KeyCode::Enter)
+                && key.modifiers == KeyModifiers::NONE
+                && matches!(
+                    app.decide_composer_submit(ComposerSubmitChord::Enter),
+                    ComposerSubmitAction::SendQueuedNow
+                )
+            {
+                let _ = send_next_queued_message_now(app, config, &engine_handle).await?;
+                continue;
+            }
             match key.code {
                 KeyCode::Enter
                     if app.input.is_empty()
@@ -7048,10 +7062,11 @@ async fn run_event_loop(
                 {
                     continue;
                 }
-                // #382: Ctrl+Enter forces a steer into the current turn.
-                // Ctrl+J remains a newline everywhere; it never changes
-                // meaning based on engine state.
+                // Accept Ctrl+Enter when the terminal reports it distinctly.
+                // It is deliberately not advertised because several common
+                // terminals encode it exactly like bare Enter.
                 _ if is_forced_submit_key(key) => {
+                    let action = app.decide_composer_submit(ComposerSubmitChord::CtrlEnter);
                     if let Some(input) = app.submit_input() {
                         if reject_local_input_while_remote(app, &input) {
                             continue;
@@ -7075,44 +7090,20 @@ async fn run_event_loop(
                             }
                         } else {
                             let (queued, recovery) = message_from_submitted_input(app, input);
-                            if app.is_loading {
-                                // Engine is busy — steer into the current turn.
-                                attempt_steer_with_queue_fallback(
-                                    app,
-                                    &engine_handle,
-                                    queued.clone(),
-                                    recovery,
-                                )
-                                .await;
-                            } else {
-                                // Engine is idle — send as a regular message
-                                // so the content is not lost to rx_steer's
-                                // stale-drain in handle_send_message (#1331).
-                                submit_or_steer_message(
-                                    app,
-                                    config,
-                                    &engine_handle,
-                                    queued,
-                                    recovery,
-                                )
-                                .await?;
-                            }
+                            dispatch_composer_message(
+                                app,
+                                config,
+                                &engine_handle,
+                                queued,
+                                recovery,
+                                action,
+                            )
+                            .await?;
                         }
                     }
                 }
-                // An empty Enter promotes the oldest queued follow-up into
-                // the active turn. This is the only context-sensitive Enter
-                // shortcut: typed Enter always submits (idle) or queues
-                // (busy), while Ctrl+Enter always means explicit steer.
-                KeyCode::Enter
-                    if app.is_loading
-                        && app.input.is_empty()
-                        && app.queued_draft.is_none()
-                        && !app.queued_messages.is_empty() =>
-                {
-                    let _ = send_next_queued_message_now(app, config, &engine_handle).await?;
-                }
                 KeyCode::Enter => {
+                    let action = app.decide_composer_submit(ComposerSubmitChord::Enter);
                     // #573: when the user typed a slash-command prefix that
                     // the popup is matching (e.g. `/mo` → `/model`), Enter
                     // should run the *highlighted match* rather than
@@ -7185,8 +7176,15 @@ async fn run_event_loop(
                                     })
                                     .await;
                             }
-                            submit_or_steer_message(app, config, &engine_handle, queued, recovery)
-                                .await?;
+                            dispatch_composer_message(
+                                app,
+                                config,
+                                &engine_handle,
+                                queued,
+                                recovery,
+                                action,
+                            )
+                            .await?;
                         }
                     }
                 }
@@ -11751,12 +11749,13 @@ async fn apply_command_result(
             }
             AppAction::SendMessage(content) => {
                 let queued = build_queued_message(app, content);
-                submit_or_steer_message(
+                dispatch_composer_message(
                     app,
                     config,
                     engine_handle,
                     queued,
                     DispatchRecovery::Immediate,
+                    ComposerSubmitAction::Submit(app.decide_submit_disposition()),
                 )
                 .await?;
             }
@@ -11782,12 +11781,13 @@ async fn apply_command_result(
                         app.status_message =
                             Some(tr(app.ui_locale, MessageId::VoiceTranscribed).to_string());
                         let queued = build_queued_message(app, content);
-                        submit_or_steer_message(
+                        dispatch_composer_message(
                             app,
                             config,
                             engine_handle,
                             queued,
                             DispatchRecovery::Immediate,
+                            ComposerSubmitAction::Submit(app.decide_submit_disposition()),
                         )
                         .await?;
                     }
@@ -13257,12 +13257,13 @@ async fn queue_follow_up(app: &mut App, message: QueuedMessage) -> Result<()> {
     Ok(())
 }
 
-async fn submit_or_steer_message(
+async fn dispatch_composer_message(
     app: &mut App,
     config: &Config,
     engine_handle: &EngineHandle,
     message: QueuedMessage,
     recovery: DispatchRecovery,
+    action: ComposerSubmitAction,
 ) -> Result<()> {
     if app.remote_control.blocks_local_input() {
         app.input = message.display;
@@ -13274,10 +13275,16 @@ async fn submit_or_steer_message(
         app.push_status_toast(status, StatusToastLevel::Warning, Some(6_000));
         return Ok(());
     }
-    match app
-        .enter_with_double_tap()
-        .unwrap_or(SubmitDisposition::Immediate)
-    {
+    let disposition = match action {
+        ComposerSubmitAction::Submit(disposition) => disposition,
+        ComposerSubmitAction::SendQueuedNow | ComposerSubmitAction::Noop => {
+            // The caller extracted a non-empty input, so these can only arise
+            // if state changed between key resolution and dispatch. Queueing
+            // is lossless and preserves ordering in that narrow race.
+            SubmitDisposition::Queue
+        }
+    };
+    match disposition {
         SubmitDisposition::Immediate => {
             let _ =
                 dispatch_user_message_with_recovery(app, config, engine_handle, message, recovery)
@@ -13311,13 +13318,24 @@ async fn submit_or_steer_message(
             app.push_status_toast(toast, StatusToastLevel::Info, Some(3_000));
             Ok(())
         }
-        // Steer: reached only via Ctrl+Enter in a busy state.
         SubmitDisposition::Steer => {
             attempt_steer_with_queue_fallback(app, engine_handle, message, recovery).await;
             Ok(())
         }
         SubmitDisposition::QueueFollowUp => queue_follow_up(app, message).await,
     }
+}
+
+#[cfg(test)]
+async fn submit_or_steer_message(
+    app: &mut App,
+    config: &Config,
+    engine_handle: &EngineHandle,
+    message: QueuedMessage,
+    recovery: DispatchRecovery,
+) -> Result<()> {
+    let action = ComposerSubmitAction::Submit(app.decide_submit_disposition());
+    dispatch_composer_message(app, config, engine_handle, message, recovery, action).await
 }
 
 fn reject_local_input_while_remote(app: &mut App, input: &str) -> bool {

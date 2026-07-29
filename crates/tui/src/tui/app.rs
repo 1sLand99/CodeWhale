@@ -69,9 +69,10 @@ pub(crate) use composer::{
 pub use status::{StatusToast, StatusToastLevel};
 pub(crate) use types::EffectiveReasoningEffort;
 pub use types::{
-    ApiKeyError, AppAction, AppMode, ComposerDensity, InitialInput, McpUiAction, QueuedMessage,
-    ReasoningEffort, SettingSelection, ShellJobAction, SubmitDisposition, TaskPanelEntry,
-    TaskPanelEntryKind, ToolCollapseMode, ToolDetailRecord, TranscriptSpacing, TuiOptions, VimMode,
+    ApiKeyError, AppAction, AppMode, ComposerDensity, ComposerSubmitAction, ComposerSubmitChord,
+    InitialInput, McpUiAction, QueuedMessage, ReasoningEffort, SettingSelection, ShellJobAction,
+    SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind, ToolCollapseMode, ToolDetailRecord,
+    TranscriptSpacing, TuiOptions, VimMode,
 };
 
 // === Types ===
@@ -4253,7 +4254,7 @@ impl App {
         self.pending_steers.drain(..).collect()
     }
 
-    /// Decide how to route a fresh composer submit.
+    /// Decide how to route a fresh non-empty composer submit.
     ///
     /// Running turns always queue bare-Enter submissions. Ctrl+Enter is the
     /// single explicit gesture for amending the active turn, regardless of
@@ -4281,11 +4282,39 @@ impl App {
         SubmitDisposition::Queue
     }
 
+    /// Resolve Enter-shaped input from the same state used by composer hints.
+    ///
+    /// Bare Enter is portable across supported terminals: it sends while idle,
+    /// queues while busy, and an empty Enter promotes the oldest queued message
+    /// into the active turn. Ctrl+Enter remains accepted when a terminal can
+    /// report it distinctly, but is intentionally not advertised because many
+    /// terminals encode it exactly like Enter.
+    #[must_use]
+    pub fn decide_composer_submit(&self, chord: ComposerSubmitChord) -> ComposerSubmitAction {
+        if self.input.is_empty() {
+            if self.is_loading && self.queued_draft.is_none() && !self.queued_messages.is_empty() {
+                return ComposerSubmitAction::SendQueuedNow;
+            }
+            return ComposerSubmitAction::Noop;
+        }
+
+        let disposition = match chord {
+            ComposerSubmitChord::Enter => self.decide_submit_disposition(),
+            ComposerSubmitChord::CtrlEnter
+                if self.is_loading && !self.offline_mode && !self.dispatch_in_flight =>
+            {
+                SubmitDisposition::Steer
+            }
+            ComposerSubmitChord::CtrlEnter => self.decide_submit_disposition(),
+        };
+        ComposerSubmitAction::Submit(disposition)
+    }
+
     /// Resolve what bare Enter should do right now.
     ///
-    /// When the engine is busy, Enter queues. When idle, Enter submits
-    /// immediately. Steering is only available via explicit Ctrl+Enter.
+    /// Kept for compatibility with older call sites and tests.
     #[must_use]
+    #[allow(dead_code)]
     pub fn enter_with_double_tap(&mut self) -> Option<SubmitDisposition> {
         // Name kept for call-site stability; the double-tap window is gone.
         Some(self.decide_submit_disposition())

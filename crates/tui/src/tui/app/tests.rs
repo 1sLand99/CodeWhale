@@ -4370,6 +4370,60 @@ fn submit_disposition_offline_busy_queues() {
 }
 
 #[test]
+fn composer_submit_state_by_chord_matrix() {
+    use super::{ComposerSubmitAction, ComposerSubmitChord};
+
+    let mut app = App::new(test_options(false), &Config::default());
+    app.input = "hello".to_string();
+    assert_eq!(
+        app.decide_composer_submit(ComposerSubmitChord::Enter),
+        ComposerSubmitAction::Submit(SubmitDisposition::Immediate)
+    );
+    assert_eq!(
+        app.decide_composer_submit(ComposerSubmitChord::CtrlEnter),
+        ComposerSubmitAction::Submit(SubmitDisposition::Immediate)
+    );
+
+    app.is_loading = true;
+    assert_eq!(
+        app.decide_composer_submit(ComposerSubmitChord::Enter),
+        ComposerSubmitAction::Submit(SubmitDisposition::Queue)
+    );
+    assert_eq!(
+        app.decide_composer_submit(ComposerSubmitChord::CtrlEnter),
+        ComposerSubmitAction::Submit(SubmitDisposition::Steer)
+    );
+
+    app.streaming_message_index = Some(0);
+    assert_eq!(
+        app.decide_composer_submit(ComposerSubmitChord::Enter),
+        ComposerSubmitAction::Submit(SubmitDisposition::Queue)
+    );
+    assert_eq!(
+        app.decide_composer_submit(ComposerSubmitChord::CtrlEnter),
+        ComposerSubmitAction::Submit(SubmitDisposition::Steer)
+    );
+
+    app.queue_message(QueuedMessage::new("older queued".to_string(), None));
+    app.input.clear();
+    assert_eq!(
+        app.decide_composer_submit(ComposerSubmitChord::Enter),
+        ComposerSubmitAction::SendQueuedNow
+    );
+    assert_eq!(
+        app.decide_composer_submit(ComposerSubmitChord::CtrlEnter),
+        ComposerSubmitAction::SendQueuedNow
+    );
+
+    app.input = "offline follow-up".to_string();
+    app.offline_mode = true;
+    assert_eq!(
+        app.decide_composer_submit(ComposerSubmitChord::CtrlEnter),
+        ComposerSubmitAction::Submit(SubmitDisposition::Queue)
+    );
+}
+
+#[test]
 fn bare_enter_while_streaming_stays_queue_not_steer() {
     let mut app = App::new(test_options(false), &Config::default());
     // Busy + streaming: every bare Enter queues. Steer is Ctrl+Enter only.

@@ -1429,6 +1429,29 @@ fn forced_submit_accepts_only_ctrl_enter() {
     )));
 }
 
+#[test]
+fn composer_key_events_map_to_portable_submit_chords() {
+    assert_eq!(
+        composer_submit_chord(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        Some(ComposerSubmitChord::Enter)
+    );
+    assert_eq!(
+        composer_submit_chord(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL)),
+        Some(ComposerSubmitChord::CtrlEnter)
+    );
+    for modifiers in [KeyModifiers::SHIFT, KeyModifiers::ALT] {
+        assert_eq!(
+            composer_submit_chord(KeyEvent::new(KeyCode::Enter, modifiers)),
+            None,
+            "newline chord must not submit: {modifiers:?}"
+        );
+    }
+    assert_eq!(
+        composer_submit_chord(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL)),
+        None
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn cmd_enter_normalizes_to_control_enter_not_newline() {
