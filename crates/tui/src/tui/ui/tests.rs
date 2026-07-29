@@ -15195,7 +15195,7 @@ async fn model_picker_persists_model_and_reasoning_effort() {
 }
 
 #[tokio::test]
-async fn model_picker_auto_releases_implicit_fixed_model_thinking() {
+async fn model_picker_auto_commits_visible_implicit_fixed_model_thinking() {
     let _guard = SettingsHomeGuard::new();
     let mut app = create_test_app();
     app.set_model_selection("deepseek-v4-pro".to_string());
@@ -15216,19 +15216,19 @@ async fn model_picker_auto_releases_implicit_fixed_model_thinking() {
         None,
         ReasoningEffort::Max,
         "deepseek-v4-pro".to_string(),
-        ReasoningEffort::Max,
+        ReasoningEffort::Auto,
     )
     .await;
 
     assert!(app.auto_model);
-    assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
-    assert_eq!(app.reasoning_effort_preference, None);
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Max);
+    assert_eq!(app.reasoning_effort_preference, Some(ReasoningEffort::Max));
     assert_eq!(
         crate::settings::Settings::load()
             .expect("load settings")
             .reasoning_effort
             .as_deref(),
-        None
+        Some("max")
     );
 }
 

@@ -92,11 +92,17 @@ pub(crate) enum EffectiveReasoningEffort {
 }
 
 impl EffectiveReasoningEffort {
+    /// Reconstruct a safe request tier for cache replay and inspection.
+    ///
+    /// Routes with an enabled-but-untiered receipt collapse every non-Off
+    /// request to the same wire toggle, so High is the canonical value that
+    /// keeps reasoning enabled without claiming a granular effective tier.
     #[must_use]
-    pub(crate) const fn tier(self) -> Option<ReasoningEffort> {
+    pub(crate) const fn request_tier_for_replay(self) -> Option<ReasoningEffort> {
         match self {
             Self::Tier(tier) => Some(tier),
-            Self::ThinkingEnabledGranularityUnavailable | Self::Unavailable => None,
+            Self::ThinkingEnabledGranularityUnavailable => Some(ReasoningEffort::High),
+            Self::Unavailable => None,
         }
     }
 }

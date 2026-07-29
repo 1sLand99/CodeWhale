@@ -4780,10 +4780,16 @@ impl App {
             // of what the completed turn received.
             return effective;
         }
+        if requested == ReasoningEffort::Auto
+            && let Some(effective) = self.last_effective_reasoning_effort
+        {
+            // The accepted route receipt is already the strongest available
+            // truth. Preserve enabled-but-untiered and unavailable states
+            // instead of forcing them through the tier-only projection.
+            return effective;
+        }
         let effective = if requested == ReasoningEffort::Auto {
-            self.last_effective_reasoning_effort
-                .and_then(EffectiveReasoningEffort::tier)
-                .unwrap_or(ReasoningEffort::Auto)
+            ReasoningEffort::Auto
         } else if self.auto_model && !auto_route_has_receipt {
             // The configured provider is only the classifier's starting
             // point, not the route that will receive the request.
@@ -4897,6 +4903,22 @@ impl App {
         let requested = self.reasoning_effort;
         let effective = self.effective_reasoning_effort_for_active_route(requested);
         Self::reasoning_effort_resolution_label(requested, effective, self.api_provider)
+    }
+
+    /// Provider-facing effort used when replaying the current prompt for cache
+    /// inspection or warmup.
+    #[must_use]
+    pub(crate) fn reasoning_effort_api_value_for_replay(
+        &self,
+        base_url: &str,
+    ) -> Option<&'static str> {
+        let requested = if self.reasoning_effort == ReasoningEffort::Auto {
+            self.last_effective_reasoning_effort?
+                .request_tier_for_replay()?
+        } else {
+            self.reasoning_effort
+        };
+        requested.api_value_for_route(self.api_provider, base_url, &self.model)
     }
 
     pub fn compaction_config(&self) -> CompactionConfig {

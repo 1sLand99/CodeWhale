@@ -7824,16 +7824,9 @@ async fn fetch_available_models(config: &Config) -> Result<Vec<String>> {
 async fn run_cache_warmup(app: &App, config: &Config) -> Result<(Usage, String, PromptInspection)> {
     let client = DeepSeekClient::new(config)?;
     let base_url = client.base_url().to_string();
-    let reasoning_effort = if app.reasoning_effort == ReasoningEffort::Auto {
-        app.last_effective_reasoning_effort
-            .and_then(EffectiveReasoningEffort::tier)
-            .and_then(|effort| effort.api_value_for_route(app.api_provider, &base_url, &app.model))
-            .map(str::to_string)
-    } else {
-        app.reasoning_effort
-            .api_value_for_route(app.api_provider, &base_url, &app.model)
-            .map(str::to_string)
-    };
+    let reasoning_effort = app
+        .reasoning_effort_api_value_for_replay(&base_url)
+        .map(str::to_string);
     let request = MessageRequest {
         model: app.model.clone(),
         messages: app.api_messages.clone(),

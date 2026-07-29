@@ -277,6 +277,52 @@ fn reasoning_effort_display_label_uses_codex_xhigh() {
 }
 
 #[test]
+fn fixed_auto_reasoning_label_preserves_untiered_effective_receipt() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Zai;
+    app.auto_model = false;
+    app.model = crate::config::ZAI_GLM_5_TURBO_MODEL.to_string();
+    app.active_route_base_url = crate::config::DEFAULT_ZAI_BASE_URL.to_string();
+    app.reasoning_effort = ReasoningEffort::Auto;
+    app.last_effective_reasoning_effort =
+        Some(EffectiveReasoningEffort::ThinkingEnabledGranularityUnavailable);
+
+    assert_eq!(
+        app.reasoning_effort_display_label(),
+        "auto→thinking enabled; granularity unavailable"
+    );
+}
+
+#[test]
+fn cache_replay_keeps_untiered_reasoning_enabled() {
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Zai;
+    app.auto_model = false;
+    app.model = crate::config::ZAI_GLM_5_TURBO_MODEL.to_string();
+    app.reasoning_effort = ReasoningEffort::Auto;
+    app.last_effective_reasoning_effort =
+        Some(EffectiveReasoningEffort::ThinkingEnabledGranularityUnavailable);
+
+    assert_eq!(
+        app.reasoning_effort_api_value_for_replay(crate::config::DEFAULT_ZAI_BASE_URL),
+        Some("high")
+    );
+
+    app.api_provider = ApiProvider::Minimax;
+    app.model = crate::config::DEFAULT_MINIMAX_MODEL.to_string();
+    assert_eq!(
+        app.reasoning_effort_api_value_for_replay(crate::config::DEFAULT_MINIMAX_BASE_URL),
+        Some("high")
+    );
+
+    app.last_effective_reasoning_effort = Some(EffectiveReasoningEffort::Unavailable);
+    assert_eq!(
+        app.reasoning_effort_api_value_for_replay(crate::config::DEFAULT_ZAI_BASE_URL),
+        None
+    );
+}
+
+#[test]
 fn mode_and_thinking_are_locked_while_a_turn_is_running() {
     // #2982: while a turn is in flight, user-initiated mode/thinking changes
     // are refused with a concise message instead of shifting the surface the

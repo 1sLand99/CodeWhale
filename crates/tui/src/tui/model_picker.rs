@@ -180,7 +180,9 @@ pub struct ModelPickerView {
     /// instead of being misclassified as "unchanged".
     previous_model: String,
     initial_provider: ApiProvider,
-    /// Raw preference before the active route normalizes unsupported tiers.
+    /// Raw preference before the picker opened. An absent explicit preference
+    /// is represented by Auto so applying a visible fixed-route tier is still
+    /// recognized as an intentional picker choice.
     initial_effort: ReasoningEffort,
     /// Working raw preference. Model-row navigation only changes how this is
     /// projected into the visible route-specific effort rows.
@@ -289,6 +291,9 @@ impl ModelPickerView {
 
         let initial_effort = app
             .reasoning_effort_preference
+            .unwrap_or(ReasoningEffort::Auto);
+        let selected_effort_request = app
+            .reasoning_effort_preference
             .unwrap_or(app.reasoning_effort);
         let effort_rows = picker_efforts_for_route(
             app.api_provider,
@@ -297,7 +302,7 @@ impl ModelPickerView {
             app.auto_model,
         );
         let normalized = normalize_picker_effort(
-            initial_effort,
+            selected_effort_request,
             app.api_provider,
             &config.deepseek_base_url(),
             &initial_model,
@@ -320,7 +325,7 @@ impl ModelPickerView {
             previous_model,
             initial_provider: app.api_provider,
             initial_effort,
-            selected_effort_request: initial_effort,
+            selected_effort_request,
             active_accepts_custom_model_ids: app.accepts_custom_model_ids(),
             query: String::new(),
             selected_model_idx,
@@ -3363,6 +3368,35 @@ mod tests {
     }
 
     #[test]
+    fn picker_auto_row_commits_visible_implicit_effort() {
+        let (mut app, config, _lock) = create_test_app();
+        app.api_provider = crate::config::ApiProvider::Deepseek;
+        app.model = "deepseek-v4-pro".to_string();
+        app.auto_model = false;
+        app.reasoning_effort = ReasoningEffort::High;
+        app.reasoning_effort_preference = None;
+
+        let mut view = ModelPickerView::new(&app, &config);
+        assert_eq!(view.initial_effort, ReasoningEffort::Auto);
+        view.selected_model_idx = view
+            .visible_model_rows()
+            .iter()
+            .position(|row| row.id == "auto")
+            .expect("Auto row");
+        view.select_effort_for_current_model();
+
+        assert_eq!(view.resolved_effort(), ReasoningEffort::High);
+        assert!(matches!(
+            view.build_event(),
+            ViewEvent::ModelPickerApplied {
+                effort: ReasoningEffort::High,
+                previous_effort: ReasoningEffort::Auto,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn picker_normalizes_low_medium_to_high() {
         let (mut app, config, _lock) = create_test_app();
         app.reasoning_effort = ReasoningEffort::Medium;
@@ -4409,6 +4443,7 @@ mod tests {
         let (mut app, mut config, _lock) = create_test_app();
         config.api_key = Some("deepseek-picker-test-key".to_string());
         app.reasoning_effort = ReasoningEffort::High;
+        app.reasoning_effort_preference = Some(ReasoningEffort::High);
         app.model = "deepseek-v4-pro".to_string();
         app.auto_model = false;
         app.enable_provider_model("deepseek", "deepseek-v4-flash");

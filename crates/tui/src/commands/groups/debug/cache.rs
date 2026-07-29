@@ -48,16 +48,14 @@ fn format_cache_inspect(app: &mut App, verbose: bool, json_mode: bool) -> String
         return "cache inspect: --json and --verbose cannot be combined".to_string();
     }
 
-    let reasoning_effort = if app.reasoning_effort == crate::tui::app::ReasoningEffort::Auto {
-        app.last_effective_reasoning_effort
-            .and_then(crate::tui::app::EffectiveReasoningEffort::tier)
-            .and_then(|effort| effort.api_value_for_provider(app.api_provider))
-            .map(str::to_string)
-    } else {
-        app.reasoning_effort
-            .api_value_for_provider(app.api_provider)
-            .map(str::to_string)
-    };
+    let replay_base_url = app
+        .session
+        .last_base_url
+        .as_deref()
+        .unwrap_or(&app.active_route_base_url);
+    let reasoning_effort = app
+        .reasoning_effort_api_value_for_replay(replay_base_url)
+        .map(str::to_string);
     let request = MessageRequest {
         model: app.model.clone(),
         messages: app.api_messages.clone(),
