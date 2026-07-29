@@ -325,7 +325,7 @@ fn cycle_effort_updates_effort_status_and_compaction() {
     app.cycle_effort();
 
     assert_eq!(app.reasoning_effort, ReasoningEffort::High);
-    assert!(app.reasoning_effort_explicit);
+    assert_eq!(app.reasoning_effort_preference, Some(ReasoningEffort::High));
     assert_eq!(
         app.status_message.as_deref(),
         Some("Reasoning effort: high"),
@@ -1017,10 +1017,12 @@ fn set_model_selection_normalizes_codex_fixed_model_effort() {
     let mut app = App::new(test_options(false), &Config::default());
     app.api_provider = ApiProvider::OpenaiCodex;
     app.reasoning_effort = ReasoningEffort::Off;
+    app.reasoning_effort_preference = Some(ReasoningEffort::Off);
 
     app.set_model_selection("gpt-5.5-codex".to_string());
 
     assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
+    assert_eq!(app.reasoning_effort_preference, Some(ReasoningEffort::Off));
     assert!(!app.auto_model);
     assert_eq!(app.reasoning_effort_display_label(), "low");
 }
@@ -1029,21 +1031,41 @@ fn set_model_selection_normalizes_codex_fixed_model_effort() {
 fn auto_model_selection_preserves_only_explicit_reasoning_effort() {
     let mut app = App::new(test_options(false), &Config::default());
     app.reasoning_effort = ReasoningEffort::Max;
-    app.reasoning_effort_explicit = false;
+    app.reasoning_effort_preference = None;
 
     app.set_model_selection("auto".to_string());
 
     assert!(app.auto_model);
     assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
-    assert!(!app.reasoning_effort_explicit);
+    assert_eq!(app.reasoning_effort_preference, None);
 
-    app.set_model_selection("deepseek-v4-pro".to_string());
-    app.reasoning_effort = ReasoningEffort::Low;
-    app.reasoning_effort_explicit = true;
-    app.set_model_selection("auto".to_string());
+    for (provider, requested, normalized) in [
+        (
+            ApiProvider::Deepseek,
+            ReasoningEffort::Low,
+            ReasoningEffort::High,
+        ),
+        (
+            ApiProvider::OpenaiCodex,
+            ReasoningEffort::Off,
+            ReasoningEffort::Low,
+        ),
+    ] {
+        app.api_provider = provider;
+        app.auto_model = false;
+        app.model = "fixed-model".to_string();
+        app.reasoning_effort = normalized;
+        app.reasoning_effort_preference = Some(requested);
 
-    assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
-    assert!(app.reasoning_effort_explicit);
+        app.set_model_selection("auto".to_string());
+
+        assert_eq!(app.reasoning_effort, requested, "{provider:?}");
+        assert_eq!(
+            app.reasoning_effort_preference,
+            Some(requested),
+            "{provider:?}"
+        );
+    }
 }
 
 #[test]
@@ -1080,6 +1102,11 @@ fn app_new_normalizes_saved_codex_reasoning_effort() {
 
         assert_eq!(app.api_provider, ApiProvider::OpenaiCodex);
         assert_eq!(app.reasoning_effort, expected, "raw setting {raw}");
+        assert_eq!(
+            app.reasoning_effort_preference,
+            Some(ReasoningEffort::from_setting(raw)),
+            "raw setting {raw}"
+        );
         assert_eq!(app.reasoning_effort_display_label(), display);
     }
 }
@@ -5735,6 +5762,35 @@ async fn rapid_thinking_selections_persist_the_last_one() {
             .as_deref(),
         Some(expected),
         "the tier the session ended on must be the tier on disk"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fixed_route_thinking_cycle_persists_raw_preference() {
+    let _lock = lock_test_env();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let _env = sealed_settings_home(tmp.path());
+    let _writes = crate::tui::startup_defaults::allow_writes_in_tests();
+
+    let mut app = App::new(test_options(false), &Config::default());
+    app.api_provider = ApiProvider::Moonshot;
+    app.auto_model = false;
+    app.active_route_base_url = crate::config::DEFAULT_MOONSHOT_BASE_URL.to_string();
+    app.model = crate::config::MOONSHOT_KIMI_K3_MODEL.to_string();
+    app.reasoning_effort = ReasoningEffort::Max;
+
+    app.apply_reasoning_effort_cycle();
+    app.startup_defaults.flush();
+
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Off);
+    assert_eq!(app.reasoning_effort_preference, Some(ReasoningEffort::Off));
+    assert_eq!(
+        Settings::load()
+            .expect("reload")
+            .reasoning_effort
+            .as_deref(),
+        Some("off"),
+        "the always-thinking route may execute Low, but the raw Off preference must survive restart"
     );
 }
 

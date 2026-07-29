@@ -2140,7 +2140,11 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
             }
         }
         "reasoning_effort" | "effort" => {
-            app.reasoning_effort = settings.reasoning_effort.as_deref().map_or_else(
+            app.reasoning_effort_preference = settings
+                .reasoning_effort
+                .as_deref()
+                .map(ReasoningEffort::from_setting);
+            app.reasoning_effort = app.reasoning_effort_preference.map_or_else(
                 || {
                     if app.auto_model {
                         ReasoningEffort::Auto
@@ -2148,15 +2152,14 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                         ReasoningEffort::default()
                     }
                 },
-                |value| {
+                |requested| {
                     if app.auto_model {
-                        ReasoningEffort::from_setting(value)
+                        requested
                     } else {
-                        ReasoningEffort::from_setting_for_provider(value, app.api_provider)
+                        requested.normalize_for_provider(app.api_provider)
                     }
                 },
             );
-            app.reasoning_effort_explicit = settings.reasoning_effort.is_some();
             app.last_effective_reasoning_effort = None;
             app.update_model_compaction_budget();
             action = Some(AppAction::UpdateCompaction(app.compaction_config()));
@@ -3266,7 +3269,7 @@ Parse error: permissions.toml at permissions.toml could not be parsed: expected 
     fn config_model_auto_preserves_explicit_thinking() {
         let mut app = create_test_app();
         app.reasoning_effort = ReasoningEffort::Off;
-        app.reasoning_effort_explicit = true;
+        app.reasoning_effort_preference = Some(ReasoningEffort::Off);
 
         let result = config_command(&mut app, Some("model auto"));
 
@@ -3288,14 +3291,14 @@ Parse error: permissions.toml at permissions.toml could not be parsed: expected 
     fn config_model_auto_releases_implicit_fixed_model_thinking() {
         let mut app = create_test_app();
         app.reasoning_effort = ReasoningEffort::Max;
-        app.reasoning_effort_explicit = false;
+        app.reasoning_effort_preference = None;
 
         let result = config_command(&mut app, Some("model auto"));
 
         assert!(result.message.is_some());
         assert!(app.auto_model);
         assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
-        assert!(!app.reasoning_effort_explicit);
+        assert_eq!(app.reasoning_effort_preference, None);
         assert!(
             result
                 .message
@@ -3309,13 +3312,13 @@ Parse error: permissions.toml at permissions.toml could not be parsed: expected 
         let mut app = create_test_app();
         app.set_model_selection("auto".to_string());
         app.reasoning_effort = ReasoningEffort::Auto;
-        app.reasoning_effort_explicit = false;
+        app.reasoning_effort_preference = None;
 
         let result = set_config_value(&mut app, "reasoning_effort", "low", false);
 
         assert!(!result.is_error);
         assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
-        assert!(app.reasoning_effort_explicit);
+        assert_eq!(app.reasoning_effort_preference, Some(ReasoningEffort::Low));
         assert!(matches!(
             result.action,
             Some(AppAction::UpdateCompaction(_))
@@ -3380,6 +3383,7 @@ Parse error: permissions.toml at permissions.toml could not be parsed: expected 
         let result = set_config_value(&mut app, "reasoning_effort", "off", false);
 
         assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
+        assert_eq!(app.reasoning_effort_preference, Some(ReasoningEffort::Off));
         assert_eq!(
             result.message.as_deref(),
             Some("reasoning_effort = low (session only, add --save to persist)")

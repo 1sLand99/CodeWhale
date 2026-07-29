@@ -417,9 +417,14 @@ pub fn parse_mode(arg: Option<&str>) -> Result<ConfigUiMode, String> {
 
 pub fn build_document(app: &App, config: &Config) -> Result<ConfigUiDocument> {
     let settings = Settings::load_persisted().unwrap_or_default();
-    let reasoning_effort = config
-        .reasoning_effort()
-        .map(ReasoningEffortValue::from_setting)
+    let reasoning_effort = app
+        .reasoning_effort_preference
+        .map(Into::into)
+        .or_else(|| {
+            config
+                .reasoning_effort()
+                .map(ReasoningEffortValue::from_setting)
+        })
         .unwrap_or_else(|| app.reasoning_effort.into());
     let default_model = settings.default_model.clone();
     let status_items = app.status_items.iter().copied().map(Into::into).collect();
@@ -904,12 +909,19 @@ fn reload_runtime_config(app: &mut App, config: &mut Config) -> Result<()> {
     }
     .map_err(anyhow::Error::msg)?;
     app.set_provider_identity_record(identity);
-    app.reasoning_effort =
-        ReasoningEffort::from_setting(reloaded.reasoning_effort().unwrap_or_else(|| {
-            app.reasoning_effort
-                .as_setting_for_provider(app.api_provider)
-        }))
-        .normalize_for_provider(app.api_provider);
+    let requested = reloaded
+        .reasoning_effort()
+        .map(ReasoningEffort::from_setting)
+        .or(app.reasoning_effort_preference)
+        .unwrap_or(app.reasoning_effort);
+    if reloaded.reasoning_effort().is_some() {
+        app.reasoning_effort_preference = Some(requested);
+    }
+    app.reasoning_effort = if app.auto_model {
+        requested
+    } else {
+        requested.normalize_for_provider(app.api_provider)
+    };
     app.last_effective_reasoning_effort = None;
     app.update_model_compaction_budget();
     app.mcp_config_path = reloaded.mcp_config_path();
@@ -936,19 +948,24 @@ fn apply_reasoning_effort(
     value: ReasoningEffortValue,
     persist: bool,
 ) -> Result<()> {
-    let effort: ReasoningEffort =
-        ReasoningEffort::from(value).normalize_for_provider(app.api_provider);
-    app.reasoning_effort = effort;
+    let requested = ReasoningEffort::from(value);
+    let effective = if app.auto_model {
+        requested
+    } else {
+        requested.normalize_for_provider(app.api_provider)
+    };
+    app.reasoning_effort = effective;
+    app.reasoning_effort_preference = Some(requested);
     app.last_effective_reasoning_effort = None;
     app.update_model_compaction_budget();
     if persist {
         crate::config_persistence::persist_root_string_key(
             app.config_path.as_deref(),
             "reasoning_effort",
-            effort.as_setting_for_provider(app.api_provider),
+            requested.as_setting(),
         )?;
     }
-    config.reasoning_effort = Some(effort.as_setting_for_provider(app.api_provider).to_string());
+    config.reasoning_effort = Some(requested.as_setting().to_string());
     Ok(())
 }
 
@@ -1468,6 +1485,7 @@ mod tests {
         app.api_provider = ApiProvider::Deepseek;
         app.model_ids_passthrough = false;
         app.active_route_limits = None;
+        app.reasoning_effort_preference = None;
         app.update_model_compaction_budget();
         app
     }
@@ -1486,6 +1504,34 @@ mod tests {
         // rewrite that product setting into an assumed Suggest default.
         assert_eq!(doc.runtime.approval_mode, app.approval_mode.into());
         assert_eq!(doc.config.reasoning_effort, ReasoningEffortValue::Max);
+    }
+
+    #[test]
+    fn build_document_uses_raw_reasoning_preference() {
+        let mut app = app();
+        app.api_provider = ApiProvider::OpenaiCodex;
+        app.reasoning_effort = ReasoningEffort::Low;
+        app.reasoning_effort_preference = Some(ReasoningEffort::Off);
+
+        let doc = build_document(&app, &Config::default()).expect("document");
+
+        assert_eq!(doc.config.reasoning_effort, ReasoningEffortValue::Off);
+    }
+
+    #[test]
+    fn config_ui_reasoning_keeps_raw_preference_for_fixed_route() {
+        let mut app = app();
+        app.api_provider = ApiProvider::OpenaiCodex;
+        app.reasoning_effort = ReasoningEffort::High;
+        app.reasoning_effort_preference = None;
+        let mut config = Config::default();
+
+        apply_reasoning_effort(&mut app, &mut config, ReasoningEffortValue::Off, false)
+            .expect("apply reasoning");
+
+        assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
+        assert_eq!(app.reasoning_effort_preference, Some(ReasoningEffort::Off));
+        assert_eq!(config.reasoning_effort.as_deref(), Some("off"));
     }
 
     #[test]

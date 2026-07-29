@@ -5877,6 +5877,7 @@ async fn provider_switch_to_openai_codex_normalizes_deepseek_off_effort() {
     app.api_provider = ApiProvider::Deepseek;
     app.model = DEFAULT_TEXT_MODEL.to_string();
     app.reasoning_effort = ReasoningEffort::Off;
+    app.reasoning_effort_preference = Some(ReasoningEffort::Off);
     let mut engine = mock_engine_handle();
     let mut config = Config {
         provider: Some("deepseek".to_string()),
@@ -5903,6 +5904,7 @@ async fn provider_switch_to_openai_codex_normalizes_deepseek_off_effort() {
     assert_eq!(app.api_provider, ApiProvider::OpenaiCodex);
     assert_eq!(app.model, crate::config::DEFAULT_OPENAI_CODEX_MODEL);
     assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
+    assert_eq!(app.reasoning_effort_preference, Some(ReasoningEffort::Off));
     assert_eq!(app.reasoning_effort_display_label(), "low");
 }
 
@@ -5979,7 +5981,7 @@ async fn auto_dispatch_keeps_last_and_pending_receipts_aligned() {
     let mut app = create_test_app();
     app.set_provider_identity(ApiProvider::Zai, "zai");
     app.reasoning_effort = ReasoningEffort::Low;
-    app.reasoning_effort_explicit = true;
+    app.reasoning_effort_preference = Some(ReasoningEffort::Low);
     app.set_model_selection("auto".to_string());
     let config = Config {
         provider: Some("zai".to_string()),
@@ -14825,6 +14827,7 @@ fn apply_loaded_session_restores_concrete_model_mode() {
     let mut app = create_test_app();
     app.set_model_selection("auto".to_string());
     app.reasoning_effort = ReasoningEffort::Low;
+    app.reasoning_effort_preference = Some(ReasoningEffort::Low);
     let mut session = saved_session_with_messages(vec![
         text_message("user", "hello"),
         text_message("assistant", "hi"),
@@ -14839,14 +14842,17 @@ fn apply_loaded_session_restores_concrete_model_mode() {
     assert_eq!(app.model, "deepseek-v4-flash");
     assert_eq!(app.model_selection_for_persistence(), "deepseek-v4-flash");
     assert_eq!(app.reasoning_effort, ReasoningEffort::High);
+    assert_eq!(app.reasoning_effort_preference, Some(ReasoningEffort::Low));
 }
 
 #[test]
 fn apply_loaded_session_restores_auto_model_mode() {
     let mut app = create_test_app();
     app.set_model_selection("deepseek-v4-pro".to_string());
-    app.reasoning_effort = ReasoningEffort::Low;
-    app.reasoning_effort_explicit = true;
+    // Simulate a raw `low` preference already collapsed by the fixed
+    // DeepSeek route. Loading Auto must restore `low`, not snapshot `high`.
+    app.reasoning_effort = ReasoningEffort::High;
+    app.reasoning_effort_preference = Some(ReasoningEffort::Low);
     app.last_effective_model = Some("deepseek-v4-flash".to_string());
     app.last_effective_reasoning_effort =
         Some(EffectiveReasoningEffort::Tier(ReasoningEffort::Low));
@@ -14869,6 +14875,7 @@ fn apply_loaded_session_restores_auto_model_mode() {
     assert_eq!(app.last_auto_route_receipt, None);
     assert_eq!(app.last_effective_reasoning_effort, None);
     assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
+    assert_eq!(app.reasoning_effort_preference, Some(ReasoningEffort::Low));
     assert_eq!(app.effective_model_for_budget(), DEFAULT_TEXT_MODEL);
 }
 
@@ -14877,7 +14884,7 @@ fn apply_loaded_auto_session_releases_implicit_fixed_model_thinking() {
     let mut app = create_test_app();
     app.set_model_selection("deepseek-v4-pro".to_string());
     app.reasoning_effort = ReasoningEffort::Max;
-    app.reasoning_effort_explicit = false;
+    app.reasoning_effort_preference = None;
     let mut session = saved_session_with_messages(vec![
         text_message("user", "hello"),
         text_message("assistant", "hi"),
@@ -14888,7 +14895,7 @@ fn apply_loaded_auto_session_releases_implicit_fixed_model_thinking() {
 
     assert!(app.auto_model);
     assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
-    assert!(!app.reasoning_effort_explicit);
+    assert_eq!(app.reasoning_effort_preference, None);
 }
 
 #[test]
@@ -15069,7 +15076,10 @@ fn app_new_auto_model_preserves_explicit_config_reasoning() {
 
     assert!(app.auto_model);
     assert_eq!(app.reasoning_effort, ReasoningEffort::Medium);
-    assert!(app.reasoning_effort_explicit);
+    assert_eq!(
+        app.reasoning_effort_preference,
+        Some(ReasoningEffort::Medium)
+    );
 }
 
 #[test]
@@ -15123,7 +15133,7 @@ fn app_new_auto_model_ignores_reasoning_inferred_from_legacy_alias() {
 
     assert!(app.auto_model);
     assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
-    assert!(!app.reasoning_effort_explicit);
+    assert_eq!(app.reasoning_effort_preference, None);
 }
 
 #[tokio::test]
@@ -15190,7 +15200,7 @@ async fn model_picker_auto_releases_implicit_fixed_model_thinking() {
     let mut app = create_test_app();
     app.set_model_selection("deepseek-v4-pro".to_string());
     app.reasoning_effort = ReasoningEffort::Max;
-    app.reasoning_effort_explicit = false;
+    app.reasoning_effort_preference = None;
     let mut engine = mock_engine_handle();
     let mut config = Config {
         api_key: Some("test-key".to_string()),
@@ -15212,7 +15222,7 @@ async fn model_picker_auto_releases_implicit_fixed_model_thinking() {
 
     assert!(app.auto_model);
     assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
-    assert!(!app.reasoning_effort_explicit);
+    assert_eq!(app.reasoning_effort_preference, None);
     assert_eq!(
         crate::settings::Settings::load()
             .expect("load settings")
@@ -15223,12 +15233,51 @@ async fn model_picker_auto_releases_implicit_fixed_model_thinking() {
 }
 
 #[tokio::test]
+async fn model_picker_auto_restores_raw_preference_after_fixed_normalization() {
+    let _guard = SettingsHomeGuard::new();
+    let mut app = create_test_app();
+    app.api_provider = ApiProvider::Deepseek;
+    app.set_model_selection("deepseek-v4-pro".to_string());
+    app.reasoning_effort = ReasoningEffort::High;
+    app.reasoning_effort_preference = Some(ReasoningEffort::Low);
+    let mut engine = mock_engine_handle();
+    let mut config = Config {
+        api_key: Some("test-key".to_string()),
+        ..Default::default()
+    };
+
+    apply_model_picker_choice(
+        &mut app,
+        &mut engine.handle,
+        &mut config,
+        "auto".to_string(),
+        None,
+        None,
+        ReasoningEffort::Low,
+        "deepseek-v4-pro".to_string(),
+        ReasoningEffort::Low,
+    )
+    .await;
+
+    assert!(app.auto_model);
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
+    assert_eq!(app.reasoning_effort_preference, Some(ReasoningEffort::Low));
+    assert_eq!(
+        crate::settings::Settings::load()
+            .expect("load settings")
+            .reasoning_effort
+            .as_deref(),
+        Some("low")
+    );
+}
+
+#[tokio::test]
 async fn auto_model_effort_picker_persists_unresolved_tier_verbatim() {
     let _guard = SettingsHomeGuard::new();
     let mut app = create_test_app();
     app.set_model_selection("auto".to_string());
     app.reasoning_effort = ReasoningEffort::Auto;
-    app.reasoning_effort_explicit = false;
+    app.reasoning_effort_preference = None;
     let engine = mock_engine_handle();
 
     apply_picker_effort_choice(
@@ -15241,7 +15290,7 @@ async fn auto_model_effort_picker_persists_unresolved_tier_verbatim() {
 
     assert!(app.auto_model);
     assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
-    assert!(app.reasoning_effort_explicit);
+    assert_eq!(app.reasoning_effort_preference, Some(ReasoningEffort::Low));
     assert_eq!(
         crate::settings::Settings::load()
             .expect("load settings")
@@ -15332,6 +15381,7 @@ async fn reselecting_live_thinking_only_persists_startup_default() {
             .as_deref(),
         Some("high")
     );
+    assert_eq!(app.reasoning_effort_preference, Some(ReasoningEffort::High));
     assert!(
         app.status_message
             .as_deref()
@@ -15401,7 +15451,7 @@ async fn model_picker_auto_switches_exact_named_custom_route_transactionally() {
     app.set_provider_identity(ApiProvider::Custom, "custom-a");
     app.set_model_selection("model-a".to_string());
     app.reasoning_effort = ReasoningEffort::Low;
-    app.reasoning_effort_explicit = true;
+    app.reasoning_effort_preference = Some(ReasoningEffort::Low);
     let previous_effort = app.reasoning_effort;
     let mut custom = HashMap::new();
     for (name, base_url, model) in [

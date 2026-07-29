@@ -336,6 +336,9 @@ impl App {
             .reasoning_effort
             .as_deref()
             .or_else(|| config.reasoning_effort());
+        let reasoning_effort_preference = configured_reasoning_effort
+            .filter(|_| reasoning_effort_explicit)
+            .map(ReasoningEffort::from_setting);
         let threshold_model = if auto_model {
             DEFAULT_TEXT_MODEL
         } else {
@@ -634,7 +637,7 @@ impl App {
             active_context_window_override,
             pending_provider_switch: None,
             reasoning_effort,
-            reasoning_effort_explicit,
+            reasoning_effort_preference,
             last_effective_reasoning_effort: None,
             workspace,
             // #4022: the worker thread is spawned lazily on first submit, so

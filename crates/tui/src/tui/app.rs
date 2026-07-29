@@ -1207,12 +1207,14 @@ pub struct App {
     /// Pending provider transition for transactional rollback when the next
     /// auth failure indicates the new provider cannot be used.
     pub pending_provider_switch: Option<PendingProviderSwitch>,
-    /// Current reasoning-effort tier for DeepSeek thinking mode.
-    /// Cycled via Shift+Tab; initialized from config at startup.
+    /// Current live reasoning-effort selection. Route changes may normalize
+    /// this value; the raw user choice remains in
+    /// [`Self::reasoning_effort_preference`].
     pub reasoning_effort: ReasoningEffort,
-    /// Whether the current effort came from an explicit user setting rather
-    /// than compatibility inference from a retiring model alias.
-    pub(crate) reasoning_effort_explicit: bool,
+    /// Raw explicit user preference, before any fixed provider/model route
+    /// normalizes it. `None` means the current live tier is an implicit route
+    /// default or compatibility inference and must not constrain Auto routing.
+    pub(crate) reasoning_effort_preference: Option<ReasoningEffort>,
     /// Last effective thinking receipt for the most recently accepted route.
     pub(crate) last_effective_reasoning_effort: Option<EffectiveReasoningEffort>,
     pub workspace: PathBuf,
@@ -2514,23 +2516,14 @@ impl App {
             return;
         }
         self.reasoning_effort = requested;
-        self.reasoning_effort_explicit = true;
+        self.reasoning_effort_preference = Some(requested);
         self.last_effective_reasoning_effort = None;
         // Same persistence owner as the model/effort pickers, so Ctrl+T and the
         // hotbar `reasoning.cycle` action restore on restart exactly like a
         // picker selection does. Only the *requested* tier is persisted — the
         // effective tier is a per-turn route fact, not a user preference.
-        let persisted_effort = if self.auto_model {
-            requested.as_setting()
-        } else {
-            requested.as_setting_for_route(
-                self.api_provider,
-                &self.active_route_base_url,
-                &self.model,
-            )
-        };
         self.startup_defaults.spawn(
-            crate::tui::startup_defaults::StartupDefaults::reasoning_effort(persisted_effort),
+            crate::tui::startup_defaults::StartupDefaults::reasoning_effort(requested.as_setting()),
         );
         self.update_model_compaction_budget();
         self.status_message = Some(format!(
@@ -4584,17 +4577,18 @@ impl App {
         self.last_auto_route_receipt = None;
         self.pending_auto_route_receipt = None;
         self.last_effective_reasoning_effort = None;
-        // Auto model routing is independent from an explicitly requested
-        // reasoning tier. An implicit fixed-model default is route-local,
-        // though, so entering Auto must hand reasoning back to the router.
+        // Auto model routing is independent from an explicitly requested raw
+        // reasoning tier. Never reuse the route-normalized live value here:
+        // fixed DeepSeek can collapse low→high and Codex off→low.
         if auto_model {
-            if !self.reasoning_effort_explicit {
-                self.reasoning_effort = ReasoningEffort::Auto;
-            }
-        } else {
             self.reasoning_effort = self
-                .reasoning_effort
-                .normalize_for_provider(self.api_provider);
+                .reasoning_effort_preference
+                .unwrap_or(ReasoningEffort::Auto);
+        } else {
+            let requested = self
+                .reasoning_effort_preference
+                .unwrap_or(self.reasoning_effort);
+            self.reasoning_effort = requested.normalize_for_provider(self.api_provider);
         }
     }
 
@@ -4694,9 +4688,8 @@ impl App {
         let inferred = model_override.and_then(|model| {
             crate::config::legacy_deepseek_alias_effort_for_route(provider, base_url, model)
         });
-        self.reasoning_effort = if self.reasoning_effort_explicit {
-            self.reasoning_effort
-                .normalize_for_route(provider, base_url, wire_model)
+        self.reasoning_effort = if let Some(requested) = self.reasoning_effort_preference {
+            requested.normalize_for_route(provider, base_url, wire_model)
         } else if let Some(effort) = inferred {
             ReasoningEffort::from_setting(effort)
                 .normalize_for_route(provider, base_url, wire_model)

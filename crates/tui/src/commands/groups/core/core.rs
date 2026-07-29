@@ -8,7 +8,9 @@ use crate::config::{
     normalize_custom_model_id, normalize_model_name_for_provider,
 };
 use crate::localization::{Locale, MessageId, tr};
-use crate::tui::app::{App, AppAction, AppMode, ReasoningEffort};
+#[cfg(test)]
+use crate::tui::app::ReasoningEffort;
+use crate::tui::app::{App, AppAction, AppMode};
 use crate::tui::views::{HelpView, ModalKind, SubAgentsView, subagent_view_agents};
 
 use super::CommandResult;
@@ -238,11 +240,7 @@ pub fn model(app: &mut App, model_name: Option<&str>) -> CommandResult {
         if name.trim().eq_ignore_ascii_case("auto") {
             let old_model = app.model_display_label();
             let model_changed = !app.auto_model || app.model != "auto";
-            app.auto_model = true;
-            app.model = "auto".to_string();
-            app.last_effective_model = None;
-            app.reasoning_effort = ReasoningEffort::Auto;
-            app.last_effective_reasoning_effort = None;
+            app.set_model_selection("auto".to_string());
             app.active_route_limits = app.context_window_override_limits();
             app.update_model_compaction_budget();
             if model_changed {
@@ -1354,6 +1352,7 @@ mod tests {
         let _settings = SettingsPathGuard::new();
         let mut app = create_test_app();
         app.reasoning_effort = ReasoningEffort::Off;
+        app.reasoning_effort_preference = None;
 
         let result = model(&mut app, Some("auto"));
 
@@ -1363,6 +1362,24 @@ mod tests {
         assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
         assert!(app.last_effective_model.is_none());
         assert!(app.last_effective_reasoning_effort.is_none());
+    }
+
+    #[test]
+    fn test_model_auto_preserves_raw_explicit_thinking() {
+        let _settings = SettingsPathGuard::new();
+        let mut app = create_test_app();
+        app.api_provider = ApiProvider::OpenaiCodex;
+        app.auto_model = false;
+        app.reasoning_effort = ReasoningEffort::Low;
+        app.reasoning_effort_preference = Some(ReasoningEffort::Off);
+
+        let result = model(&mut app, Some("auto"));
+
+        assert!(result.message.is_some());
+        assert!(app.auto_model);
+        assert_eq!(app.model, "auto");
+        assert_eq!(app.reasoning_effort, ReasoningEffort::Off);
+        assert_eq!(app.reasoning_effort_preference, Some(ReasoningEffort::Off));
     }
 
     #[test]
