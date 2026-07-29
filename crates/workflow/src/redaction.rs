@@ -220,7 +220,7 @@ impl TokenOutcome {
 /// routinely written as *two* tokens (`Authorization: Bearer <token>`), so a
 /// purely per-token rule either leaks the value or redacts the English word
 /// `bearer`. Carrying "the next token is the credential" forward — and *how
-/// certainly*, see [`CredentialArm`] — is what lets this do neither.
+/// certainly*, see `CredentialArm` — is what lets this do neither.
 #[must_use]
 pub fn redact_for_disclosure(input: &str) -> Redaction {
     let mut kinds = BTreeSet::new();

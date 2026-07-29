@@ -202,7 +202,7 @@ pub fn scan(
     scan_with_configured(workspace, home, None, mode, readiness)
 }
 
-/// Same as [`scan`] with an optional configured `skills_dir`.
+/// Scan skill roots with an optional configured `skills_dir`.
 #[must_use]
 pub fn scan_with_configured(
     workspace: &Path,

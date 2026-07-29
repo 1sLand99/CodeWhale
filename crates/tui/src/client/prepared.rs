@@ -4,7 +4,7 @@
 //! Every **primary agent turn** — `LlmClient::create_message` and
 //! `create_message_stream`, in Chat Completions, Anthropic Messages, and
 //! OpenAI Responses alike — reaches the wire through
-//! [`DeepSeekClient::prepare_outbound_request`], which returns a
+//! [`crate::client::DeepSeekClient::prepare_outbound_request`], which returns a
 //! [`PreparedOutboundRequest`]. The transports send it; the preview command
 //! describes it. Because there is exactly one builder, a preview cannot
 //! report a request different from the one a turn would send.

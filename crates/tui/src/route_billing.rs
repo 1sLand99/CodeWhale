@@ -224,7 +224,7 @@ pub enum RouteProduct {
 /// membership quota.
 ///
 /// This is the pre-dispatch answer — for a turn that already ran, bill from
-/// its receipt with [`for_dispatched_route`] instead.
+/// its receipt with [`crate::route_billing::for_dispatched_receipt`] instead.
 #[must_use]
 pub fn for_route(config: &Config, provider: ApiProvider) -> BillingPresentation {
     let base_url = config.base_url_for_route(provider);
@@ -241,7 +241,8 @@ pub fn for_route(config: &Config, provider: ApiProvider) -> BillingPresentation 
 /// client is being built from, **at dispatch time**.
 ///
 /// Call this while the config still describes the route being dispatched. The
-/// result is what travels on [`DispatchedRoute::product`]; nothing downstream
+/// result is what travels on [`crate::route_billing::DispatchedReceipt::product`];
+/// nothing downstream
 /// may re-derive it.
 #[must_use]
 pub fn capture_product(config: &Config, provider: ApiProvider) -> RouteProduct {

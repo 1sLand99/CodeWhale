@@ -2215,7 +2215,8 @@ fn spawn_tui_engine(config: EngineConfig, api_config: &Config) -> EngineHandle {
 ///   text or block the turn outright. Running them would give a *preview* the
 ///   side effects of a submit. So when any are configured, nothing downstream
 ///   of the text can be claimed exact and the whole manifest reports
-///   [`PreviewUnresolved::MessageSubmitHooksConfigured`] — including under a
+///   [`crate::core::engine::preview::PreviewUnresolved::MessageSubmitHooksConfigured`] —
+///   including under a
 ///   fixed model, because the tool policy is derived from the content too.
 /// - **Consuming the active skill.** A real submit *takes* `app.active_skill`.
 ///   The preview clones it: the skill is still pending after an inspection,

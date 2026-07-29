@@ -217,7 +217,7 @@ impl McpManager {
     /// Register an MCP server with its config, tool filter, and client implementation.
     ///
     /// Fails when the server's name collides with an already-registered server
-    /// after [`sanitize_component`] folding. Qualified tool names are built
+    /// after `sanitize_component` folding. Qualified tool names are built
     /// from the sanitized name, so `my-server`, `my_server`, and `My.Server`
     /// all produce `mcp__my_server__*`: registering two of them would let
     /// either server answer a qualified name meant for the other. Re-registering

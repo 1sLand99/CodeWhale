@@ -781,7 +781,7 @@ fn first_token(command: &str) -> String {
 ///
 /// Case is preserved on case-sensitive filesystems and folded on
 /// case-insensitive ones, matching what the host actually considers the same
-/// file. See [`platform_paths_are_case_insensitive`].
+/// file. See `platform_paths_are_case_insensitive`.
 pub fn normalize_workspace_relative_path(value: &str, workspace_root: &str) -> Option<String> {
     normalize_workspace_relative_path_with_case(
         value,

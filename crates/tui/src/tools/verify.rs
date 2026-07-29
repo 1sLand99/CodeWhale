@@ -26,7 +26,7 @@
 //!    construction, not by a denylist that could be forgotten.
 //! 2. **Re-entry guard (defense in depth):** [`VerifyTool::execute`] refuses if
 //!    it is entered while a critique is already in progress on the same task
-//!    (tracked via the [`struct@VERIFY_ACTIVE`] task-local). This protects any
+//!    (tracked via the [`static@VERIFY_ACTIVE`] task-local). This protects any
 //!    future path that might run the critic inside a tool loop.
 //!
 //! # Relationship to neighbouring tools
