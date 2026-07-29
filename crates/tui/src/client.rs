@@ -2079,10 +2079,10 @@ impl DeepSeekClient {
     /// Best-effort background refresh of the active provider's own `/v1/models`
     /// catalog, merging results into the provider lake (#3385).
     ///
-    /// Unlike [`models_dev_live::spawn_background_refresh`] (which fetches the
+    /// Unlike `models_dev_live::spawn_background_refresh` (which fetches the
     /// cross-provider Models.dev catalog), this calls the provider's own
     /// `/v1/models` endpoint and merges the results into the existing live
-    /// snapshot via [`provider_lake::merge_live_offerings`], preserving rows
+    /// snapshot via `provider_lake::merge_live_offerings`, preserving rows
     /// from other sources.
     ///
     /// Currently activated for providers whose model list is not covered by the

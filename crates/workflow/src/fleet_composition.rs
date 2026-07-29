@@ -17,14 +17,16 @@
 //! 1. **It is pure.** No clock, no filesystem, no network, no config. It maps
 //!    an input value to an output value.
 //! 2. **It cannot save or launch.** There is no path from a
-//!    [`FleetCompositionProposal`] to an [`crate::ExactFleet`], a snapshot, or a
+//!    [`crate::fleet_composition::FleetCompositionProposal`] to an
+//!    [`crate::ExactFleet`], a snapshot, or a
 //!    spawn. Turning a proposal into a saved Fleet is a separate, explicit act
 //!    that belongs to the saved-Fleet UI lane.
 //! 3. **It cannot invent a model.** Every suggestion must name a model that is
 //!    already in the operator's explicitly configured pool; anything else is
 //!    rejected, not silently substituted.
 //!
-//! Every proposal is born [`RatificationState::Unratified`] and there is no
+//! Every proposal is born
+//! [`crate::fleet_composition::RatificationState::Unratified`] and there is no
 //! method here that ratifies one. Ratification is a human act recorded
 //! elsewhere; this module can only ever describe a suggestion.
 //!

@@ -79,7 +79,7 @@ impl ChildProcessMcpClient {
     ///
     /// Returns `Err` — never a degraded-but-usable client — when the command
     /// cannot be executed, exits immediately, or does not answer `initialize`
-    /// within [`HANDSHAKE_TIMEOUT`].
+    /// within `HANDSHAKE_TIMEOUT`.
     pub fn spawn(config: &McpServerConfig) -> Result<Self> {
         Self::spawn_with_timeouts(config, HANDSHAKE_TIMEOUT, REQUEST_TIMEOUT)
     }

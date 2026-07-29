@@ -157,7 +157,7 @@ fn probe_macos() -> Result<u32, &'static str> {
 ///
 /// Policy: target roughly `display_hz / 5` for atmosphere (calm, not steppy
 /// on high-Hz panels), clamped to [`MIN_ANIMATION_HZ`]..=[`MAX_ANIMATION_HZ`].
-/// Missing measurement falls back to [`FALLBACK_ANIMATION_HZ`] (≈12.5 fps /
+/// Missing measurement falls back to [`FALLBACK_ANIMATION_MS`] (≈12.5 fps /
 /// 80 ms historical atmosphere). `low_motion` always wins (2.4s).
 #[must_use]
 pub fn animation_interval_for_hz(display_hz: Option<u32>, low_motion: bool) -> Duration {
