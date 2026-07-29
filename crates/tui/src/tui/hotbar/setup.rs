@@ -1315,9 +1315,14 @@ mod tests {
 
     #[test]
     fn disabled_actions_are_visible_but_not_assignable() {
-        let mut app = test_app();
-        app.auto_model = true;
+        let app = test_app();
         let mut view = HotbarSetupView::new(&app, &Config::default());
+        let reasoning = view
+            .actions
+            .iter_mut()
+            .find(|row| row.metadata.id == "reasoning.cycle")
+            .expect("reasoning action");
+        reasoning.disabled_reason = Some("disabled by test policy".to_string());
 
         assert!(view.select_slot(2));
         assert!(view.select_action_by_id("reasoning.cycle"));

@@ -112,7 +112,8 @@ pub struct PreviewNextTurn {
     /// Normalized reasoning-effort api value from the planner, exactly as it
     /// would be sent.
     pub reasoning_effort: Option<String>,
-    /// True when auto reasoning (or auto model routing) picked that tier.
+    /// True when the user selected auto reasoning and the planner picked that
+    /// tier.
     pub reasoning_effort_auto: bool,
     /// How the auto router chose this route, when auto routing ran.
     pub auto_route_source: Option<String>,
@@ -2653,7 +2654,7 @@ mod tests {
         let planned_base_url = planned.route.candidate.endpoint().base_url.clone();
         assert!(
             planned.auto_controls_reasoning,
-            "auto model routing also drives the reasoning tier"
+            "the helper requests auto reasoning for its auto-model fixture"
         );
 
         let manifest = engine

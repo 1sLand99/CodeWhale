@@ -356,13 +356,22 @@ impl App {
                 active_route_limits,
             )
         };
-        let mut reasoning_effort = if auto_model {
-            ReasoningEffort::Auto
-        } else {
-            configured_reasoning_effort.map_or_else(ReasoningEffort::default, |s| {
-                ReasoningEffort::from_setting_for_provider(s, provider)
-            })
-        };
+        let mut reasoning_effort = configured_reasoning_effort.map_or_else(
+            || {
+                if auto_model {
+                    ReasoningEffort::Auto
+                } else {
+                    ReasoningEffort::default()
+                }
+            },
+            |setting| {
+                if auto_model {
+                    ReasoningEffort::from_setting(setting)
+                } else {
+                    ReasoningEffort::from_setting_for_provider(setting, provider)
+                }
+            },
+        );
         if !auto_model
             && !reasoning_effort_explicit
             && let Some(effort) = crate::config::legacy_deepseek_alias_effort_for_route(

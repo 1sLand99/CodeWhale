@@ -197,7 +197,7 @@ fn ctrl_t_key_event_reaches_reasoning_effort_cycle() {
 }
 
 #[test]
-fn ctrl_t_does_not_persist_an_ignored_tier_under_auto_model() {
+fn ctrl_t_cycles_reasoning_effort_under_auto_model() {
     let mut app = create_test_app();
     app.auto_model = true;
     app.reasoning_effort = ReasoningEffort::Auto;
@@ -206,11 +206,11 @@ fn ctrl_t_does_not_persist_an_ignored_tier_under_auto_model() {
         &mut app,
         &KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
     ));
-    assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Off);
     assert!(
         app.status_message
             .as_deref()
-            .is_some_and(|message| message.contains("automatic model routing"))
+            .is_some_and(|message| message.contains("Reasoning effort: off"))
     );
 }
 
@@ -8435,7 +8435,7 @@ fn hotbar_dispatches_route_switch_slot() {
 }
 
 #[test]
-fn hotbar_bound_disabled_action_reports_reason_without_dispatching() {
+fn hotbar_bound_reasoning_action_updates_auto_model_preference() {
     let mut app = create_test_app();
     app.onboarding = OnboardingState::None;
     app.auto_model = true;
@@ -8450,16 +8450,15 @@ fn hotbar_bound_disabled_action_reports_reason_without_dispatching() {
         ..Config::default()
     };
 
-    assert_eq!(
-        dispatch_hotbar_slot(&mut app, &config, 1).expect("disabled slot dispatch"),
-        Some(HotbarDispatch::Handled)
-    );
-    assert_eq!(app.reasoning_effort, ReasoningEffort::Off);
-    assert_eq!(
-        app.status_message.as_deref(),
-        Some(
-            "Hotbar slot 1 action is not available: Reasoning effort is controlled by auto model routing."
-        )
+    assert!(matches!(
+        dispatch_hotbar_slot(&mut app, &config, 1).expect("reasoning slot dispatch"),
+        Some(HotbarDispatch::AppAction(AppAction::UpdateCompaction(_)))
+    ));
+    assert_eq!(app.reasoning_effort, ReasoningEffort::High);
+    assert!(
+        app.status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("Reasoning effort: high"))
     );
     assert!(app.needs_redraw);
 }
@@ -14906,6 +14905,7 @@ fn session_restore_rebuilds_fresh_codex_route_limits() {
 fn apply_loaded_session_restores_concrete_model_mode() {
     let mut app = create_test_app();
     app.set_model_selection("auto".to_string());
+    app.reasoning_effort = ReasoningEffort::Low;
     let mut session = saved_session_with_messages(vec![
         text_message("user", "hello"),
         text_message("assistant", "hi"),
@@ -14919,13 +14919,14 @@ fn apply_loaded_session_restores_concrete_model_mode() {
     assert!(!app.auto_model);
     assert_eq!(app.model, "deepseek-v4-flash");
     assert_eq!(app.model_selection_for_persistence(), "deepseek-v4-flash");
+    assert_eq!(app.reasoning_effort, ReasoningEffort::High);
 }
 
 #[test]
 fn apply_loaded_session_restores_auto_model_mode() {
     let mut app = create_test_app();
     app.set_model_selection("deepseek-v4-pro".to_string());
-    app.reasoning_effort = ReasoningEffort::High;
+    app.reasoning_effort = ReasoningEffort::Low;
     app.last_effective_model = Some("deepseek-v4-flash".to_string());
     app.last_effective_reasoning_effort = Some(ReasoningEffort::Low);
     let mut session = saved_session_with_messages(vec![
@@ -14946,7 +14947,7 @@ fn apply_loaded_session_restores_auto_model_mode() {
     assert_eq!(app.last_effective_provider_identity, None);
     assert_eq!(app.last_auto_route_receipt, None);
     assert_eq!(app.last_effective_reasoning_effort, None);
-    assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
     assert_eq!(app.effective_model_for_budget(), DEFAULT_TEXT_MODEL);
 }
 
@@ -15052,6 +15053,55 @@ fn app_new_restores_saved_model_and_reasoning_effort() {
     assert_eq!(app.reasoning_effort, ReasoningEffort::High);
 }
 
+#[test]
+fn app_new_restores_saved_reasoning_effort_for_auto_model() {
+    let _guard = ConfigPathEnvGuard::new();
+    let settings = crate::settings::Settings {
+        default_model: Some("auto".to_string()),
+        reasoning_effort: Some("low".to_string()),
+        ..Default::default()
+    };
+    settings.save().expect("save settings");
+
+    let options = TuiOptions {
+        model: "deepseek-v4-pro".to_string(),
+        start_in_agent_mode: true,
+        skip_onboarding: false,
+        ..crate::test_support::test_tui_options(PathBuf::from("."))
+    };
+
+    let app = App::new(options, &Config::default());
+
+    assert!(app.auto_model);
+    assert_eq!(app.model, "auto");
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
+    assert_eq!(app.reasoning_effort_display_label(), "low");
+}
+
+#[test]
+fn app_new_auto_model_without_saved_reasoning_keeps_auto_default() {
+    let _guard = ConfigPathEnvGuard::new();
+    let settings = crate::settings::Settings {
+        default_model: Some("auto".to_string()),
+        reasoning_effort: None,
+        ..Default::default()
+    };
+    settings.save().expect("save settings");
+
+    let options = TuiOptions {
+        model: "deepseek-v4-pro".to_string(),
+        start_in_agent_mode: true,
+        skip_onboarding: false,
+        ..crate::test_support::test_tui_options(PathBuf::from("."))
+    };
+
+    let app = App::new(options, &Config::default());
+
+    assert!(app.auto_model);
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Auto);
+    assert_eq!(app.reasoning_effort_display_label(), "auto");
+}
+
 #[tokio::test]
 async fn model_picker_persists_model_and_reasoning_effort() {
     let _guard = SettingsHomeGuard::new();
@@ -15108,6 +15158,36 @@ async fn model_picker_persists_model_and_reasoning_effort() {
     assert!(provider_model_result.contains("auth=key saved · not checked"));
     assert!(provider_model_result.contains("health=attemptable"));
     assert!(!provider_model_result.contains("test-key"));
+}
+
+#[tokio::test]
+async fn auto_model_effort_picker_persists_unresolved_tier_verbatim() {
+    let _guard = SettingsHomeGuard::new();
+    let mut app = create_test_app();
+    app.set_model_selection("auto".to_string());
+    app.reasoning_effort = ReasoningEffort::Auto;
+    app.reasoning_effort_explicit = false;
+    let engine = mock_engine_handle();
+
+    apply_picker_effort_choice(
+        &mut app,
+        &engine.handle,
+        ReasoningEffort::Low,
+        ReasoningEffort::Auto,
+    )
+    .await;
+
+    assert!(app.auto_model);
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
+    assert!(app.reasoning_effort_explicit);
+    assert_eq!(
+        crate::settings::Settings::load()
+            .expect("load settings")
+            .reasoning_effort
+            .as_deref(),
+        Some("low"),
+        "an unresolved auto route must not pre-normalize Low to DeepSeek High"
+    );
 }
 
 /// Re-picking the already-live model is a real, completed provider/model
@@ -15258,6 +15338,8 @@ async fn model_picker_auto_switches_exact_named_custom_route_transactionally() {
     let mut app = create_test_app();
     app.set_provider_identity(ApiProvider::Custom, "custom-a");
     app.set_model_selection("model-a".to_string());
+    app.reasoning_effort = ReasoningEffort::Low;
+    app.reasoning_effort_explicit = true;
     let previous_effort = app.reasoning_effort;
     let mut custom = HashMap::new();
     for (name, base_url, model) in [
@@ -15292,7 +15374,7 @@ async fn model_picker_auto_switches_exact_named_custom_route_transactionally() {
         "auto".to_string(),
         None,
         Some("custom-b".to_string()),
-        ReasoningEffort::Auto,
+        ReasoningEffort::Low,
         "model-a".to_string(),
         previous_effort,
     )
@@ -15302,8 +15384,16 @@ async fn model_picker_auto_switches_exact_named_custom_route_transactionally() {
     assert_eq!(app.provider_identity_for_persistence(), "custom-b");
     assert!(app.auto_model);
     assert_eq!(app.model_selection_for_persistence(), "auto");
+    assert_eq!(app.reasoning_effort, ReasoningEffort::Low);
     assert_eq!(config.provider.as_deref(), Some("custom-b"));
     assert_eq!(config.deepseek_base_url(), "http://127.0.0.1:18182/v1");
+    assert_eq!(
+        crate::settings::Settings::load()
+            .expect("load settings")
+            .reasoning_effort
+            .as_deref(),
+        Some("low")
+    );
 }
 
 #[test]

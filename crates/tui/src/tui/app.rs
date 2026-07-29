@@ -2516,11 +2516,15 @@ impl App {
         // hotbar `reasoning.cycle` action restore on restart exactly like a
         // picker selection does. Only the *requested* tier is persisted — the
         // effective tier is a per-turn route fact, not a user preference.
-        let persisted_effort = requested.as_setting_for_route(
-            self.api_provider,
-            &self.active_route_base_url,
-            &self.model,
-        );
+        let persisted_effort = if self.auto_model {
+            requested.as_setting()
+        } else {
+            requested.as_setting_for_route(
+                self.api_provider,
+                &self.active_route_base_url,
+                &self.model,
+            )
+        };
         self.startup_defaults.spawn(
             crate::tui::startup_defaults::StartupDefaults::reasoning_effort(persisted_effort),
         );
@@ -4604,9 +4608,10 @@ impl App {
         self.last_auto_route_receipt = None;
         self.pending_auto_route_receipt = None;
         self.last_effective_reasoning_effort = None;
-        if auto_model {
-            self.reasoning_effort = ReasoningEffort::Auto;
-        } else {
+        // Auto model routing is independent from the requested reasoning
+        // tier. Keep that preference intact so session restore and model
+        // changes cannot silently replace a persisted fixed tier with Auto.
+        if !auto_model {
             self.reasoning_effort = self
                 .reasoning_effort
                 .normalize_for_provider(self.api_provider);
@@ -4784,9 +4789,21 @@ impl App {
         &self,
         requested: ReasoningEffort,
     ) -> EffectiveReasoningEffort {
-        let effective = if self.auto_model || requested == ReasoningEffort::Auto {
+        let route_truth = self.active_reasoning_route_truth();
+        let auto_route_has_receipt = self
+            .active_turn
+            .as_ref()
+            .and_then(|turn| turn.route.as_ref())
+            .is_some_and(|route| route.receipt.is_some());
+        let effective = if requested == ReasoningEffort::Auto {
             self.last_effective_reasoning_effort
                 .unwrap_or(ReasoningEffort::Auto)
+        } else if self.auto_model && !auto_route_has_receipt {
+            // The configured provider is only the classifier's starting
+            // point, not the route that will receive the request.
+            requested
+        } else if let Some((provider, _, base_url, model)) = route_truth {
+            requested.normalize_for_route(provider, base_url, model)
         } else {
             requested.normalize_for_route(
                 self.api_provider,
@@ -4798,7 +4815,6 @@ impl App {
         // Prefer the immutable installed-client receipt while a turn is live.
         // If it is unavailable, only use the configured route when no pending
         // or active foreign route could make that identity stale.
-        let route_truth = self.active_reasoning_route_truth();
         if let Some((provider, _, base_url, model)) = route_truth {
             if let Some(constrained) = crate::work_graph::constrained_effective_reasoning_for_route(
                 requested.into(),
@@ -4892,11 +4908,7 @@ impl App {
     }
 
     pub fn reasoning_effort_display_label(&self) -> String {
-        let requested = if self.auto_model {
-            ReasoningEffort::Auto
-        } else {
-            self.reasoning_effort
-        };
+        let requested = self.reasoning_effort;
         let effective = self.effective_reasoning_effort_for_active_route(requested);
         Self::reasoning_effort_resolution_label(requested, effective, self.api_provider)
     }

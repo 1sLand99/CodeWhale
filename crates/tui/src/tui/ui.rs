@@ -7576,16 +7576,6 @@ fn handle_reasoning_effort_key(app: &mut App, key: &event::KeyEvent) -> bool {
     {
         return false;
     }
-    if app.auto_model {
-        // The auto router picks a tier per turn, so a Ctrl+T here would persist
-        // a startup default the session then ignores. Refuse, and say why.
-        let message = app
-            .tr(crate::localization::MessageId::ThinkingControlledByAutoRouting)
-            .into_owned();
-        app.status_message = Some(message);
-        app.needs_redraw = true;
-        return true;
-    }
     let _ = app.cycle_effort();
     true
 }
@@ -10758,9 +10748,6 @@ async fn apply_model_picker_choice(
         target_provider.as_str().to_string()
     };
     let model_is_auto = model.trim().eq_ignore_ascii_case("auto");
-    if model_is_auto {
-        effort = ReasoningEffort::Auto;
-    }
     if target_provider != app.api_provider
         || target_identity != app.provider_identity_for_persistence()
     {
@@ -10840,6 +10827,7 @@ async fn apply_model_picker_choice(
         effort = effort.normalize_for_route(app.api_provider, &route_base_url, &resolved_model);
     }
     let effort_changed = effort != previous_effort;
+    let live_effort_changed = effort != app.reasoning_effort;
 
     if model_changed {
         app.set_model_selection(resolved_model.clone());
@@ -10849,10 +10837,12 @@ async fn apply_model_picker_choice(
         app.enable_provider_model(&provider_identity, &resolved_model);
         app.clear_model_scoped_telemetry();
     }
-    if effort_changed {
+    if live_effort_changed {
         app.reasoning_effort = effort;
-        app.reasoning_effort_explicit = true;
         app.last_effective_reasoning_effort = None;
+    }
+    if effort_changed {
+        app.reasoning_effort_explicit = true;
     }
     if model_changed || effort_changed {
         app.update_model_compaction_budget();
@@ -10872,16 +10862,17 @@ async fn apply_model_picker_choice(
     ) {
         update = update.with_default_model(resolved_model.as_str());
     }
+    let persisted_effort = if model_is_auto {
+        effort.as_setting()
+    } else {
+        effort.as_setting_for_route(app.api_provider, &route_base_url, &resolved_model)
+    };
     update = update
         .with_provider_model(
             app.provider_identity_for_persistence(),
             resolved_model.as_str(),
         )
-        .with_reasoning_effort(effort.as_setting_for_route(
-            app.api_provider,
-            &route_base_url,
-            &resolved_model,
-        ));
+        .with_reasoning_effort(persisted_effort);
     // Applied synchronously: the setup receipt below is only honest if we know
     // the write landed. Going through the app-owned writer means any queued
     // mode/thinking selection the user made first is applied first, so this
@@ -10963,7 +10954,10 @@ async fn apply_picker_effort_choice(
     {
         return;
     }
-    effort = effort.normalize_for_route(app.api_provider, &app.active_route_base_url, &app.model);
+    if !app.auto_model {
+        effort =
+            effort.normalize_for_route(app.api_provider, &app.active_route_base_url, &app.model);
+    }
     let changed = effort != previous_effort;
 
     if changed {
@@ -10973,16 +10967,15 @@ async fn apply_picker_effort_choice(
         app.update_model_compaction_budget();
     }
 
+    let persisted_effort = if app.auto_model {
+        effort.as_setting()
+    } else {
+        effort.as_setting_for_route(app.api_provider, &app.active_route_base_url, &app.model)
+    };
     let persist_warning = app
         .startup_defaults
         .apply_blocking(
-            crate::tui::startup_defaults::StartupDefaults::reasoning_effort(
-                effort.as_setting_for_route(
-                    app.api_provider,
-                    &app.active_route_base_url,
-                    &app.model,
-                ),
-            ),
+            crate::tui::startup_defaults::StartupDefaults::reasoning_effort(persisted_effort),
         )
         .err()
         .map(|err| format!(" (not persisted: {err})"));
@@ -16630,7 +16623,14 @@ fn apply_loaded_session(
     app.sync_context_references_from_session(&session.context_references, &message_to_cell);
     app.mark_history_updated();
     app.viewport.transcript_selection.clear();
+    let requested_reasoning_effort = app.reasoning_effort;
     restore_loaded_session_provider(app, config, provider_identity);
+    if session.metadata.model.trim().eq_ignore_ascii_case("auto") {
+        // Session records do not own a reasoning preference. Provider restore
+        // must not normalize the global requested tier before an auto route
+        // has selected its concrete provider/model.
+        app.reasoning_effort = requested_reasoning_effort;
+    }
     app.set_model_selection(session.metadata.model.clone());
     if app.auto_model
         && let Some(saved) = session.last_auto_route.as_ref()
@@ -16643,6 +16643,13 @@ fn apply_loaded_session(
         app.last_auto_route_receipt = Some(saved.receipt.clone());
     }
     resolve_loaded_session_route(app, config);
+    if !app.auto_model {
+        app.reasoning_effort = app.reasoning_effort.normalize_for_route(
+            app.api_provider,
+            &app.active_route_base_url,
+            &app.model,
+        );
+    }
     app.provider_models.insert(
         app.provider_identity_for_persistence().to_string(),
         app.model_selection_for_persistence(),
@@ -16799,9 +16806,13 @@ fn restore_loaded_session_provider(app: &mut App, config: &mut Config, identity:
         .filter(|chain| chain.providers().len() > 1);
     app.last_fallback_reason = None;
     app.model_ids_passthrough = config.model_ids_pass_through();
-    app.reasoning_effort =
-        app.reasoning_effort
-            .normalize_for_route(provider, &config.deepseek_base_url(), &app.model);
+    if !app.auto_model {
+        app.reasoning_effort = app.reasoning_effort.normalize_for_route(
+            provider,
+            &config.deepseek_base_url(),
+            &app.model,
+        );
+    }
     app.set_active_context_window_override(config.context_window_for_provider_config(provider));
     app.active_route_limits = app.context_window_override_limits();
     app.active_route_base_url = config.deepseek_base_url();

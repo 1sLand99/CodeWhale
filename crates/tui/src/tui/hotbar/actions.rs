@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 use crate::commands::{self, CommandInfo, CommandResult};
 use crate::config::{ApiProvider, Config};
@@ -983,25 +983,12 @@ impl HotbarAction for AppHotbarAction {
             AppHotbarKind::SessionCompact => app.is_compacting,
             AppHotbarKind::Mode(mode) => app.mode == mode,
             AppHotbarKind::ReasoningCycle => {
-                !app.auto_model && app.reasoning_effort != crate::tui::app::ReasoningEffort::Off
+                app.reasoning_effort != crate::tui::app::ReasoningEffort::Off
             }
             AppHotbarKind::SidebarToggle => app.sidebar_focus != SidebarFocus::Hidden,
             AppHotbarKind::FileTreeToggle => app.file_tree.is_some(),
             AppHotbarKind::PaletteOpen => false,
             AppHotbarKind::TrustToggle => app.trust_mode,
-        }
-    }
-
-    fn disabled_reason(&self, app: &App) -> Option<String> {
-        match self.kind {
-            AppHotbarKind::ReasoningCycle if app.auto_model => Some(
-                tr(
-                    app.ui_locale,
-                    MessageId::HotbarActionReasoningCycleAutoDisabled,
-                )
-                .into_owned(),
-            ),
-            _ => None,
         }
     }
 
@@ -1034,9 +1021,6 @@ impl HotbarAction for AppHotbarAction {
                 }
             }
             AppHotbarKind::ReasoningCycle => {
-                if app.auto_model {
-                    bail!("Reasoning effort is controlled by auto model routing.");
-                }
                 if app.cycle_effort().changed_live_state() {
                     Ok(HotbarDispatch::AppAction(AppAction::UpdateCompaction(
                         app.compaction_config(),
@@ -1869,7 +1853,7 @@ mod tests {
     }
 
     #[test]
-    fn app_action_metadata_exposes_dynamic_disabled_reason() {
+    fn reasoning_action_remains_available_for_auto_model_routing() {
         let registry = HotbarActionRegistry::with_builtins();
         let reasoning = registry.get("reasoning.cycle").expect("reasoning action");
         let mut app = test_app();
@@ -1881,10 +1865,7 @@ mod tests {
         assert!(reasoning.disabled_reason(&app).is_none());
 
         app.auto_model = true;
-        assert_eq!(
-            reasoning.disabled_reason(&app).as_deref(),
-            Some("Reasoning effort is controlled by auto model routing.")
-        );
+        assert!(reasoning.disabled_reason(&app).is_none());
     }
 
     #[test]
@@ -1908,7 +1889,7 @@ mod tests {
     }
 
     #[test]
-    fn hotbar_recommendations_exclude_disabled_actions() {
+    fn hotbar_recommendations_keep_reasoning_for_auto_model() {
         let mut app = test_app();
         app.auto_model = true;
 
@@ -1916,7 +1897,7 @@ mod tests {
             recommend_hotbar_actions(&app, HotbarRecommendationOptions::for_setup_wizard());
 
         assert!(
-            !recommendations
+            recommendations
                 .iter()
                 .any(|entry| entry.metadata.id == "reasoning.cycle")
         );
@@ -2481,8 +2462,14 @@ mod tests {
         );
 
         app.auto_model = true;
-        assert!(!reasoning.is_active(&app));
-        assert!(reasoning.dispatch(&mut app).is_err());
+        assert!(reasoning.is_active(&app));
+        assert!(matches!(
+            reasoning
+                .dispatch(&mut app)
+                .expect("dispatch reasoning under auto model"),
+            HotbarDispatch::AppAction(AppAction::UpdateCompaction(_))
+        ));
+        assert_eq!(app.reasoning_effort, ReasoningEffort::Max);
     }
 
     #[test]
