@@ -2160,7 +2160,7 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                     }
                 },
             );
-            app.last_effective_reasoning_effort = None;
+            app.invalidate_route_receipts_for_reasoning_change();
             app.update_model_compaction_budget();
             action = Some(AppAction::UpdateCompaction(app.compaction_config()));
         }
