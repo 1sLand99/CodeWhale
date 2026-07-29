@@ -246,6 +246,77 @@ pub fn scan_with_configured(
     }
 }
 
+/// Expand an owned-only inventory to compatible roots without re-reading the
+/// unchanged owned packages.
+///
+/// The manager uses this for its interactive scan-mode toggle. Package audits
+/// include bounded content hashing, so re-auditing every bundled owned skill
+/// can make a simple keypress appear lost on a cold filesystem. Reusing rows by
+/// root keeps the result ordered by catalog precedence while newly eligible
+/// external roots are still read from disk.
+#[must_use]
+pub fn expand_owned_scan_to_compatible(
+    workspace: &Path,
+    home: Option<&Path>,
+    configured_skills_dir: Option<&Path>,
+    owned_skills: &[AuditedSkill],
+    readiness: Option<&dyn SkillReadinessProvider>,
+) -> SkillAuditSnapshot {
+    let catalog = SkillRootCatalog::build(workspace, home, configured_skills_dir);
+    let root_refs: Vec<SkillRootDescriptor> = catalog
+        .audit_compatible_directories()
+        .into_iter()
+        .cloned()
+        .collect();
+    let reusable_root_ids: HashSet<SkillRootId> = owned_skills
+        .iter()
+        .map(|skill| skill.id.root_id.clone())
+        .collect();
+
+    let mut skills = Vec::new();
+    for root in &root_refs {
+        if reusable_root_ids.contains(&root.id) {
+            skills.extend(
+                owned_skills
+                    .iter()
+                    .filter(|skill| skill.id.root_id == root.id)
+                    .cloned(),
+            );
+        } else {
+            skills.extend(scan_root(root, workspace, home));
+        }
+    }
+
+    // The owned rows carried their previous cross-root result. Recompute it
+    // against the expanded inventory so precedence/conflict/import actions are
+    // exactly the same as a fresh compatible scan.
+    for skill in &mut skills {
+        skill.precedence = if skill.root.active_for_runtime {
+            PrecedenceState::Unknown
+        } else {
+            PrecedenceState::InactiveSource
+        };
+        skill.exact_duplicate_of = None;
+        skill.conflicts_with.clear();
+        skill.import_candidate = false;
+        skill.available_actions.clear();
+    }
+    classify_cross_root(&mut skills);
+    for skill in &mut skills {
+        skill.readiness = readiness
+            .and_then(|provider| provider.readiness_for(&skill.id))
+            .unwrap_or(ReadinessState::Unknown);
+        skill.available_actions = action_policy(skill);
+    }
+
+    SkillAuditSnapshot {
+        scan_mode: SkillAuditMode::Compatible,
+        roots: root_refs,
+        skills,
+        generated_at: SystemTime::now(),
+    }
+}
+
 /// Compute available mutations for one audited row (UI and controller share this).
 #[must_use]
 pub fn action_policy(skill: &AuditedSkill) -> Vec<SkillActionKind> {
@@ -1010,6 +1081,40 @@ mod tests {
             .find(|s| s.root.kind == SkillRootKind::CodeWhaleProject)
             .expect("owned");
         assert_eq!(owned.precedence, PrecedenceState::Active);
+    }
+
+    #[test]
+    fn expanding_owned_scan_matches_fresh_compatible_scan() {
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path().join("ws");
+        let home = tmp.path().join("home");
+        write_skill(
+            &workspace.join(".codewhale").join("skills"),
+            "shared",
+            "owned",
+            "owned-body",
+        );
+        write_skill(
+            &workspace.join(".agents").join("skills"),
+            "shared",
+            "external conflict",
+            "external-body",
+        );
+        write_skill(
+            &workspace.join(".codex").join("skills"),
+            "candidate",
+            "import candidate",
+            "candidate-body",
+        );
+
+        let owned = scan(&workspace, Some(&home), SkillAuditMode::OwnedOnly, None);
+        let expanded =
+            expand_owned_scan_to_compatible(&workspace, Some(&home), None, &owned.skills, None);
+        let fresh = scan(&workspace, Some(&home), SkillAuditMode::Compatible, None);
+
+        assert_eq!(expanded.scan_mode, SkillAuditMode::Compatible);
+        assert_eq!(expanded.roots, fresh.roots);
+        assert_eq!(expanded.skills, fresh.skills);
     }
 
     #[test]
