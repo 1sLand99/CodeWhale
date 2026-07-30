@@ -252,6 +252,12 @@ jobs:
       - name: Check runtime-contract budget
         if: needs.changes.outputs.heavy == 'true'
         run: python3 scripts/check-runtime-contract-budget.py
+      # Provider-free paused-consumer measurement of the production
+      # persistence request channel. RSS is sampled only on macOS; every host
+      # enforces the accepted/retained request and payload contract.
+      - name: Check persistence-backlog budget
+        if: needs.changes.outputs.heavy == 'true'
+        run: python3 scripts/check-persistence-backlog-budget.py
       # Source-only ownership ratchet. Deletion and line-neutral consolidation
       # pass; new packages/binaries/thousand-line module paths, a larger maximum
       # module, or aggregate owned Rust growth require reviewed updates.
