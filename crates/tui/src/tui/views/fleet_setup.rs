@@ -2838,7 +2838,7 @@ mod tests {
                     codewhale_config::ExternalCredentialConsentToml::read_only(
                         codewhale_config::ProviderKind::OpenaiCodex,
                         codewhale_config::ExternalCredentialSource::CodexCli,
-                        std::path::PathBuf::from("/fake/auth.json"),
+                        codex_home.path().join("auth.json"),
                     ),
                 ),
                 ..Default::default()
@@ -2870,6 +2870,7 @@ mod tests {
     #[test]
     fn fleet_setup_includes_xai_grok_routes_with_dormant_consent() {
         let _env = crate::test_support::lock_test_env();
+        let grok_home = tempfile::tempdir().expect("Grok home");
         let mut config = crate::config::Config::default();
         config.providers = Some(crate::config::ProvidersConfig {
             xai: crate::config::ProviderConfig {
@@ -2878,7 +2879,7 @@ mod tests {
                     codewhale_config::ExternalCredentialConsentToml::read_only(
                         codewhale_config::ProviderKind::Xai,
                         codewhale_config::ExternalCredentialSource::GrokCli,
-                        std::path::PathBuf::from("/fake/grok-auth.json"),
+                        grok_home.path().join("grok-auth.json"),
                     ),
                 ),
                 ..Default::default()
