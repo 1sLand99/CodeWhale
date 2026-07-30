@@ -620,11 +620,11 @@ mod tests {
         skills_dir: PathBuf,
     ) -> App {
         let options = TuiOptions {
-            config_path: config_path,
+            config_path,
             skills_dir: skills_dir.clone(),
             memory_path: workspace.join("memory.md"),
             notes_path: workspace.join("notes.txt"),
-            mcp_config_path: mcp_config_path,
+            mcp_config_path,
             ..crate::test_support::test_tui_options(workspace.to_path_buf())
         };
         let mut app = App::new(options, &Config::default());
