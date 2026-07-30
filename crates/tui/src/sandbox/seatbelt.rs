@@ -1,20 +1,4 @@
-//! macOS Seatbelt (sandbox-exec) profile generation.
-//!
-//! Seatbelt is Apple's mandatory access control framework that uses the
-//! Scheme-based policy language to define what system resources a process
-//! can access. This module generates sandbox profiles dynamically based
-//! on the configured `SandboxPolicy`.
-//!
-//! # How it works
-//!
-//! 1. We generate a Seatbelt policy string in the SBPL format
-//! 2. We invoke `/usr/bin/sandbox-exec -p <policy>` to run the command
-//! 3. The kernel enforces the policy, blocking unauthorized operations
-//!
-//! # References
-//!
-//! - Apple's sandbox(7) man page
-//! - <https://reverse.put.as/wp-content/uploads/2011/09/Apple-Sandbox-Guide-v1.0.pdf>
+//! Generates macOS Seatbelt profiles for `/usr/bin/sandbox-exec`.
 
 // Note: cfg(target_os = "macos") is already applied at the module level in mod.rs
 
@@ -49,6 +33,10 @@ const SEATBELT_BASE_POLICY: &str = r#"
 
 ; User preferences (needed by many CLI tools)
 (allow user-preference-read)
+
+; Consume only filesystem access tokens already granted by macOS
+(allow file-read* (extension "com.apple.app-sandbox.read"))
+(allow file-read* (extension "com.apple.app-sandbox.read-write"))
 
 ; Basic I/O to /dev/null
 (allow file-write-data
@@ -150,6 +138,15 @@ fn generate_policy(policy: &SandboxPolicy, cwd: &Path) -> String {
     if !file_write_policy.is_empty() {
         full_policy.push_str("\n\n; Write access policy\n");
         full_policy.push_str(&file_write_policy);
+    }
+
+    // The OS-issued extension remains the authority; ReadOnly cannot consume
+    // its write capability.
+    if !matches!(policy, SandboxPolicy::ReadOnly) {
+        full_policy.push_str(
+            r#"
+(allow file-write* (extension "com.apple.app-sandbox.read-write"))"#,
+        );
     }
 
     // Add network policy if enabled
@@ -402,7 +399,10 @@ pub fn detect_denial(exit_code: i32, stderr: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+mod tests;
+
+#[cfg(test)]
+mod existing_tests {
     use super::*;
 
     // Tests that mutate HOME/CARGO_HOME use crate::test_support::lock_test_env()
