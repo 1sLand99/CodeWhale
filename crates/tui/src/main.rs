@@ -3185,6 +3185,7 @@ enum ApiKeySource {
     EnvDeclared,
     ExternalAuthDeclared,
     SecretStoreUnprobed,
+    SecretStoreUnavailable,
     OAuth,
     ExternalConsent,
     NoAuth,
@@ -3200,6 +3201,7 @@ enum CredentialAvailability {
     NotRequired,
     Unknown,
     NotProbed,
+    Unavailable,
 }
 
 impl CredentialAvailability {
@@ -3209,6 +3211,7 @@ impl CredentialAvailability {
             Self::NotRequired => "not_required",
             Self::Unknown => "unknown",
             Self::NotProbed => "not_probed",
+            Self::Unavailable => "unavailable",
         }
     }
 
@@ -3230,17 +3233,6 @@ impl CredentialDiagnostic {
             availability,
         }
     }
-}
-
-fn structurally_present_config_key(value: Option<&String>) -> bool {
-    value.is_some_and(|value| {
-        let value = value.trim();
-        !value.is_empty() && value != crate::config::API_KEYRING_SENTINEL
-    })
-}
-
-fn config_key_declares_secret_store(value: Option<&String>) -> bool {
-    value.is_some_and(|value| value.trim() == crate::config::API_KEYRING_SENTINEL)
 }
 
 fn resolve_credential_diagnostic(config: &Config) -> CredentialDiagnostic {
@@ -3306,21 +3298,26 @@ fn resolve_credential_diagnostic(config: &Config) -> CredentialDiagnostic {
             );
     }
     let provider_config = config.provider_config();
-    let provider_config_key = provider_config
-        .is_some_and(|entry| structurally_present_config_key(entry.api_key.as_ref()));
-    let provider_config_store = provider_config
-        .is_some_and(|entry| config_key_declares_secret_store(entry.api_key.as_ref()));
+    let provider_config_key_kind = provider_config
+        .and_then(|entry| entry.api_key.as_deref())
+        .map(crate::config::classify_config_api_key_value);
     let root_key_applies = matches!(
         provider,
         crate::config::ApiProvider::Deepseek | crate::config::ApiProvider::DeepseekCN
     ) || (provider == crate::config::ApiProvider::Custom
         && config.uses_legacy_literal_custom_route());
-    let root_deepseek_key =
-        root_key_applies && structurally_present_config_key(config.api_key.as_ref());
-    let root_deepseek_store =
-        root_key_applies && config_key_declares_secret_store(config.api_key.as_ref());
+    let root_key_kind = root_key_applies
+        .then(|| config.api_key.as_deref())
+        .flatten()
+        .map(crate::config::classify_config_api_key_value);
 
-    if provider_config_key || root_deepseek_key {
+    if matches!(
+        provider_config_key_kind,
+        Some(crate::config::ConfigApiKeyValueKind::Literal)
+    ) || matches!(
+        root_key_kind,
+        Some(crate::config::ConfigApiKeyValueKind::Literal)
+    ) {
         CredentialDiagnostic::new(
             ApiKeySource::ConfigDeclared,
             CredentialAvailability::Present,
@@ -3340,15 +3337,29 @@ fn resolve_credential_diagnostic(config: &Config) -> CredentialDiagnostic {
             ApiKeySource::ExternalAuthDeclared,
             CredentialAvailability::NotProbed,
         )
-    } else if provider_config_store
-        || root_deepseek_store
-        || !config.should_skip_secret_store_for_provider(provider)
-    {
+    } else if matches!(
+        provider_config_key_kind,
+        Some(crate::config::ConfigApiKeyValueKind::SecretStoreSentinel)
+    ) || matches!(
+        root_key_kind,
+        Some(crate::config::ConfigApiKeyValueKind::SecretStoreSentinel)
+    ) {
+        if config.should_skip_secret_store_for_provider(provider) {
+            return CredentialDiagnostic::new(
+                ApiKeySource::SecretStoreUnavailable,
+                CredentialAvailability::Unavailable,
+            );
+        }
         // The sentinel is a declaration that runtime resolution should use
-        // the secret-store layer, never a literal key. Ordinary doctor also
-        // reaches this state when a provider may use the store but no literal
-        // config declaration was found. Neither case reads a store or ambient
-        // provider environment.
+        // the secret-store layer, never a literal key. Doctor does not read it.
+        CredentialDiagnostic::new(
+            ApiKeySource::SecretStoreUnprobed,
+            CredentialAvailability::NotProbed,
+        )
+    } else if !config.should_skip_secret_store_for_provider(provider) {
+        // No literal config declaration was found, but this route can continue
+        // through the durable store and ambient provider environment. Ordinary
+        // doctor deliberately does not inspect either source.
         CredentialDiagnostic::new(
             ApiKeySource::SecretStoreUnprobed,
             CredentialAvailability::NotProbed,
@@ -3418,6 +3429,10 @@ fn run_setup_status(
         ApiKeySource::SecretStoreUnprobed => println!(
             "  {} api_key: secret store eligible (store not probed)",
             "·".dimmed()
+        ),
+        ApiKeySource::SecretStoreUnavailable => println!(
+            "  {} api_key: secret-store sentinel declared, but this route cannot use that store",
+            "!".truecolor(sky_r, sky_g, sky_b)
         ),
         ApiKeySource::OAuth => println!(
             "  {} oauth: Codewhale-owned route selected (token availability not probed)",
@@ -3781,10 +3796,16 @@ async fn run_doctor(
     for provider in crate::config::ApiProvider::all().iter().copied() {
         let slot = provider.as_str();
         let provider_config = config.provider_config_for(provider);
-        let config_declared = provider_config
-            .is_some_and(|entry| structurally_present_config_key(entry.api_key.as_ref()))
-            || (matches!(provider, crate::config::ApiProvider::Deepseek)
-                && structurally_present_config_key(config.api_key.as_ref()));
+        let config_declared = provider_config.is_some_and(|entry| {
+            entry.api_key.as_deref().is_some_and(|key| {
+                crate::config::classify_config_api_key_value(key)
+                    == crate::config::ConfigApiKeyValueKind::Literal
+            })
+        }) || (matches!(provider, crate::config::ApiProvider::Deepseek)
+            && config.api_key.as_deref().is_some_and(|key| {
+                crate::config::classify_config_api_key_value(key)
+                    == crate::config::ConfigApiKeyValueKind::Literal
+            }));
         let env_source_declared = provider_config
             .and_then(|entry| entry.api_key_env.as_deref())
             .is_some_and(|name| !name.trim().is_empty());
@@ -3826,6 +3847,9 @@ async fn run_doctor(
             "external auth source declared; credential not resolved"
         }
         ApiKeySource::SecretStoreUnprobed => "secret store eligible; store not probed",
+        ApiKeySource::SecretStoreUnavailable => {
+            "secret-store sentinel declared, but this route cannot use that store"
+        }
         ApiKeySource::OAuth => "OAuth route configured; token availability not probed",
         ApiKeySource::ExternalConsent => "external consent configured; token file not read",
         ApiKeySource::NoAuth => "no-auth route",
@@ -6389,6 +6413,7 @@ fn doctor_api_key_source_label(source: ApiKeySource) -> &'static str {
         ApiKeySource::EnvDeclared => "env_declared",
         ApiKeySource::ExternalAuthDeclared => "external_auth_declared",
         ApiKeySource::SecretStoreUnprobed => "secret_store_unprobed",
+        ApiKeySource::SecretStoreUnavailable => "secret_store_unavailable",
         ApiKeySource::OAuth => "oauth_unprobed",
         ApiKeySource::ExternalConsent => "external_consent",
         ApiKeySource::NoAuth => "none",

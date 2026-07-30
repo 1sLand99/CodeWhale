@@ -568,19 +568,109 @@ fn credential_diagnostic_treats_sentinel_as_unprobed_store_not_config() {
     assert!(!doctor_has_credentials_or_local_runtime(&config));
     assert!(!codewhale_home.join("secrets/secrets.json").exists());
 
+    for sentinel in [crate::config::API_KEYRING_SENTINEL, "  __KEYRING__  "] {
+        let mut providers = crate::config::ProvidersConfig::default();
+        providers.openai.api_key = Some(sentinel.to_string());
+        let official = Config {
+            provider: Some("openai".to_string()),
+            providers: Some(providers),
+            ..Config::default()
+        };
+        assert_eq!(
+            resolve_credential_diagnostic(&official),
+            CredentialDiagnostic::new(
+                ApiKeySource::SecretStoreUnprobed,
+                CredentialAvailability::NotProbed,
+            )
+        );
+    }
+}
+
+#[test]
+fn unavailable_sentinel_routes_stay_distinct_from_unknown_and_unprobed() {
+    let _lock = crate::test_support::lock_test_env();
+    let temp = TempDir::new().expect("temp home");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let _home =
+        crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", temp.path().join("codewhale-home"));
+
+    for sentinel in [crate::config::API_KEYRING_SENTINEL, "  __KEYRING__  "] {
+        let mut custom = std::collections::HashMap::new();
+        custom.insert(
+            "sentinel-route".to_string(),
+            crate::config::ProviderConfig {
+                kind: Some("openai-compatible".to_string()),
+                base_url: Some("https://gateway.example.test/v1".to_string()),
+                model: Some("test-model".to_string()),
+                api_key: Some(sentinel.to_string()),
+                ..Default::default()
+            },
+        );
+        let named_custom = Config {
+            provider: Some("sentinel-route".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                custom,
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        assert_eq!(
+            resolve_credential_diagnostic(&named_custom),
+            CredentialDiagnostic::new(
+                ApiKeySource::SecretStoreUnavailable,
+                CredentialAvailability::Unavailable,
+            )
+        );
+        assert!(!doctor_has_credentials_or_local_runtime(&named_custom));
+        let setup = doctor_setup_report_json(&named_custom, &workspace);
+        assert_eq!(setup["credential"]["source"], "secret_store_unavailable");
+        assert_eq!(setup["credential"]["availability"], "unavailable");
+        assert_eq!(setup["credential"]["ready"], false);
+        assert_eq!(
+            setup["provider_model"]["auth"]["availability"],
+            "unavailable"
+        );
+        assert_eq!(
+            setup["operate_fleet"]["provider"]["auth"]["availability"],
+            "unavailable"
+        );
+        assert_eq!(setup["operate_fleet"]["ready"], false);
+        assert_eq!(
+            doctor_route_report(&named_custom)["auth"]["availability"],
+            "unavailable"
+        );
+    }
+
+    let mut providers = crate::config::ProvidersConfig::default();
+    providers.openrouter.base_url = Some("https://gateway.example.test/v1".to_string());
+    providers.openrouter.api_key = Some(crate::config::API_KEYRING_SENTINEL.to_string());
+    let custom_endpoint = Config {
+        provider: Some("openrouter".to_string()),
+        providers: Some(providers),
+        ..Config::default()
+    };
+    assert_eq!(
+        resolve_credential_diagnostic(&custom_endpoint),
+        CredentialDiagnostic::new(
+            ApiKeySource::SecretStoreUnavailable,
+            CredentialAvailability::Unavailable,
+        )
+    );
+
     let mut custom = std::collections::HashMap::new();
     custom.insert(
-        "sentinel-route".to_string(),
+        "empty-route".to_string(),
         crate::config::ProviderConfig {
             kind: Some("openai-compatible".to_string()),
-            base_url: Some("https://gateway.example.test/v1".to_string()),
+            base_url: Some("https://empty.example.test/v1".to_string()),
             model: Some("test-model".to_string()),
-            api_key: Some(crate::config::API_KEYRING_SENTINEL.to_string()),
+            api_key: Some("  ".to_string()),
             ..Default::default()
         },
     );
-    let provider_sentinel = Config {
-        provider: Some("sentinel-route".to_string()),
+    let empty_custom = Config {
+        provider: Some("empty-route".to_string()),
         providers: Some(crate::config::ProvidersConfig {
             custom,
             ..Default::default()
@@ -588,12 +678,85 @@ fn credential_diagnostic_treats_sentinel_as_unprobed_store_not_config() {
         ..Config::default()
     };
     assert_eq!(
-        resolve_credential_diagnostic(&provider_sentinel),
-        CredentialDiagnostic::new(
-            ApiKeySource::SecretStoreUnprobed,
-            CredentialAvailability::NotProbed,
-        )
+        resolve_credential_diagnostic(&empty_custom),
+        CredentialDiagnostic::new(ApiKeySource::Unknown, CredentialAvailability::Unknown)
     );
+}
+
+#[test]
+fn sentinel_diagnostic_yields_to_route_bound_env_or_auth_declaration() {
+    for sentinel in [crate::config::API_KEYRING_SENTINEL, "  __KEYRING__  "] {
+        let mut providers = crate::config::ProvidersConfig::default();
+        providers.openai.api_key = Some(sentinel.to_string());
+        providers.openai.api_key_env = Some("OFFICIAL_SENTINEL_ROUTE_KEY".to_string());
+        let official = Config {
+            provider: Some("openai".to_string()),
+            providers: Some(providers),
+            ..Config::default()
+        };
+        assert_eq!(
+            resolve_credential_diagnostic(&official),
+            CredentialDiagnostic::new(ApiKeySource::EnvDeclared, CredentialAvailability::NotProbed,)
+        );
+
+        let mut custom = std::collections::HashMap::new();
+        custom.insert(
+            "sentinel-route".to_string(),
+            crate::config::ProviderConfig {
+                kind: Some("openai-compatible".to_string()),
+                base_url: Some("https://gateway.example.test/v1".to_string()),
+                model: Some("test-model".to_string()),
+                api_key: Some(sentinel.to_string()),
+                api_key_env: Some("CUSTOM_SENTINEL_ROUTE_KEY".to_string()),
+                ..Default::default()
+            },
+        );
+        let named_custom = Config {
+            provider: Some("sentinel-route".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                custom,
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        assert_eq!(
+            resolve_credential_diagnostic(&named_custom),
+            CredentialDiagnostic::new(ApiKeySource::EnvDeclared, CredentialAvailability::NotProbed,)
+        );
+
+        let mut external = std::collections::HashMap::new();
+        external.insert(
+            "external-sentinel-route".to_string(),
+            crate::config::ProviderConfig {
+                kind: Some("openai-compatible".to_string()),
+                base_url: Some("https://external.example.test/v1".to_string()),
+                model: Some("test-model".to_string()),
+                api_key: Some(sentinel.to_string()),
+                auth: Some(codewhale_config::ProviderAuthSourceToml {
+                    source: codewhale_config::AuthSourceKind::Command,
+                    command: vec!["MUST-NOT-RUN".to_string()],
+                    timeout_ms: None,
+                    secret_id: None,
+                }),
+                ..Default::default()
+            },
+        );
+        let named_external = Config {
+            provider: Some("external-sentinel-route".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                custom: external,
+                ..Default::default()
+            }),
+            ..Config::default()
+        };
+        assert_eq!(
+            resolve_credential_diagnostic(&named_external),
+            CredentialDiagnostic::new(
+                ApiKeySource::ExternalAuthDeclared,
+                CredentialAvailability::NotProbed,
+            )
+        );
+    }
 }
 
 #[test]

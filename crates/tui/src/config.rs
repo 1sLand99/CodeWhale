@@ -34,6 +34,25 @@ pub use models::*;
 /// the secret store. It is not a credential and must never be treated as one —
 /// including by billing classification, which reads credential *shape* only.
 pub(crate) const API_KEYRING_SENTINEL: &str = "__KEYRING__";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigApiKeyValueKind {
+    Empty,
+    SecretStoreSentinel,
+    Literal,
+}
+
+pub(crate) fn classify_config_api_key_value(value: &str) -> ConfigApiKeyValueKind {
+    let value = value.trim();
+    if value.is_empty() {
+        ConfigApiKeyValueKind::Empty
+    } else if value == API_KEYRING_SENTINEL {
+        ConfigApiKeyValueKind::SecretStoreSentinel
+    } else {
+        ConfigApiKeyValueKind::Literal
+    }
+}
+
 pub const DEFAULT_ZAI_PROVIDER_MAX_CONCURRENCY: usize = 3;
 pub const MAX_PROVIDER_REQUEST_CONCURRENCY: usize = 64;
 
@@ -5459,8 +5478,7 @@ impl Config {
         if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN)
             && self.config_credentials_are_bound_to_provider_endpoint(provider)
             && let Some(configured) = self.api_key.as_ref()
-            && !configured.trim().is_empty()
-            && configured != API_KEYRING_SENTINEL
+            && classify_config_api_key_value(configured) == ConfigApiKeyValueKind::Literal
         {
             return Ok(configured.clone());
         }
@@ -5525,7 +5543,7 @@ impl Config {
                 .provider_config_string_with_runtime_fallback(provider, |entry| {
                     entry.api_key.clone()
                 })
-            && !configured.trim().is_empty()
+            && classify_config_api_key_value(&configured) == ConfigApiKeyValueKind::Literal
         {
             return Ok(configured);
         }
@@ -5533,8 +5551,7 @@ impl Config {
             && self.uses_legacy_literal_custom_route()
             && self.config_credentials_are_bound_to_provider_endpoint(provider)
             && let Some(configured) = self.api_key.as_ref()
-            && !configured.trim().is_empty()
-            && configured != API_KEYRING_SENTINEL
+            && classify_config_api_key_value(configured) == ConfigApiKeyValueKind::Literal
         {
             return Ok(configured.clone());
         }
@@ -9363,7 +9380,9 @@ pub fn active_provider_has_config_api_key(config: &Config) -> bool {
     if config.config_credentials_are_bound_to_provider_endpoint(provider)
         && config
             .provider_config_string_with_runtime_fallback(provider, |entry| entry.api_key.clone())
-            .is_some_and(|k| !k.trim().is_empty() && k != API_KEYRING_SENTINEL)
+            .is_some_and(|key| {
+                classify_config_api_key_value(&key) == ConfigApiKeyValueKind::Literal
+            })
     {
         return true;
     }
@@ -9378,7 +9397,7 @@ pub fn active_provider_has_config_api_key(config: &Config) -> bool {
         && config
             .api_key
             .as_ref()
-            .is_some_and(|k| !k.trim().is_empty() && k != API_KEYRING_SENTINEL)
+            .is_some_and(|key| classify_config_api_key_value(key) == ConfigApiKeyValueKind::Literal)
 }
 
 #[must_use]
@@ -9464,7 +9483,9 @@ pub fn has_api_key_for(config: &Config, provider: ApiProvider) -> bool {
     if config.config_credentials_are_bound_to_provider_endpoint(provider)
         && config
             .provider_config_string_with_runtime_fallback(provider, |entry| entry.api_key.clone())
-            .is_some_and(|k| !k.trim().is_empty() && k != API_KEYRING_SENTINEL)
+            .is_some_and(|key| {
+                classify_config_api_key_value(&key) == ConfigApiKeyValueKind::Literal
+            })
     {
         return true;
     }
@@ -9484,7 +9505,7 @@ pub fn has_api_key_for(config: &Config, provider: ApiProvider) -> bool {
         && config
             .api_key
             .as_ref()
-            .is_some_and(|k| !k.trim().is_empty() && k != API_KEYRING_SENTINEL)
+            .is_some_and(|key| classify_config_api_key_value(key) == ConfigApiKeyValueKind::Literal)
     {
         return true;
     }

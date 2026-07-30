@@ -4489,6 +4489,126 @@ fn deepseek_api_key_ignores_sentinel_placeholder() -> Result<()> {
 }
 
 #[test]
+fn provider_sentinel_falls_through_to_route_env_then_fixture_store() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let codewhale_home = temp_root.path().join("isolated-codewhale");
+    fs::create_dir_all(&codewhale_home)?;
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+    let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let config_path = temp_root.path().join("config.toml");
+    let secrets = codewhale_secrets::Secrets::auto_detect();
+
+    for sentinel in [API_KEYRING_SENTINEL, "  __KEYRING__  "] {
+        fs::write(
+            &config_path,
+            format!("provider = \"openai\"\n\n[providers.openai]\napi_key = {sentinel:?}\n"),
+        )?;
+        let config = Config::load(Some(config_path.clone()), None)?;
+        assert_eq!(
+            config
+                .provider_config()
+                .and_then(|entry| entry.api_key.as_deref())
+                .map(classify_config_api_key_value),
+            Some(ConfigApiKeyValueKind::SecretStoreSentinel)
+        );
+        assert!(!active_provider_has_config_api_key(&config));
+        assert!(!has_api_key_for(&config, ApiProvider::Openai));
+
+        secrets.set("openai", "FIXTURE-STORED-KEY")?;
+        assert_eq!(
+            config.deepseek_api_key()?,
+            "FIXTURE-STORED-KEY",
+            "{sentinel:?} must fall through to the allowed fixture store"
+        );
+        assert!(active_provider_has_config_api_key(&config));
+        assert!(has_api_key_for(&config, ApiProvider::Openai));
+        secrets.delete("openai")?;
+
+        let _route_env = EnvVarGuard::set("OFFICIAL_SENTINEL_ROUTE_KEY", "FIXTURE-ENV-KEY");
+        fs::write(
+            &config_path,
+            format!(
+                "provider = \"openai\"\n\n[providers.openai]\napi_key = {sentinel:?}\napi_key_env = \"OFFICIAL_SENTINEL_ROUTE_KEY\"\n"
+            ),
+        )?;
+        let config = Config::load(Some(config_path.clone()), None)?;
+        assert_eq!(
+            config.deepseek_api_key()?,
+            "FIXTURE-ENV-KEY",
+            "route-bound api_key_env must outrank the store after {sentinel:?}"
+        );
+        assert!(!active_provider_has_config_api_key(&config));
+        assert!(active_provider_has_env_api_key(&config));
+
+        fs::write(&config_path, format!("api_key = {sentinel:?}\n"))?;
+        let root = Config::load(Some(config_path.clone()), None)?;
+        assert!(!active_provider_has_config_api_key(&root));
+        assert!(!has_api_key_for(&root, ApiProvider::Deepseek));
+        secrets.set("deepseek", "FIXTURE-DEEPSEEK-STORED-KEY")?;
+        assert_eq!(
+            root.deepseek_api_key()?,
+            "FIXTURE-DEEPSEEK-STORED-KEY",
+            "root {sentinel:?} must also fall through to the allowed fixture store"
+        );
+        assert!(active_provider_has_config_api_key(&root));
+        secrets.delete("deepseek")?;
+    }
+    Ok(())
+}
+
+#[test]
+fn custom_route_sentinel_is_never_a_key_and_requires_a_route_binding() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let config_path = temp_root.path().join("config.toml");
+
+    for sentinel in [API_KEYRING_SENTINEL, "  __KEYRING__  "] {
+        fs::write(
+            &config_path,
+            format!(
+                "provider = \"acme\"\n\n[providers.acme]\nkind = \"openai-compatible\"\nbase_url = \"https://acme.example.test/v1\"\nmodel = \"acme-model\"\napi_key = {sentinel:?}\n"
+            ),
+        )?;
+        let config = Config::load(Some(config_path.clone()), None)?;
+        assert!(config.should_skip_secret_store_for_provider(ApiProvider::Custom));
+        let error = config
+            .deepseek_api_key()
+            .expect_err("named custom sentinel must not become a bearer key");
+        assert!(error.to_string().contains("must be bound explicitly"));
+        assert!(!active_provider_has_config_api_key(&config));
+        assert!(!has_api_key_for(&config, ApiProvider::Custom));
+
+        let _route_env = EnvVarGuard::set("CUSTOM_SENTINEL_ROUTE_KEY", "FIXTURE-CUSTOM-ENV-KEY");
+        fs::write(
+            &config_path,
+            format!(
+                "provider = \"acme\"\n\n[providers.acme]\nkind = \"openai-compatible\"\nbase_url = \"https://acme.example.test/v1\"\nmodel = \"acme-model\"\napi_key = {sentinel:?}\napi_key_env = \"CUSTOM_SENTINEL_ROUTE_KEY\"\n"
+            ),
+        )?;
+        let config = Config::load(Some(config_path.clone()), None)?;
+        assert_eq!(config.deepseek_api_key()?, "FIXTURE-CUSTOM-ENV-KEY");
+        assert!(!active_provider_has_config_api_key(&config));
+        assert!(active_provider_has_env_api_key(&config));
+    }
+
+    fs::write(
+        &config_path,
+        format!(
+            "provider = \"openrouter\"\n\n[providers.openrouter]\nbase_url = \"https://gateway.example.test/v1\"\napi_key = {API_KEYRING_SENTINEL:?}\n"
+        ),
+    )?;
+    let custom_endpoint = Config::load(Some(config_path), None)?;
+    assert!(custom_endpoint.should_skip_secret_store_for_provider(ApiProvider::Openrouter));
+    assert!(custom_endpoint.deepseek_api_key().is_err());
+    assert!(!active_provider_has_config_api_key(&custom_endpoint));
+    assert!(!has_api_key_for(&custom_endpoint, ApiProvider::Openrouter));
+    Ok(())
+}
+
+#[test]
 fn default_user_paths_use_codewhale_home_for_fresh_installs() -> Result<()> {
     let _lock = lock_test_env();
     let nanos = SystemTime::now()

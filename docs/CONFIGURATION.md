@@ -2073,15 +2073,19 @@ output is always offline. Top-level keys include `version`, `paths`, `secret_bac
 `default_text_model`, `mcp`, `skills`, `tools`, `plugins`, `sandbox`,
 `platform`, `api_connectivity`, and `capability`. CI consumers should rely on
 `api_key.source` (`config_declared`/`env_declared`/`external_auth_declared`/
-`secret_store_unprobed`/`oauth_unprobed`/`external_consent`/`none`/
-`local_runtime`/`unknown`) and `api_key.availability`
-(`present`/`not_required`/`not_probed`/`unknown`) rather than parsing the
+`secret_store_unprobed`/`secret_store_unavailable`/`oauth_unprobed`/
+`external_consent`/`none`/`local_runtime`/`unknown`) and
+`api_key.availability`
+(`present`/`not_required`/`not_probed`/`unavailable`/`unknown`) rather than parsing the
 human-readable `doctor` text. Source is declaration metadata, not proof that a
 credential exists or works. Only a non-empty, non-sentinel literal config value
 is structurally `present`; no-auth and local routes are `not_required`. Environment,
 external-auth, OAuth, consent, and secret-store declarations remain `not_probed`
-and cannot make structural Setup or Fleet readiness true. `unknown` means no
-supported structural conclusion was available. The structural
+and cannot make structural Setup or Fleet readiness true. A secret-store sentinel
+on a named/custom endpoint that is prohibited from using the shared store is
+`secret_store_unavailable`/`unavailable`, while `unknown` remains reserved for
+the absence of a supported structural conclusion. Exact and whitespace-wrapped
+legacy sentinels are never treated as literal credentials. The structural
 loader still honors safe environment routing/model/policy fields, but it never
 materializes environment HTTP headers, sandbox API keys, or search API keys;
 only an explicit API/local probe switches to the normal credential-loading

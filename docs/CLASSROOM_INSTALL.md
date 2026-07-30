@@ -159,7 +159,7 @@ $newPath = ($currentPath -split ";" | Where-Object { $_ -and ($_ -ne $binDir) })
 | `MISSING_COMPANION_BINARY` | Ensure both `codewhale.exe` and `codewhale-tui.exe` are in the same directory |
 | `TLS handshake` errors | Check proxy settings or use the CNB mirror (see [INSTALL.md](INSTALL.md)) |
 | Antivirus quarantines binaries | Add the install directory to AV exclusions |
-| `codewhale doctor` reports credential availability as `unknown`/`not_probed` | This is the safe offline default. A declared environment, external-auth, OAuth, consent, or secret-store source is not proof of availability and does not certify Setup/Fleet readiness. Use `codewhale doctor --probe-api` only on an approved connected machine when a live check is required. |
+| `codewhale doctor` reports credential availability as `unknown`/`not_probed`/`unavailable` | This is the safe offline result. A declared environment, external-auth, OAuth, consent, or secret-store source is not proof of availability and does not certify Setup/Fleet readiness. `unavailable` means the route declared the legacy store sentinel but is not allowed to use that shared store. Use `codewhale doctor --probe-api` only on an approved connected machine when a live check is required. |
 
 ---
 

@@ -314,9 +314,10 @@ fn doctor_json_does_not_inherit_an_ambient_legacy_secret_from_an_explicit_home()
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("machine-readable doctor report");
     assert_eq!(
-        report["api_key"]["source"], "missing",
-        "doctor must not report an ambient legacy secret from outside an explicit home"
+        report["api_key"]["source"], "secret_store_unprobed",
+        "doctor must report only structural eligibility, not an ambient legacy secret from outside an explicit home"
     );
+    assert_eq!(report["api_key"]["availability"], "not_probed");
     assert_eq!(
         fs::read(&legacy).expect("read legacy secret after doctor"),
         legacy_before,
@@ -397,7 +398,7 @@ fn doctor_text_probe_uses_a_legacy_key_without_migrating_it() {
 }
 
 #[test]
-fn doctor_json_auth_scheme_reads_a_legacy_key_without_migrating_it() {
+fn doctor_json_reports_a_legacy_store_without_reading_or_migrating_it() {
     let fixture = TempDir::new().expect("fixture root");
     let workspace = fixture.path().join("workspace");
     let home = fixture.path().join("home");
@@ -432,9 +433,14 @@ fn doctor_json_auth_scheme_reads_a_legacy_key_without_migrating_it() {
     );
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("machine-readable doctor report");
-    assert_eq!(report["api_key"]["source"], "keyring");
-    assert_eq!(report["route"]["auth"]["scheme"], "api-key");
-    assert_eq!(report["route"]["auth"]["source"], "keyring");
+    assert_eq!(report["api_key"]["source"], "secret_store_unprobed");
+    assert_eq!(report["api_key"]["availability"], "not_probed");
+    assert_eq!(
+        report["route"]["auth"]["scheme"], "unknown",
+        "ordinary JSON doctor must not read the legacy key prefix to refine the Xiaomi scheme"
+    );
+    assert_eq!(report["route"]["auth"]["source"], "secret_store_unprobed");
+    assert_eq!(report["route"]["auth"]["availability"], "not_probed");
     assert!(
         !primary.exists(),
         "doctor --json must not migrate a legacy secret while classifying auth"
@@ -447,7 +453,7 @@ fn doctor_json_auth_scheme_reads_a_legacy_key_without_migrating_it() {
 }
 
 #[test]
-fn setup_status_reads_a_legacy_key_without_migrating_it() {
+fn setup_status_reports_a_legacy_store_without_reading_or_migrating_it() {
     let fixture = TempDir::new().expect("fixture root");
     let workspace = fixture.path().join("workspace");
     let home = fixture.path().join("home");
@@ -469,10 +475,14 @@ fn setup_status_reads_a_legacy_key_without_migrating_it() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("api_key: set via OS keyring"),
-        "stdout:\n{}",
-        String::from_utf8_lossy(&output.stdout)
+        stdout.contains("api_key: secret store eligible (store not probed)"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("credential availability: not_probed"),
+        "stdout:\n{stdout}"
     );
     assert!(
         !primary.exists(),

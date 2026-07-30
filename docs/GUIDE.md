@@ -128,7 +128,9 @@ JSON reports credential `source` separately from literal `availability`.
 Configured environment, external-auth, OAuth, consent, and secret-store sources
 remain `not_probed`; their declaration alone does not make Setup or Fleet ready.
 Only a structurally present literal config value, or a route where credentials
-are not required, certifies offline readiness.
+are not required, certifies offline readiness. A legacy secret-store sentinel on
+a route that cannot use the shared store is reported separately as
+`secret_store_unavailable`/`unavailable`, not as eligible or merely unknown.
 
 Both `doctor` and `doctor --json` also include a session-recovery diagnostic
 that compares legacy session filenames against the current store and reports
