@@ -5935,6 +5935,76 @@ fn print_agent_runtime_contract_metrics() {
 }
 
 #[test]
+#[ignore = "one-shot metric for scripts/measure-runtime-contract.py"]
+#[allow(clippy::print_stdout)]
+fn print_skill_discovery_turn_metrics() {
+    let _env_lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().join("workspace");
+    let home = tmp.path().join("home");
+    let skills_dir = workspace.join(".codewhale").join("skills");
+    let skill = skills_dir.join("receipt-demo");
+    fs::create_dir_all(&skill).expect("create skill directory");
+    fs::create_dir_all(&home).expect("create isolated home");
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: receipt-demo\ndescription: Hermetic measurement skill\n---\nMeasure discovery.\n",
+    )
+    .expect("write skill");
+
+    let _home = EnvVarGuard::set("HOME", &home);
+    let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
+    let codewhale_home = home.join(".codewhale");
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+
+    crate::skills::reset_discovery_metrics();
+    let start = crate::skills::discovery_metrics_snapshot();
+    let first_prompt = system_prompt_for_mode_with_context_skills_and_session(
+        &workspace,
+        None,
+        Some(&skills_dir),
+        None,
+        PromptSessionContext::default(),
+    );
+    let after_first = crate::skills::discovery_metrics_snapshot();
+    let second_prompt = system_prompt_for_mode_with_context_skills_and_session(
+        &workspace,
+        None,
+        Some(&skills_dir),
+        None,
+        PromptSessionContext::default(),
+    );
+    let after_second = crate::skills::discovery_metrics_snapshot();
+
+    let first = after_first.delta_since(start);
+    let second = after_second.delta_since(after_first);
+    let first_flat = system_prompt_flat_text(&first_prompt);
+    let second_flat = system_prompt_flat_text(&second_prompt);
+    assert_eq!(first, second, "unchanged turns should repeat the same walk");
+    assert_eq!(first.root_discovery_calls, 1);
+    assert_eq!(first.directories_visited, 1);
+    assert_eq!(first.skill_md_read_attempts, 1);
+    assert_eq!(first_flat, second_flat, "unchanged prompts must be stable");
+
+    println!(
+        "SKILL_DISCOVERY_METRICS {}",
+        serde_json::json!({
+            "first_delta": {
+                "root_discovery_calls": first.root_discovery_calls,
+                "directories_visited": first.directories_visited,
+                "skill_md_read_attempts": first.skill_md_read_attempts,
+            },
+            "second_delta": {
+                "root_discovery_calls": second.root_discovery_calls,
+                "directories_visited": second.directories_visited,
+                "skill_md_read_attempts": second.skill_md_read_attempts,
+            },
+            "prompts_byte_identical": true,
+        })
+    );
+}
+
+#[test]
 fn deferred_tool_hydration_activates_without_guard_result_for_same_turn_retry() {
     let mut edit = api_tool("edit_file");
     edit.defer_loading = Some(true);

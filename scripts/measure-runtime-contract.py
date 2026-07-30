@@ -16,7 +16,10 @@ def run_metric(test_name: str, marker: str) -> dict:
     cmd = [
         "cargo",
         "test",
+        "--locked",
         "-p",
+        "codewhale-tui",
+        "--bin",
         "codewhale-tui",
         test_name,
         "--",
@@ -26,6 +29,9 @@ def run_metric(test_name: str, marker: str) -> dict:
     ]
     proc = subprocess.run(cmd, text=True, capture_output=True, check=False)
     sys.stderr.write(proc.stderr)
+    if proc.returncode != 0:
+        sys.stdout.write(proc.stdout)
+        proc.check_returncode()
 
     combined = proc.stdout.splitlines() + proc.stderr.splitlines()
     for line in combined:
@@ -45,8 +51,13 @@ def main() -> int:
         "print_agent_runtime_contract_metrics",
         "RUNTIME_CONTRACT_METRICS ",
     )
+    skill_discovery_metrics = run_metric(
+        "print_skill_discovery_turn_metrics",
+        "SKILL_DISCOVERY_METRICS ",
+    )
 
     receipt = {
+        "skill_discovery": skill_discovery_metrics,
         "tool_catalog": tool_metrics,
         "system_prompt": prompt_metrics,
     }

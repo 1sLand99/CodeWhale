@@ -41,6 +41,92 @@ const MAX_SKILL_DESCRIPTION_CHARS: usize = 280;
 const MAX_AVAILABLE_SKILLS_CHARS: usize = 12_000;
 const MAX_SKILL_NAME_CHARS: usize = 64;
 
+/// Test-only observations of the synchronous skill-discovery walk.
+///
+/// Definitions are intentionally tied to concrete filesystem operations:
+/// - `root_discovery_calls`: entries into [`SkillRegistry::discover`], including
+///   roots that are missing or are not directories.
+/// - `directories_visited`: unique directories accepted by cycle detection and
+///   then submitted to `read_dir` by the recursive walker.
+/// - `skill_md_read_attempts`: calls to `read_to_string(<child>/SKILL.md)`,
+///   including expected not-found results for organizational directories.
+///
+/// These counters do not cache or otherwise change discovery behavior. They are
+/// thread-local so unrelated parallel tests cannot contaminate a measurement.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SkillDiscoveryMetrics {
+    pub(crate) root_discovery_calls: usize,
+    pub(crate) directories_visited: usize,
+    pub(crate) skill_md_read_attempts: usize,
+}
+
+#[cfg(test)]
+impl SkillDiscoveryMetrics {
+    #[must_use]
+    pub(crate) fn delta_since(self, earlier: Self) -> Self {
+        Self {
+            root_discovery_calls: self
+                .root_discovery_calls
+                .saturating_sub(earlier.root_discovery_calls),
+            directories_visited: self
+                .directories_visited
+                .saturating_sub(earlier.directories_visited),
+            skill_md_read_attempts: self
+                .skill_md_read_attempts
+                .saturating_sub(earlier.skill_md_read_attempts),
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static SKILL_DISCOVERY_METRICS: std::cell::Cell<SkillDiscoveryMetrics> =
+        const { std::cell::Cell::new(SkillDiscoveryMetrics {
+            root_discovery_calls: 0,
+            directories_visited: 0,
+            skill_md_read_attempts: 0,
+        }) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_discovery_metrics() {
+    SKILL_DISCOVERY_METRICS.set(SkillDiscoveryMetrics::default());
+}
+
+#[cfg(test)]
+#[must_use]
+pub(crate) fn discovery_metrics_snapshot() -> SkillDiscoveryMetrics {
+    SKILL_DISCOVERY_METRICS.get()
+}
+
+#[cfg(test)]
+fn record_root_discovery_call() {
+    SKILL_DISCOVERY_METRICS.with(|cell| {
+        let mut metrics = cell.get();
+        metrics.root_discovery_calls += 1;
+        cell.set(metrics);
+    });
+}
+
+#[cfg(test)]
+fn record_directory_visit() {
+    SKILL_DISCOVERY_METRICS.with(|cell| {
+        let mut metrics = cell.get();
+        metrics.directories_visited += 1;
+        cell.set(metrics);
+    });
+}
+
+#[cfg(test)]
+fn record_skill_md_read_attempt() {
+    SKILL_DISCOVERY_METRICS.with(|cell| {
+        let mut metrics = cell.get();
+        metrics.skill_md_read_attempts += 1;
+        cell.set(metrics);
+    });
+}
+
 // === Defaults ===
 
 #[must_use]
@@ -209,6 +295,8 @@ impl SkillRegistry {
     /// the walk finite when a skills layout contains cycles.
     #[must_use]
     pub fn discover(dir: &Path) -> Self {
+        #[cfg(test)]
+        record_root_discovery_call();
         let mut registry = Self::default();
         let Ok(canonical_dir) = fs::canonicalize(dir) else {
             return registry;
@@ -238,6 +326,8 @@ impl SkillRegistry {
             return;
         }
 
+        #[cfg(test)]
+        record_directory_visit();
         let entries = match fs::read_dir(dir) {
             Ok(e) => e,
             Err(err) => {
@@ -281,6 +371,8 @@ impl SkillRegistry {
             }
 
             let skill_path = path.join("SKILL.md");
+            #[cfg(test)]
+            record_skill_md_read_attempt();
             match fs::read_to_string(&skill_path) {
                 Ok(content) => match Self::parse_skill(&skill_path, &content) {
                     Ok(mut skill) => {
@@ -1258,6 +1350,49 @@ mod tests {
         let skill_dir = tmpdir.path().join("skills").join(skill_name);
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(skill_dir.join("SKILL.md"), skill_content).unwrap();
+    }
+
+    #[test]
+    fn discovery_metrics_reset_and_snapshot_are_exact() {
+        super::reset_discovery_metrics();
+        assert_eq!(
+            super::discovery_metrics_snapshot(),
+            super::SkillDiscoveryMetrics::default()
+        );
+
+        let tmpdir = TempDir::new().unwrap();
+        let skills_root = tmpdir.path().join("skills");
+        let vendor_root = skills_root.join("vendor");
+        write_skill(&vendor_root, "demo", "A demo skill", "Instructions");
+
+        let registry = super::SkillRegistry::discover(&skills_root);
+        assert_eq!(registry.len(), 1);
+        assert_eq!(
+            super::discovery_metrics_snapshot(),
+            super::SkillDiscoveryMetrics {
+                root_discovery_calls: 1,
+                directories_visited: 2,
+                skill_md_read_attempts: 2,
+            }
+        );
+
+        super::reset_discovery_metrics();
+        let missing_root = tmpdir.path().join("missing");
+        let _registry = super::SkillRegistry::discover(&missing_root);
+        assert_eq!(
+            super::discovery_metrics_snapshot(),
+            super::SkillDiscoveryMetrics {
+                root_discovery_calls: 1,
+                directories_visited: 0,
+                skill_md_read_attempts: 0,
+            }
+        );
+
+        super::reset_discovery_metrics();
+        assert_eq!(
+            super::discovery_metrics_snapshot(),
+            super::SkillDiscoveryMetrics::default()
+        );
     }
 
     #[test]
