@@ -1152,7 +1152,7 @@ mod tests {
                 ContentBlock::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
-            .last()
+            .next_back()
             .expect("turn metadata text");
         assert!(metadata.contains("123456 tokens"), "{metadata}");
         assert!(!metadata.contains(" / 4096 tokens"), "{metadata}");

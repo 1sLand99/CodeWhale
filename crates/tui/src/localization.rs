@@ -3846,7 +3846,7 @@ mod tests {
             .split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '/')
             .filter(|token| token.len() >= 2)
             .filter(|token| !token.contains('/') && !token.contains("://"))
-            .filter(|token| token.chars().all(|c| c.is_ascii()))
+            .filter(|token| token.is_ascii())
             .filter(|token| !token.chars().any(|c| c.is_ascii_digit()))
             .filter(|token| !token.chars().all(|c| c.is_ascii_uppercase()))
             .filter(|token| !ALLOWED.contains(&token.to_ascii_lowercase().as_str()))

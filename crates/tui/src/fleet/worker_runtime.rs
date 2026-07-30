@@ -2132,11 +2132,13 @@ mod tests {
 
     #[test]
     fn validate_fleet_task_routes_rejects_known_foreign_providerless_pin() {
-        let mut config = Config::default();
-        config.provider = Some("moonshot".to_string());
         let mut providers = crate::config::ProvidersConfig::default();
         providers.moonshot.api_key = Some("test-key".to_string());
-        config.providers = Some(providers);
+        let config = Config {
+            provider: Some("moonshot".to_string()),
+            providers: Some(providers),
+            ..Config::default()
+        };
         let mut profile = agent_profile(
             "moonshot-builder",
             "builder",
@@ -2156,9 +2158,13 @@ mod tests {
             )),
         );
 
-        let err =
-            validate_fleet_task_routes(&[task.clone()], &[profile.clone()], None, Some(&config))
-                .expect_err("known foreign model must fail before Fleet dispatch");
+        let err = validate_fleet_task_routes(
+            std::slice::from_ref(&task),
+            std::slice::from_ref(&profile),
+            None,
+            Some(&config),
+        )
+        .expect_err("known foreign model must fail before Fleet dispatch");
         let msg = err.to_string();
         assert!(msg.contains("deepseek-v4-pro"), "names model: {msg}");
         assert!(msg.contains("moonshot"), "names resolved route: {msg}");

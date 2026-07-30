@@ -10634,7 +10634,7 @@ fn turn_started_route_is_captured_before_cancel_suppression() {
                 billing_surface: Some(crate::pricing::FIRST_PARTY_PAYG_BILLING_SURFACE.to_string()),
                 endpoint_fingerprint: Some("openai-endpoint".to_string()),
                 billing_mode: crate::cost_status::RouteBillingMode::Metered,
-                dispatched_at: created_at.clone(),
+                dispatched_at: created_at,
             }),
             base_url: String::new(),
             billing_product: crate::route_billing::RouteProduct::Unproven,
@@ -13919,7 +13919,6 @@ fn child_usage_metadata_carries_cache_write_and_reasoning_end_to_end() {
             code_execution_requests: Some(2),
             tool_search_requests: Some(1),
         }),
-        ..Default::default()
     };
 
     // The shared producer emits every class.

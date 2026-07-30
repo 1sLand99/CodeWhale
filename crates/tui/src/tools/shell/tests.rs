@@ -207,12 +207,13 @@ fn shell_descendant_helper_process() {
     }
     let pid_file =
         PathBuf::from(std::env::var(SHELL_DESCENDANT_PID_FILE_ENV).expect("descendant pid file"));
-    let child = Command::new("sleep")
+    let mut child = Command::new("sleep")
         .arg("30")
         .spawn()
         .expect("spawn cheap descendant");
     std::fs::write(pid_file, child.id().to_string()).expect("write descendant pid");
     std::thread::sleep(Duration::from_secs(30));
+    let _ = child.wait();
 }
 
 #[cfg(unix)]
