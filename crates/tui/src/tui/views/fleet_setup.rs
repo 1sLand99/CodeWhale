@@ -579,7 +579,10 @@ impl FleetSetupView {
             role_idx: 0,
             model_idx: 0,
             thinking_idx: 0,
-            profile_scope: FleetProfileScope::Project,
+            // Profiles authored for a person should follow that person across
+            // repositories by default. Project scope remains one `s` away and
+            // keeps higher roster precedence when explicitly selected.
+            profile_scope: FleetProfileScope::Personal,
             profile_status: None,
             review_scroll: 0,
             model_draft: None,
@@ -657,7 +660,7 @@ impl FleetSetupView {
                         "The project '{id}' profile remains higher precedence; this personal profile applies elsewhere."
                     )
                 } else if self.profile_scope == FleetProfileScope::Personal {
-                    format!("Overrides the {origin} '{id}' roster member outside projects with a project-specific override.")
+                    format!("Overrides {origin} '{id}' unless a project profile exists.")
                 } else {
                     format!("Overrides the {origin} '{id}' roster member.")
                 }
@@ -1322,7 +1325,7 @@ impl FleetSetupView {
                     "Project — saved with this repository at {PROFILE_DIR}. Press s for a personal profile reusable across repositories. This choice only controls where the profile is available; active workspace, trusted-path, and permission policy still govern execution."
                 ),
                 FleetProfileScope::Personal => format!(
-                    "Personal — reusable across repositories at {}. Project profiles still override it by id. This choice grants no filesystem authority; active workspace, trusted-path, and permission policy still govern execution. Press s for project availability.",
+                    "Personal — reusable at {}; project profiles override by id. Press s for project. Scope changes discovery only; workspace, trusted-path, and permission policy still govern execution.",
                     self.profile_scope.display_dir()
                 ),
             },
@@ -1790,7 +1793,7 @@ mod tests {
         else {
             panic!("expected ratify commit event");
         };
-        assert_eq!(scope, FleetProfileScope::Project);
+        assert_eq!(scope, FleetProfileScope::Personal);
         assert_eq!(draft.provider.as_deref(), Some("zai"));
         assert_eq!(draft.model.as_deref(), Some("glm-5.2"));
         assert_eq!(draft.reasoning_effort.as_deref(), Some("max"));
@@ -1868,7 +1871,7 @@ mod tests {
         else {
             panic!("expected starter commit event");
         };
-        assert_eq!(scope, FleetProfileScope::Project);
+        assert_eq!(scope, FleetProfileScope::Personal);
         assert_eq!(draft.id, "manager");
 
         let mut view = FleetSetupView::from_snapshot(snapshot());
@@ -1885,7 +1888,7 @@ mod tests {
         else {
             panic!("expected ratify commit event");
         };
-        assert_eq!(scope, FleetProfileScope::Project);
+        assert_eq!(scope, FleetProfileScope::Personal);
         assert_eq!(draft.id, "reviewer");
     }
 
@@ -2139,7 +2142,7 @@ mod tests {
             );
         }
 
-        assert_eq!(scope, FleetProfileScope::Project);
+        assert_eq!(scope, FleetProfileScope::Personal);
         assert_eq!(draft.id, "builder");
         assert_eq!(draft.role_hint, "builder");
         assert_eq!(draft.model.as_deref(), Some("deepseek-v4-pro"));
@@ -2148,21 +2151,21 @@ mod tests {
     }
 
     #[test]
-    fn review_can_target_a_personal_cross_repository_profile() {
+    fn review_defaults_to_personal_and_can_switch_to_project() {
         let mut view = FleetSetupView::from_snapshot(snapshot());
         to_review(&mut view);
 
-        assert_eq!(view.profile_scope, FleetProfileScope::Project);
-        view.handle_key(key(KeyCode::Char('s')));
         assert_eq!(view.profile_scope, FleetProfileScope::Personal);
+        view.handle_key(key(KeyCode::Char('s')));
+        assert_eq!(view.profile_scope, FleetProfileScope::Project);
 
         let action = view.handle_key(key(KeyCode::Enter));
         let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft, scope }) =
             action
         else {
-            panic!("expected personal profile save event");
+            panic!("expected project profile save event");
         };
-        assert_eq!(scope, FleetProfileScope::Personal);
+        assert_eq!(scope, FleetProfileScope::Project);
         let rendered = draft.render_toml();
         assert!(rendered.contains("id = \"manager\""), "{rendered}");
     }
@@ -2189,7 +2192,7 @@ mod tests {
 
     #[test]
     fn role_and_review_steps_note_roster_overrides() {
-        // "reviewer" (index 4) collides with the built-in roster member; the
+        // "reviewer" collides with the built-in roster member; the
         // role step context and review Role section must both say so.
         let mut view = FleetSetupView::from_snapshot(snapshot());
         for _ in 0..3 {
@@ -2198,7 +2201,7 @@ mod tests {
         assert_eq!(view.selected_role(), "reviewer");
         assert_eq!(
             view.roster_override_note().as_deref(),
-            Some("Overrides the built-in 'reviewer' roster member.")
+            Some("Overrides built-in 'reviewer' unless a project profile exists.")
         );
 
         let role_step = render_through_stack(
@@ -2214,7 +2217,7 @@ mod tests {
         )
         .join("\n");
         assert!(
-            role_step.contains("Overrides the built-in 'reviewer'"),
+            role_step.contains("Overrides built-in 'reviewer'"),
             "{role_step}"
         );
 
@@ -2231,10 +2234,7 @@ mod tests {
             40,
         )
         .join("\n");
-        assert!(
-            review.contains("Overrides the built-in 'reviewer'"),
-            "{review}"
-        );
+        assert!(review.contains("Overrides built-in 'reviewer'"), "{review}");
 
         // "custom" matches no roster member: no override note anywhere.
         let mut custom_view = FleetSetupView::from_snapshot(snapshot());
@@ -2648,14 +2648,20 @@ mod tests {
             "Profile availability",
             "Auth & readiness",
             "Permissions",
-            "Tools",
         ] {
             assert!(top.contains(section), "review missing section: {section}");
         }
-        assert!(
-            top.contains("trusted-path, and permission policy still govern execution"),
-            "profile availability must not imply execution authority: {top}"
-        );
+        for truth in [
+            "Scope changes discovery only",
+            "trusted-path",
+            "permission policy still",
+            "govern execution",
+        ] {
+            assert!(
+                top.contains(truth),
+                "profile availability must not imply execution authority: {top}"
+            );
+        }
 
         // The review is intentionally scrollable; scrolling to the bottom reveals
         // the workspace/org execution policy, review policy, and honest save note.
@@ -2670,7 +2676,12 @@ mod tests {
             40,
         )
         .join("\n");
-        for needle in ["Workspace", "Review policy", "Press Enter or g once"] {
+        for needle in [
+            "Tools",
+            "Workspace",
+            "Review policy",
+            "Press Enter or g once",
+        ] {
             assert!(bottom.contains(needle), "scrolled review missing: {needle}");
         }
 

@@ -4,7 +4,8 @@
 //! row is the **operator** — the live session route (your main model): when a
 //! user picks a session model they are picking the operator, and the roster
 //! is that operator's team. Below it the merged [`FleetRoster`] (built-in <
-//! `[fleet.profiles]` config < `.codewhale/agents/*.toml` project members)
+//! `[fleet.profiles]` config < `$CODEWHALE_HOME/agents/*.toml` personal <
+//! `.codewhale/agents/*.toml` project members)
 //! renders as a scrollable list with a detail pane for the selected row. The
 //! view never writes anything; `s` / Enter on a member hands off to the
 //! `/fleet setup` wizard for authoring and overrides (the operator row is
