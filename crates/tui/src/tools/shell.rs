@@ -2203,15 +2203,6 @@ impl ShellManager {
         jobs
     }
 
-    /// Drain finished background shell jobs that have not yet been reported to
-    /// runtime status.
-    pub fn drain_finished_jobs(&mut self) -> Vec<ShellCompletionEvent> {
-        self.drain_finished_jobs_with_evidence()
-            .into_iter()
-            .map(|completion| completion.event)
-            .collect()
-    }
-
     /// Drain once-only completion events together with lossless stream bytes.
     /// The engine publishes the bytes outside this manager's mutex and puts
     /// only the bounded event plus resulting handle into model context.

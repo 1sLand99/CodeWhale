@@ -1006,7 +1006,7 @@ mod tests {
             "preview must not drain or report the completion"
         );
         let _ = manager.kill_running();
-        let _ = manager.drain_finished_jobs();
+        let _ = manager.drain_finished_jobs_with_evidence();
     }
 
     #[tokio::test]

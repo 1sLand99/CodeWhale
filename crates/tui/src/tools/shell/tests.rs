@@ -651,13 +651,17 @@ async fn drain_finished_jobs_reports_once() {
     assert_ne!(completed.status, ShellStatus::Running);
     assert!(manager.may_have_undelivered_completion());
 
-    let first = manager.drain_finished_jobs();
+    let first = manager
+        .drain_finished_jobs_with_evidence()
+        .into_iter()
+        .map(|completion| completion.event)
+        .collect::<Vec<_>>();
     assert_eq!(first.len(), 1);
     assert_eq!(first[0].task_id, task_id);
     assert_eq!(first[0].status, ShellStatus::Completed);
     assert!(first[0].stdout_tail.contains("drain-finished-once"));
 
-    let second = manager.drain_finished_jobs();
+    let second = manager.drain_finished_jobs_with_evidence();
     assert!(second.is_empty(), "completion should be reported only once");
     assert!(!manager.may_have_undelivered_completion());
 }

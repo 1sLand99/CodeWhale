@@ -139,12 +139,6 @@ impl AgentsMessageTool {
     }
 
     #[must_use]
-    pub fn with_caller(mut self, caller_agent_id: impl Into<String>) -> Self {
-        self.caller_agent_id = Some(caller_agent_id.into());
-        self
-    }
-
-    #[must_use]
     pub(crate) fn with_optional_caller(mut self, caller_agent_id: Option<String>) -> Self {
         self.caller_agent_id = caller_agent_id;
         self
@@ -247,12 +241,6 @@ impl AgentsFollowupTool {
             manager,
             caller_agent_id: None,
         }
-    }
-
-    #[must_use]
-    pub fn with_caller(mut self, caller_agent_id: impl Into<String>) -> Self {
-        self.caller_agent_id = Some(caller_agent_id.into());
-        self
     }
 
     #[must_use]
@@ -825,7 +813,7 @@ mod tests {
         let context = ToolContext::new(tmp.path());
 
         AgentsMessageTool::new(Arc::clone(&manager))
-            .with_caller(parent.clone())
+            .with_optional_caller(Some(parent.clone()))
             .execute(
                 json!({ "agent_id": child, "message": "bounded parent note" }),
                 &context,
@@ -833,7 +821,7 @@ mod tests {
             .await
             .expect("parent may message its own child");
         AgentsFollowupTool::new(Arc::clone(&manager))
-            .with_caller(parent.clone())
+            .with_optional_caller(Some(parent.clone()))
             .execute(
                 json!({ "agent_id": child, "message": "resume own child" }),
                 &context,
@@ -842,7 +830,7 @@ mod tests {
             .expect("parent may follow up its own child");
 
         let sibling_message = AgentsMessageTool::new(Arc::clone(&manager))
-            .with_caller(parent.clone())
+            .with_optional_caller(Some(parent.clone()))
             .execute(
                 json!({ "agent_id": sibling, "message": "cross branch" }),
                 &context,
@@ -856,7 +844,7 @@ mod tests {
         );
 
         let ancestor_followup = AgentsFollowupTool::new(Arc::clone(&manager))
-            .with_caller(child.clone())
+            .with_optional_caller(Some(child.clone()))
             .execute(
                 json!({ "agent_id": parent, "message": "wake ancestor" }),
                 &context,
@@ -870,7 +858,7 @@ mod tests {
         );
 
         let sibling_interrupt = AgentsInterruptTool::new(Arc::clone(&manager))
-            .with_caller(parent.clone())
+            .with_optional_caller(Some(parent.clone()))
             .execute(json!({ "agent_id": sibling }), &context)
             .await
             .expect_err("sibling interrupt must fail closed")
@@ -881,7 +869,7 @@ mod tests {
         );
 
         let interrupted = AgentsInterruptTool::new(Arc::clone(&manager))
-            .with_caller(parent)
+            .with_optional_caller(Some(parent))
             .execute(json!({ "agent_id": child }), &context)
             .await
             .expect("parent may interrupt its own child");
