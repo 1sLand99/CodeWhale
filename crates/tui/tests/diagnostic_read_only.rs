@@ -111,6 +111,53 @@ model = "k3[1m]"
 }
 
 #[test]
+fn doctor_json_omits_untrusted_config_validation_details() {
+    let fixture = TempDir::new().expect("fixture root");
+    let workspace = fixture.path().join("workspace");
+    let home = fixture.path().join("home");
+    let codewhale_home = fixture.path().join("isolated-codewhale-home");
+    fs::create_dir_all(&workspace).expect("workspace");
+    let config = workspace.join("untrusted-invalid.toml");
+    let config_bytes = br#"provider = "doctor-untrusted-provider-secret"
+api_key = "doctor-json-arbitrary-secret"
+"#;
+    fs::write(&config, config_bytes).expect("write invalid config");
+
+    let mut command = diagnostic_command(&workspace, &home);
+    command
+        .args([
+            "--config",
+            config.to_str().expect("config path"),
+            "doctor",
+            "--json",
+        ])
+        .env("CODEWHALE_HOME", &codewhale_home);
+    let output = command.output().expect("run invalid doctor json");
+
+    assert!(!output.status.success());
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("machine-readable doctor error");
+    assert_eq!(report["error"]["kind"], "config_validation");
+    assert_eq!(
+        report["error"]["message"],
+        "configuration validation failed; details omitted because configuration errors may contain credential material"
+    );
+    let all_output = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!all_output.contains("doctor-untrusted-provider-secret"));
+    assert!(!all_output.contains("doctor-json-arbitrary-secret"));
+    assert_eq!(
+        fs::read(&config).expect("read config after doctor"),
+        config_bytes
+    );
+    assert!(!home.exists());
+    assert!(!codewhale_home.exists());
+}
+
+#[test]
 fn doctor_json_reports_valid_kimi_code_k3_context_override_from_runtime_route() {
     let fixture = TempDir::new().expect("fixture root");
     let workspace = fixture.path().join("workspace");

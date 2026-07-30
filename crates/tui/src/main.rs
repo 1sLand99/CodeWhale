@@ -5909,12 +5909,15 @@ fn runtime_posture_source_id(source: codewhale_config::RuntimePostureSource) -> 
 /// Emit a bounded, secret-redacted JSON failure when configuration cannot be
 /// loaded or validated. Invalid configuration must not be forced through the
 /// normal doctor report because its route/capability facts would be misleading.
-fn run_doctor_json_config_error(_error: &anyhow::Error) -> Result<()> {
+fn run_doctor_json_config_error(error: &anyhow::Error) -> Result<()> {
+    let safe_message = error
+        .downcast_ref::<crate::config::SafeConfigDiagnostic>()
+        .map(ToString::to_string);
     let report = serde_json::json!({
         "status": "error",
         "error": {
             "kind": "config_validation",
-            "message": "configuration validation failed; details omitted because configuration errors may contain credential material",
+            "message": safe_message.as_deref().unwrap_or("configuration validation failed; details omitted because configuration errors may contain credential material"),
         },
     });
     println!("{}", serde_json::to_string_pretty(&report)?);

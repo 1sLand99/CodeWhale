@@ -3899,12 +3899,16 @@ impl Config {
             );
         }
         let active_provider = self.api_provider();
-        validate_kimi_code_api_model_id(
+        match validate_kimi_code_api_model_id(
             active_provider,
             &self.deepseek_base_url(),
             &self.default_model(),
-        )
-        .map_err(anyhow::Error::msg)?;
+        ) {
+            Err(error) if error == KIMI_CODE_CLAUDE_ALIAS_GUIDANCE => {
+                return Err(SafeConfigDiagnostic::KimiCodeClaudeAlias.into());
+            }
+            result => result.map_err(anyhow::Error::msg)?,
+        }
         if let Some(ref key) = self.api_key
             && key.trim().is_empty()
         {
@@ -8109,21 +8113,18 @@ pub(crate) const MOONSHOT_DIRECT_PLATFORM_MODELS: [&str; 3] = [
     MOONSHOT_KIMI_K2_6_MODEL,
 ];
 
+pub(crate) const KIMI_CODE_CLAUDE_ALIAS_GUIDANCE: &str = "Kimi Code model `k3[1m]` is a Claude Code environment convention, not an API model id. Use model = \"k3\". If your Kimi Code plan includes 1M context, also set context_window = 1048576; otherwise keep the 262144 safe default.";
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SafeConfigDiagnostic {
+    #[error("{}", KIMI_CODE_CLAUDE_ALIAS_GUIDANCE)]
+    KimiCodeClaudeAlias,
+}
+
 /// Fail closed on known-bad model/endpoint pairings (#4687).
 ///
-/// The two canonical endpoints each enforce their explicit model set:
-///
-/// - Exact Kimi Code membership endpoint (api.kimi.com/coding/v1): reject
-///   Claude Code's `k3[1m]` context hint and the known direct-platform ids
-///   (`kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`); the managed roster (`k3`,
-///   `kimi-for-coding`, `kimi-for-coding-highspeed`) is accepted.
-/// - Exact Moonshot direct platform endpoint (api.moonshot.ai/v1): reject the
-///   membership-only ids (`k3`, `kimi-for-coding`,
-///   `kimi-for-coding-highspeed`); they are membership products, not
-///   direct-platform catalog models.
-///
-/// Custom Moonshot-compatible gateways are left alone: only the two canonical
-/// endpoints enforce the documented model IDs.
+/// Canonical Kimi membership and direct endpoints enforce their model rosters;
+/// custom Moonshot-compatible gateways remain pass-through.
 pub(crate) fn validate_kimi_code_api_model_id(
     provider: ApiProvider,
     base_url: &str,
@@ -8139,10 +8140,7 @@ pub(crate) fn validate_kimi_code_api_model_id(
 
     if moonshot_base_url_is_exact_kimi_code(base_url) {
         if model.eq_ignore_ascii_case("k3[1m]") {
-            return Err(
-                "Kimi Code model `k3[1m]` is a Claude Code environment convention, not an API model id. Use model = \"k3\". If your Kimi Code plan includes 1M context, also set context_window = 1048576; otherwise keep the 262144 safe default."
-                    .to_string(),
-            );
+            return Err(KIMI_CODE_CLAUDE_ALIAS_GUIDANCE.to_string());
         }
         for direct_id in MOONSHOT_DIRECT_PLATFORM_MODELS {
             if model.eq_ignore_ascii_case(direct_id) {
