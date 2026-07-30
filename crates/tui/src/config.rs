@@ -3784,6 +3784,28 @@ impl Config {
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn load(path: Option<PathBuf>, profile: Option<&str>) -> Result<Self> {
+        Self::load_with_environment_policy(path, profile, ConfigEnvironmentPolicy::Runtime)
+    }
+
+    /// Load configuration for a structural diagnostic without materializing
+    /// secret-bearing environment values into the returned configuration.
+    ///
+    /// This still applies the ordinary safe routing, model, and policy
+    /// overrides so doctor describes the runtime the user selected. Provider
+    /// credentials are resolved only inside an explicit live-probe boundary.
+    pub(crate) fn load_structural(path: Option<PathBuf>, profile: Option<&str>) -> Result<Self> {
+        Self::load_with_environment_policy(
+            path,
+            profile,
+            ConfigEnvironmentPolicy::StructuralDiagnostic,
+        )
+    }
+
+    fn load_with_environment_policy(
+        path: Option<PathBuf>,
+        profile: Option<&str>,
+        environment_policy: ConfigEnvironmentPolicy,
+    ) -> Result<Self> {
         let path = resolve_load_config_path(path);
         let mut config = if let Some(path) = path.as_ref() {
             if path.exists() {
@@ -3806,7 +3828,7 @@ impl Config {
             Config::default()
         };
 
-        apply_env_overrides(&mut config);
+        apply_env_overrides(&mut config, environment_policy);
         apply_managed_overrides(&mut config)?;
         apply_requirements(&mut config)?;
         normalize_model_config(&mut config);
@@ -6267,6 +6289,24 @@ impl Config {
     }
 }
 
+/// Controls whether configuration loading may copy secret-bearing environment
+/// values into the in-memory configuration.
+///
+/// Structural diagnostics intentionally retain safe environment routing and
+/// policy fields while refusing values that could be secrets when later
+/// rendered or included in an error path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigEnvironmentPolicy {
+    Runtime,
+    StructuralDiagnostic,
+}
+
+impl ConfigEnvironmentPolicy {
+    const fn permits_secret_bearing_values(self) -> bool {
+        matches!(self, Self::Runtime)
+    }
+}
+
 fn root_deepseek_model_is_foreign_to_direct_provider(provider: ApiProvider, model: &str) -> bool {
     if matches!(
         provider,
@@ -6583,20 +6623,20 @@ fn codewhale_env_var(
     }
 }
 
-fn apply_env_overrides(config: &mut Config) {
+fn apply_env_overrides(config: &mut Config, policy: ConfigEnvironmentPolicy) {
     #[cfg(test)]
     {
         crate::test_support::with_test_env_lock(|| {
-            apply_env_overrides_unlocked(config);
+            apply_env_overrides_unlocked(config, policy);
         })
     }
     #[cfg(not(test))]
     {
-        apply_env_overrides_unlocked(config);
+        apply_env_overrides_unlocked(config, policy);
     }
 }
 
-fn apply_env_overrides_unlocked(config: &mut Config) {
+fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPolicy) {
     if let Ok(value) = codewhale_env_var("CODEWHALE_PROVIDER", "DEEPSEEK_PROVIDER") {
         config.provider = Some(value);
     }
@@ -7072,8 +7112,9 @@ fn apply_env_overrides_unlocked(config: &mut Config) {
             .telecomjs
             .base_url = Some(value);
     }
-    if let Ok(value) =
-        std::env::var("CODEWHALE_HTTP_HEADERS").or_else(|_| std::env::var("DEEPSEEK_HTTP_HEADERS"))
+    if policy.permits_secret_bearing_values()
+        && let Ok(value) = std::env::var("CODEWHALE_HTTP_HEADERS")
+            .or_else(|_| std::env::var("DEEPSEEK_HTTP_HEADERS"))
         && let Ok(headers) = parse_http_headers(&value)
         && !headers.is_empty()
     {
@@ -7492,8 +7533,9 @@ fn apply_env_overrides_unlocked(config: &mut Config) {
     {
         config.sandbox_url = Some(value);
     }
-    if let Ok(value) = std::env::var("CODEWHALE_SANDBOX_API_KEY")
-        .or_else(|_| std::env::var("DEEPSEEK_SANDBOX_API_KEY"))
+    if policy.permits_secret_bearing_values()
+        && let Ok(value) = std::env::var("CODEWHALE_SANDBOX_API_KEY")
+            .or_else(|_| std::env::var("DEEPSEEK_SANDBOX_API_KEY"))
     {
         config.sandbox_api_key = Some(value);
     }
@@ -7502,8 +7544,9 @@ fn apply_env_overrides_unlocked(config: &mut Config) {
     {
         config.managed_config_path = Some(value);
     }
-    if let Ok(value) = std::env::var("CODEWHALE_SEARCH_API_KEY")
-        .or_else(|_| std::env::var("DEEPSEEK_SEARCH_API_KEY"))
+    if policy.permits_secret_bearing_values()
+        && let Ok(value) = std::env::var("CODEWHALE_SEARCH_API_KEY")
+            .or_else(|_| std::env::var("DEEPSEEK_SEARCH_API_KEY"))
         && !value.trim().is_empty()
     {
         config
@@ -10087,20 +10130,6 @@ pub(crate) fn provider_secret_store_api_key(
     provider: ApiProvider,
 ) -> Option<String> {
     provider_secret_store_api_key_with_mode(config, provider, false)
-}
-
-/// Read the durable secret-store layer for a diagnostic without migration or
-/// any write-capable store handle.
-///
-/// Doctor and setup-status output need to report whether a saved credential is
-/// present, but must not turn that inspection into a legacy-store migration.
-/// Normal runtime and authentication paths use [`provider_secret_store_api_key`]
-/// and retain their existing migration behavior.
-pub(crate) fn provider_secret_store_api_key_read_only(
-    config: &Config,
-    provider: ApiProvider,
-) -> Option<String> {
-    provider_secret_store_api_key_with_mode(config, provider, true)
 }
 
 fn provider_secret_store_api_key_with_mode(

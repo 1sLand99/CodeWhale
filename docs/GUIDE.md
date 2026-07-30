@@ -117,8 +117,12 @@ Use the JSON form when you need a machine-readable report for an issue:
 codewhale doctor --json
 ```
 
-If the doctor command reports that a rejected key came from the environment,
-remove or replace that environment variable before testing saved config again.
+Both forms are offline by default. They report structural configuration and
+literal unknown/not-probed credential states without loading workspace `.env`
+credentials, opening secret/OAuth files, probing a keyring, contacting a
+provider, or starting MCP servers. Use `--check-updates`, `--probe-api`,
+`--probe-local`, or `--probe-mcp` only when you intentionally want that live
+boundary. JSON remains offline and does not accept live flags.
 
 Both `doctor` and `doctor --json` also include a session-recovery diagnostic
 that compares legacy session filenames against the current store and reports
@@ -472,9 +476,10 @@ Use JSON when filing a detailed issue:
 codewhale doctor --json
 ```
 
-For authentication problems, check which source is winning: saved config,
-keyring, environment, or an explicit launch flag. A stale `DEEPSEEK_API_KEY`
-environment variable can override what you expected to use.
+For authentication problems, use the structural source state to identify what
+is declared. Doctor deliberately does not inspect environment, secret-store,
+keyring, or OAuth token values. When a live check is appropriate, opt in with
+`codewhale doctor --probe-api` (or `--probe-local` for a local endpoint).
 
 For provider problems, confirm the active provider and model:
 

@@ -1113,13 +1113,91 @@ fn apply_env_overrides_sets_search_api_key() {
     unsafe { env::set_var("DEEPSEEK_SEARCH_API_KEY", "search-env-key") };
     let mut config = Config::default();
 
-    apply_env_overrides(&mut config);
+    apply_env_overrides(&mut config, ConfigEnvironmentPolicy::Runtime);
 
     unsafe { EnvGuard::restore_var("DEEPSEEK_SEARCH_API_KEY", prev) };
     assert_eq!(
         config.search.and_then(|search| search.api_key),
         Some("search-env-key".to_string())
     );
+}
+
+#[test]
+fn structural_config_load_keeps_safe_environment_overrides_but_omits_secret_values() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config_path = temp.path().join("config.toml");
+    fs::write(&config_path, "").expect("empty config");
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", temp.path().join("home"));
+    let _profile = EnvVarGuard::remove("CODEWHALE_PROFILE");
+    let _legacy_profile = EnvVarGuard::remove("DEEPSEEK_PROFILE");
+    let _managed = EnvVarGuard::remove("CODEWHALE_MANAGED_CONFIG_PATH");
+    let _legacy_managed = EnvVarGuard::remove("DEEPSEEK_MANAGED_CONFIG_PATH");
+    let _requirements = EnvVarGuard::remove("CODEWHALE_REQUIREMENTS_PATH");
+    let _legacy_requirements = EnvVarGuard::remove("DEEPSEEK_REQUIREMENTS_PATH");
+    let _headers = EnvVarGuard::set(
+        "CODEWHALE_HTTP_HEADERS",
+        "Authorization=structural-header-secret",
+    );
+    let _legacy_headers = EnvVarGuard::set(
+        "DEEPSEEK_HTTP_HEADERS",
+        "Authorization=legacy-structural-header-secret",
+    );
+    let _sandbox_key = EnvVarGuard::set("CODEWHALE_SANDBOX_API_KEY", "structural-sandbox-secret");
+    let _legacy_sandbox_key = EnvVarGuard::set(
+        "DEEPSEEK_SANDBOX_API_KEY",
+        "legacy-structural-sandbox-secret",
+    );
+    let _search_key = EnvVarGuard::set("CODEWHALE_SEARCH_API_KEY", "structural-search-secret");
+    let _legacy_search_key =
+        EnvVarGuard::set("DEEPSEEK_SEARCH_API_KEY", "legacy-structural-search-secret");
+    let _base_url = EnvVarGuard::set("CODEWHALE_BASE_URL", "https://safe.example:8443/v1");
+    let _allow_shell = EnvVarGuard::set("CODEWHALE_ALLOW_SHELL", "false");
+
+    let runtime = Config::load(Some(config_path.clone()), None).expect("runtime config");
+    assert!(runtime.http_headers.is_some());
+    assert_eq!(
+        runtime.sandbox_api_key.as_deref(),
+        Some("structural-sandbox-secret")
+    );
+    assert_eq!(
+        runtime
+            .search
+            .as_ref()
+            .and_then(|search| search.api_key.as_deref()),
+        Some("structural-search-secret")
+    );
+
+    let structural = Config::load_structural(Some(config_path), None).expect("structural config");
+    assert!(structural.http_headers.is_none());
+    assert!(structural.sandbox_api_key.is_none());
+    assert!(
+        structural
+            .search
+            .as_ref()
+            .and_then(|search| search.api_key.as_deref())
+            .is_none()
+    );
+    assert_eq!(
+        structural.base_url.as_deref(),
+        Some("https://safe.example:8443/v1")
+    );
+    assert_eq!(structural.allow_shell, Some(false));
+
+    let rendered = format!("{structural:?}");
+    for sentinel in [
+        "structural-header-secret",
+        "legacy-structural-header-secret",
+        "structural-sandbox-secret",
+        "legacy-structural-sandbox-secret",
+        "structural-search-secret",
+        "legacy-structural-search-secret",
+    ] {
+        assert!(
+            !rendered.contains(sentinel),
+            "structural config retained {sentinel}"
+        );
+    }
 }
 
 #[test]
@@ -1136,7 +1214,7 @@ fn apply_env_overrides_sets_search_base_url() {
     };
     let mut config = Config::default();
 
-    apply_env_overrides(&mut config);
+    apply_env_overrides(&mut config, ConfigEnvironmentPolicy::Runtime);
 
     unsafe {
         EnvGuard::restore_var("CODEWHALE_SEARCH_BASE_URL", prev_codewhale);
@@ -1165,7 +1243,7 @@ fn codewhale_search_base_url_env_wins_over_legacy_alias() {
     }
     let mut config = Config::default();
 
-    apply_env_overrides(&mut config);
+    apply_env_overrides(&mut config, ConfigEnvironmentPolicy::Runtime);
 
     unsafe {
         EnvGuard::restore_var("CODEWHALE_SEARCH_BASE_URL", prev_codewhale);
@@ -4804,7 +4882,7 @@ fn apply_env_overrides_ignores_empty_api_key() -> Result<()> {
         api_key: Some("from-config-file".to_string()),
         ..Default::default()
     };
-    apply_env_overrides(&mut config);
+    apply_env_overrides(&mut config, ConfigEnvironmentPolicy::Runtime);
 
     assert_eq!(config.api_key.as_deref(), Some("from-config-file"));
     config.validate()?;
@@ -4830,7 +4908,7 @@ fn apply_env_overrides_does_not_copy_api_key_into_config() -> Result<()> {
         env::set_var("DEEPSEEK_API_KEY", "env-key");
     }
     let mut config = Config::default();
-    apply_env_overrides(&mut config);
+    apply_env_overrides(&mut config, ConfigEnvironmentPolicy::Runtime);
 
     assert_eq!(config.api_key, None);
     assert_eq!(config.deepseek_api_key()?, "env-key");

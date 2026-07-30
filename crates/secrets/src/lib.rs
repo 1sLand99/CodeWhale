@@ -681,6 +681,137 @@ enum SecretBackendSelection {
     Unknown,
 }
 
+/// Secret-store backend selected by configuration for a structural diagnostic.
+///
+/// This type deliberately describes only configuration and filesystem shape.
+/// It never implies that a provider credential exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretBackendDiagnosticKind {
+    /// The JSON file store is selected.
+    File,
+    /// The operating-system credential store is selected.
+    System,
+    /// The configured backend value is unsupported.
+    Unknown,
+}
+
+/// Whether a secret-store path is present according to metadata only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretBackendPresence {
+    /// A regular file exists at the resolved path.
+    Present,
+    /// No filesystem entry exists at the resolved path.
+    Absent,
+    /// Presence is unavailable or the entry is not a regular file.
+    Unknown,
+}
+
+/// Scope of inspection performed for a structural secret-backend diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretBackendInspection {
+    /// Only filesystem metadata was inspected; file contents were not opened.
+    MetadataOnly,
+    /// The backend was not constructed, probed, or read.
+    NotProbed,
+}
+
+/// Secret-safe structural description of the configured credential backend.
+///
+/// File-backed diagnostics expose resolved paths and regular-file presence from
+/// metadata without opening either store. System backends intentionally report
+/// `unknown` / `not_probed`: constructing or probing an OS keyring can show a
+/// user prompt even when no credential value is requested.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SecretBackendDiagnostic {
+    /// Configured backend family.
+    pub backend: SecretBackendDiagnosticKind,
+    /// Inspection performed to produce this report.
+    pub inspection: SecretBackendInspection,
+    /// Canonical file-store path, when the file backend is selected.
+    pub path: Option<PathBuf>,
+    /// Metadata-only presence of the canonical file-store path.
+    pub presence: SecretBackendPresence,
+    /// Ambient legacy file-store path, suppressed by explicit `CODEWHALE_HOME`.
+    pub legacy_path: Option<PathBuf>,
+    /// Metadata-only presence of the legacy file-store path.
+    pub legacy_presence: SecretBackendPresence,
+}
+
+/// Describe the configured credential backend without probing or reading it.
+///
+/// This function never constructs [`DefaultKeyringStore`], calls
+/// [`KeyringStore::get`], opens a secret file, performs legacy migration, or
+/// creates filesystem state. It is suitable for ordinary status and doctor
+/// commands.
+#[must_use]
+pub fn diagnose_secret_backend() -> SecretBackendDiagnostic {
+    match secret_backend_selection(configured_secret_backend().as_deref()) {
+        SecretBackendSelection::File => {
+            let (path, legacy_path) = FileKeyringStore::default_paths_read_only()
+                .map(|(path, legacy)| (Some(path), legacy))
+                .unwrap_or((None, None));
+            SecretBackendDiagnostic {
+                backend: SecretBackendDiagnosticKind::File,
+                inspection: SecretBackendInspection::MetadataOnly,
+                presence: metadata_presence(path.as_deref()),
+                legacy_presence: metadata_presence(legacy_path.as_deref()),
+                path,
+                legacy_path,
+            }
+        }
+        SecretBackendSelection::System => SecretBackendDiagnostic {
+            backend: SecretBackendDiagnosticKind::System,
+            inspection: SecretBackendInspection::NotProbed,
+            path: None,
+            presence: SecretBackendPresence::Unknown,
+            legacy_path: None,
+            legacy_presence: SecretBackendPresence::Unknown,
+        },
+        SecretBackendSelection::Unknown => SecretBackendDiagnostic {
+            backend: SecretBackendDiagnosticKind::Unknown,
+            inspection: SecretBackendInspection::NotProbed,
+            path: None,
+            presence: SecretBackendPresence::Unknown,
+            legacy_path: None,
+            legacy_presence: SecretBackendPresence::Unknown,
+        },
+    }
+}
+
+fn metadata_presence(path: Option<&Path>) -> SecretBackendPresence {
+    let Some(path) = path else {
+        return SecretBackendPresence::Unknown;
+    };
+    if let Some(parent) = path.parent() {
+        for ancestor in parent.ancestors() {
+            if ancestor.as_os_str().is_empty() {
+                continue;
+            }
+            match fs::symlink_metadata(ancestor) {
+                Ok(metadata)
+                    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() =>
+                {
+                    return SecretBackendPresence::Unknown;
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return SecretBackendPresence::Absent;
+                }
+                Err(_) => return SecretBackendPresence::Unknown,
+            }
+        }
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => SecretBackendPresence::Present,
+        Ok(_) => SecretBackendPresence::Unknown,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => SecretBackendPresence::Absent,
+        Err(_) => SecretBackendPresence::Unknown,
+    }
+}
+
 fn secret_backend_selection(value: Option<&str>) -> SecretBackendSelection {
     match value.map(str::trim).filter(|value| !value.is_empty()) {
         None => SecretBackendSelection::File,
@@ -2067,4 +2198,7 @@ mod tests {
         ));
         assert_eq!(secrets.get("deepseek").unwrap(), None);
     }
+
+    #[path = "diagnostic_tests.rs"]
+    mod diagnostic_tests;
 }

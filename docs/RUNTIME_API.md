@@ -172,7 +172,10 @@ when another client needs DeepSeek's tools as MCP tools.
 ## Capability endpoint: `codewhale doctor --json`
 
 Returns a JSON object describing the current installation's readiness state.
-Suitable for health-check polling from a macOS workbench.
+Suitable for health-check polling from a macOS workbench. This command is
+strictly structural and offline: it does not load workspace credential
+`.env` files, inspect credential environment values, open secret/OAuth files,
+probe an OS keyring, contact providers, or start MCP processes.
 
 ```bash
 codewhale doctor --json
@@ -185,6 +188,8 @@ codewhale doctor --json
 | `version` | string | Installed version (e.g. `"0.8.9"`) |
 | `config_path` | string | Resolved config file path |
 | `config_present` | bool | Whether the config file exists |
+| `paths` | object | Canonical config, settings, state, sessions, logs, automations, and secrets paths |
+| `secret_backend` | object | Metadata-only file-store shape, or literal `unknown` / `not_probed` for system and unsupported backends |
 | `workspace` | string | Default workspace directory |
 | `legacy_state.primary_root` | string | Primary Codewhale state root inspected for known state paths |
 | `legacy_state.legacy_root` | string | Legacy `.deepseek` state root inspected for known state paths |
@@ -200,8 +205,8 @@ codewhale doctor --json
 | `legacy_state.session_recovery.recoverable_file_count` | number | Total missing destination filename count, including entries beyond the bounded sample |
 | `legacy_state.session_recovery.recoverable_files_truncated` | bool | Whether more than 100 recoverable filenames were found |
 | `legacy_state.session_recovery.recovery_command` | string or null | `codewhale sessions` when additive automatic recovery is available; null for isolated, complete, empty, or failed scans |
-| `api_key.source` | string | `env`, `config`, or `missing` |
-| `base_url` | string | API base URL |
+| `api_key.source` | string | Structural source state: `config_declared`, `env_declared`, `external_auth_declared`, `oauth_unprobed`, `external_consent`, `none`, or `unknown`; no credential value is inspected |
+| `base_url` | string | Provider URL authority only (`scheme://host[:explicit-port]`); userinfo, path, query, and fragment are omitted |
 | `default_text_model` | string | Default model |
 | `memory.enabled` | bool | Whether the memory feature is on |
 | `memory.path` | string | Path to memory file |
@@ -210,7 +215,7 @@ codewhale doctor --json
 | `mcp.present` | bool | Whether MCP config exists |
 | `mcp.probe_scope` | string | `configuration`; doctor does not start MCP servers |
 | `mcp.live_health_checked` | bool | Always false for doctor JSON |
-| `mcp.servers` | array | Per-server configuration result plus separate `checks` for command availability, process reachability, protocol initialization, and backend/tool health; live stages are `not_checked` |
+| `mcp.servers` | array | Per-server structural result and counts plus separate `checks`; URL userinfo/path/query/fragment and command argv, environment, header, and token values are never emitted, and all live stages are `not_checked` |
 | `skills.selected` | string | Resolved skills directory |
 | `skills.global.path` / `.present` / `.count` | — | Codewhale global skills dir (`~/.codewhale/skills`, with legacy `~/.deepseek/skills` support) |
 | `skills.agents.path` / `.present` / `.count` | — | Workspace `.agents/skills/` dir |
@@ -234,9 +239,9 @@ codewhale doctor --json
   "config_present": true,
   "workspace": "/Users/you/projects/codewhale-tui",
   "api_key": {
-    "source": "env"
+    "source": "unknown"
   },
-  "base_url": "https://api.deepseek.com/beta",
+  "base_url": "https://api.deepseek.com",
   "default_text_model": "deepseek-v4-pro",
   "memory": {
     "enabled": false,
@@ -247,7 +252,7 @@ codewhale doctor --json
     "config_path": "/Users/you/.codewhale/mcp.json",
     "present": true,
     "servers": [
-      {"name": "filesystem", "enabled": true, "status": "ok", "detail": "ready"}
+      {"name": "filesystem", "enabled": true, "transport": "stdio", "args_count": 2, "env_count": 0, "status": "ok"}
     ]
   },
   "sandbox": {

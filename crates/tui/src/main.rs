@@ -45,6 +45,7 @@ mod core;
 mod cost_status;
 mod deepseek_theme;
 mod dependencies;
+mod doctor;
 mod elapsed;
 mod error_taxonomy;
 mod eval;
@@ -114,6 +115,9 @@ mod session_diagnostics;
 // contract for reviewers and is enforced by the tests beside it, so it does
 // not need to exist in a shipped binary.
 #[cfg(test)]
+#[path = "main/tests.rs"]
+mod doctor_loader_tests;
+#[cfg(test)]
 mod session_control_acceptance;
 #[allow(dead_code)]
 mod session_manager;
@@ -153,7 +157,7 @@ use crate::features::{Feature, render_feature_table};
 use crate::llm_client::LlmClient;
 use crate::mcp::{
     McpCommandAvailability, McpConfig, McpPool, McpServerConfig, McpServerOAuthConfig,
-    is_relative_stdio_path_arg, static_mcp_command_availability,
+    is_relative_stdio_path_arg,
 };
 use crate::models::{ContentBlock, Message, MessageRequest, SystemPrompt};
 use crate::session_manager::{SessionManager, create_saved_session, truncate_id};
@@ -879,7 +883,7 @@ struct SetupArgs {
 
 #[derive(Args, Debug, Clone, Default)]
 struct DoctorArgs {
-    /// Emit machine-readable JSON output (skips live API connectivity check)
+    /// Emit machine-readable structural JSON output (always offline)
     #[arg(long, default_value_t = false)]
     json: bool,
     /// Emit only the diagnostic context source map as JSON
@@ -892,6 +896,20 @@ struct DoctorArgs {
         conflicts_with_all = ["json", "context_json"]
     )]
     probe_local: bool,
+    /// Opt in to probing the configured hosted provider API
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with_all = ["json", "context_json"]
+    )]
+    probe_api: bool,
+    /// Opt in to contacting the release service for an update check
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with_all = ["json", "context_json"]
+    )]
+    check_updates: bool,
     /// Opt in to starting enabled MCP servers and checking process/protocol reachability
     #[arg(
         long,
@@ -1472,10 +1490,14 @@ async fn run_async_main(
     if let Some(command) = command {
         return match command {
             Commands::Doctor(args) => {
-                let config = match load_config_from_cli(&cli) {
+                let config = match load_doctor_config_from_cli(&cli, &args) {
                     Ok(config) => config,
                     Err(error) if args.json => return run_doctor_json_config_error(&error),
-                    Err(error) => return Err(error),
+                    Err(_) => {
+                        bail!(
+                            "doctor configuration validation failed; details omitted because configuration errors may contain credential material"
+                        )
+                    }
                 };
                 let workspace = resolve_workspace(&cli);
                 if args.context_json {
@@ -1488,12 +1510,17 @@ async fn run_async_main(
                         plugin_registry.as_ref(),
                     )
                 } else {
+                    let probes = crate::doctor::DoctorProbeRequest {
+                        check_updates: args.check_updates,
+                        probe_api: args.probe_api,
+                        probe_local: args.probe_local,
+                        probe_mcp: args.probe_mcp,
+                    };
                     run_doctor(
                         &config,
                         &workspace,
                         cli.config.as_deref(),
-                        args.probe_local,
-                        args.probe_mcp,
+                        probes,
                         plugin_registry.as_ref(),
                     )
                     .await;
@@ -1883,8 +1910,14 @@ fn prepare_cli_startup(
     load_dotenv: impl FnOnce(),
 ) -> (Cli, Option<Commands>) {
     initialize_plugins();
-    load_dotenv();
     let command = cli.command.clone();
+    let should_load_dotenv = match command.as_ref() {
+        Some(Commands::Doctor(args)) => args.probe_api || args.probe_local,
+        _ => true,
+    };
+    if should_load_dotenv {
+        load_dotenv();
+    }
     (cli, command)
 }
 
@@ -3148,13 +3181,13 @@ fn report_write_status(label: &str, path: &Path, status: WriteStatus) {
 /// write-capable credential handle just to label a source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApiKeySource {
-    Env,
-    Config,
-    Keyring,
+    ConfigDeclared,
+    EnvDeclared,
+    ExternalAuthDeclared,
     OAuth,
     ExternalConsent,
     NoAuth,
-    Missing,
+    Unknown,
 }
 
 fn resolve_api_key_source(config: &Config) -> ApiKeySource {
@@ -3165,13 +3198,10 @@ fn resolve_api_key_source(config: &Config) -> ApiKeySource {
     }
     let custom_endpoint = config.provider_uses_custom_endpoint(provider);
     if !custom_endpoint && provider == crate::config::ApiProvider::OpenaiCodex {
-        if crate::oauth::credentials_from_env().is_some() {
-            return ApiKeySource::Env;
-        }
         return config
             .external_credential_consent_status(provider)
             .filter(|status| status.route_state == "active")
-            .map_or(ApiKeySource::Missing, |_| ApiKeySource::ExternalConsent);
+            .map_or(ApiKeySource::OAuth, |_| ApiKeySource::ExternalConsent);
     }
     if !custom_endpoint
         && provider == crate::config::ApiProvider::Xai
@@ -3184,75 +3214,34 @@ fn resolve_api_key_source(config: &Config) -> ApiKeySource {
             .filter(|status| status.route_state == "active")
             .map_or(ApiKeySource::OAuth, |_| ApiKeySource::ExternalConsent);
     }
-    if std::env::var("DEEPSEEK_API_KEY")
-        .ok()
-        .filter(|k| !k.trim().is_empty())
-        .is_some()
-    {
-        match std::env::var("DEEPSEEK_API_KEY_SOURCE").ok().as_deref() {
-            Some("config") => return ApiKeySource::Config,
-            Some("keyring") if !custom_endpoint => return ApiKeySource::Keyring,
-            _ => {}
-        }
-    }
-
     let provider_config_key = config
         .provider_config()
-        .and_then(|entry| entry.api_key.as_ref())
-        .is_some_and(|k| !k.trim().is_empty());
+        .is_some_and(|entry| entry.api_key.is_some());
     let root_deepseek_key = (matches!(
         provider,
         crate::config::ApiProvider::Deepseek | crate::config::ApiProvider::DeepseekCN
     ) || (provider == crate::config::ApiProvider::Custom
         && config.uses_legacy_literal_custom_route()))
-        && config
-            .api_key
-            .as_ref()
-            .is_some_and(|k| !k.trim().is_empty());
+        && config.api_key.is_some();
 
     if provider_config_key || root_deepseek_key {
-        ApiKeySource::Config
-    } else if configured_provider_env_key_source(config).is_some() {
-        ApiKeySource::Env
-    } else if !config.should_skip_secret_store_for_provider(provider)
-        && crate::config::provider_secret_store_api_key_read_only(config, provider).is_some()
-    {
-        ApiKeySource::Keyring
-    } else if provider_env_key_source_for_config(config).is_some() {
-        ApiKeySource::Env
-    } else {
-        ApiKeySource::Missing
-    }
-}
-
-fn provider_env_key_source_for_config(config: &Config) -> Option<String> {
-    configured_provider_env_key_source(config).or_else(|| {
-        (!config.should_skip_secret_store_for_provider(config.api_provider()))
-            .then(|| provider_env_key_source(config.api_provider()).map(str::to_string))
-            .flatten()
-    })
-}
-
-fn configured_provider_env_key_source(config: &Config) -> Option<String> {
-    config
+        ApiKeySource::ConfigDeclared
+    } else if config
         .provider_config()
-        .and_then(|entry| entry.api_key_env.as_deref())
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .filter(|name| std::env::var(name).is_ok_and(|value| !value.trim().is_empty()))
-        .map(str::to_string)
-}
-
-fn provider_env_key_source(provider: crate::config::ApiProvider) -> Option<&'static str> {
-    provider
-        .env_vars()
-        .iter()
-        .copied()
-        .find(|var| std::env::var(var).is_ok_and(|value| !value.trim().is_empty()))
-}
-
-fn provider_env_vars_label(provider: crate::config::ApiProvider) -> String {
-    provider.env_vars_label()
+        .is_some_and(|entry| entry.api_key_env.is_some())
+    {
+        ApiKeySource::EnvDeclared
+    } else if config
+        .provider_config()
+        .and_then(|entry| entry.auth.as_ref())
+        .is_some()
+    {
+        ApiKeySource::ExternalAuthDeclared
+    } else {
+        // Environment variables, secret files, OS keyrings, and OAuth token
+        // values are deliberately not inspected by structural diagnostics.
+        ApiKeySource::Unknown
+    }
 }
 
 fn provider_config_table_key(provider: crate::config::ApiProvider) -> &'static str {
@@ -3260,17 +3249,6 @@ fn provider_config_table_key(provider: crate::config::ApiProvider) -> &'static s
         .metadata()
         .map(|metadata| metadata.provider_config_key())
         .unwrap_or("deepseek_cn")
-}
-
-fn provider_auth_hint(provider: crate::config::ApiProvider) -> String {
-    if provider == crate::config::ApiProvider::OpenaiCodex {
-        "see docs/PROVIDERS.md for ChatGPT/Codex OAuth setup".to_string()
-    } else {
-        format!(
-            "codewhale auth set --provider {} --api-key \"...\"",
-            provider.as_str()
-        )
-    }
 }
 
 fn count_dir_entries(dir: &Path) -> usize {
@@ -3296,7 +3274,6 @@ fn run_setup_status(
 
     let (aqua_r, aqua_g, aqua_b) = palette::WHALE_INFO_RGB;
     let (sky_r, sky_g, sky_b) = palette::WHALE_INFO_RGB;
-    let (red_r, red_g, red_b) = palette::WHALE_ERROR_RGB;
 
     println!(
         "{}",
@@ -3306,25 +3283,21 @@ fn run_setup_status(
     println!("workspace: {}", workspace.display());
 
     match resolve_api_key_source(config) {
-        ApiKeySource::Env => {
-            let env_vars = provider_env_key_source_for_config(config)
-                .unwrap_or_else(|| provider_env_vars_label(config.api_provider()));
-            println!(
-                "  {} api_key: set via {env_vars}",
-                "✓".truecolor(aqua_r, aqua_g, aqua_b)
-            );
-        }
-        ApiKeySource::Keyring => println!(
-            "  {} api_key: set via OS keyring",
-            "✓".truecolor(aqua_r, aqua_g, aqua_b)
+        ApiKeySource::ConfigDeclared => println!(
+            "  {} api_key: config source declared (value not inspected)",
+            "·".dimmed()
         ),
-        ApiKeySource::Config => println!(
-            "  {} api_key: set via config",
-            "✓".truecolor(aqua_r, aqua_g, aqua_b)
+        ApiKeySource::EnvDeclared => println!(
+            "  {} api_key: environment source declared (value not inspected)",
+            "·".dimmed()
+        ),
+        ApiKeySource::ExternalAuthDeclared => println!(
+            "  {} api_key: external auth source declared (value not inspected)",
+            "·".dimmed()
         ),
         ApiKeySource::OAuth => println!(
-            "  {} oauth: Codewhale-owned storage selected (availability not probed)",
-            "✓".truecolor(aqua_r, aqua_g, aqua_b)
+            "  {} oauth: Codewhale-owned route selected (token availability not probed)",
+            "·".dimmed()
         ),
         ApiKeySource::ExternalConsent => println!(
             "  {} oauth: external read-only consent configured (credential file not probed)",
@@ -3334,39 +3307,14 @@ fn run_setup_status(
             "  {} api_key: disabled for this route",
             "✓".truecolor(aqua_r, aqua_g, aqua_b)
         ),
-        ApiKeySource::Missing => {
-            let provider = config.api_provider();
-            let provider_identity = config.provider_identity_for(provider);
-            let env_var = config
-                .provider_config()
-                .and_then(|entry| entry.api_key_env.clone())
-                .unwrap_or_else(|| provider_env_vars_label(provider));
-            let login_hint = if provider == crate::config::ApiProvider::OpenaiCodex {
-                provider_auth_hint(provider)
-            } else {
-                format!("codewhale auth set --provider {provider_identity} --api-key \"...\"")
-            };
-            let config_location = if provider == crate::config::ApiProvider::Custom
-                && config.uses_legacy_literal_custom_route()
-            {
-                "root `api_key`".to_string()
-            } else if provider == crate::config::ApiProvider::Custom {
-                format!("`[providers.{provider_identity}].api_key`")
-            } else {
-                format!(
-                    "`[providers.{}].api_key`",
-                    provider_config_table_key(provider)
-                )
-            };
-            println!(
-                "  {} api_key: missing  (set {env_var} or {config_location} in ~/.codewhale/config.toml; or run `{login_hint}`)",
-                "✗".truecolor(red_r, red_g, red_b),
-            );
-        }
+        ApiKeySource::Unknown => println!(
+            "  {} api_key: unknown (credential environment and durable stores not inspected)",
+            "·".dimmed()
+        ),
     }
     println!(
         "  · base_url: {}",
-        crate::client::redact_url_for_display(&config.deepseek_base_url())
+        crate::doctor::structural_url_authority(&config.deepseek_base_url())
     );
     let model = config
         .default_text_model
@@ -3529,16 +3477,15 @@ fn run_session_diagnostics(args: SessionDiagnosticsArgs) -> Result<()> {
     Ok(())
 }
 
-/// Local endpoints require an explicit opt-in because an HTTP request can wake
-/// a desktop-managed daemon (notably Ollama.app). Hosted endpoints preserve the
-/// historical `doctor` connectivity check.
+/// Live API checks are explicit. Local endpoints have a separate opt-in because
+/// an HTTP request can wake a desktop-managed daemon (notably Ollama.app).
 fn doctor_should_probe_api(
     provider: crate::config::ApiProvider,
     base_url: &str,
-    probe_local: bool,
+    probes: crate::doctor::DoctorProbeRequest,
 ) -> bool {
     let local = provider.is_self_hosted() || crate::config::base_url_uses_local_host(base_url);
-    !local || probe_local
+    probes.should_probe_api(local)
 }
 
 /// Doctor must never turn credential inspection into a refresh/write path.
@@ -3570,8 +3517,7 @@ async fn run_doctor(
     config: &Config,
     workspace: &Path,
     config_path_override: Option<&Path>,
-    probe_local: bool,
-    probe_mcp: bool,
+    probes: crate::doctor::DoctorProbeRequest,
     plugins: &crate::plugins::PluginRegistry,
 ) {
     use crate::palette;
@@ -3598,76 +3544,60 @@ async fn run_doctor(
     println!();
 
     println!("{}", "Updates:".bold());
-    let current_version = env!("CARGO_PKG_VERSION");
-    println!("  · current: v{current_version}");
-    match codewhale_release::latest_release_tag_async(codewhale_release::ReleaseChannel::Stable)
-        .await
-    {
-        Ok(latest_tag) => {
-            match codewhale_release::compare_release_versions(current_version, &latest_tag) {
-                Ok(std::cmp::Ordering::Less) => {
-                    println!(
-                        "  {} latest: {latest_tag}",
-                        "!".truecolor(sky_r, sky_g, sky_b)
-                    );
-                    println!("    Update available. Run `codewhale update` to install.");
-                }
-                Ok(std::cmp::Ordering::Equal) => {
-                    println!(
-                        "  {} latest: {latest_tag}",
-                        "✓".truecolor(aqua_r, aqua_g, aqua_b)
-                    );
-                    println!("    Already up to date.");
-                }
-                Ok(std::cmp::Ordering::Greater) => {
-                    println!("  {} latest: {latest_tag}", "·".dimmed());
-                    println!("    Current build is newer than the latest published release.");
-                }
-                Err(err) => {
-                    println!(
-                        "  {} latest: {latest_tag}",
-                        "!".truecolor(sky_r, sky_g, sky_b)
-                    );
-                    println!("    Version comparison failed: {err}");
-                }
-            }
-        }
-        Err(err) => {
-            println!(
-                "  {} latest release check failed: {err}",
-                "!".truecolor(sky_r, sky_g, sky_b)
-            );
-            println!("    Run `codewhale update --check` to retry.");
-        }
-    }
+    crate::doctor::print_update_report(probes).await;
     println!();
 
     // Configuration summary
+    let doctor_paths = match crate::doctor::DoctorPathReport::resolve(config_path_override) {
+        Ok(paths) => paths,
+        Err(error) => {
+            println!("{}", "Resolved User Paths:".bold());
+            println!(
+                "  {} unavailable: {error:#}",
+                "✗".truecolor(red_r, red_g, red_b)
+            );
+            return;
+        }
+    };
     println!("{}", "Configuration:".bold());
-    let config_path = config_path_override
-        .map(PathBuf::from)
-        .or_else(|| codewhale_config::resolve_config_path(None).ok())
-        .unwrap_or_else(|| {
-            codewhale_config::codewhale_home()
-                .unwrap_or_else(|_| PathBuf::from(".codewhale"))
-                .join("config.toml")
-        });
+    let config_path = &doctor_paths.config;
 
     if config_path.exists() {
         println!(
             "  {} config.toml found at {}",
             "✓".truecolor(aqua_r, aqua_g, aqua_b),
-            crate::utils::display_path(&config_path)
+            crate::utils::display_path(config_path)
         );
     } else {
         println!(
             "  {} config.toml not found at {} (using defaults/env)",
             "!".truecolor(sky_r, sky_g, sky_b),
-            crate::utils::display_path(&config_path)
+            crate::utils::display_path(config_path)
         );
     }
     println!("  workspace: {}", crate::utils::display_path(workspace));
     println!("  {}", doctor_search_provider_line(config));
+
+    println!();
+    println!("{}", "Resolved User Paths (read-only):".bold());
+    for (label, path) in [
+        ("config", doctor_paths.config.as_path()),
+        ("settings", doctor_paths.settings.as_path()),
+        ("state", doctor_paths.state.as_path()),
+        ("sessions", doctor_paths.sessions.as_path()),
+        ("logs", doctor_paths.logs.as_path()),
+        ("automations", doctor_paths.automations.as_path()),
+        ("secrets", doctor_paths.secrets.as_path()),
+    ] {
+        println!("  · {label}: {}", crate::utils::display_path(path));
+    }
+
+    let secret_backend = codewhale_secrets::diagnose_secret_backend();
+    println!();
+    println!("{}", "Secret Backend (structural only):".bold());
+    for line in crate::doctor::secret_backend_human_lines(&secret_backend) {
+        println!("  · {line}");
+    }
 
     // State root (v0.8.44)
     println!();
@@ -3722,43 +3652,36 @@ async fn run_doctor(
     println!("{}", "API Keys:".bold());
 
     // Per-provider state: env + config file only (no values printed).
-    // Keep doctor/status prompt-free even for unsigned rebuilt binaries.
-    let dispatcher_api_key_source = std::env::var("DEEPSEEK_API_KEY_SOURCE").ok();
+    // Keep doctor/status prompt-free and credential-value-free even for
+    // unsigned rebuilt binaries.
     for provider in crate::config::ApiProvider::all().iter().copied() {
         let slot = provider.as_str();
-        let in_env = provider.env_vars().iter().any(|var| {
-            std::env::var(var)
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-                .is_some()
-        });
-        let injected_runtime_key = matches!(
-            dispatcher_api_key_source.as_deref(),
-            Some("keyring" | "env" | "cli")
-        );
-        let in_config = config
-            .provider_config_for(provider)
-            .and_then(|entry| entry.api_key.as_ref())
-            .is_some_and(|v| !v.trim().is_empty())
+        let provider_config = config.provider_config_for(provider);
+        let config_declared = provider_config.is_some_and(|entry| entry.api_key.is_some())
             || (matches!(provider, crate::config::ApiProvider::Deepseek)
-                && !injected_runtime_key
-                && config
-                    .api_key
-                    .as_ref()
-                    .is_some_and(|v| !v.trim().is_empty()));
-        let icon = if in_env || in_config {
-            "✓".truecolor(aqua_r, aqua_g, aqua_b)
+                && config.api_key.is_some());
+        let env_source_declared = provider_config.is_some_and(|entry| entry.api_key_env.is_some());
+        let icon = if config_declared || env_source_declared {
+            "·".truecolor(aqua_r, aqua_g, aqua_b)
         } else {
             "·".dimmed()
         };
         println!(
-            "  {} {slot}: env={}, config={}",
+            "  {} {slot}: env_source={}, config_source={}",
             icon,
-            if in_env { "yes" } else { "no" },
-            if in_config { "yes" } else { "no" }
+            if env_source_declared {
+                "declared (value not inspected)"
+            } else {
+                "not inspected"
+            },
+            if config_declared {
+                "declared (value not inspected)"
+            } else {
+                "not declared"
+            }
         );
     }
-    println!("  · credential precedence: ~/.codewhale/config.toml, OS keyring, then env");
+    println!("  · credential precedence is unchanged; doctor does not inspect credential values");
     println!();
     println!(
         "{}",
@@ -3769,44 +3692,21 @@ async fn run_doctor(
     }
 
     let api_key_source = resolve_api_key_source(config);
-    let has_api_key = if !matches!(
-        api_key_source,
-        ApiKeySource::Missing | ApiKeySource::ExternalConsent
-    ) {
-        let source_label = match api_key_source {
-            ApiKeySource::Config => "config.toml",
-            ApiKeySource::Keyring => "OS keyring",
-            ApiKeySource::Env => "environment",
-            ApiKeySource::OAuth => "non-mutating OAuth readiness",
-            ApiKeySource::ExternalConsent => "external consent (not probed)",
-            ApiKeySource::NoAuth => "no-auth route",
-            ApiKeySource::Missing
-                if matches!(
-                    config.api_provider(),
-                    crate::config::ApiProvider::Sglang
-                        | crate::config::ApiProvider::Vllm
-                        | crate::config::ApiProvider::Ollama
-                ) =>
-            {
-                "optional local auth"
-            }
-            ApiKeySource::Missing => "unknown source",
-        };
-        println!(
-            "  {} active provider key resolved from {source_label}",
-            "✓".truecolor(aqua_r, aqua_g, aqua_b)
-        );
-        true
-    } else {
-        println!(
-            "  {} active provider key not configured",
-            "✗".truecolor(red_r, red_g, red_b)
-        );
-        println!(
-            "    Run 'codewhale auth set --provider <name>' to save a key to ~/.codewhale/config.toml."
-        );
-        false
+    let source_label = match api_key_source {
+        ApiKeySource::ConfigDeclared => "config source declared; value not inspected",
+        ApiKeySource::EnvDeclared => "environment source declared; value not inspected",
+        ApiKeySource::ExternalAuthDeclared => {
+            "external auth source declared; credential not resolved"
+        }
+        ApiKeySource::OAuth => "OAuth route configured; token availability not probed",
+        ApiKeySource::ExternalConsent => "external consent configured; token file not read",
+        ApiKeySource::NoAuth => "no-auth route",
+        ApiKeySource::Unknown => "unknown; credential environment and stores not inspected",
     };
+    println!(
+        "  {} active provider credential source: {source_label}",
+        "·".dimmed()
+    );
 
     // API connectivity test
     println!();
@@ -3815,7 +3715,7 @@ async fn run_doctor(
     println!("  · provider: {}", api_target.provider);
     println!(
         "  · base_url: {}",
-        crate::client::redact_url_for_display(&api_target.base_url)
+        crate::doctor::structural_url_authority(&api_target.base_url)
     );
     println!("  · model: {}", api_target.model);
     let tls_status = doctor_tls_status(config);
@@ -3833,8 +3733,11 @@ async fn run_doctor(
         "  {} strict_tool_mode: {}",
         strict_icon, strict_tool_mode.message
     );
-    if let Some(recommended) = strict_tool_mode.recommended_base_url.as_ref() {
-        println!("    Use `base_url = \"{recommended}\"` for DeepSeek strict schemas.");
+    if let Some(recommended) = strict_tool_mode.recommended_base_url.as_deref() {
+        println!(
+            "    Use the {} endpoint for DeepSeek strict schemas.",
+            crate::doctor::structural_url_authority(recommended)
+        );
     }
     let capability = crate::config::provider_capability(config.api_provider(), &api_target.model);
     if let Some(alias) = capability.alias_deprecation.as_ref() {
@@ -3843,10 +3746,11 @@ async fn run_doctor(
             alias.alias, alias.retirement_date, alias.replacement
         );
     }
-    if has_api_key
-        && doctor_should_probe_auth(config)
-        && doctor_should_probe_api(config.api_provider(), &api_target.base_url, probe_local)
-    {
+    let live_api_requested =
+        doctor_should_probe_api(config.api_provider(), &api_target.base_url, probes);
+    let endpoint_is_local = config.api_provider().is_self_hosted()
+        || crate::config::base_url_uses_local_host(&api_target.base_url);
+    if doctor_should_probe_auth(config) && live_api_requested {
         print!("  {} Testing connection...", "·".dimmed());
         use std::io::Write;
         std::io::stdout().flush().ok();
@@ -3876,21 +3780,6 @@ async fn run_doctor(
                     println!(
                         "    Invalid API key. Check `codewhale auth status`, DEEPSEEK_API_KEY, or config.toml"
                     );
-                    if matches!(api_key_source, ApiKeySource::Keyring) {
-                        println!(
-                            "    The rejected key came from the OS keyring via the dispatcher."
-                        );
-                        println!(
-                            "    Run `codewhale auth status` to inspect config/keyring/env sources."
-                        );
-                    } else if matches!(api_key_source, ApiKeySource::Env) {
-                        println!(
-                            "    The rejected key came from DEEPSEEK_API_KEY; no saved config key is present."
-                        );
-                        println!(
-                            "    Run `codewhale auth set --provider deepseek` to save a config key that overrides stale env."
-                        );
-                    }
                 } else if error_msg.contains("403") || error_msg.contains("Forbidden") {
                     println!(
                         "    API key lacks permissions. Verify key is active at platform.deepseek.com"
@@ -3904,11 +3793,13 @@ async fn run_doctor(
                 } else if error_msg.contains("connect") {
                     println!("    Connection failed. Check firewall settings or try again");
                 } else {
-                    println!("    Error: {error_msg}");
+                    println!(
+                        "    Error details omitted because provider failures can contain credential material."
+                    );
                 }
             }
         }
-    } else if has_api_key && !doctor_should_probe_auth(config) {
+    } else if !doctor_should_probe_auth(config) {
         println!(
             "  {} Live OAuth connectivity not checked by non-mutating doctor",
             "·".dimmed()
@@ -3916,16 +3807,22 @@ async fn run_doctor(
         println!(
             "    Doctor never refreshes or rewrites credentials; exercise the route with a normal request."
         );
-    } else if has_api_key {
-        println!(
-            "  {} Live connectivity not checked for this local endpoint",
-            "·".dimmed()
-        );
-        println!(
-            "    Run `codewhale doctor --probe-local` to opt in; the request may start a local service."
-        );
     } else {
-        println!("  {} Skipped (no API key configured)", "·".dimmed());
+        if endpoint_is_local {
+            println!(
+                "  {} Live connectivity not checked for this local endpoint",
+                "·".dimmed()
+            );
+            println!(
+                "    Run `codewhale doctor --probe-local` to opt in; the request may start a local service."
+            );
+        } else {
+            println!(
+                "  {} Live hosted connectivity not checked (offline default)",
+                "·".dimmed()
+            );
+            println!("    Run `codewhale doctor --probe-api` to opt in.");
+        }
     }
 
     // MCP configuration
@@ -4021,7 +3918,7 @@ async fn run_doctor(
                     );
                 }
             }
-            if probe_mcp {
+            if probes.should_probe_mcp() {
                 println!();
                 println!(
                     "  {} Live MCP probe enabled: starting enabled servers; backend tool health remains untested.",
@@ -4043,13 +3940,8 @@ async fn run_doctor(
                                 continue;
                             }
                             if failed.contains(name.as_str()) {
-                                let detail = errors
-                                    .iter()
-                                    .find(|(failed_name, _)| failed_name == name)
-                                    .map(|(_, error)| format!("{error:#}"))
-                                    .unwrap_or_else(|| "connection failed".to_string());
                                 println!(
-                                    "      {} {name}: process/protocol unreachable; {detail}",
+                                    "      {} {name}: process/protocol unreachable; error details omitted",
                                     "✗".truecolor(red_r, red_g, red_b)
                                 );
                             } else {
@@ -4060,8 +3952,8 @@ async fn run_doctor(
                             }
                         }
                     }
-                    Err(error) => println!(
-                        "      {} live MCP probe could not load merged configuration: {error:#}",
+                    Err(_) => println!(
+                        "      {} live MCP probe could not load merged configuration; details omitted",
                         "✗".truecolor(red_r, red_g, red_b)
                     ),
                 }
@@ -4071,11 +3963,10 @@ async fn run_doctor(
                 );
             }
         }
-        Err(err) => {
+        Err(_) => {
             println!(
-                "  {} MCP config parse error: {}",
-                "✗".truecolor(red_r, red_g, red_b),
-                err
+                "  {} MCP configuration could not be loaded; details omitted",
+                "✗".truecolor(red_r, red_g, red_b)
             );
         }
     }
@@ -5226,7 +5117,7 @@ fn doctor_inherited_setup_facts(
 }
 
 fn doctor_has_credentials_or_local_runtime(config: &Config) -> bool {
-    if resolve_api_key_source(config) != ApiKeySource::Missing {
+    if doctor_auth_present_or_local(config.api_provider(), resolve_api_key_source(config)) {
         return true;
     }
 
@@ -5565,6 +5456,12 @@ fn doctor_provider_model_report_json(config: &Config) -> serde_json::Value {
     let auth_source = resolve_api_key_source(config);
     let auth_present_or_local = doctor_auth_present_or_local(provider, auth_source);
     let credential_help = provider.credential_help();
+    let credential_url = credential_help
+        .credential_url
+        .map(crate::doctor::structural_url_authority);
+    let credential_docs_url = credential_help
+        .docs_url
+        .map(crate::doctor::structural_url_authority);
 
     json!({
         "provider": {
@@ -5579,8 +5476,8 @@ fn doctor_provider_model_report_json(config: &Config) -> serde_json::Value {
             "source": doctor_api_key_source_label(auth_source),
             "env_vars": provider.env_vars(),
             "credential_mode": credential_help.acquisition.as_str(),
-            "credential_url": credential_help.credential_url,
-            "credential_docs_url": credential_help.docs_url,
+            "credential_url": credential_url,
+            "credential_docs_url": credential_docs_url,
             "credential_guidance": credential_help.guidance,
             "oauth_only": credential_help.acquisition
                 == codewhale_config::provider::CredentialAcquisition::OAuth,
@@ -5600,9 +5497,9 @@ fn doctor_auth_present_or_local(
     provider: crate::config::ApiProvider,
     auth_source: ApiKeySource,
 ) -> bool {
-    !matches!(
+    matches!(
         auth_source,
-        ApiKeySource::Missing | ApiKeySource::ExternalConsent
+        ApiKeySource::ConfigDeclared | ApiKeySource::NoAuth
     ) || matches!(
         provider,
         crate::config::ApiProvider::Sglang
@@ -5859,17 +5756,12 @@ fn runtime_posture_source_id(source: codewhale_config::RuntimePostureSource) -> 
 /// Emit a bounded, secret-redacted JSON failure when configuration cannot be
 /// loaded or validated. Invalid configuration must not be forced through the
 /// normal doctor report because its route/capability facts would be misleading.
-fn run_doctor_json_config_error(error: &anyhow::Error) -> Result<()> {
-    const MAX_ERROR_CHARS: usize = 2_000;
-
-    let redacted = codewhale_config::persistence::redact_secrets(&format!("{error:#}"));
-    let message =
-        crate::utils::truncate_with_ellipsis(&redacted, MAX_ERROR_CHARS, "...[truncated]");
+fn run_doctor_json_config_error(_error: &anyhow::Error) -> Result<()> {
     let report = serde_json::json!({
         "status": "error",
         "error": {
             "kind": "config_validation",
-            "message": message,
+            "message": "configuration validation failed; details omitted because configuration errors may contain credential material",
         },
     });
     println!("{}", serde_json::to_string_pretty(&report)?);
@@ -5879,8 +5771,8 @@ fn run_doctor_json_config_error(error: &anyhow::Error) -> Result<()> {
     bail!("doctor configuration validation failed; see JSON output")
 }
 
-/// Machine-readable counterpart to `run_doctor`. Skips the live API call so it
-/// is safe to run in CI and from non-interactive scripts.
+/// Machine-readable counterpart to `run_doctor`. This report is always
+/// structural and offline; live probe flags conflict with `--json`.
 fn run_doctor_json(
     config: &Config,
     workspace: &Path,
@@ -5889,23 +5781,18 @@ fn run_doctor_json(
 ) -> Result<()> {
     use serde_json::json;
 
-    let config_path = config_path_override
-        .map(PathBuf::from)
-        .or_else(|| codewhale_config::resolve_config_path(None).ok())
-        .unwrap_or_else(|| {
-            codewhale_config::codewhale_home()
-                .unwrap_or_else(|_| PathBuf::from(".codewhale"))
-                .join("config.toml")
-        });
+    let doctor_paths = crate::doctor::DoctorPathReport::resolve(config_path_override)?;
+    let config_path = &doctor_paths.config;
+    let secret_backend = codewhale_secrets::diagnose_secret_backend();
 
     let api_key_state = match resolve_api_key_source(config) {
-        ApiKeySource::Env => "env",
-        ApiKeySource::Config => "config",
-        ApiKeySource::Keyring => "keyring",
-        ApiKeySource::OAuth => "oauth",
+        ApiKeySource::ConfigDeclared => "config_declared",
+        ApiKeySource::EnvDeclared => "env_declared",
+        ApiKeySource::ExternalAuthDeclared => "external_auth_declared",
+        ApiKeySource::OAuth => "oauth_unprobed",
         ApiKeySource::ExternalConsent => "external_consent",
         ApiKeySource::NoAuth => "none",
-        ApiKeySource::Missing => "missing",
+        ApiKeySource::Unknown => "unknown",
     };
 
     let mcp_config_path = config.mcp_config_path();
@@ -5933,7 +5820,7 @@ fn run_doctor_json(
                 "servers": servers,
             })
         }
-        Err(err) => json!({
+        Err(_) => json!({
             "config_path": mcp_config_path.display().to_string(),
             "present": mcp_present,
             "project_config_path": project_mcp_config_path.display().to_string(),
@@ -5941,7 +5828,7 @@ fn run_doctor_json(
             "probe_scope": "configuration",
             "live_health_checked": false,
             "servers": [],
-            "error": err.to_string(),
+            "error": "configuration_unavailable_details_omitted",
         }),
     };
 
@@ -6029,6 +5916,8 @@ fn run_doctor_json(
         "version": env!("CARGO_PKG_VERSION"),
         "config_path": config_path.display().to_string(),
         "config_present": config_path.exists(),
+        "paths": doctor_paths,
+        "secret_backend": secret_backend,
         "workspace": workspace.display().to_string(),
         "legacy_state": doctor_legacy_state_json(
             &code_home,
@@ -6041,16 +5930,10 @@ fn run_doctor_json(
             "source": api_key_state,
         },
         "external_credentials": doctor_external_credential_consent_json(config),
-        "base_url": crate::client::redact_url_for_display(&api_target.base_url),
+        "base_url": crate::doctor::structural_url_authority(&api_target.base_url),
         "default_text_model": api_target.model,
         "route": doctor_route_report(config),
-        "strict_tool_mode": {
-            "enabled": strict_tool_mode.enabled,
-            "status": strict_tool_mode.status,
-            "function_strict_sent": strict_tool_mode.function_strict_sent,
-            "message": strict_tool_mode.message,
-            "recommended_base_url": strict_tool_mode.recommended_base_url,
-        },
+        "strict_tool_mode": doctor_strict_tool_mode_report_json(&strict_tool_mode),
         "tls": {
             "certificate_verification": tls_status.certificate_verification,
             "insecure_skip_tls_verify": tls_status.insecure_skip_tls_verify,
@@ -6134,7 +6017,8 @@ fn run_doctor_json(
         },
         "api_connectivity": {
             "checked": false,
-            "note": "Skipped in --json mode; run `codewhale doctor` for a live check.",
+            "status": "not_probed",
+            "note": "JSON doctor is offline; use `codewhale doctor --probe-api` or `--probe-local` for an explicit live check.",
         },
         "capability": provider_capability_report(config),
     });
@@ -6161,7 +6045,9 @@ fn provider_capability_report(config: &Config) -> serde_json::Value {
     let configured_model = config.default_model();
     let route_result =
         crate::route_runtime::resolve_runtime_route(config, provider, Some(&configured_model));
-    let route_error = route_result.as_ref().err().cloned();
+    let route_error = route_result
+        .is_err()
+        .then_some("route_resolution_failed_details_omitted");
     let route = route_result.ok();
     let resolved_model = route
         .as_ref()
@@ -6232,10 +6118,12 @@ fn doctor_route_report(config: &Config) -> serde_json::Value {
 
     let target = doctor_api_target(config);
     let provider = config.api_provider();
-    let redacted_base_url = crate::client::redact_url_for_display(&target.base_url);
+    let redacted_base_url = crate::doctor::structural_url_authority(&target.base_url);
     let route_result =
         crate::route_runtime::resolve_runtime_route(config, provider, Some(&target.model));
-    let route_error = route_result.as_ref().err().cloned();
+    let route_error = route_result
+        .is_err()
+        .then_some("route_resolution_failed_details_omitted");
     let context_window = route_result
         .ok()
         .map(|route| {
@@ -6341,21 +6229,20 @@ fn doctor_auth_scheme(config: &Config) -> &'static str {
     } else if provider == crate::config::ApiProvider::Anthropic {
         "x-api-key"
     } else if provider == crate::config::ApiProvider::XiaomiMimo
-        && (doctor_xiaomi_mimo_base_url_uses_token_plan(&config.deepseek_base_url())
-            || config
-                .deepseek_api_key_read_only()
-                .ok()
-                .is_some_and(|key| key.trim_start().starts_with("tp-")))
+        && doctor_xiaomi_mimo_base_url_uses_token_plan(&config.deepseek_base_url())
     {
         "api-key"
+    } else if provider == crate::config::ApiProvider::XiaomiMimo {
+        // The alternate MiMo scheme depends on a credential prefix. Ordinary
+        // doctor does not read credentials merely to make this label precise.
+        "unknown"
     } else if matches!(
         provider,
         crate::config::ApiProvider::Sglang
             | crate::config::ApiProvider::Vllm
             | crate::config::ApiProvider::Ollama
-    ) && config.deepseek_api_key_read_only().is_err()
-    {
-        "none"
+    ) {
+        "optional_bearer"
     } else {
         "bearer"
     }
@@ -6374,13 +6261,13 @@ fn doctor_xiaomi_mimo_base_url_uses_token_plan(base_url: &str) -> bool {
 
 fn doctor_api_key_source_label(source: ApiKeySource) -> &'static str {
     match source {
-        ApiKeySource::Env => "env",
-        ApiKeySource::Config => "config",
-        ApiKeySource::Keyring => "keyring",
-        ApiKeySource::OAuth => "oauth",
+        ApiKeySource::ConfigDeclared => "config_declared",
+        ApiKeySource::EnvDeclared => "env_declared",
+        ApiKeySource::ExternalAuthDeclared => "external_auth_declared",
+        ApiKeySource::OAuth => "oauth_unprobed",
         ApiKeySource::ExternalConsent => "external_consent",
         ApiKeySource::NoAuth => "none",
-        ApiKeySource::Missing => "missing",
+        ApiKeySource::Unknown => "unknown",
     }
 }
 
@@ -6483,6 +6370,19 @@ fn doctor_strict_tool_mode_status(config: &Config) -> DoctorStrictToolModeStatus
     }
 }
 
+fn doctor_strict_tool_mode_report_json(status: &DoctorStrictToolModeStatus) -> serde_json::Value {
+    serde_json::json!({
+        "enabled": status.enabled,
+        "status": status.status,
+        "function_strict_sent": status.function_strict_sent,
+        "message": status.message,
+        "recommended_base_url": status
+            .recommended_base_url
+            .as_deref()
+            .map(crate::doctor::structural_url_authority),
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DoctorTlsStatus {
     certificate_verification: bool,
@@ -6540,7 +6440,7 @@ fn doctor_timeout_recovery_lines(config: &Config) -> Vec<String> {
     let target = doctor_api_target(config);
     let mut lines = vec![format!(
         "Connection timed out while reaching {}.",
-        target.base_url
+        crate::doctor::structural_url_authority(&target.base_url)
     )];
 
     match config.api_provider() {
@@ -6990,6 +6890,27 @@ fn resolve_workspace(cli: &Cli) -> PathBuf {
 
 fn load_config_from_cli(cli: &Cli) -> Result<Config> {
     load_config_from_cli_with_effective_profile(cli).map(|(config, _)| config)
+}
+
+/// Doctor is a structural report unless the user explicitly asks it to probe
+/// a provider endpoint. Keep credential-bearing environment values out of the
+/// regular diagnostic configuration so an unrelated renderer or error path
+/// cannot disclose them.
+fn load_doctor_config_from_cli(cli: &Cli, args: &DoctorArgs) -> Result<Config> {
+    if args.probe_api || args.probe_local {
+        return load_config_from_cli(cli);
+    }
+    load_structural_config_from_cli(cli)
+}
+
+fn load_structural_config_from_cli(cli: &Cli) -> Result<Config> {
+    let profile = effective_config_profile(cli);
+    let mut config = Config::load_structural(cli.config.clone(), profile.as_deref())?;
+    if let Ok(settings) = crate::settings::Settings::load_read_only() {
+        apply_saved_reasoning_preference(&mut config, &settings);
+    }
+    cli.feature_toggles.apply(&mut config)?;
+    Ok(config)
 }
 
 fn effective_config_profile(cli: &Cli) -> Option<String> {
@@ -8122,8 +8043,14 @@ impl McpServerDoctorStatus {
 }
 
 /// Inspect command availability without starting the configured MCP server.
-fn doctor_mcp_command_status(server: &McpServerConfig) -> Result<McpCommandAvailability> {
-    static_mcp_command_availability(server)
+fn doctor_mcp_command_status(server: &McpServerConfig) -> McpCommandAvailability {
+    if server.url.is_some() {
+        return McpCommandAvailability::NotApplicable;
+    }
+    match server.command.as_deref() {
+        Some("") => McpCommandAvailability::Missing,
+        Some(_) | None => McpCommandAvailability::NotChecked,
+    }
 }
 
 fn doctor_mcp_server_json(name: &str, server: &McpServerConfig) -> serde_json::Value {
@@ -8137,6 +8064,13 @@ fn doctor_mcp_server_json(name: &str, server: &McpServerConfig) -> serde_json::V
         // Its scope is now explicit in `checks.configuration` below.
         "status": status.legacy_status(),
         "detail": status.detail(),
+        "transport": if server.url.is_some() { "http" } else { "stdio" },
+        "endpoint": server.url.as_deref().map(crate::doctor::structural_url_authority),
+        "command_configured": server.command.is_some(),
+        "args_count": server.args.len(),
+        "env_count": server.env.len(),
+        "headers_count": server.headers.len(),
+        "env_headers_count": server.env_headers.len(),
         "check_scope": "configuration",
         "checks": {
             "configuration": {
@@ -8144,9 +8078,7 @@ fn doctor_mcp_server_json(name: &str, server: &McpServerConfig) -> serde_json::V
                 "detail": status.detail(),
             },
             "command": {
-                "status": doctor_mcp_command_status(server)
-                    .map(McpCommandAvailability::as_str)
-                    .unwrap_or("invalid_environment"),
+                "status": doctor_mcp_command_status(server).as_str(),
             },
             "process_reachable": {
                 "status": "not_checked",
@@ -8168,9 +8100,16 @@ fn doctor_check_mcp_server(server: &McpServerConfig) -> McpServerDoctorStatus {
         return McpServerDoctorStatus::Error("no command or url configured".to_string());
     }
 
-    // URL-based server — just report the URL.
+    // URL-based server: omit userinfo, query, and fragment entirely.
     if let Some(ref url) = server.url {
-        return McpServerDoctorStatus::Ok(format!("HTTP/SSE server at {url}"));
+        let authority = crate::doctor::structural_url_authority(url);
+        return if authority.starts_with("unparseable") {
+            McpServerDoctorStatus::Warning(
+                "HTTP/SSE server URL is invalid; configured value omitted".to_string(),
+            )
+        } else {
+            McpServerDoctorStatus::Ok(format!("HTTP/SSE server at {authority}"))
+        };
     }
 
     // Command-based: validate command path exists.
@@ -8179,71 +8118,30 @@ fn doctor_check_mcp_server(server: &McpServerConfig) -> McpServerDoctorStatus {
         return McpServerDoctorStatus::Error("empty command".to_string());
     }
 
-    let command_availability = match doctor_mcp_command_status(server) {
-        Ok(McpCommandAvailability::Missing) => {
-            return McpServerDoctorStatus::Error(format!("command not found: {cmd}"));
-        }
-        Err(error) => {
-            return McpServerDoctorStatus::Error(format!(
-                "invalid MCP stdio environment: {error:#}"
-            ));
-        }
-        Ok(status) => status,
-    };
-
-    let cmd_path = Path::new(cmd);
-    // Also accept Unix-style `/` prefix on Windows, where Path::is_absolute()
-    // requires a drive letter.
-    let is_absolute = cmd_path.is_absolute() || cmd.starts_with('/');
-
     if server.cwd.is_none() {
         if is_relative_stdio_path_arg(cmd) {
-            return McpServerDoctorStatus::Warning(format!(
-                "stdio server uses relative command \"{cmd}\" without cwd; set cwd so headless exec and UI status checks resolve the same path"
-            ));
+            return McpServerDoctorStatus::Warning(
+                "stdio server uses a relative command without cwd; command value omitted"
+                    .to_string(),
+            );
         }
-        if let Some(arg) = server
+        if server
             .args
             .iter()
-            .find(|arg| is_relative_stdio_path_arg(arg))
+            .any(|arg| is_relative_stdio_path_arg(arg))
         {
-            return McpServerDoctorStatus::Warning(format!(
-                "stdio server uses relative path argument \"{arg}\" without cwd; set cwd so headless exec and UI status checks resolve the same path"
-            ));
+            return McpServerDoctorStatus::Warning(
+                "stdio server uses a relative path argument without cwd; argument values omitted"
+                    .to_string(),
+            );
         }
     }
 
-    if command_availability == McpCommandAvailability::NotChecked {
-        return McpServerDoctorStatus::Warning(format!(
-            "stdio command availability could not be confirmed without starting \"{cmd}\""
-        ));
-    }
-
-    // Detect self-hosted DeepSeek server entries.
-    let is_self_hosted = server
-        .args
-        .windows(2)
-        .any(|w| w[0] == "serve" && w[1] == "--mcp");
-
-    let args_str = server.args.join(" ");
-    if is_self_hosted {
-        if is_absolute {
-            McpServerDoctorStatus::Ok(format!("self-hosted MCP server ({cmd} {args_str})"))
-        } else {
-            McpServerDoctorStatus::Warning(format!(
-                "self-hosted MCP server uses relative command \"{cmd}\" — consider using an absolute path"
-            ))
-        }
-    } else {
-        McpServerDoctorStatus::Ok(format!(
-            "stdio server ({cmd}{})",
-            if args_str.is_empty() {
-                String::new()
-            } else {
-                format!(" {args_str}")
-            }
-        ))
-    }
+    McpServerDoctorStatus::Ok(format!(
+        "stdio server configured (command omitted; {} argument(s), {} environment binding(s))",
+        server.args.len(),
+        server.env.len()
+    ))
 }
 
 fn save_mcp_config(path: &Path, cfg: &McpConfig) -> Result<()> {
@@ -11813,10 +11711,10 @@ mod doctor_setup_state_tests {
             report["provider_model"]["model"]["resolved"],
             crate::config::DEFAULT_TEXT_MODEL
         );
-        assert_eq!(report["provider_model"]["auth"]["source"], "missing");
+        assert_eq!(report["provider_model"]["auth"]["source"], "unknown");
         assert_eq!(
             report["provider_model"]["auth"]["credential_url"],
-            "https://platform.deepseek.com/api_keys"
+            "https://platform.deepseek.com"
         );
         assert_eq!(
             report["provider_model"]["auth"]["credential_mode"],
@@ -11890,7 +11788,7 @@ mod doctor_setup_state_tests {
         );
         assert_eq!(
             cn_report["provider_model"]["auth"]["credential_url"],
-            "https://platform.deepseek.com/api_keys"
+            "https://platform.deepseek.com"
         );
         assert_eq!(cn_report["provider_model"]["auth"]["oauth_only"], false);
         assert_eq!(
@@ -12051,11 +11949,11 @@ mod doctor_setup_state_tests {
         let kimi_report = doctor_setup_report_json(&kimi_config, &workspace);
         assert_eq!(
             kimi_report["provider_model"]["auth"]["credential_url"],
-            "https://platform.kimi.ai/console/api-keys"
+            "https://platform.kimi.ai"
         );
         assert_eq!(
             kimi_report["provider_model"]["auth"]["credential_docs_url"],
-            "https://platform.kimi.ai/docs/overview"
+            "https://platform.kimi.ai"
         );
         assert_eq!(
             kimi_report["provider_model"]["auth"]["credential_mode"],
@@ -12380,6 +12278,10 @@ mod doctor_endpoint_tests {
             status.recommended_base_url.as_deref(),
             Some(crate::config::DEFAULT_DEEPSEEK_BASE_URL)
         );
+        assert_eq!(
+            doctor_strict_tool_mode_report_json(&status)["recommended_base_url"],
+            "https://api.deepseek.com"
+        );
     }
 
     #[test]
@@ -12516,11 +12418,11 @@ mod doctor_endpoint_tests {
         assert_eq!(report["wire_protocol"], "chat_completions");
         assert_eq!(
             report["base_url"]["redacted"],
-            "https://tokenhub.tencentmaas.com/v1"
+            "https://tokenhub.tencentmaas.com"
         );
         assert_eq!(report["base_url"]["class"], "custom");
         assert_eq!(report["auth"]["scheme"], "bearer");
-        assert_eq!(report["auth"]["source"], "config");
+        assert_eq!(report["auth"]["source"], "config_declared");
         assert!(
             report["base_url"]["fingerprint"]
                 .as_str()
@@ -12550,11 +12452,11 @@ mod doctor_endpoint_tests {
         assert_eq!(report["model"], crate::config::DEFAULT_SILICONFLOW_MODEL);
         assert_eq!(
             report["base_url"]["redacted"],
-            crate::config::DEFAULT_SILICONFLOW_CN_BASE_URL
+            crate::doctor::structural_url_authority(crate::config::DEFAULT_SILICONFLOW_CN_BASE_URL)
         );
         assert_eq!(report["base_url"]["class"], "default");
         assert_eq!(report["auth"]["scheme"], "bearer");
-        assert_eq!(report["auth"]["source"], "config");
+        assert_eq!(report["auth"]["source"], "config_declared");
         assert!(!serialized.contains("sf-cn-secret-value"));
     }
 
@@ -15747,28 +15649,6 @@ mod doctor_mcp_tests {
         }
     }
 
-    fn write_path_only_command(dir: &Path) -> String {
-        let command = "codewhale-doctor-mcp-path-only-test";
-        #[cfg(windows)]
-        let file_name = format!("{command}.exe");
-        #[cfg(not(windows))]
-        let file_name = command.to_string();
-        let path = dir.join(file_name);
-        std::fs::write(&path, b"test executable").expect("write path-only command");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            let mut permissions = std::fs::metadata(&path)
-                .expect("path-only command metadata")
-                .permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&path, permissions)
-                .expect("make path-only command executable");
-        }
-        command.to_string()
-    }
-
     #[test]
     fn test_no_command_or_url_is_error() {
         let server = make_server(None, &[], None);
@@ -15796,73 +15676,6 @@ mod doctor_mcp_tests {
             McpServerDoctorStatus::Ok(detail) => assert!(detail.contains("stdio")),
             other => panic!("Expected Ok, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn doctor_uses_server_path_for_bare_command_availability() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let command = write_path_only_command(temp.path());
-        let mut server = make_server(Some(&command), &[], None);
-        server.env.insert(
-            "PATH".to_string(),
-            temp.path().to_string_lossy().into_owned(),
-        );
-
-        assert!(matches!(
-            doctor_check_mcp_server(&server),
-            McpServerDoctorStatus::Ok(_)
-        ));
-        assert_eq!(
-            doctor_mcp_server_json("path-only", &server)["checks"]["command"]["status"],
-            "available"
-        );
-
-        server.command = Some("codewhale-doctor-mcp-command-that-does-not-exist".to_string());
-        #[cfg(not(windows))]
-        assert!(matches!(
-            doctor_check_mcp_server(&server),
-            McpServerDoctorStatus::Error(detail) if detail.contains("command not found")
-        ));
-        #[cfg(windows)]
-        assert!(matches!(
-            doctor_check_mcp_server(&server),
-            McpServerDoctorStatus::Warning(detail) if detail.contains("could not be confirmed")
-        ));
-        #[cfg(not(windows))]
-        assert_eq!(
-            doctor_mcp_server_json("missing", &server)["checks"]["command"]["status"],
-            "missing"
-        );
-        #[cfg(windows)]
-        assert_eq!(
-            doctor_mcp_server_json("missing", &server)["checks"]["command"]["status"],
-            "not_checked"
-        );
-    }
-
-    #[test]
-    fn doctor_reports_path_expansion_errors_without_leaking_values() {
-        let _lock = crate::test_support::lock_test_env();
-        let _missing =
-            crate::test_support::EnvVarGuard::remove("CODEWHALE_DOCTOR_MCP_MISSING_PATH");
-        let mut server = make_server(Some("codewhale-mcp-command"), &[], None);
-        server.env.insert(
-            "PATH".to_string(),
-            "do-not-leak-${CODEWHALE_DOCTOR_MCP_MISSING_PATH}-also-secret".to_string(),
-        );
-
-        match doctor_check_mcp_server(&server) {
-            McpServerDoctorStatus::Error(detail) => {
-                assert!(detail.contains("CODEWHALE_DOCTOR_MCP_MISSING_PATH"));
-                assert!(!detail.contains("do-not-leak"));
-                assert!(!detail.contains("also-secret"));
-            }
-            other => panic!("Expected invalid environment error, got {other:?}"),
-        }
-        assert_eq!(
-            doctor_mcp_server_json("invalid-env", &server)["checks"]["command"]["status"],
-            "invalid_environment"
-        );
     }
 
     #[test]
@@ -15895,17 +15708,11 @@ mod doctor_mcp_tests {
     fn test_self_hosted_absolute_is_ok() {
         let server = make_server(Some("/usr/local/bin/codewhale"), &["serve", "--mcp"], None);
         match doctor_check_mcp_server(&server) {
-            McpServerDoctorStatus::Ok(detail) | McpServerDoctorStatus::Error(detail) => {
-                // On systems where the path doesn't exist, this will be Error.
-                // On systems where it does, it'll be Ok. Either is valid for the test.
-                assert!(
-                    detail.contains("self-hosted") || detail.contains("not found"),
-                    "unexpected detail: {detail}"
-                );
-            }
+            McpServerDoctorStatus::Ok(detail) => assert!(detail.contains("stdio server")),
             McpServerDoctorStatus::Warning(detail) => {
                 panic!("Absolute path should not warn: {detail}")
             }
+            McpServerDoctorStatus::Error(detail) => panic!("unexpected error: {detail}"),
         }
     }
 
@@ -15918,21 +15725,6 @@ mod doctor_mcp_tests {
                 hint,
                 "MCP server 'nordic-mcp' requires OAuth authentication. Run `codewhale mcp login nordic-mcp` to authenticate."
             );
-        }
-    }
-
-    #[test]
-    fn test_self_hosted_relative_is_warning() {
-        #[cfg(unix)]
-        let command = "sh";
-        #[cfg(windows)]
-        let command = "cmd";
-        let server = make_server(Some(command), &["serve", "--mcp"], None);
-        match doctor_check_mcp_server(&server) {
-            McpServerDoctorStatus::Warning(detail) => {
-                assert!(detail.contains("relative"));
-            }
-            other => panic!("Expected Warning for relative path, got {other:?}"),
         }
     }
 
@@ -16006,12 +15798,15 @@ mod doctor_live_probe_tests {
         assert!(!doctor_should_probe_api(
             crate::config::ApiProvider::Ollama,
             "http://127.0.0.1:11434/v1",
-            false,
+            crate::doctor::DoctorProbeRequest::default(),
         ));
         assert!(doctor_should_probe_api(
             crate::config::ApiProvider::Ollama,
             "http://127.0.0.1:11434/v1",
-            true,
+            crate::doctor::DoctorProbeRequest {
+                probe_local: true,
+                ..crate::doctor::DoctorProbeRequest::default()
+            },
         ));
     }
 
@@ -16020,16 +15815,7 @@ mod doctor_live_probe_tests {
         assert!(!doctor_should_probe_api(
             crate::config::ApiProvider::Custom,
             "http://localhost:8000/v1",
-            false,
-        ));
-    }
-
-    #[test]
-    fn hosted_provider_preserves_the_default_live_check() {
-        assert!(doctor_should_probe_api(
-            crate::config::ApiProvider::Deepseek,
-            "https://api.deepseek.com/beta",
-            false,
+            crate::doctor::DoctorProbeRequest::default(),
         ));
     }
 
@@ -16573,71 +16359,6 @@ mod setup_helper_tests {
     }
 
     #[test]
-    fn resolve_api_key_source_reports_env_when_set() {
-        let _guard = crate::test_support::lock_test_env();
-        let prev = std::env::var("DEEPSEEK_API_KEY").ok();
-        let prev_source = std::env::var("DEEPSEEK_API_KEY_SOURCE").ok();
-        unsafe {
-            std::env::set_var("DEEPSEEK_API_KEY", "test-helper-value");
-            std::env::remove_var("DEEPSEEK_API_KEY_SOURCE");
-        }
-        let cfg = Config::default();
-        let source = resolve_api_key_source(&cfg);
-        match prev {
-            Some(value) => unsafe { std::env::set_var("DEEPSEEK_API_KEY", value) },
-            None => unsafe { std::env::remove_var("DEEPSEEK_API_KEY") },
-        }
-        match prev_source {
-            Some(value) => unsafe { std::env::set_var("DEEPSEEK_API_KEY_SOURCE", value) },
-            None => unsafe { std::env::remove_var("DEEPSEEK_API_KEY_SOURCE") },
-        }
-        assert_eq!(source, ApiKeySource::Env);
-    }
-
-    #[test]
-    fn resolve_api_key_source_reports_dispatcher_keyring() {
-        let _guard = crate::test_support::lock_test_env();
-        let prev = std::env::var("DEEPSEEK_API_KEY").ok();
-        let prev_source = std::env::var("DEEPSEEK_API_KEY_SOURCE").ok();
-        unsafe {
-            std::env::set_var("DEEPSEEK_API_KEY", "test-helper-value");
-            std::env::set_var("DEEPSEEK_API_KEY_SOURCE", "keyring");
-        }
-        let cfg = Config::default();
-        let source = resolve_api_key_source(&cfg);
-        match prev {
-            Some(value) => unsafe { std::env::set_var("DEEPSEEK_API_KEY", value) },
-            None => unsafe { std::env::remove_var("DEEPSEEK_API_KEY") },
-        }
-        match prev_source {
-            Some(value) => unsafe { std::env::set_var("DEEPSEEK_API_KEY_SOURCE", value) },
-            None => unsafe { std::env::remove_var("DEEPSEEK_API_KEY_SOURCE") },
-        }
-        assert_eq!(source, ApiKeySource::Keyring);
-    }
-
-    #[test]
-    fn resolve_api_key_source_reports_standalone_secret_store() {
-        let _lock = crate::test_support::lock_test_env();
-        let temp = TempDir::new().expect("temp home");
-        let codewhale_home = temp.path().join("codewhale-home");
-        std::fs::create_dir_all(&codewhale_home).expect("create codewhale home");
-        let _home =
-            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", codewhale_home.as_os_str());
-        let _backend = crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
-        let _deepseek_key = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY");
-        let _deepseek_source = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY_SOURCE");
-        codewhale_secrets::Secrets::auto_detect()
-            .set("deepseek", "standalone-secret")
-            .expect("save secret");
-
-        assert_eq!(
-            resolve_api_key_source(&Config::default()),
-            ApiKeySource::Keyring
-        );
-    }
-
-    #[test]
     fn custom_provider_env_source_precedes_saved_secret_store() {
         let _lock = crate::test_support::lock_test_env();
         let temp = TempDir::new().expect("temp home");
@@ -16674,7 +16395,7 @@ mod setup_helper_tests {
             ..Config::default()
         };
 
-        assert_eq!(resolve_api_key_source(&config), ApiKeySource::Env);
+        assert_eq!(resolve_api_key_source(&config), ApiKeySource::EnvDeclared);
         assert_eq!(
             config.deepseek_api_key().expect("custom key"),
             "declared-env-key"
@@ -16716,7 +16437,7 @@ mod setup_helper_tests {
             ..Config::default()
         };
 
-        assert_eq!(resolve_api_key_source(&config), ApiKeySource::Missing);
+        assert_eq!(resolve_api_key_source(&config), ApiKeySource::Unknown);
         assert!(config.deepseek_api_key().is_err());
     }
 
@@ -16735,7 +16456,7 @@ mod setup_helper_tests {
             ..Config::default()
         };
 
-        assert_eq!(resolve_api_key_source(&config), ApiKeySource::Missing);
+        assert_eq!(resolve_api_key_source(&config), ApiKeySource::Unknown);
         assert!(config.deepseek_api_key().is_err());
     }
 
@@ -16781,7 +16502,7 @@ mod setup_helper_tests {
             Some(value) => unsafe { std::env::set_var("DEEPSEEK_API_KEY_SOURCE", value) },
             None => unsafe { std::env::remove_var("DEEPSEEK_API_KEY_SOURCE") },
         }
-        assert_eq!(source, ApiKeySource::Config);
+        assert_eq!(source, ApiKeySource::ConfigDeclared);
     }
 
     #[test]
@@ -16798,7 +16519,7 @@ mod setup_helper_tests {
 
         let source = resolve_api_key_source(&cfg);
 
-        assert_eq!(source, ApiKeySource::Env);
+        assert_eq!(source, ApiKeySource::Unknown);
     }
 
     #[test]
@@ -16822,7 +16543,7 @@ mod setup_helper_tests {
 
         let source = resolve_api_key_source(&cfg);
 
-        assert_eq!(source, ApiKeySource::Missing);
+        assert_eq!(source, ApiKeySource::ExternalAuthDeclared);
         assert!(cfg.deepseek_api_key().is_err());
     }
 
@@ -16847,7 +16568,7 @@ mod setup_helper_tests {
 
         let source = resolve_api_key_source(&cfg);
 
-        assert_eq!(source, ApiKeySource::Missing);
+        assert_eq!(source, ApiKeySource::ExternalAuthDeclared);
         assert!(cfg.deepseek_api_key().is_err());
     }
 
@@ -16865,15 +16586,11 @@ mod setup_helper_tests {
 
         let source = resolve_api_key_source(&cfg);
 
-        assert_eq!(source, ApiKeySource::Missing);
+        assert_eq!(source, ApiKeySource::Unknown);
     }
 
     #[test]
     fn provider_status_helpers_use_provider_metadata() {
-        assert_eq!(
-            provider_env_vars_label(crate::config::ApiProvider::NvidiaNim),
-            "NVIDIA_API_KEY / NVIDIA_NIM_API_KEY / DEEPSEEK_API_KEY"
-        );
         assert_eq!(
             provider_config_table_key(crate::config::ApiProvider::Anthropic),
             "anthropic"
@@ -16881,9 +16598,6 @@ mod setup_helper_tests {
         assert_eq!(
             provider_config_table_key(crate::config::ApiProvider::SiliconflowCn),
             "siliconflow_cn"
-        );
-        assert!(
-            provider_auth_hint(crate::config::ApiProvider::OpenaiCodex).contains("PROVIDERS.md")
         );
     }
 

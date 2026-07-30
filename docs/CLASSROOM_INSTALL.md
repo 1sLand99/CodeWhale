@@ -77,7 +77,7 @@ Run these on **each machine** (or spot-check a sample):
 | # | Command | Expected output | Done? |
 |---|---------|-----------------|-------|
 | 1 | `codewhale --version` | Prints version string | ☐ |
-| 2 | `codewhale doctor` | All checks pass | ☐ |
+| 2 | `codewhale doctor` | Prints the offline structural report; live checks remain not probed | ☐ |
 | 3 | `codewhale-tui --version` | Prints version string | ☐ |
 
 If `codewhale` is not found, the user may need to open a **new** terminal window for PATH changes to take effect.
@@ -159,7 +159,7 @@ $newPath = ($currentPath -split ";" | Where-Object { $_ -and ($_ -ne $binDir) })
 | `MISSING_COMPANION_BINARY` | Ensure both `codewhale.exe` and `codewhale-tui.exe` are in the same directory |
 | `TLS handshake` errors | Check proxy settings or use the CNB mirror (see [INSTALL.md](INSTALL.md)) |
 | Antivirus quarantines binaries | Add the install directory to AV exclusions |
-| `codewhale doctor` fails API check | Verify `OPENAI_API_KEY` is set or `config.toml` exists |
+| `codewhale doctor` reports credential state as unknown/not probed | This is the safe offline default. Verify the declared source, then use `codewhale doctor --probe-api` only on an approved connected machine when a live check is required. |
 
 ---
 
