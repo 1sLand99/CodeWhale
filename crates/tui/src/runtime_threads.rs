@@ -16,7 +16,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
@@ -63,6 +63,9 @@ const MAX_PENDING_DYNAMIC_TOOL_CALLS: usize = 128;
 const SUMMARY_LIMIT: usize = 280;
 const STREAM_DELTA_BATCH_MAX_LATENCY: Duration = Duration::from_millis(32);
 const STREAM_DELTA_BATCH_MAX_BYTES: usize = 16 * 1024;
+const EVENT_TRANSACTION_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+const EVENT_TRANSACTION_LOCK_POLL: Duration = Duration::from_millis(5);
+const EVENT_TRANSACTION_LOCK_FILE: &str = "events.lock";
 const REQUEST_USER_INPUT_TOOL_NAME: &str = "request_user_input";
 const REDACTED_USER_INPUT_RECEIPT: &str = "User input submitted";
 pub(crate) const MAX_ROUTED_USAGE_RECORDS_PER_TURN: usize = 64;
@@ -699,6 +702,8 @@ pub(crate) struct RuntimeEventReplay {
     pub(crate) batches: mpsc::Receiver<std::result::Result<Vec<RuntimeEventRecord>, String>>,
 }
 
+type RuntimeEventReader = BufReader<std::io::Take<File>>;
+
 enum RuntimeEventMatch {
     TurnCompleted { turn_id: String },
     DynamicTerminal { turn_id: String, call_id: String },
@@ -732,6 +737,10 @@ struct RuntimeEventAppendError {
     append_error: String,
     rollback_error: Option<String>,
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("Runtime event lock timed out after {0:?}")]
+struct RuntimeEventLockTimeout(Duration);
 
 impl RuntimeEventAppendError {
     const fn retry_safe(&self) -> bool {
@@ -773,7 +782,7 @@ pub struct RuntimeThreadStore {
     items_dir: PathBuf,
     events_dir: PathBuf,
     state_path: PathBuf,
-    state: Arc<Mutex<RuntimeStoreState>>,
+    event_lock_path: PathBuf,
     /// Serializes load-modify-save operations on thread records. The guard is
     /// synchronous and must never cross an `.await`; JSON records are small,
     /// and one global guard avoids per-thread lock lifecycle races.
@@ -786,6 +795,7 @@ pub struct RuntimeThreadStore {
 impl RuntimeThreadStore {
     pub fn open(root: PathBuf) -> Result<Self> {
         let root = checked_runtime_store_root(root)?;
+        ensure_runtime_store_dir(&root)?;
         let threads_dir = root.join("threads");
         let turns_dir = root.join("turns");
         let items_dir = root.join("items");
@@ -794,30 +804,68 @@ impl RuntimeThreadStore {
         ensure_runtime_store_dir(&turns_dir)?;
         ensure_runtime_store_dir(&items_dir)?;
         ensure_runtime_store_dir(&events_dir)?;
-        repair_torn_event_log_tails(&events_dir)?;
-
         let state_path = root.join("state.json");
-        reject_symlinked_store_file(&state_path)?;
-        let state = if state_path.exists() {
-            let raw = read_store_file(&state_path)?;
-            serde_json::from_str::<RuntimeStoreState>(&raw)
-                .with_context(|| format!("Failed to parse {}", state_path.display()))?
-        } else {
-            let default = RuntimeStoreState::default();
-            write_json_atomic(&state_path, &default)?;
-            default
-        };
-
-        Ok(Self {
+        let store = Self {
             threads_dir,
             turns_dir,
             items_dir,
             events_dir,
             state_path,
-            state: Arc::new(Mutex::new(state)),
+            event_lock_path: root.join(EVENT_TRANSACTION_LOCK_FILE),
             thread_mutation: Arc::new(parking_lot::Mutex::new(())),
             turn_mutation: Arc::new(parking_lot::Mutex::new(())),
-        })
+        };
+        store.with_event_transaction(EVENT_TRANSACTION_LOCK_TIMEOUT, || {
+            repair_torn_event_log_tails(&store.events_dir)?;
+            if store.state_path.exists() {
+                load_runtime_store_state(&store.state_path)?;
+            } else {
+                write_json_atomic(&store.state_path, &RuntimeStoreState::default())?;
+            }
+            Ok(())
+        })?;
+        Ok(store)
+    }
+
+    fn open_event_lock(&self) -> Result<File> {
+        let file =
+            open_runtime_store_file(&self.event_lock_path, "Runtime event lock", |options| {
+                options.create(true).truncate(false).read(true).write(true);
+            })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            file.set_permissions(fs::Permissions::from_mode(0o600))
+                .context("Failed to secure Runtime event lock")?;
+        }
+        Ok(file)
+    }
+
+    fn with_event_transaction<T>(
+        &self,
+        timeout: Duration,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let mut lock = fd_lock::RwLock::new(self.open_event_lock()?);
+        let started = Instant::now();
+        let mut operation = Some(operation);
+        loop {
+            match lock
+                .try_write()
+                .map(|_guard| operation.take().expect("event transaction runs once")())
+            {
+                Ok(result) => return result,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    wait_for_event_lock(started, timeout)?;
+                }
+                Err(error) => return Err(error).context("Failed to lock Runtime events"),
+            }
+        }
     }
 
     fn record_path(base: &Path, id: &str, extension: &str, label: &str) -> Result<PathBuf> {
@@ -1072,91 +1120,122 @@ impl RuntimeThreadStore {
         if let Some(item_id) = item_id {
             validated_record_id(item_id, "item id")?;
         }
-        let path = self.events_path(thread_id)?;
-        reject_symlinked_store_dir(&self.events_dir)?;
-        reject_symlinked_store_file(&path)?;
+        let store = self.clone();
+        let thread_id = thread_id.to_string();
+        let turn_id = turn_id.map(ToString::to_string);
+        let item_id = item_id.map(ToString::to_string);
+        let event = event.into();
+        tokio::task::spawn_blocking(move || {
+            store.append_event_transaction(
+                thread_id,
+                turn_id,
+                item_id,
+                event,
+                payload,
+                EVENT_TRANSACTION_LOCK_TIMEOUT,
+            )
+        })
+        .await
+        .context("Runtime event transaction worker failed")?
+    }
 
-        let mut state = self.state.lock().await;
-        let seq = state.next_seq;
-        state.next_seq = state.next_seq.saturating_add(1);
-        write_json_atomic(&self.state_path, &*state)?;
+    fn append_event_transaction(
+        &self,
+        thread_id: String,
+        turn_id: Option<String>,
+        item_id: Option<String>,
+        event: String,
+        payload: Value,
+        lock_timeout: Duration,
+    ) -> Result<RuntimeEventRecord> {
+        let path = self.events_path(&thread_id)?;
+        self.with_event_transaction(lock_timeout, || {
+            reject_symlinked_store_dir(&self.events_dir)?;
+            repair_torn_event_log_tail(&path)?;
+            let mut state = load_runtime_store_state(&self.state_path)?;
+            let seq = state.next_seq;
+            state.next_seq = seq
+                .checked_add(1)
+                .context("Runtime event sequence exhausted")?;
+            write_json_atomic(&self.state_path, &state)?;
 
-        let record = RuntimeEventRecord {
-            schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
-            seq,
-            timestamp: Utc::now(),
-            thread_id: thread_id.to_string(),
-            turn_id: turn_id.map(ToString::to_string),
-            item_id: item_id.map(ToString::to_string),
-            event: event.into(),
-            payload,
-        };
-
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .with_context(|| format!("Failed to open {}", path.display()))?;
-        let original_len = file
-            .metadata()
-            .with_context(|| format!("Failed to inspect {}", path.display()))?
-            .len();
-        let mut line = serde_json::to_vec(&record)?;
-        // The trailing newline is the JSONL transaction's commit marker. A
-        // crash after all JSON bytes reach the file but before this delimiter
-        // is written leaves a parseable yet uncommitted tail; startup removes
-        // that tail and deliberately does not reuse its reserved sequence.
-        line.push(b'\n');
-        let append_result = (|| -> std::io::Result<()> {
-            file.write_all(&line)?;
-            file.flush()?;
-            #[cfg(test)]
-            if take_test_event_append_fault(thread_id, EventAppendTestFault::AfterFlush) {
-                return Err(std::io::Error::other(
-                    "injected Runtime event failure after flush",
-                ));
-            }
-            file.sync_all()?;
-            #[cfg(test)]
-            if take_test_event_append_fault(thread_id, EventAppendTestFault::AfterSync) {
-                return Err(std::io::Error::other(
-                    "injected Runtime event failure after fsync",
-                ));
-            }
-            Ok(())
-        })();
-        if let Err(append_error) = append_result {
-            // A failed flush/fsync can still leave the complete JSONL record
-            // visible (or even durable). Roll back to the exact pre-append
-            // offset and fsync that truncation before reporting a retryable
-            // error. If rollback itself fails, classify the write as
-            // indeterminate so callers never restore/retry and duplicate a
-            // possibly committed terminal receipt.
-            // Rust intentionally opens append-mode files on Windows without
-            // FILE_WRITE_DATA. That preserves kernel append semantics but
-            // means the append handle cannot truncate. Reopen the exact path
-            // with ordinary write authority only on the failure path so the
-            // success path remains an atomic append on every platform.
-            drop(file);
-            let rollback_result = rollback_failed_event_append(&path, original_len);
-            let error = match rollback_result {
-                Ok(()) => RuntimeEventAppendError {
-                    disposition: EventAppendFailureDisposition::RolledBack,
-                    append_error: append_error.to_string(),
-                    rollback_error: None,
-                },
-                Err(rollback_error) => RuntimeEventAppendError {
-                    disposition: EventAppendFailureDisposition::Indeterminate,
-                    append_error: append_error.to_string(),
-                    rollback_error: Some(rollback_error.to_string()),
-                },
+            let record = RuntimeEventRecord {
+                schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
+                seq,
+                timestamp: Utc::now(),
+                thread_id,
+                turn_id,
+                item_id,
+                event,
+                payload,
             };
-            return Err(anyhow!(error));
-        }
-        // Keep the global sequence lock through the append so no later event
-        // can reach disk or broadcast before this sequence number.
-        drop(state);
-        Ok(record)
+
+            let mut file = open_runtime_store_file(&path, "event append", |options| {
+                options.create(true).append(true);
+            })?;
+            let rollback_file =
+                open_runtime_store_file(&path, "Runtime event rollback", |options| {
+                    options.write(true);
+                })?;
+            validate_same_runtime_store_file_handles(&file, &rollback_file, &path)?;
+            let original_len = file
+                .metadata()
+                .with_context(|| format!("Failed to inspect {}", path.display()))?
+                .len();
+            let mut line = serde_json::to_vec(&record)?;
+            // The trailing newline is the JSONL transaction's commit marker. A
+            // crash after all JSON bytes reach the file but before this delimiter
+            // is written leaves a parseable yet uncommitted tail; startup removes
+            // that tail and deliberately does not reuse its reserved sequence.
+            line.push(b'\n');
+            let append_result = (|| -> std::io::Result<()> {
+                file.write_all(&line)?;
+                file.flush()?;
+                #[cfg(test)]
+                if take_test_event_append_fault(&record.thread_id, EventAppendTestFault::AfterFlush)
+                {
+                    return Err(std::io::Error::other(
+                        "injected Runtime event failure after flush",
+                    ));
+                }
+                file.sync_all()?;
+                #[cfg(test)]
+                if take_test_event_append_fault(&record.thread_id, EventAppendTestFault::AfterSync)
+                {
+                    return Err(std::io::Error::other(
+                        "injected Runtime event failure after fsync",
+                    ));
+                }
+                Ok(())
+            })();
+            if let Err(append_error) = append_result {
+                // A failed flush/fsync can still leave the complete JSONL record
+                // visible (or even durable). Roll back to the exact pre-append
+                // offset and fsync that truncation before reporting a retryable
+                // error. If rollback itself fails, classify the write as
+                // indeterminate so callers never restore/retry and duplicate a
+                // possibly committed terminal receipt.
+                // The pre-opened rollback handle was identity-checked before
+                // any bytes were written and stays live across this transaction.
+                drop(file);
+                let rollback_result =
+                    rollback_failed_event_append_handle(&rollback_file, original_len);
+                let error = match rollback_result {
+                    Ok(()) => RuntimeEventAppendError {
+                        disposition: EventAppendFailureDisposition::RolledBack,
+                        append_error: append_error.to_string(),
+                        rollback_error: None,
+                    },
+                    Err(rollback_error) => RuntimeEventAppendError {
+                        disposition: EventAppendFailureDisposition::Indeterminate,
+                        append_error: append_error.to_string(),
+                        rollback_error: Some(rollback_error.to_string()),
+                    },
+                };
+                return Err(anyhow!(error));
+            }
+            Ok(record)
+        })
     }
 
     pub fn events_since(
@@ -1165,14 +1244,9 @@ impl RuntimeThreadStore {
         since_seq: Option<u64>,
     ) -> Result<Vec<RuntimeEventRecord>> {
         let path = self.events_path(thread_id)?;
-        reject_symlinked_store_dir(&self.events_dir)?;
-        reject_symlinked_store_file(&path)?;
-        if !path.exists() {
+        let Some(mut reader) = self.open_event_reader(thread_id)? else {
             return Ok(Vec::new());
-        }
-        let file =
-            File::open(&path).with_context(|| format!("Failed to open {}", path.display()))?;
-        let mut reader = BufReader::new(file);
+        };
         let mut out = Vec::new();
         while let Some(event) = read_complete_event(&mut reader, &path)? {
             if let Some(since) = since_seq
@@ -1210,16 +1284,22 @@ impl RuntimeThreadStore {
         }
     }
 
-    fn open_event_reader(&self, thread_id: &str) -> Result<Option<BufReader<File>>> {
+    fn open_event_reader(&self, thread_id: &str) -> Result<Option<RuntimeEventReader>> {
         let path = self.events_path(thread_id)?;
-        reject_symlinked_store_dir(&self.events_dir)?;
-        reject_symlinked_store_file(&path)?;
-        if !path.exists() {
-            return Ok(None);
-        }
-        let file =
-            File::open(&path).with_context(|| format!("Failed to open {}", path.display()))?;
-        Ok(Some(BufReader::new(file)))
+        self.with_event_transaction(EVENT_TRANSACTION_LOCK_TIMEOUT, || {
+            reject_symlinked_store_dir(&self.events_dir)?;
+            if !path.exists() {
+                return Ok(None);
+            }
+            let file = open_runtime_store_file(&path, "Runtime event replay", |options| {
+                options.read(true);
+            })?;
+            let committed_len = file
+                .metadata()
+                .with_context(|| format!("Failed to inspect {}", path.display()))?
+                .len();
+            Ok(Some(BufReader::new(file.take(committed_len))))
+        })
     }
 
     fn contains_event(&self, thread_id: &str, expected: &RuntimeEventMatch) -> Result<bool> {
@@ -1337,9 +1417,17 @@ impl RuntimeThreadStore {
         Ok(())
     }
 
-    pub async fn current_seq(&self) -> u64 {
-        let state = self.state.lock().await;
-        state.next_seq.saturating_sub(1)
+    pub async fn current_seq(&self) -> Result<u64> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || {
+            store.with_event_transaction(EVENT_TRANSACTION_LOCK_TIMEOUT, || {
+                Ok(load_runtime_store_state(&store.state_path)?
+                    .next_seq
+                    .saturating_sub(1))
+            })
+        })
+        .await
+        .context("Runtime event cursor worker failed")?
     }
 }
 
@@ -1898,7 +1986,7 @@ struct RecoveredTurnReceipt {
 ///   published, or while a snapshot captures its cursor and reads projections.
 /// - `RuntimeThreadManager::recovery_flush` — serializes deferred receipt
 ///   reconciliation before it acquires a projection lock and `event_emit`.
-/// - `RuntimeThreadStore::state` — protects the monotonic event sequence counter.
+/// - the Runtime event-file transaction lock — serializes writes across processes.
 /// - `RuntimeThreadStore::thread_mutation` — synchronizes short, synchronous
 ///   thread-record load-modify-save transactions and never crosses `.await`.
 /// - `RuntimeThreadStore::turn_mutation` — does the same for turn records.
@@ -3767,7 +3855,7 @@ impl RuntimeThreadManager {
         // after it (old item + replayable delta), never both.
         let projection_lock = self.projection_lock(id);
         let _projection = projection_lock.lock().await;
-        let latest_seq = self.store.current_seq().await;
+        let latest_seq = self.store.current_seq().await?;
 
         #[cfg(test)]
         let snapshot_test_hook = { self.snapshot_test_hook.lock().take() };
@@ -7577,18 +7665,107 @@ fn reject_symlinked_store_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn rollback_failed_event_append(path: &Path, original_len: u64) -> Result<()> {
+fn open_runtime_store_file(
+    path: &Path,
+    purpose: &str,
+    configure: impl FnOnce(&mut OpenOptions),
+) -> Result<File> {
     reject_symlinked_store_file(path)?;
-    let rollback_file = OpenOptions::new()
-        .write(true)
+    let mut options = OpenOptions::new();
+    configure(&mut options);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options
         .open(path)
-        .with_context(|| format!("Failed to reopen {} for rollback", path.display()))?;
+        .with_context(|| format!("Failed to open {purpose} {}", path.display()))?;
+    runtime_store_file_identity(&file)
+        .with_context(|| format!("Invalid {purpose} {}", path.display()))?;
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn runtime_store_file_identity(file: &File) -> Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = file.metadata()?;
+    anyhow::ensure!(
+        metadata.is_file() && metadata.nlink() == 1,
+        "not one regular file"
+    );
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(windows)]
+fn runtime_store_file_identity(file: &File) -> Result<(u64, u64)> {
+    use std::os::windows::fs::MetadataExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, GetFileInformationByHandle,
+    };
+
+    let metadata = file.metadata()?;
+    let safe = metadata.is_file() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0;
+    anyhow::ensure!(safe, "not a regular non-reparse file");
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the handle and writable output remain valid for the call.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return Err(std::io::Error::last_os_error()).context("Inspect Runtime store file identity");
+    }
+    anyhow::ensure!(info.nNumberOfLinks == 1, "has multiple filesystem links");
+    Ok((
+        u64::from(info.dwVolumeSerialNumber),
+        (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+    ))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn runtime_store_file_identity(file: &File) -> Result<(u64, u64)> {
+    anyhow::ensure!(file.metadata()?.is_file(), "must be a regular file");
+    Ok((0, 0))
+}
+
+fn validate_same_runtime_store_file_handles(
+    first: &File,
+    second: &File,
+    path: &Path,
+) -> Result<()> {
+    let first = runtime_store_file_identity(first)?;
+    let second = runtime_store_file_identity(second)?;
+    anyhow::ensure!(
+        first == second,
+        "Runtime event file changed: {}",
+        path.display()
+    );
+    Ok(())
+}
+
+fn wait_for_event_lock(started: Instant, timeout: Duration) -> Result<()> {
+    let elapsed = started.elapsed();
+    if elapsed >= timeout {
+        return Err(anyhow!(RuntimeEventLockTimeout(timeout)));
+    }
+    std::thread::sleep(EVENT_TRANSACTION_LOCK_POLL.min(timeout - elapsed));
+    Ok(())
+}
+
+fn rollback_failed_event_append_handle(rollback_file: &File, original_len: u64) -> Result<()> {
     rollback_file
         .set_len(original_len)
-        .with_context(|| format!("Failed to roll back {}", path.display()))?;
+        .context("Failed to roll back Runtime event")?;
     rollback_file
         .sync_all()
-        .with_context(|| format!("Failed to sync rollback for {}", path.display()))
+        .context("Failed to sync Runtime event rollback")
 }
 
 fn reject_symlinked_store_dir(path: &Path) -> Result<()> {
@@ -7613,7 +7790,7 @@ fn ensure_runtime_store_dir(path: &Path) -> Result<()> {
 }
 
 fn read_complete_event(
-    reader: &mut BufReader<File>,
+    reader: &mut impl BufRead,
     path: &Path,
 ) -> Result<Option<RuntimeEventRecord>> {
     loop {
@@ -7657,7 +7834,6 @@ fn repair_torn_event_log_tails(events_dir: &Path) -> Result<()> {
         {
             continue;
         }
-        reject_symlinked_store_file(&path)?;
         if !entry
             .file_type()
             .with_context(|| format!("Failed to inspect {}", path.display()))?
@@ -7665,64 +7841,75 @@ fn repair_torn_event_log_tails(events_dir: &Path) -> Result<()> {
         {
             continue;
         }
-
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .with_context(|| format!("Failed to open {} for tail recovery", path.display()))?;
-        let len = file
-            .metadata()
-            .with_context(|| format!("Failed to inspect {}", path.display()))?
-            .len();
-        if len == 0 {
-            continue;
-        }
-
-        file.seek(SeekFrom::End(-1))?;
-        let mut last = [0_u8; 1];
-        file.read_exact(&mut last)?;
-        if last[0] == b'\n' {
-            continue;
-        }
-
-        let mut search_end = len;
-        let mut truncate_at = 0_u64;
-        let mut buffer = [0_u8; 8 * 1024];
-        let buffer_len = u64::try_from(buffer.len()).expect("event recovery buffer fits u64");
-        while search_end > 0 {
-            let chunk_len = usize::try_from(search_end.min(buffer_len))
-                .expect("event recovery chunk length fits usize");
-            let chunk_len_u64 =
-                u64::try_from(chunk_len).expect("event recovery chunk length fits u64");
-            let chunk_start = search_end - chunk_len_u64;
-            file.seek(SeekFrom::Start(chunk_start))?;
-            file.read_exact(&mut buffer[..chunk_len])?;
-            if let Some(index) = buffer[..chunk_len].iter().rposition(|byte| *byte == b'\n') {
-                truncate_at = chunk_start
-                    + u64::try_from(index).expect("event recovery newline index fits u64")
-                    + 1;
-                break;
-            }
-            search_end = chunk_start;
-        }
-
-        file.set_len(truncate_at)
-            .with_context(|| format!("Failed to truncate torn tail in {}", path.display()))?;
-        file.sync_all()
-            .with_context(|| format!("Failed to sync repaired {}", path.display()))?;
-        tracing::warn!(
-            path = %path.display(),
-            removed_bytes = len.saturating_sub(truncate_at),
-            "Recovered an unterminated Runtime event-log tail"
-        );
+        repair_torn_event_log_tail(&path)?;
     }
+    Ok(())
+}
+
+fn repair_torn_event_log_tail(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut file = open_runtime_store_file(path, "Runtime event tail recovery", |options| {
+        options.read(true).write(true);
+    })?;
+    let len = file
+        .metadata()
+        .with_context(|| format!("Failed to inspect {}", path.display()))?
+        .len();
+    if len == 0 {
+        return Ok(());
+    }
+
+    file.seek(SeekFrom::End(-1))?;
+    let mut last = [0_u8; 1];
+    file.read_exact(&mut last)?;
+    if last[0] == b'\n' {
+        return Ok(());
+    }
+
+    let mut search_end = len;
+    let mut truncate_at = 0_u64;
+    let mut buffer = [0_u8; 8 * 1024];
+    let buffer_len = u64::try_from(buffer.len()).expect("event recovery buffer fits u64");
+    while search_end > 0 {
+        let chunk_len = usize::try_from(search_end.min(buffer_len))
+            .expect("event recovery chunk length fits usize");
+        let chunk_len_u64 = u64::try_from(chunk_len).expect("event recovery chunk length fits u64");
+        let chunk_start = search_end - chunk_len_u64;
+        file.seek(SeekFrom::Start(chunk_start))?;
+        file.read_exact(&mut buffer[..chunk_len])?;
+        if let Some(index) = buffer[..chunk_len].iter().rposition(|byte| *byte == b'\n') {
+            truncate_at = chunk_start
+                + u64::try_from(index).expect("event recovery newline index fits u64")
+                + 1;
+            break;
+        }
+        search_end = chunk_start;
+    }
+
+    file.set_len(truncate_at)
+        .with_context(|| format!("Failed to truncate torn tail in {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("Failed to sync repaired {}", path.display()))?;
+    tracing::warn!(
+        path = %path.display(),
+        removed_bytes = len.saturating_sub(truncate_at),
+        "Recovered an unterminated Runtime event-log tail"
+    );
     Ok(())
 }
 
 fn read_store_file(path: &Path) -> Result<String> {
     reject_symlinked_store_file(path)?;
     fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))
+}
+
+fn load_runtime_store_state(path: &Path) -> Result<RuntimeStoreState> {
+    let file = open_runtime_store_file(path, "Runtime store state", |options| {
+        options.read(true);
+    })?;
+    serde_json::from_reader(file).with_context(|| format!("Failed to parse {}", path.display()))
 }
 
 fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
