@@ -845,7 +845,6 @@
     "FooterWorkedChip": "ha treballat {duration}",
     "FleetDraftTitle": "Perfil de Fleet — esborrany de {model_label} (g desa)",
     "FleetDraftHeader": "# .codewhale/agents/{name}\n# Esborrany de {model_label}, validat i limitat per Codewhale.\n# Els permisos es mantenen al mínim del Fleet: sense shell, sense confiança, aprovació requerida.\n# No es desa res fins que premis g a l'assistent.\n\n",
-    "FleetPreviewHeader": "# .codewhale/agents/{name}\n# Perfil inicial determinista generat per Codewhale a partir de les teves eleccions de rol/model.\n# Els permisos es mantenen al mínim del Fleet: sense shell, sense confiança, aprovació requerida.\n# No es desa res fins que premis Enter o g a l'assistent.\n\n",
     "SetupRemoteOnRampText": "Incorporació al runtime remot\n\n/setup només mostra dades del runtime remot. No genera paquets de desplegament, no escriu credencials, no crida CLI de núvol ni executa `remote-setup`.\n\nDades actuals:\n- Núvols: {clouds_result}\n- Ponts de xat: {bridges_result}\n- Proveïdors: {providers_result}\n- Mode: {mode_result}\n\nPer generar un paquet de desplegament, executa explícitament en un terminal normal:\n\n```sh\n{command}\n```\n\nEl RUNBOOK generat inclou passos de l'amfitrió per a revisió humana. `--apply` continua sense implementar; no ho tractis com un desplegament automàtic.",
     "ApprovalDescSafe": "Sol·licita una operació segura/de només lectura.",
     "ApprovalDescFileWrite": "Sol·licita modificar un fitxer. Confirma el camí i el contingut.",

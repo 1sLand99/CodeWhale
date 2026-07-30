@@ -459,8 +459,6 @@ pub struct FleetSetupView {
     /// bounded by the untrusted gate). Cleared when the selection changes so
     /// a stale draft can never be saved against fresh answers.
     model_draft: Option<Box<crate::fleet::profile::FleetProfileDraft>>,
-    /// Display label of the model that authored `model_draft`.
-    model_draft_label: Option<String>,
     /// Exact rendered TOML preview for `model_draft` (header comment + the
     /// deterministic bytes saving would persist). Rendered inline on the
     /// Review step — never in a separate pager (#4093): a standalone pager
@@ -509,7 +507,6 @@ impl FleetSetupView {
         let old_review_scroll = self.review_scroll;
         let old_profile_status = self.profile_status.clone();
         let old_model_draft = self.model_draft.clone();
-        let old_model_draft_label = self.model_draft_label.clone();
         let old_model_draft_preview = self.model_draft_preview.clone();
 
         *self = Self::from_snapshot(snapshot);
@@ -524,7 +521,6 @@ impl FleetSetupView {
         self.review_scroll = old_review_scroll;
         self.profile_status = old_profile_status;
         self.model_draft = old_model_draft;
-        self.model_draft_label = old_model_draft_label;
         self.model_draft_preview = old_model_draft_preview;
     }
 
@@ -587,7 +583,6 @@ impl FleetSetupView {
             profile_status: None,
             review_scroll: 0,
             model_draft: None,
-            model_draft_label: None,
             model_draft_preview: None,
             model_choices,
             model_routes,
@@ -637,7 +632,6 @@ impl FleetSetupView {
             draft.render_toml()
         );
         self.model_draft = Some(draft);
-        self.model_draft_label = Some(model_label);
         self.model_draft_preview = Some(content.clone());
         self.review_scroll = 0;
         (title, content)
@@ -764,7 +758,6 @@ impl FleetSetupView {
     /// A draft is only valid for the answers it was requested against.
     fn discard_model_draft(&mut self) {
         self.model_draft = None;
-        self.model_draft_label = None;
         self.model_draft_preview = None;
     }
 
@@ -783,7 +776,6 @@ impl FleetSetupView {
         }
     }
 
-    /// Advance to the next step, or — on the review step — preview the exact
     /// Re-stat the profile directory. Called on the two transitions that can
     /// change the answer — entering Review, and toggling project/user scope —
     /// so the Review step never touches the filesystem while painting.
@@ -841,7 +833,7 @@ impl FleetSetupView {
                 }
                 ViewAction::None
             }
-            Step::Review => self.preview_starter_profile_action(),
+            Step::Review => self.commit_starter_profile_action(),
         }
     }
 
@@ -861,24 +853,15 @@ impl FleetSetupView {
         }
     }
 
-    /// Preview the exact starter profile TOML the next save keypress would
-    /// persist. Renders inline within the Review step's own scrollable pane —
-    /// deliberately NOT via `ViewEvent::OpenTextPager` (#4093): a standalone
-    /// pager view has its own `g`/`G` scroll bindings and would swallow the
-    /// save keypress, forcing an Esc-then-g round trip to actually save.
-    fn preview_starter_profile_action(&mut self) -> ViewAction {
-        let draft = self.starter_profile_draft();
-        let header = tr(self.snapshot.locale, MessageId::FleetPreviewHeader)
-            .replace("{name}", &draft.file_name());
-        self.model_draft_preview = Some(format!(
-            "{}{}",
-            self.scope_preview_header(header),
-            draft.render_toml()
-        ));
-        self.model_draft = Some(draft);
-        self.model_draft_label = Some("Codewhale starter".to_string());
-        self.review_scroll = 0;
-        ViewAction::None
+    /// Persist the deterministic starter profile directly from the Review
+    /// summary. Unlike a model-authored draft, every field is derived from the
+    /// structured choices already visible on this screen, so a second TOML
+    /// ratification state adds no trust boundary.
+    fn commit_starter_profile_action(&self) -> ViewAction {
+        ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested {
+            draft: self.starter_profile_draft(),
+            scope: self.profile_scope,
+        })
     }
 
     /// Build a deterministic starter profile for the current role/model
@@ -932,11 +915,11 @@ impl FleetSetupView {
                     hints.push(ActionHint::new("Enter", "Save profile"));
                     hints.push(ActionHint::new("g", "Save profile"));
                     hints.push(ActionHint::new("m", "redraft"));
-                } else if self.snapshot.provider_ready {
-                    hints.push(ActionHint::new("Enter", "preview"));
-                    hints.push(ActionHint::new("m", "model draft"));
                 } else {
-                    hints.push(ActionHint::new("Enter", "preview"));
+                    hints.push(ActionHint::new("Enter/g", "save"));
+                    if self.snapshot.provider_ready {
+                        hints.push(ActionHint::new("m", "model draft"));
+                    }
                 }
                 hints.push(ActionHint::new("←", "back"));
             }
@@ -1058,15 +1041,17 @@ impl ModalView for FleetSetupView {
                     locale: self.snapshot.locale,
                 })
             }
-            KeyCode::Char('g') if self.step == Step::Review => match self.model_draft.clone() {
-                Some(draft) => {
-                    ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested {
-                        draft,
-                        scope: self.profile_scope,
-                    })
-                }
-                None => ViewAction::None,
-            },
+            KeyCode::Char('g') if self.step == Step::Review => {
+                self.model_draft.clone().map_or_else(
+                    || self.commit_starter_profile_action(),
+                    |draft| {
+                        ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested {
+                            draft,
+                            scope: self.profile_scope,
+                        })
+                    },
+                )
+            }
             KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')
                 if self.step == Step::Review && self.model_draft.is_some() =>
             {
@@ -1385,7 +1370,7 @@ impl FleetSetupView {
             &mut lines,
             "Profile",
             format!(
-                "{}/{file_stem}.toml  ·  {profile_value} present. Preview shows the exact starter profile; nothing is written until you save.",
+                "{}/{file_stem}.toml  ·  {profile_value} present. Press Enter or g once to save the deterministic starter profile.",
                 self.profile_scope.display_dir(),
             ),
         );
@@ -1872,16 +1857,22 @@ mod tests {
     }
 
     #[test]
-    fn ratify_is_inert_without_a_draft_and_commits_with_one() {
+    fn review_saves_starter_or_ratifies_installed_model_draft() {
         let mut view = FleetSetupView::from_snapshot(snapshot());
         to_review(&mut view);
 
-        // No draft installed: g does nothing, m is the offered action.
-        assert!(matches!(
-            view.handle_key(key(KeyCode::Char('g'))),
-            ViewAction::None
-        ));
+        // A structured starter draft is save-ready from the summary.
+        let action = view.handle_key(key(KeyCode::Char('g')));
+        let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft, scope }) =
+            action
+        else {
+            panic!("expected starter commit event");
+        };
+        assert_eq!(scope, FleetProfileScope::Project);
+        assert_eq!(draft.id, "manager");
 
+        let mut view = FleetSetupView::from_snapshot(snapshot());
+        to_review(&mut view);
         let (title, content) =
             view.install_model_draft(sample_draft(), "GLM-5.2".to_string(), None, None);
         assert!(title.contains("GLM-5.2"));
@@ -1915,10 +1906,13 @@ mod tests {
         assert!(view.model_draft.is_none());
 
         to_review(&mut view);
-        assert!(matches!(
-            view.handle_key(key(KeyCode::Char('g'))),
-            ViewAction::None
-        ));
+        let action = view.handle_key(key(KeyCode::Char('g')));
+        let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft, .. }) =
+            action
+        else {
+            panic!("expected fresh deterministic starter");
+        };
+        assert_eq!(draft.id, "scout");
     }
 
     #[test]
@@ -2108,7 +2102,7 @@ mod tests {
     }
 
     #[test]
-    fn start_on_review_previews_inline_and_ratifies_starter_profile_for_selection() {
+    fn one_enter_from_review_saves_starter_profile_for_selection() {
         let mut view = FleetSetupView::from_snapshot(snapshot());
         // Role: manager(0) scout(1) builder(2) -> builder.
         view.handle_key(key(KeyCode::Down));
@@ -2121,17 +2115,15 @@ mod tests {
             view.handle_key(key(KeyCode::Char('t')));
         }
 
-        // Start previews inline (#4093: no separate pager to steal the next
-        // ratify keypress) — the action stays `None` and the draft/preview
-        // land directly on this same view.
-        let action = view.handle_key(key(KeyCode::Enter)); // Start
-        assert!(matches!(action, ViewAction::None));
-        assert!(view.model_draft.is_some());
-        let content = view
-            .model_draft_preview
-            .as_deref()
-            .expect("preview installed inline");
-        assert!(content.contains("# .codewhale/agents/builder.toml"));
+        // The Review summary is already the structured confirmation surface;
+        // one Enter saves the deterministic starter without another state.
+        let action = view.handle_key(key(KeyCode::Enter));
+        let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft, scope }) =
+            action
+        else {
+            panic!("expected one-Enter starter save");
+        };
+        let content = draft.render_toml();
         assert!(content.contains("id = \"builder\""));
         assert!(content.contains("role_hint = \"builder\""));
         assert!(content.contains("model = \"deepseek-v4-pro\""));
@@ -2140,7 +2132,6 @@ mod tests {
         // explicitly (#4093) — the saved profile must not be ambiguously
         // scoped to whatever provider happens to be active at launch time.
         assert!(content.contains("provider = \"deepseek\""), "{content}");
-        assert!(content.contains("Nothing is saved until"));
         for forbidden in ["base_url", "api_key"] {
             assert!(
                 !content.contains(forbidden),
@@ -2148,14 +2139,6 @@ mod tests {
             );
         }
 
-        // `g` ratifies directly from this same view — no Esc-then-g round
-        // trip through a separate pager required.
-        let action = view.handle_key(key(KeyCode::Char('g')));
-        let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft, scope }) =
-            action
-        else {
-            panic!("expected ratified starter draft");
-        };
         assert_eq!(scope, FleetProfileScope::Project);
         assert_eq!(draft.id, "builder");
         assert_eq!(draft.role_hint, "builder");
@@ -2173,23 +2156,15 @@ mod tests {
         view.handle_key(key(KeyCode::Char('s')));
         assert_eq!(view.profile_scope, FleetProfileScope::Personal);
 
-        view.handle_key(key(KeyCode::Enter));
-        let preview = view
-            .model_draft_preview
-            .as_deref()
-            .expect("personal preview");
-        assert!(
-            preview.contains("# $CODEWHALE_HOME/agents/manager.toml"),
-            "{preview}"
-        );
-
         let action = view.handle_key(key(KeyCode::Enter));
-        let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { scope, .. }) =
+        let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft, scope }) =
             action
         else {
             panic!("expected personal profile save event");
         };
         assert_eq!(scope, FleetProfileScope::Personal);
+        let rendered = draft.render_toml();
+        assert!(rendered.contains("id = \"manager\""), "{rendered}");
     }
 
     #[test]
@@ -2198,12 +2173,16 @@ mod tests {
         // there's no explicit route to name (#4093).
         let mut view = FleetSetupView::from_snapshot(snapshot());
         to_review(&mut view);
-        view.handle_key(key(KeyCode::Enter)); // Start -> preview inherit draft
-        let draft = view.model_draft.as_deref().expect("draft installed");
+        let action = view.handle_key(key(KeyCode::Enter));
+        let ViewAction::EmitAndClose(ViewEvent::FleetProfileDraftCommitRequested { draft, .. }) =
+            action
+        else {
+            panic!("expected inherit starter save");
+        };
         assert_eq!(draft.model, None);
         assert_eq!(draft.provider, None);
         assert_eq!(draft.reasoning_effort, None);
-        let content = view.model_draft_preview.as_deref().unwrap();
+        let content = draft.render_toml();
         assert!(!content.contains("provider"), "{content}");
         assert!(!content.contains("reasoning_effort"), "{content}");
     }
@@ -2691,7 +2670,7 @@ mod tests {
             40,
         )
         .join("\n");
-        for needle in ["Workspace", "Review policy", "until you save"] {
+        for needle in ["Workspace", "Review policy", "Press Enter or g once"] {
             assert!(bottom.contains(needle), "scrolled review missing: {needle}");
         }
 

@@ -845,7 +845,6 @@
     "FooterWorkedChip": "bekerja {duration}",
     "FleetDraftTitle": "Profil Fleet — draf oleh {model_label} (g menyimpan)",
     "FleetDraftHeader": "# .codewhale/agents/{name}\n# Draf oleh {model_label}, divalidasi dan dibatasi oleh Codewhale.\n# Izin tetap di batas dasar fleet: tanpa shell, tanpa trust, perlu persetujuan.\n# Tidak ada yang disimpan sampai Anda menekan g di wizard.\n\n",
-    "FleetPreviewHeader": "# .codewhale/agents/{name}\n# Profil awal deterministik dirender oleh Codewhale dari pilihan peran/model Anda.\n# Izin tetap di batas dasar fleet: tanpa shell, tanpa trust, perlu persetujuan.\n# Tidak ada yang disimpan sampai Anda menekan Enter atau g di wizard.\n\n",
     "SetupRemoteOnRampText": "Jalur Awal Runtime Remote\n\n/setup hanya menampilkan fakta runtime remote. Tidak membuat bundle deploy, menulis kredensial, memanggil CLI cloud, atau menjalankan `remote-setup`.\n\nFakta saat ini:\n- Cloud: {clouds_result}\n- Bridge chat: {bridges_result}\n- Provider: {providers_result}\n- Mode: {mode_result}\n\nUntuk membuat bundle deploy, jalankan secara eksplisit di terminal normal:\n\n```sh\n{command}\n```\n\nRUNBOOK yang dihasilkan mencakup langkah host untuk ditinjau manusia. `--apply` belum diimplementasikan; jangan anggap ini auto-deploy.",
     "ApprovalDescSafe": "Meminta operasi aman/baca-saja.",
     "ApprovalDescFileWrite": "Meminta untuk mengubah file. Harap konfirmasi path dan konten.",

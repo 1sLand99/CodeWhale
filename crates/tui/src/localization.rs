@@ -1037,7 +1037,6 @@ pub enum MessageId {
     // Fleet setup wizard.
     FleetDraftTitle,
     FleetDraftHeader,
-    FleetPreviewHeader,
     // Remote setup on-ramp.
     SetupRemoteOnRampText,
     // Approval dialog — localized descriptions.
@@ -2328,7 +2327,6 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::FooterWorkedChip,
     MessageId::FleetDraftTitle,
     MessageId::FleetDraftHeader,
-    MessageId::FleetPreviewHeader,
     MessageId::SetupRemoteOnRampText,
     MessageId::ApprovalDescSafe,
     MessageId::ApprovalDescFileWrite,
