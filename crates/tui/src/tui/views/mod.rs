@@ -2902,10 +2902,10 @@ fn config_hint_for_key(key: &str) -> &'static str {
             "used by Auto routing and agent model_strength=faster when this provider has a known sibling"
         }
         "provider" => "deepseek | openrouter | xiaomi-mimo | fireworks | siliconflow | ...",
-        "approval_mode" => "this session only: Ask | Auto-Review | Full Access | Never",
+        "approval_mode" => "this session only: Ask | Auto-Review | Full Access",
         "permission_posture" => "default for new sessions: Ask | Auto-Review | Full Access",
         "approval_policy" => {
-            "config.toml override for new sessions; choose Use TUI default to unlock Ask | Auto-Review | Full Access"
+            "new sessions: Ask | Auto-Review | Full Access; choosing Full Access releases the raw config override"
         }
         "managed_approval_policy" => {
             "a project, profile, environment, managed config, or organization requirement controls this value"
@@ -3047,9 +3047,9 @@ fn config_integer_key(key: &str) -> bool {
 fn config_choice_values(key: &str, provider: ApiProvider) -> Option<Vec<String>> {
     let values = match key {
         key if config_boolean_key(key) => vec!["false", "true"],
-        "approval_mode" => vec!["ask", "auto-review", "full-access", "never"],
+        "approval_mode" => vec!["ask", "auto-review", "full-access"],
         "permission_posture" => vec!["ask", "auto-review", "full-access"],
-        "approval_policy" => vec!["use-tui-default", "ask", "auto-review", "never"],
+        "approval_policy" => vec!["use-tui-default", "ask", "auto-review", "full-access"],
         "default_mode" => vec!["agent", "plan", "operate"],
         "reasoning_effort" if provider == ApiProvider::OpenaiCodex => {
             vec!["default", "low", "medium", "high", "xhigh"]
@@ -3141,7 +3141,9 @@ fn config_choice_label(locale: Locale, key: &str, value: &str) -> String {
             "Auto-Review".to_string()
         }
         ("approval_policy", "use-tui-default") => "Use TUI permission default".to_string(),
-        ("approval_mode" | "permission_posture", "full-access") => "Full Access".to_string(),
+        ("approval_mode" | "permission_posture" | "approval_policy", "full-access") => {
+            "Full Access".to_string()
+        }
         ("approval_mode" | "approval_policy", "never") => "Never".to_string(),
         ("default_mode", "agent") => "Act".to_string(),
         ("default_mode", "plan") => "Plan (read only)".to_string(),
@@ -3188,7 +3190,7 @@ fn config_choice_detail(locale: Locale, key: &str, value: &str) -> Cow<'static, 
         ("approval_policy", "use-tui-default") => {
             "Remove the root config override and use the saved TUI permission choice."
         }
-        ("approval_mode" | "permission_posture", "full-access") => {
+        ("approval_mode" | "permission_posture" | "approval_policy", "full-access") => {
             "Run tools without approval prompts; workspace rules still apply."
         }
         ("approval_mode" | "approval_policy", "never") => {
@@ -5282,6 +5284,32 @@ consent_version = 1
         );
         explicit.focus_key("approval_policy");
         explicit.start_edit();
+        let choices = explicit
+            .editing
+            .as_ref()
+            .and_then(|edit| edit.choices.as_ref())
+            .expect("approval posture choices");
+        assert_eq!(
+            choices,
+            &vec![
+                "use-tui-default".to_string(),
+                "ask".to_string(),
+                "auto-review".to_string(),
+                "full-access".to_string(),
+            ]
+        );
+        let area = Rect::new(0, 0, 110, 30);
+        let mut buf = Buffer::empty(area);
+        explicit.render(area, &mut buf);
+        let dump = buffer_text(&buf, area);
+        assert!(
+            dump.contains("4. Full Access"),
+            "root permission chooser must expose the product posture:\n{dump}"
+        );
+        assert!(
+            !dump.contains("4. Never"),
+            "root permission chooser leaked the raw fail-closed policy token:\n{dump}"
+        );
         let use_tui_default = explicit
             .editing
             .as_ref()
@@ -6768,6 +6796,17 @@ context_window = 262144
         view.focus_key("approval_mode");
         view.start_edit();
         assert!(view.editing.is_some(), "approval_mode should be editable");
+        assert_eq!(
+            view.editing
+                .as_ref()
+                .and_then(|edit| edit.choices.as_ref())
+                .expect("session permission choices"),
+            &vec![
+                "ask".to_string(),
+                "auto-review".to_string(),
+                "full-access".to_string(),
+            ]
+        );
         let area = Rect::new(0, 0, 40, 12);
         let mut buf = Buffer::empty(area);
 
