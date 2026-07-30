@@ -7251,13 +7251,7 @@ fn provider_pin_matches_session(runtime: &SubAgentRuntime, provider_id: &str) ->
     if let Some(provider) = crate::config::ApiProvider::parse(provider_id) {
         return provider == session_provider;
     }
-    session_provider == crate::config::ApiProvider::Custom
-        && runtime
-            .api_config
-            .as_ref()
-            .and_then(|config| config.provider.as_deref())
-            .map(str::trim)
-            .is_some_and(|active| active == provider_id)
+    false
 }
 
 struct ChildProviderBinding {
@@ -7360,6 +7354,19 @@ async fn spawn_subagent_from_input(
         )));
     }
 
+    // Bind and validate the exact child route before admission can create a
+    // git worktree. Provider credentials, explicit profile ids, and fixed
+    // model selectors therefore fail without leaving filesystem artifacts.
+    let mut child_runtime = runtime.background_runtime();
+    let provider_binding = child_provider_binding(&runtime, profile_member.as_ref())?;
+    child_runtime.client = provider_binding.client;
+    child_runtime.api_config = provider_binding.api_config;
+    let mut model_selection =
+        resolve_spawn_model_selection(&child_runtime, &spawn_request, profile_member.as_ref())?;
+    let providerless =
+        crate::fleet::worker_runtime::explicit_fleet_provider_id(profile_member.as_ref()).is_none();
+    resolve_fixed_spawn_model_route(&child_runtime, &mut model_selection, providerless)?;
+
     if spawn_request.worktree.is_some() {
         let manager_guard = manager.read().await;
         manager_guard
@@ -7368,17 +7375,6 @@ async fn spawn_subagent_from_input(
     }
     let child_workspace = prepare_child_workspace(&runtime.context.workspace, &spawn_request)?;
 
-    let mut child_runtime = runtime.background_runtime();
-    // #4193 seam 3 (the substantive fix): if the resolved roster member's
-    // profile pins a provider different from the session's, rebind the child to
-    // a fresh client for that provider BEFORE any model normalization/routing.
-    // Every downstream model decision below derives its provider from
-    // `child_runtime.client.api_provider()`, so swapping the client here is what
-    // actually routes the request to provider B's endpoint with B's creds —
-    // rather than tagging `provider = B` on a client still pointed at A (#4093).
-    let provider_binding = child_provider_binding(&runtime, profile_member.as_ref())?;
-    child_runtime.client = provider_binding.client;
-    child_runtime.api_config = provider_binding.api_config;
     child_runtime.max_spawn_depth = child_max_spawn_depth_for_spawn(
         child_runtime.max_spawn_depth,
         child_runtime.spawn_depth,
@@ -7429,11 +7425,6 @@ async fn spawn_subagent_from_input(
     }
     apply_spawn_write_authority(&mut child_runtime, &spawn_request);
     let write_capable = spawn_request_is_write_capable(&spawn_request);
-    // Resolve the model once against the CHILD's (possibly profile-pinned)
-    // provider. The typed selection carries both precedence and provenance so
-    // a role default cannot override a saved AgentProfile model (#4177).
-    let model_selection =
-        resolve_spawn_model_selection(&child_runtime, &spawn_request, profile_member.as_ref())?;
     let resident_context = spawn_request
         .resident_file
         .as_deref()
@@ -10741,6 +10732,48 @@ fn resolve_spawn_model_selection(
         model_route: ModelRoute::Inherit,
         source: SpawnRouteSource::RunModel,
     })
+}
+
+/// Resolve caller/config model pins to the child provider's exact wire id
+/// before a child reserves worktree or concurrency resources. Provider-less
+/// pins also receive the conservative known-foreign check; explicit provider
+/// pairs keep their deliberate route intent. Inherited/strength routes stay
+/// unchanged.
+fn resolve_fixed_spawn_model_route(
+    runtime: &SubAgentRuntime,
+    selection: &mut SpawnModelSelection,
+    providerless: bool,
+) -> Result<(), ToolError> {
+    if !matches!(
+        selection.source,
+        SpawnRouteSource::TaskModel
+            | SpawnRouteSource::AgentProfileModel
+            | SpawnRouteSource::RoleDefault
+    ) {
+        return Ok(());
+    }
+    let ModelRoute::Fixed(model) = &selection.model_route else {
+        return Ok(());
+    };
+    let provider = runtime.client.api_provider();
+    let candidate = if providerless {
+        crate::route_runtime::resolve_unpinned_model_candidate(
+            provider,
+            model,
+            runtime.client.base_url(),
+        )
+    } else {
+        crate::route_runtime::resolve_route_candidate(
+            provider,
+            Some(model),
+            None,
+            Some(runtime.client.base_url().to_string()),
+            None,
+        )
+    }
+    .map_err(ToolError::invalid_input)?;
+    selection.model_route = ModelRoute::Fixed(candidate.wire_model_id().as_str().to_string());
+    Ok(())
 }
 
 /// Effective absolute `max_spawn_depth` for a child, combining the inherited

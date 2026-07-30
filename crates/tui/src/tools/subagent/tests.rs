@@ -3008,6 +3008,58 @@ fn spawn_model_selection_has_stable_four_tier_precedence_and_source() {
 }
 
 #[test]
+fn providerless_spawn_model_gate_rejects_known_foreign_route_before_spawn() {
+    let runtime = stub_runtime_for_provider("moonshot");
+    let mut selection = SpawnModelSelection {
+        model_route: ModelRoute::Fixed("deepseek-v4-pro".to_string()),
+        source: SpawnRouteSource::TaskModel,
+    };
+
+    let err = resolve_fixed_spawn_model_route(&runtime, &mut selection, true)
+        .expect_err("Moonshot must not receive a provider-less DeepSeek model pin");
+    let message = err.to_string();
+    assert!(
+        message.contains("deepseek-v4-pro"),
+        "names model: {message}"
+    );
+    assert!(
+        message.contains("moonshot"),
+        "names resolved route: {message}"
+    );
+    assert!(
+        message.contains("deepseek"),
+        "names catalog owner: {message}"
+    );
+
+    let mut unknown = SpawnModelSelection {
+        model_route: ModelRoute::Fixed("private-finetune-v7".to_string()),
+        source: SpawnRouteSource::TaskModel,
+    };
+    resolve_fixed_spawn_model_route(&runtime, &mut unknown, true)
+        .expect("unknown custom model ids remain provider-authoritative");
+
+    let mut inherited = SpawnModelSelection {
+        model_route: ModelRoute::Inherit,
+        source: SpawnRouteSource::RunModel,
+    };
+    resolve_fixed_spawn_model_route(&runtime, &mut inherited, true)
+        .expect("session-inherited routes are unchanged");
+
+    let openrouter = stub_runtime_for_provider("openrouter");
+    let mut explicit = SpawnModelSelection {
+        model_route: ModelRoute::Fixed("deepseek-v4-pro".to_string()),
+        source: SpawnRouteSource::AgentProfileModel,
+    };
+    resolve_fixed_spawn_model_route(&openrouter, &mut explicit, false)
+        .expect("an explicit aggregator route remains allowed");
+    assert_eq!(
+        explicit.model_route,
+        ModelRoute::Fixed(crate::config::DEFAULT_OPENROUTER_MODEL.to_string()),
+        "the child and receipt must use the provider's exact wire id"
+    );
+}
+
+#[test]
 fn test_child_max_spawn_depth_profile_hint_only_narrows() {
     // Profile hint narrows the inherited budget...
     assert_eq!(child_max_spawn_depth_for_spawn(3, 1, None, Some(1)), 2);
