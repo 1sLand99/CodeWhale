@@ -7135,6 +7135,58 @@ fn subagent_done_sentinel_marks_truncated_summaries() {
 }
 
 #[test]
+fn failed_subagent_completion_is_high_priority_and_retrievable() {
+    let mut res = make_snapshot(SubAgentStatus::Failed(
+        "child stopped without returning a final summary (its last turn produced no assistant text)"
+            .to_string(),
+    ));
+    res.name = "research-lane".to_string();
+    res.nickname = Some("Tide".to_string());
+    res.steps_taken = 7;
+    res.duration_ms = 12_345;
+
+    let completion = subagent_completion_from_result(&res);
+
+    assert!(completion.is_high_priority_failure());
+    assert!(completion.payload.contains(r#""event":"subagent.failed""#));
+    assert!(completion.payload.contains(r#""priority":"high""#));
+    assert!(
+        completion
+            .payload
+            .contains(r#""failure_class":"empty_turn""#)
+    );
+    assert!(completion.payload.contains(r#""name":"Tide""#));
+    assert!(completion.payload.contains(r#""steps":7"#));
+    assert!(completion.payload.contains(r#""elapsed_ms":12345"#));
+    assert!(
+        completion
+            .payload
+            .contains(r#""transcript_handle":"agent:agent_test/full_transcript""#)
+    );
+
+    let completed = subagent_completion_from_result(&make_snapshot(SubAgentStatus::Completed));
+    assert!(!completed.is_high_priority_failure());
+}
+
+#[test]
+fn budget_exhaustion_is_a_high_priority_failure_event() {
+    let completion =
+        subagent_completion_from_result(&make_snapshot(SubAgentStatus::BudgetExhausted));
+
+    assert!(completion.is_high_priority_failure());
+    assert!(
+        completion
+            .payload
+            .contains(r#""status":"budget_exhausted""#)
+    );
+    assert!(
+        completion
+            .payload
+            .contains(r#""failure_class":"token_budget""#)
+    );
+}
+
+#[test]
 fn stamp_subagent_summary_appends_note_when_short() {
     // issue #2652: a short (complete) summary gets the soft self-report note
     // and is NOT marked truncated.
@@ -7183,13 +7235,23 @@ fn stamp_subagent_summary_truncates_when_over_budget() {
 
 #[test]
 fn subagent_failed_sentinel_format_is_well_formed() {
-    let sentinel = subagent_failed_sentinel("agent_zzz", "boom");
+    let mut result = make_snapshot(SubAgentStatus::Failed("boom".to_string()));
+    result.agent_id = "agent_zzz".to_string();
+    result.name = "agent_zzz".to_string();
+    let sentinel = subagent_failed_sentinel(&result, "boom");
     let inner = sentinel
         .trim_start_matches("<codewhale:subagent.done>")
         .trim_end_matches("</codewhale:subagent.done>");
     let parsed: serde_json::Value = serde_json::from_str(inner).expect("inner JSON parses");
     assert_eq!(parsed["agent_id"], "agent_zzz");
     assert_eq!(parsed["status"], "failed");
+    assert_eq!(parsed["event"], "subagent.failed");
+    assert_eq!(parsed["priority"], "high");
+    assert_eq!(parsed["failure_class"], "runtime_error");
+    assert_eq!(
+        parsed["transcript_handle"],
+        "agent:agent_zzz/full_transcript"
+    );
     assert_eq!(parsed["error_location"], "previous_line");
     assert!(parsed.get("details").is_none());
     assert!(parsed.get("next_action").is_none());
@@ -10189,8 +10251,11 @@ fn subagent_budget_exhaustion_completion_carries_budget_exhausted_sentinel() {
         .and_then(|chunk| chunk.split("</codewhale:subagent.done>").next())
         .expect("sentinel json");
     let parsed: serde_json::Value = serde_json::from_str(inner).expect("sentinel parses");
+    assert_eq!(parsed["event"], "subagent.failed");
+    assert_eq!(parsed["priority"], "high");
     assert_eq!(parsed["status"], "budget_exhausted");
-    assert_eq!(parsed["summary_location"], "previous_line");
+    assert_eq!(parsed["failure_class"], "token_budget");
+    assert_eq!(parsed["error_location"], "previous_line");
 }
 
 #[test]

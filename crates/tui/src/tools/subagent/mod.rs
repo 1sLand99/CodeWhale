@@ -2174,6 +2174,15 @@ pub struct SubAgentCompletion {
     pub payload: String,
 }
 
+impl SubAgentCompletion {
+    /// Terminal failures are marked inside the model-visible sentinel so the
+    /// same fact survives channel fan-in, transcript persistence, and replay.
+    #[must_use]
+    pub fn is_high_priority_failure(&self) -> bool {
+        self.payload.contains(r#""event":"subagent.failed""#)
+    }
+}
+
 /// Live-only sinks needed to publish one terminal child outcome.
 ///
 /// This deliberately lives on [`SubAgent`] rather than the persisted worker
@@ -8317,7 +8326,10 @@ pub(crate) fn subagent_completion_from_result(result: &SubAgentResult) -> SubAge
     let (summary, truncated) = stamp_subagent_summary(&summary_source);
     let summary_truncated = truncated || evidence_truncated;
     let sentinel = match &result.status {
-        SubAgentStatus::Failed(error) => subagent_failed_sentinel(&result.agent_id, error),
+        SubAgentStatus::Failed(error) => subagent_failed_sentinel(result, error),
+        SubAgentStatus::BudgetExhausted => {
+            subagent_failed_sentinel(result, "child token budget exhausted")
+        }
         _ => subagent_done_sentinel(&result.agent_id, result, summary_truncated),
     };
     let payload = match evidence_block {
@@ -8420,15 +8432,45 @@ fn subagent_done_sentinel(agent_id: &str, res: &SubAgentResult, truncated: bool)
     format!("<codewhale:subagent.done>{payload}</codewhale:subagent.done>")
 }
 
-/// Build a `<codewhale:subagent.done>` sentinel for a failed child.
-///
-/// Kept lean: the (annotated) error is on the previous line (`error_location`)
-/// so the sentinel only signals completion state rather than re-embedding the
-/// error text.
-fn subagent_failed_sentinel(agent_id: &str, _err: &str) -> String {
+fn subagent_failure_class(status: &SubAgentStatus, error: &str) -> &'static str {
+    if matches!(status, SubAgentStatus::BudgetExhausted) {
+        return "token_budget";
+    }
+    let error = error.to_ascii_lowercase();
+    if error.contains("no assistant text") || error.contains("without returning a final summary") {
+        "empty_turn"
+    } else if error.contains("step budget exhausted") {
+        "step_budget"
+    } else if error.contains("wall-time budget exhausted") {
+        "wall_time_budget"
+    } else if error.contains("authorization failed")
+        || error.contains("usage limit")
+        || error.contains("quota")
+    {
+        "auth_or_quota"
+    } else if error.contains("timed out") || error.contains("timeout") {
+        "timeout"
+    } else {
+        "runtime_error"
+    }
+}
+
+/// Build the distinct high-priority failure event carried to the owning
+/// parent. The human-readable, already-sanitized reason stays on the previous
+/// line; this sentinel carries only bounded routing and recovery metadata.
+fn subagent_failed_sentinel(res: &SubAgentResult, error: &str) -> String {
+    let transcript_handle = format!("agent:{}/full_transcript", res.agent_id);
     let payload = json!({
-        "agent_id": agent_id,
-        "status": "failed",
+        "event": "subagent.failed",
+        "priority": "high",
+        "agent_id": res.agent_id,
+        "name": res.nickname.as_deref().unwrap_or(&res.name),
+        "agent_type": res.agent_type.as_str(),
+        "status": subagent_status_name(&res.status),
+        "failure_class": subagent_failure_class(&res.status, error),
+        "steps": res.steps_taken,
+        "elapsed_ms": res.duration_ms,
+        "transcript_handle": transcript_handle,
         "error_location": "previous_line",
     });
     format!("<codewhale:subagent.done>{payload}</codewhale:subagent.done>")
@@ -8907,7 +8949,9 @@ fn child_completion_runtime_message(completions: &[SubAgentCompletion]) -> Messa
 This is an internal runtime event, not user input. One or more child sub-agents \
 you spawned have finished. Treat each child summary as an unverified self-report: \
 if you rely on it, cite the child agent_id and the EVIDENCE lines it provided, \
-and distinguish that from evidence you personally verified.\n",
+and distinguish that from evidence you personally verified. A sentinel marked \
+event=subagent.failed is high priority: inspect its failure_class and transcript_handle, \
+then re-plan dependent work before claiming completion.\n",
     );
     for completion in completions {
         text.push_str("\n--- child sub-agent completion ---\n");

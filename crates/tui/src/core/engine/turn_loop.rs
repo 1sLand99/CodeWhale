@@ -16,7 +16,7 @@ use crate::core::ops::UserInputProvenance;
 use crate::prompt_zones::PinnedPrefix;
 use crate::runtime_handoff::{
     shell_completion_runtime_message, subagent_completion_runtime_message,
-    waiting_for_subagents_runtime_message,
+    subagent_failure_runtime_message, waiting_for_subagents_runtime_message,
 };
 use crate::tools::spec::ToolTerminalStatus;
 
@@ -286,19 +286,32 @@ impl Engine {
             return 0;
         }
 
+        let failed = completions
+            .iter()
+            .filter(|completion| completion.is_high_priority_failure())
+            .count();
         for completion in completions {
-            self.add_session_message(subagent_completion_runtime_message(&completion.payload))
-                .await;
+            let message = if completion.is_high_priority_failure() {
+                subagent_failure_runtime_message(&completion.payload)
+            } else {
+                subagent_completion_runtime_message(&completion.payload)
+            };
+            self.add_session_message(message).await;
         }
         let prefix = if status_label.is_empty() {
             String::new()
         } else {
             format!("{status_label} ")
         };
+        let failure_suffix = if failed == 0 {
+            String::new()
+        } else {
+            format!(" ({failed} failed)")
+        };
         let _ = self
             .tx_event
             .send(Event::status(format!(
-                "Resuming turn with {count} {prefix}sub-agent completion(s)"
+                "Resuming turn with {count} {prefix}sub-agent completion(s){failure_suffix}"
             )))
             .await;
         count

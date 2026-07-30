@@ -2003,6 +2003,44 @@ fn subagent_completion_status(result: &str) -> Option<String> {
     }
 }
 
+fn subagent_failure_notice(result: &str) -> Option<String> {
+    const START: &str = "<codewhale:subagent.done>";
+    const END: &str = "</codewhale:subagent.done>";
+    let start = result.find(START)? + START.len();
+    let end = result[start..].find(END)? + start;
+    let value = serde_json::from_str::<serde_json::Value>(&result[start..end]).ok()?;
+    (value.get("event").and_then(serde_json::Value::as_str) == Some("subagent.failed"))
+        .then(|| {
+            let name = value
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            let agent_id = value
+                .get("agent_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            let class = value
+                .get("failure_class")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unavailable");
+            let steps = value
+                .get("steps")
+                .and_then(serde_json::Value::as_u64)
+                .map_or_else(|| "?".to_string(), |steps| steps.to_string());
+            let elapsed_ms = value
+                .get("elapsed_ms")
+                .and_then(serde_json::Value::as_u64)
+                .map_or_else(|| "?".to_string(), |elapsed| elapsed.to_string());
+            let transcript_handle = value
+                .get("transcript_handle")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unavailable");
+            format!(
+                "{name} ({agent_id}) · {class} · {steps} steps · {elapsed_ms} ms · inspect {transcript_handle}"
+            )
+        })
+}
+
 fn subagent_status_from_completion_result(result: &str) -> SubAgentStatus {
     let reason = result
         .lines()
@@ -4532,6 +4570,19 @@ async fn run_event_loop(
                         );
                         // #3030: stable label with raw-id fallback.
                         apply_agent_complete_status_and_observer(app, &id, &result, terminal_verb);
+                        if let Some(failure) = subagent_failure_notice(&result) {
+                            let message_id =
+                                if matches!(terminal_status, SubAgentStatus::BudgetExhausted) {
+                                    MessageId::NotificationSubagentBudgetExhausted
+                                } else {
+                                    MessageId::NotificationSubagentFailed
+                                };
+                            app.set_sticky_status(
+                                format!("{} · {failure}", app.tr(message_id)),
+                                StatusToastLevel::Error,
+                                None,
+                            );
+                        }
                         let should_recapture_terminal =
                             !has_other_running_subagents && app.use_alt_screen;
                         let subagent_notification_mode =

@@ -9114,6 +9114,27 @@ fn subagent_completion_status_reads_done_sentinel() {
 }
 
 #[test]
+fn subagent_failure_notice_surfaces_receipt_fields() {
+    let result = concat!(
+        "Failed: quota exhausted\n",
+        "<codewhale:subagent.done>{\"event\":\"subagent.failed\",",
+        "\"agent_id\":\"agent_x\",\"name\":\"Tide\",",
+        "\"status\":\"failed\",\"failure_class\":\"auth_or_quota\",",
+        "\"steps\":12,\"elapsed_ms\":3456,",
+        "\"transcript_handle\":\"agent:agent_x/full_transcript\"}",
+        "</codewhale:subagent.done>",
+    );
+
+    let notice = subagent_failure_notice(result).expect("failure notice");
+    assert!(notice.contains("Tide (agent_x)"), "{notice}");
+    assert!(notice.contains("auth_or_quota"), "{notice}");
+    assert!(notice.contains("12 steps"), "{notice}");
+    assert!(notice.contains("3456 ms"), "{notice}");
+    assert!(notice.contains("agent:agent_x/full_transcript"), "{notice}");
+    assert!(subagent_failure_notice("plain completion").is_none());
+}
+
+#[test]
 fn subagent_completion_status_reads_summary_fallbacks() {
     assert_eq!(
         subagent_completion_status("Cancelled").as_deref(),

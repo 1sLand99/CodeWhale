@@ -2904,15 +2904,29 @@ impl Engine {
         let content = completions
             .iter()
             .map(|completion| {
-                crate::runtime_handoff::subagent_completion_runtime_text(&completion.payload)
+                if completion.is_high_priority_failure() {
+                    crate::runtime_handoff::subagent_failure_runtime_text(&completion.payload)
+                } else {
+                    crate::runtime_handoff::subagent_completion_runtime_text(&completion.payload)
+                }
             })
             .collect::<Vec<_>>()
             .join("\n\n");
 
+        let failed = completions
+            .iter()
+            .filter(|completion| completion.is_high_priority_failure())
+            .count();
+        let failure_suffix = if failed == 0 {
+            String::new()
+        } else {
+            format!(" ({failed} failed)")
+        };
+
         let _ = self
             .tx_event
             .send(Event::status(format!(
-                "Resuming turn with {count} idle sub-agent completion(s)"
+                "Resuming turn with {count} idle sub-agent completion(s){failure_suffix}"
             )))
             .await;
 
