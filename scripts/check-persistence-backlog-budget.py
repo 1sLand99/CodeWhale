@@ -16,6 +16,8 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 MEASURE_SCRIPT = ROOT / "scripts" / "measure-persistence-backlog.py"
 BUDGET_PATH = ROOT / "scripts" / "persistence-backlog-budget.json"
+BASELINE_RECEIPT_PATH = ROOT / "scripts" / "persistence-backlog-baseline-receipt.json"
+BASELINE_RECEIPT_REFERENCE = "scripts/persistence-backlog-baseline-receipt.json"
 RECEIPT_KIND = "codewhale.persistence_backlog_receipt"
 BUDGET_KIND = "codewhale.persistence_backlog_budget"
 SCHEMA_VERSION = 2
@@ -175,7 +177,7 @@ def validate_receipt(
     if require_clean_source and receipt["source_dirty"]:
         raise PersistenceBacklogError("persistence measurement source tree is dirty")
     platform = receipt["platform"]
-    if platform not in SUPPORTED_PLATFORMS:
+    if not isinstance(platform, str) or platform not in SUPPORTED_PLATFORMS:
         raise PersistenceBacklogError("receipt platform is unsupported")
 
     attempted = non_negative_integer(receipt["requests_attempted"], "requests_attempted")
@@ -243,8 +245,15 @@ def validate_budget(budget: dict[str, Any]) -> None:
     if budget.get("schema_version") != SCHEMA_VERSION:
         raise PersistenceBacklogError("budget schema_version changed")
     fixture = budget.get("fixture")
-    if fixture != FIXTURE:
+    if not isinstance(fixture, dict) or set(fixture) != set(FIXTURE):
         raise PersistenceBacklogError("budget fixture no longer matches the frozen workload")
+    for field, expected in FIXTURE.items():
+        if type(fixture[field]) is not type(expected) or fixture[field] != expected:
+            raise PersistenceBacklogError(
+                f"budget fixture.{field} must remain {expected!r}"
+            )
+    if budget.get("baseline_receipt") != BASELINE_RECEIPT_REFERENCE:
+        raise PersistenceBacklogError("budget baseline_receipt path changed")
     ceilings = budget.get("ceilings")
     baseline = budget.get("baseline_observation")
     if not isinstance(ceilings, dict) or not isinstance(baseline, dict):
@@ -258,13 +267,33 @@ def validate_budget(budget: dict[str, Any]) -> None:
             raise PersistenceBacklogError(
                 f"baseline_observation.{field} exceeds its ceiling"
             )
-    if baseline.get("accepted_requests") != FIXTURE["requests_attempted"]:
+    baseline_accepted = non_negative_integer(
+        baseline.get("accepted_requests"), "baseline_observation.accepted_requests"
+    )
+    if baseline_accepted != FIXTURE["requests_attempted"]:
         raise PersistenceBacklogError(
             "baseline_observation.accepted_requests must equal requests_attempted"
         )
-    if baseline.get("applied_version") != FIXTURE["expected_applied_version"]:
+    baseline_applied = non_negative_integer(
+        baseline.get("applied_version"), "baseline_observation.applied_version"
+    )
+    if baseline_applied != FIXTURE["expected_applied_version"]:
         raise PersistenceBacklogError(
             "baseline_observation.applied_version must be the final sent version"
+        )
+    baseline_retained = baseline["retained_queued_requests"]
+    baseline_payload = baseline["estimated_retained_payload_bytes"]
+    if baseline_retained == 0 or baseline_payload == 0:
+        raise PersistenceBacklogError(
+            "baseline_observation must retain the final request and payload"
+        )
+    if baseline_retained > baseline_accepted:
+        raise PersistenceBacklogError(
+            "baseline_observation.retained_queued_requests exceeds accepted_requests"
+        )
+    if baseline_payload < baseline_retained * FIXTURE["content_bytes_per_request"]:
+        raise PersistenceBacklogError(
+            "baseline_observation payload is smaller than frozen retained content"
         )
     provenance = baseline.get("provenance")
     if not isinstance(provenance, dict):
@@ -280,8 +309,37 @@ def validate_budget(budget: dict[str, Any]) -> None:
     for field, prefix in (("rustc_version", "rustc "), ("cargo_version", "cargo ")):
         if not isinstance(provenance.get(field), str) or not provenance[field].startswith(prefix):
             raise PersistenceBacklogError(f"baseline provenance needs {field}")
-    if provenance.get("build_profile") != "test" or provenance.get("sample_count") != 1:
+    if provenance.get("build_profile") != "test" or not (
+        type(provenance.get("sample_count")) is int
+        and provenance["sample_count"] == 1
+    ):
         raise PersistenceBacklogError("baseline provenance build profile/sample count changed")
+
+
+def validate_baseline_receipt(
+    budget: dict[str, Any], baseline_receipt: dict[str, Any]
+) -> None:
+    validate_receipt(baseline_receipt, require_clean_source=True)
+    baseline = budget["baseline_observation"]
+    for field in ("accepted_requests", "applied_version", *CEILING_FIELDS):
+        if baseline_receipt[field] != baseline[field]:
+            raise PersistenceBacklogError(
+                f"baseline receipt {field} does not match baseline_observation"
+            )
+    provenance = baseline["provenance"]
+    for field in (
+        "platform",
+        "source_sha",
+        "source_dirty",
+        "rustc_version",
+        "cargo_version",
+        "build_profile",
+        "sample_count",
+    ):
+        if baseline_receipt[field] != provenance[field]:
+            raise PersistenceBacklogError(
+                f"baseline receipt {field} does not match baseline provenance"
+            )
 
 
 def compare(
@@ -344,6 +402,8 @@ def main() -> int:
         expected_source = current_source_identity()
         receipt = load_json(args.receipt, "receipt") if args.receipt else measure()
         budget = load_json(args.budget, "budget")
+        baseline_receipt = load_json(BASELINE_RECEIPT_PATH, "baseline receipt")
+        validate_baseline_receipt(budget, baseline_receipt)
         increases, decreases = compare(
             receipt,
             budget,

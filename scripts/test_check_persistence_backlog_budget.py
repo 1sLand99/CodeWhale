@@ -57,6 +57,7 @@ def budget_fixture(receipt: dict | None = None) -> dict:
     return {
         "document_kind": mod.BUDGET_KIND,
         "schema_version": mod.SCHEMA_VERSION,
+        "baseline_receipt": mod.BASELINE_RECEIPT_REFERENCE,
         "fixture": copy.deepcopy(mod.FIXTURE),
         "baseline_observation": {
             "accepted_requests": receipt["accepted_requests"],
@@ -119,6 +120,20 @@ class PersistenceBacklogBudgetTests(unittest.TestCase):
                 receipt[field] = 1
                 with self.assertRaisesRegex(mod.PersistenceBacklogError, field):
                     mod.compare(receipt, budget)
+
+    def test_budget_boolean_and_sample_count_aliases_are_rejected(self) -> None:
+        receipt = receipt_fixture()
+        for field in ("paused_consumer", "single_session_id"):
+            with self.subTest(field=field):
+                budget = budget_fixture()
+                budget["fixture"][field] = 1
+                with self.assertRaisesRegex(mod.PersistenceBacklogError, field):
+                    mod.compare(receipt, budget)
+
+        budget = budget_fixture()
+        budget["baseline_observation"]["provenance"]["sample_count"] = True
+        with self.assertRaisesRegex(mod.PersistenceBacklogError, "sample count"):
+            mod.compare(receipt, budget)
 
     def test_every_ceiling_rejects_growth_and_accepts_tightening(self) -> None:
         baseline = receipt_fixture()
@@ -204,6 +219,11 @@ class PersistenceBacklogBudgetTests(unittest.TestCase):
         with self.assertRaisesRegex(mod.PersistenceBacklogError, "unsupported"):
             mod.compare(unknown, budget_fixture())
 
+        malformed = receipt_fixture(rss_supported=False)
+        malformed["platform"] = []
+        with self.assertRaisesRegex(mod.PersistenceBacklogError, "unsupported"):
+            mod.compare(malformed, budget_fixture())
+
     def test_cli_source_identity_rejects_historical_or_dirty_receipts(self) -> None:
         receipt = receipt_fixture()
         expected = {
@@ -239,6 +259,28 @@ class PersistenceBacklogBudgetTests(unittest.TestCase):
         budget["baseline_observation"]["retained_queued_requests"] += 1
         with self.assertRaisesRegex(mod.PersistenceBacklogError, "exceeds its ceiling"):
             mod.compare(receipt_fixture(), budget)
+
+    def test_budget_cannot_claim_an_empty_retained_baseline(self) -> None:
+        budget = budget_fixture()
+        budget["baseline_observation"]["retained_queued_requests"] = 0
+        budget["baseline_observation"]["estimated_retained_payload_bytes"] = 0
+        with self.assertRaisesRegex(mod.PersistenceBacklogError, "retain the final"):
+            mod.compare(receipt_fixture(), budget)
+
+    def test_raw_baseline_receipt_must_match_budget_metrics_and_provenance(self) -> None:
+        receipt = receipt_fixture()
+        budget = budget_fixture(receipt)
+        mod.validate_baseline_receipt(budget, receipt)
+
+        stale_metric = copy.deepcopy(receipt)
+        stale_metric["enqueue_elapsed_ns"] += 1
+        with self.assertRaisesRegex(mod.PersistenceBacklogError, "does not match"):
+            mod.validate_baseline_receipt(budget, stale_metric)
+
+        stale_source = copy.deepcopy(receipt)
+        stale_source["source_sha"] = "f" * 40
+        with self.assertRaisesRegex(mod.PersistenceBacklogError, "does not match"):
+            mod.validate_baseline_receipt(budget, stale_source)
 
 
 if __name__ == "__main__":
