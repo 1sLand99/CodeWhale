@@ -27,6 +27,7 @@ codewhale-lane = { path = "../lane", version = "0.9.2" }
 codewhale-workflow = { path = "../workflow", version = "0.9.2" }
 codewhale-execpolicy = { path = "../execpolicy", version = "0.9.2" }
 codewhale-mcp = { path = "../mcp", version = "0.9.2" }
+codewhale-paths = { path = "../paths", version = "0.9.2" }
 codewhale-release = { path = "../release", version = "0.9.2" }
 codewhale-secrets = { path = "../secrets", version = "0.9.2" }
 codewhale-state = { path = "../state", version = "0.9.2" }

@@ -906,6 +906,7 @@ dependencies = [
  "codewhale-execpolicy",
  "codewhale-lane",
  "codewhale-mcp",
+ "codewhale-paths",
  "codewhale-release",
  "codewhale-secrets",
  "codewhale-state",
@@ -931,8 +932,8 @@ version = "0.9.2"
 dependencies = [
  "anyhow",
  "codewhale-execpolicy",
+ "codewhale-paths",
  "codewhale-secrets",
- "dirs",
  "fd-lock",
  "libc",
  "serde",
@@ -1016,6 +1017,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "codewhale-paths"
+version = "0.9.2"
+dependencies = [
+ "dirs",
+]
+
+[[package]]
 name = "codewhale-protocol"
 version = "0.9.2"
 dependencies = [
@@ -1042,7 +1050,7 @@ dependencies = [
 name = "codewhale-secrets"
 version = "0.9.2"
 dependencies = [
- "dirs",
+ "codewhale-paths",
  "keyring",
  "serde",
  "serde_json",
@@ -1057,8 +1065,8 @@ version = "0.9.2"
 dependencies = [
  "anyhow",
  "chrono",
+ "codewhale-paths",
  "codewhale-protocol",
- "dirs",
  "fd-lock",
  "rusqlite",
  "serde",

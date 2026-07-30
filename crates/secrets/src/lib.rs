@@ -16,6 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use codewhale_paths::codewhale_home_is_explicit;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -461,24 +462,6 @@ impl FileKeyringStore {
         Ok(())
     }
 
-    fn home_dir() -> Result<PathBuf, SecretsError> {
-        for var in ["HOME", "USERPROFILE"] {
-            if let Ok(value) = std::env::var(var) {
-                let trimmed = value.trim();
-                if !trimmed.is_empty() {
-                    return Ok(PathBuf::from(trimmed));
-                }
-            }
-        }
-
-        dirs::home_dir().ok_or_else(|| {
-            SecretsError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "could not resolve home directory for FileKeyringStore",
-            ))
-        })
-    }
-
     /// Path used for storage.
     #[must_use]
     pub fn path(&self) -> &Path {
@@ -671,29 +654,24 @@ impl KeyringStore for FileKeyringStore {
 }
 
 fn default_codewhale_secrets_path() -> Result<PathBuf, SecretsError> {
-    if let Ok(value) = std::env::var("CODEWHALE_HOME") {
-        let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            return Ok(PathBuf::from(trimmed).join("secrets").join("secrets.json"));
-        }
-    }
-    Ok(FileKeyringStore::home_dir()?
-        .join(".codewhale")
+    Ok(codewhale_paths::codewhale_home()
+        .ok_or_else(home_resolution_error)?
         .join("secrets")
         .join("secrets.json"))
 }
 
 fn legacy_deepseek_secrets_path() -> Result<PathBuf, SecretsError> {
-    Ok(FileKeyringStore::home_dir()?
-        .join(".deepseek")
+    Ok(codewhale_paths::legacy_deepseek_home()
+        .ok_or_else(home_resolution_error)?
         .join("secrets")
         .join("secrets.json"))
 }
 
-/// Match the state/config isolation boundary: an explicit Codewhale home must
-/// not fall back to ambient legacy data under `$HOME/.deepseek`.
-fn codewhale_home_is_explicit() -> bool {
-    std::env::var("CODEWHALE_HOME").is_ok_and(|value| !value.trim().is_empty())
+fn home_resolution_error() -> SecretsError {
+    SecretsError::Io(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "could not resolve home directory for FileKeyringStore",
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2076,8 +2054,8 @@ mod tests {
 
     #[test]
     fn file_backed_default_refuses_writes_when_home_resolution_fails() {
-        // Force the exact fallback branch instead of relying on the host's
-        // dirs::home_dir(), which normally succeeds even with HOME unset.
+        // Force the exact fallback branch instead of relying on the shared
+        // platform-home resolver, which normally succeeds with HOME unset.
         let err = SecretsError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "synthetic unresolved home",
