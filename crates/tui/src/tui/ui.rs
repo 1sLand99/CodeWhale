@@ -3004,6 +3004,37 @@ fn toggle_settings_view(app: &mut App) {
     app.needs_redraw = true;
 }
 
+/// Route one terminal bracketed-paste event without exposing its contents.
+///
+/// Keeping the routing in one function makes the credential and ordinary
+/// composer paths exercise the same observability boundary.
+fn handle_bracketed_paste(app: &mut App, config: &Config, text: &str) {
+    tracing::debug!(
+        paste_bytes = text.len(),
+        paste_chars = text.chars().count(),
+        "Received bracketed paste event"
+    );
+    // Once a real bracketed-paste event has been observed in this session,
+    // the rapid-keystroke heuristic in paste_burst is redundant — disable it
+    // so fast typing / IME commits / autocomplete bursts don't get
+    // mis-classified as a paste.
+    app.bracketed_paste_seen = true;
+    if app.onboarding == OnboardingState::ApiKey {
+        // Paste into API key input.
+        app.insert_api_key_str(text);
+        onboarding::sync_api_key_validation_status(app, config, false);
+    } else if app.is_history_search_active() {
+        app.history_search_insert_str(text);
+    } else if app.view_stack.handle_paste(text) {
+        // Modal consumed the paste (e.g. provider picker key entry).
+    } else if !app.view_stack.is_empty() {
+        // A non-consumed modal is open — don't leak paste into composer.
+    } else {
+        // Paste into main input.
+        app.insert_paste_text(text);
+    }
+}
+
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn run_event_loop(
     terminal: &mut AppTerminal,
@@ -5455,31 +5486,7 @@ async fn run_event_loop(
 
             // Handle bracketed paste events
             if let Event::Paste(text) = &evt {
-                tracing::debug!(
-                    paste_len = text.len(),
-                    preview = %text.chars().take(80).collect::<String>(),
-                    "Received bracketed paste event"
-                );
-                // Once a real bracketed-paste event has been observed in
-                // this session, the rapid-keystroke heuristic in
-                // paste_burst is redundant — disable it so fast typing /
-                // IME commits / autocomplete bursts don't get
-                // mis-classified as a paste.
-                app.bracketed_paste_seen = true;
-                if app.onboarding == OnboardingState::ApiKey {
-                    // Paste into API key input
-                    app.insert_api_key_str(text);
-                    onboarding::sync_api_key_validation_status(app, config, false);
-                } else if app.is_history_search_active() {
-                    app.history_search_insert_str(text);
-                } else if app.view_stack.handle_paste(text) {
-                    // Modal consumed the paste (e.g. provider picker key entry)
-                } else if !app.view_stack.is_empty() {
-                    // A non-consumed modal is open — don't leak paste into composer
-                } else {
-                    // Paste into main input
-                    app.insert_paste_text(text);
-                }
+                handle_bracketed_paste(app, config, text);
                 continue;
             }
 

@@ -22,6 +22,7 @@ use crate::tui::history::{
     ExecCell, ExecSource, GenericToolCell, HistoryCell, SubAgentCell, ToolCell, ToolStatus,
 };
 use crate::tui::hotbar::actions::{HotbarActionCategory, HotbarDispatch};
+use crate::tui::provider_picker::ProviderPickerView;
 use crate::tui::ui_text::truncate_line_to_width;
 use crate::tui::views::{HelpView, ModalView, ViewAction};
 use crate::working_set::Workspace;
@@ -31,6 +32,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 
@@ -2851,6 +2853,193 @@ fn create_test_app() -> App {
         skip_onboarding: false,
         ..crate::test_support::test_tui_options(PathBuf::from("."))
     })
+}
+
+#[derive(Clone, Default)]
+struct CapturedTrace(Arc<Mutex<Vec<u8>>>);
+
+struct CapturedTraceWriter(CapturedTrace);
+
+impl std::io::Write for CapturedTraceWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .0
+            .lock()
+            .expect("captured trace lock")
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl CapturedTrace {
+    fn record(&self, action: impl FnOnce()) -> String {
+        let writer = self.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_target(false)
+            .with_writer(move || CapturedTraceWriter(writer.clone()))
+            .finish();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        tracing::dispatcher::with_default(&dispatch, action);
+        String::from_utf8(self.0.lock().expect("captured trace lock").clone())
+            .expect("trace output is UTF-8")
+    }
+}
+
+fn credential_paste_sentinel() -> String {
+    [
+        "violet",
+        "otter",
+        "credential",
+        "paste",
+        "must",
+        "stay",
+        "private",
+        "7361",
+    ]
+    .join("-")
+}
+
+fn sensitive_prefixes(secret: &str) -> Vec<String> {
+    [8, 16, 24]
+        .into_iter()
+        .filter(|length| secret.chars().count() >= *length)
+        .map(|length| secret.chars().take(length).collect())
+        .collect()
+}
+
+fn render_test_app(app: &mut App, config: &Config, width: u16, height: u16) -> String {
+    let mut terminal =
+        Terminal::new(TestBackend::new(width, height)).expect("paste safety test terminal");
+    terminal
+        .draw(|frame| render(frame, app, config))
+        .expect("render paste safety surface");
+    terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>()
+}
+
+fn assert_sensitive_paste_absent(surface: &str, secret: &str, label: &str) {
+    assert!(
+        !surface.contains(secret),
+        "{label} exposed the complete pasted credential"
+    );
+    for prefix in sensitive_prefixes(secret) {
+        assert!(
+            !surface.contains(&prefix),
+            "{label} exposed a pasted credential prefix"
+        );
+    }
+}
+
+#[test]
+fn credential_paste_content_never_enters_traces_or_rendered_status() {
+    let _env = crate::test_support::lock_test_env();
+    let temp = TempDir::new().expect("isolated paste safety home");
+    let _home = crate::test_support::EnvVarGuard::set(
+        "CODEWHALE_HOME",
+        temp.path().to_string_lossy().as_ref(),
+    );
+    let _secret_backend = crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let _anthropic_key = crate::test_support::EnvVarGuard::remove("ANTHROPIC_API_KEY");
+    let config = Config::default();
+    let secret = credential_paste_sentinel();
+
+    // The legacy first-run editor is still reachable by backtracking. Keep
+    // this test until that state is deleted so its paste route cannot leak.
+    let mut legacy = create_test_app();
+    legacy.onboarding = OnboardingState::ApiKey;
+    legacy.onboarding_provider = ApiProvider::Anthropic;
+    let logs = CapturedTrace::default().record(|| {
+        handle_bracketed_paste(&mut legacy, &config, &secret);
+    });
+    assert_eq!(legacy.api_key_input, secret);
+    assert!(legacy.bracketed_paste_seen);
+    let rendered = render_test_app(&mut legacy, &config, 80, 24);
+    assert_sensitive_paste_absent(&logs, &secret, "legacy API-key paste trace");
+    assert_sensitive_paste_absent(&rendered, &secret, "legacy API-key screen");
+    assert_sensitive_paste_absent(
+        legacy.status_message.as_deref().unwrap_or_default(),
+        &secret,
+        "legacy API-key validation status",
+    );
+
+    let setup = ProviderPickerView::new_for_setup(
+        ApiProvider::Deepseek,
+        Some(ApiProvider::Anthropic),
+        &config,
+        None,
+    );
+    let missing_auth = ProviderPickerView::new_for_missing_auth(
+        ApiProvider::Deepseek,
+        ApiProvider::Anthropic,
+        &config,
+        None,
+    )
+    .expect("Anthropic missing-auth editor");
+    let mut onboarding = ProviderPickerView::new_for_onboarding(
+        ApiProvider::Deepseek,
+        Some(ApiProvider::Anthropic),
+        &config,
+        None,
+    );
+    assert!(matches!(
+        onboarding.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ViewAction::None
+    ));
+
+    for (label, picker, onboarding_state) in [
+        ("setup", setup, OnboardingState::None),
+        ("missing-auth", missing_auth, OnboardingState::None),
+        ("onboarding", onboarding, OnboardingState::Provider),
+    ] {
+        let mut app = create_test_app();
+        app.onboarding = onboarding_state;
+        app.view_stack.push(picker);
+        let logs = CapturedTrace::default().record(|| {
+            handle_bracketed_paste(&mut app, &config, &secret);
+        });
+        assert!(app.bracketed_paste_seen, "{label}");
+        let rendered = render_test_app(&mut app, &config, 120, 32);
+        assert_sensitive_paste_absent(&logs, &secret, &format!("{label} paste trace"));
+        assert_sensitive_paste_absent(&rendered, &secret, &format!("{label} credential editor"));
+        assert_sensitive_paste_absent(
+            app.status_message.as_deref().unwrap_or_default(),
+            &secret,
+            &format!("{label} status"),
+        );
+    }
+}
+
+#[test]
+fn ordinary_bracketed_paste_keeps_content_but_logs_only_metadata() {
+    let config = Config::default();
+    let mut app = create_test_app();
+    app.onboarding = OnboardingState::None;
+    assert!(app.view_stack.is_empty());
+    let ordinary = ["ordinary", "composer", "paste", "7361"].join(" ");
+
+    let logs = CapturedTrace::default().record(|| {
+        handle_bracketed_paste(&mut app, &config, &ordinary);
+    });
+
+    assert_eq!(app.input, ordinary);
+    assert!(app.bracketed_paste_seen);
+    assert!(logs.contains("Received bracketed paste event"), "{logs}");
+    assert!(logs.contains("paste_bytes"), "{logs}");
+    assert!(logs.contains("paste_chars"), "{logs}");
+    assert!(logs.contains(&ordinary.len().to_string()), "{logs}");
+    assert_sensitive_paste_absent(&logs, &ordinary, "ordinary paste trace");
 }
 
 #[test]
