@@ -1936,6 +1936,23 @@ struct SubAgentInput {
     interrupt: bool,
 }
 
+fn append_subagent_inputs_as_user_messages(
+    messages: &mut Vec<Message>,
+    pending_inputs: &mut VecDeque<SubAgentInput>,
+) {
+    while let Some(input) = pending_inputs.pop_front() {
+        if !input.text.trim().is_empty() {
+            messages.push(Message {
+                role: "user".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: input.text,
+                    cache_control: None,
+                }],
+            });
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct SpawnRequest {
     session_name: Option<String>,
@@ -4664,15 +4681,50 @@ impl SubAgentManager {
         })
     }
 
-    /// Queue mail and attempt a live wake (`agents/followup`).
-    pub fn followup_child(&mut self, agent_ref: &str, text: String) -> Result<ParentMailReceipt> {
-        let mut receipt = self.queue_parent_message(agent_ref, text.clone(), true)?;
-        let agent_id = receipt.agent_id.clone();
+    /// Queue-only message entrypoint for live children. Terminal records are
+    /// immutable receipts, not mailboxes, so the message surface fails closed
+    /// instead of acknowledging undeliverable work.
+    pub fn queue_running_parent_message(
+        &mut self,
+        agent_ref: &str,
+        text: String,
+    ) -> Result<ParentMailReceipt> {
+        let agent_id = self.resolve_agent_ref(agent_ref)?;
         let status = self
             .agents
             .get(&agent_id)
             .map(|agent| agent.status.clone())
             .ok_or_else(|| anyhow!("Agent {agent_id} not found"))?;
+        if status != SubAgentStatus::Running {
+            return Err(anyhow!(
+                "Cannot queue a parent message for agent {agent_id}: status is {} (only running children accept messages)",
+                subagent_status_name(&status)
+            ));
+        }
+        self.queue_parent_message(&agent_id, text, false)
+    }
+
+    /// Queue mail and attempt a live wake (`agents/followup`).
+    pub fn followup_child(&mut self, agent_ref: &str, text: String) -> Result<ParentMailReceipt> {
+        let agent_id = self.resolve_agent_ref(agent_ref)?;
+        let status = self
+            .agents
+            .get(&agent_id)
+            .map(|agent| agent.status.clone())
+            .ok_or_else(|| anyhow!("Agent {agent_id} not found"))?;
+        if matches!(
+            status,
+            SubAgentStatus::Completed
+                | SubAgentStatus::Failed(_)
+                | SubAgentStatus::Cancelled
+                | SubAgentStatus::BudgetExhausted
+        ) {
+            return Err(anyhow!(
+                "Cannot follow up agent {agent_id}: status is {} and the child cannot resume",
+                subagent_status_name(&status)
+            ));
+        }
+        let mut receipt = self.queue_parent_message(&agent_id, text.clone(), true)?;
         let has_input_tx = self
             .agents
             .get(&agent_id)
@@ -4687,22 +4739,55 @@ impl SubAgentManager {
         match status {
             SubAgentStatus::Running if has_input_tx => {
                 let pending = self.queued_mail.remove(&agent_id).unwrap_or_default();
-                if let Some(agent) = self.agents.get_mut(&agent_id)
-                    && let Some(tx) = agent.input_tx.as_ref()
-                {
-                    for mail in pending {
-                        let _ = tx.send(SubAgentInput {
-                            text: mail.text,
-                            interrupt: false,
-                        });
+                let input_tx = self
+                    .agents
+                    .get(&agent_id)
+                    .and_then(|agent| agent.input_tx.clone());
+                let mut pending = pending.into_iter();
+                let mut undelivered = VecDeque::new();
+                let mut delivered = 0_usize;
+                if let Some(tx) = input_tx {
+                    while let Some(mail) = pending.next() {
+                        if tx
+                            .send(SubAgentInput {
+                                text: mail.text.clone(),
+                                interrupt: false,
+                            })
+                            .is_ok()
+                        {
+                            delivered = delivered.saturating_add(1);
+                        } else {
+                            undelivered.push_back(mail);
+                            undelivered.extend(pending);
+                            break;
+                        }
                     }
                 }
-                self.woken_agents.insert(agent_id.clone(), true);
-                receipt.woke = true;
-                receipt.queue_depth = 0;
+                if !undelivered.is_empty() {
+                    self.queued_mail.insert(agent_id.clone(), undelivered);
+                }
+                receipt.woke = delivered > 0;
+                receipt.queue_depth = self
+                    .queued_mail
+                    .get(&agent_id)
+                    .map(VecDeque::len)
+                    .unwrap_or(0);
                 receipt.continuation_handle = None;
-                receipt.note = "queued and delivered to running child".to_string();
-                if let Some(record) = self.worker_records.get_mut(&agent_id) {
+                receipt.note = if receipt.woke && receipt.queue_depth == 0 {
+                    self.woken_agents.insert(agent_id.clone(), true);
+                    "queued and delivered to running child".to_string()
+                } else if receipt.woke {
+                    self.woken_agents.insert(agent_id.clone(), true);
+                    format!(
+                        "partially delivered to running child; {} message(s) remain queued after the live input channel closed",
+                        receipt.queue_depth
+                    )
+                } else {
+                    "queued; running child's live input channel is closed".to_string()
+                };
+                if receipt.woke
+                    && let Some(record) = self.worker_records.get_mut(&agent_id)
+                {
                     record.follow_up.latest_delivery = Some(AgentRunFollowUpDelivery {
                         delivered: true,
                         timestamp_ms: epoch_millis_now(),
@@ -4921,8 +5006,19 @@ impl SubAgentManager {
     /// Test helper: seed a running child with a live input channel.
     #[cfg(test)]
     pub fn insert_test_running_agent(&mut self, name: &str, workspace: &Path) -> String {
+        self.insert_test_running_agent_with_input(name, workspace).0
+    }
+
+    /// Test helper exposing the receiving side so delivery and provenance can
+    /// be verified rather than inferred from a still-present sender handle.
+    #[cfg(test)]
+    fn insert_test_running_agent_with_input(
+        &mut self,
+        name: &str,
+        workspace: &Path,
+    ) -> (String, mpsc::UnboundedReceiver<SubAgentInput>) {
         let agent_id = format!("agent_{name}");
-        let (input_tx, _input_rx) = mpsc::unbounded_channel();
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
         let mut agent = SubAgent::new(
             agent_id.clone(),
             FleetRole::Worker,
@@ -4959,7 +5055,7 @@ impl SubAgentManager {
             launch_manifest: None,
         };
         self.register_worker(spec);
-        agent_id
+        (agent_id, input_rx)
     }
 
     /// Test helper: seed a current-session direct child whose future terminal
@@ -6613,6 +6709,9 @@ enum AgentToolAction {
     Start,
     Status,
     Peek,
+    Message,
+    Followup,
+    Interrupt,
     Wait,
     Cancel,
 }
@@ -6625,10 +6724,13 @@ fn parse_agent_tool_action(input: &Value) -> Result<AgentToolAction, ToolError> 
         "" | "start" | "spawn" | "run" => Ok(AgentToolAction::Start),
         "status" | "list" | "inspect" => Ok(AgentToolAction::Status),
         "peek" | "progress" => Ok(AgentToolAction::Peek),
+        "message" | "queue_message" => Ok(AgentToolAction::Message),
+        "followup" | "follow_up" | "steer" => Ok(AgentToolAction::Followup),
+        "interrupt" | "pause" => Ok(AgentToolAction::Interrupt),
         "wait" | "join" | "await" | "block" => Ok(AgentToolAction::Wait),
         "cancel" | "stop" | "abort" => Ok(AgentToolAction::Cancel),
         other => Err(ToolError::invalid_input(format!(
-            "Invalid agent action '{other}'. Use start, status, peek, wait, or cancel."
+            "Invalid agent action '{other}'. Use start, status, peek, message, followup, interrupt, wait, or cancel."
         ))),
     }
 }
@@ -6652,9 +6754,10 @@ impl ToolSpec for AgentTool {
             "Use multiple starts for independent parallel tasks. Prefer type=implementer for write work and type=verifier (or run_verifiers) after writes settle — dispatch is not completion. ",
             "For parallel write work use worktree=true so children do not collide in the parent checkout. ",
             "Add a Fleet profile, role, or explicit limits only when they improve the task. ",
-            "Coordinate later with agents/list, agents/message, agents/followup, agents/interrupt, or agents/wait instead of polling. ",
+            "Coordinate through this same tool: action=message queues a note without waking the child; action=followup delivers queued notes and wakes a running child for its next user-provenance turn; action=interrupt stops the current child turn while preserving its checkpoint; action=wait only observes. ",
+            "The narrow agents/list, agents/message, agents/followup, agents/interrupt, and agents/wait tools expose the same semantics directly; there is no second transport. ",
             "In Operate, background workers are the default for independent or long work; a write-capable root start also declares bounded write_roots, exact_files, or coordination_contracts; arbitrary shell remains gated. ",
-            "Legacy action=status|peek|wait|cancel remain for compatibility."
+            "Legacy action=status|peek|cancel remain for compatibility."
         )
     }
 
@@ -6664,18 +6767,26 @@ impl ToolSpec for AgentTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["start", "status", "peek", "wait", "cancel"],
-                    "description": "start (default) launches a background worker and returns immediately. status lists current children or inspects agent_id. peek is status for one child. wait blocks until a running child settles (agent_id for one specific child, otherwise the next completion). cancel stops a running child by agent_id."
+                    "enum": ["start", "status", "peek", "message", "followup", "interrupt", "wait", "cancel"],
+                    "description": "start (default) launches a background worker and returns immediately. status/peek inspect. message queues a note without waking a running child. followup delivers queued notes and wakes a running child for its next user-provenance model turn. interrupt stops the current turn while preserving the child checkpoint. wait only observes until a child settles. cancel permanently cancels a running child."
                 },
                 "agent_id": {
                     "type": "string",
-                    "description": "Agent id or session name for action=status, action=peek, action=wait, or action=cancel."
+                    "description": "Agent id or session name for any action except start and unscoped status/wait."
                 },
                 "timeout_secs": {
                     "type": "integer",
                     "minimum": 5,
                     "maximum": 1800,
                     "description": "For action=wait: maximum seconds to block before returning a still-running snapshot. Default 300."
+                },
+                "message": {
+                    "type": "string",
+                    "description": "Parent note for action=message or action=followup. message queues only; followup also wakes a running child."
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Optional bounded reason for action=interrupt."
                 },
                 "include_archived": {
                     "type": "boolean",
@@ -6864,6 +6975,24 @@ impl ToolSpec for AgentTool {
                     Some(&self.inspect_memo),
                 )
                 .await;
+            }
+            AgentToolAction::Message => {
+                return AgentsMessageTool::new(self.manager.clone())
+                    .with_optional_caller(self.runtime.parent_agent_id.clone())
+                    .execute(input, context)
+                    .await;
+            }
+            AgentToolAction::Followup => {
+                return AgentsFollowupTool::new(self.manager.clone())
+                    .with_optional_caller(self.runtime.parent_agent_id.clone())
+                    .execute(input, context)
+                    .await;
+            }
+            AgentToolAction::Interrupt => {
+                return AgentsInterruptTool::new(self.manager.clone())
+                    .with_optional_caller(self.runtime.parent_agent_id.clone())
+                    .execute(input, context)
+                    .await;
             }
             AgentToolAction::Wait => {
                 return wait_for_subagents_from_input(&input, self.manager.clone(), context).await;
@@ -9195,17 +9324,7 @@ async fn run_subagent(
             pending_inputs.push_back(input);
         }
 
-        while let Some(input) = pending_inputs.pop_front() {
-            if !input.text.trim().is_empty() {
-                messages.push(Message {
-                    role: "user".to_string(),
-                    content: vec![ContentBlock::Text {
-                        text: input.text,
-                        cache_control: None,
-                    }],
-                });
-            }
-        }
+        append_subagent_inputs_as_user_messages(&mut messages, &mut pending_inputs);
 
         let child_completions = drain_child_completion_events(&mut child_completion_rx);
         if !child_completions.is_empty() {

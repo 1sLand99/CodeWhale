@@ -3820,7 +3820,7 @@ fn agent_tool_prompt_schema_keeps_ordinary_starts_message_first() {
 }
 
 #[test]
-fn agent_tool_schema_advertises_status_peek_cancel_actions() {
+fn agent_tool_schema_advertises_lifecycle_and_coordination_actions() {
     let tmp = tempdir().expect("tempdir");
     let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 1);
     let agent_schema = AgentTool::new(manager, stub_runtime()).input_schema();
@@ -3828,8 +3828,114 @@ fn agent_tool_schema_advertises_status_peek_cancel_actions() {
     let action = schema_property_description(&agent_schema, "action");
     assert!(action.contains("status"));
     assert!(action.contains("peek"));
+    assert!(action.contains("message"));
+    assert!(action.contains("followup"));
+    assert!(action.contains("interrupt"));
+    assert!(action.contains("wait only observes"));
     assert!(action.contains("cancel"));
     assert!(agent_schema["properties"].get("agent_id").is_some());
+    assert!(agent_schema["properties"].get("message").is_some());
+    assert!(agent_schema["properties"].get("reason").is_some());
+}
+
+#[tokio::test]
+async fn agent_message_queues_and_followup_delivers_as_user_provenance() {
+    let tmp = tempdir().expect("tempdir");
+    let mut inner = SubAgentManager::new(tmp.path().to_path_buf(), 2);
+    let (agent_id, mut input_rx) =
+        inner.insert_test_running_agent_with_input("steer_target", tmp.path());
+    let manager = Arc::new(RwLock::new(inner));
+    let tool = AgentTool::new(manager.clone(), stub_runtime());
+    let context = ToolContext::new(tmp.path());
+
+    let queued = tool
+        .execute(
+            json!({
+                "action": "message",
+                "agent_id": agent_id,
+                "message": "first queued note"
+            }),
+            &context,
+        )
+        .await
+        .expect("queue parent message");
+    let queued: Value = serde_json::from_str(&queued.content).expect("queued receipt JSON");
+    assert_eq!(queued["queued"], json!(true));
+    assert_eq!(queued["woke"], json!(false));
+    assert!(matches!(
+        input_rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+
+    let followed_up = tool
+        .execute(
+            json!({
+                "action": "followup",
+                "agent_id": agent_id,
+                "message": "wake with this steer"
+            }),
+            &context,
+        )
+        .await
+        .expect("follow up running child");
+    let followed_up: Value =
+        serde_json::from_str(&followed_up.content).expect("followup receipt JSON");
+    assert_eq!(followed_up["woke"], json!(true));
+    assert_eq!(followed_up["queue_depth"], json!(0));
+
+    let mut pending_inputs = VecDeque::from([
+        input_rx.try_recv().expect("queued note delivered"),
+        input_rx.try_recv().expect("followup note delivered"),
+    ]);
+    let mut messages = Vec::new();
+    append_subagent_inputs_as_user_messages(&mut messages, &mut pending_inputs);
+    assert_eq!(messages.len(), 2);
+    assert!(messages.iter().all(|message| message.role == "user"));
+    let delivered = messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(delivered, vec!["first queued note", "wake with this steer"]);
+
+    {
+        let mut manager = manager.write().await;
+        manager
+            .agents
+            .get_mut(&agent_id)
+            .expect("test child")
+            .status = SubAgentStatus::Completed;
+    }
+    let terminal = tool
+        .execute(
+            json!({
+                "action": "message",
+                "agent_id": agent_id,
+                "message": "too late"
+            }),
+            &context,
+        )
+        .await
+        .expect_err("terminal child must fail closed")
+        .to_string();
+    assert!(terminal.contains("only running children"), "{terminal}");
+
+    let absent = tool
+        .execute(
+            json!({
+                "action": "message",
+                "agent_id": "agent_absent",
+                "message": "nowhere"
+            }),
+            &context,
+        )
+        .await
+        .expect_err("absent child must fail closed")
+        .to_string();
+    assert!(absent.contains("not found"), "{absent}");
 }
 
 #[tokio::test]
