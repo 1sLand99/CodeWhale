@@ -402,9 +402,8 @@
     "KbFuzzyFilePicker": "Mở trình tìm file nhanh (fuzzy) (chèn @path khi nhấn Enter)",
     "KbCompactInspector": "Mở trình kiểm tra ngữ cảnh phiên thu gọn",
     "KbLastMessagePager": "Mở trang xem cho tin nhắn cuối cùng (khi khung nhập trống)",
-    "KbSelectedDetails": "Hiển thị chi tiết thô của công cụ hoặc tin nhắn đã chọn; Ctrl+O mở tổng quan cả lượt",
+    "KbSelectedDetails": "Hiển thị chi tiết thô của công cụ hoặc tin nhắn đã chọn; Ctrl+Alt+O mở tổng quan cả lượt",
     "KbToolDetailsPager": "Hiển thị chi tiết thô của mục đã chọn (Alt+V)",
-    "KbThinkingPager": "Mở Trình kiểm tra lượt (Turn Inspector)",
     "KbExternalEditor": "Mở bản nháp trong trình soạn thảo bên ngoài",
     "KbLiveTranscript": "Mở lớp phủ bản ghi trực tiếp (tự động cuộn theo đuôi)",
     "KbBacktrackMessage": "Quay lại tin nhắn trước đó của người dùng (nhấn Trái/Phải để chuyển bước, Enter để lùi lại)",
@@ -1246,5 +1245,8 @@
     "SessionsArchiveFailed": "Lưu trữ thất bại: {error}",
     "SessionsShowingArchived": "Đang hiển thị phiên đã lưu trữ",
     "SessionsHidingArchived": "Đang ẩn phiên đã lưu trữ",
-    "SessionsArchivedCompact": "đã lưu trữ"
+    "SessionsArchivedCompact": "đã lưu trữ",
+    "KbReasoningDetail": "Open reasoning detail for the selected or current turn",
+    "KbTurnInspector": "Mở Trình kiểm tra lượt (Turn Inspector)",
+    "CmdTurnInspectDescription": "Open the whole-turn inspector"
 }

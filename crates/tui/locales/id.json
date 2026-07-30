@@ -385,9 +385,8 @@
     "KbFuzzyFilePicker": "Buka pemilih file fuzzy (sisipkan @path saat Enter)",
     "KbCompactInspector": "Buka inspektor konteks sesi padat",
     "KbLastMessagePager": "Buka pager untuk pesan terakhir (saat input kosong)",
-    "KbSelectedDetails": "Tampilkan detail mentah alat atau pesan terpilih; Ctrl+O membuka ikhtisar seluruh giliran",
+    "KbSelectedDetails": "Tampilkan detail mentah alat atau pesan terpilih; Ctrl+Alt+O membuka ikhtisar seluruh giliran",
     "KbToolDetailsPager": "Tampilkan detail mentah item terpilih (Alt+V)",
-    "KbThinkingPager": "Buka Turn Inspector",
     "KbExternalEditor": "Buka draf komposer di editor eksternal",
     "KbLiveTranscript": "Buka overlay transkrip langsung (Ctrl+Shift+T; auto-scroll mengikuti ekor)",
     "KbBacktrackMessage": "Mundur ke pesan pengguna sebelumnya (Left/Right berpindah, Enter untuk memutar balik)",
@@ -1246,5 +1245,8 @@
     "SessionsArchiveFailed": "Gagal mengarsipkan: {error}",
     "SessionsShowingArchived": "Menampilkan sesi terarsip",
     "SessionsHidingArchived": "Menyembunyikan sesi terarsip",
-    "SessionsArchivedCompact": "diarsipkan"
+    "SessionsArchivedCompact": "diarsipkan",
+    "KbReasoningDetail": "Open reasoning detail for the selected or current turn",
+    "KbTurnInspector": "Buka Turn Inspector",
+    "CmdTurnInspectDescription": "Open the whole-turn inspector"
 }

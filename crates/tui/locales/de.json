@@ -385,9 +385,8 @@
     "KbFuzzyFilePicker": "Fuzzy-Dateiauswahl öffnen (Enter fügt @path ein)",
     "KbCompactInspector": "Kontext-Inspektor der komprimierten Sitzung öffnen",
     "KbLastMessagePager": "Pager für die letzte Nachricht öffnen (bei leerer Eingabe)",
-    "KbSelectedDetails": "Rohdetails zum ausgewählten Tool oder zur Nachricht anzeigen; Ctrl+O öffnet die Gesamtübersicht des Zugs",
+    "KbSelectedDetails": "Rohdetails zum ausgewählten Tool oder zur Nachricht anzeigen; Ctrl+Alt+O öffnet die Gesamtübersicht des Zugs",
     "KbToolDetailsPager": "Rohdetails zum ausgewählten Element anzeigen (Alt+V)",
-    "KbThinkingPager": "Turn Inspector öffnen",
     "KbExternalEditor": "Composer-Entwurf in externem Editor öffnen",
     "KbLiveTranscript": "Live-Transkript-Overlay öffnen (Ctrl+Shift+T; Sticky-Tail-Auto-Scroll)",
     "KbBacktrackMessage": "Zu einer früheren Benutzernachricht zurückspringen (Links/Rechts schrittweise, Enter zum Zurückspulen)",
@@ -1246,5 +1245,8 @@
     "SessionsArchiveFailed": "Archivieren fehlgeschlagen: {error}",
     "SessionsShowingArchived": "Archivierte Sitzungen werden angezeigt",
     "SessionsHidingArchived": "Archivierte Sitzungen ausgeblendet",
-    "SessionsArchivedCompact": "archiviert"
+    "SessionsArchivedCompact": "archiviert",
+    "KbReasoningDetail": "Open reasoning detail for the selected or current turn",
+    "KbTurnInspector": "Turn Inspector öffnen",
+    "CmdTurnInspectDescription": "Open the whole-turn inspector"
 }

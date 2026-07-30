@@ -497,5 +497,8 @@
     "CmdCostLivePricingDowngraded": "無法驗證此路由的即時供應商價格（{defects}）；改用內建的公開價格。",
     "CmdCostLivePricingUnavailable": "無法驗證此路由的即時供應商價格（{defects}），且沒有可用的內建費率；此筆支出未知。",
     "CmdCostRoutesHeader": "已稽核路由（已脫敏）：",
-    "CmdTokensReport": "Token 用量：\n─────────────────────────────\n作用中內容：       {active}\n上次 API 輸入：    {input}（回合遙測；工具往返可能重複計入相同前綴）\n上次 API 輸出：    {output}\n快取命中/未命中：  {cache}（僅用於遙測/費用）\n累計 token：       {total}（工作階段用量遙測）\n已定價金額：       {cost}\nAPI 訊息數：       {api_messages}\n聊天訊息數：       {chat_messages}\n模型：             {model}"
+    "CmdTokensReport": "Token 用量：\n─────────────────────────────\n作用中內容：       {active}\n上次 API 輸入：    {input}（回合遙測；工具往返可能重複計入相同前綴）\n上次 API 輸出：    {output}\n快取命中/未命中：  {cache}（僅用於遙測/費用）\n累計 token：       {total}（工作階段用量遙測）\n已定價金額：       {cost}\nAPI 訊息數：       {api_messages}\n聊天訊息數：       {chat_messages}\n模型：             {model}",
+    "KbReasoningDetail": "Open reasoning detail for the selected or current turn",
+    "KbTurnInspector": "Open Turn Inspector",
+    "CmdTurnInspectDescription": "Open the whole-turn inspector"
 }

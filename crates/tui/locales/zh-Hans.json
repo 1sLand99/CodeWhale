@@ -402,9 +402,8 @@
     "KbFuzzyFilePicker": "打开模糊文件选择器（按 Enter 插入 @path）",
     "KbCompactInspector": "打开压缩会话上下文检查器",
     "KbLastMessagePager": "打开最后一条消息的分页器（输入框为空时）",
-    "KbSelectedDetails": "显示所选工具或消息的原始详情；Ctrl+O 打开整轮概览",
+    "KbSelectedDetails": "显示所选工具或消息的原始详情；Ctrl+Alt+O 打开整轮概览",
     "KbToolDetailsPager": "显示所选项的原始详情（Alt+V）",
-    "KbThinkingPager": "打开回合检查器 (Turn Inspector)",
     "KbExternalEditor": "在外部编辑器中打开撰写中的草稿",
     "KbLiveTranscript": "打开实时对话覆盖层（Ctrl+Shift+T；尾部自动滚动）",
     "KbBacktrackMessage": "回退到之前的用户消息（左右键步进，Enter 回退）",
@@ -1246,5 +1245,8 @@
     "SessionsArchiveFailed": "归档失败：{error}",
     "SessionsShowingArchived": "正在显示已归档会话",
     "SessionsHidingArchived": "已隐藏归档会话",
-    "SessionsArchivedCompact": "已归档"
+    "SessionsArchivedCompact": "已归档",
+    "KbReasoningDetail": "Open reasoning detail for the selected or current turn",
+    "KbTurnInspector": "打开回合检查器 (Turn Inspector)",
+    "CmdTurnInspectDescription": "Open the whole-turn inspector"
 }

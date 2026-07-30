@@ -385,9 +385,8 @@
     "KbFuzzyFilePicker": "Открыть нечёткий выбор файлов (Enter вставляет @path)",
     "KbCompactInspector": "Открыть инспектор контекста сжатой сессии",
     "KbLastMessagePager": "Открыть последнее сообщение в пейджере (при пустом вводе)",
-    "KbSelectedDetails": "Показать сырые детали выбранного инструмента или сообщения; Ctrl+O — обзор всего хода",
+    "KbSelectedDetails": "Показать сырые детали выбранного инструмента или сообщения; Ctrl+Alt+O — обзор всего хода",
     "KbToolDetailsPager": "Показать сырые детали выбранного элемента (Alt+V)",
-    "KbThinkingPager": "Открыть инспектор хода",
     "KbExternalEditor": "Открыть черновик во внешнем редакторе",
     "KbLiveTranscript": "Открыть живую ленту поверх (Ctrl+Shift+T; автопрокрутка с привязкой к концу)",
     "KbBacktrackMessage": "Вернуться к предыдущему сообщению пользователя (Left/Right — шаг, Enter — откат)",
@@ -1246,5 +1245,8 @@
     "SessionsArchiveFailed": "Не удалось архивировать: {error}",
     "SessionsShowingArchived": "Показаны архивные сеансы",
     "SessionsHidingArchived": "Архивные сеансы скрыты",
-    "SessionsArchivedCompact": "в архиве"
+    "SessionsArchivedCompact": "в архиве",
+    "KbReasoningDetail": "Open reasoning detail for the selected or current turn",
+    "KbTurnInspector": "Открыть инспектор хода",
+    "CmdTurnInspectDescription": "Open the whole-turn inspector"
 }

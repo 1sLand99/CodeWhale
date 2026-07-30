@@ -167,14 +167,12 @@ pub(crate) use self::activity_detail::{
     selected_detail_footer_label, turn_handoff_markdown,
 };
 use self::activity_detail::{
-    copy_focused_cell, detail_target_cell_index, extract_reasoning_header, open_tool_details_pager,
-    open_turn_inspector_pager,
+    copy_focused_cell, detail_target_cell_index, extract_reasoning_header,
+    open_reasoning_detail_pager, open_tool_details_pager, open_turn_inspector_pager,
 };
-// Ctrl+O now opens the whole-turn Turn Inspector (#4104); the single-cell
-// Activity Detail pager is no longer bound to a key, so it is only referenced
-// from tests. (`v` raw leaf detail keeps using `open_tool_details_pager`.)
-#[cfg(test)]
-use self::activity_detail::open_activity_detail_pager;
+// Ctrl+O now opens the full recorded Reasoning Detail for the selected or
+// current reasoning block. The whole-turn Turn Inspector moved to Ctrl+Alt+O
+// and `/turn inspect`. (`v` raw leaf detail keeps using `open_tool_details_pager`.)
 
 // === Constants ===
 
@@ -6562,6 +6560,11 @@ async fn run_event_loop(
                 {
                     continue;
                 }
+                _ if key_shortcuts::is_reasoning_detail_shortcut(&key)
+                    && open_reasoning_detail_pager(app) =>
+                {
+                    continue;
+                }
                 _ if key_shortcuts::is_turn_inspector_shortcut(&key)
                     && open_turn_inspector_pager(app) =>
                 {
@@ -6570,7 +6573,8 @@ async fn run_event_loop(
                 // Space toggles fold/unfold of the focused thinking block
                 // when the composer is empty. For thinking cells, toggles
                 // between summary and full content; for other cells, toggles
-                // visibility (#1972, #2348).
+                // visibility (#1972, #2348). Uses virtual-cell lookup so
+                // in-flight active reasoning works too.
                 KeyCode::Char(' ')
                     if key.modifiers == KeyModifiers::NONE && app.input.is_empty() =>
                 {
@@ -6579,8 +6583,7 @@ async fn run_event_loop(
                             continue;
                         }
                         let is_thinking = app
-                            .history
-                            .get(idx)
+                            .cell_at_virtual_index(idx)
                             .is_some_and(|c| matches!(c, HistoryCell::Thinking { .. }));
                         if is_thinking {
                             if app.folded_thinking.contains(&idx) {
@@ -12368,6 +12371,9 @@ async fn apply_command_result(
             AppAction::OpenLiveTranscript => {
                 open_live_transcript_overlay(app);
             }
+            AppAction::OpenTurnInspector => {
+                open_turn_inspector_pager(app);
+            }
             AppAction::CompactContext { focus } => {
                 app.status_message = Some("Compacting context...".to_string());
                 match validated_app_runtime_route(app, config) {
@@ -17932,12 +17938,12 @@ fn open_pager_for_last_message(app: &mut App) -> bool {
     true
 }
 
-/// Compatibility wrapper for the old test name. Exercises the single-cell
-/// Activity Detail helper (still used by `v`-adjacent detail paths); the
-/// user-facing Ctrl+O surface is now the whole-turn Turn Inspector (#4104).
+/// Compatibility wrapper for tests that exercise Ctrl+O on a thinking cell.
+/// The user-facing Ctrl+O surface is now the turn-scoped Reasoning Detail
+/// pager (#v092-reasoning-fix).
 #[cfg(test)]
 fn open_thinking_pager(app: &mut App) -> bool {
-    open_activity_detail_pager(app)
+    open_reasoning_detail_pager(app)
 }
 
 // Keyboard-shortcut predicates moved to `tui/key_shortcuts.rs`.

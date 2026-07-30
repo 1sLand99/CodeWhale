@@ -402,9 +402,8 @@
     "KbFuzzyFilePicker": "퍼지 파일 선택기 열기 (Enter로 @경로 삽입)",
     "KbCompactInspector": "간단한 세션 컨텍스트 인스펙터 열기",
     "KbLastMessagePager": "마지막 메시지의 페이저 열기 (입력창이 비어 있을 때)",
-    "KbSelectedDetails": "선택한 도구나 메시지의 원본 세부 정보 표시; Ctrl+O로 전체 턴 개요 열기",
+    "KbSelectedDetails": "선택한 도구나 메시지의 원본 세부 정보 표시; Ctrl+Alt+O로 전체 턴 개요 열기",
     "KbToolDetailsPager": "선택한 항목의 원본 세부 정보 표시 (Alt+V)",
-    "KbThinkingPager": "턴 인스펙터 열기",
     "KbExternalEditor": "작성 중인 초안을 외부 편집기에서 열기",
     "KbLiveTranscript": "실시간 대화 기록 오버레이 열기 (Ctrl+Shift+T; 하단 고정 자동 스크롤)",
     "KbBacktrackMessage": "이전 사용자 메시지로 되돌아가기 (Left/Right로 이동, Enter로 되감기)",
@@ -1246,5 +1245,8 @@
     "SessionsArchiveFailed": "보관에 실패했습니다: {error}",
     "SessionsShowingArchived": "보관된 세션을 표시하는 중",
     "SessionsHidingArchived": "보관된 세션을 숨기는 중",
-    "SessionsArchivedCompact": "보관됨"
+    "SessionsArchivedCompact": "보관됨",
+    "KbReasoningDetail": "Open reasoning detail for the selected or current turn",
+    "KbTurnInspector": "턴 인스펙터 열기",
+    "CmdTurnInspectDescription": "Open the whole-turn inspector"
 }

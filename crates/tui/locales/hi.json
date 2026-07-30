@@ -385,9 +385,8 @@
     "KbFuzzyFilePicker": "फ़ज़ी फ़ाइल चयनकर्ता खोलें (Enter पर @path डालता है)",
     "KbCompactInspector": "कॉम्पैक्ट सत्र संदर्भ निरीक्षक खोलें",
     "KbLastMessagePager": "अंतिम संदेश के लिए पेजर खोलें (जब इनपुट खाली हो)",
-    "KbSelectedDetails": "चुने टूल या संदेश का कच्चा विवरण दिखाएँ; Ctrl+O पूरे टर्न का अवलोकन खोलता है",
+    "KbSelectedDetails": "चुने टूल या संदेश का कच्चा विवरण दिखाएँ; Ctrl+Alt+O पूरे टर्न का अवलोकन खोलता है",
     "KbToolDetailsPager": "चुने आइटम का कच्चा विवरण दिखाएँ (Alt+V)",
-    "KbThinkingPager": "Turn Inspector खोलें",
     "KbExternalEditor": "कम्पोज़र मसौदा बाहरी संपादक में खोलें",
     "KbLiveTranscript": "लाइव ट्रांसक्रिप्ट ओवरले खोलें (Ctrl+Shift+T; स्टिकी-टेल ऑटो-स्क्रॉल)",
     "KbBacktrackMessage": "पिछले उपयोगकर्ता संदेश पर वापस जाएँ (Left/Right कदम, रिवाइंड के लिए Enter)",
@@ -1246,5 +1245,8 @@
     "SessionsArchiveFailed": "संग्रह विफल: {error}",
     "SessionsShowingArchived": "संग्रहित सत्र दिखाए जा रहे हैं",
     "SessionsHidingArchived": "संग्रहित सत्र छिपाए गए",
-    "SessionsArchivedCompact": "संग्रहित"
+    "SessionsArchivedCompact": "संग्रहित",
+    "KbReasoningDetail": "Open reasoning detail for the selected or current turn",
+    "KbTurnInspector": "Turn Inspector खोलें",
+    "CmdTurnInspectDescription": "Open the whole-turn inspector"
 }

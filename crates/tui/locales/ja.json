@@ -402,9 +402,8 @@
     "KbFuzzyFilePicker": "ファジーファイルピッカーを開く（Enter で @path を挿入）",
     "KbCompactInspector": "コンパクトなセッションコンテキスト検査ツールを開く",
     "KbLastMessagePager": "最後のメッセージのページャーを開く（入力が空の時）",
-    "KbSelectedDetails": "選択したツールまたはメッセージの生の詳細を表示（Ctrl+O でターン全体の概要）",
+    "KbSelectedDetails": "選択したツールまたはメッセージの生の詳細を表示（Ctrl+Alt+O でターン全体の概要）",
     "KbToolDetailsPager": "選択した項目の生の詳細を表示（Alt+V）",
-    "KbThinkingPager": "ターン インスペクターを開く",
     "KbExternalEditor": "作成中の下書きを外部エディターで開く",
     "KbLiveTranscript": "ライブ会話履歴オーバーレイを開く（自動追尾スクロール）",
     "KbBacktrackMessage": "前のユーザーメッセージに戻る（左右でステップ、Enter で巻き戻し）",
@@ -1246,5 +1245,8 @@
     "SessionsArchiveFailed": "アーカイブに失敗しました: {error}",
     "SessionsShowingArchived": "アーカイブ済みセッションを表示中",
     "SessionsHidingArchived": "アーカイブ済みセッションを非表示",
-    "SessionsArchivedCompact": "アーカイブ済み"
+    "SessionsArchivedCompact": "アーカイブ済み",
+    "KbReasoningDetail": "Open reasoning detail for the selected or current turn",
+    "KbTurnInspector": "ターン インスペクターを開く",
+    "CmdTurnInspectDescription": "Open the whole-turn inspector"
 }

@@ -402,9 +402,8 @@
     "KbFuzzyFilePicker": "Open the fuzzy file picker (insert @path on Enter)",
     "KbCompactInspector": "Open compact session context inspector",
     "KbLastMessagePager": "Open pager for the last message (when input is empty)",
-    "KbSelectedDetails": "Show raw detail for the selected tool or message; Ctrl+O opens the whole-turn overview",
+    "KbSelectedDetails": "Show raw detail for the selected tool or message; Ctrl+Alt+O opens the whole-turn overview",
     "KbToolDetailsPager": "Show raw detail for the selected item (Alt+V)",
-    "KbThinkingPager": "Open Turn Inspector",
     "KbExternalEditor": "Open composer draft in external editor",
     "KbLiveTranscript": "Open live transcript overlay (Ctrl+Shift+T; sticky-tail auto-scroll)",
     "KbBacktrackMessage": "Backtrack to a previous user message (Left/Right step, Enter to rewind)",
@@ -1246,5 +1245,8 @@
     "SessionsArchiveFailed": "Archive failed: {error}",
     "SessionsShowingArchived": "Showing archived sessions",
     "SessionsHidingArchived": "Hiding archived sessions",
-    "SessionsArchivedCompact": "archived"
+    "SessionsArchivedCompact": "archived",
+    "KbReasoningDetail": "Open reasoning detail for the selected or current turn",
+    "KbTurnInspector": "Open Turn Inspector",
+    "CmdTurnInspectDescription": "Open the whole-turn inspector"
 }

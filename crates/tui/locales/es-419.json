@@ -402,9 +402,8 @@
     "KbFuzzyFilePicker": "Abrir selector de archivo fuzzy (inserta @ruta al presionar Enter)",
     "KbCompactInspector": "Abrir inspector compacto de contexto de la sesión",
     "KbLastMessagePager": "Abrir paginador para el último mensaje (cuando la entrada está vacía)",
-    "KbSelectedDetails": "Mostrar el detalle sin procesar de la herramienta o mensaje seleccionado; Ctrl+O abre la vista general de todo el turno",
+    "KbSelectedDetails": "Mostrar el detalle sin procesar de la herramienta o mensaje seleccionado; Ctrl+Alt+O abre la vista general de todo el turno",
     "KbToolDetailsPager": "Mostrar el detalle sin procesar del elemento seleccionado (Alt+V)",
-    "KbThinkingPager": "Abrir Inspector de turno",
     "KbExternalEditor": "Abrir borrador en el editor externo",
     "KbLiveTranscript": "Abrir superposición de transcripción en vivo (auto-scroll)",
     "KbBacktrackMessage": "Retroceder al mensaje anterior del usuario (izquierda/derecha, Enter para rebobinar)",
@@ -1246,5 +1245,8 @@
     "SessionsArchiveFailed": "Error al archivar: {error}",
     "SessionsShowingArchived": "Mostrando sesiones archivadas",
     "SessionsHidingArchived": "Ocultando sesiones archivadas",
-    "SessionsArchivedCompact": "archivada"
+    "SessionsArchivedCompact": "archivada",
+    "KbReasoningDetail": "Open reasoning detail for the selected or current turn",
+    "KbTurnInspector": "Abrir Inspector de turno",
+    "CmdTurnInspectDescription": "Open the whole-turn inspector"
 }
