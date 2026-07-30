@@ -168,15 +168,17 @@ impl ModalView for FleetRosterView {
                 ViewAction::None
             }
             KeyCode::Enter | KeyCode::Char('s') => {
-                if self.operator_selected() {
+                if let Some(member) = self.selected_member() {
+                    let role = member.profile.role.name.clone();
+                    // Carry the role the operator already chose. The setup
+                    // wizard can still step back to Role when they want to
+                    // change it, but does not force a duplicate selection.
+                    ViewAction::EmitAndClose(ViewEvent::FleetRosterOpenSetupRequested { role })
+                } else {
                     // The operator is not a wizard-authored profile; its
                     // route changes via /model or /provider (the detail pane
                     // says so).
                     ViewAction::None
-                } else {
-                    // Hand off to the authoring wizard; the roster itself
-                    // never writes anything.
-                    ViewAction::EmitAndClose(ViewEvent::FleetRosterOpenSetupRequested)
                 }
             }
             KeyCode::Char('w') => {
@@ -706,13 +708,12 @@ mod tests {
             // Member row: hands off to the setup wizard.
             view.handle_key(key(KeyCode::Down));
             let action = view.handle_key(key(code));
-            assert!(
-                matches!(
-                    action,
-                    ViewAction::EmitAndClose(ViewEvent::FleetRosterOpenSetupRequested)
-                ),
-                "{code:?} should hand off to the setup wizard"
-            );
+            let ViewAction::EmitAndClose(ViewEvent::FleetRosterOpenSetupRequested { role }) =
+                action
+            else {
+                panic!("{code:?} should hand off to the setup wizard");
+            };
+            assert_eq!(role, "manager");
         }
     }
 

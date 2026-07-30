@@ -533,6 +533,24 @@ impl FleetSetupView {
         Self::from_snapshot(FleetSetupSnapshot::from_app(app, config))
     }
 
+    /// Open setup for a role the operator already selected in `/fleet`.
+    /// Unknown/custom roster roles map to the explicit custom authoring row;
+    /// Left or Esc still exposes Role so the carried choice is never sticky.
+    #[must_use]
+    pub fn new_for_role(app: &App, config: &Config, role: &str) -> Self {
+        Self::from_snapshot_for_role(FleetSetupSnapshot::from_app(app, config), role)
+    }
+
+    fn from_snapshot_for_role(snapshot: FleetSetupSnapshot, role: &str) -> Self {
+        let mut view = Self::from_snapshot(snapshot);
+        view.role_idx = ROLES
+            .iter()
+            .position(|choice| choice.label.eq_ignore_ascii_case(role.trim()))
+            .unwrap_or(ROLES.len() - 1);
+        view.step = Step::Model;
+        view
+    }
+
     fn from_snapshot(snapshot: FleetSetupSnapshot) -> Self {
         let mut model_choices = vec![MODEL_INHERIT];
         // `inherit` (index 0) maps to the active route; every later row pins a
@@ -997,6 +1015,7 @@ impl ModalView for FleetSetupView {
             return ViewAction::None;
         }
         match key.code {
+            KeyCode::Esc if self.step != Step::Role => self.back(),
             KeyCode::Esc | KeyCode::Char('q') => ViewAction::Close,
             KeyCode::Char('/') if self.step == Step::Model => {
                 self.model_filter_active = true;
@@ -1931,9 +1950,39 @@ mod tests {
     }
 
     #[test]
-    fn esc_cancels_from_any_step() {
+    fn roster_role_handoff_starts_at_model_and_can_return_to_role() {
+        let mut via_left = FleetSetupView::from_snapshot_for_role(snapshot(), "consultant");
+        assert_eq!(via_left.step, Step::Model);
+        assert_eq!(via_left.selected_role(), "consultant");
+        assert!(matches!(
+            via_left.handle_key(key(KeyCode::Left)),
+            ViewAction::None
+        ));
+        assert_eq!(via_left.step, Step::Role);
+        assert_eq!(via_left.selected_role(), "consultant");
+
+        let mut via_esc = FleetSetupView::from_snapshot_for_role(snapshot(), "reviewer");
+        assert_eq!(via_esc.step, Step::Model);
+        assert_eq!(via_esc.selected_role(), "reviewer");
+        assert!(matches!(
+            via_esc.handle_key(key(KeyCode::Esc)),
+            ViewAction::None
+        ));
+        assert_eq!(via_esc.step, Step::Role);
+        assert_eq!(via_esc.selected_role(), "reviewer");
+
+        let custom = FleetSetupView::from_snapshot_for_role(snapshot(), "domain-expert");
+        assert_eq!(custom.step, Step::Model);
+        assert_eq!(custom.selected_role(), "custom");
+    }
+
+    #[test]
+    fn esc_steps_back_then_cancels_from_role() {
         let mut view = FleetSetupView::from_snapshot(snapshot());
         view.handle_key(key(KeyCode::Enter)); // -> Model
+        let action = view.handle_key(key(KeyCode::Esc));
+        assert!(matches!(action, ViewAction::None));
+        assert_eq!(view.step, Step::Role);
         let action = view.handle_key(key(KeyCode::Esc));
         assert!(matches!(action, ViewAction::Close));
     }

@@ -14920,15 +14920,17 @@ async fn handle_view_events(
                 )
                 .await;
             }
-            ViewEvent::FleetRosterOpenSetupRequested => {
+            ViewEvent::FleetRosterOpenSetupRequested { role } => {
                 // The roster view hands off to the authoring wizard (same
-                // path as AppAction::OpenFleetSetup).
+                // path as AppAction::OpenFleetSetup), carrying the member role
+                // already selected so the wizard can begin at Model.
                 if app.view_stack.top_kind() != Some(ModalKind::FleetSetup) {
                     let _ = app.next_draft_gen();
-                    app.view_stack
-                        .push(crate::tui::views::fleet_setup::FleetSetupView::new(
-                            app, config,
-                        ));
+                    app.view_stack.push(
+                        crate::tui::views::fleet_setup::FleetSetupView::new_for_role(
+                            app, config, &role,
+                        ),
+                    );
                 }
             }
             ViewEvent::FleetRosterOpenWorkersRequested => {

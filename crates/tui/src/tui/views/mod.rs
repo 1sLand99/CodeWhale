@@ -891,7 +891,11 @@ pub enum ViewEvent {
     /// Emitted by the `/fleet` roster view (`s` / Enter) to hand off to the
     /// setup wizard for authoring or overriding a roster member. The roster
     /// view itself never writes anything.
-    FleetRosterOpenSetupRequested,
+    FleetRosterOpenSetupRequested {
+        /// Canonical Fleet role carried from the selected roster member so
+        /// setup can continue at model selection without asking twice.
+        role: String,
+    },
     /// Open the live workers tab from the unified Fleet surface.
     FleetRosterOpenWorkersRequested,
     /// Emitted by the fleet setup Review step after the user previewed a
