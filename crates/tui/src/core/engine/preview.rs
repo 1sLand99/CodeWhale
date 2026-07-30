@@ -1452,13 +1452,31 @@ mod tests {
         }
     }
 
-    /// Session-section labels the default `inputs()` fixture hard-codes to the
-    /// DeepSeek route. The exact-route matrix must report the model and
-    /// reasoning tier the user actually asked that route for.
-    #[derive(Default)]
-    struct PreviewSessionOverrides {
+    /// Typed controls for the preview/wire parity fixture. Defaults mirror the
+    /// ordinary active DeepSeek turn; individual tests override only the
+    /// production context they are proving.
+    struct PreviewWireFixture {
+        goal_objective: Option<String>,
+        goal_status: GoalStatus,
+        translation_enabled: bool,
+        show_thinking: bool,
+        verbosity: Option<String>,
         requested_model: Option<String>,
         requested_reasoning: Option<String>,
+    }
+
+    impl Default for PreviewWireFixture {
+        fn default() -> Self {
+            Self {
+                goal_objective: None,
+                goal_status: GoalStatus::Active,
+                translation_enabled: false,
+                show_thinking: false,
+                verbosity: None,
+                requested_model: None,
+                requested_reasoning: None,
+            }
+        }
     }
 
     async fn assert_preview_matches_first_wire_body(
@@ -1466,22 +1484,26 @@ mod tests {
         server: &wiremock::MockServer,
         planned: crate::turn_route_plan::PlannedTurnRoute,
         prompt: &str,
-        goal_objective: Option<String>,
-        goal_status: GoalStatus,
-        translation_enabled: bool,
-        show_thinking: bool,
-        verbosity: Option<String>,
-        overrides: PreviewSessionOverrides,
+        fixture: PreviewWireFixture,
     ) -> (RequestManifest, serde_json::Value) {
+        let PreviewWireFixture {
+            goal_objective,
+            goal_status,
+            translation_enabled,
+            show_thinking,
+            verbosity,
+            requested_model,
+            requested_reasoning,
+        } = fixture;
         let production_route = planned.route.clone();
         let compaction = planned.compaction.clone();
         let reasoning_effort = planned.effective_reasoning_effort.clone();
         let reasoning_effort_auto = planned.auto_controls_reasoning;
         let mut preview_inputs = inputs(false, Some(planned), prompt);
-        if let Some(requested_model) = overrides.requested_model {
+        if let Some(requested_model) = requested_model {
             preview_inputs.requested_model = requested_model;
         }
-        if let Some(requested_reasoning) = overrides.requested_reasoning {
+        if let Some(requested_reasoning) = requested_reasoning {
             preview_inputs.requested_reasoning = requested_reasoning;
         }
         let next = preview_inputs.next_turn.as_mut().expect("planned preview");
@@ -1604,12 +1626,7 @@ mod tests {
             &server,
             planned,
             prompt,
-            None,
-            GoalStatus::Active,
-            false,
-            false,
-            None,
-            PreviewSessionOverrides::default(),
+            PreviewWireFixture::default(),
         )
         .await;
         let body_text = first_wire_body.to_string();
@@ -1752,12 +1769,12 @@ mod tests {
             &server,
             planned,
             "/translate explain this",
-            None,
-            GoalStatus::Active,
-            true,
-            true,
-            Some("concise".to_string()),
-            PreviewSessionOverrides::default(),
+            PreviewWireFixture {
+                translation_enabled: true,
+                show_thinking: true,
+                verbosity: Some("concise".to_string()),
+                ..Default::default()
+            },
         )
         .await;
     }
@@ -1799,12 +1816,7 @@ mod tests {
             &server,
             planned,
             prompt,
-            None,
-            GoalStatus::Active,
-            false,
-            false,
-            None,
-            PreviewSessionOverrides::default(),
+            PreviewWireFixture::default(),
         )
         .await;
         assert!(
@@ -1865,12 +1877,7 @@ mod tests {
             &server,
             planned,
             prompt,
-            None,
-            GoalStatus::Active,
-            false,
-            false,
-            None,
-            PreviewSessionOverrides::default(),
+            PreviewWireFixture::default(),
         )
         .await;
 
@@ -2133,14 +2140,10 @@ mod tests {
             &server,
             planned,
             prompt,
-            None,
-            GoalStatus::Active,
-            false,
-            false,
-            None,
-            PreviewSessionOverrides {
+            PreviewWireFixture {
                 requested_model: Some(route.model.to_string()),
                 requested_reasoning: Some(route.requested_reasoning_label.to_string()),
+                ..Default::default()
             },
         )
         .await;

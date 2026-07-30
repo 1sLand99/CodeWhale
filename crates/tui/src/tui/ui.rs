@@ -14999,21 +14999,20 @@ async fn handle_view_events(
                 // Refresh the Fleet setup view from a snapshot built against the
                 // updated health state so the activated row becomes Ready
                 // without closing the modal.
-                if app.view_stack.top_kind() == Some(crate::tui::views::ModalKind::FleetSetup) {
-                    if let Some(view) = app.view_stack.pop() {
-                        let mut restored = view;
-                        if let Some(fleet_setup) = restored
-                            .as_any_mut()
-                            .downcast_mut::<crate::tui::views::fleet_setup::FleetSetupView>(
-                        ) {
-                            let fresh =
-                                crate::tui::views::fleet_setup::FleetSetupSnapshot::from_app(
-                                    app, config,
-                                );
-                            fleet_setup.refresh_from_snapshot(fresh);
-                        }
-                        app.view_stack.push_boxed(restored);
+                if app.view_stack.top_kind() == Some(crate::tui::views::ModalKind::FleetSetup)
+                    && let Some(view) = app.view_stack.pop()
+                {
+                    let mut restored = view;
+                    if let Some(fleet_setup) = restored
+                        .as_any_mut()
+                        .downcast_mut::<crate::tui::views::fleet_setup::FleetSetupView>(
+                    ) {
+                        let fresh = crate::tui::views::fleet_setup::FleetSetupSnapshot::from_app(
+                            app, config,
+                        );
+                        fleet_setup.refresh_from_snapshot(fresh);
                     }
+                    app.view_stack.push_boxed(restored);
                 }
                 app.needs_redraw = true;
             }

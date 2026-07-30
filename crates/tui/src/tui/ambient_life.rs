@@ -961,8 +961,10 @@ mod tests {
 
     #[test]
     fn ambient_min_dimensions_allow_small_windows() {
-        assert!(AMBIENT_MIN_WIDTH < 68);
-        assert!(AMBIENT_MIN_HEIGHT < 15);
+        const {
+            assert!(AMBIENT_MIN_WIDTH < 68);
+            assert!(AMBIENT_MIN_HEIGHT < 15);
+        }
     }
 
     #[test]
