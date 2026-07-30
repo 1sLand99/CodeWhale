@@ -1167,10 +1167,10 @@ pub fn default_automations_dir() -> PathBuf {
     // NOT fall back to the legacy ~/.deepseek path — silent fallback would
     // defeat the isolation the override promises. Check the env var directly
     // (not codewhale_home()'s Ok/Err, which succeeds for the default home too).
-    if let Some(home) = std::env::var_os("CODEWHALE_HOME").filter(|value| !value.is_empty()) {
-        return PathBuf::from(home).join("automations");
+    if let Some(home) = codewhale_paths::codewhale_home_override() {
+        return home.join("automations");
     }
-    crate::config::effective_home_dir()
+    codewhale_paths::user_home()
         .map(|home| {
             let primary = home.join(".codewhale").join("automations");
             let legacy = home.join(".deepseek").join("automations");

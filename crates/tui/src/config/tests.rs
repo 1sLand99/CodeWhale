@@ -2664,6 +2664,40 @@ fn save_deepseek_key_uses_isolated_file_store_without_plaintext_config() -> Resu
 }
 
 #[test]
+fn whitespace_codewhale_home_never_opens_ambient_file_secret_store() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let ambient_home = temp_root.path().join("ambient-home");
+    let config_path = temp_root.path().join("isolated-config.toml");
+    fs::create_dir_all(&ambient_home)?;
+    let _home = EnvVarGuard::set("HOME", &ambient_home);
+    let _userprofile = EnvVarGuard::set("USERPROFILE", &ambient_home);
+    let _codewhale_home_unset = EnvVarGuard::remove("CODEWHALE_HOME");
+    let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let _config_path = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", &config_path);
+    let ambient_store = codewhale_secrets::Secrets::file_backed();
+    ambient_store.set("deepseek", "ambient-secret-sentinel")?;
+    let ambient_secret_path = ambient_home
+        .join(".codewhale")
+        .join("secrets")
+        .join("secrets.json");
+    let before = fs::read(&ambient_secret_path)?;
+    let _whitespace_home = EnvVarGuard::set("CODEWHALE_HOME", " \t ");
+
+    let read = provider_secret_store_api_key(&Config::default(), ApiProvider::Deepseek);
+    let saved = save_api_key("replacement-secret-sentinel")?;
+    let after = fs::read(&ambient_secret_path)?;
+
+    assert_eq!(
+        read, None,
+        "whitespace must not opt tests into ambient reads"
+    );
+    assert_eq!(saved, SavedCredential::ConfigFile(config_path));
+    assert_eq!(after, before, "ambient file secret store was modified");
+    Ok(())
+}
+
+#[test]
 fn save_non_deepseek_key_uses_isolated_file_store_without_plaintext_config() -> Result<()> {
     let _lock = lock_test_env();
     let temp_root = tempfile::tempdir()?;
@@ -4414,6 +4448,10 @@ fn default_user_paths_use_codewhale_home_for_fresh_installs() -> Result<()> {
         config.memory_path(),
         temp_root.join(".codewhale").join("memory.md")
     );
+    assert_eq!(
+        config.skills_dir(),
+        temp_root.join(".codewhale").join("skills")
+    );
 
     Ok(())
 }
@@ -4435,6 +4473,7 @@ fn default_user_paths_preserve_existing_legacy_files() -> Result<()> {
     for name in ["config.toml", "mcp.json", "notes.txt", "memory.md"] {
         fs::write(legacy_home.join(name), "")?;
     }
+    fs::create_dir_all(legacy_home.join("skills"))?;
     let _guard = EnvGuard::new(&temp_root);
 
     unsafe {
@@ -4449,7 +4488,82 @@ fn default_user_paths_preserve_existing_legacy_files() -> Result<()> {
     assert_eq!(config.mcp_config_path(), legacy_home.join("mcp.json"));
     assert_eq!(config.notes_path(), legacy_home.join("notes.txt"));
     assert_eq!(config.memory_path(), legacy_home.join("memory.md"));
+    assert_eq!(config.skills_dir(), legacy_home.join("skills"));
 
+    Ok(())
+}
+
+#[test]
+fn explicit_codewhale_home_isolates_all_config_owned_user_paths() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let ambient_home = temp_root.path().join("ambient-home");
+    let explicit_home = temp_root.path().join("explicit-home");
+    let ambient_legacy = ambient_home.join(".deepseek");
+    fs::create_dir_all(ambient_legacy.join("skills"))?;
+    for name in ["mcp.json", "notes.txt", "memory.md"] {
+        fs::write(ambient_legacy.join(name), "legacy")?;
+    }
+    let _home = EnvVarGuard::set("HOME", &ambient_home);
+    let _userprofile = EnvVarGuard::set("USERPROFILE", &ambient_home);
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &explicit_home);
+
+    assert_eq!(default_skills_dir(), Some(explicit_home.join("skills")));
+    assert_eq!(
+        default_mcp_config_path(),
+        Some(explicit_home.join("mcp.json"))
+    );
+    assert_eq!(default_notes_path(), Some(explicit_home.join("notes.txt")));
+    assert_eq!(default_memory_path(), Some(explicit_home.join("memory.md")));
+    Ok(())
+}
+
+#[test]
+fn whitespace_codewhale_home_keeps_ambient_legacy_config_path_fallbacks() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let ambient_home = temp_root.path().join("ambient-home");
+    let ambient_legacy = ambient_home.join(".deepseek");
+    fs::create_dir_all(ambient_legacy.join("skills"))?;
+    for name in ["mcp.json", "notes.txt", "memory.md"] {
+        fs::write(ambient_legacy.join(name), "legacy")?;
+    }
+    let _home = EnvVarGuard::set("HOME", &ambient_home);
+    let _userprofile = EnvVarGuard::set("USERPROFILE", &ambient_home);
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", " \t ");
+
+    assert_eq!(default_skills_dir(), Some(ambient_legacy.join("skills")));
+    assert_eq!(
+        default_mcp_config_path(),
+        Some(ambient_legacy.join("mcp.json"))
+    );
+    assert_eq!(default_notes_path(), Some(ambient_legacy.join("notes.txt")));
+    assert_eq!(
+        default_memory_path(),
+        Some(ambient_legacy.join("memory.md"))
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn non_unicode_codewhale_home_is_preserved_by_config_owned_user_paths() -> Result<()> {
+    use std::os::unix::ffi::OsStringExt;
+
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let explicit_home = temp_root
+        .path()
+        .join(OsString::from_vec(b"codewhale-\xff-home".to_vec()));
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &explicit_home);
+
+    assert_eq!(default_skills_dir(), Some(explicit_home.join("skills")));
+    assert_eq!(
+        default_mcp_config_path(),
+        Some(explicit_home.join("mcp.json"))
+    );
+    assert_eq!(default_notes_path(), Some(explicit_home.join("notes.txt")));
+    assert_eq!(default_memory_path(), Some(explicit_home.join("memory.md")));
     Ok(())
 }
 

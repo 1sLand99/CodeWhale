@@ -27,6 +27,7 @@ anyhow.workspace = true
 codewhale-config = { path = "../config", version = "0.9.2" }
 codewhale-execpolicy = { path = "../execpolicy", version = "0.9.2" }
 codewhale-lane = { path = "../lane", version = "0.9.2" }
+codewhale-paths = { path = "../paths", version = "0.9.2" }
 codewhale-protocol = { path = "../protocol", version = "0.9.2" }
 codewhale-release = { path = "../release", version = "0.9.2" }
 codewhale-secrets = { path = "../secrets", version = "0.9.2" }

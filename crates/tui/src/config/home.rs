@@ -1,4 +1,4 @@
-//! Home-directory resolution, kept as a dependency-free leaf.
+//! Home-directory compatibility adapter, kept as an includable leaf.
 //!
 //! This is one function that could live in `paths.rs` — and did, until #4757
 //! made it the crate-wide replacement for `dirs::home_dir()`. Two of the new
@@ -11,12 +11,14 @@
 //! `#[cfg(test)]`, and integration test binaries compile *with* `cfg(test)`
 //! set, so including it drags in `test_support` — and then
 //! `config_persistence` behind that. Splitting this function out keeps the
-//! includable surface to `std` + `dirs` with no `crate::` references at all,
-//! so the test binary picks up production behavior verbatim instead of a
-//! divergent shim.
+//! includable surface to `std` + `codewhale-paths` with no `crate::` references
+//! at all, so the test binary picks up production behavior verbatim instead of
+//! a divergent shim.
 //!
 //! `paths.rs` re-exports this so `config::effective_home_dir` and every
-//! existing `use paths::{...}` caller resolve unchanged.
+//! existing `use paths::{...}` caller resolve unchanged. The implementation
+//! delegates to the workspace's leaf path-authority crate, which is also safe
+//! to reference from the integration-test binary that includes this file.
 
 use std::path::PathBuf;
 
@@ -29,32 +31,5 @@ use std::path::PathBuf;
 /// OS lookup last is what makes a faked environment win in tests while
 /// production still falls back to the real thing.
 pub(crate) fn effective_home_dir() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("HOME") {
-        let path = PathBuf::from(path);
-        if !path.as_os_str().is_empty() {
-            return Some(path);
-        }
-    }
-
-    if let Some(path) = std::env::var_os("USERPROFILE") {
-        let path = PathBuf::from(path);
-        if !path.as_os_str().is_empty() {
-            return Some(path);
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        if let (Some(drive), Some(homepath)) =
-            (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH"))
-        {
-            let mut path = PathBuf::from(drive);
-            path.push(homepath);
-            if !path.as_os_str().is_empty() {
-                return Some(path);
-            }
-        }
-    }
-
-    dirs::home_dir()
+    codewhale_paths::user_home()
 }

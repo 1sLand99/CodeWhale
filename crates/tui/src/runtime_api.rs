@@ -485,11 +485,7 @@ pub async fn run_http_server(
         AutomationSchedulerConfig::default(),
     );
 
-    let sessions_dir = default_sessions_dir().unwrap_or_else(|_| {
-        crate::config::effective_home_dir()
-            .map(|h| h.join(".deepseek").join("sessions"))
-            .unwrap_or_else(|| PathBuf::from(".deepseek").join("sessions"))
-    });
+    let sessions_dir = default_sessions_dir().unwrap_or_else(|_| fallback_sessions_dir());
     let runtime_token_env = std::env::var("CODEWHALE_RUNTIME_TOKEN")
         .ok()
         .or_else(|| std::env::var("DEEPSEEK_RUNTIME_TOKEN").ok());
@@ -599,6 +595,15 @@ pub async fn run_http_server(
     scheduler_cancel.cancel();
     scheduler_handle.abort();
     serve_result
+}
+
+fn fallback_sessions_dir() -> PathBuf {
+    if let Some(home) = codewhale_paths::codewhale_home_override() {
+        return home.join("sessions");
+    }
+    codewhale_paths::legacy_deepseek_home()
+        .unwrap_or_else(|| PathBuf::from(codewhale_paths::LEGACY_APP_DIR))
+        .join("sessions")
 }
 
 pub fn build_router(state: RuntimeApiState) -> Router {

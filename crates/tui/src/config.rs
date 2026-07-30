@@ -9142,7 +9142,7 @@ fn credential_secret_store_for_save() -> Option<codewhale_secrets::Secrets> {
 
 #[cfg(test)]
 fn credential_secret_store_for_save() -> Option<codewhale_secrets::Secrets> {
-    let isolated_home = std::env::var_os("CODEWHALE_HOME").is_some_and(|value| !value.is_empty());
+    let isolated_home = codewhale_paths::codewhale_home_is_explicit();
     let explicit_backend = std::env::var_os("CODEWHALE_SECRET_BACKEND")
         .or_else(|| std::env::var_os("DEEPSEEK_SECRET_BACKEND"))
         .is_some_and(|value| !value.is_empty());
@@ -10119,7 +10119,7 @@ fn provider_secret_store_api_key_with_mode(
     // Secret-store regressions opt in with an isolated CODEWHALE_HOME and an
     // explicit backend, matching the secrets crate's own test discipline.
     #[cfg(test)]
-    if std::env::var_os("CODEWHALE_HOME").is_none()
+    if !codewhale_paths::codewhale_home_is_explicit()
         || std::env::var_os("CODEWHALE_SECRET_BACKEND").is_none()
     {
         return None;

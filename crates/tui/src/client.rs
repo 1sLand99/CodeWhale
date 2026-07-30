@@ -499,7 +499,7 @@ fn push_file_backed_model_bound_secrets(values: &mut Vec<String>) {
     // The isolated regression below opts in with a temporary CODEWHALE_HOME,
     // matching Config's existing secret-store test discipline.
     #[cfg(test)]
-    if std::env::var_os("CODEWHALE_HOME").is_none()
+    if !codewhale_paths::codewhale_home_is_explicit()
         || std::env::var_os("CODEWHALE_SECRET_BACKEND").is_none()
     {
         return;
@@ -5202,6 +5202,33 @@ mod tests {
         }
         assert!(content.contains(codewhale_config::persistence::REDACTED));
         assert!(content.contains("ordinary output survives"));
+    }
+
+    #[test]
+    fn whitespace_codewhale_home_does_not_load_ambient_redaction_secrets() {
+        let _env_lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ambient_home = tmp.path().join("ambient-home");
+        std::fs::create_dir_all(&ambient_home).expect("create ambient home");
+        let _home = crate::test_support::EnvVarGuard::set("HOME", &ambient_home);
+        let _userprofile = crate::test_support::EnvVarGuard::set("USERPROFILE", &ambient_home);
+        let _codewhale_home_unset = crate::test_support::EnvVarGuard::remove("CODEWHALE_HOME");
+        let _secret_backend =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+        codewhale_secrets::Secrets::file_backed()
+            .set("arcee", "ambient-redaction-secret-sentinel")
+            .expect("seed ambient file secret store");
+        let _whitespace_home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", " \t ");
+        let mut values = Vec::new();
+
+        push_file_backed_model_bound_secrets(&mut values);
+
+        assert!(
+            !values
+                .iter()
+                .any(|value| value == "ambient-redaction-secret-sentinel"),
+            "whitespace must not opt tests into reading the ambient secret store"
+        );
     }
 
     #[test]

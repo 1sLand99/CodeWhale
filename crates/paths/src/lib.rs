@@ -44,13 +44,27 @@ pub fn legacy_deepseek_home_override() -> Option<PathBuf> {
 /// Resolve the user's platform home, preferring `HOME` before `USERPROFILE`.
 ///
 /// The explicit environment order makes CLI, state, config, and secret paths
-/// deterministic in hermetic shells. The platform resolver remains the final
-/// fallback for ordinary desktop launches where neither variable is present.
+/// deterministic in hermetic shells. On Windows, `HOMEDRIVE` plus `HOMEPATH`
+/// remains a compatibility fallback before the platform resolver. The platform
+/// resolver remains last for ordinary desktop launches without those variables.
 #[must_use]
 pub fn user_home() -> Option<PathBuf> {
     path_env("HOME")
         .or_else(|| path_env("USERPROFILE"))
+        .or_else(windows_home_from_environment)
         .or_else(dirs::home_dir)
+}
+
+#[cfg(windows)]
+fn windows_home_from_environment() -> Option<PathBuf> {
+    let mut path = path_env("HOMEDRIVE")?;
+    path.push(path_env("HOMEPATH")?);
+    (!path.as_os_str().is_empty()).then_some(path)
+}
+
+#[cfg(not(windows))]
+fn windows_home_from_environment() -> Option<PathBuf> {
+    None
 }
 
 /// Resolve the canonical Codewhale runtime home.

@@ -1106,6 +1106,7 @@ dependencies = [
  "codewhale-config",
  "codewhale-execpolicy",
  "codewhale-lane",
+ "codewhale-paths",
  "codewhale-protocol",
  "codewhale-release",
  "codewhale-secrets",
