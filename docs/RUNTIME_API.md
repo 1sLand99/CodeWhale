@@ -205,7 +205,8 @@ codewhale doctor --json
 | `legacy_state.session_recovery.recoverable_file_count` | number | Total missing destination filename count, including entries beyond the bounded sample |
 | `legacy_state.session_recovery.recoverable_files_truncated` | bool | Whether more than 100 recoverable filenames were found |
 | `legacy_state.session_recovery.recovery_command` | string or null | `codewhale sessions` when additive automatic recovery is available; null for isolated, complete, empty, or failed scans |
-| `api_key.source` | string | Structural source state: `config_declared`, `env_declared`, `external_auth_declared`, `oauth_unprobed`, `external_consent`, `none`, or `unknown`; no credential value is inspected |
+| `api_key.source` | string | Structural source state: `config_declared`, `env_declared`, `external_auth_declared`, `secret_store_unprobed`, `oauth_unprobed`, `external_consent`, `none`, `local_runtime`, or `unknown`; declarations are not availability proof |
+| `api_key.availability` | string | Literal `present`, `not_required`, `not_probed`, or `unknown`; only `present` and `not_required` certify structural Setup/Fleet credential readiness |
 | `base_url` | string | Provider URL authority only (`scheme://host[:explicit-port]`); userinfo, path, query, and fragment are omitted |
 | `default_text_model` | string | Default model |
 | `memory.enabled` | bool | Whether the memory feature is on |
@@ -239,7 +240,8 @@ codewhale doctor --json
   "config_present": true,
   "workspace": "/Users/you/projects/codewhale-tui",
   "api_key": {
-    "source": "unknown"
+    "source": "secret_store_unprobed",
+    "availability": "not_probed"
   },
   "base_url": "https://api.deepseek.com",
   "default_text_model": "deepseek-v4-pro",

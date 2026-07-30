@@ -436,7 +436,7 @@ fn resolve_api_key_source_does_not_inspect_dispatcher_source_or_value() {
         Some(value) => unsafe { std::env::set_var("DEEPSEEK_API_KEY_SOURCE", value) },
         None => unsafe { std::env::remove_var("DEEPSEEK_API_KEY_SOURCE") },
     }
-    assert_eq!(source, ApiKeySource::Unknown);
+    assert_eq!(source, ApiKeySource::SecretStoreUnprobed);
 }
 #[test]
 fn resolve_api_key_source_does_not_inspect_provider_env_values() {
@@ -457,7 +457,7 @@ fn resolve_api_key_source_does_not_inspect_provider_env_values() {
         Some(value) => unsafe { std::env::set_var("DEEPSEEK_API_KEY_SOURCE", value) },
         None => unsafe { std::env::remove_var("DEEPSEEK_API_KEY_SOURCE") },
     }
-    assert_eq!(source, ApiKeySource::Unknown);
+    assert_eq!(source, ApiKeySource::SecretStoreUnprobed);
 }
 #[test]
 fn resolve_api_key_source_does_not_open_standalone_secret_store() {
@@ -475,8 +475,11 @@ fn resolve_api_key_source_does_not_open_standalone_secret_store() {
     std::fs::write(&secret_path, sentinel).expect("secret fixture");
 
     assert_eq!(
-        resolve_api_key_source(&Config::default()),
-        ApiKeySource::Unknown
+        resolve_credential_diagnostic(&Config::default()),
+        CredentialDiagnostic::new(
+            ApiKeySource::SecretStoreUnprobed,
+            CredentialAvailability::NotProbed,
+        )
     );
     assert_eq!(std::fs::read_to_string(secret_path).unwrap(), sentinel);
 }
@@ -493,9 +496,189 @@ fn resolve_api_key_source_does_not_probe_system_keyring() {
     let _deepseek_source = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY_SOURCE");
 
     assert_eq!(
-        resolve_api_key_source(&Config::default()),
-        ApiKeySource::Unknown
+        resolve_credential_diagnostic(&Config::default()),
+        CredentialDiagnostic::new(
+            ApiKeySource::SecretStoreUnprobed,
+            CredentialAvailability::NotProbed,
+        )
     );
+}
+
+#[test]
+fn credential_diagnostic_distinguishes_literal_from_empty_config_keys() {
+    let literal = Config {
+        api_key: Some("TEST-LITERAL-CONFIG-KEY".to_string()),
+        ..Config::default()
+    };
+    assert_eq!(
+        resolve_credential_diagnostic(&literal),
+        CredentialDiagnostic::new(
+            ApiKeySource::ConfigDeclared,
+            CredentialAvailability::Present,
+        )
+    );
+    assert!(doctor_has_credentials_or_local_runtime(&literal));
+
+    let mut providers = crate::config::ProvidersConfig::default();
+    providers.openai.api_key = Some("  ".to_string());
+    let empty = Config {
+        provider: Some("openai".to_string()),
+        providers: Some(providers),
+        ..Config::default()
+    };
+    assert_eq!(
+        resolve_credential_diagnostic(&empty),
+        CredentialDiagnostic::new(
+            ApiKeySource::SecretStoreUnprobed,
+            CredentialAvailability::NotProbed,
+        )
+    );
+    assert!(!doctor_has_credentials_or_local_runtime(&empty));
+
+    let empty_root = Config {
+        api_key: Some(String::new()),
+        ..Config::default()
+    };
+    assert_eq!(
+        resolve_credential_diagnostic(&empty_root).source,
+        ApiKeySource::SecretStoreUnprobed
+    );
+    assert!(!doctor_has_credentials_or_local_runtime(&empty_root));
+}
+
+#[test]
+fn credential_diagnostic_treats_sentinel_as_unprobed_store_not_config() {
+    let _lock = crate::test_support::lock_test_env();
+    let temp = TempDir::new().expect("temp home");
+    let codewhale_home = temp.path().join("codewhale-home");
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+    let _backend = crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let config = Config {
+        api_key: Some(crate::config::API_KEYRING_SENTINEL.to_string()),
+        ..Config::default()
+    };
+
+    assert_eq!(
+        resolve_credential_diagnostic(&config),
+        CredentialDiagnostic::new(
+            ApiKeySource::SecretStoreUnprobed,
+            CredentialAvailability::NotProbed,
+        )
+    );
+    assert!(!doctor_has_credentials_or_local_runtime(&config));
+    assert!(!codewhale_home.join("secrets/secrets.json").exists());
+
+    let mut custom = std::collections::HashMap::new();
+    custom.insert(
+        "sentinel-route".to_string(),
+        crate::config::ProviderConfig {
+            kind: Some("openai-compatible".to_string()),
+            base_url: Some("https://gateway.example.test/v1".to_string()),
+            model: Some("test-model".to_string()),
+            api_key: Some(crate::config::API_KEYRING_SENTINEL.to_string()),
+            ..Default::default()
+        },
+    );
+    let provider_sentinel = Config {
+        provider: Some("sentinel-route".to_string()),
+        providers: Some(crate::config::ProvidersConfig {
+            custom,
+            ..Default::default()
+        }),
+        ..Config::default()
+    };
+    assert_eq!(
+        resolve_credential_diagnostic(&provider_sentinel),
+        CredentialDiagnostic::new(
+            ApiKeySource::SecretStoreUnprobed,
+            CredentialAvailability::NotProbed,
+        )
+    );
+}
+
+#[test]
+fn credential_declarations_do_not_certify_setup_or_fleet_readiness() {
+    let _lock = crate::test_support::lock_test_env();
+    let temp = TempDir::new().expect("temp home");
+    let codewhale_home = temp.path().join("codewhale-home");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+    let _declared_value =
+        crate::test_support::EnvVarGuard::set("TEST_DECLARED_API_KEY", "MUST-NOT-BE-READ");
+
+    let mut providers = crate::config::ProvidersConfig::default();
+    providers.openai.api_key_env = Some("TEST_DECLARED_API_KEY".to_string());
+    let env_config = Config {
+        provider: Some("openai".to_string()),
+        providers: Some(providers),
+        ..Config::default()
+    };
+    let env_diagnostic = resolve_credential_diagnostic(&env_config);
+    assert_eq!(env_diagnostic.source, ApiKeySource::EnvDeclared);
+    assert_eq!(
+        env_diagnostic.availability,
+        CredentialAvailability::NotProbed
+    );
+    let env_setup = doctor_setup_report_json(&env_config, &workspace);
+    assert_eq!(env_setup["credential"]["ready"], false);
+    assert_eq!(
+        env_setup["operate_fleet"]["provider"]["auth"]["present_or_local"],
+        false
+    );
+    assert_eq!(env_setup["operate_fleet"]["ready"], false);
+    assert!(!env_setup.to_string().contains("MUST-NOT-BE-READ"));
+
+    let mut providers = crate::config::ProvidersConfig::default();
+    providers.openai.auth = Some(codewhale_config::ProviderAuthSourceToml {
+        source: codewhale_config::AuthSourceKind::Command,
+        command: vec!["MUST-NOT-RUN".to_string()],
+        timeout_ms: None,
+        secret_id: None,
+    });
+    let external_config = Config {
+        provider: Some("openai".to_string()),
+        providers: Some(providers),
+        ..Config::default()
+    };
+    let external_diagnostic = resolve_credential_diagnostic(&external_config);
+    assert_eq!(
+        external_diagnostic,
+        CredentialDiagnostic::new(
+            ApiKeySource::ExternalAuthDeclared,
+            CredentialAvailability::NotProbed,
+        )
+    );
+    assert!(!doctor_has_credentials_or_local_runtime(&external_config));
+}
+
+#[test]
+fn credential_diagnostic_certifies_only_no_auth_and_local_runtime_without_keys() {
+    let mut providers = crate::config::ProvidersConfig::default();
+    providers.openrouter.auth_mode = Some("none".to_string());
+    let no_auth = Config {
+        provider: Some("openrouter".to_string()),
+        providers: Some(providers),
+        ..Config::default()
+    };
+    assert_eq!(
+        resolve_credential_diagnostic(&no_auth),
+        CredentialDiagnostic::new(ApiKeySource::NoAuth, CredentialAvailability::NotRequired,)
+    );
+    assert!(doctor_has_credentials_or_local_runtime(&no_auth));
+
+    let local = Config {
+        provider: Some("ollama".to_string()),
+        ..Config::default()
+    };
+    assert_eq!(
+        resolve_credential_diagnostic(&local),
+        CredentialDiagnostic::new(
+            ApiKeySource::LocalRuntime,
+            CredentialAvailability::NotRequired,
+        )
+    );
+    assert!(doctor_has_credentials_or_local_runtime(&local));
 }
 #[test]
 fn test_bare_stdio_command_is_structurally_valid_without_resolution() {

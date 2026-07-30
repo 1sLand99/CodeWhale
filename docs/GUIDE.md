@@ -124,6 +124,12 @@ provider, or starting MCP servers. Use `--check-updates`, `--probe-api`,
 `--probe-local`, or `--probe-mcp` only when you intentionally want that live
 boundary. JSON remains offline and does not accept live flags.
 
+JSON reports credential `source` separately from literal `availability`.
+Configured environment, external-auth, OAuth, consent, and secret-store sources
+remain `not_probed`; their declaration alone does not make Setup or Fleet ready.
+Only a structurally present literal config value, or a route where credentials
+are not required, certifies offline readiness.
+
 Both `doctor` and `doctor --json` also include a session-recovery diagnostic
 that compares legacy session filenames against the current store and reports
 one of `isolated`, `no_legacy_sessions`, `migration_pending`,

@@ -2068,14 +2068,20 @@ live boundary; `--probe-local` may start a desktop-managed service such as
 Ollama. Only the explicit API/local probe paths may load workspace credential
 `.env` values. Live flags conflict with `--json`, so machine-readable doctor
 output is always offline. Top-level keys include `version`, `paths`, `secret_backend`,
-`config_path`, `config_present`, `workspace`, `api_key.source`, `base_url`,
+`config_path`, `config_present`, `workspace`, `api_key.source`,
+`api_key.availability`, `base_url`,
 `default_text_model`, `mcp`, `skills`, `tools`, `plugins`, `sandbox`,
 `platform`, `api_connectivity`, and `capability`. CI consumers should rely on
 `api_key.source` (`config_declared`/`env_declared`/`external_auth_declared`/
-`oauth_unprobed`/`external_consent`/`none`/`unknown`) rather than parsing the
-human-readable `doctor` text. These are structural source states, not proof
-that a credential value exists or works. `unknown` means credential environment
-values and durable stores were deliberately not inspected. The structural
+`secret_store_unprobed`/`oauth_unprobed`/`external_consent`/`none`/
+`local_runtime`/`unknown`) and `api_key.availability`
+(`present`/`not_required`/`not_probed`/`unknown`) rather than parsing the
+human-readable `doctor` text. Source is declaration metadata, not proof that a
+credential exists or works. Only a non-empty, non-sentinel literal config value
+is structurally `present`; no-auth and local routes are `not_required`. Environment,
+external-auth, OAuth, consent, and secret-store declarations remain `not_probed`
+and cannot make structural Setup or Fleet readiness true. `unknown` means no
+supported structural conclusion was available. The structural
 loader still honors safe environment routing/model/policy fields, but it never
 materializes environment HTTP headers, sandbox API keys, or search API keys;
 only an explicit API/local probe switches to the normal credential-loading

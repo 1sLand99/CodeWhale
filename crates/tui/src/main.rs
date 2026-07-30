@@ -3184,24 +3184,102 @@ enum ApiKeySource {
     ConfigDeclared,
     EnvDeclared,
     ExternalAuthDeclared,
+    SecretStoreUnprobed,
     OAuth,
     ExternalConsent,
     NoAuth,
+    LocalRuntime,
     Unknown,
 }
 
-fn resolve_api_key_source(config: &Config) -> ApiKeySource {
+/// What structural diagnostics can truthfully say about credential
+/// availability without consulting environment values or durable stores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CredentialAvailability {
+    Present,
+    NotRequired,
+    Unknown,
+    NotProbed,
+}
+
+impl CredentialAvailability {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Present => "present",
+            Self::NotRequired => "not_required",
+            Self::Unknown => "unknown",
+            Self::NotProbed => "not_probed",
+        }
+    }
+
+    fn certifies_ready(self) -> bool {
+        matches!(self, Self::Present | Self::NotRequired)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CredentialDiagnostic {
+    source: ApiKeySource,
+    availability: CredentialAvailability,
+}
+
+impl CredentialDiagnostic {
+    const fn new(source: ApiKeySource, availability: CredentialAvailability) -> Self {
+        Self {
+            source,
+            availability,
+        }
+    }
+}
+
+fn structurally_present_config_key(value: Option<&String>) -> bool {
+    value.is_some_and(|value| {
+        let value = value.trim();
+        !value.is_empty() && value != crate::config::API_KEYRING_SENTINEL
+    })
+}
+
+fn config_key_declares_secret_store(value: Option<&String>) -> bool {
+    value.is_some_and(|value| value.trim() == crate::config::API_KEYRING_SENTINEL)
+}
+
+fn resolve_credential_diagnostic(config: &Config) -> CredentialDiagnostic {
     let provider = config.api_provider();
     let auth_mode = config.auth_mode_for_provider(provider);
     if crate::config::auth_mode_disables_api_key(auth_mode.as_deref()) {
-        return ApiKeySource::NoAuth;
+        return CredentialDiagnostic::new(
+            ApiKeySource::NoAuth,
+            CredentialAvailability::NotRequired,
+        );
+    }
+    if !crate::config::auth_mode_requires_api_key(auth_mode.as_deref())
+        && (provider.is_self_hosted()
+            || crate::config::base_url_uses_local_host(&config.deepseek_base_url()))
+    {
+        return CredentialDiagnostic::new(
+            ApiKeySource::LocalRuntime,
+            CredentialAvailability::NotRequired,
+        );
     }
     let custom_endpoint = config.provider_uses_custom_endpoint(provider);
     if !custom_endpoint && provider == crate::config::ApiProvider::OpenaiCodex {
         return config
             .external_credential_consent_status(provider)
             .filter(|status| status.route_state == "active")
-            .map_or(ApiKeySource::OAuth, |_| ApiKeySource::ExternalConsent);
+            .map_or_else(
+                || {
+                    CredentialDiagnostic::new(
+                        ApiKeySource::OAuth,
+                        CredentialAvailability::NotProbed,
+                    )
+                },
+                |_| {
+                    CredentialDiagnostic::new(
+                        ApiKeySource::ExternalConsent,
+                        CredentialAvailability::NotProbed,
+                    )
+                },
+            );
     }
     if !custom_endpoint
         && provider == crate::config::ApiProvider::Xai
@@ -3212,36 +3290,77 @@ fn resolve_api_key_source(config: &Config) -> ApiKeySource {
         return config
             .external_credential_consent_status(provider)
             .filter(|status| status.route_state == "active")
-            .map_or(ApiKeySource::OAuth, |_| ApiKeySource::ExternalConsent);
+            .map_or_else(
+                || {
+                    CredentialDiagnostic::new(
+                        ApiKeySource::OAuth,
+                        CredentialAvailability::NotProbed,
+                    )
+                },
+                |_| {
+                    CredentialDiagnostic::new(
+                        ApiKeySource::ExternalConsent,
+                        CredentialAvailability::NotProbed,
+                    )
+                },
+            );
     }
-    let provider_config_key = config
-        .provider_config()
-        .is_some_and(|entry| entry.api_key.is_some());
-    let root_deepseek_key = (matches!(
+    let provider_config = config.provider_config();
+    let provider_config_key = provider_config
+        .is_some_and(|entry| structurally_present_config_key(entry.api_key.as_ref()));
+    let provider_config_store = provider_config
+        .is_some_and(|entry| config_key_declares_secret_store(entry.api_key.as_ref()));
+    let root_key_applies = matches!(
         provider,
         crate::config::ApiProvider::Deepseek | crate::config::ApiProvider::DeepseekCN
     ) || (provider == crate::config::ApiProvider::Custom
-        && config.uses_legacy_literal_custom_route()))
-        && config.api_key.is_some();
+        && config.uses_legacy_literal_custom_route());
+    let root_deepseek_key =
+        root_key_applies && structurally_present_config_key(config.api_key.as_ref());
+    let root_deepseek_store =
+        root_key_applies && config_key_declares_secret_store(config.api_key.as_ref());
 
     if provider_config_key || root_deepseek_key {
-        ApiKeySource::ConfigDeclared
+        CredentialDiagnostic::new(
+            ApiKeySource::ConfigDeclared,
+            CredentialAvailability::Present,
+        )
     } else if config
         .provider_config()
-        .is_some_and(|entry| entry.api_key_env.is_some())
+        .and_then(|entry| entry.api_key_env.as_deref())
+        .is_some_and(|name| !name.trim().is_empty())
     {
-        ApiKeySource::EnvDeclared
+        CredentialDiagnostic::new(ApiKeySource::EnvDeclared, CredentialAvailability::NotProbed)
     } else if config
         .provider_config()
         .and_then(|entry| entry.auth.as_ref())
         .is_some()
     {
-        ApiKeySource::ExternalAuthDeclared
+        CredentialDiagnostic::new(
+            ApiKeySource::ExternalAuthDeclared,
+            CredentialAvailability::NotProbed,
+        )
+    } else if provider_config_store
+        || root_deepseek_store
+        || !config.should_skip_secret_store_for_provider(provider)
+    {
+        // The sentinel is a declaration that runtime resolution should use
+        // the secret-store layer, never a literal key. Ordinary doctor also
+        // reaches this state when a provider may use the store but no literal
+        // config declaration was found. Neither case reads a store or ambient
+        // provider environment.
+        CredentialDiagnostic::new(
+            ApiKeySource::SecretStoreUnprobed,
+            CredentialAvailability::NotProbed,
+        )
     } else {
-        // Environment variables, secret files, OS keyrings, and OAuth token
-        // values are deliberately not inspected by structural diagnostics.
-        ApiKeySource::Unknown
+        CredentialDiagnostic::new(ApiKeySource::Unknown, CredentialAvailability::Unknown)
     }
+}
+
+#[cfg(test)]
+fn resolve_api_key_source(config: &Config) -> ApiKeySource {
+    resolve_credential_diagnostic(config).source
 }
 
 fn provider_config_table_key(provider: crate::config::ApiProvider) -> &'static str {
@@ -3282,10 +3401,11 @@ fn run_setup_status(
     println!("{}", "===============".truecolor(sky_r, sky_g, sky_b));
     println!("workspace: {}", workspace.display());
 
-    match resolve_api_key_source(config) {
+    let credential = resolve_credential_diagnostic(config);
+    match credential.source {
         ApiKeySource::ConfigDeclared => println!(
-            "  {} api_key: config source declared (value not inspected)",
-            "·".dimmed()
+            "  {} api_key: literal config value structurally present",
+            "✓".truecolor(aqua_r, aqua_g, aqua_b)
         ),
         ApiKeySource::EnvDeclared => println!(
             "  {} api_key: environment source declared (value not inspected)",
@@ -3293,6 +3413,10 @@ fn run_setup_status(
         ),
         ApiKeySource::ExternalAuthDeclared => println!(
             "  {} api_key: external auth source declared (value not inspected)",
+            "·".dimmed()
+        ),
+        ApiKeySource::SecretStoreUnprobed => println!(
+            "  {} api_key: secret store eligible (store not probed)",
             "·".dimmed()
         ),
         ApiKeySource::OAuth => println!(
@@ -3307,11 +3431,19 @@ fn run_setup_status(
             "  {} api_key: disabled for this route",
             "✓".truecolor(aqua_r, aqua_g, aqua_b)
         ),
+        ApiKeySource::LocalRuntime => println!(
+            "  {} api_key: not required for this local runtime",
+            "✓".truecolor(aqua_r, aqua_g, aqua_b)
+        ),
         ApiKeySource::Unknown => println!(
             "  {} api_key: unknown (credential environment and durable stores not inspected)",
             "·".dimmed()
         ),
     }
+    println!(
+        "  · credential availability: {}",
+        credential.availability.label()
+    );
     println!(
         "  · base_url: {}",
         crate::doctor::structural_url_authority(&config.deepseek_base_url())
@@ -3649,10 +3781,13 @@ async fn run_doctor(
     for provider in crate::config::ApiProvider::all().iter().copied() {
         let slot = provider.as_str();
         let provider_config = config.provider_config_for(provider);
-        let config_declared = provider_config.is_some_and(|entry| entry.api_key.is_some())
+        let config_declared = provider_config
+            .is_some_and(|entry| structurally_present_config_key(entry.api_key.as_ref()))
             || (matches!(provider, crate::config::ApiProvider::Deepseek)
-                && config.api_key.is_some());
-        let env_source_declared = provider_config.is_some_and(|entry| entry.api_key_env.is_some());
+                && structurally_present_config_key(config.api_key.as_ref()));
+        let env_source_declared = provider_config
+            .and_then(|entry| entry.api_key_env.as_deref())
+            .is_some_and(|name| !name.trim().is_empty());
         let icon = if config_declared || env_source_declared {
             "·".truecolor(aqua_r, aqua_g, aqua_b)
         } else {
@@ -3683,21 +3818,27 @@ async fn run_doctor(
         println!("  {line}");
     }
 
-    let api_key_source = resolve_api_key_source(config);
-    let source_label = match api_key_source {
-        ApiKeySource::ConfigDeclared => "config source declared; value not inspected",
+    let credential = resolve_credential_diagnostic(config);
+    let source_label = match credential.source {
+        ApiKeySource::ConfigDeclared => "literal config value structurally present",
         ApiKeySource::EnvDeclared => "environment source declared; value not inspected",
         ApiKeySource::ExternalAuthDeclared => {
             "external auth source declared; credential not resolved"
         }
+        ApiKeySource::SecretStoreUnprobed => "secret store eligible; store not probed",
         ApiKeySource::OAuth => "OAuth route configured; token availability not probed",
         ApiKeySource::ExternalConsent => "external consent configured; token file not read",
         ApiKeySource::NoAuth => "no-auth route",
+        ApiKeySource::LocalRuntime => "local runtime; credentials not required",
         ApiKeySource::Unknown => "unknown; credential environment and stores not inspected",
     };
     println!(
         "  {} active provider credential source: {source_label}",
         "·".dimmed()
+    );
+    println!(
+        "  · active provider credential availability: {}",
+        credential.availability.label()
     );
 
     // API connectivity test
@@ -5109,16 +5250,9 @@ fn doctor_inherited_setup_facts(
 }
 
 fn doctor_has_credentials_or_local_runtime(config: &Config) -> bool {
-    if doctor_auth_present_or_local(config.api_provider(), resolve_api_key_source(config)) {
-        return true;
-    }
-
-    matches!(
-        config.api_provider(),
-        crate::config::ApiProvider::Sglang
-            | crate::config::ApiProvider::Vllm
-            | crate::config::ApiProvider::Ollama
-    )
+    resolve_credential_diagnostic(config)
+        .availability
+        .certifies_ready()
 }
 
 fn print_doctor_setup_report(
@@ -5131,9 +5265,12 @@ fn print_doctor_setup_report(
 ) {
     use colored::Colorize;
 
-    let first_run_ready = state.first_run_ready();
-    let update_ready = state.update_ready(crate::tui::setup::CONSTITUTION_CHECKPOINT_VERSION);
-    let operate_ready = state.operate_ready();
+    let credential = resolve_credential_diagnostic(config);
+    let credential_ready = credential.availability.certifies_ready();
+    let first_run_ready = state.first_run_ready() && credential_ready;
+    let update_ready =
+        state.update_ready(crate::tui::setup::CONSTITUTION_CHECKPOINT_VERSION) && credential_ready;
+    let operate_ready = state.operate_ready() && credential_ready;
     let first_run_icon = if first_run_ready {
         "✓".truecolor(ok_rgb.0, ok_rgb.1, ok_rgb.2)
     } else {
@@ -5153,6 +5290,11 @@ fn print_doctor_setup_report(
     println!();
     println!("{}", "Setup State:".bold());
     println!("  · source: {source}");
+    println!(
+        "  · credential: source={}, availability={}",
+        doctor_api_key_source_label(credential.source),
+        credential.availability.label()
+    );
     println!(
         "  {first_run_icon} first-run: {}",
         doctor_ready_label(first_run_ready)
@@ -5367,8 +5509,8 @@ fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_
     let provider = config.api_provider();
     // Doctor reports configured routing posture only. In particular it must
     // never consume an external-file grant merely to label Fleet readiness.
-    let auth_source = resolve_api_key_source(config);
-    let has_credentials_or_local = doctor_auth_present_or_local(provider, auth_source);
+    let credential = resolve_credential_diagnostic(config);
+    let has_credentials_or_local = credential.availability.certifies_ready();
     let subagents_enabled = config.subagents_enabled_for_provider(provider);
     let disabled_reason = if subagents_enabled {
         None
@@ -5408,7 +5550,8 @@ fn doctor_operate_fleet_report_json(config: &Config, workspace: &Path) -> serde_
             "id": config.provider_identity_for(provider),
             "auth": {
                 "present_or_local": has_credentials_or_local,
-                "source": doctor_api_key_source_label(auth_source),
+                "source": doctor_api_key_source_label(credential.source),
+                "availability": credential.availability.label(),
             },
         },
         "worker_runtime": {
@@ -5445,8 +5588,8 @@ fn doctor_provider_model_report_json(config: &Config) -> serde_json::Value {
     use serde_json::json;
 
     let provider = config.api_provider();
-    let auth_source = resolve_api_key_source(config);
-    let auth_present_or_local = doctor_auth_present_or_local(provider, auth_source);
+    let credential = resolve_credential_diagnostic(config);
+    let auth_present_or_local = credential.availability.certifies_ready();
     let credential_help = provider.credential_help();
     let credential_url = credential_help
         .credential_url
@@ -5465,7 +5608,8 @@ fn doctor_provider_model_report_json(config: &Config) -> serde_json::Value {
         },
         "auth": {
             "present_or_local": auth_present_or_local,
-            "source": doctor_api_key_source_label(auth_source),
+            "source": doctor_api_key_source_label(credential.source),
+            "availability": credential.availability.label(),
             "env_vars": provider.env_vars(),
             "credential_mode": credential_help.acquisition.as_str(),
             "credential_url": credential_url,
@@ -5483,21 +5627,6 @@ fn doctor_provider_model_report_json(config: &Config) -> serde_json::Value {
             },
         },
     })
-}
-
-fn doctor_auth_present_or_local(
-    provider: crate::config::ApiProvider,
-    auth_source: ApiKeySource,
-) -> bool {
-    matches!(
-        auth_source,
-        ApiKeySource::ConfigDeclared | ApiKeySource::NoAuth
-    ) || matches!(
-        provider,
-        crate::config::ApiProvider::Sglang
-            | crate::config::ApiProvider::Vllm
-            | crate::config::ApiProvider::Ollama
-    )
 }
 
 fn doctor_external_credential_consent_statuses(
@@ -5598,6 +5727,8 @@ fn doctor_setup_report_json(config: &Config, workspace: &Path) -> serde_json::Va
         "default"
     };
     let workspace_trusted = !crate::tui::onboarding::needs_trust(workspace);
+    let credential = resolve_credential_diagnostic(config);
+    let credential_ready = credential.availability.certifies_ready();
     let steps: Vec<_> = codewhale_config::SetupStep::ALL
         .into_iter()
         .map(|step| {
@@ -5617,9 +5748,15 @@ fn doctor_setup_report_json(config: &Config, workspace: &Path) -> serde_json::Va
         "schema_version": state.schema_version,
         "inherited": state.inherited,
         "checkpoint_version": crate::tui::setup::CONSTITUTION_CHECKPOINT_VERSION,
-        "first_run_ready": state.first_run_ready(),
-        "update_ready": state.update_ready(crate::tui::setup::CONSTITUTION_CHECKPOINT_VERSION),
-        "operate_ready": state.operate_ready(),
+        "first_run_ready": state.first_run_ready() && credential_ready,
+        "update_ready": state.update_ready(crate::tui::setup::CONSTITUTION_CHECKPOINT_VERSION)
+            && credential_ready,
+        "operate_ready": state.operate_ready() && credential_ready,
+        "credential": {
+            "ready": credential_ready,
+            "source": doctor_api_key_source_label(credential.source),
+            "availability": credential.availability.label(),
+        },
         "constitution": {
             "choice": constitution_choice_id(state.constitution_choice),
             "source": constitution_source_id(state.constitution_source),
@@ -5777,15 +5914,7 @@ fn run_doctor_json(
     let config_path = &doctor_paths.config;
     let secret_backend = codewhale_secrets::diagnose_secret_backend();
 
-    let api_key_state = match resolve_api_key_source(config) {
-        ApiKeySource::ConfigDeclared => "config_declared",
-        ApiKeySource::EnvDeclared => "env_declared",
-        ApiKeySource::ExternalAuthDeclared => "external_auth_declared",
-        ApiKeySource::OAuth => "oauth_unprobed",
-        ApiKeySource::ExternalConsent => "external_consent",
-        ApiKeySource::NoAuth => "none",
-        ApiKeySource::Unknown => "unknown",
-    };
+    let credential = resolve_credential_diagnostic(config);
 
     let mcp_config_path = config.mcp_config_path();
     let project_mcp_config_path = crate::mcp::workspace_mcp_config_path(workspace);
@@ -5919,7 +6048,8 @@ fn run_doctor_json(
         ),
         "setup": doctor_setup_report_json(config, workspace),
         "api_key": {
-            "source": api_key_state,
+            "source": doctor_api_key_source_label(credential.source),
+            "availability": credential.availability.label(),
         },
         "external_credentials": doctor_external_credential_consent_json(config),
         "base_url": crate::doctor::structural_url_authority(&api_target.base_url),
@@ -6133,6 +6263,7 @@ fn doctor_route_report(config: &Config) -> serde_json::Value {
 
     let route_identity =
         crate::config::moonshot_k3_route_display_name(&target.base_url, &target.model);
+    let credential = resolve_credential_diagnostic(config);
 
     json!({
         "provider": target.provider,
@@ -6148,7 +6279,8 @@ fn doctor_route_report(config: &Config) -> serde_json::Value {
         },
         "auth": {
             "scheme": doctor_auth_scheme(config),
-            "source": doctor_api_key_source_label(resolve_api_key_source(config)),
+            "source": doctor_api_key_source_label(credential.source),
+            "availability": credential.availability.label(),
         },
         "context_window": context_window,
         "route_error": route_error,
@@ -6256,9 +6388,11 @@ fn doctor_api_key_source_label(source: ApiKeySource) -> &'static str {
         ApiKeySource::ConfigDeclared => "config_declared",
         ApiKeySource::EnvDeclared => "env_declared",
         ApiKeySource::ExternalAuthDeclared => "external_auth_declared",
+        ApiKeySource::SecretStoreUnprobed => "secret_store_unprobed",
         ApiKeySource::OAuth => "oauth_unprobed",
         ApiKeySource::ExternalConsent => "external_consent",
         ApiKeySource::NoAuth => "none",
+        ApiKeySource::LocalRuntime => "local_runtime",
         ApiKeySource::Unknown => "unknown",
     }
 }
@@ -11703,7 +11837,14 @@ mod doctor_setup_state_tests {
             report["provider_model"]["model"]["resolved"],
             crate::config::DEFAULT_TEXT_MODEL
         );
-        assert_eq!(report["provider_model"]["auth"]["source"], "unknown");
+        assert_eq!(
+            report["provider_model"]["auth"]["source"],
+            "secret_store_unprobed"
+        );
+        assert_eq!(
+            report["provider_model"]["auth"]["availability"],
+            "not_probed"
+        );
         assert_eq!(
             report["provider_model"]["auth"]["credential_url"],
             "https://platform.deepseek.com"
@@ -12013,6 +12154,7 @@ mod doctor_setup_state_tests {
         .save()
         .expect("persist user constitution");
         let config = Config {
+            api_key: Some("TEST-STRUCTURAL-LITERAL".to_string()),
             approval_policy: Some("never".to_string()),
             allow_shell: Some(false),
             sandbox_mode: Some("read-only".to_string()),
@@ -12153,7 +12295,11 @@ mod doctor_setup_state_tests {
         );
         state.save().expect("persist setup state");
 
-        let report = doctor_setup_report_json(&Config::default(), &workspace);
+        let config = Config {
+            api_key: Some("TEST-STRUCTURAL-LITERAL".to_string()),
+            ..Config::default()
+        };
+        let report = doctor_setup_report_json(&config, &workspace);
 
         assert_eq!(report["first_run_ready"], true);
         assert_eq!(report["operate_ready"], false);
@@ -16511,7 +16657,7 @@ mod setup_helper_tests {
 
         let source = resolve_api_key_source(&cfg);
 
-        assert_eq!(source, ApiKeySource::Unknown);
+        assert_eq!(source, ApiKeySource::SecretStoreUnprobed);
     }
 
     #[test]
@@ -16578,7 +16724,7 @@ mod setup_helper_tests {
 
         let source = resolve_api_key_source(&cfg);
 
-        assert_eq!(source, ApiKeySource::Unknown);
+        assert_eq!(source, ApiKeySource::SecretStoreUnprobed);
     }
 
     #[test]
