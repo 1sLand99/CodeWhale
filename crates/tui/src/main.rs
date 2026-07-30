@@ -3307,7 +3307,7 @@ fn resolve_credential_diagnostic(config: &Config) -> CredentialDiagnostic {
     ) || (provider == crate::config::ApiProvider::Custom
         && config.uses_legacy_literal_custom_route());
     let root_key_kind = root_key_applies
-        .then(|| config.api_key.as_deref())
+        .then_some(config.api_key.as_deref())
         .flatten()
         .map(crate::config::classify_config_api_key_value);
 

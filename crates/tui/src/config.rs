@@ -30,9 +30,9 @@ use subagent_limits::{resolve_subagent_api_timeout_secs, resolve_subagent_heartb
 mod models;
 pub use models::*;
 
-pub(crate) use codewhale_config::{
-    API_KEYRING_SENTINEL, ConfigApiKeyValueKind, classify_config_api_key_value,
-};
+#[cfg(test)]
+pub(crate) use codewhale_config::API_KEYRING_SENTINEL;
+pub(crate) use codewhale_config::{ConfigApiKeyValueKind, classify_config_api_key_value};
 
 pub const DEFAULT_ZAI_PROVIDER_MAX_CONCURRENCY: usize = 3;
 pub const MAX_PROVIDER_REQUEST_CONCURRENCY: usize = 64;
