@@ -1190,19 +1190,18 @@ async fn release_bench_thirty_two_worker_fanout_stays_live() -> Result<()> {
     )?;
     wait_for_counter(&mut tui, &child_requests, WORKERS, Duration::from_secs(60))?;
     let all_children_live = spawn_started.elapsed();
-    // The Ocean work surface reports both the active count and the worker
-    // count in its compact summary. Do not couple this runtime benchmark to
-    // the retired sidebar phrase ("N running").
+    // The Ocean work surface owns the exact copy around the aggregate count.
+    // Keep this runtime benchmark coupled only to the typed count glyph in the
+    // regular/wide phase strip; labels and available actions legitimately
+    // change with layout, and compact layouts intentionally omit the count.
     tui.wait_for(
         |frame| {
             let text = frame.text();
-            (text.contains(&format!("Active {WORKERS}"))
-                && text.contains(&format!("Workers {WORKERS}")))
-                || (text.contains(&format!("run ×{WORKERS}")) && text.contains("[open] [stop]"))
+            text.contains(&format!("×{WORKERS}"))
         },
         Duration::from_secs(10),
     )?;
-    let sidebar_visible = spawn_started.elapsed();
+    let aggregate_visible = spawn_started.elapsed();
     let rss_storm = pid.and_then(rss_kib);
 
     // Echo latency under storm: three samples.
@@ -1235,7 +1234,7 @@ async fn release_bench_thirty_two_worker_fanout_stays_live() -> Result<()> {
     let rss_after = pid.and_then(rss_kib);
 
     println!(
-        "BENCH32: children_live={all_children_live:?} sidebar={sidebar_visible:?} \
+        "BENCH32: children_live={all_children_live:?} aggregate={aggregate_visible:?} \
          echo={echo_samples:?} cancel={cancel_latency:?} \
          rss_idle_kib={rss_idle:?} rss_storm_kib={rss_storm:?} rss_after_kib={rss_after:?}"
     );
