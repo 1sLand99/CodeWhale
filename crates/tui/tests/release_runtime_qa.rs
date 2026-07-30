@@ -1136,12 +1136,93 @@ impl Respond for BenchFanoutResponder {
     }
 }
 
-fn rss_kib(pid: u32) -> Option<u64> {
-    let out = std::process::Command::new("ps")
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RssSample {
+    Kib(u64),
+    Unavailable(&'static str),
+}
+
+impl RssSample {
+    fn required_kib(self, phase: &str) -> Result<u64> {
+        match self {
+            Self::Kib(value) => Ok(value),
+            Self::Unavailable(reason) => Err(anyhow!(
+                "RSS UNAVAILABLE during {phase}: {reason}; this Unix benchmark requires every sample"
+            )),
+        }
+    }
+}
+
+fn rss_kib(pid: Option<u32>) -> RssSample {
+    let Some(pid) = pid else {
+        return RssSample::Unavailable("process_id_unavailable");
+    };
+    let out = match std::process::Command::new("ps")
         .args(["-o", "rss=", "-p", &pid.to_string()])
         .output()
-        .ok()?;
-    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    {
+        Ok(output) => output,
+        Err(_) => return RssSample::Unavailable("ps_command_unavailable"),
+    };
+    if !out.status.success() {
+        return RssSample::Unavailable("ps_nonzero_or_process_exited");
+    }
+    match std::str::from_utf8(&out.stdout)
+        .ok()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse().ok())
+    {
+        Some(value) => RssSample::Kib(value),
+        None => RssSample::Unavailable("ps_output_invalid"),
+    }
+}
+
+fn engine_turn_receipts(ws: &SealedWorkspace, pid: u32) -> Result<String> {
+    let log_dir = ws.home().join(".codewhale").join("logs");
+    if !log_dir.is_dir() {
+        return Ok(String::new());
+    }
+
+    let pid_suffix = format!("-{pid}.log");
+    let mut receipts = String::new();
+    for entry in std::fs::read_dir(&log_dir)? {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().ends_with(&pid_suffix) {
+            receipts.push_str(&std::fs::read_to_string(entry.path())?);
+        }
+    }
+    Ok(receipts)
+}
+
+fn wait_for_interrupted_engine_turn_receipt(
+    tui: &mut Harness,
+    ws: &SealedWorkspace,
+    timeout: Duration,
+) -> Result<()> {
+    let pid = tui
+        .pid()
+        .ok_or_else(|| anyhow!("engine completion receipt unavailable: process id missing"))?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        tui.pump();
+        let receipts = engine_turn_receipts(ws, pid)?;
+        if receipts.lines().any(|line| {
+            line.contains("engine turn completion settled")
+                && line.contains("status=Interrupted")
+                && line.contains("delivered=true")
+        }) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(anyhow!(
+                "typed engine TurnComplete(Interrupted) receipt did not arrive within {timeout:?}; \
+                 rendered cancellation text is not a settlement receipt\nengine log:\n{receipts}\n{}",
+                tui.debug_dump()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
 }
 
 /// #4014 acceptance benchmark: 32 concurrent loopback workers must keep the
@@ -1173,6 +1254,7 @@ async fn release_bench_thirty_two_worker_fanout_stays_live() -> Result<()> {
         ),
     )?;
     let mut tui = common_tui_builder(&ws)
+        .env("RUST_LOG", "warn,engine.turn=info")
         .env("CODEWHALE_PROVIDER", "deepseek")
         .env("DEEPSEEK_API_KEY", "deepseek-local-test-key")
         .env("DEEPSEEK_BASE_URL", server.uri())
@@ -1181,7 +1263,7 @@ async fn release_bench_thirty_two_worker_fanout_stays_live() -> Result<()> {
         .spawn()?;
     enter_launch_session(&mut tui)?;
     let pid = tui.pid();
-    let rss_idle = pid.and_then(rss_kib);
+    let rss_idle = rss_kib(pid);
 
     let spawn_started = Instant::now();
     type_and_submit(
@@ -1202,7 +1284,7 @@ async fn release_bench_thirty_two_worker_fanout_stays_live() -> Result<()> {
         Duration::from_secs(10),
     )?;
     let aggregate_visible = spawn_started.elapsed();
-    let rss_storm = pid.and_then(rss_kib);
+    let rss_storm = rss_kib(pid);
 
     // Echo latency under storm: three samples.
     let mut echo_samples = Vec::new();
@@ -1220,23 +1302,55 @@ async fn release_bench_thirty_two_worker_fanout_stays_live() -> Result<()> {
 
     let cancel_started = Instant::now();
     tui.send(b"\x1b")?;
-    tui.wait_for(
-        |frame| {
-            let text = frame.text().to_ascii_lowercase();
-            text.contains("cancelled") || text.contains("interrupted")
-        },
-        Duration::from_secs(10),
-    )?;
+    wait_for_interrupted_engine_turn_receipt(&mut tui, &ws, Duration::from_secs(10))?;
     let cancel_latency = cancel_started.elapsed();
+
+    // Anchor retention evidence to the typed engine cancellation settlement,
+    // then schedule absolute 1/3/5-second samples on another runtime worker so
+    // the independent post-cancel input proof cannot shift their epoch.
+    let post_cancel_observation_started = Instant::now();
+    let mut rss_retention_samples = Vec::with_capacity(4);
+    rss_retention_samples.push((
+        Duration::ZERO,
+        post_cancel_observation_started.elapsed(),
+        rss_kib(pid),
+    ));
+    let rss_sampler = tokio::spawn(async move {
+        let mut samples = Vec::with_capacity(3);
+        for target in [
+            Duration::from_secs(1),
+            Duration::from_secs(3),
+            Duration::from_secs(5),
+        ] {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(
+                post_cancel_observation_started + target,
+            ))
+            .await;
+            samples.push((
+                target,
+                post_cancel_observation_started.elapsed(),
+                rss_kib(pid),
+            ));
+        }
+        samples
+    });
 
     tui.send(keys::key::text("post-cancel-live"))?;
     tui.wait_for_text("post-cancel-live", Duration::from_secs(5))?;
-    let rss_after = pid.and_then(rss_kib);
+    let delayed_samples = tokio::time::timeout(Duration::from_secs(8), rss_sampler)
+        .await
+        .map_err(|_| anyhow!("RSS sampler exceeded its bounded post-cancel retention window"))?
+        .map_err(|error| anyhow!("RSS sampler task failed: {error}"))?;
+    rss_retention_samples.extend(delayed_samples);
+
+    tui.send(keys::key::text("post-cancel-5s-live"))?;
+    tui.wait_for_text("post-cancel-5s-live", Duration::from_secs(5))?;
 
     println!(
         "BENCH32: children_live={all_children_live:?} aggregate={aggregate_visible:?} \
          echo={echo_samples:?} cancel={cancel_latency:?} \
-         rss_idle_kib={rss_idle:?} rss_storm_kib={rss_storm:?} rss_after_kib={rss_after:?}"
+         rss_idle_kib={rss_idle:?} rss_storm_kib={rss_storm:?} \
+         rss_retention_samples={rss_retention_samples:?}"
     );
 
     let worst_echo = echo_samples.iter().max().copied().unwrap_or_default();
@@ -1248,10 +1362,27 @@ async fn release_bench_thirty_two_worker_fanout_stays_live() -> Result<()> {
         cancel_latency < Duration::from_secs(5),
         "Esc cancellation exceeded 5s under a {WORKERS}-worker storm: {cancel_latency:?}"
     );
-    if let (Some(idle), Some(storm)) = (rss_idle, rss_storm) {
+    let idle = rss_idle.required_kib("idle baseline")?;
+    let storm = rss_storm.required_kib("live worker storm")?;
+    let rss_ceiling = idle.saturating_mul(6).max(idle + 1_500_000);
+    assert!(
+        storm < rss_ceiling,
+        "RSS exploded under storm: idle={idle} KiB storm={storm} KiB"
+    );
+    for (target, observed, sample) in &rss_retention_samples {
         assert!(
-            storm < idle.saturating_mul(6).max(idle + 1_500_000),
-            "RSS exploded under storm: idle={idle} KiB storm={storm} KiB"
+            *observed >= *target,
+            "RSS sample preceded its target: target={target:?} observed={observed:?}"
+        );
+        assert!(
+            *observed <= *target + Duration::from_secs(2),
+            "RSS sample missed its bounded target window: target={target:?} observed={observed:?}"
+        );
+        let sample = sample.required_kib(&format!("post-cancel target {target:?}"))?;
+        assert!(
+            sample < rss_ceiling,
+            "RSS exceeded the bounded storm ceiling at target={target:?} \
+             observed={observed:?}: idle={idle} KiB storm={storm} KiB sample={sample} KiB"
         );
     }
 

@@ -4041,7 +4041,7 @@ impl Engine {
         // Emit turn complete event — after all post-turn bookkeeping so
         // the terminal is immediately responsive when the UI receives it.
         self.emit_goal_updated().await;
-        let _ = self
+        let turn_complete_delivered = self
             .tx_event
             .send(Event::TurnComplete {
                 usage: turn.usage,
@@ -4050,7 +4050,14 @@ impl Engine {
                 tool_catalog: tool_catalog_for_event,
                 base_url: base_url_for_event,
             })
-            .await;
+            .await
+            .is_ok();
+        tracing::info!(
+            target: "engine.turn",
+            status = ?status,
+            delivered = turn_complete_delivered,
+            "engine turn completion settled"
+        );
 
         // Post-turn snapshot. Fire-and-forget: TurnComplete is already
         // emitted, so the UI is unblocked and the user can type / select /
