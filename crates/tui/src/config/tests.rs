@@ -11157,6 +11157,14 @@ fn k3_and_kimi_k3_never_cross_products_and_fail_visibly() {
 }
 
 #[test]
+fn unknown_models_pass_through_on_canonical_moonshot_endpoints() {
+    for base_url in [DEFAULT_KIMI_CODE_BASE_URL, DEFAULT_MOONSHOT_BASE_URL] {
+        validate_kimi_code_api_model_id(ApiProvider::Moonshot, base_url, "future-kimi-model")
+            .expect("unknown model IDs remain provider-owned");
+    }
+}
+
+#[test]
 fn dispatch_endpoint_and_billing_receipts_agree_for_every_resolved_route() -> Result<()> {
     let _lock = lock_test_env();
     let temp_root = tempfile::tempdir()?;

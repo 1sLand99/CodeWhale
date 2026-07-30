@@ -8123,8 +8123,8 @@ pub(crate) enum SafeConfigDiagnostic {
 
 /// Fail closed on known-bad model/endpoint pairings (#4687).
 ///
-/// Canonical Kimi membership and direct endpoints enforce their model rosters;
-/// custom Moonshot-compatible gateways remain pass-through.
+/// Canonical endpoints reject `k3[1m]` and known membership/direct cross-pairings.
+/// Unknown IDs and custom Moonshot-compatible gateways remain pass-through.
 pub(crate) fn validate_kimi_code_api_model_id(
     provider: ApiProvider,
     base_url: &str,
