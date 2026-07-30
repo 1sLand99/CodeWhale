@@ -729,12 +729,34 @@ fn has_explicit_quota_code_marker(body: &str) -> bool {
 
 fn has_explicit_quota_phrase(body: &str) -> bool {
     let lower = body.to_ascii_lowercase();
-    lower.contains("exceeded your current quota")
-        || lower.contains("current quota has been exceeded")
-        || lower.contains("quota has been exceeded")
-        || lower.contains("quota exceeded")
-        || lower.contains("quota exhausted")
-        || lower.contains("billing hard limit has been reached")
+    let current_quota_exhausted = lower.contains("exceeded your current quota")
+        || lower.contains("current quota has been exceeded");
+    let plan_and_billing_guidance = lower.contains("plan") && lower.contains("billing");
+    let durable_scope_exhausted = [
+        "billing quota exceeded",
+        "billing quota exhausted",
+        "billing quota is exhausted",
+        "billing quota has been exceeded",
+        "billing quota has been exhausted",
+        "account quota exceeded",
+        "account quota exhausted",
+        "account quota is exhausted",
+        "account quota has been exceeded",
+        "account quota has been exhausted",
+        "plan quota exceeded",
+        "plan quota exhausted",
+        "plan quota is exhausted",
+        "plan quota has been exceeded",
+        "plan quota has been exhausted",
+    ]
+    .into_iter()
+    .any(|phrase| lower.contains(phrase));
+
+    lower.contains("billing hard limit has been reached")
+        || lower.contains("credit balance exhausted")
+        || lower.contains("credit balance is exhausted")
+        || durable_scope_exhausted
+        || (current_quota_exhausted && plan_and_billing_guidance)
 }
 
 fn extract_json_error_message(body: &str) -> Option<String> {

@@ -91,6 +91,11 @@ fn explicit_400_402_and_429_quota_responses_are_typed_and_non_retryable() {
             402,
             r#"{"error":{"code":"billing_hard_limit_reached","message":"Payment required"}}"#,
         ),
+        (
+            429,
+            "You exceeded your current quota. Please check your plan and billing details.",
+        ),
+        (429, "Account quota exhausted"),
     ] {
         let error = LlmError::from_http_response(status, body);
         assert!(matches!(error, LlmError::QuotaExhausted(_)));
@@ -107,7 +112,23 @@ fn explicit_400_402_and_429_quota_responses_are_typed_and_non_retryable() {
 
 #[test]
 fn generic_429_stays_rate_limited_and_retryable() {
-    let error = LlmError::from_http_response(429, "Too Many Requests");
+    for body in [
+        "Too Many Requests",
+        "Rate limit on your API quota exceeded",
+        "Requests per minute quota exceeded",
+        "Quota rate limit exceeded; retry after 10 seconds",
+    ] {
+        let error = LlmError::from_http_response(429, body);
+        assert!(
+            matches!(error, LlmError::RateLimited { .. }),
+            "expected transient rate limit for {body:?}, got {error:?}"
+        );
+        assert!(error.is_retryable());
+    }
+
+    let raw = r#"{"error":{"code":"RESOURCE_EXHAUSTED","message":"Rate limit on your API quota exceeded"}}"#;
+    let safe = sanitize_http_error_body(Some("fixture"), 429, raw);
+    let error = LlmError::from_http_response(429, &safe);
     assert!(matches!(error, LlmError::RateLimited { .. }));
     assert!(error.is_retryable());
 }
