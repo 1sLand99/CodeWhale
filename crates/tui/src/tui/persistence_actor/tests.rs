@@ -6,10 +6,14 @@ use std::time::{Duration, Instant};
 use crate::models::{ContentBlock, Message};
 
 const BACKLOG_RECEIPT_PATH_ENV: &str = "CODEWHALE_TEST_PERSISTENCE_BACKLOG_RECEIPT_PATH";
+const BACKLOG_SOURCE_SHA_ENV: &str = "CODEWHALE_TEST_PERSISTENCE_BACKLOG_SOURCE_SHA";
+const BACKLOG_SOURCE_DIRTY_ENV: &str = "CODEWHALE_TEST_PERSISTENCE_BACKLOG_SOURCE_DIRTY";
+const BACKLOG_RUSTC_VERSION_ENV: &str = "CODEWHALE_TEST_PERSISTENCE_BACKLOG_RUSTC_VERSION";
+const BACKLOG_CARGO_VERSION_ENV: &str = "CODEWHALE_TEST_PERSISTENCE_BACKLOG_CARGO_VERSION";
 const BACKLOG_FIXTURE_ID: &str = "paused-production-channel-session-snapshot-v1";
 const BACKLOG_REQUESTS_ATTEMPTED: usize = 128;
 const BACKLOG_CONTENT_BYTES_PER_REQUEST: usize = 64 * 1024;
-const BACKLOG_FINAL_VERSION: usize = BACKLOG_REQUESTS_ATTEMPTED - 1;
+const BACKLOG_EXPECTED_APPLIED_VERSION: usize = BACKLOG_REQUESTS_ATTEMPTED - 1;
 const BACKLOG_SESSION_ID: &str = "persistence-backlog-single-session";
 const BACKLOG_PAYLOAD_ESTIMATOR: &str = "retained-saved-session-json-bytes-v1";
 const BACKLOG_REQUEST_VARIANT: &str = "session_snapshot";
@@ -19,20 +23,37 @@ struct PersistenceBacklogObservation {
     accepted_requests: usize,
     retained_queued_requests: usize,
     estimated_retained_payload_bytes: usize,
-    newest_retained_version: Option<usize>,
+    applied_version: Option<usize>,
     enqueue_elapsed_ns: u128,
     rss_before_bytes: Option<u64>,
     rss_during_bytes: Option<u64>,
     rss_after_bytes: Option<u64>,
 }
 
-fn persistence_backlog_receipt(observation: &PersistenceBacklogObservation) -> serde_json::Value {
+#[derive(Debug)]
+struct PersistenceBacklogProvenance {
+    source_sha: String,
+    source_dirty: bool,
+    rustc_version: String,
+    cargo_version: String,
+}
+
+fn persistence_backlog_receipt(
+    observation: &PersistenceBacklogObservation,
+    provenance: &PersistenceBacklogProvenance,
+) -> serde_json::Value {
     let rss_supported = observation.rss_before_bytes.is_some()
         && observation.rss_during_bytes.is_some()
         && observation.rss_after_bytes.is_some();
     serde_json::json!({
         "document_kind": "codewhale.persistence_backlog_receipt",
-        "schema_version": 1,
+        "schema_version": 2,
+        "source_sha": provenance.source_sha,
+        "source_dirty": provenance.source_dirty,
+        "rustc_version": provenance.rustc_version,
+        "cargo_version": provenance.cargo_version,
+        "build_profile": "test",
+        "sample_count": 1,
         "fixture_id": BACKLOG_FIXTURE_ID,
         "platform": std::env::consts::OS,
         "request_variant": BACKLOG_REQUEST_VARIANT,
@@ -41,12 +62,12 @@ fn persistence_backlog_receipt(observation: &PersistenceBacklogObservation) -> s
         "requests_attempted": BACKLOG_REQUESTS_ATTEMPTED,
         "content_bytes_per_request": BACKLOG_CONTENT_BYTES_PER_REQUEST,
         "single_session_id": true,
-        "expected_newest_version": BACKLOG_FINAL_VERSION,
+        "expected_applied_version": BACKLOG_EXPECTED_APPLIED_VERSION,
         "accepted_requests": observation.accepted_requests,
         "retained_queued_requests": observation.retained_queued_requests,
         "estimated_retained_payload_bytes": observation.estimated_retained_payload_bytes,
-        "newest_retained_version": observation.newest_retained_version,
-        "newest_version_retained": observation.newest_retained_version == Some(BACKLOG_FINAL_VERSION),
+        "applied_version": observation.applied_version,
+        "final_version_applied": observation.applied_version == Some(BACKLOG_EXPECTED_APPLIED_VERSION),
         "enqueue_elapsed_ns": observation.enqueue_elapsed_ns,
         "rss_supported": rss_supported,
         "rss_before_bytes": observation.rss_before_bytes,
@@ -107,19 +128,41 @@ fn backlog_session(workspace: &std::path::Path, index: usize) -> SavedSession {
     session
 }
 
-fn retained_request_facts(request: &PersistRequest) -> (usize, Option<usize>) {
+fn retained_request_payload_bytes(request: &PersistRequest) -> usize {
     let PersistRequest::SessionSnapshot(session) = request else {
         panic!("backlog fixture retained an unexpected request variant")
     };
-    let payload_bytes = serde_json::to_vec(session)
+    serde_json::to_vec(session)
         .expect("retained measurement session must serialize")
-        .len();
-    let version = session
+        .len()
+}
+
+fn saved_session_version(session: &SavedSession) -> Option<usize> {
+    session
         .metadata
         .title
         .strip_prefix("Persistence backlog version ")
-        .and_then(|value| value.parse::<usize>().ok());
-    (payload_bytes, version)
+        .and_then(|value| value.parse::<usize>().ok())
+}
+
+fn drain_retained_requests(receiver: &mut PersistRequestReceiver) -> (usize, usize, Option<usize>) {
+    let mut retained_queued_requests = 0;
+    let mut estimated_retained_payload_bytes = 0;
+    let mut pending = PendingState::default();
+    while let Ok(request) = receiver.try_recv() {
+        retained_queued_requests += 1;
+        estimated_retained_payload_bytes += retained_request_payload_bytes(&request);
+        assert!(matches!(pending.absorb(request), Control::Continue));
+    }
+    let applied_version = pending
+        .sessions
+        .get(BACKLOG_SESSION_ID)
+        .and_then(saved_session_version);
+    (
+        retained_queued_requests,
+        estimated_retained_payload_bytes,
+        applied_version,
+    )
 }
 
 fn measure_paused_persistence_backlog() -> PersistenceBacklogObservation {
@@ -151,15 +194,8 @@ fn measure_paused_persistence_backlog() -> PersistenceBacklogObservation {
     std::hint::black_box(&receiver);
     let rss_during_bytes = current_process_rss_bytes();
 
-    let mut retained_queued_requests = 0;
-    let mut estimated_retained_payload_bytes = 0;
-    let mut newest_retained_version = None;
-    while let Ok(request) = receiver.try_recv() {
-        let (payload_bytes, version) = retained_request_facts(&request);
-        retained_queued_requests += 1;
-        estimated_retained_payload_bytes += payload_bytes;
-        newest_retained_version = newest_retained_version.max(version);
-    }
+    let (retained_queued_requests, estimated_retained_payload_bytes, applied_version) =
+        drain_retained_requests(&mut receiver);
     drop(handle);
     drop(receiver);
     std::thread::sleep(Duration::from_millis(50));
@@ -169,7 +205,7 @@ fn measure_paused_persistence_backlog() -> PersistenceBacklogObservation {
         accepted_requests,
         retained_queued_requests,
         estimated_retained_payload_bytes,
-        newest_retained_version,
+        applied_version,
         enqueue_elapsed_ns,
         rss_before_bytes,
         rss_during_bytes,
@@ -179,20 +215,34 @@ fn measure_paused_persistence_backlog() -> PersistenceBacklogObservation {
 
 #[test]
 fn persistence_backlog_receipt_contract_keeps_required_fields() {
-    let receipt = persistence_backlog_receipt(&PersistenceBacklogObservation {
-        accepted_requests: 2,
-        retained_queued_requests: 1,
-        estimated_retained_payload_bytes: 4_096,
-        newest_retained_version: Some(BACKLOG_FINAL_VERSION),
-        enqueue_elapsed_ns: 1_000,
-        rss_before_bytes: Some(10_000),
-        rss_during_bytes: Some(14_000),
-        rss_after_bytes: Some(11_000),
-    });
+    let receipt = persistence_backlog_receipt(
+        &PersistenceBacklogObservation {
+            accepted_requests: 2,
+            retained_queued_requests: 1,
+            estimated_retained_payload_bytes: 4_096,
+            applied_version: Some(BACKLOG_EXPECTED_APPLIED_VERSION),
+            enqueue_elapsed_ns: 1_000,
+            rss_before_bytes: Some(10_000),
+            rss_during_bytes: Some(14_000),
+            rss_after_bytes: Some(11_000),
+        },
+        &PersistenceBacklogProvenance {
+            source_sha: "0123456789abcdef0123456789abcdef01234567".to_string(),
+            source_dirty: false,
+            rustc_version: "rustc test".to_string(),
+            cargo_version: "cargo test".to_string(),
+        },
+    );
     let object = receipt.as_object().expect("receipt object");
     for field in [
         "document_kind",
         "schema_version",
+        "source_sha",
+        "source_dirty",
+        "rustc_version",
+        "cargo_version",
+        "build_profile",
+        "sample_count",
         "fixture_id",
         "platform",
         "request_variant",
@@ -201,12 +251,12 @@ fn persistence_backlog_receipt_contract_keeps_required_fields() {
         "requests_attempted",
         "content_bytes_per_request",
         "single_session_id",
-        "expected_newest_version",
+        "expected_applied_version",
         "accepted_requests",
         "retained_queued_requests",
         "estimated_retained_payload_bytes",
-        "newest_retained_version",
-        "newest_version_retained",
+        "applied_version",
+        "final_version_applied",
         "enqueue_elapsed_ns",
         "rss_supported",
         "rss_before_bytes",
@@ -218,9 +268,32 @@ fn persistence_backlog_receipt_contract_keeps_required_fields() {
     ] {
         assert!(object.contains_key(field), "receipt lost `{field}`");
     }
-    assert_eq!(receipt["newest_version_retained"], true);
+    assert_eq!(receipt["final_version_applied"], true);
     assert_eq!(receipt["rss_during_delta_bytes"], 4_000);
     assert_eq!(receipt["rss_after_delta_bytes"], 1_000);
+}
+
+#[test]
+fn applied_version_follows_production_drain_order_instead_of_numeric_maximum() {
+    let tmp = tempfile::tempdir().expect("isolated measurement workspace");
+    let (tx, mut receiver) = persistence_request_channel();
+    tx.send(PersistRequest::SessionSnapshot(backlog_session(
+        tmp.path(),
+        BACKLOG_EXPECTED_APPLIED_VERSION,
+    )))
+    .expect("send final version first");
+    tx.send(PersistRequest::SessionSnapshot(backlog_session(
+        tmp.path(),
+        BACKLOG_EXPECTED_APPLIED_VERSION - 1,
+    )))
+    .expect("send stale version last");
+
+    let (_, _, applied_version) = drain_retained_requests(&mut receiver);
+    assert_eq!(
+        applied_version,
+        Some(BACKLOG_EXPECTED_APPLIED_VERSION - 1),
+        "production PendingState must expose stale last-drained ordering instead of hiding it behind max(version)"
+    );
 }
 
 /// Exact, ignored child-process measurement invoked by
@@ -231,7 +304,19 @@ fn write_paused_persistence_backlog_measurement_receipt() {
     let Ok(path) = std::env::var(BACKLOG_RECEIPT_PATH_ENV) else {
         return;
     };
-    let receipt = persistence_backlog_receipt(&measure_paused_persistence_backlog());
+    let provenance = PersistenceBacklogProvenance {
+        source_sha: std::env::var(BACKLOG_SOURCE_SHA_ENV)
+            .expect("measurement wrapper must provide the exact source SHA"),
+        source_dirty: std::env::var(BACKLOG_SOURCE_DIRTY_ENV)
+            .expect("measurement wrapper must provide source dirty state")
+            .parse::<bool>()
+            .expect("source dirty state must be true or false"),
+        rustc_version: std::env::var(BACKLOG_RUSTC_VERSION_ENV)
+            .expect("measurement wrapper must provide rustc version"),
+        cargo_version: std::env::var(BACKLOG_CARGO_VERSION_ENV)
+            .expect("measurement wrapper must provide cargo version"),
+    };
+    let receipt = persistence_backlog_receipt(&measure_paused_persistence_backlog(), &provenance);
     std::fs::write(
         path,
         serde_json::to_vec_pretty(&receipt).expect("serialize backlog receipt"),

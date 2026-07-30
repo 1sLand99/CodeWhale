@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -17,7 +18,7 @@ MEASURE_SCRIPT = ROOT / "scripts" / "measure-persistence-backlog.py"
 BUDGET_PATH = ROOT / "scripts" / "persistence-backlog-budget.json"
 RECEIPT_KIND = "codewhale.persistence_backlog_receipt"
 BUDGET_KIND = "codewhale.persistence_backlog_budget"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 FIXTURE = {
     "fixture_id": "paused-production-channel-session-snapshot-v1",
@@ -27,12 +28,18 @@ FIXTURE = {
     "requests_attempted": 128,
     "content_bytes_per_request": 64 * 1024,
     "single_session_id": True,
-    "expected_newest_version": 127,
+    "expected_applied_version": 127,
 }
 
 REQUIRED_RECEIPT_FIELDS = (
     "document_kind",
     "schema_version",
+    "source_sha",
+    "source_dirty",
+    "rustc_version",
+    "cargo_version",
+    "build_profile",
+    "sample_count",
     "fixture_id",
     "platform",
     "request_variant",
@@ -41,12 +48,12 @@ REQUIRED_RECEIPT_FIELDS = (
     "requests_attempted",
     "content_bytes_per_request",
     "single_session_id",
-    "expected_newest_version",
+    "expected_applied_version",
     "accepted_requests",
     "retained_queued_requests",
     "estimated_retained_payload_bytes",
-    "newest_retained_version",
-    "newest_version_retained",
+    "applied_version",
+    "final_version_applied",
     "enqueue_elapsed_ns",
     "rss_supported",
     "rss_before_bytes",
@@ -66,6 +73,8 @@ CEILING_FIELDS = (
 )
 RSS_SAMPLE_FIELDS = ("rss_before_bytes", "rss_during_bytes", "rss_after_bytes")
 RSS_DELTA_FIELDS = ("rss_during_delta_bytes", "rss_after_delta_bytes")
+SUPPORTED_PLATFORMS = {"linux", "macos", "windows"}
+SOURCE_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 
 
 class PersistenceBacklogError(ValueError):
@@ -88,7 +97,46 @@ def non_negative_integer(value: Any, field: str) -> int:
     return value
 
 
-def validate_receipt(receipt: dict[str, Any]) -> None:
+def validate_frozen_field(field: str, value: Any, expected: Any) -> None:
+    if type(value) is not type(expected) or value != expected:
+        raise PersistenceBacklogError(
+            f"receipt {field} must remain {expected!r}, got {value!r}"
+        )
+
+
+def current_source_identity() -> dict[str, Any]:
+    def run(command: list[str]) -> str:
+        result = subprocess.run(
+            command,
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise PersistenceBacklogError(
+                f"source provenance command failed: {' '.join(command)}"
+            )
+        return result.stdout.strip()
+
+    return {
+        "source_sha": run(["git", "rev-parse", "HEAD"]),
+        "source_dirty": bool(
+            run(["git", "status", "--porcelain", "--untracked-files=normal"])
+        ),
+        "rustc_version": run(["rustc", "--version"]),
+        "cargo_version": run(["cargo", "--version"]),
+        "build_profile": "test",
+        "sample_count": 1,
+    }
+
+
+def validate_receipt(
+    receipt: dict[str, Any],
+    *,
+    expected_source: dict[str, Any] | None = None,
+    require_clean_source: bool = False,
+) -> None:
     missing = [field for field in REQUIRED_RECEIPT_FIELDS if field not in receipt]
     if missing:
         raise PersistenceBacklogError(
@@ -99,12 +147,36 @@ def validate_receipt(receipt: dict[str, Any]) -> None:
     if receipt["schema_version"] != SCHEMA_VERSION:
         raise PersistenceBacklogError("receipt schema_version changed")
     for field, expected in FIXTURE.items():
-        if receipt[field] != expected:
-            raise PersistenceBacklogError(
-                f"receipt {field} must remain {expected!r}, got {receipt[field]!r}"
-            )
-    if not isinstance(receipt["platform"], str) or not receipt["platform"]:
-        raise PersistenceBacklogError("receipt platform must be a non-empty string")
+        validate_frozen_field(field, receipt[field], expected)
+    if not isinstance(receipt["source_sha"], str) or not SOURCE_SHA_PATTERN.fullmatch(
+        receipt["source_sha"]
+    ):
+        raise PersistenceBacklogError("receipt source_sha must be an exact lowercase Git SHA")
+    if type(receipt["source_dirty"]) is not bool:
+        raise PersistenceBacklogError("receipt source_dirty must be boolean")
+    for field, prefix in (("rustc_version", "rustc "), ("cargo_version", "cargo ")):
+        if not isinstance(receipt[field], str) or not receipt[field].startswith(prefix):
+            raise PersistenceBacklogError(f"receipt {field} must be a version string")
+    validate_frozen_field("build_profile", receipt["build_profile"], "test")
+    validate_frozen_field("sample_count", receipt["sample_count"], 1)
+    if expected_source is not None:
+        for field in (
+            "source_sha",
+            "source_dirty",
+            "rustc_version",
+            "cargo_version",
+            "build_profile",
+            "sample_count",
+        ):
+            if receipt[field] != expected_source[field]:
+                raise PersistenceBacklogError(
+                    f"receipt {field} does not match the checked source"
+                )
+    if require_clean_source and receipt["source_dirty"]:
+        raise PersistenceBacklogError("persistence measurement source tree is dirty")
+    platform = receipt["platform"]
+    if platform not in SUPPORTED_PLATFORMS:
+        raise PersistenceBacklogError("receipt platform is unsupported")
 
     attempted = non_negative_integer(receipt["requests_attempted"], "requests_attempted")
     accepted = non_negative_integer(receipt["accepted_requests"], "accepted_requests")
@@ -123,13 +195,18 @@ def validate_receipt(receipt: dict[str, Any]) -> None:
         raise PersistenceBacklogError(
             "the paused channel must retain the newest request and its payload"
         )
-    newest = non_negative_integer(
-        receipt["newest_retained_version"], "newest_retained_version"
+    minimum_payload_bytes = retained * FIXTURE["content_bytes_per_request"]
+    if receipt["estimated_retained_payload_bytes"] < minimum_payload_bytes:
+        raise PersistenceBacklogError(
+            "estimated_retained_payload_bytes is smaller than the frozen retained content"
+        )
+    applied = non_negative_integer(
+        receipt["applied_version"], "applied_version"
     )
-    if newest != FIXTURE["expected_newest_version"]:
-        raise PersistenceBacklogError("newest_retained_version is not the final sent version")
-    if receipt["newest_version_retained"] is not True:
-        raise PersistenceBacklogError("newest_version_retained must be true")
+    if applied != FIXTURE["expected_applied_version"]:
+        raise PersistenceBacklogError("applied_version is not the final sent version")
+    if receipt["final_version_applied"] is not True:
+        raise PersistenceBacklogError("final_version_applied must be true")
 
     limitations = receipt["limitations"]
     if not isinstance(limitations, list) or not limitations or not all(
@@ -139,6 +216,10 @@ def validate_receipt(receipt: dict[str, Any]) -> None:
 
     if not isinstance(receipt["rss_supported"], bool):
         raise PersistenceBacklogError("rss_supported must be boolean")
+    if receipt["rss_supported"] != (platform == "macos"):
+        raise PersistenceBacklogError(
+            "rss_supported must be true exactly on the macOS measurement lane"
+        )
     rss_fields = RSS_SAMPLE_FIELDS + RSS_DELTA_FIELDS
     if receipt["rss_supported"]:
         for field in rss_fields:
@@ -181,12 +262,40 @@ def validate_budget(budget: dict[str, Any]) -> None:
         raise PersistenceBacklogError(
             "baseline_observation.accepted_requests must equal requests_attempted"
         )
+    if baseline.get("applied_version") != FIXTURE["expected_applied_version"]:
+        raise PersistenceBacklogError(
+            "baseline_observation.applied_version must be the final sent version"
+        )
+    provenance = baseline.get("provenance")
+    if not isinstance(provenance, dict):
+        raise PersistenceBacklogError("baseline_observation needs provenance")
+    if provenance.get("platform") != "macos":
+        raise PersistenceBacklogError("baseline provenance platform must be macos")
+    if not isinstance(provenance.get("source_sha"), str) or not SOURCE_SHA_PATTERN.fullmatch(
+        provenance["source_sha"]
+    ):
+        raise PersistenceBacklogError("baseline provenance needs an exact source SHA")
+    if provenance.get("source_dirty") is not False:
+        raise PersistenceBacklogError("baseline provenance must identify a clean source tree")
+    for field, prefix in (("rustc_version", "rustc "), ("cargo_version", "cargo ")):
+        if not isinstance(provenance.get(field), str) or not provenance[field].startswith(prefix):
+            raise PersistenceBacklogError(f"baseline provenance needs {field}")
+    if provenance.get("build_profile") != "test" or provenance.get("sample_count") != 1:
+        raise PersistenceBacklogError("baseline provenance build profile/sample count changed")
 
 
 def compare(
-    receipt: dict[str, Any], budget: dict[str, Any]
+    receipt: dict[str, Any],
+    budget: dict[str, Any],
+    *,
+    expected_source: dict[str, Any] | None = None,
+    require_clean_source: bool = False,
 ) -> tuple[list[tuple[str, int, int]], list[tuple[str, int, int]]]:
-    validate_receipt(receipt)
+    validate_receipt(
+        receipt,
+        expected_source=expected_source,
+        require_clean_source=require_clean_source,
+    )
     validate_budget(budget)
     increases: list[tuple[str, int, int]] = []
     decreases: list[tuple[str, int, int]] = []
@@ -232,9 +341,15 @@ def main() -> int:
     parser.add_argument("--budget", type=Path, default=BUDGET_PATH)
     args = parser.parse_args()
     try:
+        expected_source = current_source_identity()
         receipt = load_json(args.receipt, "receipt") if args.receipt else measure()
         budget = load_json(args.budget, "budget")
-        increases, decreases = compare(receipt, budget)
+        increases, decreases = compare(
+            receipt,
+            budget,
+            expected_source=expected_source,
+            require_clean_source=True,
+        )
     except PersistenceBacklogError as error:
         print(f"[persistence-backlog-budget] ERROR: {error}", file=sys.stderr)
         return 2

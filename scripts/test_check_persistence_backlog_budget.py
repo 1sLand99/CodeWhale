@@ -24,12 +24,18 @@ def receipt_fixture(*, rss_supported: bool = True) -> dict:
         "document_kind": mod.RECEIPT_KIND,
         "schema_version": mod.SCHEMA_VERSION,
         **mod.FIXTURE,
+        "source_sha": "0123456789abcdef0123456789abcdef01234567",
+        "source_dirty": False,
+        "rustc_version": "rustc test",
+        "cargo_version": "cargo test",
+        "build_profile": "test",
+        "sample_count": 1,
         "platform": "macos" if rss_supported else "linux",
         "accepted_requests": 128,
         "retained_queued_requests": 128,
         "estimated_retained_payload_bytes": 8_500_000,
-        "newest_retained_version": 127,
-        "newest_version_retained": True,
+        "applied_version": 127,
+        "final_version_applied": True,
         "enqueue_elapsed_ns": 500_000,
         "rss_supported": rss_supported,
         "rss_before_bytes": 100_000_000 if rss_supported else None,
@@ -54,6 +60,16 @@ def budget_fixture(receipt: dict | None = None) -> dict:
         "fixture": copy.deepcopy(mod.FIXTURE),
         "baseline_observation": {
             "accepted_requests": receipt["accepted_requests"],
+            "applied_version": receipt["applied_version"],
+            "provenance": {
+                "platform": "macos",
+                "source_sha": receipt["source_sha"],
+                "source_dirty": False,
+                "rustc_version": receipt["rustc_version"],
+                "cargo_version": receipt["cargo_version"],
+                "build_profile": "test",
+                "sample_count": 1,
+            },
             **copy.deepcopy(metrics),
         },
         "ceilings": copy.deepcopy(metrics),
@@ -85,7 +101,7 @@ class PersistenceBacklogBudgetTests(unittest.TestCase):
             ("requests_attempted", 64),
             ("content_bytes_per_request", 32 * 1024),
             ("single_session_id", False),
-            ("expected_newest_version", 63),
+            ("expected_applied_version", 63),
             ("request_variant", "clear_checkpoint"),
             ("payload_estimator", "shallow-size"),
         ]:
@@ -95,10 +111,21 @@ class PersistenceBacklogBudgetTests(unittest.TestCase):
                 with self.assertRaisesRegex(mod.PersistenceBacklogError, field):
                     mod.compare(receipt, budget)
 
+    def test_boolean_fixture_fields_reject_integer_aliases(self) -> None:
+        budget = budget_fixture()
+        for field in ("paused_consumer", "single_session_id"):
+            with self.subTest(field=field):
+                receipt = receipt_fixture()
+                receipt[field] = 1
+                with self.assertRaisesRegex(mod.PersistenceBacklogError, field):
+                    mod.compare(receipt, budget)
+
     def test_every_ceiling_rejects_growth_and_accepts_tightening(self) -> None:
         baseline = receipt_fixture()
         baseline["retained_queued_requests"] = 64
-        baseline["estimated_retained_payload_bytes"] = 4_250_000
+        # Leave enough valid payload headroom for the retained-count subtest
+        # to change that one metric without making the receipt impossible.
+        baseline["estimated_retained_payload_bytes"] = 8_500_000
         budget = budget_fixture(baseline)
         for field in mod.CEILING_FIELDS:
             with self.subTest(field=field):
@@ -147,12 +174,65 @@ class PersistenceBacklogBudgetTests(unittest.TestCase):
         ):
             mod.compare(receipt, budget_fixture())
 
-    def test_missing_newest_version_cannot_pass_as_coalescing(self) -> None:
+    def test_stale_applied_version_cannot_pass_as_coalescing(self) -> None:
         receipt = receipt_fixture()
-        receipt["newest_retained_version"] = 126
-        receipt["newest_version_retained"] = False
+        receipt["applied_version"] = 126
+        receipt["final_version_applied"] = False
         with self.assertRaisesRegex(mod.PersistenceBacklogError, "final sent version"):
             mod.compare(receipt, budget_fixture())
+
+    def test_impossible_one_byte_retained_payload_is_rejected(self) -> None:
+        receipt = receipt_fixture()
+        receipt["retained_queued_requests"] = 1
+        receipt["estimated_retained_payload_bytes"] = 1
+        with self.assertRaisesRegex(mod.PersistenceBacklogError, "frozen retained content"):
+            mod.compare(receipt, budget_fixture())
+
+    def test_rss_support_is_required_exactly_on_macos(self) -> None:
+        macos_without_rss = receipt_fixture(rss_supported=False)
+        macos_without_rss["platform"] = "macos"
+        with self.assertRaisesRegex(mod.PersistenceBacklogError, "exactly on the macOS"):
+            mod.compare(macos_without_rss, budget_fixture())
+
+        linux_with_rss = receipt_fixture()
+        linux_with_rss["platform"] = "linux"
+        with self.assertRaisesRegex(mod.PersistenceBacklogError, "exactly on the macOS"):
+            mod.compare(linux_with_rss, budget_fixture())
+
+        unknown = receipt_fixture(rss_supported=False)
+        unknown["platform"] = "unknown"
+        with self.assertRaisesRegex(mod.PersistenceBacklogError, "unsupported"):
+            mod.compare(unknown, budget_fixture())
+
+    def test_cli_source_identity_rejects_historical_or_dirty_receipts(self) -> None:
+        receipt = receipt_fixture()
+        expected = {
+            field: receipt[field]
+            for field in (
+                "source_sha",
+                "source_dirty",
+                "rustc_version",
+                "cargo_version",
+                "build_profile",
+                "sample_count",
+            )
+        }
+        historical = copy.deepcopy(receipt)
+        historical["source_sha"] = "f" * 40
+        with self.assertRaisesRegex(mod.PersistenceBacklogError, "checked source"):
+            mod.compare(historical, budget_fixture(), expected_source=expected)
+
+        dirty = copy.deepcopy(receipt)
+        dirty["source_dirty"] = True
+        expected_dirty = copy.deepcopy(expected)
+        expected_dirty["source_dirty"] = True
+        with self.assertRaisesRegex(mod.PersistenceBacklogError, "source tree is dirty"):
+            mod.compare(
+                dirty,
+                budget_fixture(),
+                expected_source=expected_dirty,
+                require_clean_source=True,
+            )
 
     def test_budget_cannot_hide_a_baseline_above_its_ceiling(self) -> None:
         budget = budget_fixture()
