@@ -3429,7 +3429,6 @@ struct GuiConfigResponse {
     inline_diffs: String,
     locale: String,
     max_history: usize,
-    prefer_external_pdftotext: bool,
     workspace_follow_symlinks: bool,
     calm_mode: bool,
     sandbox_mode: String,
@@ -3527,7 +3526,6 @@ async fn get_config(
         inline_diffs: settings.inline_diffs.clone(),
         locale: settings.locale.clone(),
         max_history: settings.max_input_history,
-        prefer_external_pdftotext: settings.prefer_external_pdftotext,
         workspace_follow_symlinks: settings.workspace_follow_symlinks,
         calm_mode: settings.calm_mode,
         sandbox_mode: config
@@ -3636,7 +3634,6 @@ async fn set_config(
             | "show_tool_details"
             | "inline_diffs"
             | "calm_mode"
-            | "prefer_external_pdftotext"
             | "workspace_follow_symlinks"
             | "locale"
             | "max_history" => {
@@ -3741,7 +3738,7 @@ async fn set_config(
             }
             _ => {
                 return Err(ApiError::bad_request(format!(
-                    "Unknown config key '{key}'. Supported keys: model, default_model, reasoning_effort, approval_mode, base_url, provider, provider_url, cost_currency, default_mode, auto_compact, allow_shell, mcp_config_path, show_thinking, thinking_default_expanded, thinking_highlight, show_tool_details, inline_diffs, locale, max_history, calm_mode, prefer_external_pdftotext, workspace_follow_symlinks, subagents_enabled, subagents_max_depth, sandbox_mode, strict_tool_mode, memory_enabled, search_provider, prompt_suggestion"
+                    "Unknown config key '{key}'. Supported keys: model, default_model, reasoning_effort, approval_mode, base_url, provider, provider_url, cost_currency, default_mode, auto_compact, allow_shell, mcp_config_path, show_thinking, thinking_default_expanded, thinking_highlight, show_tool_details, inline_diffs, locale, max_history, calm_mode, workspace_follow_symlinks, subagents_enabled, subagents_max_depth, sandbox_mode, strict_tool_mode, memory_enabled, search_provider, prompt_suggestion"
                 )));
             }
         };

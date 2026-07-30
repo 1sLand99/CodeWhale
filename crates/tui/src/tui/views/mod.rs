@@ -1953,13 +1953,6 @@ impl ConfigView {
             },
             ConfigRow {
                 section: ConfigSection::Mcp,
-                key: "prefer_external_pdftotext".to_string(),
-                value: settings.prefer_external_pdftotext.to_string(),
-                editable: true,
-                scope: ConfigScope::Saved,
-            },
-            ConfigRow {
-                section: ConfigSection::Mcp,
                 key: "mcp_config_path".to_string(),
                 value: app.mcp_config_path.display().to_string(),
                 editable: true,
@@ -2868,7 +2861,6 @@ fn config_label_message(key: &str) -> Option<MessageId> {
         "auto_compact" => MessageId::ConfigLabelAutoCompact,
         "auto_compact_threshold_percent" => MessageId::ConfigLabelAutoCompactThreshold,
         "max_history" => MessageId::ConfigLabelMaxHistory,
-        "prefer_external_pdftotext" => MessageId::ConfigLabelPreferExternalPdftotext,
         "mcp_config_path" => MessageId::ConfigLabelMcpConfigPath,
         "fleet.exec.max_spawn_depth" => MessageId::ConfigLabelFleetSpawnDepth,
         "goal_command" => MessageId::ConfigLabelGoalCommand,
@@ -3040,7 +3032,6 @@ fn config_boolean_key(key: &str) -> bool {
             | "sessions_rail"
             | "session_auto_resume"
             | "auto_compact"
-            | "prefer_external_pdftotext"
     )
 }
 
@@ -5151,7 +5142,6 @@ mod tests {
         assert!(keys.contains(&"bracketed_paste"));
         assert!(keys.contains(&"context_panel"));
         assert!(keys.contains(&"cost_currency"));
-        assert!(keys.contains(&"prefer_external_pdftotext"));
         assert!(keys.contains(&"mcp_config_path"));
         assert!(keys.contains(&"fleet.exec.max_spawn_depth"));
         assert!(keys.contains(&"features.vision_model"));

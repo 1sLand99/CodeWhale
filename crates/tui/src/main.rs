@@ -4480,59 +4480,28 @@ async fn run_doctor(
         }
     }
 
-    // PDF reader: pure-Rust `pdf-extract` is the v0.8.32 default, so
-    // `pdftotext` is no longer required for `read_file` to handle PDFs.
-    // We still surface its presence (a) so users with column-heavy PDFs
-    // know they can opt in via `prefer_external_pdftotext = true`, and
-    // (b) so users who *did* opt in get a clean signal when the binary
-    // is missing rather than discovering it on the next PDF read.
-    let prefer_external = crate::settings::Settings::load_read_only()
-        .map(|s| s.prefer_external_pdftotext)
-        .unwrap_or(false);
+    // PDF text extraction is an optional integration. Codewhale itself stays
+    // a single required executable; file and web tools report a typed
+    // unavailable result when Poppler is not installed.
     match crate::dependencies::resolve_pdftotext() {
-        Some(_) => {
-            if prefer_external {
-                println!(
-                    "  {} pdftotext: available → read_file routes PDFs through Poppler (prefer_external_pdftotext = true)",
-                    "✓".truecolor(aqua_r, aqua_g, aqua_b),
-                );
-            } else {
-                println!(
-                    "  {} pdftotext: available (optional — pure-Rust extractor is the default in v0.8.32)",
-                    "✓".truecolor(aqua_r, aqua_g, aqua_b),
-                );
-                println!(
-                    "    Set `prefer_external_pdftotext = true` in settings.toml for column-heavy PDFs."
-                );
-            }
-        }
+        Some(_) => println!(
+            "  {} pdftotext: available → PDF text extraction enabled",
+            "✓".truecolor(aqua_r, aqua_g, aqua_b),
+        ),
         None => {
-            if prefer_external {
-                println!(
-                    "  {} pdftotext: not found, but `prefer_external_pdftotext = true` is set → PDF reads will return `binary_unavailable`",
-                    "✗".truecolor(red_r, red_g, red_b),
-                );
-                println!(
-                    "    Either install Poppler or unset `prefer_external_pdftotext` to fall back to the bundled pure-Rust extractor."
-                );
-                match std::env::consts::OS {
-                    "macos" => println!("    Install via: brew install poppler"),
-                    "linux" => println!(
-                        "    Install via: sudo apt install poppler-utils   (Debian/Ubuntu)"
-                    ),
-                    "windows" => println!(
-                        "    Install Poppler for Windows from https://blog.alivate.com.au/poppler-windows/"
-                    ),
-                    _ => {}
+            println!(
+                "  {} pdftotext: not found (optional; PDF reads return `binary_unavailable`)",
+                "·".dimmed(),
+            );
+            match std::env::consts::OS {
+                "macos" => println!("    Install via: brew install poppler"),
+                "linux" => {
+                    println!("    Install via: sudo apt install poppler-utils   (Debian/Ubuntu)")
                 }
-            } else {
-                println!(
-                    "  {} pdftotext: not found (optional — pure-Rust extractor is the default in v0.8.32)",
-                    "·".dimmed(),
-                );
-                println!(
-                    "    Install Poppler only if you want to opt into pdftotext for column-heavy PDFs."
-                );
+                "windows" => println!(
+                    "    Install Poppler for Windows from https://blog.alivate.com.au/poppler-windows/"
+                ),
+                _ => {}
             }
         }
     }

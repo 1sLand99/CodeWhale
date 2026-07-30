@@ -40,6 +40,7 @@ pub mod native_memory;
 pub mod notify;
 pub mod pandoc;
 pub mod parallel;
+mod pdf;
 pub mod plan;
 pub mod plugin;
 pub mod project;

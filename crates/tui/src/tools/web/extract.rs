@@ -6,9 +6,6 @@
 
 use std::sync::OnceLock;
 
-#[cfg(feature = "pdf")]
-use std::fmt::Display;
-
 use encoding_rs::{Encoding, UTF_8, UTF_16BE, UTF_16LE};
 use regex::Regex;
 
@@ -81,7 +78,7 @@ pub(crate) fn extract_document(
         });
     }
 
-    if looks_like_pdf(bytes) || declared == Some("application/pdf") || url_is_pdf(url) {
+    if is_pdf_response(url, declared, bytes) {
         if looks_like_pdf(bytes) && declared_media_family(declared).is_some() {
             return Err(ToolError::execution_failed(format!(
                 "Response media type `{}` did not match its PDF bytes",
@@ -155,6 +152,16 @@ pub(crate) fn extract_document(
         "Unsupported binary response type `{}`; use a dedicated download tool",
         declared.unwrap_or("unknown")
     )))
+}
+
+fn is_pdf_response(url: &str, content_type: Option<&str>, bytes: &[u8]) -> bool {
+    has_pdf_signature(bytes)
+        || normalized_content_type(content_type).as_deref() == Some("application/pdf")
+        || url_is_pdf(url)
+}
+
+pub(crate) fn has_pdf_signature(bytes: &[u8]) -> bool {
+    looks_like_pdf(bytes)
 }
 
 fn extract_html(url: &str, html: &str) -> Result<ExtractedDocument, ToolError> {
@@ -711,10 +718,9 @@ fn sniff_media(bytes: &[u8]) -> Option<MediaSignature> {
     Some(signature)
 }
 
-#[cfg(feature = "pdf")]
 fn extract_pdf(bytes: &[u8]) -> Result<ExtractedDocument, ToolError> {
-    let text = guard_pdf_extract(|| pdf_extract::extract_text_from_mem(bytes))
-        .map_err(|err| ToolError::execution_failed(format!("PDF extract failed: {err}")))?;
+    let text = super::super::pdf::extract_bytes(bytes)
+        .map_err(|error| ToolError::execution_failed(format!("PDF extract failed: {error}")))?;
     let pages = split_pdf_pages(&text);
     let text = pages
         .iter()
@@ -732,41 +738,6 @@ fn extract_pdf(bytes: &[u8]) -> Result<ExtractedDocument, ToolError> {
     })
 }
 
-#[cfg(not(feature = "pdf"))]
-fn extract_pdf(_bytes: &[u8]) -> Result<ExtractedDocument, ToolError> {
-    Err(ToolError::execution_failed(
-        "PDF extraction is unavailable in this build",
-    ))
-}
-
-#[cfg(feature = "pdf")]
-fn guard_pdf_extract<T, E, F>(extract: F) -> Result<T, String>
-where
-    E: Display,
-    F: FnOnce() -> Result<T, E>,
-{
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(extract)) {
-        Ok(Ok(value)) => Ok(value),
-        Ok(Err(err)) => Err(err.to_string()),
-        Err(payload) => Err(format!(
-            "extractor panicked: {}",
-            panic_payload_message(payload.as_ref())
-        )),
-    }
-}
-
-#[cfg(feature = "pdf")]
-fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        (*message).to_string()
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.clone()
-    } else {
-        "unknown panic".to_string()
-    }
-}
-
-#[cfg(feature = "pdf")]
 fn split_pdf_pages(text: &str) -> Vec<Vec<String>> {
     text.split('\x0C')
         .map(|page| {
@@ -1082,13 +1053,5 @@ mod tests {
             .expect("sniff svg");
         assert_eq!(document.kind, DocumentKind::Media);
         assert_eq!(document.media_extension, Some("svg"));
-    }
-
-    #[cfg(feature = "pdf")]
-    #[test]
-    fn pdf_panic_is_contained() {
-        let error = guard_pdf_extract::<(), &str, _>(|| panic!("malformed pdf"))
-            .expect_err("panic must be captured");
-        assert!(error.contains("extractor panicked: malformed pdf"));
     }
 }

@@ -444,9 +444,6 @@ fn show_single_setting(app: &App, key: &str) -> CommandResult {
                 .as_setting_for_provider(app.api_provider)
                 .to_string(),
         ),
-        "prefer_external_pdftotext" | "external_pdftotext" | "pdftotext" => Settings::load()
-            .ok()
-            .map(|settings| settings.prefer_external_pdftotext.to_string()),
         "workspace_follow_symlinks" | "follow_symlinks" => Settings::load().ok().map(|settings| {
             format!(
                 "{} (restart required for engine tools)",

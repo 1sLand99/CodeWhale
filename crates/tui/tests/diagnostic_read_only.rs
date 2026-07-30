@@ -282,8 +282,8 @@ fn diagnostics_read_home_legacy_settings_without_migrating_them() {
                     "doctor must report the legacy default mode\nstdout:\n{stdout}"
                 );
                 assert!(
-                    stdout.contains("prefer_external_pdftotext = true"),
-                    "doctor must report the legacy PDF preference\nstdout:\n{stdout}"
+                    !stdout.contains("prefer_external_pdftotext"),
+                    "doctor must not advertise the removed PDF preference\nstdout:\n{stdout}"
                 );
             }
             ["doctor", "--json"] => {

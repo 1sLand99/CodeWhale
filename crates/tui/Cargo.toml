@@ -9,13 +9,12 @@ description = "Terminal UI for open-source and open-weight coding models"
 default-run = "codewhale-tui"
 
 [features]
-default = ["tui", "json", "toml", "pdf"]
+default = ["tui", "json", "toml"]
 tui = ["dep:schemaui", "schemaui/tui", "json", "toml"]
 web = ["dep:schemaui", "schemaui/web", "json", "toml"]
 json = ["schemaui/json"]
 toml = ["schemaui/toml"]
 long-running-tests = []
-pdf = ["dep:pdf-extract"]
 
 [[bin]]
 name = "codewhale-tui"
@@ -88,7 +87,6 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 htmd = "0.5.4"
 lru = "0.18"
 parking_lot = "0.12"
-pdf-extract = { version = "0.12", optional = true }
 readability = { version = "0.3.0", default-features = false }
 tar = "0.4"
 flate2 = "1.1"

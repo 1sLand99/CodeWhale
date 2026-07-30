@@ -111,7 +111,6 @@ pub struct SettingsSection {
     #[schemars(range(min = 0))]
     pub max_history: usize,
     pub cost_currency: CostCurrencyValue,
-    pub prefer_external_pdftotext: bool,
     #[schemars(
         title = "Follow symlinks",
         description = "Allow workspace discovery to cross symbolic links. Enable only when linked projects are part of this workspace."
@@ -476,7 +475,6 @@ pub fn build_document(app: &App, config: &Config) -> Result<ConfigUiDocument> {
             context_panel: settings.context_panel,
             max_history: settings.max_input_history,
             cost_currency: CostCurrencyValue::from_setting(&settings.cost_currency)?,
-            prefer_external_pdftotext: settings.prefer_external_pdftotext,
             workspace_follow_symlinks: settings.workspace_follow_symlinks,
             provider_models: settings
                 .provider_models
@@ -712,10 +710,6 @@ pub fn apply_document(
         ("context_panel", bool_str(doc.settings.context_panel)),
         ("max_history", &doc.settings.max_history.to_string()),
         ("cost_currency", doc.settings.cost_currency.as_setting()),
-        (
-            "prefer_external_pdftotext",
-            bool_str(doc.settings.prefer_external_pdftotext),
-        ),
         (
             "workspace_follow_symlinks",
             bool_str(doc.settings.workspace_follow_symlinks),

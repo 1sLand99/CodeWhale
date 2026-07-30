@@ -188,51 +188,62 @@ impl ToolSpec for FetchUrlTool {
             Some(body) => project_json_fields(body, &fetched.content_type, &requested_fields)?,
             None => None,
         };
-        let extracted =
-            match extract_document(&fetched.url, Some(&fetched.content_type), &fetched.bytes) {
-                Ok(document) => document,
-                Err(_error)
-                    if format == Format::Raw && is_declared_textual(&fetched.content_type) =>
-                {
-                    let body_text = match body_text.as_ref() {
-                        Some(body_text) => body_text.clone(),
-                        None => decode_response_body(
-                            &fetched.bytes,
-                            Some(&fetched.content_type),
-                            is_declared_html(&fetched.content_type),
-                        )?,
-                    };
-                    ExtractedDocument {
-                        kind: DocumentKind::Text,
-                        title: None,
-                        text: body_text.clone(),
-                        markdown: body_text,
-                        cleaned_html: None,
-                        pdf_pages: None,
-                        media_extension: None,
-                    }
-                }
-                Err(_error) if !is_success && is_declared_textual(&fetched.content_type) => {
-                    let body_text = match body_text.as_ref() {
-                        Some(body_text) => body_text.clone(),
-                        None => decode_response_body(
-                            &fetched.bytes,
-                            Some(&fetched.content_type),
-                            is_declared_html(&fetched.content_type),
-                        )?,
-                    };
-                    ExtractedDocument {
-                        kind: DocumentKind::Text,
-                        title: None,
-                        text: body_text.clone(),
-                        markdown: body_text,
-                        cleaned_html: None,
-                        pdf_pages: None,
-                        media_extension: None,
-                    }
-                }
-                Err(error) => return Err(error),
+        let extraction =
+            if format == Format::Raw && super::web::extract::has_pdf_signature(&fetched.bytes) {
+                Ok(ExtractedDocument {
+                    kind: DocumentKind::Pdf,
+                    title: Some("PDF Document".to_string()),
+                    text: String::new(),
+                    markdown: String::new(),
+                    cleaned_html: None,
+                    pdf_pages: None,
+                    media_extension: None,
+                })
+            } else {
+                extract_document(&fetched.url, Some(&fetched.content_type), &fetched.bytes)
             };
+        let extracted = match extraction {
+            Ok(document) => document,
+            Err(_error) if format == Format::Raw && is_declared_textual(&fetched.content_type) => {
+                let body_text = match body_text.as_ref() {
+                    Some(body_text) => body_text.clone(),
+                    None => decode_response_body(
+                        &fetched.bytes,
+                        Some(&fetched.content_type),
+                        is_declared_html(&fetched.content_type),
+                    )?,
+                };
+                ExtractedDocument {
+                    kind: DocumentKind::Text,
+                    title: None,
+                    text: body_text.clone(),
+                    markdown: body_text,
+                    cleaned_html: None,
+                    pdf_pages: None,
+                    media_extension: None,
+                }
+            }
+            Err(_error) if !is_success && is_declared_textual(&fetched.content_type) => {
+                let body_text = match body_text.as_ref() {
+                    Some(body_text) => body_text.clone(),
+                    None => decode_response_body(
+                        &fetched.bytes,
+                        Some(&fetched.content_type),
+                        is_declared_html(&fetched.content_type),
+                    )?,
+                };
+                ExtractedDocument {
+                    kind: DocumentKind::Text,
+                    title: None,
+                    text: body_text.clone(),
+                    markdown: body_text,
+                    cleaned_html: None,
+                    pdf_pages: None,
+                    media_extension: None,
+                }
+            }
+            Err(error) => return Err(error),
+        };
 
         let citation_title = extracted.title.clone();
         let (processed, artifact_write) = render_extracted(
@@ -547,6 +558,45 @@ mod tests {
         )
         .expect_err("raw text must retain the binary guard");
         assert!(error.to_string().contains("NUL bytes"));
+    }
+
+    #[test]
+    fn raw_pdf_is_preserved_without_running_text_extraction() {
+        let _lock = crate::artifacts::TEST_ARTIFACT_SESSIONS_GUARD
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let temporary = tempfile::tempdir().expect("artifact root");
+        let prior = crate::artifacts::set_test_artifact_sessions_root(Some(
+            temporary.path().join("sessions"),
+        ));
+        let _restore = ArtifactRootRestore(prior);
+        let bytes = b"%PDF-1.7\nraw fixture that is intentionally not parseable\n%%EOF";
+        assert!(super::super::web::extract::has_pdf_signature(bytes));
+
+        let document = ExtractedDocument {
+            kind: DocumentKind::Pdf,
+            title: Some("PDF Document".to_string()),
+            text: String::new(),
+            markdown: String::new(),
+            cleaned_html: None,
+            pdf_pages: None,
+            media_extension: None,
+        };
+        let (content, artifact) = render_extracted(
+            "https://example.com/raw.pdf",
+            "application/pdf",
+            Format::Raw,
+            document,
+            bytes,
+            &ctx(),
+        )
+        .expect("raw PDF preservation must not require pdftotext");
+        let artifact = artifact.expect("raw PDF artifact");
+        assert!(content.contains("PDF response saved"), "{content}");
+        assert_eq!(
+            std::fs::read(artifact.absolute_path).expect("artifact"),
+            bytes
+        );
     }
 
     #[test]
