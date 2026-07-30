@@ -1,27 +1,75 @@
 use super::*;
 
-/// #4085: entering Codewhale's Seatbelt profile must retain filesystem
-/// access already granted by macOS. A read-write extension remains readable
-/// under ReadOnly, but only a write-capable policy may honor its write half.
+/// #4085: an inherited read-write extension is necessary but never sufficient
+/// for WorkspaceWrite. Every extension-backed write must also match one
+/// approved root and retain that root's protected-subpath exclusions.
 #[test]
-fn file_provider_extensions_preserve_read_without_bypassing_read_only() {
-    let cwd = Path::new("/tmp/test");
-    let workspace_write = generate_policy(&SandboxPolicy::default(), cwd);
-    let read_only = generate_policy(&SandboxPolicy::ReadOnly, cwd);
+fn file_provider_extensions_intersect_each_workspace_root_and_exclusions() {
+    assert!(
+        is_available(),
+        "UNRUN: macOS sandbox-exec is unavailable; generated policy was not parsed"
+    );
+
+    let fixture = tempfile::tempdir().expect("create policy fixture");
+    let workspace = fixture.path().join("workspace");
+    let additional_root = fixture.path().join("additional-root");
+    std::fs::create_dir_all(workspace.join(".codewhale")).expect("create protected workspace path");
+    std::fs::create_dir_all(additional_root.join(".deepseek"))
+        .expect("create protected additional-root path");
+
+    let policy = SandboxPolicy::WorkspaceWrite {
+        writable_roots: vec![additional_root],
+        network_access: false,
+        exclude_tmpdir: true,
+        exclude_slash_tmp: true,
+    };
+    let workspace_write = generate_policy(&policy, &workspace);
+    let read_only = generate_policy(&SandboxPolicy::ReadOnly, &workspace);
 
     for policy in [&workspace_write, &read_only] {
+        assert!(policy.contains("(version 1)"));
+        assert!(policy.contains("(deny default)"));
+        assert!(policy.contains("(allow file-read*)"));
         assert!(policy.contains(r#"(allow file-read* (extension "com.apple.app-sandbox.read"))"#));
         assert!(
             policy.contains(r#"(allow file-read* (extension "com.apple.app-sandbox.read-write"))"#)
         );
     }
-    assert!(
-        workspace_write
-            .contains(r#"(allow file-write* (extension "com.apple.app-sandbox.read-write"))"#)
+    assert!(!workspace_write.contains("network-outbound"));
+
+    for root_index in 0..=1 {
+        let expected = format!(
+            r#"(require-all (extension "com.apple.app-sandbox.read-write") (subpath (param "WRITABLE_ROOT_{root_index}")) (require-not (subpath (param "WRITABLE_ROOT_{root_index}_RO_0"))))"#
+        );
+        assert!(
+            workspace_write.contains(&expected),
+            "extension write must retain root {root_index} and its exclusion:\n{workspace_write}"
+        );
+    }
+    let read_write_extension = r#"(extension "com.apple.app-sandbox.read-write")"#;
+    assert_eq!(
+        workspace_write.matches(read_write_extension).count(),
+        3,
+        "one read rule plus exactly one root-scoped write rule per approved root"
     );
+    assert!(workspace_write.contains("file-write*"));
+    assert!(!workspace_write.lines().any(|line| {
+        line.trim() == r#"(allow file-write* (extension "com.apple.app-sandbox.read-write"))"#
+    }));
+    assert!(!read_only.contains(r#"file-write* (extension "com.apple.app-sandbox.read-write")"#));
+    assert_eq!(read_only.matches(read_write_extension).count(), 1);
+    assert!(!read_only.contains("WRITABLE_ROOT"));
+
+    let args = create_seatbelt_args(vec!["/usr/bin/true".to_string()], &policy, &workspace);
+    let output = Command::new(SANDBOX_EXEC_PATH)
+        .args(args)
+        .current_dir(&workspace)
+        .output()
+        .expect("parse generated policy with sandbox-exec");
     assert!(
-        !read_only
-            .contains(r#"(allow file-write* (extension "com.apple.app-sandbox.read-write"))"#)
+        output.status.success(),
+        "sandbox-exec rejected generated intersection policy: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -29,11 +77,11 @@ fn file_provider_extensions_preserve_read_without_bypassing_read_only() {
 /// #4085. Each operation gets a fresh fixture so an early failure cannot hide
 /// later results. This is not physical File Provider acceptance.
 #[test]
-fn file_provider_synthetic_operations_are_independent_when_seatbelt_available() {
-    if !is_available() {
-        eprintln!("SKIP: sandbox-exec unavailable; no synthetic operation evidence collected");
-        return;
-    }
+fn file_provider_synthetic_operations_are_independent_under_seatbelt() {
+    assert!(
+        is_available(),
+        "UNRUN: macOS sandbox-exec is unavailable; no synthetic operation evidence collected"
+    );
 
     #[derive(Clone, Copy, Debug)]
     enum Operation {
