@@ -213,6 +213,15 @@ impl From<LlmError> for ErrorEnvelope {
                 "llm_rate_limited",
                 message,
             ),
+            // Keep the broad wire-compatible category while making the typed
+            // code and recovery contract distinct from an ordinary 429.
+            LlmError::QuotaExhausted(error) => Self::new(
+                ErrorCategory::RateLimit,
+                ErrorSeverity::Error,
+                false,
+                "llm_quota_exhausted",
+                error.into_message(),
+            ),
             LlmError::ServerError { status, message } => Self::new(
                 ErrorCategory::Internal,
                 ErrorSeverity::Error,
@@ -508,6 +517,10 @@ impl fmt::Display for StreamError {
 impl std::error::Error for StreamError {}
 
 #[cfg(test)]
+#[path = "error_taxonomy/tests.rs"]
+mod quota_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -531,23 +544,6 @@ mod tests {
                 classify(msg),
                 ErrorCategory::InvalidInput,
                 "expected InvalidInput for `{msg}`",
-            );
-        }
-    }
-
-    #[test]
-    fn rate_limit_catches_429_and_quota_phrasings() {
-        for msg in [
-            "Rate limit reached for gpt-4",
-            "Too Many Requests",
-            "HTTP 429 from upstream",
-            "Your quota has been exceeded",
-            "Authorization failed: You've reached your usage limit for this billing cycle",
-        ] {
-            assert_eq!(
-                classify(msg),
-                ErrorCategory::RateLimit,
-                "expected RateLimit for `{msg}`",
             );
         }
     }
@@ -593,35 +589,6 @@ mod tests {
                 "expected Authentication for `{msg}`",
             );
         }
-    }
-
-    #[test]
-    fn llm_auth_error_envelope_renders_context_without_secret() {
-        let api_key = "tp-secret-token-plan-value";
-        let env = ErrorEnvelope::from(LlmError::from_http_response_with_request_context(
-            401,
-            &format!("Invalid API Key: {api_key}"),
-            Some("Xiaomi MiMo"),
-            Some("https://token-plan-sgp.xiaomimimo.com/v1"),
-            Some("mimo-v2.5"),
-            Some("env"),
-            Some(api_key),
-        ));
-
-        assert_eq!(env.category, ErrorCategory::Authentication);
-        assert_eq!(env.severity, ErrorSeverity::Critical);
-        assert!(!env.recoverable);
-        assert!(env.message.contains("provider: Xiaomi MiMo"));
-        assert!(
-            env.message
-                .contains("base URL authority: token-plan-sgp.xiaomimimo.com")
-        );
-        assert!(env.message.contains("model: mimo-v2.5"));
-        assert!(env.message.contains("key source: env"));
-        assert!(env.message.contains("key fingerprint: tp-... (len=26)"));
-        assert!(env.message.contains("key type: Xiaomi MiMo Token Plan key"));
-        assert!(!env.message.contains(api_key));
-        assert!(!env.message.contains("secret-token-plan-value"));
     }
 
     #[test]
