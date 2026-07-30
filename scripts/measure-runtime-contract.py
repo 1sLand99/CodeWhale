@@ -44,12 +44,16 @@ def run_metric(test_name: str, marker: str) -> dict:
 
 def main() -> int:
     tool_metrics = run_metric(
-        "print_agent_tool_catalog_metrics",
+        "print_mode_tool_catalog_metrics",
         "TOOL_CATALOG_METRICS ",
     )
     prompt_metrics = run_metric(
-        "print_agent_runtime_contract_metrics",
+        "print_mode_runtime_contract_metrics",
         "RUNTIME_CONTRACT_METRICS ",
+    )
+    representative_context_metrics = run_metric(
+        "print_representative_runtime_context_metrics",
+        "REPRESENTATIVE_CONTEXT_METRICS ",
     )
     skill_discovery_metrics = run_metric(
         "print_skill_discovery_turn_metrics",
@@ -57,6 +61,9 @@ def main() -> int:
     )
 
     receipt = {
+        "document_kind": "codewhale.runtime_contract_receipt",
+        "schema_version": 1,
+        "representative_context": representative_context_metrics,
         "skill_discovery": skill_discovery_metrics,
         "tool_catalog": tool_metrics,
         "system_prompt": prompt_metrics,

@@ -9,7 +9,7 @@ use super::turn_loop::{
 use crate::config::ApiProvider;
 use crate::models::{SystemBlock, Usage};
 use crate::prompts::{
-    PromptSessionContext, system_prompt_flat_text,
+    InstructionSource, PromptSessionContext, system_prompt_flat_text,
     system_prompt_for_mode_with_context_skills_and_session,
 };
 use crate::test_support::{EnvVarGuard, lock_test_env};
@@ -24,6 +24,25 @@ use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 const WORKING_SET_SUMMARY_MARKER: &str = "## Repo Working Set";
+const REPRESENTATIVE_FIXTURE_ID: &str = "representative-v1";
+const REPRESENTATIVE_PROJECT_AUTHORITY: &str = "REPRESENTATIVE_PROJECT_AUTHORITY";
+const REPRESENTATIVE_PROJECT_AUTHORITY_BODY: &str = concat!(
+    "# Representative Project Authority\n\n",
+    "REPRESENTATIVE_PROJECT_AUTHORITY\n\n",
+    "- Keep all work local to the isolated fixture workspace.\n",
+    "- Treat the checked-in repository instructions as the authority for edits.\n",
+    "- Preserve unrelated files and report unsupported checks as unrun.\n",
+    "- Prefer one owner for each runtime fact and delete duplicated derivations.\n",
+    "- Use deterministic provider-free tests before claiming a behavior is verified.\n",
+    "- Keep durable state atomic, recoverable, and explicit about unavailable facts.\n",
+    "- Do not contact remotes, providers, registries, or production services.\n",
+    "- Record exact measurements and distinguish source proof from installed proof.\n",
+);
+const REPRESENTATIVE_INLINE_INSTRUCTIONS: &str = "REPRESENTATIVE_INLINE_INSTRUCTIONS";
+const REPRESENTATIVE_SKILL_DESCRIPTION: &str = "REPRESENTATIVE_SKILL_DESCRIPTION";
+const REPRESENTATIVE_MEMORY_CHECKPOINT: &str = "REPRESENTATIVE_MEMORY_CHECKPOINT";
+const REPRESENTATIVE_GOAL_OBJECTIVE: &str = "REPRESENTATIVE_GOAL_OBJECTIVE";
+const REPRESENTATIVE_HANDOFF_RELAY: &str = "REPRESENTATIVE_HANDOFF_RELAY";
 
 #[test]
 fn custom_route_identity_change_rebuilds_client_for_new_named_endpoint() {
@@ -5828,116 +5847,549 @@ fn tools_always_load_overrides_default_native_deferral() {
     assert!(!should_default_defer_tool("git_blame", &always_load));
 }
 
-#[test]
-#[ignore = "one-shot metric for scripts/measure-tool-catalog.py"]
-#[allow(clippy::print_stderr)]
-fn print_agent_tool_catalog_metrics() {
-    let tmp = tempdir().expect("tempdir");
-    let context = crate::tools::ToolContext::new(tmp.path().to_path_buf());
-    let client = DeepSeekClient::new(&Config {
-        api_key: Some("test-key".to_string()),
-        ..Config::default()
+fn tool_catalog_surface_metrics(catalog: &[Tool]) -> serde_json::Value {
+    let serialized = serde_json::to_vec(catalog).expect("serialize canonical tool catalog");
+    let mut tool_names = catalog
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect::<Vec<_>>();
+    tool_names.sort();
+    let identity_sha256 = crate::hashing::sha256_hex(tool_names.join("\0").as_bytes());
+    serde_json::json!({
+        "tools": catalog.len(),
+        "bytes": serialized.len(),
+        "tokens_est": serialized.len().div_ceil(4),
+        "tool_names": tool_names,
+        "identity_sha256": identity_sha256,
     })
-    .expect("stub client");
-    let manager = crate::tools::subagent::new_shared_subagent_manager(tmp.path().to_path_buf(), 8);
-    let runtime = crate::tools::subagent::SubAgentRuntime::new(
-        client,
-        DEFAULT_TEXT_MODEL.to_string(),
-        context.clone(),
-        true,
-        None,
-        manager.clone(),
-    );
-    let registry = crate::tools::ToolRegistryBuilder::new()
-        .with_agent_tools(true)
-        // Exercise the complete default-active policy. Production registers
-        // this opt-in tool only when user memory is enabled.
-        .with_remember_tool()
-        .with_todo_tool(new_shared_todo_list())
-        .with_plan_tool(new_shared_plan_state())
-        .with_review_tool(None, DEFAULT_TEXT_MODEL.to_string())
-        .with_rlm_tool(None, DEFAULT_TEXT_MODEL.to_string())
-        .with_notify_tool()
-        .with_subagent_tools(manager, runtime)
-        .build(context);
-    let baseline_catalog = registry.to_api_tools_with_cache(true);
-    let baseline_json = serde_json::to_vec(&baseline_catalog).expect("serialize baseline");
+}
 
-    let always_load = HashSet::new();
-    let mut catalog = build_model_tool_catalog(
-        baseline_catalog.clone(),
-        vec![],
-        AppMode::Agent,
-        &always_load,
-    );
-    ensure_advanced_tooling(&mut catalog, AppMode::Agent, &always_load);
-    let active = initial_active_tools(&catalog);
-    let active_catalog = active_tools_for_step(&catalog, &active);
-    let active_json = serde_json::to_vec(&active_catalog).expect("serialize active");
-    let reduction_percent = if baseline_json.is_empty() {
-        0.0
-    } else {
-        100.0 * (baseline_json.len().saturating_sub(active_json.len())) as f64
-            / baseline_json.len() as f64
+async fn measure_production_mode_tool_catalogs() -> serde_json::Value {
+    let _env_lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).expect("create isolated home");
+    let _home = EnvVarGuard::set("HOME", &home);
+    let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", home.join(".codewhale"));
+    // Interpreter-backed advanced tools are intentionally excluded from this
+    // cross-platform built-in profile. The production planner still owns that
+    // decision; a deliberately nonexistent PATH root makes its real dependency
+    // probes return absent without inheriting the developer or CI host.
+    let _path = EnvVarGuard::set("PATH", tmp.path().join("no-host-interpreters"));
+
+    let api_config = Config {
+        api_key: Some("local-runtime-contract-fixture".to_string()),
+        default_text_model: Some(DEFAULT_TEXT_MODEL.to_string()),
+        ..Config::default()
     };
+    let mut mode_metrics = serde_json::Map::new();
+    for (mode_name, mode) in [
+        ("plan", AppMode::Plan),
+        ("act", AppMode::Agent),
+        ("operate", AppMode::Operate),
+    ] {
+        let workspace = tmp.path().join(mode_name);
+        fs::create_dir_all(&workspace).expect("create isolated mode workspace");
+        let engine_config = EngineConfig {
+            workspace,
+            allow_shell: true,
+            ..EngineConfig::default()
+        };
+        let (mut engine, _handle) = Engine::new(engine_config, &api_config);
+        // MCP catalogs depend on configured external servers. This receipt owns
+        // the canonical provider-free built-in profile and exercises the same
+        // production builder/planner with MCP explicitly disabled.
+        engine.config.features.disable(Feature::Mcp);
+        let route = TurnRouteContext {
+            provider: ApiProvider::Deepseek,
+            model: DEFAULT_TEXT_MODEL.to_string(),
+            capabilities: codewhale_config::route::RouteCapabilities::default(),
+            limits: None,
+            client: engine.deepseek_client.clone(),
+            api_config: Box::new(api_config.clone()),
+            locale_tag: engine.config.locale_tag.clone(),
+            role_models: engine.subagent_role_models(),
+            fleet_roster: engine.config.fleet_roster.clone(),
+            auto_model: false,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+        };
+        let policy = crate::core::authority::TurnAuthority::from_effective_fields(
+            mode,
+            true,
+            false,
+            false,
+            crate::tui::approval::ApprovalMode::Suggest,
+        );
+        let build = engine
+            .build_turn_tool_registry_and_catalog(
+                &policy,
+                &[],
+                None,
+                SubAgentWiring::Inert,
+                McpAccess::PassiveSnapshot,
+                route,
+                "",
+            )
+            .await;
+        let plan = plan_turn_tools(
+            build.catalog,
+            mode,
+            &engine.config.tools_always_load,
+            &policy.dynamic_active_tools,
+            engine.config.strict_tool_mode,
+        );
+        let active = plan.active.unwrap_or_default();
+        mode_metrics.insert(
+            mode_name.to_string(),
+            serde_json::json!({
+                "full": tool_catalog_surface_metrics(&plan.catalog),
+                "active": tool_catalog_surface_metrics(&active),
+            }),
+        );
+    }
 
-    eprintln!(
+    serde_json::json!({
+        "surface_profile": "production-default-builtins-no-mcp-no-host-interpreters-v1",
+        "modes": mode_metrics,
+    })
+}
+
+fn metric_tool_names<'a>(
+    payload: &'a serde_json::Value,
+    mode: &str,
+    surface: &str,
+) -> HashSet<&'a str> {
+    payload["modes"][mode][surface]["tool_names"]
+        .as_array()
+        .expect("tool names array")
+        .iter()
+        .map(|name| name.as_str().expect("tool name string"))
+        .collect()
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn runtime_contract_tool_metric_uses_canonical_mode_surfaces() {
+    let payload = measure_production_mode_tool_catalogs().await;
+    let plan = metric_tool_names(&payload, "plan", "full");
+    for required in [
+        "create_goal",
+        "get_goal",
+        "update_goal",
+        "slop_ledger_query",
+        "slop_ledger_export",
+    ] {
+        assert!(plan.contains(required), "Plan must include {required}");
+    }
+    for forbidden in [
+        "Bash",
+        "Run",
+        "fim_edit",
+        "verify",
+        "slop_ledger_append",
+        "slop_ledger_update",
+    ] {
+        assert!(!plan.contains(forbidden), "Plan must exclude {forbidden}");
+    }
+
+    for mode in ["act", "operate"] {
+        let full = metric_tool_names(&payload, mode, "full");
+        for required in [
+            "Bash",
+            "Run",
+            "create_goal",
+            "get_goal",
+            "update_goal",
+            "verify",
+            "fim_edit",
+            "slop_ledger_append",
+            "slop_ledger_query",
+            "slop_ledger_update",
+            "slop_ledger_export",
+        ] {
+            assert!(full.contains(required), "{mode} must include {required}");
+        }
+    }
+
+    let plan_active = metric_tool_names(&payload, "plan", "active");
+    assert!(!plan_active.contains("Bash"));
+    assert!(!plan_active.contains("Run"));
+}
+
+#[tokio::test]
+#[ignore = "one-shot metric for scripts/measure-tool-catalog.py"]
+#[allow(clippy::await_holding_lock)]
+#[allow(clippy::print_stdout)]
+async fn print_mode_tool_catalog_metrics() {
+    println!(
         "TOOL_CATALOG_METRICS {}",
-        serde_json::json!({
-            "baseline_tools": baseline_catalog.len(),
-            "baseline_bytes": baseline_json.len(),
-            "baseline_tokens_est": baseline_json.len().div_ceil(4),
-            "active_tools": active_catalog.len(),
-            "active_bytes": active_json.len(),
-            "active_tokens_est": active_json.len().div_ceil(4),
-            "reduction_percent": reduction_percent,
-            "active_tool_names": active_catalog.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
-        })
+        measure_production_mode_tool_catalogs().await
     );
 }
 
 #[test]
 #[ignore = "one-shot metric for scripts/measure-runtime-contract.py"]
 #[allow(clippy::print_stdout)]
-fn print_agent_runtime_contract_metrics() {
+fn print_mode_runtime_contract_metrics() {
+    let _env_lock = lock_test_env();
     let tmp = tempdir().expect("tempdir");
-    let workspace = tmp.path().to_path_buf();
-    let session_context = PromptSessionContext::default();
-    let prompt = system_prompt_for_mode_with_context_skills_and_session(
-        &workspace,
-        None,
-        None,
-        None,
-        session_context,
-    );
-    let flat_prompt = system_prompt_flat_text(&prompt);
-    let prompt_bytes = flat_prompt.len();
-    let prompt_tokens_est = prompt_bytes.div_ceil(4);
-
-    // Mode runtime instructions are delivered as per-turn metadata; measure
-    // them separately so prompt-size work does not forget the volatile surface.
-    let mode_bytes = crate::prompts::AGENT_MODE.len();
-    let mode_tokens_est = mode_bytes.div_ceil(4);
+    let workspace = tmp.path().join("workspace");
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&workspace).expect("create isolated workspace");
+    fs::create_dir_all(&home).expect("create isolated home");
+    let _home = EnvVarGuard::set("HOME", &home);
+    let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
+    let codewhale_home = home.join(".codewhale");
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+    // Keep the model-visible shell fact stable across developer and CI hosts.
+    // ShellDispatcher recognizes this token without executing a shell.
+    let _shell = EnvVarGuard::set("SHELL", "bash");
+    let mut mode_metrics = serde_json::Map::new();
+    for (mode_name, mode, mode_instructions) in [
+        ("plan", AppMode::Plan, crate::prompts::PLAN_MODE),
+        ("act", AppMode::Agent, crate::prompts::AGENT_MODE),
+        ("operate", AppMode::Operate, crate::prompts::OPERATE_MODE),
+    ] {
+        let prompt = system_prompt_for_mode_with_context_skills_and_session(
+            &workspace,
+            None,
+            None,
+            None,
+            PromptSessionContext {
+                mode,
+                ..PromptSessionContext::default()
+            },
+        );
+        let prompt_bytes = system_prompt_flat_text(&prompt).len();
+        let prompt_blocks = match &prompt {
+            crate::models::SystemPrompt::Blocks(blocks) => blocks.len(),
+            _ => 1,
+        };
+        mode_metrics.insert(
+            mode_name.to_string(),
+            serde_json::json!({
+                "system_prompt_bytes": prompt_bytes,
+                "system_prompt_tokens_est": prompt_bytes.div_ceil(4),
+                "system_prompt_blocks": prompt_blocks,
+                "mode_instructions_bytes": mode_instructions.len(),
+                "mode_instructions_tokens_est": mode_instructions.len().div_ceil(4),
+            }),
+        );
+    }
 
     println!(
         "RUNTIME_CONTRACT_METRICS {}",
         serde_json::json!({
-            "system_prompt_bytes": prompt_bytes,
-            "system_prompt_tokens_est": prompt_tokens_est,
-            "system_prompt_blocks": match prompt {
-                crate::models::SystemPrompt::Blocks(blocks) => blocks.len(),
-                _ => 1,
-            },
-            "agent_mode_instructions_bytes": mode_bytes,
-            "agent_mode_instructions_tokens_est": mode_tokens_est,
+            "modes": mode_metrics,
         })
     );
+}
+
+fn representative_prompt(
+    workspace: &Path,
+    skills_dir: &Path,
+    instructions: Option<&[InstructionSource]>,
+    user_memory_block: Option<&str>,
+    goal_objective: Option<&str>,
+) -> crate::models::SystemPrompt {
+    system_prompt_for_mode_with_context_skills_and_session(
+        workspace,
+        None,
+        Some(skills_dir),
+        instructions,
+        PromptSessionContext {
+            user_memory_block,
+            goal_objective,
+            skills_scan_codewhale_only: true,
+            mode: AppMode::Agent,
+            ..PromptSessionContext::default()
+        },
+    )
+}
+
+fn prompt_block_count(prompt: &crate::models::SystemPrompt) -> usize {
+    match prompt {
+        crate::models::SystemPrompt::Blocks(blocks) => blocks.len(),
+        crate::models::SystemPrompt::Text(_) => 1,
+    }
+}
+
+#[derive(Debug)]
+struct RepresentativePromptStage {
+    name: &'static str,
+    flat: String,
+    normalized: String,
+}
+
+fn normalize_representative_prompt(text: &str, workspace: &Path, home: &Path) -> String {
+    let mut replacements = Vec::new();
+    for (path, replacement) in [(workspace, "<WORKSPACE>"), (home, "<HOME>")] {
+        replacements.push((path.to_path_buf(), replacement));
+        if let Ok(canonical) = path.canonicalize() {
+            replacements.push((canonical, replacement));
+        }
+    }
+    replacements.sort_by(|(left, _), (right, _)| {
+        right
+            .to_string_lossy()
+            .len()
+            .cmp(&left.to_string_lossy().len())
+            .then_with(|| left.cmp(right))
+    });
+    replacements.dedup_by(|(left, _), (right, _)| left == right);
+
+    replacements
+        .into_iter()
+        .fold(text.to_string(), |normalized, (path, replacement)| {
+            normalized.replace(path.to_string_lossy().as_ref(), replacement)
+        })
+}
+
+fn representative_stage(
+    name: &'static str,
+    prompt: crate::models::SystemPrompt,
+    workspace: &Path,
+    home: &Path,
+) -> RepresentativePromptStage {
+    let flat = system_prompt_flat_text(&prompt);
+    let normalized = normalize_representative_prompt(&flat, workspace, home);
+    RepresentativePromptStage {
+        name,
+        flat,
+        normalized,
+    }
+}
+
+fn measure_representative_runtime_context()
+-> (serde_json::Value, Vec<RepresentativePromptStage>, String) {
+    let _env_lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().join("workspace");
+    let home = tmp.path().join("home");
+    let skills_dir = workspace.join(".codewhale").join("skills");
+    fs::create_dir_all(&workspace).expect("create isolated workspace");
+    fs::create_dir_all(&home).expect("create isolated home");
+
+    let _home = EnvVarGuard::set("HOME", &home);
+    let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
+    let codewhale_home = home.join(".codewhale");
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+    // Keep the model-visible shell fact stable across developer and CI hosts.
+    let _shell = EnvVarGuard::set("SHELL", "bash");
+
+    let mut stages = vec![representative_stage(
+        "base",
+        representative_prompt(&workspace, &skills_dir, None, None, None),
+        &workspace,
+        &home,
+    )];
+
+    fs::write(
+        workspace.join("AGENTS.md"),
+        REPRESENTATIVE_PROJECT_AUTHORITY_BODY,
+    )
+    .expect("write representative project authority");
+    stages.push(representative_stage(
+        "project",
+        representative_prompt(&workspace, &skills_dir, None, None, None),
+        &workspace,
+        &home,
+    ));
+
+    let instructions = [InstructionSource::Inline {
+        name: "embedded:representative-v1".to_string(),
+        content: REPRESENTATIVE_INLINE_INSTRUCTIONS.to_string(),
+    }];
+    stages.push(representative_stage(
+        "instructions",
+        representative_prompt(&workspace, &skills_dir, Some(&instructions), None, None),
+        &workspace,
+        &home,
+    ));
+
+    let skill_dir = skills_dir.join("representative-skill");
+    fs::create_dir_all(&skill_dir).expect("create representative skill directory");
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        format!(
+            "---\nname: representative-skill\ndescription: {REPRESENTATIVE_SKILL_DESCRIPTION}\n---\nExercise the deterministic runtime-contract fixture.\n"
+        ),
+    )
+    .expect("write representative skill");
+    stages.push(representative_stage(
+        "skill",
+        representative_prompt(&workspace, &skills_dir, Some(&instructions), None, None),
+        &workspace,
+        &home,
+    ));
+
+    let memory_block = format!("## Memory\n\n- {REPRESENTATIVE_MEMORY_CHECKPOINT}");
+    stages.push(representative_stage(
+        "memory",
+        representative_prompt(
+            &workspace,
+            &skills_dir,
+            Some(&instructions),
+            Some(&memory_block),
+            None,
+        ),
+        &workspace,
+        &home,
+    ));
+    stages.push(representative_stage(
+        "goal",
+        representative_prompt(
+            &workspace,
+            &skills_dir,
+            Some(&instructions),
+            Some(&memory_block),
+            Some(REPRESENTATIVE_GOAL_OBJECTIVE),
+        ),
+        &workspace,
+        &home,
+    ));
+
+    fs::write(
+        workspace.join(crate::prompts::HANDOFF_RELATIVE_PATH),
+        format!("# Representative Relay\n\n{REPRESENTATIVE_HANDOFF_RELAY}\n"),
+    )
+    .expect("write representative handoff");
+    let final_prompt = representative_prompt(
+        &workspace,
+        &skills_dir,
+        Some(&instructions),
+        Some(&memory_block),
+        Some(REPRESENTATIVE_GOAL_OBJECTIVE),
+    );
+    let final_blocks = prompt_block_count(&final_prompt);
+    stages.push(representative_stage(
+        "handoff",
+        final_prompt,
+        &workspace,
+        &home,
+    ));
+    let repeated_flat = system_prompt_flat_text(&representative_prompt(
+        &workspace,
+        &skills_dir,
+        Some(&instructions),
+        Some(&memory_block),
+        Some(REPRESENTATIVE_GOAL_OBJECTIVE),
+    ));
+
+    let mut stage_metrics = serde_json::Map::new();
+    for (index, stage) in stages.iter().enumerate() {
+        let mut metrics = serde_json::json!({
+            "bytes": stage.flat.len(),
+            "identity_sha256": crate::hashing::sha256_hex(stage.normalized.as_bytes()),
+        });
+        if let Some(previous) = index.checked_sub(1).and_then(|i| stages.get(i)) {
+            metrics["delta_bytes"] = serde_json::json!(
+                stage
+                    .flat
+                    .len()
+                    .checked_sub(previous.flat.len())
+                    .unwrap_or_else(|| panic!(
+                        "representative {} stage unexpectedly shrank prompt",
+                        stage.name
+                    ))
+            );
+        }
+        stage_metrics.insert(stage.name.to_string(), metrics);
+    }
+    let final_stage = stages.last().expect("handoff stage");
+    let payload = serde_json::json!({
+        "fixture_id": REPRESENTATIVE_FIXTURE_ID,
+        "stages": stage_metrics,
+        "total_bytes": final_stage.flat.len(),
+        "total_tokens_est": final_stage.flat.len().div_ceil(4),
+        "system_prompt_blocks": final_blocks,
+        "prompts_byte_identical": final_stage.flat == repeated_flat,
+    });
+
+    (payload, stages, repeated_flat)
+}
+
+#[test]
+fn representative_runtime_context_fixture_is_stable_and_contains_expected_markers() {
+    let (payload, stages, repeated_prompt) = measure_representative_runtime_context();
+    let (second_payload, second_stages, _) = measure_representative_runtime_context();
+    let final_stage = stages.last().expect("handoff stage");
+    assert_eq!(payload["fixture_id"], REPRESENTATIVE_FIXTURE_ID);
+    assert_eq!(final_stage.flat, repeated_prompt);
+    assert_eq!(payload["prompts_byte_identical"], true);
+    for (first, second) in stages.iter().zip(&second_stages) {
+        assert_eq!(first.name, second.name);
+        assert_eq!(first.normalized, second.normalized);
+        assert_eq!(
+            payload["stages"][first.name]["identity_sha256"],
+            second_payload["stages"][second.name]["identity_sha256"],
+            "representative {} digest must be stable across temp roots",
+            first.name
+        );
+    }
+    for pair in stages.windows(2) {
+        let [previous, current] = pair else {
+            unreachable!("stage windows always contain two entries")
+        };
+        assert_eq!(
+            payload["stages"][current.name]["delta_bytes"],
+            current.flat.len() - previous.flat.len(),
+            "representative {} delta must be computed from its adjacent stages",
+            current.name
+        );
+    }
+    let markers = [
+        REPRESENTATIVE_PROJECT_AUTHORITY,
+        REPRESENTATIVE_INLINE_INSTRUCTIONS,
+        REPRESENTATIVE_SKILL_DESCRIPTION,
+        REPRESENTATIVE_MEMORY_CHECKPOINT,
+        REPRESENTATIVE_GOAL_OBJECTIVE,
+        REPRESENTATIVE_HANDOFF_RELAY,
+    ];
+    for (stage_index, stage) in stages.iter().enumerate() {
+        for (marker_index, marker) in markers.iter().enumerate() {
+            let expected = usize::from(marker_index < stage_index);
+            assert_eq!(
+                stage.flat.matches(marker).count(),
+                expected,
+                "representative {} stage has the wrong count for {marker}",
+                stage.name
+            );
+        }
+    }
+    let fixture_sources = [
+        REPRESENTATIVE_PROJECT_AUTHORITY,
+        REPRESENTATIVE_INLINE_INSTRUCTIONS,
+        REPRESENTATIVE_SKILL_DESCRIPTION,
+        REPRESENTATIVE_MEMORY_CHECKPOINT,
+        REPRESENTATIVE_GOAL_OBJECTIVE,
+        REPRESENTATIVE_HANDOFF_RELAY,
+    ]
+    .join("\n")
+    .to_ascii_lowercase();
+    for secret_shape in ["sk-", "api_key=", "password=", "bearer "] {
+        assert!(
+            !fixture_sources.contains(secret_shape),
+            "representative fixture must not contain secret-shaped values"
+        );
+    }
 }
 
 #[test]
 #[ignore = "one-shot metric for scripts/measure-runtime-contract.py"]
 #[allow(clippy::print_stdout)]
-fn print_skill_discovery_turn_metrics() {
+fn print_representative_runtime_context_metrics() {
+    let (payload, _, _) = measure_representative_runtime_context();
+    println!("REPRESENTATIVE_CONTEXT_METRICS {payload}");
+}
+
+fn measure_unchanged_prompt_skill_discovery() -> (
+    crate::skills::SkillDiscoveryMetrics,
+    crate::skills::SkillDiscoveryMetrics,
+    bool,
+) {
     let _env_lock = lock_test_env();
     let tmp = tempdir().expect("tempdir");
     let workspace = tmp.path().join("workspace");
@@ -5980,27 +6432,69 @@ fn print_skill_discovery_turn_metrics() {
     let second = after_second.delta_since(after_first);
     let first_flat = system_prompt_flat_text(&first_prompt);
     let second_flat = system_prompt_flat_text(&second_prompt);
-    assert_eq!(first, second, "unchanged turns should repeat the same walk");
-    assert_eq!(first.root_discovery_calls, 1);
-    assert_eq!(first.directories_visited, 1);
-    assert_eq!(first.skill_md_read_attempts, 1);
-    assert_eq!(first_flat, second_flat, "unchanged prompts must be stable");
+    (first, second, first_flat == second_flat)
+}
+
+#[test]
+fn unchanged_prompt_skill_discovery_baseline_is_one_walk_per_turn() {
+    let (first, second, prompts_byte_identical) = measure_unchanged_prompt_skill_discovery();
+    let expected = crate::skills::SkillDiscoveryMetrics {
+        root_discovery_calls: 1,
+        directories_visited: 1,
+        skill_md_read_attempts: 1,
+    };
+    assert_eq!(first, expected);
+    assert_eq!(second, expected);
+    assert!(prompts_byte_identical);
+}
+
+fn skill_discovery_metric_payload(
+    first: crate::skills::SkillDiscoveryMetrics,
+    second: crate::skills::SkillDiscoveryMetrics,
+    prompts_byte_identical: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "first_delta": {
+            "root_discovery_calls": first.root_discovery_calls,
+            "directories_visited": first.directories_visited,
+            "skill_md_read_attempts": first.skill_md_read_attempts,
+        },
+        "second_delta": {
+            "root_discovery_calls": second.root_discovery_calls,
+            "directories_visited": second.directories_visited,
+            "skill_md_read_attempts": second.skill_md_read_attempts,
+        },
+        "prompts_byte_identical": prompts_byte_identical,
+    })
+}
+
+#[test]
+fn skill_discovery_metric_payload_accepts_cached_second_turn() {
+    let first = crate::skills::SkillDiscoveryMetrics {
+        root_discovery_calls: 1,
+        directories_visited: 1,
+        skill_md_read_attempts: 1,
+    };
+    let payload = skill_discovery_metric_payload(
+        first,
+        crate::skills::SkillDiscoveryMetrics::default(),
+        true,
+    );
+    assert_eq!(payload["first_delta"]["root_discovery_calls"], 1);
+    assert_eq!(payload["second_delta"]["root_discovery_calls"], 0);
+    assert_eq!(payload["second_delta"]["directories_visited"], 0);
+    assert_eq!(payload["second_delta"]["skill_md_read_attempts"], 0);
+}
+
+#[test]
+#[ignore = "one-shot metric for scripts/measure-runtime-contract.py"]
+#[allow(clippy::print_stdout)]
+fn print_skill_discovery_turn_metrics() {
+    let (first, second, prompts_byte_identical) = measure_unchanged_prompt_skill_discovery();
 
     println!(
         "SKILL_DISCOVERY_METRICS {}",
-        serde_json::json!({
-            "first_delta": {
-                "root_discovery_calls": first.root_discovery_calls,
-                "directories_visited": first.directories_visited,
-                "skill_md_read_attempts": first.skill_md_read_attempts,
-            },
-            "second_delta": {
-                "root_discovery_calls": second.root_discovery_calls,
-                "directories_visited": second.directories_visited,
-                "skill_md_read_attempts": second.skill_md_read_attempts,
-            },
-            "prompts_byte_identical": true,
-        })
+        skill_discovery_metric_payload(first, second, prompts_byte_identical)
     );
 }
 

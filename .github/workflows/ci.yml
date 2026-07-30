@@ -247,6 +247,11 @@ jobs:
       - name: Check dead-code budget
         if: needs.changes.outputs.heavy == 'true'
         run: python3 scripts/check-dead-code-budget.py
+      # Provider-free local measurement. The checker forces Cargo offline and
+      # the measurement script runs only locked, ignored Rust metric tests.
+      - name: Check runtime-contract budget
+        if: needs.changes.outputs.heavy == 'true'
+        run: python3 scripts/check-runtime-contract-budget.py
       - name: Check README translations stay in sync
         if: github.event_name != 'schedule'
         run: python3 scripts/check-readme-translations.py
