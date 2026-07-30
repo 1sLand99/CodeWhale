@@ -139,6 +139,23 @@ pub struct PendingXaiDeviceLogin {
     token: TokenResponse,
 }
 
+#[cfg(test)]
+pub(crate) fn pending_device_login_for_test(
+    access_token: &str,
+    refresh_token: &str,
+) -> PendingXaiDeviceLogin {
+    PendingXaiDeviceLogin {
+        issuer: XAI_OIDC_ISSUER.to_string(),
+        client_id: GROK_OIDC_CLIENT_ID.to_string(),
+        token: TokenResponse {
+            access_token: Some(access_token.to_string()),
+            refresh_token: Some(refresh_token.to_string()),
+            expires_in: Some(3600),
+            error: None,
+        },
+    }
+}
+
 /// Receipt for the committed Codewhale-owned xAI OAuth generation.
 #[derive(Debug)]
 pub struct XaiDeviceActivation {
@@ -1533,16 +1550,7 @@ mod tests {
     }
 
     fn pending_login(access: &str, refresh: &str) -> PendingXaiDeviceLogin {
-        PendingXaiDeviceLogin {
-            issuer: XAI_OIDC_ISSUER.to_string(),
-            client_id: GROK_OIDC_CLIENT_ID.to_string(),
-            token: TokenResponse {
-                access_token: Some(access.to_string()),
-                refresh_token: Some(refresh.to_string()),
-                expires_in: Some(3600),
-                error: None,
-            },
-        }
+        pending_device_login_for_test(access, refresh)
     }
 
     fn seed_expired_owned_generation() -> String {

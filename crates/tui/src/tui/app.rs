@@ -11,7 +11,6 @@ use ratatui::layout::Rect;
 use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use thiserror::Error;
 
 use codewhale_config::{ProviderChain, route::RouteLimits};
 
@@ -19,8 +18,7 @@ use crate::artifacts::ArtifactRecord;
 use crate::client::{CacheWarmupKey, PromptInspection};
 use crate::compaction::CompactionConfig;
 use crate::config::{
-    ApiProvider, ApprovalPolicyControl, Config, DEFAULT_TEXT_MODEL, SavedCredential, has_api_key,
-    has_api_key_for, save_api_key, save_api_key_for,
+    ApiProvider, ApprovalPolicyControl, Config, DEFAULT_TEXT_MODEL, has_api_key, has_api_key_for,
 };
 use crate::config_ui::ConfigUiMode;
 use crate::core::authority::{ModeSessionPrefs, base_policy_for_mode};
@@ -59,17 +57,15 @@ mod status;
 mod types;
 
 pub use composer::ComposerHistorySearch;
-pub(crate) use composer::{
-    InputHistoryDraft, byte_index_at_char, char_count, remove_char_at, sanitize_api_key_text,
-};
+pub(crate) use composer::{InputHistoryDraft, char_count};
 #[cfg(test)]
 pub(crate) use composer::{
     MAX_SUBMITTED_INPUT_CHARS, next_grapheme_boundary, prev_grapheme_boundary,
 };
 pub use status::{StatusToast, StatusToastLevel};
 pub use types::{
-    ApiKeyError, AppAction, AppMode, ComposerDensity, ComposerSubmitAction, ComposerSubmitChord,
-    InitialInput, McpUiAction, QueuedMessage, ReasoningEffort, SettingSelection, ShellJobAction,
+    AppAction, AppMode, ComposerDensity, ComposerSubmitAction, ComposerSubmitChord, InitialInput,
+    McpUiAction, QueuedMessage, ReasoningEffort, SettingSelection, ShellJobAction,
     SubmitDisposition, TaskPanelEntry, TaskPanelEntryKind, ToolCollapseMode, ToolDetailRecord,
     TranscriptSpacing, TuiOptions, VimMode,
 };
@@ -119,7 +115,6 @@ pub enum OnboardingState {
     /// theme the session started with) and there is no second theme registry.
     Appearance,
     Provider,
-    ApiKey,
     TrustDirectory,
     MentalModels,
     Tips,
@@ -1491,11 +1486,13 @@ pub struct App {
     /// activated later (`/provider`), which is the only thing that clears it.
     pub onboarding_explore_offline: bool,
     /// First-run route receipts used by the mental-model screen's Back action.
-    pub onboarding_had_api_key_step: bool,
+    pub onboarding_had_provider_step: bool,
     pub onboarding_had_trust_step: bool,
+    /// True when the active credential was discovered only through an
+    /// environment variable. Missing-key recovery and route rollback use this
+    /// provenance to decide whether a durable provider slot still exists;
+    /// credential drafts live exclusively inside `ProviderPickerView`.
     pub api_key_env_only: bool,
-    pub api_key_input: String,
-    pub api_key_cursor: usize,
     // Hooks system
     pub hooks: HookExecutor,
     #[allow(dead_code)]
@@ -2112,29 +2109,6 @@ impl App {
         );
         self.hotbar_actions.replace_skills(&cached_skills);
         self.cached_skills = cached_skills;
-    }
-
-    pub fn submit_api_key(&mut self) -> Result<SavedCredential, ApiKeyError> {
-        let key = self.api_key_input.trim().to_string();
-        if key.is_empty() {
-            return Err(ApiKeyError::Empty);
-        }
-
-        let saved = if matches!(
-            self.onboarding_provider,
-            ApiProvider::Deepseek | ApiProvider::DeepseekCN
-        ) {
-            save_api_key(&key).map_err(|source| ApiKeyError::SaveFailed { source })?
-        } else {
-            let path = save_api_key_for(self.onboarding_provider, &key)
-                .map_err(|source| ApiKeyError::SaveFailed { source })?;
-            SavedCredential::ConfigFile(path)
-        };
-        self.api_key_input.clear();
-        self.api_key_cursor = 0;
-        self.onboarding_needs_api_key = false;
-        self.api_key_env_only = false;
-        Ok(saved)
     }
 
     pub fn finish_onboarding_without_feature_intro(&mut self) {
@@ -4157,46 +4131,6 @@ impl App {
         self.mark_history_updated();
     }
 
-    pub fn insert_api_key_char(&mut self, c: char) {
-        let cursor = self.api_key_cursor.min(char_count(&self.api_key_input));
-        let byte_index = byte_index_at_char(&self.api_key_input, cursor);
-        self.api_key_input.insert(byte_index, c);
-        self.api_key_cursor = cursor + 1;
-    }
-
-    pub fn insert_api_key_str(&mut self, text: &str) {
-        let sanitized = sanitize_api_key_text(text);
-        if sanitized.is_empty() {
-            return;
-        }
-        let cursor = self.api_key_cursor.min(char_count(&self.api_key_input));
-        let byte_index = byte_index_at_char(&self.api_key_input, cursor);
-        self.api_key_input.insert_str(byte_index, &sanitized);
-        self.api_key_cursor = cursor + char_count(&sanitized);
-    }
-
-    pub fn delete_api_key_char(&mut self) {
-        if self.api_key_cursor == 0 {
-            return;
-        }
-        let target = self.api_key_cursor.saturating_sub(1);
-        if remove_char_at(&mut self.api_key_input, target) {
-            self.api_key_cursor = target;
-        }
-    }
-
-    pub fn paste_api_key_from_clipboard(&mut self) -> bool {
-        if self.clipboard.requires_terminal_paste() {
-            self.status_message = Some(self.tr(MessageId::ClipboardSshPasteHint).into_owned());
-            return false;
-        }
-        if let Some(ClipboardContent::Text(text)) = self.clipboard.read(self.workspace.as_path()) {
-            self.insert_api_key_str(&text);
-            return true;
-        }
-        false
-    }
-
     pub fn scroll_up(&mut self, amount: usize) {
         let delta = i32::try_from(amount).unwrap_or(i32::MAX);
         self.viewport.pending_scroll_delta =
@@ -4587,27 +4521,6 @@ impl App {
         self.active_route_base_url = base_url.into();
         self.set_active_route_limits(limits);
         self.active_context_window_source = context_window_source;
-    }
-
-    /// Whether the currently selected onboarding route is Kimi Code's
-    /// membership-plan `k3` endpoint. The check is deliberately exact: the
-    /// Moonshot public API must never inherit Kimi Code plan guidance.
-    pub fn onboarding_uses_kimi_code_plan(&self) -> bool {
-        crate::config::is_exact_kimi_code_k3_route(
-            self.onboarding_provider,
-            &self.active_route_base_url,
-            &self.model,
-        )
-    }
-
-    /// Whether onboarding is pointed at StepFun's Step Plan subscription
-    /// endpoint rather than its pay-as-you-go one (#4526).
-    pub fn onboarding_uses_stepfun_plan(&self) -> bool {
-        self.onboarding_provider == crate::config::ApiProvider::Stepfun
-            && crate::pricing::billing_surface_for_route(
-                crate::config::ApiProvider::Stepfun,
-                Some(&self.active_route_base_url),
-            ) == Some(crate::pricing::STEPFUN_PLAN_BILLING_SURFACE)
     }
 
     pub fn set_active_context_window_override(&mut self, context_window: Option<u32>) {

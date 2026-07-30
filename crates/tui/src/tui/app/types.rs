@@ -820,19 +820,6 @@ impl QueuedMessage {
     }
 }
 
-// === Errors ===
-
-/// Errors that can occur while submitting API keys during onboarding.
-#[derive(Debug, Error)]
-pub enum ApiKeyError {
-    /// The provided API key was empty.
-    #[error("Failed to save API key: API key cannot be empty")]
-    Empty,
-    /// Persisting the API key failed.
-    #[error("Failed to save API key: {source}")]
-    SaveFailed { source: anyhow::Error },
-}
-
 // === Actions ===
 
 /// Actions emitted by the UI event loop.

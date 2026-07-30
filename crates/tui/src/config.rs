@@ -9576,6 +9576,7 @@ fn provider_config_is_explicit(entry: &ProviderConfig) -> bool {
 /// DeepSeek goes through [`save_api_key`]. Other providers write
 /// `[providers.<name>] api_key = "..."` to `~/.codewhale/config.toml`.
 /// Returns the config file path.
+#[cfg(test)]
 pub fn save_api_key_for(provider: ApiProvider, api_key: &str) -> Result<PathBuf> {
     save_api_key_for_identity(
         &ProviderIdentity {

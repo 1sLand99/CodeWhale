@@ -2403,14 +2403,18 @@ pub fn logout(app: &mut App) -> CommandResult {
     let provider_name = app.provider_identity_for_persistence().to_string();
     match clear_active_provider_api_key(&provider_name) {
         Ok(()) => {
-            app.onboarding = OnboardingState::ApiKey;
+            app.onboarding = OnboardingState::Provider;
             app.onboarding_needs_api_key = true;
-            app.api_key_input.clear();
-            app.api_key_cursor = 0;
-            CommandResult::message(format!(
-                "Cleared API key for {provider_name}. \
-                 Use `codewhale auth clear --provider <id>` to clear a different provider."
-            ))
+            app.onboarding_provider = app.api_provider;
+            app.onboarding_missing_key_recovery = true;
+            app.api_key_env_only = false;
+            CommandResult::with_message_and_action(
+                format!(
+                    "Cleared API key for {provider_name}. \
+                     Use `codewhale auth clear --provider <id>` to clear a different provider."
+                ),
+                AppAction::OpenProviderPicker,
+            )
         }
         Err(e) => CommandResult::error(format!("Failed to clear API key for {provider_name}: {e}")),
     }
@@ -4403,10 +4407,10 @@ context_window = 262144
         let mut app = create_test_app();
         let result = logout(&mut app);
         assert!(result.message.is_some());
-        assert_eq!(app.onboarding, OnboardingState::ApiKey);
+        assert_eq!(app.onboarding, OnboardingState::Provider);
         assert!(app.onboarding_needs_api_key);
-        assert!(app.api_key_input.is_empty());
-        assert_eq!(app.api_key_cursor, 0);
+        assert!(app.onboarding_missing_key_recovery);
+        assert_eq!(result.action, Some(AppAction::OpenProviderPicker));
 
         let updated = fs::read_to_string(config_path).unwrap();
         assert!(!updated.contains("api_key"));

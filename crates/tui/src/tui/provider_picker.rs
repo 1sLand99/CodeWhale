@@ -66,6 +66,9 @@ use std::sync::OnceLock;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
     List,
+    /// Explicit xAI acquisition choice. xAI supports both an API key and the
+    /// Codewhale-owned device OAuth flow; neither path may impersonate the other.
+    XaiAuthChoice,
     KeyEntry,
     /// Explicit disabled/read-only/managed external-credential policy choice.
     ExternalConsentChoice,
@@ -88,6 +91,12 @@ enum ExternalConsentChoice {
     Disabled,
     ReadOnly,
     ManagedUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum XaiAuthChoice {
+    ApiKey,
+    DeviceOAuth,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +165,7 @@ pub struct ProviderPickerView {
     /// in the key-entry stage. Cleared when the user edits the input.
     key_entry_error: Option<String>,
     locale: Locale,
+    xai_auth_choice: XaiAuthChoice,
     external_consent_choice: ExternalConsentChoice,
     /// Validated key held only in memory until the confirm stage persists it.
     pending_api_key: Option<String>,
@@ -1464,6 +1474,7 @@ impl ProviderPickerView {
             api_key_input: String::new(),
             key_entry_error: None,
             locale: Locale::En,
+            xai_auth_choice: XaiAuthChoice::ApiKey,
             external_consent_choice: ExternalConsentChoice::Disabled,
             pending_api_key: None,
             model_options: Vec::new(),
@@ -1724,11 +1735,28 @@ impl ProviderPickerView {
     /// than one endpoint choose the route first so the key is validated
     /// against the endpoint it will actually be saved for (#4526).
     fn begin_setup(&mut self) {
-        if self.stepfun_billing_route_applies() {
+        if self.selected_provider() == ApiProvider::Xai {
+            self.enter_xai_auth_choice();
+        } else if self.stepfun_billing_route_applies() {
             self.enter_stepfun_billing_route();
         } else {
             self.enter_key_entry();
         }
+    }
+
+    fn enter_xai_auth_choice(&mut self) {
+        self.xai_auth_choice = XaiAuthChoice::ApiKey;
+        self.stage = Stage::XaiAuthChoice;
+        self.api_key_input.clear();
+        self.key_entry_error = None;
+        self.pending_api_key = None;
+    }
+
+    fn move_xai_auth_choice(&mut self) {
+        self.xai_auth_choice = match self.xai_auth_choice {
+            XaiAuthChoice::ApiKey => XaiAuthChoice::DeviceOAuth,
+            XaiAuthChoice::DeviceOAuth => XaiAuthChoice::ApiKey,
+        };
     }
 
     fn stepfun_billing_route_applies(&self) -> bool {
@@ -2389,11 +2417,52 @@ impl ProviderPickerView {
             .render(inner, buf);
     }
 
+    fn render_xai_auth_choice(&self, area: Rect, buf: &mut Buffer) {
+        let outer = Block::default()
+            .title(Line::from(Span::styled(
+                self.tr(MessageId::XaiAuthChoiceTitle),
+                Style::default()
+                    .fg(palette::WHALE_INFO)
+                    .add_modifier(Modifier::BOLD),
+            )))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette::BORDER_COLOR))
+            .style(Style::default().bg(palette::WHALE_BG));
+        let inner = outer.inner(area);
+        outer.render(area, buf);
+        let content = render_modal_footer(
+            inner,
+            buf,
+            &[
+                ActionHint::new("↑↓/1-2", self.tr(MessageId::ProviderExternalActionChoose)),
+                ActionHint::new("Enter", self.tr(MessageId::SetupActionContinue)),
+                ActionHint::new("E", self.tr(MessageId::ProviderExternalActionReuseGrok)),
+                ActionHint::new("Esc", self.tr(MessageId::SetupActionBack)),
+            ],
+        );
+        let marker = |choice| crate::tui::glyphs::selection_marker(self.xai_auth_choice == choice);
+        Paragraph::new(vec![
+            Line::from(self.tr(MessageId::XaiAuthChoiceIntro)),
+            Line::from(""),
+            Line::from(format!(
+                "{} 1. {}",
+                marker(XaiAuthChoice::ApiKey),
+                self.tr(MessageId::XaiAuthChoiceApiKeyOption),
+            )),
+            Line::from(format!(
+                "{} 2. {}",
+                marker(XaiAuthChoice::DeviceOAuth),
+                self.tr(MessageId::XaiAuthChoiceDeviceOAuthOption),
+            )),
+        ])
+        .wrap(Wrap { trim: false })
+        .render(content, buf);
+    }
+
     fn render_key_entry(&self, area: Rect, buf: &mut Buffer) {
         let row = &self.rows[self.selected_idx];
         let codex_oauth = row.provider == ApiProvider::OpenaiCodex;
-        let xai_oauth = row.provider == ApiProvider::Xai;
-        let oauth_provider = codex_oauth || xai_oauth;
+        let oauth_provider = codex_oauth;
         let saved_credential = !oauth_provider && row.has_key;
         let outer = Block::default()
             .title(Line::from(Span::styled(
@@ -2423,16 +2492,6 @@ impl ProviderPickerView {
                     ActionHint::new("Esc", self.tr(MessageId::SetupActionBack)),
                 ],
             )
-        } else if xai_oauth {
-            render_modal_footer(
-                inner,
-                buf,
-                &[
-                    ActionHint::new("Enter", "device login"),
-                    ActionHint::new("E", self.tr(MessageId::ProviderExternalActionReuseGrok)),
-                    ActionHint::new("Esc", self.tr(MessageId::SetupActionBack)),
-                ],
-            )
         } else if saved_credential && self.api_key_input.trim().is_empty() {
             render_modal_footer(
                 inner,
@@ -2456,8 +2515,6 @@ impl ProviderPickerView {
         let masked = mask_key(&self.api_key_input);
         let display = if codex_oauth {
             "(run codex login; then explicitly grant read-only access)".to_string()
-        } else if xai_oauth {
-            "(browser/device-code sign-in; tokens use Codewhale-owned storage)".to_string()
         } else if masked.is_empty() && saved_credential {
             "Saved credential configured".to_string()
         } else if masked.is_empty() {
@@ -2498,17 +2555,6 @@ impl ProviderPickerView {
                 )),
                 Line::from(Span::styled(
                     "CLI: codewhale auth external-consent --provider openai-codex; no token is stored here.",
-                    Style::default().fg(palette::TEXT_MUTED),
-                )),
-            ]
-        } else if xai_oauth {
-            vec![
-                Line::from(Span::styled(
-                    self.tr(MessageId::ProviderExternalHintXaiReview),
-                    Style::default().fg(palette::TEXT_MUTED),
-                )),
-                Line::from(Span::styled(
-                    self.tr(MessageId::ProviderExternalHintXaiApiKey),
                     Style::default().fg(palette::TEXT_MUTED),
                 )),
             ]
@@ -3106,10 +3152,7 @@ impl ModalView for ProviderPickerView {
     fn handle_paste(&mut self, text: &str) -> bool {
         match self.stage {
             Stage::KeyEntry => {
-                if matches!(
-                    self.selected_provider(),
-                    ApiProvider::OpenaiCodex | ApiProvider::Xai
-                ) {
+                if self.selected_provider() == ApiProvider::OpenaiCodex {
                     return true;
                 }
                 let sanitized: String = text.chars().filter(|c| !c.is_whitespace()).collect();
@@ -3125,6 +3168,7 @@ impl ModalView for ProviderPickerView {
                 true
             }
             Stage::List
+            | Stage::XaiAuthChoice
             | Stage::ExternalConsentChoice
             | Stage::ExternalConsentConfirm
             | Stage::ModelPick
@@ -3163,7 +3207,12 @@ impl ModalView for ProviderPickerView {
                 KeyCode::Enter if self.row_visible(self.selected_idx) => {
                     let provider = self.selected_provider();
                     let provider_id = self.selected_provider_id();
-                    if !self.selected_route_is_valid() {
+                    if provider == ApiProvider::Custom
+                        && !self.rows[self.selected_idx].is_configured
+                    {
+                        self.enter_custom_form();
+                        ViewAction::None
+                    } else if !self.selected_route_is_valid() {
                         ViewAction::None
                     } else if self.selected_has_key() {
                         ViewAction::EmitAndClose(ViewEvent::ProviderPickerApplied {
@@ -3251,11 +3300,45 @@ impl ModalView for ProviderPickerView {
                 }
                 _ => ViewAction::None,
             },
+            Stage::XaiAuthChoice => match key.code {
+                KeyCode::Esc => {
+                    self.stage = Stage::List;
+                    ViewAction::None
+                }
+                KeyCode::Up | KeyCode::Down => {
+                    self.move_xai_auth_choice();
+                    ViewAction::None
+                }
+                KeyCode::Char('1') => {
+                    self.xai_auth_choice = XaiAuthChoice::ApiKey;
+                    ViewAction::None
+                }
+                KeyCode::Char('2') => {
+                    self.xai_auth_choice = XaiAuthChoice::DeviceOAuth;
+                    ViewAction::None
+                }
+                KeyCode::Char(c) if key.modifiers.is_empty() && c.eq_ignore_ascii_case(&'e') => {
+                    self.enter_external_consent_choice();
+                    ViewAction::None
+                }
+                KeyCode::Enter => match self.xai_auth_choice {
+                    XaiAuthChoice::ApiKey => {
+                        self.enter_key_entry();
+                        ViewAction::None
+                    }
+                    XaiAuthChoice::DeviceOAuth => {
+                        ViewAction::EmitAndClose(ViewEvent::ProviderPickerXaiOAuthRequested)
+                    }
+                },
+                _ => ViewAction::None,
+            },
             Stage::KeyEntry => match key.code {
                 KeyCode::Esc => {
                     // Back to the route choice when one was made, so Esc undoes
                     // one wizard step instead of discarding the whole flow.
-                    self.stage = if self.pending_base_url.is_some() {
+                    self.stage = if self.selected_provider() == ApiProvider::Xai {
+                        Stage::XaiAuthChoice
+                    } else if self.pending_base_url.is_some() {
                         Stage::StepfunBillingRoute
                     } else {
                         Stage::List
@@ -3269,20 +3352,14 @@ impl ModalView for ProviderPickerView {
                     ViewAction::None
                 }
                 KeyCode::Backspace => {
-                    if !matches!(
-                        self.selected_provider(),
-                        ApiProvider::OpenaiCodex | ApiProvider::Xai
-                    ) {
+                    if self.selected_provider() != ApiProvider::OpenaiCodex {
                         self.api_key_input.pop();
                         self.key_entry_error = None;
                     }
                     ViewAction::None
                 }
                 KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if !matches!(
-                        self.selected_provider(),
-                        ApiProvider::OpenaiCodex | ApiProvider::Xai
-                    ) {
+                    if self.selected_provider() != ApiProvider::OpenaiCodex {
                         self.api_key_input.pop();
                         self.key_entry_error = None;
                     }
@@ -3292,11 +3369,6 @@ impl ModalView for ProviderPickerView {
                     if self.selected_provider() == ApiProvider::OpenaiCodex {
                         self.enter_external_consent_choice();
                         return ViewAction::None;
-                    }
-                    if self.selected_provider() == ApiProvider::Xai {
-                        return ViewAction::EmitAndClose(
-                            ViewEvent::ProviderPickerXaiOAuthRequested,
-                        );
                     }
                     let key = self.api_key_input.trim().to_string();
                     if key.is_empty() {
@@ -3314,18 +3386,11 @@ impl ModalView for ProviderPickerView {
                     }
                 }
                 KeyCode::Char(c)
-                    if key.modifiers.is_empty()
-                        && c.eq_ignore_ascii_case(&'e')
-                        && self.selected_provider() == ApiProvider::Xai =>
+                    if !key.modifiers.intersects(
+                        KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
+                    ) =>
                 {
-                    self.enter_external_consent_choice();
-                    ViewAction::None
-                }
-                KeyCode::Char(c) => {
-                    if matches!(
-                        self.selected_provider(),
-                        ApiProvider::OpenaiCodex | ApiProvider::Xai
-                    ) {
+                    if self.selected_provider() == ApiProvider::OpenaiCodex {
                         return ViewAction::None;
                     }
                     // Reject ASCII whitespace so a stray space/tab doesn't slip
@@ -3341,7 +3406,11 @@ impl ModalView for ProviderPickerView {
             },
             Stage::ExternalConsentChoice => match key.code {
                 KeyCode::Esc => {
-                    self.stage = Stage::KeyEntry;
+                    self.stage = if self.selected_provider() == ApiProvider::Xai {
+                        Stage::XaiAuthChoice
+                    } else {
+                        Stage::KeyEntry
+                    };
                     ViewAction::None
                 }
                 KeyCode::Up => {
@@ -3546,6 +3615,7 @@ impl ModalView for ProviderPickerView {
             },
             Stage::PlanTier
             | Stage::StepfunBillingRoute
+            | Stage::XaiAuthChoice
             | Stage::KeyEntry
             | Stage::ExternalConsentChoice
             | Stage::ExternalConsentConfirm
@@ -3558,6 +3628,7 @@ impl ModalView for ProviderPickerView {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let preferred_height = match self.stage {
             Stage::List => (self.rows.len() as u16).saturating_add(2),
+            Stage::XaiAuthChoice => 12,
             // Key/OAuth help is intentionally multi-line and wraps at narrow
             // widths. One shared height keeps every provider's final guidance
             // visible instead of special-casing whichever route clipped last.
@@ -3576,6 +3647,7 @@ impl ModalView for ProviderPickerView {
 
         match self.stage {
             Stage::List => self.render_list(popup_area, buf),
+            Stage::XaiAuthChoice => self.render_xai_auth_choice(popup_area, buf),
             Stage::KeyEntry => self.render_key_entry(popup_area, buf),
             Stage::ExternalConsentChoice => self.render_external_consent_choice(popup_area, buf),
             Stage::ExternalConsentConfirm => self.render_external_consent_confirm(popup_area, buf),
@@ -5540,6 +5612,195 @@ mod tests {
         );
     }
 
+    #[test]
+    fn onboarding_catalog_honors_typed_credentials_for_every_builtin_provider() {
+        use codewhale_config::provider::CredentialAcquisition;
+
+        let _global_env = crate::test_support::lock_test_env();
+        let _module_env = ENV_LOCK.lock().expect("env lock poisoned");
+        let home = tempfile::tempdir().expect("isolated provider catalog home");
+        let _home = EnvVarGuard::set("HOME", home.path().to_string_lossy().as_ref());
+        let _codewhale_home =
+            EnvVarGuard::set("CODEWHALE_HOME", home.path().to_string_lossy().as_ref());
+        let _codex_home = EnvVarGuard::set("CODEX_HOME", home.path().to_string_lossy().as_ref());
+        let _secret_backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+        let mut key_envs = ApiProvider::all()
+            .iter()
+            .flat_map(|provider| provider.env_vars().iter().copied())
+            .collect::<Vec<_>>();
+        key_envs.sort_unstable();
+        key_envs.dedup();
+        let _missing_keys = key_envs
+            .into_iter()
+            .map(EnvVarGuard::remove)
+            .collect::<Vec<_>>();
+        let config = Config::default();
+
+        for provider in ApiProvider::all().iter().copied() {
+            let mut picker = ProviderPickerView::new_for_onboarding(
+                ApiProvider::Deepseek,
+                Some(provider),
+                &config,
+                None,
+            );
+            assert_eq!(picker.selected_provider(), provider, "{provider:?}");
+            assert_eq!(picker.stage, Stage::List, "{provider:?}");
+
+            let action = picker.handle_key(key(KeyCode::Enter));
+            match provider.credential_help().acquisition {
+                CredentialAcquisition::ApiKey => {
+                    assert!(matches!(action, ViewAction::None), "{provider:?}");
+                    assert!(
+                        matches!(picker.stage, Stage::KeyEntry | Stage::StepfunBillingRoute),
+                        "{provider:?} entered {:?}",
+                        picker.stage
+                    );
+                }
+                CredentialAcquisition::ApiKeyOrOAuth => {
+                    assert_eq!(provider, ApiProvider::Xai, "{provider:?}");
+                    assert!(matches!(action, ViewAction::None), "{provider:?}");
+                    let choices = render_text(&picker, 80, 24);
+                    assert!(choices.contains("API key"), "{choices}");
+                    assert!(choices.contains("device OAuth"), "{choices}");
+
+                    // Choice 1 is an ordinary API-key path. Text remains a key;
+                    // it is never reinterpreted as an OAuth bearer token.
+                    assert!(matches!(
+                        picker.handle_key(key(KeyCode::Char('1'))),
+                        ViewAction::None
+                    ));
+                    assert!(matches!(
+                        picker.handle_key(key(KeyCode::Enter)),
+                        ViewAction::None
+                    ));
+                    assert_eq!(picker.stage, Stage::KeyEntry);
+                    for ch in "violet-".chars() {
+                        picker.handle_key(key(KeyCode::Char(ch)));
+                    }
+                    assert!(picker.handle_paste("otter-key"));
+                    let key_text = "violet-otter-key";
+                    assert_eq!(picker.api_key_input, key_text);
+                    for (width, height) in [(80, 24), (120, 32)] {
+                        let rendered = render_text(&picker, width, height);
+                        assert!(!rendered.contains(key_text), "{width}x{height}: {rendered}");
+                        assert!(rendered.contains('*'), "{width}x{height}: {rendered}");
+                    }
+                    assert!(matches!(
+                        picker.handle_key(key(KeyCode::Enter)),
+                        ViewAction::EmitAndClose(ViewEvent::ProviderPickerApiKeySubmitted {
+                            provider: ApiProvider::Xai,
+                            provider_id: None,
+                            api_key,
+                            base_url: None,
+                        }) if api_key == key_text
+                    ));
+
+                    // Choice 2 is the provider-native device flow and emits only
+                    // the request event; the picker never manufactures a token.
+                    let mut oauth = ProviderPickerView::new_for_onboarding(
+                        ApiProvider::Deepseek,
+                        Some(ApiProvider::Xai),
+                        &config,
+                        None,
+                    );
+                    assert!(matches!(
+                        oauth.handle_key(key(KeyCode::Enter)),
+                        ViewAction::None
+                    ));
+                    assert!(matches!(
+                        oauth.handle_key(key(KeyCode::Char('2'))),
+                        ViewAction::None
+                    ));
+                    assert!(matches!(
+                        oauth.handle_key(key(KeyCode::Enter)),
+                        ViewAction::EmitAndClose(ViewEvent::ProviderPickerXaiOAuthRequested)
+                    ));
+                }
+                CredentialAcquisition::LocalOptional => assert!(matches!(
+                    action,
+                    ViewAction::EmitAndClose(ViewEvent::ProviderPickerApplied {
+                        provider: applied,
+                        provider_id: None,
+                    }) if applied == provider
+                )),
+                CredentialAcquisition::OAuth => {
+                    assert!(matches!(action, ViewAction::None), "{provider:?}");
+                    assert_eq!(picker.stage, Stage::KeyEntry, "{provider:?}");
+                    assert!(picker.handle_paste("fixture-oauth-paste"));
+                    assert!(
+                        picker.api_key_input.is_empty(),
+                        "{provider:?} must reject key paste"
+                    );
+                }
+                CredentialAcquisition::Configuration => {
+                    assert_eq!(provider, ApiProvider::Custom);
+                    assert!(matches!(action, ViewAction::None));
+                    assert_eq!(picker.stage, Stage::CustomForm);
+                    assert!(picker.api_key_input.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn credential_draft_is_masked_and_escape_drops_it_without_persistence() {
+        let _global_env = crate::test_support::lock_test_env();
+        let _module_env = ENV_LOCK.lock().expect("env lock poisoned");
+        let home = tempfile::tempdir().expect("isolated credential draft home");
+        let _home = EnvVarGuard::set("HOME", home.path().to_string_lossy().as_ref());
+        let _codewhale_home =
+            EnvVarGuard::set("CODEWHALE_HOME", home.path().to_string_lossy().as_ref());
+        let _secret_backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+        let _openrouter_key = EnvVarGuard::remove("OPENROUTER_API_KEY");
+        let config = Config::default();
+        let draft = ["violet", "otter", "draft", "7361"].join("-");
+        let mut picker = ProviderPickerView::new_for_missing_auth(
+            ApiProvider::Deepseek,
+            ApiProvider::Openrouter,
+            &config,
+            None,
+        )
+        .expect("OpenRouter key editor");
+
+        let ctrl_v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
+        assert!(matches!(picker.handle_key(ctrl_v), ViewAction::None));
+        assert!(
+            picker.api_key_input.is_empty(),
+            "shortcut must not type `v`"
+        );
+        let shifted_v = KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT);
+        assert!(matches!(picker.handle_key(shifted_v), ViewAction::None));
+        assert_eq!(
+            picker.api_key_input, "V",
+            "shifted credential text is valid"
+        );
+        assert!(matches!(
+            picker.handle_key(key(KeyCode::Backspace)),
+            ViewAction::None
+        ));
+        assert!(picker.handle_paste(&draft));
+        assert_eq!(picker.api_key_input, draft);
+        for (width, height) in [(80, 24), (120, 32)] {
+            let rendered = render_text(&picker, width, height);
+            assert!(!rendered.contains(&draft), "{width}x{height}: {rendered}");
+            assert!(rendered.contains('*'), "{width}x{height}: {rendered}");
+        }
+
+        assert!(matches!(
+            picker.handle_key(key(KeyCode::Esc)),
+            ViewAction::None
+        ));
+        assert_eq!(picker.stage, Stage::List);
+        assert!(picker.api_key_input.is_empty());
+        assert_eq!(
+            std::fs::read_dir(home.path())
+                .expect("isolated home remains readable")
+                .count(),
+            0,
+            "Esc must not create config or credential-backend files"
+        );
+    }
+
     /// #4763: Escape backs out one stage at a time — key entry returns to the
     /// list, and only the list dismisses the picker.
     #[test]
@@ -6270,7 +6531,7 @@ mod tests {
     }
 
     #[test]
-    fn xai_key_entry_launches_device_oauth() {
+    fn xai_auth_choice_keeps_api_key_device_oauth_and_external_reuse_distinct() {
         let config = Config::default();
         let mut picker = ProviderPickerView::new_for_missing_auth(
             ApiProvider::Deepseek,
@@ -6279,16 +6540,13 @@ mod tests {
             None,
         )
         .expect("xAI has a picker row");
-        assert_eq!(picker.stage, Stage::KeyEntry);
+        assert_eq!(picker.stage, Stage::XaiAuthChoice);
 
         let rendered = render_text(&picker, 96, 20);
-        assert!(rendered.contains("OAuth login"));
-        assert!(rendered.contains("device login"));
+        assert!(rendered.contains("xAI API key"));
+        assert!(rendered.contains("Native device OAuth"));
         assert!(rendered.contains("Codewhale-owned storage"));
-        assert!(!rendered.contains("(paste key here)"));
-
-        assert!(picker.handle_paste("xai-token"));
-        assert!(picker.api_key_input.is_empty());
+        picker.handle_key(key(KeyCode::Char('2')));
         assert!(matches!(
             picker.handle_key(key(KeyCode::Enter)),
             ViewAction::EmitAndClose(ViewEvent::ProviderPickerXaiOAuthRequested)
@@ -6308,6 +6566,35 @@ mod tests {
         assert_eq!(external.stage, Stage::ExternalConsentChoice);
         let rendered = render_text(&external, 100, 20);
         assert!(rendered.contains("Managed (unavailable)"), "{rendered}");
+    }
+
+    #[test]
+    fn xai_auth_choice_uses_the_selected_locale() {
+        let config = Config::default();
+        let picker = ProviderPickerView::new_for_missing_auth(
+            ApiProvider::Deepseek,
+            ApiProvider::Xai,
+            &config,
+            None,
+        )
+        .expect("xAI has a picker row")
+        .with_locale(crate::localization::Locale::ZhHans);
+
+        let rendered = render_text(&picker, 100, 24);
+        let compact = rendered
+            .chars()
+            .filter(|ch| !ch.is_whitespace())
+            .collect::<String>();
+        for translated in [
+            "xAI身份验证",
+            "请选择一个明确的凭据来源",
+            "xAIAPI密钥",
+            "原生设备OAuth",
+        ] {
+            assert!(compact.contains(translated), "{translated}: {rendered}");
+        }
+        assert!(!rendered.contains("Choose one explicit credential source"));
+        assert!(!rendered.contains("Native device OAuth"));
     }
 
     #[test]
