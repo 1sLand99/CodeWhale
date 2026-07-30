@@ -1571,6 +1571,8 @@ impl Runtime {
         .await
         {
             Ok(Ok(tool_output)) => {
+                let success = tool_output.success();
+                let status = if success { "completed" } else { "failed" };
                 let result_frame = EventFrame::ToolCallResult {
                     response_id: response_id.clone(),
                     tool_name: call.name.clone(),
@@ -1585,13 +1587,13 @@ impl Runtime {
                     .emit(HookEvent::ToolLifecycle {
                         response_id: response_id.clone(),
                         tool_name: call.name,
-                        phase: "completed".to_string(),
-                        payload: json!({ "ok": true }),
+                        phase: status.to_string(),
+                        payload: json!({ "ok": success }),
                     })
                     .await;
                 Ok(json!({
-                    "ok": true,
-                    "status": "completed",
+                    "ok": success,
+                    "status": status,
                     "execution_kind": execution_kind,
                     "response_id": response_id,
                     "precheck": precheck,

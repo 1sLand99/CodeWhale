@@ -447,6 +447,14 @@ pub enum ToolPayload {
     },
 }
 
+const fn default_true() -> bool {
+    true
+}
+
+const fn is_true(value: &bool) -> bool {
+    *value
+}
+
 /// The result of a tool call, discriminated by tool type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -463,7 +471,22 @@ pub enum ToolOutput {
     Mcp {
         /// The result value returned by the MCP server.
         result: Value,
+        /// Whether the MCP call succeeded at the application layer.
+        ///
+        /// Legacy payloads omitted this field and represented success, so true
+        /// remains the wire-default and is omitted when serialized.
+        #[serde(default = "default_true", skip_serializing_if = "is_true")]
+        success: bool,
     },
+}
+
+impl ToolOutput {
+    /// Returns the tool's application-level success independently of transport.
+    pub const fn success(&self) -> bool {
+        match self {
+            Self::Function { success, .. } | Self::Mcp { success, .. } => *success,
+        }
+    }
 }
 
 /// Action to take for a network policy rule.
