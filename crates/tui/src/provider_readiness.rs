@@ -211,10 +211,10 @@ pub(crate) fn credential_state_for_provider(
         }
         let has_auth = (provider == config.api_provider()
             && crate::config::explicit_cli_api_key_override().is_some())
-            || configured
-                .api_key
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty())
+            || configured.api_key.as_deref().is_some_and(|value| {
+                crate::config::classify_config_api_key_value(value)
+                    == crate::config::ConfigApiKeyValueKind::Literal
+            })
             || configured
                 .api_key_env
                 .as_deref()
@@ -312,18 +312,17 @@ fn explicit_provider_credential_present(
                 .any(|name| std::env::var(name).is_ok_and(|value| !value.trim().is_empty())))
         || (config.config_credentials_are_bound_to_provider_endpoint(provider)
             && config.provider_config_for(provider).is_some_and(|entry| {
-                entry
-                    .api_key
+                entry.api_key.as_deref().is_some_and(|value| {
+                    crate::config::classify_config_api_key_value(value)
+                        == crate::config::ConfigApiKeyValueKind::Literal
+                }) || entry
+                    .api_key_env
                     .as_deref()
-                    .is_some_and(|value| !value.trim().is_empty())
-                    || entry
-                        .api_key_env
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|name| !name.is_empty())
-                        .is_some_and(|name| {
-                            std::env::var(name).is_ok_and(|value| !value.trim().is_empty())
-                        })
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .is_some_and(|name| {
+                        std::env::var(name).is_ok_and(|value| !value.trim().is_empty())
+                    })
             }))
 }
 

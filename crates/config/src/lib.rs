@@ -75,6 +75,26 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 pub const CONFIG_FILE_NAME: &str = "config.toml";
 pub const PERMISSIONS_FILE_NAME: &str = "permissions.toml";
 
+/// Secret-store routing metadata; never credential material.
+pub const API_KEYRING_SENTINEL: &str = "__KEYRING__";
+
+/// Canonical structural classification for configured API-key values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigApiKeyValueKind {
+    Empty,
+    SecretStoreSentinel,
+    Literal,
+}
+
+#[must_use]
+pub fn classify_config_api_key_value(value: &str) -> ConfigApiKeyValueKind {
+    match value.trim() {
+        "" => ConfigApiKeyValueKind::Empty,
+        API_KEYRING_SENTINEL => ConfigApiKeyValueKind::SecretStoreSentinel,
+        _ => ConfigApiKeyValueKind::Literal,
+    }
+}
+
 fn http_headers_are_effectively_empty(headers: &BTreeMap<String, String>) -> bool {
     !headers
         .iter()
@@ -2504,7 +2524,9 @@ impl ConfigToml {
         let explicit_api_key_for_endpoint = cli
             .api_key
             .as_deref()
-            .or(from_file.as_deref())
+            .or(from_file.as_deref().filter(|value| {
+                classify_config_api_key_value(value) == ConfigApiKeyValueKind::Literal
+            }))
             .or(xiaomi_mimo_env_api_key.as_deref());
         let base_url = if provider == ProviderKind::XiaomiMimo {
             resolve_xiaomi_mimo_base_url(
@@ -2585,7 +2607,9 @@ impl ConfigToml {
         } else if uses_kimi_imported_token && !custom_endpoint {
             (None, None)
         } else if (!custom_endpoint || base_url_from_file)
-            && let Some(value) = from_file.clone().filter(|v| !v.trim().is_empty())
+            && let Some(value) = from_file.clone().filter(|value| {
+                classify_config_api_key_value(value) == ConfigApiKeyValueKind::Literal
+            })
         {
             (Some(value), Some(RuntimeApiKeySource::ConfigFile))
         } else if !custom_endpoint

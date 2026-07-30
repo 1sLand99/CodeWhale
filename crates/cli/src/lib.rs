@@ -17,8 +17,9 @@ use codewhale_app_server::{
     AppServerOptions, run as run_app_server, run_stdio as run_app_server_stdio,
 };
 use codewhale_config::{
-    CliRuntimeOverrides, ConfigStore, ConfigToml, ProviderKind, ProviderSource,
-    ResolvedRuntimeOptions, RuntimeApiKeySource, provider_base_url_is_official,
+    CliRuntimeOverrides, ConfigApiKeyValueKind, ConfigStore, ConfigToml, ProviderKind,
+    ProviderSource, ResolvedRuntimeOptions, RuntimeApiKeySource, classify_config_api_key_value,
+    provider_base_url_is_official,
 };
 use codewhale_execpolicy::{AskForApproval, ExecPolicyContext, ExecPolicyEngine};
 use codewhale_mcp::{McpServerDefinition, run_stdio_server};
@@ -2266,7 +2267,8 @@ fn provider_config_api_key(store: &ConfigStore, provider: ProviderKind) -> Optio
     let root = (provider == ProviderKind::Deepseek)
         .then_some(store.config.api_key.as_deref())
         .flatten();
-    slot.or(root).filter(|v| !v.trim().is_empty())
+    slot.or(root)
+        .filter(|value| classify_config_api_key_value(value) == ConfigApiKeyValueKind::Literal)
 }
 
 fn provider_config_set(store: &ConfigStore, provider: ProviderKind) -> bool {
@@ -3510,6 +3512,8 @@ fn prompt_api_key(slot: &str) -> Result<String> {
 fn run_auth_migrate(store: &mut ConfigStore, secrets: &Secrets, dry_run: bool) -> Result<()> {
     let mut migrated: Vec<(ProviderKind, &'static str)> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
+    let literal =
+        |value: &String| classify_config_api_key_value(value) == ConfigApiKeyValueKind::Literal;
 
     for provider in ProviderKind::ALL {
         let slot = provider_slot(provider);
@@ -3519,11 +3523,11 @@ fn run_auth_migrate(store: &mut ConfigStore, secrets: &Secrets, dry_run: bool) -
             .for_provider(provider)
             .api_key
             .clone()
-            .filter(|v| !v.trim().is_empty());
+            .filter(literal);
         let from_root = (provider == ProviderKind::Deepseek)
             .then(|| store.config.api_key.clone())
             .flatten()
-            .filter(|v| !v.trim().is_empty());
+            .filter(literal);
         let value = from_provider_block.or(from_root);
         let Some(value) = value else { continue };
 
@@ -7398,6 +7402,11 @@ model = "qwen-2.5-7b"
         assert!(output.contains("route:"));
         assert!(output.contains("model:"));
         assert!(!output.contains("sk-arcee-9999"));
+
+        for sentinel in [codewhale_config::API_KEYRING_SENTINEL, "  __KEYRING__  "] {
+            store.config.providers.arcee.api_key = Some(sentinel.to_string());
+            assert_eq!(provider_config_api_key(&store, ProviderKind::Arcee), None);
+        }
 
         let _ = std::fs::remove_file(path);
     }

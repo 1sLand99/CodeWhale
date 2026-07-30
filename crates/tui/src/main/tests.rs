@@ -684,6 +684,98 @@ fn unavailable_sentinel_routes_stay_distinct_from_unknown_and_unprobed() {
 }
 
 #[test]
+fn sentinel_placeholders_never_become_attemptable_routes_or_metered_evidence() {
+    let _lock = crate::test_support::lock_test_env();
+    let temp = TempDir::new().expect("isolated credential home");
+    let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", temp.path());
+    let _backend = crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let _xai = crate::test_support::EnvVarGuard::remove("XAI_API_KEY");
+    let _cli_source = crate::test_support::EnvVarGuard::remove("DEEPSEEK_API_KEY_SOURCE");
+    let _cli_key = crate::test_support::EnvVarGuard::remove("CODEWHALE_CLI_API_KEY");
+    let _mimo_mode = crate::test_support::EnvVarGuard::remove("XIAOMI_MIMO_MODE");
+    let _mimo_base = crate::test_support::EnvVarGuard::remove("XIAOMI_MIMO_BASE_URL");
+    let _mimo_plan = crate::test_support::EnvVarGuard::remove("XIAOMI_MIMO_TOKEN_PLAN_API_KEY");
+    let _mimo_plan_alias = crate::test_support::EnvVarGuard::remove("MIMO_TOKEN_PLAN_API_KEY");
+    let _mimo_key = crate::test_support::EnvVarGuard::remove("XIAOMI_MIMO_API_KEY");
+    let _xiaomi_key = crate::test_support::EnvVarGuard::remove("XIAOMI_API_KEY");
+    let _mimo_key_alias = crate::test_support::EnvVarGuard::remove("MIMO_API_KEY");
+
+    for sentinel in [crate::config::API_KEYRING_SENTINEL, "  __KEYRING__  "] {
+        let named_custom = Config {
+            provider: Some("sentinel-route".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                custom: std::collections::HashMap::from([(
+                    "sentinel-route".to_string(),
+                    crate::config::ProviderConfig {
+                        kind: Some("openai-compatible".to_string()),
+                        base_url: Some("https://gateway.example.test/v1".to_string()),
+                        model: Some("sentinel-model".to_string()),
+                        api_key: Some(sentinel.to_string()),
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::provider_readiness::credential_state_for_provider(
+                &named_custom,
+                crate::config::ApiProvider::Custom,
+            ),
+            crate::provider_readiness::CredentialState::MissingKey
+        );
+        let readiness = crate::provider_readiness::resolve_for_model(
+            &named_custom,
+            crate::config::ApiProvider::Custom,
+            "sentinel-model",
+            &crate::provider_readiness::ProviderReadinessSnapshot::default(),
+        );
+        assert_eq!(
+            readiness,
+            crate::provider_readiness::ResolvedProviderReadiness::MissingKey
+        );
+        assert!(!readiness.can_attempt());
+        assert!(
+            crate::model_inventory::ModelInventory::from_config(&named_custom)
+                .candidates
+                .iter()
+                .all(|candidate| candidate.provider != crate::config::ApiProvider::Custom)
+        );
+
+        let xai = Config {
+            provider: Some("xai".to_string()),
+            providers: Some(crate::config::ProvidersConfig {
+                xai: crate::config::ProviderConfig {
+                    api_key: Some(sentinel.to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::provider_readiness::credential_state_for_provider(
+                &xai,
+                crate::config::ApiProvider::Xai,
+            ),
+            crate::provider_readiness::CredentialState::MissingKey
+        );
+
+        let mut xiaomi_providers = crate::config::ProvidersConfig::default();
+        xiaomi_providers.xiaomi_mimo.api_key = Some(sentinel.to_string());
+        let xiaomi = Config {
+            providers: Some(xiaomi_providers),
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::route_billing::for_route(&xiaomi, crate::config::ApiProvider::XiaomiMimo),
+            crate::route_billing::BillingPresentation::Subscription("MiMo token plan")
+        );
+    }
+}
+
+#[test]
 fn sentinel_diagnostic_yields_to_route_bound_env_or_auth_declaration() {
     for sentinel in [crate::config::API_KEYRING_SENTINEL, "  __KEYRING__  "] {
         let mut providers = crate::config::ProvidersConfig::default();

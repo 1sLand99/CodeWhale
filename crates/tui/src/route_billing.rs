@@ -1011,11 +1011,10 @@ fn xiaomi_is_explicit_pay_as_you_go(config: Option<&ProviderConfig>) -> bool {
             "pay_as_you_go" | "payg" | "paygo" | "api" | "standard" | "default"
         );
     }
-    if let Some(api_key) = config
-        .api_key
-        .as_deref()
-        .filter(|key| !key.trim().is_empty())
-    {
+    if let Some(api_key) = config.api_key.as_deref().filter(|key| {
+        crate::config::classify_config_api_key_value(key)
+            == crate::config::ConfigApiKeyValueKind::Literal
+    }) {
         return !api_key.trim_start().starts_with("tp-");
     }
     config.base_url.as_deref().is_some_and(|base_url| {

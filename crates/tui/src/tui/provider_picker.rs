@@ -1234,10 +1234,10 @@ fn has_explicit_credential(
         .iter()
         .any(|var| std::env::var(var).is_ok_and(|value| !value.trim().is_empty()))
         || configured.is_some_and(|entry| {
-            entry
-                .api_key
-                .as_deref()
-                .is_some_and(|value| !value.trim().is_empty())
+            entry.api_key.as_deref().is_some_and(|value| {
+                crate::config::classify_config_api_key_value(value)
+                    == crate::config::ConfigApiKeyValueKind::Literal
+            })
         })
 }
 
@@ -1246,16 +1246,15 @@ fn custom_provider_has_auth(configured: Option<&crate::config::ProviderConfig>) 
         return true;
     }
     configured.is_some_and(|entry| {
-        entry
-            .api_key
+        entry.api_key.as_deref().is_some_and(|value| {
+            crate::config::classify_config_api_key_value(value)
+                == crate::config::ConfigApiKeyValueKind::Literal
+        }) || entry
+            .api_key_env
             .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-            || entry
-                .api_key_env
-                .as_deref()
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .is_some_and(|name| std::env::var(name).is_ok_and(|value| !value.trim().is_empty()))
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .is_some_and(|name| std::env::var(name).is_ok_and(|value| !value.trim().is_empty()))
     })
 }
 
@@ -5043,6 +5042,7 @@ mod tests {
                 kind: Some("openai-compatible".to_string()),
                 base_url: Some("https://api.example.com/v1".to_string()),
                 model: Some("vendor/custom-model-v1".to_string()),
+                api_key: Some(crate::config::API_KEYRING_SENTINEL.to_string()),
                 api_key_env: Some("EXAMPLE_API_KEY".to_string()),
                 ..Default::default()
             },
@@ -6623,6 +6623,17 @@ mod tests {
             xai_oauth_status(Some(&fallback_key), false),
             Some(ProviderAuthStatus::Configured)
         );
+        for sentinel in [crate::config::API_KEYRING_SENTINEL, "  __KEYRING__  "] {
+            let placeholder = crate::config::ProviderConfig {
+                auth_mode: Some("oauth".to_string()),
+                api_key: Some(sentinel.to_string()),
+                ..Default::default()
+            };
+            assert_eq!(
+                xai_oauth_status(Some(&placeholder), false),
+                Some(ProviderAuthStatus::OAuthMissing)
+            );
+        }
     }
 
     #[test]

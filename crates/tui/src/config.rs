@@ -30,28 +30,9 @@ use subagent_limits::{resolve_subagent_api_timeout_secs, resolve_subagent_heartb
 mod models;
 pub use models::*;
 
-/// Legacy placeholder written into `api_key` when the real credential lives in
-/// the secret store. It is not a credential and must never be treated as one —
-/// including by billing classification, which reads credential *shape* only.
-pub(crate) const API_KEYRING_SENTINEL: &str = "__KEYRING__";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ConfigApiKeyValueKind {
-    Empty,
-    SecretStoreSentinel,
-    Literal,
-}
-
-pub(crate) fn classify_config_api_key_value(value: &str) -> ConfigApiKeyValueKind {
-    let value = value.trim();
-    if value.is_empty() {
-        ConfigApiKeyValueKind::Empty
-    } else if value == API_KEYRING_SENTINEL {
-        ConfigApiKeyValueKind::SecretStoreSentinel
-    } else {
-        ConfigApiKeyValueKind::Literal
-    }
-}
+pub(crate) use codewhale_config::{
+    API_KEYRING_SENTINEL, ConfigApiKeyValueKind, classify_config_api_key_value,
+};
 
 pub const DEFAULT_ZAI_PROVIDER_MAX_CONCURRENCY: usize = 3;
 pub const MAX_PROVIDER_REQUEST_CONCURRENCY: usize = 64;
@@ -5053,7 +5034,10 @@ impl Config {
         let base = if provider == ApiProvider::XiaomiMimo {
             let config_api_key = self
                 .provider_config_for(provider)
-                .and_then(|entry| entry.api_key.as_deref());
+                .and_then(|entry| entry.api_key.as_deref())
+                .filter(|value| {
+                    classify_config_api_key_value(value) == ConfigApiKeyValueKind::Literal
+                });
             let mode = self
                 .provider_config_for(provider)
                 .and_then(|entry| entry.mode.as_deref());
