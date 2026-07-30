@@ -1362,6 +1362,35 @@ fn compact_base_url(base_url: &str) -> String {
     crate::tui::ui_text::truncate_line_to_width(stripped, 24)
 }
 
+/// Resolve the external credential target for a provider that supports
+/// read-only external consent. This is the same lower-level fact the
+/// provider picker uses to build its consent flow; Fleet setup reuses it
+/// for route-scoped activation without switching the parent session.
+#[must_use]
+pub(crate) fn external_consent_target_for_provider(
+    provider: ApiProvider,
+) -> Option<(
+    codewhale_config::ProviderKind,
+    codewhale_config::ExternalCredentialSource,
+    std::path::PathBuf,
+)> {
+    let (consent_provider, source, path) = match provider {
+        ApiProvider::OpenaiCodex => (
+            codewhale_config::ProviderKind::OpenaiCodex,
+            codewhale_config::ExternalCredentialSource::CodexCli,
+            crate::oauth::auth_file_path(),
+        ),
+        ApiProvider::Xai => (
+            codewhale_config::ProviderKind::Xai,
+            codewhale_config::ExternalCredentialSource::GrokCli,
+            crate::xai_oauth::auth_file_path(),
+        ),
+        _ => return None,
+    };
+    let path = codewhale_config::resolve_external_credential_path(path).ok()?;
+    Some((consent_provider, source, path))
+}
+
 impl ProviderPickerView {
     #[cfg(test)]
     #[must_use]
@@ -1737,21 +1766,7 @@ impl ProviderPickerView {
         codewhale_config::ExternalCredentialSource,
         std::path::PathBuf,
     )> {
-        let (provider, source, path) = match self.selected_provider() {
-            ApiProvider::OpenaiCodex => (
-                codewhale_config::ProviderKind::OpenaiCodex,
-                codewhale_config::ExternalCredentialSource::CodexCli,
-                crate::oauth::auth_file_path(),
-            ),
-            ApiProvider::Xai => (
-                codewhale_config::ProviderKind::Xai,
-                codewhale_config::ExternalCredentialSource::GrokCli,
-                crate::xai_oauth::auth_file_path(),
-            ),
-            _ => return None,
-        };
-        let path = codewhale_config::resolve_external_credential_path(path).ok()?;
-        Some((provider, source, path))
+        external_consent_target_for_provider(self.selected_provider())
     }
 
     fn enter_external_consent_choice(&mut self) {

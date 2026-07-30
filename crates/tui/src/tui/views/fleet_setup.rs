@@ -203,7 +203,11 @@ pub struct FleetSetupSnapshot {
     /// to a route independent of the parent/current provider. The provider id
     /// is a canonical built-in id or the exact named custom table key, not a
     /// display label — see [`cross_provider_model_routes`].
-    available_models: Vec<(String, String, String, bool)>,
+    available_models: Vec<(
+        String,
+        String,
+        crate::provider_readiness::ResolvedProviderReadiness,
+    )>,
 }
 
 impl FleetSetupSnapshot {
@@ -277,7 +281,11 @@ fn cross_provider_model_routes(
     config: &Config,
     active: crate::config::ApiProvider,
     health: &crate::provider_readiness::ProviderReadinessSnapshot,
-) -> Vec<(String, String, String, bool)> {
+) -> Vec<(
+    String,
+    String,
+    crate::provider_readiness::ResolvedProviderReadiness,
+)> {
     let mut routes = Vec::new();
     let configured = crate::provider_lake::configured_providers(config, active);
     let legacy_custom_configured = configured.contains(&crate::config::ApiProvider::Custom);
@@ -330,7 +338,11 @@ fn cross_provider_model_routes(
 }
 
 fn append_provider_model_routes(
-    routes: &mut Vec<(String, String, String, bool)>,
+    routes: &mut Vec<(
+        String,
+        String,
+        crate::provider_readiness::ResolvedProviderReadiness,
+    )>,
     config: &Config,
     active: crate::config::ApiProvider,
     provider: crate::config::ApiProvider,
@@ -359,12 +371,7 @@ fn append_provider_model_routes(
     for model in models {
         let readiness =
             crate::provider_readiness::resolve_for_model(config, provider, &model, health);
-        routes.push((
-            provider_id.to_string(),
-            model,
-            readiness.label().into_owned(),
-            readiness.can_attempt(),
-        ));
+        routes.push((provider_id.to_string(), model, readiness));
     }
 }
 
@@ -397,6 +404,40 @@ enum Step {
     Model,
     /// Review the full posture and save.
     Review,
+}
+
+/// Per-row Fleet Model step interaction state.
+///
+/// Replaces the old `model_selectable: Vec<bool>` so a dormant external-consent
+/// route can require explicit activation (#v092-fleet-routes-fix) while
+/// genuinely unconfigured routes stay blocked with a reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FleetModelRowState {
+    Ready,
+    NeedsActivation,
+    Blocked { reason: String },
+}
+
+impl FleetModelRowState {
+    fn from_readiness(readiness: &crate::provider_readiness::ResolvedProviderReadiness) -> Self {
+        if readiness.requires_explicit_activation() {
+            return Self::NeedsActivation;
+        }
+        if let Some(reason) = readiness.blocked_reason() {
+            return Self::Blocked {
+                reason: reason.into_owned(),
+            };
+        }
+        if readiness.can_attempt() {
+            return Self::Ready;
+        }
+        Self::Blocked {
+            reason: readiness
+                .blocked_reason()
+                .map(std::borrow::Cow::into_owned)
+                .unwrap_or_else(|| readiness.label().into_owned()),
+        }
+    }
 }
 
 pub struct FleetSetupView {
@@ -435,9 +476,10 @@ pub struct FleetSetupView {
     /// (the active route); later rows pin a concrete, possibly cross-provider
     /// route. Drives the review/copy so a pinned route names its own provider.
     model_routes: Vec<(String, String)>,
-    /// Whether the aligned Model row can be persisted. Missing-auth and
-    /// statically invalid routes remain visible with their reason but inert.
-    model_selectable: Vec<bool>,
+    /// Interaction state for each aligned Model row. Distinguishes ready rows,
+    /// dormant external-consent rows that need explicit activation, and
+    /// genuinely blocked rows with a short reason.
+    model_row_states: Vec<FleetModelRowState>,
     /// Typed filter for the Model step (#4639): substring match over
     /// provider and model id, so provider-heavy catalogs (e.g. OpenRouter)
     /// stay navigable without a provider→model drill-down.
@@ -452,6 +494,40 @@ pub struct FleetSetupView {
 }
 
 impl FleetSetupView {
+    /// Refresh row states from a freshly built snapshot while preserving the
+    /// user's current selection position and draft state. Used after the host
+    /// validates a dormant external-consent route so the same row becomes
+    /// Ready without closing and reopening the modal.
+    pub fn refresh_from_snapshot(&mut self, snapshot: FleetSetupSnapshot) {
+        let old_step = self.step;
+        let old_role_idx = self.role_idx;
+        let old_model_idx = self.model_idx;
+        let old_thinking_idx = self.thinking_idx;
+        let old_profile_scope = self.profile_scope;
+        let old_model_query = self.model_query.clone();
+        let old_model_filter_active = self.model_filter_active;
+        let old_review_scroll = self.review_scroll;
+        let old_profile_status = self.profile_status.clone();
+        let old_model_draft = self.model_draft.clone();
+        let old_model_draft_label = self.model_draft_label.clone();
+        let old_model_draft_preview = self.model_draft_preview.clone();
+
+        *self = Self::from_snapshot(snapshot);
+
+        self.step = old_step;
+        self.role_idx = old_role_idx;
+        self.model_idx = old_model_idx.min(self.filtered_model_indices().len().saturating_sub(1));
+        self.thinking_idx = old_thinking_idx;
+        self.profile_scope = old_profile_scope;
+        self.model_query = old_model_query;
+        self.model_filter_active = old_model_filter_active;
+        self.review_scroll = old_review_scroll;
+        self.profile_status = old_profile_status;
+        self.model_draft = old_model_draft;
+        self.model_draft_label = old_model_draft_label;
+        self.model_draft_preview = old_model_draft_preview;
+    }
+
     #[must_use]
     pub fn new(app: &App, config: &Config) -> Self {
         Self::from_snapshot(FleetSetupSnapshot::from_app(app, config))
@@ -462,13 +538,17 @@ impl FleetSetupView {
         // `inherit` (index 0) maps to the active route; every later row pins a
         // concrete (provider, model) drawn from all configured providers.
         let mut model_routes = vec![(snapshot.provider.clone(), snapshot.model.clone())];
-        let mut model_selectable = vec![true];
-        for (provider, model, readiness, selectable) in &snapshot.available_models {
+        let mut model_row_states = vec![FleetModelRowState::Ready];
+        for (provider, model, readiness) in &snapshot.available_models {
             let provider_label = provider_display_label(provider);
+            let readiness_summary = readiness.detail().map_or_else(
+                || readiness.label().into_owned(),
+                |detail| format!("{}: {detail}", readiness.label()),
+            );
             model_choices.push(Choice {
                 label: Cow::Owned(model.clone()),
                 summary: Cow::Owned(format!(
-                    "Pin this model ({provider_label}) · {readiness}"
+                    "Pin this model ({provider_label}) · {readiness_summary}"
                 )),
                 description: Cow::Owned(format!(
                     "Route this worker to {model} on {provider_label} instead of inheriting the session route."
@@ -477,7 +557,7 @@ impl FleetSetupView {
             // Canonical provider id (not the display label above) — this is
             // what gets persisted into the saved profile (#4093).
             model_routes.push((provider.clone(), model.clone()));
-            model_selectable.push(*selectable);
+            model_row_states.push(FleetModelRowState::from_readiness(readiness));
         }
         Self {
             snapshot,
@@ -493,7 +573,7 @@ impl FleetSetupView {
             model_draft_preview: None,
             model_choices,
             model_routes,
-            model_selectable,
+            model_row_states,
             model_query: String::new(),
             model_filter_active: false,
             row_hitboxes: RefCell::new(Vec::new()),
@@ -704,17 +784,42 @@ impl FleetSetupView {
                 ViewAction::None
             }
             Step::Model => {
-                if self
-                    .model_selectable
-                    .get(self.real_model_idx())
-                    .copied()
-                    .unwrap_or(false)
-                {
-                    // Shortest valid path: role → model → review/save.
-                    // Thinking defaults to inherit; adjust on review with `t`.
-                    self.step = Step::Review;
-                    self.review_scroll = 0;
-                    self.refresh_profile_status();
+                let idx = self.real_model_idx();
+                match self.model_row_states.get(idx) {
+                    Some(FleetModelRowState::Ready) => {
+                        // Shortest valid path: role → model → review/save.
+                        // Thinking defaults to inherit; adjust on review with `t`.
+                        self.step = Step::Review;
+                        self.review_scroll = 0;
+                        self.refresh_profile_status();
+                    }
+                    Some(FleetModelRowState::NeedsActivation) => {
+                        // Dormant external-consent route: explicit human
+                        // selection must mint the read capability and validate
+                        // only this exact provider/model. Hand off to the host
+                        // so rendering stays I/O-free.
+                        if let Some((provider_id, model)) = self.model_routes.get(idx) {
+                            if let Some(provider) = crate::config::ApiProvider::parse(provider_id) {
+                                if crate::tui::provider_picker::external_consent_target_for_provider(
+                                    provider,
+                                )
+                                .is_some()
+                                {
+                                    return ViewAction::Emit(
+                                        ViewEvent::FleetSetupExternalConsentActivationRequested {
+                                            provider_id: provider_id.clone(),
+                                            model: model.clone(),
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Some(FleetModelRowState::Blocked { .. }) => {
+                        // The summary line already shows the reason; stay on
+                        // the Model step so the user can pick a different route.
+                    }
+                    None => {}
                 }
                 ViewAction::None
             }
@@ -1176,14 +1281,16 @@ impl FleetSetupView {
                         .snapshot
                         .available_models
                         .iter()
-                        .find(|(candidate_provider, candidate_model, _, _)| {
+                        .find(|(candidate_provider, candidate_model, _)| {
                             candidate_provider == &provider && candidate_model == &model
                         })
-                        .map(|(_, _, readiness, _)| readiness.as_str())
-                        .unwrap_or(if self.snapshot.provider_ready {
-                            "ready"
-                        } else {
-                            "needs action"
+                        .map(|(_, _, readiness)| readiness.label().into_owned())
+                        .unwrap_or_else(|| {
+                            if self.snapshot.provider_ready {
+                                "ready".to_string()
+                            } else {
+                                "needs action".to_string()
+                            }
                         });
                     format!(
                         "{model}  ·  provider {}  ·  {readiness}",
@@ -1529,14 +1636,12 @@ mod tests {
                 (
                     "deepseek".to_string(),
                     "deepseek-v4-pro".to_string(),
-                    "key saved · not checked".to_string(),
-                    true,
+                    crate::provider_readiness::ResolvedProviderReadiness::SavedUnchecked,
                 ),
                 (
                     "deepseek".to_string(),
                     "deepseek-v4-flash".to_string(),
-                    "key saved · not checked".to_string(),
-                    true,
+                    crate::provider_readiness::ResolvedProviderReadiness::SavedUnchecked,
                 ),
             ],
         }
@@ -1612,8 +1717,7 @@ mod tests {
         snap.available_models = vec![(
             "zai".to_string(),
             "glm-5.2".to_string(),
-            "key saved · not checked".to_string(),
-            true,
+            crate::provider_readiness::ResolvedProviderReadiness::SavedUnchecked,
         )];
         let mut view = FleetSetupView::from_snapshot(snap);
 
@@ -1696,15 +1800,13 @@ mod tests {
             snap.available_models.push((
                 "openrouter".to_string(),
                 format!("vendor/model-{i:03}"),
-                "key saved · not checked".to_string(),
-                true,
+                crate::provider_readiness::ResolvedProviderReadiness::SavedUnchecked,
             ));
         }
         snap.available_models.push((
             "openrouter".to_string(),
             "z-ai/glm-5-turbo".to_string(),
-            "key saved · not checked".to_string(),
-            true,
+            crate::provider_readiness::ResolvedProviderReadiness::SavedUnchecked,
         ));
         let mut view = FleetSetupView::from_snapshot(snap);
         // Role → Model.
@@ -2137,20 +2239,34 @@ mod tests {
         snap.available_models = vec![(
             "zai".to_string(),
             "glm-5.2".to_string(),
-            "last check failed (authentication)".to_string(),
-            true,
+            crate::provider_readiness::ResolvedProviderReadiness::SavedLastCheckFailed {
+                category: crate::error_taxonomy::ErrorCategory::Authentication,
+                message: "auth failed".to_string(),
+            },
         )];
-        let view = FleetSetupView::from_snapshot(snap);
+        let mut view = FleetSetupView::from_snapshot(snap);
         assert_eq!(view.model_choices.len(), 2);
         assert!(
             view.model_choices[1]
                 .summary
                 .contains("last check failed (authentication)")
         );
+        assert!(view.model_choices[1].summary.contains("auth failed"));
         assert_eq!(
             view.model_routes[1],
             ("zai".to_string(), "glm-5.2".to_string())
         );
+        assert!(matches!(
+            &view.model_row_states[1],
+            FleetModelRowState::Blocked { reason } if reason == "auth failed"
+        ));
+        view.step = Step::Model;
+        view.model_idx = 1;
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Enter)),
+            ViewAction::None
+        ));
+        assert_eq!(view.step, Step::Model);
     }
 
     #[test]
@@ -2159,8 +2275,7 @@ mod tests {
         snap.available_models = vec![(
             "zai".to_string(),
             "broken-model".to_string(),
-            "invalid route".to_string(),
-            false,
+            crate::provider_readiness::ResolvedProviderReadiness::InvalidRoute,
         )];
         let mut view = FleetSetupView::from_snapshot(snap);
         view.step = Step::Model;
@@ -2196,13 +2311,13 @@ mod tests {
             &crate::provider_readiness::ProviderReadinessSnapshot::default(),
         );
 
-        assert!(routes.iter().any(|(provider, model, _, selectable)| {
-            provider == "openrouter" && model == "acme/private-preview" && *selectable
+        assert!(routes.iter().any(|(provider, model, readiness)| {
+            provider == "openrouter" && model == "acme/private-preview" && readiness.can_attempt()
         }));
         assert_eq!(
             routes
                 .iter()
-                .filter(|(provider, model, _, _)| {
+                .filter(|(provider, model, _)| {
                     provider == "openrouter" && model == "acme/private-preview"
                 })
                 .count(),
@@ -2245,18 +2360,14 @@ mod tests {
         assert!(
             routes
                 .iter()
-                .any(|(provider, model, _, _)| { provider == "custom-a" && model == "model-a" })
+                .any(|(provider, model, _)| { provider == "custom-a" && model == "model-a" })
         );
         assert!(
             routes
                 .iter()
-                .any(|(provider, model, _, _)| { provider == "custom-b" && model == "model-b" })
+                .any(|(provider, model, _)| { provider == "custom-b" && model == "model-b" })
         );
-        assert!(
-            !routes
-                .iter()
-                .any(|(provider, _, _, _)| provider == "custom")
-        );
+        assert!(!routes.iter().any(|(provider, _, _)| provider == "custom"));
 
         let mut view = FleetSetupView::from_snapshot(FleetSetupSnapshot {
             available_models: routes,
@@ -2293,14 +2404,15 @@ mod tests {
         );
 
         assert!(
-            routes
-                .iter()
-                .any(|(provider, model, readiness, selectable)| {
-                    provider == "custom"
-                        && model == "legacy-custom-model"
-                        && readiness == "local · not checked"
-                        && *selectable
-                }),
+            routes.iter().any(|(provider, model, readiness)| {
+                provider == "custom"
+                    && model == "legacy-custom-model"
+                    && matches!(
+                        readiness,
+                        crate::provider_readiness::ResolvedProviderReadiness::LocalUnchecked
+                    )
+                    && readiness.can_attempt()
+            }),
             "{routes:?}"
         );
     }
@@ -2545,6 +2657,218 @@ mod tests {
         assert!(
             !policy.contains("inspects the ledger"),
             "the interactive status command must not claim to inspect the durable ledger: {policy}"
+        );
+    }
+
+    #[test]
+    fn dormant_external_consent_row_requires_activation() {
+        let mut snap = snapshot();
+        snap.available_models = vec![(
+            "openai-codex".to_string(),
+            "gpt-5.6-sol".to_string(),
+            crate::provider_readiness::ResolvedProviderReadiness::ExternalConsentPendingSelection,
+        )];
+        let view = FleetSetupView::from_snapshot(snap);
+        assert!(
+            view.model_choices[1]
+                .summary
+                .contains("external consent · select to check")
+        );
+        assert!(matches!(
+            view.model_row_states[1],
+            FleetModelRowState::NeedsActivation
+        ));
+    }
+
+    #[test]
+    fn enter_on_dormant_external_consent_emits_activation_event() {
+        let mut snap = snapshot();
+        snap.available_models = vec![(
+            "openai-codex".to_string(),
+            "gpt-5.6-terra".to_string(),
+            crate::provider_readiness::ResolvedProviderReadiness::ExternalConsentPendingSelection,
+        )];
+        let mut view = FleetSetupView::from_snapshot(snap);
+        view.handle_key(key(KeyCode::Enter)); // Role -> Model
+        view.handle_key(key(KeyCode::Down)); // inherit -> codex row
+        assert_eq!(
+            view.selected_route(),
+            Some(("openai-codex".to_string(), "gpt-5.6-terra".to_string()))
+        );
+        let action = view.handle_key(key(KeyCode::Enter));
+        let ViewAction::Emit(ViewEvent::FleetSetupExternalConsentActivationRequested {
+            provider_id,
+            model,
+        }) = action
+        else {
+            panic!("expected external-consent activation request, got {action:?}");
+        };
+        assert_eq!(provider_id, "openai-codex");
+        assert_eq!(model, "gpt-5.6-terra");
+        assert_eq!(
+            view.step,
+            Step::Model,
+            "stays on Model step until host validates"
+        );
+    }
+
+    #[test]
+    fn refresh_from_snapshot_makes_activated_row_ready() {
+        let mut snap = snapshot();
+        snap.available_models = vec![(
+            "xai".to_string(),
+            "grok-4.5".to_string(),
+            crate::provider_readiness::ResolvedProviderReadiness::ExternalConsentPendingSelection,
+        )];
+        let mut view = FleetSetupView::from_snapshot(snap);
+        view.handle_key(key(KeyCode::Enter)); // Role -> Model
+        view.handle_key(key(KeyCode::Down)); // xai row
+        assert!(matches!(
+            view.model_row_states[1],
+            FleetModelRowState::NeedsActivation
+        ));
+
+        // Simulate the host validating the route and rebuilding the snapshot:
+        // the same row is now Ready.
+        let mut refreshed = snapshot();
+        refreshed.available_models = vec![(
+            "xai".to_string(),
+            "grok-4.5".to_string(),
+            crate::provider_readiness::ResolvedProviderReadiness::Ready,
+        )];
+        view.refresh_from_snapshot(refreshed);
+
+        assert!(matches!(
+            view.model_row_states[1],
+            FleetModelRowState::Ready
+        ));
+        // Selection and step are preserved.
+        assert_eq!(view.step, Step::Model);
+        assert_eq!(
+            view.selected_route(),
+            Some(("xai".to_string(), "grok-4.5".to_string()))
+        );
+    }
+
+    #[test]
+    fn blocked_row_cannot_advance() {
+        let mut snap = snapshot();
+        snap.available_models = vec![(
+            "xai".to_string(),
+            "grok-4.5".to_string(),
+            crate::provider_readiness::ResolvedProviderReadiness::MissingKey,
+        )];
+        let mut view = FleetSetupView::from_snapshot(snap);
+        view.step = Step::Model;
+        view.model_idx = 1;
+        assert!(matches!(
+            &view.model_row_states[1],
+            FleetModelRowState::Blocked { reason } if reason == "missing API key"
+        ));
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Enter)),
+            ViewAction::None
+        ));
+        assert_eq!(view.step, Step::Model);
+    }
+
+    #[test]
+    fn fleet_setup_includes_openai_codex_account_roster_with_dormant_consent() {
+        let _env = crate::test_support::lock_test_env();
+        let codex_home = tempfile::tempdir().expect("Codex home");
+        let _home = crate::test_support::EnvVarGuard::set("CODEX_HOME", codex_home.path());
+        std::fs::write(
+            codex_home.path().join("models_cache.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "fetched_at": chrono::Utc::now(),
+                "models": [
+                    { "slug": "gpt-5.6-sol", "priority": 1 },
+                    { "slug": "gpt-5.6-terra", "priority": 2 },
+                    { "slug": "gpt-5.6-luna", "priority": 3 }
+                ]
+            }))
+            .expect("serialize cache"),
+        )
+        .expect("write cache");
+
+        let mut config = crate::config::Config::default();
+        config.providers = Some(crate::config::ProvidersConfig {
+            openai_codex: crate::config::ProviderConfig {
+                auth_mode: Some("oauth".to_string()),
+                external_credentials: Some(
+                    codewhale_config::ExternalCredentialConsentToml::read_only(
+                        codewhale_config::ProviderKind::OpenaiCodex,
+                        codewhale_config::ExternalCredentialSource::CodexCli,
+                        std::path::PathBuf::from("/fake/auth.json"),
+                    ),
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        let routes = cross_provider_model_routes(
+            &config,
+            crate::config::ApiProvider::Moonshot,
+            &crate::provider_readiness::ProviderReadinessSnapshot::default(),
+        );
+
+        for model in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+            assert!(
+                routes.iter().any(|(provider, m, readiness)| {
+                    provider == "openai-codex"
+                        && m == model
+                        && matches!(
+                            readiness,
+                            crate::provider_readiness::ResolvedProviderReadiness::ExternalConsentPendingSelection
+                        )
+                }),
+                "missing dormant-consent Codex route for {model}: {routes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fleet_setup_includes_xai_grok_routes_with_dormant_consent() {
+        let _env = crate::test_support::lock_test_env();
+        let mut config = crate::config::Config::default();
+        config.providers = Some(crate::config::ProvidersConfig {
+            xai: crate::config::ProviderConfig {
+                auth_mode: Some("oauth".to_string()),
+                external_credentials: Some(
+                    codewhale_config::ExternalCredentialConsentToml::read_only(
+                        codewhale_config::ProviderKind::Xai,
+                        codewhale_config::ExternalCredentialSource::GrokCli,
+                        std::path::PathBuf::from("/fake/grok-auth.json"),
+                    ),
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        let routes = cross_provider_model_routes(
+            &config,
+            crate::config::ApiProvider::Moonshot,
+            &crate::provider_readiness::ProviderReadinessSnapshot::default(),
+        );
+
+        let xai_rows: Vec<_> = routes
+            .iter()
+            .filter(|(provider, _, _)| provider == "xai")
+            .collect();
+        assert!(
+            !xai_rows.is_empty(),
+            "xAI routes must be offered when Grok CLI consent is configured: {routes:?}"
+        );
+        assert!(
+            xai_rows.iter().all(|(_, _, readiness)| {
+                matches!(
+                    readiness,
+                    crate::provider_readiness::ResolvedProviderReadiness::ExternalConsentPendingSelection
+                )
+            }),
+            "every xAI row must require explicit activation: {xai_rows:?}"
         );
     }
 }

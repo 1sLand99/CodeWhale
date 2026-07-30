@@ -14,6 +14,7 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use crate::error_taxonomy::{ErrorCategory, ErrorEnvelope, ErrorSeverity};
 use crate::resource_telemetry::{TokenThroughput, estimate_output_tokens_from_text};
 use anyhow::{Context, Result};
 // On Windows the push/pop helpers write the escapes directly; crossterm's
@@ -14939,6 +14940,79 @@ async fn handle_view_events(
                 app.status_message =
                     Some(tr(app.ui_locale, MessageId::SubagentsFetching).to_string());
                 let _ = engine_handle.try_send(Op::ListSubAgents);
+            }
+            ViewEvent::FleetSetupExternalConsentActivationRequested { provider_id, model } => {
+                // Validate the selected Fleet route by minting the read-only
+                // external credential capability only for this exact
+                // provider/source/path. The check is route-scoped: a cloned
+                // config has the target provider active so credential discovery
+                // succeeds, but the parent session provider/model are never
+                // mutated.
+                let Some(provider) = ApiProvider::parse(&provider_id) else {
+                    app.set_sticky_status(
+                        format!("Fleet route activation failed: unknown provider `{provider_id}`"),
+                        crate::tui::app::StatusToastLevel::Error,
+                        None,
+                    );
+                    app.needs_redraw = true;
+                    continue;
+                };
+                let provider_label = provider.display_name();
+                let mut scoped = config.clone();
+                scoped.provider = Some(provider_id.clone());
+                let validation =
+                    crate::route_runtime::resolve_runtime_route(&scoped, provider, Some(&model))
+                        .and_then(|route| route.validate().map_err(|err| err.to_string()));
+                match validation {
+                    Ok(validated) => {
+                        app.provider_health
+                            .record_success(&scoped, provider, &validated.model);
+                        app.push_status_toast(
+                            format!(
+                                "{provider_label} route activated for Fleet: {}",
+                                validated.model
+                            ),
+                            crate::tui::app::StatusToastLevel::Success,
+                            Some(5_000),
+                        );
+                    }
+                    Err(error) => {
+                        let envelope = ErrorEnvelope::new(
+                            ErrorCategory::Authentication,
+                            ErrorSeverity::Error,
+                            false,
+                            "route_validation_failed",
+                            &error,
+                        );
+                        app.provider_health
+                            .record_failure(&scoped, provider, &model, &envelope);
+                        app.push_status_toast(
+                            format!("{provider_label} route activation failed: {error}"),
+                            crate::tui::app::StatusToastLevel::Error,
+                            None,
+                        );
+                    }
+                }
+                // Refresh the Fleet setup view from a snapshot built against the
+                // updated health state so the activated row becomes Ready
+                // without closing the modal.
+                if app.view_stack.top_kind() == Some(crate::tui::views::ModalKind::FleetSetup) {
+                    if let Some(view) = app.view_stack.pop() {
+                        let mut restored = view;
+                        if let Some(fleet_setup) = restored
+                            .as_any_mut()
+                            .downcast_mut::<crate::tui::views::fleet_setup::FleetSetupView>(
+                        ) {
+                            let fresh =
+                                crate::tui::views::fleet_setup::FleetSetupSnapshot::from_app(
+                                    app, config,
+                                );
+                            fleet_setup.refresh_from_snapshot(fresh);
+                        }
+                        app.view_stack.push_boxed(restored);
+                    }
+                }
+                app.needs_redraw = true;
             }
             ViewEvent::FleetProfileDraftCommitRequested { draft, scope } => {
                 // The TOML is rendered deterministically from the validated

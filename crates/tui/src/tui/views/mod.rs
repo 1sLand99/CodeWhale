@@ -902,6 +902,17 @@ pub enum ViewEvent {
         draft: Box<crate::fleet::profile::FleetProfileDraft>,
         scope: crate::fleet::profile::FleetProfileScope,
     },
+    /// Emitted by the Fleet setup Model step when the user selects a route that
+    /// has structurally valid external-consent credentials but is not the
+    /// active session provider. The host performs a route-scoped validation
+    /// (minting the read capability only for this exact provider/source/path)
+    /// and records the result in the session health snapshot so the same row
+    /// becomes selectable on the next render. The parent session provider and
+    /// model are never changed.
+    FleetSetupExternalConsentActivationRequested {
+        provider_id: String,
+        model: String,
+    },
     /// Emitted by the setup Runtime Posture card after the user has previewed
     /// and confirmed an explicit preset/config diff.
     SetupRuntimePresetApplyRequested {
