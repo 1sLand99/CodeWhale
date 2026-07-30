@@ -3580,15 +3580,7 @@ async fn run_doctor(
 
     println!();
     println!("{}", "Resolved User Paths (read-only):".bold());
-    for (label, path) in [
-        ("config", doctor_paths.config.as_path()),
-        ("settings", doctor_paths.settings.as_path()),
-        ("state", doctor_paths.state.as_path()),
-        ("sessions", doctor_paths.sessions.as_path()),
-        ("logs", doctor_paths.logs.as_path()),
-        ("automations", doctor_paths.automations.as_path()),
-        ("secrets", doctor_paths.secrets.as_path()),
-    ] {
+    for (label, path) in doctor_paths.entries() {
         println!("  · {label}: {}", crate::utils::display_path(path));
     }
 

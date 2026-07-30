@@ -102,16 +102,55 @@ fn explicit_codewhale_home_owns_every_default_user_path() {
     let _legacy_config = crate::test_support::EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
     let _automations = crate::test_support::EnvVarGuard::remove("CODEWHALE_AUTOMATIONS_DIR");
     let _legacy_automations = crate::test_support::EnvVarGuard::remove("DEEPSEEK_AUTOMATIONS_DIR");
+    let _tasks = crate::test_support::EnvVarGuard::remove("CODEWHALE_TASKS_DIR");
+    let _legacy_tasks = crate::test_support::EnvVarGuard::remove("DEEPSEEK_TASKS_DIR");
+    let _runtime = crate::test_support::EnvVarGuard::remove("CODEWHALE_RUNTIME_DIR");
+    let _legacy_runtime = crate::test_support::EnvVarGuard::remove("DEEPSEEK_RUNTIME_DIR");
 
     let report = DoctorPathReport::resolve(None).expect("resolve doctor paths");
+    let task_manager_root = crate::task_manager::default_tasks_dir();
+    let runtime_config = crate::runtime_threads::RuntimeThreadManagerConfig::from_task_data_dir(
+        task_manager_root.clone(),
+    );
+    let (secrets, legacy_secrets) =
+        codewhale_secrets::FileKeyringStore::default_paths_read_only().expect("secret paths");
 
+    assert_eq!(report.home, home);
     assert_eq!(report.config, home.join("config.toml"));
     assert_eq!(report.settings, home.join("settings.toml"));
-    assert_eq!(report.state, home);
     assert_eq!(report.sessions, home.join("sessions"));
     assert_eq!(report.logs, home.join("logs"));
     assert_eq!(report.automations, home.join("automations"));
-    assert_eq!(report.secrets, home.join("secrets").join("secrets.json"));
+    assert_eq!(report.task_manager_root, task_manager_root);
+    assert_eq!(report.task_manager_tasks, task_manager_root.join("tasks"));
+    assert_eq!(
+        report.task_manager_artifacts,
+        task_manager_root.join("artifacts")
+    );
+    assert_eq!(report.runtime_store, runtime_config.data_dir);
+    assert_eq!(
+        report.runtime_events,
+        runtime_config.data_dir.join("events")
+    );
+    assert_eq!(
+        report.personal_fleet_definitions,
+        crate::fleet::exact::personal_fleet_definitions_dir().expect("personal fleets")
+    );
+    assert_eq!(
+        report.personal_fleet_agents,
+        crate::fleet::profile::personal_agent_profile_dir().expect("personal agents")
+    );
+    assert_eq!(report.secrets, secrets);
+    assert_eq!(legacy_secrets, None);
+    assert_eq!(report.entries().len(), 14);
+    let json = serde_json::to_value(&report).expect("serialize path snapshot");
+    for (label, path) in report.entries() {
+        assert_eq!(
+            json[label].as_str(),
+            Some(path.to_string_lossy().as_ref()),
+            "human and JSON path snapshots diverged for {label}"
+        );
+    }
     assert!(
         !home.exists(),
         "path reporting must not create the configured home"

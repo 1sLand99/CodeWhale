@@ -11,24 +11,31 @@ use serde::Serialize;
 /// directories, or trigger legacy migration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct DoctorPathReport {
+    pub(crate) home: PathBuf,
     pub(crate) config: PathBuf,
     pub(crate) settings: PathBuf,
-    pub(crate) state: PathBuf,
     pub(crate) sessions: PathBuf,
     pub(crate) logs: PathBuf,
     pub(crate) automations: PathBuf,
+    pub(crate) task_manager_root: PathBuf,
+    pub(crate) task_manager_tasks: PathBuf,
+    pub(crate) task_manager_artifacts: PathBuf,
+    pub(crate) runtime_store: PathBuf,
+    pub(crate) runtime_events: PathBuf,
+    pub(crate) personal_fleet_definitions: PathBuf,
+    pub(crate) personal_fleet_agents: PathBuf,
     pub(crate) secrets: PathBuf,
 }
 
 impl DoctorPathReport {
     pub(crate) fn resolve(config_override: Option<&Path>) -> Result<Self> {
-        let state = codewhale_paths::codewhale_home()
+        let home = codewhale_paths::codewhale_home()
             .context("could not resolve the canonical Codewhale state root")?;
         let config = match config_override {
             Some(path) => codewhale_config::resolve_config_path(Some(path.to_path_buf()))
                 .context("could not normalize the explicit config path")?,
             None => codewhale_config::resolve_config_path(None)
-                .unwrap_or_else(|_| state.join(codewhale_config::CONFIG_FILE_NAME)),
+                .unwrap_or_else(|_| home.join(codewhale_config::CONFIG_FILE_NAME)),
         };
         let settings = crate::settings::Settings::path()
             .context("could not resolve the canonical settings path")?;
@@ -37,16 +44,64 @@ impl DoctorPathReport {
         let logs = crate::runtime_log::log_directory()
             .context("could not resolve the runtime log directory")?;
         let automations = crate::automation_manager::default_automations_dir();
-        let secrets = state.join("secrets").join("secrets.json");
+        let task_manager_root = crate::task_manager::default_tasks_dir();
+        let task_manager_tasks = task_manager_root.join("tasks");
+        let task_manager_artifacts = task_manager_root.join("artifacts");
+        let runtime_config = crate::runtime_threads::RuntimeThreadManagerConfig::from_task_data_dir(
+            task_manager_root.clone(),
+        );
+        let runtime_store = runtime_config.data_dir;
+        let runtime_events = runtime_store.join("events");
+        let personal_fleet_definitions = crate::fleet::exact::personal_fleet_definitions_dir()
+            .context("could not resolve the personal Fleet definitions directory")?;
+        let personal_fleet_agents = crate::fleet::profile::personal_agent_profile_dir()
+            .context("could not resolve the personal Fleet agent directory")?;
+        let (secrets, _) = codewhale_secrets::FileKeyringStore::default_paths_read_only()
+            .context("could not resolve the file secret backend path")?;
         Ok(Self {
+            home,
             config,
             settings,
-            state,
             sessions,
             logs,
             automations,
+            task_manager_root,
+            task_manager_tasks,
+            task_manager_artifacts,
+            runtime_store,
+            runtime_events,
+            personal_fleet_definitions,
+            personal_fleet_agents,
             secrets,
         })
+    }
+
+    pub(crate) fn entries(&self) -> [(&'static str, &Path); 14] {
+        [
+            ("home", self.home.as_path()),
+            ("config", self.config.as_path()),
+            ("settings", self.settings.as_path()),
+            ("sessions", self.sessions.as_path()),
+            ("logs", self.logs.as_path()),
+            ("automations", self.automations.as_path()),
+            ("task_manager_root", self.task_manager_root.as_path()),
+            ("task_manager_tasks", self.task_manager_tasks.as_path()),
+            (
+                "task_manager_artifacts",
+                self.task_manager_artifacts.as_path(),
+            ),
+            ("runtime_store", self.runtime_store.as_path()),
+            ("runtime_events", self.runtime_events.as_path()),
+            (
+                "personal_fleet_definitions",
+                self.personal_fleet_definitions.as_path(),
+            ),
+            (
+                "personal_fleet_agents",
+                self.personal_fleet_agents.as_path(),
+            ),
+            ("secrets", self.secrets.as_path()),
+        ]
     }
 }
 

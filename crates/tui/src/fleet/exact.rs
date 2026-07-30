@@ -52,10 +52,18 @@ use crate::tui::app::ReasoningEffort;
 /// Where exact fleet definitions and Reasoning Router profiles are looked up,
 /// labelled so an identity can be qualified (`workspace/glm-pair`) instead of
 /// silently shadowed.
+fn personal_fleet_root() -> anyhow::Result<std::path::PathBuf> {
+    codewhale_config::codewhale_home()
+}
+
+pub(crate) fn personal_fleet_definitions_dir() -> anyhow::Result<std::path::PathBuf> {
+    Ok(personal_fleet_root()?.join("fleets"))
+}
+
 #[must_use]
 pub(crate) fn fleet_search_roots(workspace: &std::path::Path) -> Vec<FleetSearchRoot> {
     let mut roots = Vec::new();
-    if let Ok(home) = codewhale_config::codewhale_home() {
+    if let Ok(home) = personal_fleet_root() {
         roots.push(FleetSearchRoot::new("codewhale_home", home));
     }
     roots.push(FleetSearchRoot::new("workspace", workspace.to_path_buf()));
