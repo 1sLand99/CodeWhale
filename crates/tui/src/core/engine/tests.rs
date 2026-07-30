@@ -13328,9 +13328,8 @@ async fn background_completion_after_a_turn_is_delivered_once_on_the_next_turn()
     #[cfg(unix)]
     let command = format!("printf '%s' '{stdout_body}'; printf '%s' '{stderr_body}' >&2");
     #[cfg(windows)]
-    let command = format!(
-        "powershell -NoProfile -Command \"[Console]::Out.Write('{stdout_body}'); [Console]::Error.Write('{stderr_body}')\""
-    );
+    let command =
+        format!("[Console]::Out.Write('{stdout_body}')\n[Console]::Error.Write('{stderr_body}')");
 
     let task_id = {
         let mut shell = engine.shell_manager.lock().expect("shell manager");
