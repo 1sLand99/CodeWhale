@@ -625,7 +625,7 @@ mod tests {
             memory_path: workspace.join("memory.md"),
             notes_path: workspace.join("notes.txt"),
             mcp_config_path,
-            ..crate::test_support::test_tui_options(workspace.to_path_buf())
+            ..crate::test_support::test_tui_options(workspace)
         };
         let mut app = App::new(options, &Config::default());
         app.ui_locale = Locale::En;
