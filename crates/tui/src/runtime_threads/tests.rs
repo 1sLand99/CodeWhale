@@ -169,7 +169,7 @@ fn spawn_runtime_event_child(
     root: &Path,
     thread_id: &str,
     signal: &Path,
-) -> std::process::Child {
+) -> RuntimeEventChildGuard {
     let mut command = std::process::Command::new(
         std::env::current_exe().expect("current test executable for Runtime event child"),
     );
@@ -186,24 +186,52 @@ fn spawn_runtime_event_child(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    command.spawn().expect("spawn Runtime event child")
+    RuntimeEventChildGuard::new(command.spawn().expect("spawn Runtime event child"))
 }
 
-fn wait_for_runtime_event_child(child: &mut std::process::Child, label: &str) {
-    use wait_timeout::ChildExt as _;
+struct RuntimeEventChildGuard(Option<std::process::Child>);
 
-    let status = match child
-        .wait_timeout(Duration::from_secs(30))
-        .expect("wait for Runtime event child")
-    {
-        Some(status) => status,
-        None => {
+impl RuntimeEventChildGuard {
+    const fn new(child: std::process::Child) -> Self {
+        Self(Some(child))
+    }
+
+    fn wait_success(mut self, label: &str) {
+        use wait_timeout::ChildExt as _;
+
+        let outcome = self
+            .0
+            .as_mut()
+            .expect("Runtime event child is present")
+            .wait_timeout(Duration::from_secs(30));
+        match outcome {
+            Ok(Some(status)) => {
+                self.0.take();
+                assert!(status.success(), "{label} failed with {status}");
+            }
+            Ok(None) => panic!("timed out waiting for {label}"),
+            Err(error) => panic!("failed waiting for {label}: {error}"),
+        }
+    }
+
+    fn kill_and_reap(mut self) -> std::io::Result<std::process::ExitStatus> {
+        let child = self.0.as_mut().expect("Runtime event child is present");
+        let kill = child.kill();
+        let status = child.wait();
+        if status.is_ok() {
+            self.0.take();
+        }
+        kill.and(status)
+    }
+}
+
+impl Drop for RuntimeEventChildGuard {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.as_mut() {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("timed out waiting for {label}");
         }
-    };
-    assert!(status.success(), "{label} failed with {status}");
+    }
 }
 
 fn test_manager_config(data_dir: PathBuf) -> RuntimeThreadManagerConfig {
@@ -2595,8 +2623,8 @@ fn runtime_event_sequences_serialize_across_real_processes() -> Result<()> {
     // The children already opened their stores before this barrier. The old
     // store-local sequence cache therefore allocated duplicates deterministically.
     std::fs::write(&start, b"go")?;
-    for (child, _) in &mut children {
-        wait_for_runtime_event_child(child, "cross-process event writer");
+    for (child, _) in children {
+        child.wait_success("cross-process event writer");
     }
 
     let events = store.events_since(thread_id, None)?;
@@ -2635,7 +2663,7 @@ fn runtime_event_lock_timeout_is_non_mutating_and_holder_death_releases_lock() -
     let store = RuntimeThreadStore::open(dir.clone())?;
     let thread_id = "thr_process_holder";
     let signal = dir.join("process-holder.ready");
-    let mut child = spawn_runtime_event_child("holder", &dir, thread_id, &signal);
+    let child = spawn_runtime_event_child("holder", &dir, thread_id, &signal);
     wait_for_runtime_event_test_file(&signal, "held Runtime event lock");
 
     let state_before = std::fs::read(&store.state_path)?;
@@ -2664,8 +2692,7 @@ fn runtime_event_lock_timeout_is_non_mutating_and_holder_death_releases_lock() -
     assert_eq!(std::fs::read(&store.state_path)?, state_before);
     assert!(!event_path.exists());
 
-    child.kill()?;
-    let status = child.wait()?;
+    let status = child.kill_and_reap()?;
     assert!(
         !status.success(),
         "killed lock holder unexpectedly succeeded"
@@ -2692,10 +2719,9 @@ fn killed_torn_append_is_repaired_and_preserves_reserved_gap() -> Result<()> {
     let store = RuntimeThreadStore::open(dir.clone())?;
     let thread_id = "thr_process_torn";
     let signal = dir.join("process-torn.ready");
-    let mut child = spawn_runtime_event_child("torn", &dir, thread_id, &signal);
+    let child = spawn_runtime_event_child("torn", &dir, thread_id, &signal);
     wait_for_runtime_event_test_file(&signal, "durable torn Runtime event tail");
-    child.kill()?;
-    let status = child.wait()?;
+    let status = child.kill_and_reap()?;
     assert!(
         !status.success(),
         "killed torn writer unexpectedly succeeded"
@@ -2735,7 +2761,7 @@ fn event_reader_never_observes_cross_process_rollback_candidate() -> Result<()> 
     let store = RuntimeThreadStore::open(dir.clone())?;
     let thread_id = "thr_process_phantom";
     let signal = dir.join("process-phantom.ready");
-    let mut child = spawn_runtime_event_child("phantom", &dir, thread_id, &signal);
+    let child = spawn_runtime_event_child("phantom", &dir, thread_id, &signal);
     wait_for_runtime_event_test_file(&signal, "visible rollback candidate");
 
     let started = Instant::now();
@@ -2744,8 +2770,31 @@ fn event_reader_never_observes_cross_process_rollback_candidate() -> Result<()> 
         started.elapsed() >= Duration::from_millis(200),
         "reader did not wait for rollback disposition"
     );
-    wait_for_runtime_event_child(&mut child, "phantom rollback child");
+    child.wait_success("phantom rollback child");
     assert!(store.events_since(thread_id, None)?.is_empty());
+
+    std::fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn event_history_lock_wait_does_not_block_tokio_worker() -> Result<()> {
+    let dir = test_runtime_dir();
+    let manager = test_manager(dir.clone())?;
+    let thread_id = "thr_async_history_wait";
+    let signal = dir.join("async-history-holder.ready");
+    let child = spawn_runtime_event_child("holder", &dir, thread_id, &signal);
+    wait_for_runtime_event_test_file(&signal, "async history lock holder");
+
+    let history = manager.events_since_async(thread_id, None);
+    tokio::pin!(history);
+    tokio::select! {
+        result = &mut history => panic!("history lock wait returned early: {result:?}"),
+        () = sleep(Duration::from_millis(50)) => {}
+    }
+    let status = child.kill_and_reap()?;
+    assert!(!status.success(), "killed history lock holder succeeded");
+    assert!(history.await?.is_empty());
 
     std::fs::remove_dir_all(dir)?;
     Ok(())

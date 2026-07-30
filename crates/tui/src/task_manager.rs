@@ -540,7 +540,8 @@ impl TaskExecutor for EngineTaskExecutor {
 
             let batch = match self
                 .runtime_threads
-                .events_since(&thread.id, Some(seen_seq))
+                .events_since_async(&thread.id, Some(seen_seq))
+                .await
             {
                 Ok(batch) => batch,
                 Err(err) => {

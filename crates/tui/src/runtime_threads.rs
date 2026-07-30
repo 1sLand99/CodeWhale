@@ -1183,10 +1183,8 @@ impl RuntimeThreadStore {
                 .with_context(|| format!("Failed to inspect {}", path.display()))?
                 .len();
             let mut line = serde_json::to_vec(&record)?;
-            // The trailing newline is the JSONL transaction's commit marker. A
-            // crash after all JSON bytes reach the file but before this delimiter
-            // is written leaves a parseable yet uncommitted tail; startup removes
-            // that tail and deliberately does not reuse its reserved sequence.
+            // A trailing newline is the commit marker. Startup removes a
+            // parseable but unterminated tail without reusing its sequence.
             line.push(b'\n');
             let append_result = (|| -> std::io::Result<()> {
                 file.write_all(&line)?;
@@ -3927,7 +3925,7 @@ impl RuntimeThreadManager {
         id: &str,
     ) -> Result<(ThreadRecord, Vec<AgentRebindHint>)> {
         let thread = self.resume_thread(id).await?;
-        let events = self.events_since_offloaded(&thread.id, None).await?;
+        let events = self.events_since_async(&thread.id, None).await?;
         let hints = collect_agent_rebind_hints(&events);
         Ok((thread, hints))
     }
@@ -5398,6 +5396,7 @@ impl RuntimeThreadManager {
             .map_err(anyhow::Error::msg)
     }
 
+    #[cfg(test)]
     pub fn events_since(
         &self,
         thread_id: &str,
@@ -5406,7 +5405,7 @@ impl RuntimeThreadManager {
         self.store.events_since(thread_id, since_seq)
     }
 
-    async fn events_since_offloaded(
+    pub(crate) async fn events_since_async(
         &self,
         thread_id: &str,
         since_seq: Option<u64>,
