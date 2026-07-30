@@ -4223,7 +4223,12 @@ impl Engine {
                 }
             }
             Err(err) => {
-                let message = format!("Manual context compaction failed: {err}");
+                let message = crate::compaction::report_compaction_failure(
+                    "Manual context compaction failed",
+                    &id,
+                    false,
+                    &err,
+                );
                 self.emit_compaction_failed(id, false, message.clone())
                     .await;
                 let _ = self.tx_event.send(Event::status(message.clone())).await;

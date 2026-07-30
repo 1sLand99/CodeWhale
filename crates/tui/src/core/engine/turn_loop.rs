@@ -532,7 +532,12 @@ impl Engine {
                     }
                     Err(err) => {
                         // Log error but continue with original messages (never corrupt)
-                        let message = format!("Auto-compaction failed: {err}");
+                        let message = crate::compaction::report_compaction_failure(
+                            "Auto-compaction failed",
+                            &compaction_id,
+                            true,
+                            &err,
+                        );
                         self.emit_compaction_failed(compaction_id, true, message.clone())
                             .await;
                         let _ = self.tx_event.send(Event::status(message)).await;
