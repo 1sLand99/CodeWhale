@@ -158,6 +158,53 @@ already claimed to.
 
 ### Fixed
 
+- Permission setup now consistently presents the product postures Ask,
+  Auto-Review, and Full Access instead of leaking the internal `never` token.
+  The same resolved sandbox policy now drives execution and UI receipts: Plan
+  stays read-only, Ask and Auto-Review stay workspace-scoped, and Full Access
+  is actually unsandboxed unless a stricter effective configuration wins.
+
+- Fleet setup no longer stalls when a user explicitly selects a configured
+  Codex or Grok external-consent route. The selected route is activated and
+  validated before saving, roster roles open directly on their Model step,
+  Review saves on the first Enter, and new profiles default to the personal
+  profile directory that the roster loads on the next session.
+
+- Provider credential dialogs now share one wrapping, secret-safe API-key
+  surface across every non-OAuth provider. A key already present in durable
+  storage is reported as configured without rendering it, typing or pasting is
+  clearly framed as replacement, narrow help text remains visible, and Codex
+  and Grok OAuth flows remain token-free in this modal.
+
+- Ctrl+O again opens the complete recorded reasoning detail for the selected,
+  active, or latest reasoning block. The whole-turn Turn Inspector moved to
+  Ctrl+Alt+O and `/turn inspect`, removing the shortcut collision while keeping
+  raw leaf detail and post-flush reasoning discoverable.
+
+- Failed child agents now deliver a distinct high-priority failure receipt to
+  their owning parent with a sanitized failure class, elapsed work, and a full
+  transcript handle. Parent-to-child message, follow-up, and interrupt tools
+  now use one hierarchy-checked mailbox path, and persisted nested completion
+  envelopes remain safely restorable across instruction-text revisions.
+
+- Background-shell completion events now carry only bounded tails plus a
+  retrievable exact-evidence handle. Terminal foreground Bash results are
+  acknowledged at the direct tool-result boundary and are no longer emitted a
+  second time as background completion artifacts.
+
+- Providerless Fleet and child-agent fixed-model routes now reject only
+  high-confidence foreign-provider model ids before creating a worktree, while
+  explicit provider/model pairs, custom and local endpoints, unknown ids, and
+  aggregator wire-id resolution retain their intended behavior.
+
+- Manual compaction now preserves and reports the supplied provider failure
+  class instead of replacing it with an opaque generic error. This does not
+  infer quota exhaustion when the recorded failure does not prove it.
+
+- The ambient jellyfish keep complete, readable silhouettes while animating,
+  and the website favicon now uses the Signal Current desktop tile instead of
+  the legacy whale mark.
+
 - Auto model routing now preserves the user's requested reasoning effort
   through startup, provider/model changes, session restore, the picker,
   Ctrl+T, and Hotbar actions. The tier is normalized only after the concrete
