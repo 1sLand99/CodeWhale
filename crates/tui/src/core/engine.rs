@@ -2090,6 +2090,7 @@ impl Engine {
                         trust_mode,
                         auto_approve,
                         approval_mode,
+                        configured_sandbox_mode,
                     } => {
                         let authority = TurnAuthority::from_effective_fields(
                             mode,
@@ -2098,6 +2099,7 @@ impl Engine {
                             auto_approve,
                             approval_mode,
                         );
+                        self.api_config.sandbox_mode = configured_sandbox_mode;
                         self.apply_runtime_mode_policy(&authority);
                         self.emit_session_updated().await;
                         let _ = self
@@ -4653,7 +4655,10 @@ impl Engine {
                 .and_then(crate::client::ProviderNativeSearchClient::new);
         }
 
-        let policy = authority.sandbox_policy(&self.session.workspace);
+        let policy = authority.sandbox_policy(
+            &self.session.workspace,
+            self.api_config.sandbox_mode.as_deref(),
+        );
         let mut ctx = ctx.with_elevated_sandbox_policy(policy);
         if matches!(authority.mode, AppMode::Plan) {
             ctx = ctx.with_shell_network_denied_hint(

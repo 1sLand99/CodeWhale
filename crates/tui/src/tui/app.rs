@@ -1219,6 +1219,9 @@ pub struct App {
     /// Last effective thinking receipt for the most recently accepted route.
     pub(crate) last_effective_reasoning_effort: Option<EffectiveReasoningEffort>,
     pub workspace: PathBuf,
+    /// Effective explicit/managed filesystem scope captured at startup. The
+    /// named permission posture supplies the default when this is `None`.
+    pub configured_sandbox_mode: Option<String>,
     /// Off-event-loop worker for durable Lane control writes. `/lane interrupt`
     /// submits here instead of tearing down a Runtime on the composer thread
     /// (#4022).

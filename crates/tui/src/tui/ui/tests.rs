@@ -3789,6 +3789,7 @@ fn setup_runtime_preset_apply_persists_settings_config_and_state() {
     assert_eq!(config.allow_shell, Some(false));
     assert_eq!(config.approval_policy.as_deref(), Some("on-request"));
     assert_eq!(config.sandbox_mode.as_deref(), Some("read-only"));
+    assert_eq!(app.configured_sandbox_mode.as_deref(), Some("read-only"));
 
     let body = std::fs::read_to_string(&config_path).expect("read saved config");
     assert!(
@@ -3933,6 +3934,10 @@ fn setup_high_trust_persists_full_access_without_legacy_yolo_mode() {
     assert_eq!(app.approval_mode, ApprovalMode::Bypass);
     assert!(app.allow_shell);
     assert!(app.trust_mode);
+    assert_eq!(
+        app.configured_sandbox_mode.as_deref(),
+        Some("danger-full-access")
+    );
 
     app.set_mode(AppMode::Plan);
     assert!(!app.allow_shell);
@@ -5454,6 +5459,7 @@ async fn mode_change_update_notifies_engine() {
             trust_mode,
             auto_approve,
             approval_mode,
+            configured_sandbox_mode,
         } => {
             // The deprecated YOLO alias lands in Agent mode with full-access
             // compat policies (M6 shim); the engine sees the remapped mode.
@@ -5462,6 +5468,7 @@ async fn mode_change_update_notifies_engine() {
             assert!(trust_mode);
             assert!(auto_approve);
             assert_eq!(approval_mode, crate::tui::approval::ApprovalMode::Bypass);
+            assert_eq!(configured_sandbox_mode, app.configured_sandbox_mode);
         }
         other => panic!("expected ChangeMode, got {other:?}"),
     }
@@ -5485,12 +5492,14 @@ async fn mode_change_update_sends_restored_agent_policy() {
             trust_mode,
             auto_approve,
             approval_mode,
+            configured_sandbox_mode,
         } => {
             assert_eq!(mode, crate::tui::app::AppMode::Agent);
             assert!(allow_shell);
             assert!(!trust_mode);
             assert!(!auto_approve);
             assert_eq!(approval_mode, crate::tui::approval::ApprovalMode::Never);
+            assert_eq!(configured_sandbox_mode, app.configured_sandbox_mode);
         }
         other => panic!("expected ChangeMode, got {other:?}"),
     }

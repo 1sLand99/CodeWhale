@@ -8313,6 +8313,19 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
             plan_hint: false,
         },
         ModeCase {
+            name: "agent-full-access",
+            mode: AppMode::Agent,
+            setting: "agent",
+            prompt_marker: "##### Mode: Agent",
+            shell_policy: ShellPolicy::Full,
+            sandbox: ExpectedSandbox::DangerFullAccess,
+            trust_mode: true,
+            auto_approve: true,
+            approval_mode: ApprovalMode::Bypass,
+            exec_shell_available: true,
+            plan_hint: false,
+        },
+        ModeCase {
             name: "auto-compat",
             mode: AppMode::Auto,
             setting: "agent",
@@ -8385,7 +8398,7 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
         assert_eq!(policy.approval_mode, case.approval_mode, "{}", case.name);
         assert!(policy.allow_shell, "{}", case.name);
 
-        let context = engine.build_tool_context(case.mode, false);
+        let context = engine.build_tool_context(case.mode, case.auto_approve);
         assert_eq!(context.shell_policy, case.shell_policy, "{}", case.name);
         assert_eq!(context.trust_mode, case.trust_mode, "{}", case.name);
         assert_eq!(context.auto_approve, case.auto_approve, "{}", case.name);
@@ -8503,6 +8516,32 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
             case.prompt_marker
         );
     }
+}
+
+#[test]
+fn engine_context_honors_stricter_config_under_full_access() {
+    use crate::sandbox::SandboxPolicy;
+    use crate::tui::approval::ApprovalMode;
+
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..EngineConfig::default()
+    };
+    let api_config = Config {
+        sandbox_mode: Some("workspace-write".to_string()),
+        ..Config::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &api_config);
+    engine.session.approval_mode = ApprovalMode::Bypass;
+    engine.session.auto_approve = true;
+
+    let context = engine.build_tool_context(AppMode::Agent, true);
+    assert!(matches!(
+        context.elevated_sandbox_policy.as_ref(),
+        Some(SandboxPolicy::WorkspaceWrite { writable_roots, .. })
+            if *writable_roots == vec![tmp.path().to_path_buf()]
+    ));
 }
 
 #[test]
@@ -8798,20 +8837,21 @@ fn agent_and_yolo_modes_elevate_shell_sandbox_to_allow_network() {
 }
 
 #[test]
-fn sandbox_policy_for_mode_returns_correct_policy_per_mode() {
-    use crate::core::authority::sandbox_policy_for_mode;
+fn sandbox_policy_for_turn_returns_correct_default_policy_per_mode() {
+    use crate::core::authority::sandbox_policy_for_turn;
     use crate::sandbox::SandboxPolicy;
+    use crate::tui::approval::ApprovalMode;
 
     let workspace = PathBuf::from("/tmp/example-workspace");
 
     // Plan: ReadOnly. The whole point of #1077.
     assert!(matches!(
-        sandbox_policy_for_mode(AppMode::Plan, &workspace),
+        sandbox_policy_for_turn(AppMode::Plan, ApprovalMode::Suggest, None, &workspace,),
         SandboxPolicy::ReadOnly
     ));
 
     // Agent: WorkspaceWrite with workspace as writable root, network on.
-    match sandbox_policy_for_mode(AppMode::Agent, &workspace) {
+    match sandbox_policy_for_turn(AppMode::Agent, ApprovalMode::Suggest, None, &workspace) {
         SandboxPolicy::WorkspaceWrite {
             writable_roots,
             network_access,
@@ -8825,7 +8865,7 @@ fn sandbox_policy_for_mode_returns_correct_policy_per_mode() {
 
     // YOLO: DangerFullAccess.
     assert!(matches!(
-        sandbox_policy_for_mode(AppMode::Yolo, &workspace),
+        sandbox_policy_for_turn(AppMode::Yolo, ApprovalMode::Suggest, None, &workspace,),
         SandboxPolicy::DangerFullAccess
     ));
 }
@@ -8936,6 +8976,7 @@ async fn change_mode_refreshes_session_prompt_and_updates_session() {
             trust_mode: true,
             auto_approve: true,
             approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            configured_sandbox_mode: None,
         })
         .await
         .expect("send change mode");
@@ -9529,6 +9570,7 @@ async fn change_mode_op_updates_current_mode_and_emits_status() {
             trust_mode: true,
             auto_approve: true,
             approval_mode: crate::tui::approval::ApprovalMode::Bypass,
+            configured_sandbox_mode: None,
         })
         .await
         .expect("send change mode");
@@ -9839,6 +9881,7 @@ async fn edit_last_turn_preserves_current_mode() {
             trust_mode: false,
             auto_approve: false,
             approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+            configured_sandbox_mode: None,
         })
         .await
         .expect("send plan mode");

@@ -10612,6 +10612,7 @@ async fn sync_mode_update(app: &App, engine_handle: &EngineHandle) {
             trust_mode: app.trust_mode,
             auto_approve: app_auto_approve_enabled(app),
             approval_mode: app.approval_mode,
+            configured_sandbox_mode: app.configured_sandbox_mode.clone(),
         })
         .await;
 }
@@ -15195,6 +15196,7 @@ async fn handle_view_events(
                 message,
             } => match apply_setup_runtime_preset(app, config, preset, state) {
                 Ok(summary) => {
+                    sync_mode_update(app, engine_handle).await;
                     app.status_message = Some(format!("{message} {summary}"));
                 }
                 Err(err) => {
@@ -16018,6 +16020,7 @@ fn apply_setup_runtime_preset(
     }
     config.allow_shell = Some(preset.allow_shell());
     config.sandbox_mode = Some(preset.sandbox_mode().to_string());
+    app.configured_sandbox_mode = config.sandbox_mode.clone();
 
     let approval_mode = ApprovalMode::from_config_value(
         preset
