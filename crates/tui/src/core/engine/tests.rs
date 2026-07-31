@@ -3281,7 +3281,11 @@ async fn tool_call_budget_admits_exactly_the_cap_and_rejects_the_ninth() {
         run_budgeted_read_turn(workspace.path(), Some(8), mock.clone()).await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
     assert_eq!(mock.call_count(), 2, "batch turn then the final text turn");
-    assert_eq!(completions.len(), 9, "every proposed call reports a completion");
+    assert_eq!(
+        completions.len(),
+        9,
+        "every proposed call reports a completion"
+    );
 
     for (id, result) in &completions {
         let index = id.strip_prefix("call-").expect("call id");
@@ -3387,7 +3391,11 @@ async fn tool_call_budget_persists_across_model_steps_within_a_turn() {
     let (status, error, completions) =
         run_budgeted_read_turn(workspace.path(), Some(8), mock.clone()).await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
-    assert_eq!(mock.call_count(), 3, "two tool steps then the final text turn");
+    assert_eq!(
+        mock.call_count(),
+        3,
+        "two tool steps then the final text turn"
+    );
     assert_eq!(completions.len(), 9);
 
     let (id, ninth) = completions
@@ -3395,7 +3403,9 @@ async fn tool_call_budget_persists_across_model_steps_within_a_turn() {
         .find(|(id, _)| id == "call-9")
         .expect("the ninth call still reports a completion");
     assert_eq!(id, "call-9");
-    let reason = ninth.as_ref().expect_err("ninth call exceeds the turn budget");
+    let reason = ninth
+        .as_ref()
+        .expect_err("ninth call exceeds the turn budget");
     let reason = reason.to_string();
     assert!(reason.contains("remaining=0"), "{reason}");
     assert!(
@@ -3460,7 +3470,10 @@ async fn named_file_write_scope_denies_mutation_outside_the_named_files() {
         )
         .await
         .expect_err("mutation outside the named files is denied");
-    assert!(denied.to_string().contains("authority envelope"), "{denied}");
+    assert!(
+        denied.to_string().contains("authority envelope"),
+        "{denied}"
+    );
     assert_eq!(
         fs::read_to_string(workspace.path().join("docs/other.md")).expect("read back"),
         "outside\n",
