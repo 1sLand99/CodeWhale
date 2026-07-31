@@ -4701,20 +4701,20 @@ mod tests {
         })
     }
 
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|p| p.into_inner())
     }
 
-    struct ScopedEnvVar {
+    pub(crate) struct ScopedEnvVar {
         name: &'static str,
         previous: Option<OsString>,
     }
 
     impl ScopedEnvVar {
-        fn set(name: &'static str, value: &str) -> Self {
+        pub(crate) fn set(name: &'static str, value: &str) -> Self {
             let previous = std::env::var_os(name);
             // Safety: tests using this helper serialize with env_lock() and
             // restore the original value in Drop.
@@ -4722,7 +4722,7 @@ mod tests {
             Self { name, previous }
         }
 
-        fn remove(name: &'static str) -> Self {
+        pub(crate) fn remove(name: &'static str) -> Self {
             let previous = std::env::var_os(name);
             // Safety: tests using this helper serialize with env_lock() and
             // restore the original value in Drop.
