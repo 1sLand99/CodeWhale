@@ -15830,7 +15830,9 @@ mod doctor_mcp_tests {
 
     #[test]
     fn test_self_hosted_absolute_is_ok() {
-        let server = make_server(Some("/usr/local/bin/codewhale"), &["serve", "--mcp"], None);
+        let executable = std::env::current_exe().expect("current test executable");
+        let executable = executable.to_string_lossy();
+        let server = make_server(Some(&executable), &["serve", "--mcp"], None);
         match doctor_check_mcp_server(&server) {
             McpServerDoctorStatus::Ok(detail) => assert!(detail.contains("stdio server")),
             McpServerDoctorStatus::Warning(detail) => {
