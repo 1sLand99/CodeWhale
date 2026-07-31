@@ -194,9 +194,10 @@ impl RouteResolver {
         // OpenCode Zen's published roster is closed; DeepSeek's direct route
         // deliberately preserves its existing future-model pass-through and
         // sends unknown bare ids over Chat until an exact Responses row exists.
-        // Custom compatible endpoints also retain Chat pass-through.
-        let require_catalog_match =
-            model_aware && !custom_endpoint && provider_kind != ProviderKind::Deepseek;
+        // A custom DeepSeek-compatible endpoint retains that pass-through, but
+        // a custom URL must not weaken another model-aware provider's closed
+        // protocol roster.
+        let require_catalog_match = model_aware && provider_kind != ProviderKind::Deepseek;
         let mut selected = if is_auto {
             match default_offering {
                 None if require_catalog_match => {
