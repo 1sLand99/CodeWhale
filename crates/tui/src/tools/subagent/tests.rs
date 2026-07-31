@@ -5085,7 +5085,12 @@ fn seed_recon_deny_list(runtime: &mut SubAgentRuntime) {
         .iter()
         .chain(MUTATING_TOOL_DENYLIST.iter())
     {
-        if !runtime.worker_profile.denied_tools.iter().any(|d| d == rule) {
+        if !runtime
+            .worker_profile
+            .denied_tools
+            .iter()
+            .any(|d| d == rule)
+        {
             runtime.worker_profile.denied_tools.push(rule.to_string());
         }
     }

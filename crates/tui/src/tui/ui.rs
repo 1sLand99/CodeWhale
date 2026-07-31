@@ -2737,7 +2737,8 @@ async fn handle_automation_list(app: &mut App) {
     match manager.list_automations() {
         Ok(records) if records.is_empty() => {
             app.add_message(HistoryCell::System {
-                content: "No scheduled automations. Use the `automation` tool to create one.".to_string(),
+                content: "No scheduled automations. Use the `automation` tool to create one."
+                    .to_string(),
             });
         }
         Ok(records) => {

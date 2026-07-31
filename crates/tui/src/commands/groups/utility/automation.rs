@@ -72,7 +72,9 @@ fn automation(_app: &mut App, args: Option<&str>) -> CommandResult {
             };
             CommandResult::action(AppAction::AutomationRun { id: id.to_string() })
         }
-        _ => CommandResult::error("Usage: /automation [list|show <id>|pause <id>|resume <id>|delete <id>|run <id>]"),
+        _ => CommandResult::error(
+            "Usage: /automation [list|show <id>|pause <id>|resume <id>|delete <id>|run <id>]",
+        ),
     }
 }
 
