@@ -268,16 +268,28 @@ pub struct SkillRegistry {
     warnings: Vec<String>,
 }
 
-/// One cached discovery's watched filesystem entries: a path and the
-/// modification time observed during the validating walk. `None` means the
-/// path was unreadable at walk time; any later readability or mtime change
-/// invalidates the entry.
-pub(crate) type WatchedPaths = Vec<(PathBuf, Option<std::time::SystemTime>)>;
+/// Cheap metadata stamp used to validate one watched discovery path.
+///
+/// Some filesystems expose modification times at a coarse resolution. Keeping
+/// the file length alongside the timestamp lets an immediate content rewrite
+/// invalidate the cache even when the timestamp is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WatchedPathStamp {
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+}
 
-pub(crate) fn mtime_of(path: &Path) -> Option<std::time::SystemTime> {
-    fs::metadata(path)
-        .and_then(|metadata| metadata.modified())
-        .ok()
+/// One cached discovery's watched filesystem entries: a path and the metadata
+/// stamp observed during the validating walk. `None` means the path was
+/// unreadable at walk time; any later readability or metadata change
+/// invalidates the entry.
+pub(crate) type WatchedPaths = Vec<(PathBuf, Option<WatchedPathStamp>)>;
+
+pub(crate) fn watched_path_stamp(path: &Path) -> Option<WatchedPathStamp> {
+    fs::metadata(path).ok().map(|metadata| WatchedPathStamp {
+        modified: metadata.modified().ok(),
+        len: metadata.len(),
+    })
 }
 
 impl SkillRegistry {
@@ -313,7 +325,7 @@ impl SkillRegistry {
 
     /// Discover skills like [`Self::discover`], also returning the watched
     /// filesystem set (every visited directory and every parsed `SKILL.md`)
-    /// with its modification time. The discovery cache validates hits by
+    /// with its metadata stamp. The discovery cache validates hits by
     /// re-stat()ing only this set instead of re-walking every root.
     pub(crate) fn discover_watched(dir: &Path) -> (Self, WatchedPaths) {
         #[cfg(test)]
@@ -332,12 +344,12 @@ impl SkillRegistry {
         registry
             .skills
             .sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
-        watched.extend(visited.iter().map(|p| (p.clone(), mtime_of(p))));
+        watched.extend(visited.iter().map(|p| (p.clone(), watched_path_stamp(p))));
         watched.extend(
             registry
                 .skills
                 .iter()
-                .map(|skill| (skill.path.clone(), mtime_of(&skill.path))),
+                .map(|skill| (skill.path.clone(), watched_path_stamp(&skill.path))),
         );
         (registry, watched)
     }
@@ -1027,7 +1039,7 @@ fn merge_watched_directories(dirs: Vec<PathBuf>) -> (SkillRegistry, WatchedPaths
     let mut merged = SkillRegistry::default();
     let mut watched = WatchedPaths::default();
     for dir in dirs {
-        watched.push((dir.clone(), mtime_of(&dir)));
+        watched.push((dir.clone(), watched_path_stamp(&dir)));
         let (registry, dir_watched) = SkillRegistry::discover_watched(&dir);
         watched.extend(dir_watched);
         for skill in registry.skills {
@@ -1076,20 +1088,19 @@ pub fn clear_skill_discovery_cache() {
 
 /// Merged discovery for one resolved directory set, cached by that set.
 /// A hit re-stats only the watched entries (each visited directory and
-/// parsed `SKILL.md`); any mtime or readability change re-walks fully.
+/// parsed `SKILL.md`); any metadata or readability change re-walks fully.
 fn cached_merged_discovery(dirs: Vec<PathBuf>) -> SkillRegistry {
     {
         let read = discovery_cache()
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(entry) = read.get(&dirs) {
-            if entry
+        if let Some(entry) = read.get(&dirs)
+            && entry
                 .watched
                 .iter()
-                .all(|(path, mtime)| mtime_of(path) == *mtime)
-            {
-                return entry.registry.clone();
-            }
+                .all(|(path, stamp)| watched_path_stamp(path) == *stamp)
+        {
+            return entry.registry.clone();
         }
     }
     let (merged, watched) = merge_watched_directories(dirs.clone());
