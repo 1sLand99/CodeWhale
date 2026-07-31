@@ -673,11 +673,11 @@ workflow({
             );
             if expected_role == "scout" {
                 assert!(
-                    leaf.prompt.contains("exactly one `grep_files` call")
+                    leaf.prompt.contains("exactly one `File` call")
+                        && leaf.prompt.contains("Do not call `File` more than once")
                         && leaf
                             .prompt
-                            .contains("Do not call `grep_files` more than once")
-                        && leaf.prompt.contains("do not call `read_file`"),
+                            .contains("do not use any action except `search_content`"),
                     "the scout must finish discovery in one bounded tool round"
                 );
                 assert_eq!(
@@ -698,7 +698,7 @@ workflow({
                     leaf.prompt.contains(
                         "`include` set exactly to [`fleets/stopship.toml`, `crates/cli/src/lib.rs`, `crates/workflow/src/role_resolve.rs`, `crates/tui/src/tools/workflow.rs`, `crates/lane/src/runtime.rs`]"
                     ) && leaf.prompt.contains("Matches outside that exact include list do not count"),
-                    "the one grep must constrain the actual tool input, not only File scope metadata"
+                    "the one File search must constrain the actual tool input, not only File scope metadata"
                 );
                 assert!(
                     leaf.prompt.contains("if you can populate all seven")
