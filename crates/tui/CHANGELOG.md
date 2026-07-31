@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.3] - 2026-07-31
 
+This is the Codewhale v0.9.3 source candidate. It is not a published release
+until the matching tag, packages, checksums, and release assets exist.
+
 DeepSeek V4 Flash is now a first-class Codewhale route, and the agent-facing
 tool surface has been reduced to the canonical action tools that current
 models actually need. This release also hardens credential, authorization,
@@ -94,6 +97,9 @@ stale runtime and dependency surface.
   shell detachment before steering in PR #4979.
 - [Watcher24](https://github.com/Watcher24) (`@Watcher24`) provided the macOS
   File Provider report and reproduction for #4085.
+- [Fred Leitz](https://github.com/fleitz) (`@fleitz`) retains required
+  source-candidate credit for the canonical `Bash` workspace fix from PR #4673
+  and issue #4674.
 
 ## [0.9.2] - 2026-07-29
 
