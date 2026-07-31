@@ -3198,6 +3198,216 @@ async fn denied_synthetic_tool_is_blocked_by_the_same_turn_policy_at_execution()
     );
 }
 
+/// Compose one assistant turn that proposes `calls` as a single parallel
+/// tool-call batch: `(call_id, tool_name, args_json)` per block, in order.
+fn tool_batch_turn(calls: &[(&str, &str, &str)]) -> Vec<crate::models::StreamEvent> {
+    use crate::llm_client::mock::canned;
+
+    let mut events = vec![canned::message_start("mock_tool_batch")];
+    for (index, (call_id, tool_name, args_json)) in calls.iter().enumerate() {
+        let index = u32::try_from(index).expect("test batch index fits u32");
+        events.push(canned::tool_use_block_start(index, call_id, tool_name));
+        events.push(canned::tool_input_delta(index, args_json));
+        events.push(canned::block_stop(index));
+    }
+    events.push(canned::message_delta("tool_use", None));
+    events.push(canned::message_stop());
+    events
+}
+
+/// Drive one engine turn against the scripted `mock` turns with a registry
+/// that only serves `read_file`, collecting every `ToolCallComplete` event as
+/// `(call_id, result)` in emission order.
+async fn run_budgeted_read_turn(
+    workspace: &Path,
+    max_tool_calls: Option<u32>,
+    mock: std::sync::Arc<crate::llm_client::mock::MockLlmClient>,
+) -> (
+    TurnOutcomeStatus,
+    Option<String>,
+    Vec<(String, Result<ToolResult, ToolError>)>,
+) {
+    let mut engine_config = deterministic_engine_config(workspace);
+    engine_config.max_tool_calls = max_tool_calls;
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, handle) =
+        Engine::new_with_model_client(engine_config, &Config::default(), client);
+    let context = crate::tools::ToolContext::new(workspace.to_path_buf());
+    let mut registry = crate::tools::ToolRegistry::new(context);
+    registry.register(std::sync::Arc::new(crate::tools::file::ReadFileTool));
+    let tools = Some(registry.to_api_tools_with_cache(true));
+    let surface = test_tool_surface(&engine, registry, tools, AppMode::Agent);
+    let mut turn = crate::core::turn::TurnContext::new(4);
+
+    let (status, error) = engine.handle_deepseek_turn(&mut turn, surface, None).await;
+    let mut events = handle.rx_event.write().await;
+    let completions = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            Event::ToolCallComplete { id, result, .. } => Some((id, result)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    (status, error, completions)
+}
+
+/// #4415 AC(a): an 8-call cap admits exactly 8 calls; the 9th is rejected
+/// with the typed reason carrying `remaining=0` and is never executed.
+#[tokio::test]
+async fn tool_call_budget_admits_exactly_the_cap_and_rejects_the_ninth() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mut calls = Vec::new();
+    for index in 1..=9 {
+        let name = format!("fixture-{index}.txt");
+        fs::write(workspace.path().join(&name), format!("fixture-{index}\n"))
+            .expect("write fixture");
+        calls.push((
+            format!("call-{index}"),
+            "read_file".to_string(),
+            format!(r#"{{"path":"{name}"}}"#),
+        ));
+    }
+    let call_refs = calls
+        .iter()
+        .map(|(id, name, args)| (id.as_str(), name.as_str(), args.as_str()))
+        .collect::<Vec<_>>();
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        tool_batch_turn(&call_refs),
+        canned::simple_text_turn("done"),
+    ]));
+
+    let (status, error, completions) =
+        run_budgeted_read_turn(workspace.path(), Some(8), mock.clone()).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert_eq!(mock.call_count(), 2, "batch turn then the final text turn");
+    assert_eq!(completions.len(), 9, "every proposed call reports a completion");
+
+    for (id, result) in &completions {
+        let index = id.strip_prefix("call-").expect("call id");
+        if index == "9" {
+            let rejection = result.as_ref().expect_err("the 9th call must be rejected");
+            let reason = rejection.to_string();
+            assert!(reason.contains("budget of 8"), "{reason}");
+            assert!(reason.contains("remaining=0"), "{reason}");
+            assert!(reason.contains("not executed"), "{reason}");
+        } else {
+            let outcome = result.as_ref().expect("calls within budget execute");
+            assert!(
+                outcome.content.contains(&format!("fixture-{index}")),
+                "call {id} must return its file contents: {outcome:?}"
+            );
+        }
+    }
+}
+
+/// #4415 AC(b): a 4-call parallel batch proposed with 2 calls remaining is
+/// truncated to the first 2 calls in proposal order; the excess 2 are
+/// rejected with the same typed reason, and the batch is counted in full.
+#[tokio::test]
+async fn tool_call_budget_truncates_an_over_budget_parallel_batch() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mut calls = Vec::new();
+    for index in 1..=4 {
+        let name = format!("fixture-{index}.txt");
+        fs::write(workspace.path().join(&name), format!("fixture-{index}\n"))
+            .expect("write fixture");
+        calls.push((
+            format!("call-{index}"),
+            "read_file".to_string(),
+            format!(r#"{{"path":"{name}"}}"#),
+        ));
+    }
+    let call_refs = calls
+        .iter()
+        .map(|(id, name, args)| (id.as_str(), name.as_str(), args.as_str()))
+        .collect::<Vec<_>>();
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        tool_batch_turn(&call_refs),
+        canned::simple_text_turn("done"),
+    ]));
+
+    let (status, error, completions) =
+        run_budgeted_read_turn(workspace.path(), Some(2), mock.clone()).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert_eq!(mock.call_count(), 2, "batch turn then the final text turn");
+    assert_eq!(completions.len(), 4);
+
+    let mut admitted = 0;
+    for (id, result) in &completions {
+        match id.as_str() {
+            "call-1" | "call-2" => {
+                admitted += 1;
+                assert!(result.is_ok(), "{id} must execute: {result:?}");
+            }
+            "call-3" | "call-4" => {
+                let rejection = result.as_ref().expect_err("excess calls are rejected");
+                let reason = rejection.to_string();
+                assert!(reason.contains("budget of 2"), "{reason}");
+                assert!(reason.contains("remaining=0"), "{reason}");
+            }
+            other => panic!("unexpected call id {other}"),
+        }
+    }
+    assert_eq!(admitted, 2, "exactly the remaining 2 calls are admitted");
+}
+
+/// #4415: the budget is per-turn, not per-batch — a counter that survives
+/// every model step of the turn. A full 8-call first batch leaves the next
+/// step's single call with `remaining=0`.
+#[tokio::test]
+async fn tool_call_budget_persists_across_model_steps_within_a_turn() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mut first_batch = Vec::new();
+    for index in 1..=8 {
+        let name = format!("fixture-{index}.txt");
+        fs::write(workspace.path().join(&name), format!("fixture-{index}\n"))
+            .expect("write fixture");
+        first_batch.push((
+            format!("call-{index}"),
+            "read_file".to_string(),
+            format!(r#"{{"path":"{name}"}}"#),
+        ));
+    }
+    let first_refs = first_batch
+        .iter()
+        .map(|(id, name, args)| (id.as_str(), name.as_str(), args.as_str()))
+        .collect::<Vec<_>>();
+    fs::write(workspace.path().join("fixture-9.txt"), "fixture-9\n").expect("write fixture");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        tool_batch_turn(&first_refs),
+        canned::tool_call_turn("call-9", "read_file", r#"{"path":"fixture-9.txt"}"#),
+        canned::simple_text_turn("done"),
+    ]));
+
+    let (status, error, completions) =
+        run_budgeted_read_turn(workspace.path(), Some(8), mock.clone()).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert_eq!(mock.call_count(), 3, "two tool steps then the final text turn");
+    assert_eq!(completions.len(), 9);
+
+    let (id, ninth) = completions
+        .iter()
+        .find(|(id, _)| id == "call-9")
+        .expect("the ninth call still reports a completion");
+    assert_eq!(id, "call-9");
+    let reason = ninth.as_ref().expect_err("ninth call exceeds the turn budget");
+    let reason = reason.to_string();
+    assert!(reason.contains("remaining=0"), "{reason}");
+    assert!(
+        completions
+            .iter()
+            .filter(|(id, result)| id != "call-9" && result.is_ok())
+            .count()
+            == 8,
+        "the first batch of 8 all executed: {completions:?}"
+    );
+}
+
 #[test]
 fn empty_allowed_tools_surface_is_empty_and_sends_no_tools_field() {
     let surface = policy_for_catalog(

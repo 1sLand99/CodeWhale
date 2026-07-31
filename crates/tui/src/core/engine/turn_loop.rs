@@ -19,6 +19,7 @@ use crate::runtime_handoff::{
     subagent_failure_runtime_message, waiting_for_subagents_runtime_message,
 };
 use crate::tools::spec::ToolTerminalStatus;
+use crate::tools::tool_call_budget::ToolCallBudget;
 
 const MAX_APPROVAL_INTENT_SUMMARY_CHARS: usize = 2_000;
 const TOOL_ERROR_DEGRADATION_THRESHOLD: u32 = 2;
@@ -394,6 +395,11 @@ impl Engine {
         let tool_catalog = std::mem::take(&mut tool_policy.catalog);
         let mut active_tool_names = std::mem::take(&mut tool_policy.active_names);
         let tool_registry = Some(&tool_policy.registry);
+        // #4415: the turn's tool-call admission counter. It lives here —
+        // across every model step and batch of this turn — never in the
+        // catalog; the policy only carries the declared limit, and `None`
+        // (no declared budget) leaves the gate below inert.
+        let mut tool_call_budget = ToolCallBudget::new(tool_policy.max_tool_calls);
         let mut goal_continuations_this_turn = 0u32;
         // Outer stream-retry counter: when the chunked-transfer connection
         // dies mid-stream and either nothing useful was streamed (#103
@@ -1793,6 +1799,18 @@ impl Engine {
                 // registry-based approval computation below so it cannot be
                 // clobbered by it.
                 let mut hook_requires_approval = false;
+
+                // #4415: hard per-turn tool-call budget. This gate runs first
+                // so the budget counts every proposed call in the batch: while
+                // calls remain, the call is admitted and the count decrements;
+                // once exhausted, the call is rejected with a typed reason and
+                // never executes — an over-budget batch is truncated to exactly
+                // the calls that still fit, in proposal order.
+                if let Err(exceeded) = tool_call_budget.admit()
+                    && blocked_error.is_none()
+                {
+                    blocked_error = Some(exceeded.into_tool_error(&tool_name));
+                }
 
                 if mode_blocks_command_execution(mode, &tool_name) {
                     blocked_error = Some(ToolError::permission_denied(format!(
