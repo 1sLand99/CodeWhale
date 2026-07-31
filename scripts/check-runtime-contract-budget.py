@@ -309,11 +309,18 @@ def compare(
     validate_receipt(receipt)
     validate_budget(budget)
     for path, label in IDENTITIES:
-        if required_value(receipt, path, "receipt") != required_value(
-            budget, path, "budget"
-        ):
+        receipt_value = required_value(receipt, path, "receipt")
+        budget_value = required_value(budget, path, "budget")
+        if receipt_value != budget_value:
+            detail = ""
+            if isinstance(receipt_value, list) and isinstance(budget_value, list):
+                added = [str(item) for item in receipt_value if item not in budget_value]
+                removed = [
+                    str(item) for item in budget_value if item not in receipt_value
+                ]
+                detail = f" (added={added} removed={removed})"
             raise RuntimeContractError(
-                f"identity changed for {label} [`{'.'.join(path)}`]"
+                f"identity changed for {label} [`{'.'.join(path)}`]{detail}"
             )
     increases: list[MetricResult] = []
     decreases: list[MetricResult] = []
