@@ -33,7 +33,7 @@ pub struct ToolRegistry {
     /// Memoised serialised tool catalog. Rebuilt lazily on first
     /// `to_api_tools` call after a mutation; pinned across reads so the
     /// description and schema bytes stay byte-stable for DeepSeek's KV
-    /// prefix cache. Invalidated on `register` / `remove` / `clear`.
+    /// prefix cache. Invalidated on `register` / `remove_tool`.
     api_cache: OnceLock<Vec<Tool>>,
 }
 
@@ -78,41 +78,14 @@ impl ToolRegistry {
 
     /// Get all registered tool names.
     #[must_use]
-    #[allow(dead_code)]
     pub fn names(&self) -> Vec<&str> {
         self.tools.keys().map(std::string::String::as_str).collect()
-    }
-
-    /// Get the number of registered tools.
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
-        self.tools.len()
-    }
-
-    /// Check if the registry is empty.
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.tools.is_empty()
     }
 
     /// Get all registered tools.
     #[must_use]
     pub fn all(&self) -> Vec<Arc<dyn ToolSpec>> {
         self.tools.values().cloned().collect()
-    }
-
-    /// Execute a tool by name with the given input.
-    #[allow(dead_code)]
-    pub async fn execute(&self, name: &str, input: Value) -> Result<String, ToolError> {
-        let tool = self
-            .get(name)
-            .ok_or_else(|| ToolError::not_available(format!("tool '{name}' is not registered")))?;
-
-        enforce_tool_authority(name, &input, tool.as_ref(), &self.context)?;
-        let result = tool.execute(input, &self.context).await?;
-        Ok(result.content)
     }
 
     /// Execute a tool by name, returning the full `ToolResult`.
@@ -319,79 +292,6 @@ impl ToolRegistry {
         facts
     }
 
-    /// Filter tools by capability.
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn filter_by_capability(&self, capability: ToolCapability) -> Vec<Arc<dyn ToolSpec>> {
-        self.tools
-            .values()
-            .filter(|t| t.capabilities().contains(&capability))
-            .cloned()
-            .collect()
-    }
-
-    /// Get read-only tools.
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn read_only_tools(&self) -> Vec<Arc<dyn ToolSpec>> {
-        self.tools
-            .values()
-            .filter(|t| t.is_read_only())
-            .cloned()
-            .collect()
-    }
-
-    /// Get tools that require approval.
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn approval_required_tools(&self) -> Vec<Arc<dyn ToolSpec>> {
-        self.tools
-            .values()
-            .filter(|t| t.approval_requirement() == ApprovalRequirement::Required)
-            .cloned()
-            .collect()
-    }
-
-    /// Get tools that suggest approval.
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn approval_suggested_tools(&self) -> Vec<Arc<dyn ToolSpec>> {
-        self.tools
-            .values()
-            .filter(|t| {
-                matches!(
-                    t.approval_requirement(),
-                    ApprovalRequirement::Suggest | ApprovalRequirement::Required
-                )
-            })
-            .cloned()
-            .collect()
-    }
-
-    /// Update the context (e.g., when workspace changes).
-    #[allow(dead_code)]
-    pub fn set_context(&mut self, context: ToolContext) {
-        self.context = context;
-    }
-
-    /// Get a mutable reference to the current context.
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn context_mut(&mut self) -> &mut ToolContext {
-        &mut self.context
-    }
-
-    /// Remove a tool by name.
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn remove(&mut self, name: &str) -> Option<Arc<dyn ToolSpec>> {
-        let removed = self.tools.remove(name);
-        if removed.is_some() {
-            self.invalidate_api_cache();
-        }
-        removed
-    }
-
     /// Resolve a non-canonical tool name to a registered canonical name.
     ///
     /// Runs a deterministic ladder against the registered tool names:
@@ -446,13 +346,6 @@ impl ToolRegistry {
             }
         }
         None
-    }
-
-    /// Clear all tools from the registry.
-    #[allow(dead_code)]
-    pub fn clear(&mut self) {
-        self.tools.clear();
-        self.invalidate_api_cache();
     }
 
     /// Remove a tool from the registry by name. Returns `true` if the tool
@@ -1237,21 +1130,6 @@ impl ToolRegistryBuilder {
         self
     }
 
-    /// Include all agent tools (file tools + shell + note + search).
-    ///
-    /// Web and patch tools are NOT registered here — callers must add them
-    /// via `.with_web_tools()` and `.with_patch_tools()` after checking
-    /// feature flags (see `tool_setup.rs`). This prevents double-registration
-    /// when `tool_setup.rs` conditionally registers them on top of
-    /// `with_agent_tools`.
-    #[must_use]
-    #[allow(dead_code)] // legacy allow_shell convenience wrapper; used by tests, prod uses with_agent_tools_policy
-    pub fn with_agent_tools(self, allow_shell: bool) -> Self {
-        self.with_agent_tools_policy(crate::worker_profile::ShellPolicy::from_legacy_allow_shell(
-            allow_shell,
-        ))
-    }
-
     /// Include all agent tools under a typed shell policy.
     #[must_use]
     pub fn with_agent_tools_policy(self, shell_policy: crate::worker_profile::ShellPolicy) -> Self {
@@ -1330,40 +1208,6 @@ impl ToolRegistryBuilder {
         builder.with_notify_tool()
     }
 
-    /// Legacy convenience wrapper for the full child-inherited Agent surface.
-    ///
-    /// New production callers should prefer [`Self::with_full_agent_surface_options`]
-    /// so feature/config-gated families (web, patch, memory, vision, etc.)
-    /// stay in parity with the parent Agent-mode registry.
-    ///
-    /// `allow_shell` mirrors the session's shell permission. `manager` and
-    /// `runtime` are the sub-agent runtime — children pass through their own
-    /// runtime so grandchildren can spawn within the same depth/cancellation
-    /// envelope.
-    #[must_use]
-    #[allow(dead_code)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn with_full_agent_surface(
-        self,
-        client: Option<DeepSeekClient>,
-        model: String,
-        manager: super::subagent::SharedSubAgentManager,
-        runtime: super::subagent::SubAgentRuntime,
-        allow_shell: bool,
-        todo_list: super::todo::SharedTodoList,
-        plan_state: super::plan::SharedPlanState,
-    ) -> Self {
-        self.with_full_agent_surface_policy(
-            client,
-            model,
-            manager,
-            runtime,
-            crate::worker_profile::ShellPolicy::from_legacy_allow_shell(allow_shell),
-            todo_list,
-            plan_state,
-        )
-    }
-
     /// Include the full child-inherited Agent surface under resolved
     /// feature/config options.
     #[must_use]
@@ -1380,30 +1224,6 @@ impl ToolRegistryBuilder {
     ) -> Self {
         self.with_agent_runtime_surface(client, model, options, todo_list, plan_state)
             .with_subagent_tools(manager, runtime)
-    }
-
-    /// Legacy typed-shell wrapper for the full child-inherited Agent surface.
-    ///
-    /// New production callers should pass resolved [`AgentToolSurfaceOptions`]
-    /// to [`Self::with_full_agent_surface_options`].
-    #[must_use]
-    #[allow(dead_code)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn with_full_agent_surface_policy(
-        self,
-        client: Option<DeepSeekClient>,
-        model: String,
-        manager: super::subagent::SharedSubAgentManager,
-        runtime: super::subagent::SubAgentRuntime,
-        shell_policy: crate::worker_profile::ShellPolicy,
-        todo_list: super::todo::SharedTodoList,
-        plan_state: super::plan::SharedPlanState,
-    ) -> Self {
-        let mut options = AgentToolSurfaceOptions::new(shell_policy);
-        options.speech_output_dir = runtime.speech_output_dir.clone();
-        self.with_full_agent_surface_options(
-            client, model, manager, runtime, options, todo_list, plan_state,
-        )
     }
 
     /// Include the todo / work-progress tools with a shared `TodoList`.
@@ -1504,7 +1324,6 @@ fn to_snake_case(s: &str) -> String {
 
 /// Adapter that wraps an MCP tool definition so it can live in the
 /// unified `ToolRegistry` alongside native tools (§5.B).
-#[allow(dead_code)]
 struct McpToolAdapter {
     name: String,
     tool: crate::mcp::McpTool,
@@ -1707,7 +1526,7 @@ mod tests {
 
         assert!(registry.contains("test_tool"));
         assert!(!registry.contains("nonexistent"));
-        assert_eq!(registry.len(), 1);
+        assert_eq!(registry.all().len(), 1);
     }
 
     #[test]
@@ -1970,7 +1789,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_and_clear_invalidate_api_tools_cache() {
+    fn remove_tool_invalidates_api_tools_cache() {
         let tmp = tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
         let mut registry = ToolRegistry::new(ctx);
@@ -1980,14 +1799,10 @@ mod tests {
         let before = registry.to_api_tools();
         assert_eq!(before.len(), 2);
 
-        let _ = registry.remove("alpha");
+        assert!(registry.remove_tool("alpha"));
         let after_remove = registry.to_api_tools();
         assert_eq!(after_remove.len(), 1);
         assert_eq!(after_remove[0].name, "beta");
-
-        registry.clear();
-        let after_clear = registry.to_api_tools();
-        assert!(after_clear.is_empty(), "cache must clear with the registry");
     }
 
     #[test]
@@ -2026,59 +1841,6 @@ mod tests {
 
         assert_eq!(order_a, vec!["alpha", "mango", "zebra"]);
         assert_eq!(order_a, order_b);
-    }
-
-    #[test]
-    fn test_registry_remove() {
-        let tmp = tempdir().expect("tempdir");
-        let ctx = ToolContext::new(tmp.path().to_path_buf());
-        let mut registry = ToolRegistry::new(ctx);
-
-        registry.register(make_test_tool("removable"));
-        assert!(registry.contains("removable"));
-
-        let _ = registry.remove("removable");
-        assert!(!registry.contains("removable"));
-    }
-
-    #[test]
-    fn test_registry_clear() {
-        let tmp = tempdir().expect("tempdir");
-        let ctx = ToolContext::new(tmp.path().to_path_buf());
-        let mut registry = ToolRegistry::new(ctx);
-
-        registry.register(make_test_tool("tool1"));
-        registry.register(make_test_tool("tool2"));
-        assert_eq!(registry.len(), 2);
-
-        registry.clear();
-        assert!(registry.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_registry_execute() {
-        let tmp = tempdir().expect("tempdir");
-        let ctx = ToolContext::new(tmp.path().to_path_buf());
-        let mut registry = ToolRegistry::new(ctx);
-
-        registry.register(make_test_tool("echo"));
-
-        let result = registry
-            .execute("echo", json!({"message": "hello"}))
-            .await
-            .expect("execute");
-
-        assert_eq!(result, "Echo: hello");
-    }
-
-    #[tokio::test]
-    async fn test_registry_execute_unknown_tool() {
-        let tmp = tempdir().expect("tempdir");
-        let ctx = ToolContext::new(tmp.path().to_path_buf());
-        let registry = ToolRegistry::new(ctx);
-
-        let result = registry.execute("nonexistent", json!({})).await;
-        assert!(result.is_err());
     }
 
     fn scoped_context(workspace: &std::path::Path) -> ToolContext {
@@ -2319,34 +2081,6 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_by_capability() {
-        let tmp = tempdir().expect("tempdir");
-        let ctx = ToolContext::new(tmp.path().to_path_buf());
-        let mut registry = ToolRegistry::new(ctx);
-
-        registry.register(make_test_tool("readonly_tool"));
-
-        let readonly = registry.filter_by_capability(ToolCapability::ReadOnly);
-        assert_eq!(readonly.len(), 1);
-
-        let writes = registry.filter_by_capability(ToolCapability::WritesFiles);
-        assert_eq!(writes.len(), 0);
-    }
-
-    #[test]
-    fn test_read_only_tools() {
-        let tmp = tempdir().expect("tempdir");
-        let ctx = ToolContext::new(tmp.path().to_path_buf());
-        let mut registry = ToolRegistry::new(ctx);
-
-        registry.register(make_test_tool("reader"));
-
-        let readonly = registry.read_only_tools();
-        assert_eq!(readonly.len(), 1);
-        assert_eq!(readonly[0].name(), "reader");
-    }
-
-    #[test]
     fn test_builder_with_web_tools_no_longer_includes_finance() {
         let tmp = tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
@@ -2419,11 +2153,11 @@ mod tests {
         let registry = ToolRegistryBuilder::new().with_file_tools().build(ctx);
 
         registry
-            .execute("read_file", json!({"path": "sample.txt"}))
+            .execute_full("read_file", json!({"path": "sample.txt"}))
             .await
             .expect("legacy read should execute");
         registry
-            .execute(
+            .execute_full(
                 "edit_file",
                 json!({"path": "sample.txt", "search": "before", "replace": "after"}),
             )
@@ -2524,37 +2258,37 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_with_agent_tools_includes_finance() {
+    fn test_builder_with_agent_tools_policy_includes_finance() {
         let tmp = tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
 
         let registry = ToolRegistryBuilder::new()
-            .with_agent_tools(false)
+            .with_agent_tools_policy(crate::worker_profile::ShellPolicy::None)
             .build(ctx);
 
         assert!(registry.contains("finance"));
     }
 
     #[test]
-    fn agent_tools_with_allow_shell_false_excludes_shell_tools() {
+    fn agent_tools_with_shell_policy_none_excludes_shell_tools() {
         let tmp = tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
 
         let registry = ToolRegistryBuilder::new()
-            .with_agent_tools(false)
+            .with_agent_tools_policy(crate::worker_profile::ShellPolicy::None)
             .build(ctx);
 
         assert!(
             !registry.contains("exec_shell"),
-            "exec_shell should be excluded when allow_shell is false"
+            "exec_shell should be excluded when the shell policy is None"
         );
         assert!(
             !registry.contains("task_shell_start"),
-            "task_shell_start should be excluded when allow_shell is false"
+            "task_shell_start should be excluded when the shell policy is None"
         );
         assert!(
             !registry.contains("task_shell_wait"),
-            "task_shell_wait should be excluded when allow_shell is false"
+            "task_shell_wait should be excluded when the shell policy is None"
         );
     }
 
@@ -2576,23 +2310,25 @@ mod tests {
     }
 
     #[test]
-    fn agent_tools_with_allow_shell_true_includes_shell_tools() {
+    fn agent_tools_with_shell_policy_full_includes_shell_tools() {
         let tmp = tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
 
-        let registry = ToolRegistryBuilder::new().with_agent_tools(true).build(ctx);
+        let registry = ToolRegistryBuilder::new()
+            .with_agent_tools_policy(crate::worker_profile::ShellPolicy::Full)
+            .build(ctx);
 
         assert!(
             registry.contains("exec_shell"),
-            "exec_shell should be included when allow_shell is true"
+            "exec_shell should be included when the shell policy is Full"
         );
         assert!(
             registry.contains("task_shell_start"),
-            "task_shell_start should be included when allow_shell is true"
+            "task_shell_start should be included when the shell policy is Full"
         );
         assert!(
             registry.contains("task_shell_wait"),
-            "task_shell_wait should be included when allow_shell is true"
+            "task_shell_wait should be included when the shell policy is Full"
         );
     }
 
