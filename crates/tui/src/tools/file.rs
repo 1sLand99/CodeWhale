@@ -143,8 +143,14 @@ impl ToolSpec for ReadFileTool {
         }
         let pages = optional_str(&input, "pages");
 
-        if is_pdf(&file_path)? {
-            return read_pdf(&file_path, pages, context.cancel_token.as_ref()).await;
+        if let Some(result) = read_pdf_if_detected(
+            &file_path,
+            pages,
+            super::pdf::PdfTextCommand::system(context.cancel_token.as_ref()),
+        )
+        .await?
+        {
+            return Ok(result);
         }
         if is_image_for_ocr(&file_path) {
             return read_image_via_ocr(&file_path, path_str);
@@ -396,28 +402,21 @@ fn read_image_via_ocr(path: &Path, requested_path: &str) -> Result<ToolResult, T
     )))
 }
 
-/// Detect a PDF by extension OR by sniffing the `%PDF-` magic bytes.
-/// Files without an extension are still recognized as PDFs when the header
-/// matches.
+/// Detect an existing PDF by extension or by sniffing `%PDF` magic bytes.
 fn is_pdf(path: &Path) -> Result<bool, ToolError> {
-    if path
+    let extension_matches = path
         .extension()
         .and_then(|e| e.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
-    {
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"));
+    let mut file = fs::File::open(path).map_err(|error| {
+        ToolError::execution_failed(format!("Failed to read {}: {error}", path.display()))
+    })?;
+    if extension_matches {
         return Ok(true);
     }
-    // Sniff first 4 bytes. Don't error if the file doesn't exist — let the
-    // caller's `read_to_string` produce the canonical not-found error.
     let mut buf = [0u8; 4];
-    let result = match fs::File::open(path) {
-        Ok(mut f) => {
-            use std::io::Read;
-            f.read_exact(&mut buf).map(|_| buf)
-        }
-        Err(_) => return Ok(false),
-    };
-    Ok(matches!(result, Ok(b) if &b == b"%PDF"))
+    use std::io::Read;
+    Ok(file.read_exact(&mut buf).is_ok() && &buf == b"%PDF")
 }
 
 fn is_image_for_ocr(path: &Path) -> bool {
@@ -497,11 +496,14 @@ fn clean_pdf_text(raw: &str) -> String {
     }
 }
 
-async fn read_pdf(
+async fn read_pdf_if_detected(
     path: &Path,
     pages: Option<&str>,
-    cancel: Option<&CancellationToken>,
-) -> Result<ToolResult, ToolError> {
+    command: super::pdf::PdfTextCommand<'_>,
+) -> Result<Option<ToolResult>, ToolError> {
+    if !is_pdf(path)? {
+        return Ok(None);
+    }
     // Validate the `pages` spec once, up front, so both extractor paths
     // surface the same error shape on bad input.
     let page_range = match pages {
@@ -516,15 +518,9 @@ async fn read_pdf(
         None => None,
     };
 
-    read_pdf_via_pdftotext(path, page_range, cancel).await
-}
-
-async fn read_pdf_via_pdftotext(
-    path: &Path,
-    page_range: Option<(u32, u32)>,
-    cancel: Option<&CancellationToken>,
-) -> Result<ToolResult, ToolError> {
-    read_pdf_with_command(path, page_range, super::pdf::PdfTextCommand::system(cancel)).await
+    read_pdf_with_command(path, page_range, command)
+        .await
+        .map(Some)
 }
 
 async fn read_pdf_with_command(
@@ -1317,6 +1313,10 @@ fn list_dir_timeout(timeout: Duration) -> ToolError {
 // === Unit Tests ===
 
 #[cfg(test)]
+#[path = "file/tests.rs"]
+mod pdf_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
@@ -1833,37 +1833,6 @@ mod tests {
         assert!(
             result.content.contains("Recursive Language Models"),
             "page-1 extraction must surface the title"
-        );
-    }
-
-    #[tokio::test]
-    async fn read_file_missing_pdftotext_is_a_failed_typed_outcome() {
-        let temporary = tempfile::tempdir().expect("tempdir");
-        let missing = temporary.path().join("definitely-not-pdftotext");
-        let input = temporary.path().join("input.pdf");
-        std::fs::write(&input, b"%PDF-1.7\n%%EOF").expect("fixture");
-
-        let error = read_pdf_with_command(
-            &input,
-            None,
-            super::super::pdf::PdfTextCommand::test(
-                missing.as_os_str(),
-                Duration::from_secs(1),
-                None,
-            ),
-        )
-        .await
-        .expect_err("missing helper must fail the tool call");
-        let payload = match &error {
-            ToolError::NotAvailable { message } => {
-                serde_json::from_str::<Value>(message).expect("structured unavailable payload")
-            }
-            other => panic!("unexpected error: {other:?}"),
-        };
-        assert_eq!(payload["type"], "binary_unavailable");
-        assert_eq!(
-            crate::tools::spec::ToolExecutionOutcome::from_legacy(Err(error)).status,
-            crate::tools::spec::ToolTerminalStatus::Failed
         );
     }
 

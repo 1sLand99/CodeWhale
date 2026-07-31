@@ -267,17 +267,9 @@ async fn extract_fetched_document(
     decoded_body: Option<&str>,
     pdf_command: PdfTextCommand<'_>,
 ) -> Result<ExtractedDocument, ToolError> {
-    let has_pdf_signature = super::web::extract::has_pdf_signature(bytes);
-    if format == Format::Raw
-        && super::web::extract::is_pdf_response(url, Some(content_type), bytes)
-        && !has_pdf_signature
+    let extraction = if format == Format::Raw
+        && super::web::extract::validate_pdf_response(url, Some(content_type), bytes)?
     {
-        return Err(ToolError::execution_failed(
-            "Response claimed to be a PDF, but its bytes did not contain a PDF signature",
-        ));
-    }
-
-    let extraction = if format == Format::Raw && has_pdf_signature {
         Ok(ExtractedDocument {
             kind: DocumentKind::Pdf,
             title: Some("PDF Document".to_string()),
@@ -513,6 +505,10 @@ fn project_json_fields(
 }
 
 #[cfg(test)]
+#[path = "fetch_url/tests.rs"]
+mod pdf_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::tools::spec::ToolContext;
@@ -574,116 +570,6 @@ mod tests {
         )
         .expect_err("raw text must retain the binary guard");
         assert!(error.to_string().contains("NUL bytes"));
-    }
-
-    #[test]
-    fn raw_pdf_production_path_preserves_exact_bytes_without_extractor() {
-        let _lock = crate::artifacts::TEST_ARTIFACT_SESSIONS_GUARD
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let temporary = tempfile::tempdir().expect("artifact root");
-        let prior = crate::artifacts::set_test_artifact_sessions_root(Some(
-            temporary.path().join("sessions"),
-        ));
-        let _restore = ArtifactRootRestore(prior);
-        let bytes = b"%PDF-1.7\nraw fixture that is intentionally not parseable\n%%EOF";
-        let missing = temporary.path().join("definitely-not-pdftotext");
-        let document = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("test runtime")
-            .block_on(extract_fetched_document(
-                Format::Raw,
-                "https://example.com/raw.pdf",
-                "application/pdf",
-                bytes,
-                true,
-                None,
-                PdfTextCommand::test(missing.as_os_str(), Duration::from_millis(50), None),
-            ))
-            .expect("signed raw PDF must bypass the missing extractor");
-        let (content, artifact) = render_extracted(
-            "https://example.com/raw.pdf",
-            "application/pdf",
-            Format::Raw,
-            document,
-            bytes,
-            &ctx(),
-        )
-        .expect("raw PDF preservation must not require pdftotext");
-        let artifact = artifact.expect("raw PDF artifact");
-        assert!(content.contains("PDF response saved"), "{content}");
-        assert_eq!(
-            std::fs::read(artifact.absolute_path).expect("artifact"),
-            bytes
-        );
-    }
-
-    #[test]
-    fn raw_pdf_claims_without_signature_are_rejected_without_artifacts() {
-        let _lock = crate::artifacts::TEST_ARTIFACT_SESSIONS_GUARD
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let temporary = tempfile::tempdir().expect("artifact root");
-        let sessions = temporary.path().join("sessions");
-        let prior = crate::artifacts::set_test_artifact_sessions_root(Some(sessions.clone()));
-        let _restore = ArtifactRootRestore(prior);
-        let missing = temporary.path().join("definitely-not-pdftotext");
-        let request = PdfTextCommand::test(missing.as_os_str(), Duration::from_millis(50), None);
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("test runtime");
-
-        for (url, content_type) in [
-            ("https://example.com/download", "application/pdf"),
-            ("https://example.com/spoof.pdf", "text/plain"),
-        ] {
-            let error = runtime
-                .block_on(extract_fetched_document(
-                    Format::Raw,
-                    url,
-                    content_type,
-                    b"plain text pretending to be a PDF",
-                    true,
-                    None,
-                    request,
-                ))
-                .expect_err("spoofed PDF claim");
-            assert!(error.to_string().contains("PDF signature"), "{error}");
-        }
-        assert!(
-            !sessions.exists(),
-            "rejected bytes must not create artifacts"
-        );
-    }
-
-    #[tokio::test]
-    async fn fetched_pdf_missing_helper_is_a_failed_typed_outcome() {
-        let temporary = tempfile::tempdir().expect("tempdir");
-        let missing = temporary.path().join("definitely-not-pdftotext");
-        let error = extract_fetched_document(
-            Format::Text,
-            "https://example.com/document.pdf",
-            "application/pdf",
-            b"%PDF-1.7\n%%EOF",
-            true,
-            None,
-            PdfTextCommand::test(missing.as_os_str(), Duration::from_secs(1), None),
-        )
-        .await
-        .expect_err("missing helper must fail the fetched PDF call");
-        let payload = match &error {
-            ToolError::NotAvailable { message } => {
-                serde_json::from_str::<Value>(message).expect("structured unavailable payload")
-            }
-            other => panic!("unexpected error: {other:?}"),
-        };
-        assert_eq!(payload["type"], "binary_unavailable");
-        assert_eq!(
-            crate::tools::spec::ToolExecutionOutcome::from_legacy(Err(error)).status,
-            crate::tools::spec::ToolTerminalStatus::Failed
-        );
     }
 
     #[test]

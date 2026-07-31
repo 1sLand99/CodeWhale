@@ -95,18 +95,7 @@ pub(crate) async fn extract_document_with_pdf_command(
         });
     }
 
-    if is_pdf_response(url, declared, bytes) {
-        if looks_like_pdf(bytes) && declared_media_family(declared).is_some() {
-            return Err(ToolError::execution_failed(format!(
-                "Response media type `{}` did not match its PDF bytes",
-                declared.unwrap_or("unknown")
-            )));
-        }
-        if !looks_like_pdf(bytes) {
-            return Err(ToolError::execution_failed(
-                "Response claimed to be a PDF, but its bytes did not contain a PDF signature",
-            ));
-        }
+    if validate_pdf_response(url, content_type, bytes)? {
         return extract_pdf(bytes, pdf_command).await;
     }
 
@@ -171,14 +160,27 @@ pub(crate) async fn extract_document_with_pdf_command(
     )))
 }
 
-pub(crate) fn is_pdf_response(url: &str, content_type: Option<&str>, bytes: &[u8]) -> bool {
-    has_pdf_signature(bytes)
-        || normalized_content_type(content_type).as_deref() == Some("application/pdf")
-        || url_is_pdf(url)
-}
-
-pub(crate) fn has_pdf_signature(bytes: &[u8]) -> bool {
-    looks_like_pdf(bytes)
+pub(crate) fn validate_pdf_response(
+    url: &str,
+    content_type: Option<&str>,
+    bytes: &[u8],
+) -> Result<bool, ToolError> {
+    let declared = normalized_content_type(content_type);
+    let declared = declared.as_deref();
+    let signed = looks_like_pdf(bytes);
+    if signed && declared_media_family(declared).is_some() {
+        return Err(ToolError::execution_failed(format!(
+            "Response media type `{}` did not match its PDF bytes",
+            declared.unwrap_or("unknown")
+        )));
+    }
+    let claimed = signed || declared == Some("application/pdf") || url_is_pdf(url);
+    if claimed && !signed {
+        return Err(ToolError::execution_failed(
+            "Response claimed to be a PDF, but its bytes did not contain a PDF signature",
+        ));
+    }
+    Ok(claimed)
 }
 
 fn extract_html(url: &str, html: &str) -> Result<ExtractedDocument, ToolError> {
