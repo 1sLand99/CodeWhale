@@ -1660,6 +1660,15 @@ fn run() -> Result<()> {
         return run_lane_log_proxy_command(args);
     }
 
+    let pipe_api_key_handoff = matches!(
+        &command,
+        Some(Commands::Auth(AuthArgs {
+            command: AuthCommand::PrintApiKey { .. }
+        }))
+    );
+    if pipe_api_key_handoff {
+        credential_handoff::prepare_stdout(io::stdout().is_terminal())?;
+    }
     let runtime_provider = top_level_provider_override(cli.provider.as_deref(), command.as_ref())?;
     let uses_raw_tui_provider = cli.provider.is_some() && runtime_provider.is_none();
     let runtime_overrides = CliRuntimeOverrides {
@@ -1683,7 +1692,13 @@ fn run() -> Result<()> {
         return delegate_to_tui(&cli, &resolved_runtime, passthrough);
     }
 
-    let mut store = ConfigStore::load(cli.config.clone())?;
+    let mut store = ConfigStore::load(cli.config.clone()).map_err(|error| {
+        if pipe_api_key_handoff {
+            anyhow!("unavailable credential")
+        } else {
+            error
+        }
+    })?;
     match command {
         Some(Commands::Run(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);

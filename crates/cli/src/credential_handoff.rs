@@ -7,6 +7,20 @@ use codewhale_config::{
 use codewhale_secrets::Secrets;
 use std::io::{ErrorKind, Write};
 use zeroize::Zeroizing;
+
+const TERMINAL_REFUSAL: &str =
+    "refusing terminal output; pipe credential handoff to the intended local client";
+
+pub(crate) fn prepare_stdout(stdout_is_terminal: bool) -> Result<()> {
+    ensure!(!stdout_is_terminal, TERMINAL_REFUSAL);
+    #[cfg(unix)]
+    // SAFETY: this one-shot CLI exits before another command can inherit it.
+    unsafe {
+        let _ = libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+    Ok(())
+}
+
 pub(crate) fn resolve_api_key(
     store: &ConfigStore,
     secrets: &Secrets,
@@ -20,7 +34,8 @@ pub(crate) fn resolve_api_key(
     if resolved.provider != provider {
         bail!("resolved a different provider");
     }
-    if resolved.api_key_source != Some(RuntimeApiKeySource::Cli) {
+    let source = resolved.api_key_source;
+    if source != Some(RuntimeApiKeySource::Cli) {
         if provider == ProviderKind::OpenaiCodex {
             bail!("bearer credentials are not an API key");
         }
@@ -34,9 +49,7 @@ pub(crate) fn resolve_api_key(
                 .is_some_and(auth_mode_uses_kimi_imported_token);
         ensure!(!kimi_bearer, "bearer credentials are not an API key");
     }
-    if resolved.api_key_source.is_none() {
-        bail!("no runtime-effective API key");
-    }
+    ensure!(source.is_some(), "no runtime-effective API key");
     resolved
         .api_key
         .filter(|value| !value.trim().is_empty())
@@ -48,13 +61,9 @@ pub(crate) fn handoff_secret_line(
     stdout_is_terminal: bool,
     resolve: impl FnOnce() -> Result<String>,
 ) -> Result<()> {
-    if stdout_is_terminal {
-        bail!("refusing terminal output; pipe credential handoff to the intended local client");
-    }
+    prepare_stdout(stdout_is_terminal)?;
     let secret = Zeroizing::new(resolve().map_err(|_| anyhow::anyhow!("unavailable credential"))?);
-    if secret.trim().is_empty() {
-        bail!("credential handoff found no usable material");
-    }
+    ensure!(!secret.trim().is_empty(), "credential handoff was empty");
     let written = writeln!(writer, "{}", secret.as_str());
     if written.is_ok() || written.is_err_and(|error| error.kind() == ErrorKind::BrokenPipe) {
         return Ok(());
