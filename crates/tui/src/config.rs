@@ -198,10 +198,18 @@ impl ApiProvider {
     pub fn default_base_url(self) -> &'static str {
         match self {
             Self::DeepseekCN => DEFAULT_DEEPSEEKCN_BASE_URL,
-            _ => self
-                .metadata()
-                .expect("ApiProvider variant missing ProviderKind metadata")
-                .default_base_url(),
+            // Mirror credential_help()/env_vars(): a variant without
+            // registered metadata falls back to the DeepSeek defaults
+            // instead of panicking at startup/render. The
+            // all_provider_variants_have_metadata test guards the table.
+            _ => self.metadata().map_or_else(
+                || {
+                    codewhale_config::ProviderKind::Deepseek
+                        .provider()
+                        .default_base_url()
+                },
+                |provider| provider.default_base_url(),
+            ),
         }
     }
 
@@ -7183,7 +7191,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
                 ApiProvider::Telecomjs => &mut providers.telecomjs,
                 ApiProvider::Custom => providers
                     .custom
-                    .entry(custom_key.expect("custom key captured for custom provider"))
+                    .entry(custom_key.unwrap_or_else(|| "__custom__".to_string()))
                     .or_default(),
             };
             let mut provider_headers = entry.http_headers.clone().unwrap_or_default();
@@ -7428,7 +7436,7 @@ fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPo
                 ),
                 ApiProvider::Custom => providers
                     .custom
-                    .entry(custom_key.expect("custom key captured for custom provider"))
+                    .entry(custom_key.unwrap_or_else(|| "__custom__".to_string()))
                     .or_default(),
                 ApiProvider::NvidiaNim => &mut providers.nvidia_nim,
                 ApiProvider::Openai => &mut providers.openai,
@@ -9085,8 +9093,8 @@ fn save_root_api_key_for_secret_slot(
 
     if let Some(secrets) = credential_secret_store_for_save() {
         let prior_secret = secrets.get(secret_slot);
-        match prior_secret.as_ref().map_err(|error| error.to_string()) {
-            Ok(_) => match secrets.set(secret_slot, trimmed) {
+        match prior_secret.as_ref() {
+            Ok(prior) => match secrets.set(secret_slot, trimmed) {
                 Ok(()) => {
                     if let Err(error) = save_root_api_key_metadata_without_plaintext(
                         &path,
@@ -9098,8 +9106,8 @@ fn save_root_api_key_for_secret_slot(
                         )
                     })?;
                         if current.as_deref() == Some(trimmed) {
-                            match prior_secret.expect("snapshot succeeded before secret write") {
-                            Some(previous) => secrets.set(secret_slot, &previous),
+                            match prior {
+                            Some(previous) => secrets.set(secret_slot, previous),
                             None => secrets.delete(secret_slot),
                         }
                         .map_err(|rollback| {
@@ -9678,8 +9686,8 @@ fn save_api_key_for_identity_unlocked(
     {
         let secret_slot = provider_secret_store_slot(provider);
         let prior_secret = secrets.get(secret_slot);
-        match prior_secret.as_ref().map_err(|error| error.to_string()) {
-            Ok(_) => match secrets.set(secret_slot, api_key) {
+        match prior_secret.as_ref() {
+            Ok(prior) => match secrets.set(secret_slot, api_key) {
                 Ok(()) => {
                     let config_result =
                         crate::config_persistence::mutate_config_document(&config_path, |doc| {
@@ -9721,8 +9729,8 @@ fn save_api_key_for_identity_unlocked(
                         )
                     })?;
                         if current.as_deref() == Some(api_key) {
-                            match prior_secret.expect("snapshot succeeded before secret write") {
-                            Some(previous) => secrets.set(secret_slot, &previous),
+                            match prior {
+                            Some(previous) => secrets.set(secret_slot, previous),
                             None => secrets.delete(secret_slot),
                         }
                         .map_err(|rollback| {

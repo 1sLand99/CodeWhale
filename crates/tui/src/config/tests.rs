@@ -113,6 +113,35 @@ fn api_provider_metadata_helpers_follow_config_provider_metadata() {
 }
 
 #[test]
+fn every_api_provider_variant_resolves_base_url_without_panicking() {
+    // Guard against the historical `.expect("ApiProvider variant missing
+    // ProviderKind metadata")` in `default_base_url()`: a provider variant
+    // added without KIND_LOOKUP metadata used to hard-panic at startup or
+    // render. Every variant must resolve a non-empty base URL through the
+    // DeepSeek fallback when it has no registered metadata.
+    let mut constructed = 0usize;
+    for provider in ApiProvider::all() {
+        let url = provider.default_base_url();
+        assert!(!url.is_empty(), "{provider:?} default_base_url is empty");
+        constructed += 1;
+    }
+    // DeepseekCN is intentionally absent from `all()` (TUI-only legacy alias
+    // with its own config table) — cover it explicitly.
+    let url = ApiProvider::DeepseekCN.default_base_url();
+    assert!(!url.is_empty(), "DeepseekCN default_base_url is empty");
+    constructed += 1;
+
+    // Every variant of the enum must have been constructed above. If this
+    // assertion fails, a new variant was added without extending the lookup
+    // tables — extend `all()`/KIND_LOOKUP and re-run.
+    assert_eq!(
+        constructed,
+        ApiProvider::all().len() + 1,
+        "unconstructed ApiProvider variant"
+    );
+}
+
+#[test]
 fn provider_config_key_follows_config_provider_metadata() {
     for kind in codewhale_config::ProviderKind::ALL
         .into_iter()
