@@ -493,7 +493,13 @@ fn agent_worker_profile_derives_from_parent_without_escalation() {
         !profile.permissions.write,
         "child cannot gain write permission from a read-only parent profile"
     );
-    assert_eq!(profile.shell, ShellPolicy::ReadOnly);
+    assert_eq!(
+        profile.shell,
+        ShellPolicy::Full,
+        "scout parents carry the recon posture (bounded verification \
+         surface + network); children inherit the full-shell authority \
+         without gaining write"
+    );
     assert_eq!(profile.max_spawn_depth, DEFAULT_MAX_SPAWN_DEPTH - 1);
     assert_eq!(
         profile.model,
@@ -568,7 +574,11 @@ fn custom_runtime_opens_only_for_explicit_bounded_write_authority() {
         true,
     );
     assert!(!intersected.permissions.write);
-    assert_eq!(intersected.shell, ShellPolicy::ReadOnly);
+    assert_eq!(
+        intersected.shell,
+        ShellPolicy::Full,
+        "scout parents carry the recon posture"
+    );
 }
 
 #[test]
@@ -4531,14 +4541,23 @@ fn role_posture_blocks_writes_and_shell_for_read_only_roles() {
         );
     }
 
-    // Only Full-shell roles may run shell (Required) tools.
-    for role in [FleetRole::Verifier, FleetRole::Builder, FleetRole::Worker] {
+    // Only Full-shell roles may run shell (Required) tools. Scout/reviewer
+    // now carry the recon posture (full shell authority, bounded verification
+    // surface; raw shell still requires write and stays denied by the clamp),
+    // so they join verifier/builder/worker. Planner stays shell-less.
+    for role in [
+        FleetRole::Verifier,
+        FleetRole::Builder,
+        FleetRole::Worker,
+        FleetRole::Scout,
+        FleetRole::Reviewer,
+    ] {
         assert!(
             role_posture_permits(&role, ApprovalRequirement::Required),
             "{role:?} has full shell"
         );
     }
-    for role in [FleetRole::Planner, FleetRole::Scout, FleetRole::Reviewer] {
+    for role in [FleetRole::Planner] {
         assert!(
             !role_posture_permits(&role, ApprovalRequirement::Required),
             "{role:?} must not run shell tools"
@@ -5054,6 +5073,24 @@ fn subagent_feature_gates_match_parent_agent_surface() {
     }
 }
 
+/// Model the clamp's deny list the way a real spawn threads it in
+/// (fleet/worker_runtime.rs): a `write: false` member loses the raw shell
+/// surface and the non-shell execution surface even when its posture holds
+/// full shell authority (recon). The catalog tests exercise the posture
+/// layer alone, so seeding the deny list keeps them faithful to the
+/// surface a real scout lane would see.
+fn seed_recon_deny_list(runtime: &mut SubAgentRuntime) {
+    use crate::fleet::exact::{MUTATING_TOOL_DENYLIST, RAW_SHELL_DENYLIST};
+    for rule in RAW_SHELL_DENYLIST
+        .iter()
+        .chain(MUTATING_TOOL_DENYLIST.iter())
+    {
+        if !runtime.worker_profile.denied_tools.iter().any(|d| d == rule) {
+            runtime.worker_profile.denied_tools.push(rule.to_string());
+        }
+    }
+}
+
 #[test]
 fn explore_catalog_inherits_web_but_hides_write_shell_and_fim_tools() {
     let tmp = tempdir().expect("tempdir");
@@ -5061,6 +5098,10 @@ fn explore_catalog_inherits_web_but_hides_write_shell_and_fim_tools() {
         stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
     runtime.context = ToolContext::new(tmp.path().to_path_buf());
     runtime.context.auto_approve = true;
+    // The real spawn threads the clamp's deny list into the child profile
+    // (write:false => raw shell + mutating surface denied); model it so the
+    // catalog assertion matches what a real scout lane sees.
+    seed_recon_deny_list(&mut runtime);
     let registry = SubAgentToolRegistry::new(
         runtime,
         FleetRole::Scout,
@@ -5076,7 +5117,6 @@ fn explore_catalog_inherits_web_but_hides_write_shell_and_fim_tools() {
     }
     for name in [
         "Bash",
-        "Run",
         "write_file",
         "edit_file",
         "apply_patch",
@@ -5086,6 +5126,11 @@ fn explore_catalog_inherits_web_but_hides_write_shell_and_fim_tools() {
     ] {
         assert!(!names.contains(name), "Explore must hide {name}");
     }
+    // Recon posture keeps the bounded verification surface: raw shell stays
+    // denied (write=false), but the canonical `Run` verification gate
+    // survives the clamp because the shell posture is Full. (`run_tests` /
+    // `run_verifiers` are retired names from the canonical-action cutover.)
+    assert!(names.contains("Run"), "Explore should inherit Run");
     let file = tools.iter().find(|tool| tool.name == "File").unwrap();
     assert_eq!(
         file.input_schema["properties"]["action"]["enum"],
@@ -5166,8 +5211,17 @@ fn every_fleet_role_catalog_advertises_one_executable_load_skill() {
         FleetRole::Builder,
         FleetRole::Verifier,
     ] {
+        let mut role_runtime = runtime.clone();
+        if matches!(
+            role,
+            FleetRole::Scout | FleetRole::Reviewer | FleetRole::Planner
+        ) {
+            // Model the clamp deny list for read-only roles, as the real
+            // spawn does (write:false => raw shell + mutating surface denied).
+            seed_recon_deny_list(&mut role_runtime);
+        }
         let registry = SubAgentToolRegistry::new(
-            runtime.clone(),
+            role_runtime,
             role.clone(),
             None,
             todo_list.clone(),
@@ -5199,15 +5253,24 @@ fn every_fleet_role_catalog_advertises_one_executable_load_skill() {
                     "read-only role {role:?} keeps load_skill without gaining {denied}"
                 );
             }
-            // Verifier intentionally keeps shell (it runs the test suite);
-            // the other read-only roles must not gain arbitrary shell.
+            // Verifier keeps raw shell authority; scout/reviewer carry the
+            // recon posture (full shell authority with the bounded
+            // verification surface, raw shell still denied by the clamp);
+            // planner stays shell-less. Raw shell names stay denied for
+            // every read-only role.
             if !matches!(role, FleetRole::Verifier) {
-                for denied in ["exec_shell", "task_shell_start", "Bash", "Run"] {
+                for denied in ["exec_shell", "task_shell_start", "Bash"] {
                     assert!(
                         !names.contains(denied),
                         "read-only role {role:?} keeps load_skill without gaining {denied}"
                     );
                 }
+            }
+            if matches!(role, FleetRole::Planner) {
+                assert!(
+                    !names.contains("Run"),
+                    "planner must not gain the verification surface"
+                );
             }
         }
     }

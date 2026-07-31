@@ -4241,7 +4241,11 @@ esac
                         !permissions.write,
                         "scout receipt {key} must stay read-only"
                     );
-                    assert_eq!(permissions.shell, "read_only");
+                    // Scout/reviewer lanes now carry the recon posture:
+                    // network reach + bounded verification surface, so the
+                    // receipt records full shell authority (raw shell still
+                    // requires write and stays denied by the clamp).
+                    assert_eq!(permissions.shell, "full");
                 }
                 Some("verifier") => {
                     assert!(

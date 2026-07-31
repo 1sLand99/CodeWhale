@@ -2220,10 +2220,11 @@ permissions = "read_only"
         let workflow = workflow_with(None, GLM_FLEET);
         let auditor = workflow.roster().get("auditor").expect("auditor");
 
-        // `reviewer` is read-only with a read-only shell, which is exactly the
-        // `read_only` ceiling this member saved — so it keeps its own role and
-        // its own system prompt instead of being flattened into `scout`.
-        assert_eq!(auditor.profile.role.name, "reviewer");
+        // `reviewer`'s built-in posture now needs a full shell (recon:
+        // bounded verification surface + network), which the `read_only`
+        // ceiling this member saved refuses — so it is flattened into
+        // `scout`, exactly as a `verifier` member under the same ceiling is.
+        assert_eq!(auditor.profile.role.name, "scout");
         assert!(!auditor.profile.permissions.allow_shell);
         assert_eq!(
             write_authority_for(workflow.member("auditor").expect("member").permissions),
@@ -2243,7 +2244,11 @@ permissions = "read_only"
         let read_write = PermissionCeiling::preset("read_write").expect("preset");
 
         // Roles that fit are preserved, including the renamed public role.
-        assert_eq!(posture_role_for_member("reviewer", read_only), "reviewer");
+        // `reviewer` needs a full shell for its recon posture, which a
+        // read-only ceiling refuses, so it flattens to `scout` like
+        // `verifier` does below.
+        assert_eq!(posture_role_for_member("reviewer", read_only), "scout");
+        assert_eq!(posture_role_for_member("reviewer", read_write), "reviewer");
         assert_eq!(posture_role_for_member("planner", read_only), "planner");
         assert_eq!(
             posture_role_for_member("consultant", read_only),
@@ -2287,7 +2292,9 @@ permissions = "read_only"
 
         let workflow = workflow_with(None, GLM_FLEET);
         for (id, expected) in [
-            ("auditor", FleetRole::Reviewer),
+            // auditor saved `permissions = "read_only"`, which refuses
+            // reviewer's recon shell posture, so it projects scout.
+            ("auditor", FleetRole::Scout),
             ("implementer", FleetRole::Builder),
         ] {
             let member = workflow.roster().get(id).expect("roster entry");

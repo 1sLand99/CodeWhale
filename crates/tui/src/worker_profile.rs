@@ -47,6 +47,20 @@ impl PermissionSet {
         }
     }
 
+    /// Recon: read-only on the workspace, but network-capable.
+    ///
+    /// The read-only investigator posture (scout/reviewer): it must not
+    /// mutate the workspace, but real recon needs `git`/`gh`/web reach —
+    /// the old `read_only()` default left such lanes with no way to run any
+    /// command or reach any remote, which made default scout lanes useless
+    /// for the recon they exist for.
+    pub const fn recon() -> Self {
+        Self {
+            write: false,
+            network: true,
+        }
+    }
+
     /// Intersection: a capability is granted only if **both** sets grant it.
     /// This is the core non-escalation primitive — `parent.intersect(child)`
     /// can never produce a capability the parent lacks.
@@ -184,9 +198,15 @@ impl WorkerRuntimeProfile {
     #[must_use]
     pub fn for_role(role: FleetRole) -> Self {
         let (permissions, shell) = match role {
-            // Read-only investigators.
+            // Read-only investigators. Recon posture: no workspace writes,
+            // but network reach and the bounded verification surface are
+            // granted so a default scout/reviewer lane can actually run
+            // git/gh/web recon instead of being reduced to file reads.
+            // Raw shell stays denied by the clamp (write && shell == Full
+            // is required for it), so this widens capability without
+            // widening mutation authority.
             FleetRole::Scout | FleetRole::Reviewer => {
-                (PermissionSet::read_only(), ShellPolicy::ReadOnly)
+                (PermissionSet::recon(), ShellPolicy::Full)
             }
             // Planner: analysis only, no shell.
             FleetRole::Planner => (PermissionSet::read_only(), ShellPolicy::None),
@@ -360,7 +380,15 @@ mod tests {
     fn for_role_postures_match_role_stances() {
         let explore = WorkerRuntimeProfile::for_role(FleetRole::Scout);
         assert!(!explore.permissions.write, "explore must not write");
-        assert_eq!(explore.shell, ShellPolicy::ReadOnly);
+        assert!(
+            explore.permissions.network,
+            "explore/recon lanes keep network reach"
+        );
+        assert_eq!(
+            explore.shell,
+            ShellPolicy::Full,
+            "explore/recon lanes hold shell authority so the bounded              verification surface survives the clamp (raw shell still              requires write)"
+        );
         assert_eq!(
             explore.model,
             ModelRoute::Inherit,
@@ -451,18 +479,24 @@ mod tests {
 
     #[test]
     fn child_cannot_escalate_beyond_a_readonly_parent() {
-        let parent = WorkerRuntimeProfile::for_role(FleetRole::Scout); // read-only
+        // Scout now carries the recon posture: no writes, but network reach
+        // and full shell authority (bounded verification surface; raw shell
+        // still requires write at the clamp).
+        let parent = WorkerRuntimeProfile::for_role(FleetRole::Scout); // recon
         let greedy = WorkerRuntimeProfile::for_role(FleetRole::Builder); // wants write + full shell
         let child = parent.derive_child(&greedy);
         assert!(
             !child.permissions.write,
             "a read-only parent cannot bear a writing child"
         );
-        assert!(!child.permissions.network);
+        assert!(
+            child.permissions.network,
+            "child inherits the recon parent's network reach"
+        );
         assert_eq!(
             child.shell,
-            ShellPolicy::ReadOnly,
-            "child shell clamped to parent's"
+            ShellPolicy::Full,
+            "child shell clamped to parent's recon posture"
         );
     }
 

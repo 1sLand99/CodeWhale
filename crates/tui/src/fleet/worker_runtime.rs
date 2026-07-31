@@ -1830,10 +1830,21 @@ mod tests {
         );
         let mut reviewer = reviewer;
         reviewer.instructions = "Use gh to check the PR and report CI evidence.".to_string();
-        let warning = network_posture_warning_for_task(&reviewer, &[], None)
-            .expect("network-dependent reviewer brief should warn");
+        // Scout/reviewer lanes now ship the recon posture (network reach,
+        // bounded verification surface; see worker_profile::for_role), so a
+        // network-dependent reviewer brief no longer warns by default.
+        assert!(
+            network_posture_warning_for_task(&reviewer, &[], None).is_none(),
+            "reviewer recon posture must not warn for a gh brief"
+        );
+
+        // A genuinely network-less role (planner: analysis only, no shell)
+        // still warns for the same brief.
+        let mut planner = reviewer.clone();
+        planner.worker.as_mut().unwrap().role = Some("planner".to_string());
+        let warning = network_posture_warning_for_task(&planner, &[], None)
+            .expect("network-dependent planner brief should warn");
         assert!(warning.contains("network=off"));
-        assert!(warning.contains("worker"));
 
         let mut worker = reviewer.clone();
         worker.worker.as_mut().unwrap().role = Some("worker".to_string());
@@ -3077,10 +3088,13 @@ mod tests {
 
         assert_eq!(spec.agent_type, FleetRole::Builder);
         assert!(!spec.runtime_profile.permissions.write);
-        assert!(!spec.runtime_profile.permissions.network);
+        assert!(
+            spec.runtime_profile.permissions.network,
+            "recon lanes keep network reach"
+        );
         assert_eq!(
             spec.runtime_profile.shell,
-            crate::worker_profile::ShellPolicy::ReadOnly
+            crate::worker_profile::ShellPolicy::Full
         );
         assert_eq!(
             spec.runtime_profile.tools,
@@ -3091,8 +3105,8 @@ mod tests {
 
         let permissions = fleet_effective_permissions_from_worker_spec(&spec);
         assert!(!permissions.write);
-        assert!(!permissions.network);
-        assert_eq!(permissions.shell, "read_only");
+        assert!(permissions.network, "recon lanes keep network reach");
+        assert_eq!(permissions.shell, "full");
         assert_eq!(permissions.tool_scope, "explicit");
         assert_eq!(permissions.tools, vec!["read_file".to_string()]);
         assert!(permissions.background);
