@@ -12,8 +12,8 @@
 //! - **Never `session.last_tool_catalog`.** That value is one turn stale and
 //!   stores the pre-activation catalog, so it cannot describe what the *next*
 //!   request would send. The catalog is rebuilt through
-//!   [`Engine::build_turn_tool_registry_and_catalog`] and narrowed through
-//!   [`plan_turn_tools`] — the same two calls a real turn makes.
+//!   [`Engine::build_turn_tool_registry_and_catalog`], which returns the same
+//!   typed policy a real turn consumes.
 //! - **Never invent a route.** For fixed routes, the host resolves the next
 //!   turn through the same shared planner production dispatch uses. Auto would
 //!   require a model-classifier call, so the human preview stops before the
@@ -315,20 +315,13 @@ impl Engine {
             )
             .await;
 
-        // Exactly the narrowing the turn loop applies before building its
-        // request — including deferred-tool activation and strict mode.
-        let plan = plan_turn_tools(
-            build.catalog,
-            input_policy.mode,
-            &self.config.tools_always_load,
-            &input_policy.dynamic_active_tools,
-            self.config.strict_tool_mode,
-        );
-        let active_tools = plan.active.clone().unwrap_or_default();
+        // The build owns the exact same initial subset dispatch consumes.
+        let surface = &build.surface;
+        let active_tools = surface.active.clone().unwrap_or_default();
         let active_catalog_sha256 = active_tool_catalog_sha256(&active_tools);
 
-        let tool_choice = plan.active.as_ref().map(|_| {
-            if self.config.strict_tool_mode {
+        let tool_choice = surface.active.as_ref().map(|_| {
+            if surface.strict_tool_mode {
                 json!("required")
             } else {
                 json!({ "type": "auto" })
@@ -340,8 +333,8 @@ impl Engine {
         // turn", which is the failure mode this command exists to avoid.
         let tools = match build.mcp.server_count() {
             Some(mcp_server_count) => Availability::Exact(ToolSurfaceFacts {
-                catalog_tool_count: plan.catalog.len(),
-                deferred_tool_count: plan
+                catalog_tool_count: surface.catalog.len(),
+                deferred_tool_count: surface
                     .catalog
                     .iter()
                     .filter(|tool| tool.defer_loading.unwrap_or(false))
@@ -353,7 +346,7 @@ impl Engine {
                     route_context.capability_profile().tool_surface_budget
                 ),
                 standard_and_full_surfaces_collapsed: standard_and_full_collapse(
-                    &plan.catalog,
+                    &surface.catalog,
                     &self.config.tools_always_load,
                 ),
                 mcp_server_count,
@@ -508,7 +501,7 @@ impl Engine {
             messages: outbound_messages,
             max_tokens: effective_max_output_tokens_for_route(provider, &model, limits),
             system: system_prompt,
-            tools: plan.active.clone(),
+            tools: surface.active.clone(),
             tool_choice: tool_choice.clone(),
             metadata: None,
             thinking: None,
@@ -1202,8 +1195,8 @@ mod tests {
             .await;
         assert!(
             build
+                .surface
                 .catalog
-                .expect("catalog")
                 .iter()
                 .any(|tool| tool.name == "agent"),
             "the planned route client must make sub-agent tools available"

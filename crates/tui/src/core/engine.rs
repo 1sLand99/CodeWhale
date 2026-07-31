@@ -3455,29 +3455,24 @@ impl Engine {
                 None
             };
             if let Some(subagent_runtime) = runtime {
-                Some(
-                    builder
-                        .with_subagent_tools(self.subagent_manager.clone(), subagent_runtime)
-                        .build(tool_context),
-                )
+                builder
+                    .with_subagent_tools(self.subagent_manager.clone(), subagent_runtime)
+                    .build(tool_context)
             } else {
                 tracing::warn!(
                     "Sub-agents enabled but no API client available, falling back to basic tool set"
                 );
-                Some(builder.build(tool_context))
+                builder.build(tool_context)
             }
         } else {
-            Some(builder.build(tool_context))
+            builder.build(tool_context)
         };
 
         // Load plugin tools from the user's tools directory and apply any
         // config.toml overrides. Explicit overrides win over auto-discovered
         // scripts with the same tool name.
-        let mut plugin_tool_names: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-        if let Some(ref mut tool_registry) = tool_registry {
-            plugin_tool_names = configure_plugin_tools(tool_registry, self.config.tools.as_ref());
-        }
+        let plugin_tool_names =
+            configure_plugin_tools(&mut tool_registry, self.config.tools.as_ref());
 
         let mcp_state = if self.config.features.enabled(Feature::Mcp) {
             if mcp_access.may_connect() {
@@ -3500,48 +3495,45 @@ impl Engine {
         // caller can attribute MCP contributions without a second connect.
         let mcp_tools = mcp_state.tools().to_vec();
         let mcp_tool_names: Vec<String> = mcp_tools.iter().map(|tool| tool.name.clone()).collect();
-        let tools = tool_registry.as_ref().map(|registry| {
-            // The surface budget belongs to the route the request would go
-            // to, which is not necessarily the installed one: with auto model
-            // routing the host has already planned a different route for the
-            // next turn.
-            let capability = route.capability_profile();
-            let mut always_load = self.config.tools_always_load.clone();
-            if self.config.features.enabled(Feature::Mcp) {
-                always_load.insert("start_mcp_server".to_string());
+        // The surface budget belongs to the route the request would go to,
+        // which is not necessarily the installed one under auto routing.
+        let capability = route.capability_profile();
+        let mut always_load = self.config.tools_always_load.clone();
+        if self.config.features.enabled(Feature::Mcp) {
+            always_load.insert("start_mcp_server".to_string());
+        }
+        let bypass = input_policy.auto_approve
+            || input_policy.approval_mode == crate::tui::approval::ApprovalMode::Bypass;
+        let catalog_mode = if bypass {
+            AppMode::Yolo
+        } else {
+            input_policy.mode
+        };
+        let mut catalog = build_model_tool_catalog_with_surface(
+            tool_registry.to_api_tools_with_cache(true),
+            mcp_tools,
+            catalog_mode,
+            &always_load,
+            capability.tool_surface_budget,
+        );
+        for tool in &mut catalog {
+            if plugin_tool_names.contains(&tool.name) {
+                tool.defer_loading = Some(false);
             }
-            let bypass = input_policy.auto_approve
-                || input_policy.approval_mode == crate::tui::approval::ApprovalMode::Bypass;
-            let mut catalog = build_model_tool_catalog_with_surface(
-                registry.to_api_tools_with_cache(true),
-                mcp_tools,
-                if bypass {
-                    AppMode::Yolo
-                } else {
-                    input_policy.mode
-                },
-                &always_load,
-                capability.tool_surface_budget,
-            );
-            for tool in &mut catalog {
-                if plugin_tool_names.contains(&tool.name) {
-                    tool.defer_loading = Some(false);
-                }
-            }
-            filter_tool_catalog_for_gates(
-                &mut catalog,
-                allowed_tools.as_deref(),
-                self.config.disallowed_tools.as_deref(),
-            );
-            filter_tool_catalog_for_permission_posture(
-                &mut catalog,
-                input_policy.approval_mode_for_session(),
-            );
-            catalog
-        });
+        }
+        let surface = ToolSurfacePolicy::new(
+            tool_registry,
+            Some(catalog),
+            input_policy.mode,
+            &always_load,
+            &input_policy.dynamic_active_tools,
+            self.config.strict_tool_mode,
+            allowed_tools,
+            self.config.disallowed_tools.clone(),
+            input_policy.approval_mode_for_session(),
+        );
         TurnToolBuild {
-            registry: tool_registry,
-            catalog: tools,
+            surface,
             mcp_tool_names,
             mcp: mcp_state,
             subagent_runtime_model,
@@ -3920,8 +3912,7 @@ impl Engine {
         // Build tool registry and tool list for the current mode
         let turn_id_for_mailbox = turn.id.clone();
         let TurnToolBuild {
-            registry: tool_registry,
-            catalog: tools,
+            surface,
             mailbox: mut mailbox_for_runtime,
             plugin_tool_names,
             ..
@@ -3949,7 +3940,7 @@ impl Engine {
                 &turn_id_for_mailbox,
             )
             .await;
-        let tool_catalog_for_event = tools.clone();
+        let tool_catalog_for_event = Some(surface.catalog.clone());
 
         // Resolve, once per turn, the out-of-request facts the read-only
         // request projection is allowed to report: flattened registry facts,
@@ -3958,10 +3949,7 @@ impl Engine {
         // live; the snapshot itself is built later, at the request seam, from
         // the tools actually prepared for that step.
         let mut tool_surface = crate::tool_inspection::ToolSurfaceContext {
-            registry: tool_registry
-                .as_ref()
-                .map(|registry| registry.registry_facts(&plugin_tool_names))
-                .unwrap_or_default(),
+            registry: surface.registry.registry_facts(&plugin_tool_names),
             mcp_servers: match self.mcp_pool.as_ref() {
                 Some(pool) => pool.lock().await.resolved_tool_servers(),
                 None => std::collections::BTreeMap::new(),
@@ -3986,10 +3974,7 @@ impl Engine {
         use futures_util::FutureExt as _;
         let turn_result = std::panic::AssertUnwindSafe(self.handle_deepseek_turn(
             &mut turn,
-            tool_registry.as_ref(),
-            tools,
-            input_policy.mode,
-            input_policy.dynamic_active_tools,
+            surface,
             Some(tool_surface),
         ))
         .catch_unwind()
@@ -5578,28 +5563,26 @@ pub(crate) struct TurnMailboxBarrier {
     pub(crate) drain_handle: tokio::task::JoinHandle<()>,
 }
 
-pub(crate) struct TurnToolBuild {
-    /// Runtime registry that will execute the tools.
-    pub(crate) registry: Option<crate::tools::ToolRegistry>,
-    /// Full model-facing catalog, including deferred entries.
-    pub(crate) catalog: Option<Vec<Tool>>,
+struct TurnToolBuild {
+    /// One authority for executable, searchable, and initially active tools.
+    surface: ToolSurfacePolicy,
     /// Names of the MCP-contributed tools in this build.
-    pub(crate) mcp_tool_names: Vec<String>,
+    mcp_tool_names: Vec<String>,
     /// What is known about the MCP contribution to this catalog.
-    pub(crate) mcp: McpToolState,
+    mcp: McpToolState,
     /// Route model installed into the child runtime, when sub-agent tools were
     /// available. This is an internal receipt, not a manifest field.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) subagent_runtime_model: Option<String>,
+    subagent_runtime_model: Option<String>,
     /// Turn-scoped sub-agent mailbox and its flush barrier, when sub-agent
     /// wiring was live. The engine must seal, flush, and await this before it
     /// emits `TurnComplete`: that is what makes detached-child usage accounting
     /// exactly-once rather than "whatever arrived in time".
-    pub(crate) mailbox: Option<TurnMailboxBarrier>,
+    mailbox: Option<TurnMailboxBarrier>,
     /// Tools this build loaded from the plugin surface rather than the built-in
     /// registry builder. Carried out so the read-only request projection can
     /// tell `plugin` provenance from `builtin` instead of collapsing both.
-    pub(crate) plugin_tool_names: std::collections::HashSet<String>,
+    plugin_tool_names: std::collections::HashSet<String>,
 }
 
 /// The route a tool catalog is being shaped for.
@@ -5774,33 +5757,9 @@ pub(crate) use token_estimate_cache::TokenEstimateCache;
 
 pub(super) const MAX_PARALLEL_SHELL_EXEC: usize = 4;
 
+#[cfg(test)]
 pub(crate) fn default_active_native_tool_names() -> &'static [&'static str] {
     tool_catalog::DEFAULT_ACTIVE_NATIVE_TOOLS
-}
-
-/// Drop catalog entries the execution gates would reject (#3027): the model
-/// should never be advertised a tool it cannot call. Deny wins over allow.
-fn filter_tool_catalog_for_gates(
-    catalog: &mut Vec<Tool>,
-    allowed_tools: Option<&[String]>,
-    disallowed_tools: Option<&[String]>,
-) {
-    catalog.retain(|tool| {
-        !turn_loop::command_denies_tool(disallowed_tools, &tool.name)
-            && turn_loop::command_allows_tool(allowed_tools, &tool.name)
-    });
-}
-
-/// Auto-Review is the one fully autonomous posture. Hiding the question tool
-/// keeps both the eager and deferred/tool-search surfaces aligned with the
-/// runtime question guard in `turn_loop`.
-fn filter_tool_catalog_for_permission_posture(
-    catalog: &mut Vec<Tool>,
-    approval_mode: crate::tui::approval::ApprovalMode,
-) {
-    if !super::authority::permission_posture_allows_questions(approval_mode) {
-        catalog.retain(|tool| tool.name != REQUEST_USER_INPUT_NAME);
-    }
 }
 
 use self::approval::{ApprovalDecision, ApprovalResult, UserInputDecision};
@@ -5828,16 +5787,17 @@ use self::streaming::{
 };
 use self::tool_catalog::{
     CODE_EXECUTION_TOOL_NAME, JS_EXECUTION_TOOL_NAME, MULTI_TOOL_PARALLEL_NAME,
-    REQUEST_USER_INPUT_NAME, active_tools_for_request, build_model_tool_catalog_with_surface,
-    default_synthetic_catalog_tool_names, execute_code_execution_tool, execute_tool_search,
-    is_tool_search_tool, maybe_hydrate_requested_deferred_tool, missing_tool_error_message,
-    plan_turn_tools, tool_catalog_consistency_issues,
+    REQUEST_USER_INPUT_NAME, ToolSurfacePolicy, active_tools_for_request,
+    build_model_tool_catalog_with_surface, default_synthetic_catalog_tool_names,
+    execute_code_execution_tool, execute_tool_search, is_tool_search_tool,
+    maybe_hydrate_requested_deferred_tool, missing_tool_error_message,
 };
 #[cfg(test)]
 use self::tool_catalog::{
     TOOL_SEARCH_NAME, active_tools_for_step, build_model_tool_catalog, ensure_advanced_tooling,
     initial_active_tools, maybe_activate_requested_deferred_tool,
-    preflight_requested_deferred_tool, should_default_defer_tool,
+    preflight_requested_deferred_tool, should_default_defer_tool, tool_allowed,
+    tool_catalog_consistency_issues, tool_denied,
 };
 use self::tool_execution::emit_tool_audit;
 use self::tool_preparation::{prepare_tool_call, reprepare_tool_call_after_hook};

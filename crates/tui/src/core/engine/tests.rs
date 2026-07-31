@@ -3029,27 +3029,47 @@ fn catalog_tool(name: &str) -> Tool {
     }
 }
 
+fn policy_for_catalog(
+    catalog: Vec<Tool>,
+    allowed_tools: Option<Vec<String>>,
+    disallowed_tools: Option<Vec<String>>,
+    approval_mode: crate::tui::approval::ApprovalMode,
+) -> ToolSurfacePolicy {
+    ToolSurfacePolicy::new(
+        crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(PathBuf::from("."))),
+        Some(catalog),
+        AppMode::Agent,
+        &HashSet::new(),
+        &[],
+        false,
+        allowed_tools,
+        disallowed_tools,
+        approval_mode,
+    )
+}
+
 #[test]
 fn tool_catalog_filter_applies_allow_and_deny_gates() {
     // #3027 AC1: the advertised catalog must not contain tools the execution
     // gates would deny; deny wins over allow.
-    let mut catalog = vec![
+    let catalog = vec![
         catalog_tool("read_file"),
         catalog_tool("exec_shell"),
         catalog_tool("grep_files"),
     ];
-    filter_tool_catalog_for_gates(
-        &mut catalog,
-        Some(&["read_file".to_string(), "exec_shell".to_string()][..]),
-        Some(&["exec_shell".to_string()][..]),
+    let surface = policy_for_catalog(
+        catalog,
+        Some(vec!["read_file".to_string(), "exec_shell".to_string()]),
+        Some(vec!["exec_shell".to_string()]),
+        crate::tui::approval::ApprovalMode::Suggest,
     );
-    let names: Vec<&str> = catalog.iter().map(|t| t.name.as_str()).collect();
+    let names: Vec<&str> = surface.catalog.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(names, ["read_file"]);
 }
 
 #[test]
 fn tool_catalog_shell_only_benchmark_surface_hides_native_tools() {
-    let mut catalog = vec![
+    let catalog = vec![
         catalog_tool("exec_shell"),
         catalog_tool("exec_shell_wait"),
         catalog_tool("exec_shell_interact"),
@@ -3065,9 +3085,14 @@ fn tool_catalog_shell_only_benchmark_surface_hides_native_tools() {
         "exec_shell_interact".to_string(),
     ];
 
-    filter_tool_catalog_for_gates(&mut catalog, Some(&shell_only), None);
+    let surface = policy_for_catalog(
+        catalog,
+        Some(shell_only.to_vec()),
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
 
-    let names: Vec<&str> = catalog.iter().map(|t| t.name.as_str()).collect();
+    let names: Vec<&str> = surface.catalog.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(
         names,
         ["exec_shell", "exec_shell_wait", "exec_shell_interact"]
@@ -3076,9 +3101,115 @@ fn tool_catalog_shell_only_benchmark_surface_hides_native_tools() {
 
 #[test]
 fn tool_catalog_filter_is_inert_without_gates() {
-    let mut catalog = vec![catalog_tool("read_file"), catalog_tool("exec_shell")];
-    filter_tool_catalog_for_gates(&mut catalog, None, None);
-    assert_eq!(catalog.len(), 2);
+    let surface = policy_for_catalog(
+        vec![catalog_tool("read_file"), catalog_tool("exec_shell")],
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    assert!(surface.catalog.iter().any(|tool| tool.name == "read_file"));
+    assert!(surface.catalog.iter().any(|tool| tool.name == "exec_shell"));
+}
+
+#[test]
+fn tool_surface_policy_never_reintroduces_denied_synthetic_tools() {
+    let denied = vec![
+        TOOL_SEARCH_NAME.to_string(),
+        CODE_EXECUTION_TOOL_NAME.to_string(),
+        JS_EXECUTION_TOOL_NAME.to_string(),
+    ];
+    let surface = policy_for_catalog(
+        vec![
+            catalog_tool("read_file"),
+            catalog_tool(CODE_EXECUTION_TOOL_NAME),
+            catalog_tool(JS_EXECUTION_TOOL_NAME),
+        ],
+        Some(vec![
+            TOOL_SEARCH_NAME.to_string(),
+            CODE_EXECUTION_TOOL_NAME.to_string(),
+            JS_EXECUTION_TOOL_NAME.to_string(),
+        ]),
+        Some(denied),
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+
+    for denied_name in [
+        TOOL_SEARCH_NAME,
+        CODE_EXECUTION_TOOL_NAME,
+        JS_EXECUTION_TOOL_NAME,
+    ] {
+        assert!(surface.denies_tool(denied_name));
+        assert!(surface.passes_allow_list(denied_name));
+        assert!(
+            !surface.allows_tool(denied_name),
+            "deny must win over allow for {denied_name}"
+        );
+        assert!(
+            surface.catalog.iter().all(|tool| tool.name != denied_name),
+            "{denied_name} must not reappear after policy narrowing"
+        );
+        assert!(!surface.active_names.contains(denied_name));
+    }
+}
+
+#[tokio::test]
+async fn denied_synthetic_tool_is_blocked_by_the_same_turn_policy_at_execution() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::tool_call_turn(
+            "call-denied-search",
+            TOOL_SEARCH_NAME,
+            r#"{"query":"File"}"#,
+        ),
+        canned::simple_text_turn("Denied tool handled."),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let policy = policy_for_catalog(
+        vec![catalog_tool("read_file")],
+        Some(vec![TOOL_SEARCH_NAME.to_string()]),
+        Some(vec![TOOL_SEARCH_NAME.to_string()]),
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    assert!(!policy.allows_tool(TOOL_SEARCH_NAME));
+    let mut turn = crate::core::turn::TurnContext::new(4);
+
+    let (status, error) = engine.handle_deepseek_turn(&mut turn, policy, None).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+
+    let mut events = handle.rx_event.write().await;
+    let denied = std::iter::from_fn(|| events.try_recv().ok()).find_map(|event| match event {
+        Event::ToolCallComplete { name, result, .. } if name == TOOL_SEARCH_NAME => Some(result),
+        _ => None,
+    });
+    let error = denied
+        .expect("denied synthetic tool completion")
+        .expect_err("denied synthetic tool must not execute");
+    assert!(
+        error.to_string().contains("disallowed-tools list"),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn empty_allowed_tools_surface_is_empty_and_sends_no_tools_field() {
+    let surface = policy_for_catalog(
+        vec![catalog_tool("read_file")],
+        Some(Vec::new()),
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+
+    assert!(surface.catalog.is_empty());
+    assert!(surface.active_names.is_empty());
+    assert!(surface.active.is_none());
+    assert!(!surface.allows_tool("read_file"));
 }
 
 /// The turn-start capture carries mode/workspace/working-set state only. Work
@@ -3376,6 +3507,25 @@ impl crate::core::model_client::ModelClient for BlockingModelClient {
     }
 }
 
+fn test_tool_surface(
+    engine: &Engine,
+    registry: crate::tools::ToolRegistry,
+    tools: Option<Vec<crate::models::Tool>>,
+    mode: AppMode,
+) -> ToolSurfacePolicy {
+    ToolSurfacePolicy::new(
+        registry,
+        tools,
+        mode,
+        &engine.config.tools_always_load,
+        &[],
+        engine.config.strict_tool_mode,
+        engine.config.allowed_tools.clone(),
+        engine.config.disallowed_tools.clone(),
+        engine.session.approval_mode,
+    )
+}
+
 #[tokio::test]
 async fn tool_request_snapshot_matches_the_exact_mock_request_payload() {
     use crate::llm_client::mock::{MockLlmClient, canned};
@@ -3392,18 +3542,10 @@ async fn tool_request_snapshot_matches_the_exact_mock_request_payload() {
     let mut registry = crate::tools::ToolRegistry::new(context);
     registry.register(std::sync::Arc::new(crate::tools::file::ReadFileTool));
     let tools = Some(registry.to_api_tools_with_cache(true));
+    let surface = test_tool_surface(&engine, registry, tools, AppMode::Agent);
     let mut turn = crate::core::turn::TurnContext::new(4);
 
-    let (status, error) = engine
-        .handle_deepseek_turn(
-            &mut turn,
-            Some(&registry),
-            tools,
-            AppMode::Agent,
-            Vec::new(),
-            None,
-        )
-        .await;
+    let (status, error) = engine.handle_deepseek_turn(&mut turn, surface, None).await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
 
     let request = mock.last_request().expect("mock request");
@@ -3444,10 +3586,11 @@ async fn snapshot_for_catalog(
         &Config::default(),
         client,
     );
+    let registry =
+        crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(workspace.to_path_buf()));
+    let surface = test_tool_surface(&engine, registry, catalog, AppMode::Agent);
     let mut turn = crate::core::turn::TurnContext::new(2);
-    let (status, error) = engine
-        .handle_deepseek_turn(&mut turn, None, catalog, AppMode::Agent, Vec::new(), None)
-        .await;
+    let (status, error) = engine.handle_deepseek_turn(&mut turn, surface, None).await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
     let mut events = handle.rx_event.write().await;
     std::iter::from_fn(|| events.try_recv().ok())
@@ -3507,18 +3650,10 @@ async fn request_snapshots_advance_to_the_latest_tool_step() {
     let mut registry = crate::tools::ToolRegistry::new(context);
     registry.register(std::sync::Arc::new(crate::tools::file::ReadFileTool));
     let tools = Some(registry.to_api_tools_with_cache(true));
+    let surface = test_tool_surface(&engine, registry, tools, AppMode::Agent);
     let mut turn = crate::core::turn::TurnContext::new(4);
 
-    let (status, error) = engine
-        .handle_deepseek_turn(
-            &mut turn,
-            Some(&registry),
-            tools,
-            AppMode::Agent,
-            Vec::new(),
-            None,
-        )
-        .await;
+    let (status, error) = engine.handle_deepseek_turn(&mut turn, surface, None).await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
     let mut events = handle.rx_event.write().await;
     let snapshots = std::iter::from_fn(|| events.try_recv().ok())
@@ -3576,17 +3711,11 @@ async fn request_snapshot_reports_registry_provenance_for_the_transmitted_catalo
         synthetic_names: synthetic_names.clone(),
         provider: engine.tool_surface_provider_receipt(),
     };
+    let policy = test_tool_surface(&engine, registry, tools, AppMode::Agent);
 
     let mut turn = crate::core::turn::TurnContext::new(4);
     let (status, error) = engine
-        .handle_deepseek_turn(
-            &mut turn,
-            Some(&registry),
-            tools,
-            AppMode::Agent,
-            Vec::new(),
-            Some(surface),
-        )
+        .handle_deepseek_turn(&mut turn, policy, Some(surface))
         .await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
 
@@ -3899,18 +4028,10 @@ async fn coalesced_raw_read_error_touches_working_set_once() {
         let mut registry = crate::tools::ToolRegistry::new(context);
         registry.register(std::sync::Arc::new(crate::tools::file::ReadFileTool));
         let tools = Some(registry.to_api_tools_with_cache(true));
+        let surface = test_tool_surface(&engine, registry, tools, AppMode::Agent);
         let mut turn = crate::core::turn::TurnContext::new(8);
 
-        let (status, error) = engine
-            .handle_deepseek_turn(
-                &mut turn,
-                Some(&registry),
-                tools,
-                AppMode::Agent,
-                Vec::new(),
-                None,
-            )
-            .await;
+        let (status, error) = engine.handle_deepseek_turn(&mut turn, surface, None).await;
 
         assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
         engine
@@ -5928,18 +6049,11 @@ async fn measure_production_mode_tool_catalogs() -> serde_json::Value {
                 "",
             )
             .await;
-        let plan = plan_turn_tools(
-            build.catalog,
-            mode,
-            &engine.config.tools_always_load,
-            &policy.dynamic_active_tools,
-            engine.config.strict_tool_mode,
-        );
-        let active = plan.active.unwrap_or_default();
+        let active = build.surface.active.clone().unwrap_or_default();
         mode_metrics.insert(
             mode_name.to_string(),
             serde_json::json!({
-                "full": tool_catalog_surface_metrics(&plan.catalog),
+                "full": tool_catalog_surface_metrics(&build.surface.catalog),
                 "active": tool_catalog_surface_metrics(&active),
             }),
         );
@@ -6670,16 +6784,22 @@ fn auto_review_hides_question_tool_while_other_postures_keep_it() {
         (ApprovalMode::Bypass, true),
         (ApprovalMode::Never, true),
     ] {
-        let mut catalog = vec![api_tool("read_file"), api_tool(REQUEST_USER_INPUT_NAME)];
-        filter_tool_catalog_for_permission_posture(&mut catalog, posture);
+        let surface = policy_for_catalog(
+            vec![api_tool("read_file"), api_tool(REQUEST_USER_INPUT_NAME)],
+            None,
+            None,
+            posture,
+        );
         assert_eq!(
-            catalog
+            surface
+                .catalog
                 .iter()
                 .any(|tool| tool.name == REQUEST_USER_INPUT_NAME),
             expected,
             "{posture:?}"
         );
-        assert!(catalog.iter().any(|tool| tool.name == "read_file"));
+        assert_eq!(surface.allows_questions(), expected, "{posture:?}");
+        assert!(surface.catalog.iter().any(|tool| tool.name == "read_file"));
     }
 }
 
@@ -6699,10 +6819,15 @@ fn legacy_yolo_auto_shape_keeps_question_tool_as_effective_full_access() {
         crate::tui::approval::ApprovalMode::Bypass
     );
 
-    let mut catalog = vec![api_tool("read_file"), api_tool(REQUEST_USER_INPUT_NAME)];
-    filter_tool_catalog_for_permission_posture(&mut catalog, authority.approval_mode_for_session());
+    let surface = policy_for_catalog(
+        vec![api_tool("read_file"), api_tool(REQUEST_USER_INPUT_NAME)],
+        None,
+        None,
+        authority.approval_mode_for_session(),
+    );
     assert!(
-        catalog
+        surface
+            .catalog
             .iter()
             .any(|tool| tool.name == REQUEST_USER_INPUT_NAME),
         "effective Full Access must keep the question tool"
