@@ -6818,6 +6818,7 @@ fn measure_unchanged_prompt_skill_discovery() -> (
     let codewhale_home = home.join(".codewhale");
     let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
 
+    crate::skills::clear_skill_discovery_cache();
     crate::skills::reset_discovery_metrics();
     let start = crate::skills::discovery_metrics_snapshot();
     let first_prompt = system_prompt_for_mode_with_context_skills_and_session(
@@ -6845,15 +6846,15 @@ fn measure_unchanged_prompt_skill_discovery() -> (
 }
 
 #[test]
-fn unchanged_prompt_skill_discovery_baseline_is_one_walk_per_turn() {
+fn unchanged_prompt_skill_discovery_baseline_caches_the_second_turn() {
     let (first, second, prompts_byte_identical) = measure_unchanged_prompt_skill_discovery();
-    let expected = crate::skills::SkillDiscoveryMetrics {
+    let first_expected = crate::skills::SkillDiscoveryMetrics {
         root_discovery_calls: 1,
         directories_visited: 1,
         skill_md_read_attempts: 1,
     };
-    assert_eq!(first, expected);
-    assert_eq!(second, expected);
+    assert_eq!(first, first_expected);
+    assert_eq!(second, crate::skills::SkillDiscoveryMetrics::default());
     assert!(prompts_byte_identical);
 }
 
