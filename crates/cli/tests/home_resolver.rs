@@ -6,7 +6,7 @@ use codewhale_config::{
     CODEWHALE_APP_DIR, CONFIG_FILE_NAME, LEGACY_APP_DIR, codewhale_home, default_config_path,
 };
 use codewhale_secrets::FileKeyringStore;
-use codewhale_state::{StateStore, default_state_db_path};
+use codewhale_state::StateStore;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -106,6 +106,8 @@ fn whitespace_override_uses_home_before_userprofile_and_allows_legacy_fallback()
 #[test]
 fn non_unicode_override_is_one_explicit_isolation_boundary() {
     use std::os::unix::ffi::OsStringExt;
+
+    use codewhale_state::default_state_db_path;
 
     let tmp = tempfile::tempdir().expect("temporary root");
     let home = tmp.path().join("home");
