@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `codewhale account login`, `status`, `logout`, and `keys` connect a CLI
+  profile to the managed Codewhale account through the browser device flow.
+  Sessions use the OS credential manager, remote BYOK values are never printed,
+  and `codewhale cloud ...` remains a compatibility alias. Provider-facing
+  `codewhale auth` and the legacy local `codewhale login` keep their existing
+  behavior.
+
 ## [0.9.3] - 2026-07-31
 
 This is the Codewhale v0.9.3 source candidate. It is not a published release

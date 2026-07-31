@@ -310,6 +310,15 @@ the legacy `codewhale login --api-key ...` alias) saves the key to
 launch when needed), and `codewhale --model deepseek-v4-flash` is forwarded to
 the TUI as `DEEPSEEK_MODEL`.
 
+That provider credential is distinct from the optional managed-product
+account. `codewhale account login` starts the Codewhale browser device flow;
+`codewhale account status` and `codewhale account logout` inspect or remove the
+session for the selected `--profile`. Account sessions are stored in the OS
+credential manager. A file-backed session store exists only as an explicit
+development fallback. `codewhale account keys list|set|remove` manages the
+signed-in account's BYOK vault without displaying secret values. The older
+`codewhale cloud ...` spelling remains a command alias.
+
 Credential lookup uses `config -> keyring -> env` after any explicit CLI
 `--api-key`. Run `codewhale auth status` to inspect the active provider's config
 file, OS keyring backend, environment variable, winning source, and last-four

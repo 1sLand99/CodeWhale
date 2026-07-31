@@ -1,5 +1,6 @@
 #![allow(clippy::uninlined_format_args)]
 
+mod cloud;
 mod credential_handoff;
 mod metrics;
 #[cfg(not(target_env = "ohos"))]
@@ -357,6 +358,9 @@ New integrations should prefer `codewhale app-server`.")]
     Logout,
     /// Manage authentication credentials and provider mode.
     Auth(AuthArgs),
+    /// Sign in to your Codewhale account and manage account-scoped provider keys.
+    #[command(visible_alias = "cloud")]
+    Account(cloud::CloudArgs),
     /// Run MCP server mode over stdio.
     McpServer,
     /// Read/write/list config values.
@@ -1818,6 +1822,10 @@ fn run() -> Result<()> {
             }
             command => run_auth_command_with_runtime(&mut store, command, &runtime_overrides),
         },
+        Some(Commands::Account(args)) => {
+            cloud::reject_inline_api_key(cli.api_key.as_deref())?;
+            cloud::run(args, cli.profile.as_deref(), &store)
+        }
         Some(Commands::McpServer) => run_mcp_server_command(&mut store),
         Some(Commands::Config(args)) => run_config_command(&mut store, args.command),
         Some(Commands::Model(args)) => {

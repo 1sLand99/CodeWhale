@@ -32,6 +32,7 @@ codewhale-release = { path = "../release", version = "0.9.3" }
 codewhale-secrets = { path = "../secrets", version = "0.9.3" }
 codewhale-state = { path = "../state", version = "0.9.3" }
 chrono.workspace = true
+console = "0.16.3"
 dirs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -43,6 +44,7 @@ mimalloc.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 tracing.workspace = true
+webbrowser = "1.0"
 zeroize = "1.8.2"
 
 [build-dependencies]
