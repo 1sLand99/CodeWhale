@@ -57,9 +57,9 @@ stewardship.
 | Role          | Stance                                 | Writes? | Shell posture | Typical use                                  |
 |---------------|----------------------------------------|---------|---------------|----------------------------------------------|
 | `worker`      | flexible; do whatever the parent says  | yes     | yes           | the default; multi-step tasks                |
-| `scout`       | read-only; map the relevant code fast  | no      | read-only     | "find every call site of `Foo`"              |
+| `scout`       | read-only; map the relevant code fast  | no      | recon (net + bounded verify) | "find every call site of `Foo`; check the PR with gh" |
 | `planner`     | analyse and produce a strategy         | minimal | minimal       | "design the migration; don't execute"        |
-| `reviewer`    | read-and-grade with severity scores    | no      | read-only     | "audit this PR for bugs"                     |
+| `reviewer`    | read-and-grade with severity scores    | no      | recon (net + bounded verify) | "audit this PR for bugs"                     |
 | `builder`     | land a specific change with min edit   | yes     | yes           | "rewrite `bar.rs::Foo::bar` to do X"         |
 | `verifier`    | run tests / validation, report outcome | no      | test-focused  | "run cargo test --workspace, report"         |
 | `consultant`  | short-lived, high-reasoning counsel     | no      | none          | "what are we missing in this design?"        |
@@ -162,7 +162,9 @@ STOP_CONDITION:
 OUTPUT: VERDICT, EVIDENCE, GAPS, NEXT
 ```
 
-`scout` briefs default to quick, read-only investigation. About 3-5 tool calls
+`scout` briefs default to quick, read-only investigation (no writes, but
+network reach and the bounded verification surface are available for real
+recon). About 3-5 tool calls
 is enough for quick exploration: orient, search, read the decisive lines, and
 return. Do not repeat `ALREADY_KNOWN` work unless evidence contradicts it. Review
 and verifier briefs can spend more calls, but should stop after decisive
