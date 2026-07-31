@@ -51,9 +51,9 @@
       "skill_md_read_attempts": 1
     },
     "second_delta": {
-      "directories_visited": 1,
-      "root_discovery_calls": 1,
-      "skill_md_read_attempts": 1
+      "directories_visited": 0,
+      "root_discovery_calls": 0,
+      "skill_md_read_attempts": 0
     }
   },
   "system_prompt": {
