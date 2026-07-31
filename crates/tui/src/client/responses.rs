@@ -348,6 +348,28 @@ impl DeepSeekClient {
                                             current_block_index =
                                                 Some(content_block_counter - 1);
                                         }
+                                        // DeepSeek can run server-side web
+                                        // search on this route, but Codewhale
+                                        // does not yet replay `web_search_call`
+                                        // items or their citations (the
+                                        // offering keeps
+                                        // `server_side_web_search: Unknown`).
+                                        // Surface a visible notice instead of
+                                        // dropping the item silently so the
+                                        // user is not handed an ungrounded
+                                        // answer with no explanation.
+                                        "web_search_call" => {
+                                            content_block_counter += 1;
+                                            yield Ok(StreamEvent::ContentBlockStart {
+                                                index: content_block_counter - 1,
+                                                content_block:
+                                                    ContentBlockStart::Text {
+                                                        text: "[Web search ran server-side; results are not replayed on this route.]".to_string(),
+                                                    },
+                                            });
+                                            current_block_index =
+                                                Some(content_block_counter - 1);
+                                        }
                                         _ => {}
                                     }
                                 }
@@ -1157,6 +1179,61 @@ mod tests {
         .await
         .expect("terminal event ends the stream without [DONE]");
         assert!(saw_stop);
+    }
+
+    #[tokio::test]
+    async fn responses_stream_surfaces_notice_for_web_search_call_items() {
+        let server = MockServer::start().await;
+        let sse_body = concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"call_id\":\"call_1\"}}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"web_search_call\",\"id\":\"ws_1\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n\n",
+        );
+        Mock::given(method("POST"))
+            .and(path(CODEX_RESPONSES_PATH))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .mount(&server)
+            .await;
+
+        let client = {
+            let _env_lock = crate::test_support::lock_test_env();
+            let _codex_token =
+                crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
+            let _legacy_codex_token =
+                crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
+            DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        };
+        let mut stream = client
+            .handle_responses_stream(
+                &client
+                    .prepare_outbound_request(minimal_responses_request(), true)
+                    .expect("responses request prepares"),
+            )
+            .await
+            .expect("semantic Responses stream opens");
+
+        let mut saw_notice = false;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(event) = stream.next().await {
+                if let Ok(StreamEvent::ContentBlockStart {
+                    content_block: ContentBlockStart::Text { text },
+                    ..
+                }) = event
+                {
+                    if text.contains("not replayed") {
+                        saw_notice = true;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("stream terminates");
+        assert!(saw_notice, "web_search_call must surface a visible notice");
     }
 
     #[tokio::test]
