@@ -6249,11 +6249,18 @@ fn normalize_representative_prompt(text: &str, workspace: &Path, home: &Path) ->
     });
     replacements.dedup_by(|(left, _), (right, _)| left == right);
 
-    replacements
-        .into_iter()
-        .fold(text.to_string(), |normalized, (path, replacement)| {
-            normalized.replace(path.to_string_lossy().as_ref(), replacement)
-        })
+    let normalized =
+        replacements
+            .into_iter()
+            .fold(text.to_string(), |normalized, (path, replacement)| {
+                normalized.replace(path.to_string_lossy().as_ref(), replacement)
+            });
+    // The environment block truthfully reports the host OS per render; the
+    // contract tracks content stability modulo host facts, so pin it here.
+    normalized.replace(
+        &format!("- platform: {}", std::env::consts::OS),
+        "- platform: <PLATFORM>",
+    )
 }
 
 fn representative_stage(
