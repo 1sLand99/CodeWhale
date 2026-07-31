@@ -472,3 +472,142 @@ fn frame_stats_never_overwrite_text() {
         }
     }
 }
+
+fn full_jellyfish_frame(x: u16, y: u16) -> FrameMarks {
+    let mark = |x, y, glyph, depth| AmbientMark {
+        x,
+        y,
+        glyph,
+        jellyfish: Some(0),
+        depth,
+        style_mod: None,
+        brightness: None,
+    };
+    FrameMarks {
+        marks: vec![
+            mark(x, y, JELLY_DOME_TOP_FRAMES[0], Depth::Midground),
+            mark(x, y + 1, JELLY_DOME_SKIRT_FRAMES[0], Depth::Midground),
+            mark(x + 1, y + 2, "|", Depth::Background),
+            mark(x + 2, y + 2, "/", Depth::Background),
+            mark(x + 3, y + 2, "\\", Depth::Background),
+        ],
+    }
+}
+
+fn paint_fixture(
+    area: Rect,
+    lines: &[Line<'static>],
+    frame: &FrameMarks,
+) -> (Buffer, AmbientFrameStats) {
+    let mut buf = Buffer::empty(area);
+    for (row, line) in lines.iter().enumerate() {
+        buf.set_line(area.x, area.y + row as u16, line, area.width);
+    }
+    let mut stats = AmbientFrameStats {
+        marks_built: frame.marks.len() as u32,
+        ..AmbientFrameStats::default()
+    };
+    paint_marks(
+        area,
+        &mut buf,
+        (Color::Cyan, Color::Blue),
+        lines,
+        frame,
+        &mut stats,
+    );
+    (buf, stats)
+}
+
+#[test]
+fn jellyfish_relocates_as_one_nearest_silhouette() {
+    let area = Rect::new(0, 0, 24, 8);
+    let mut lines = vec![Line::default(); usize::from(area.height)];
+    lines[2] = Line::from(Span::raw("          X"));
+    let (buf, stats) = paint_fixture(area, &lines, &full_jellyfish_frame(10, 2));
+
+    assert_eq!(buf[(10, 2)].symbol(), "X");
+    assert_eq!(buf[(12, 2)].symbol(), ".");
+    assert_eq!(buf[(12, 3)].symbol(), "\\");
+    assert_eq!(buf[(13, 4)].symbol(), "|");
+    assert_eq!(buf[(14, 4)].symbol(), "/");
+    assert_eq!(buf[(15, 4)].symbol(), "\\");
+    assert_eq!(stats.marks_painted, 5);
+    assert_eq!(stats.marks_skipped_text, 0);
+    assert_eq!(stats.marks_clipped, 0);
+    assert_eq!(stats.cells_written, 13);
+}
+
+#[test]
+fn jellyfish_uses_the_nearest_protected_edge_at_x33() {
+    let area = Rect::new(0, 0, 100, 8);
+    let mut lines = vec![Line::default(); usize::from(area.height)];
+    lines[2] = Line::from(Span::raw("X".repeat(32)));
+    let (buf, stats) = paint_fixture(area, &lines, &full_jellyfish_frame(16, 2));
+
+    assert_eq!(buf[(31, 2)].symbol(), "X");
+    assert_eq!(buf[(32, 2)].symbol(), " ");
+    assert_eq!(buf[(33, 2)].symbol(), ".");
+    assert_eq!(buf[(33, 3)].symbol(), "\\");
+    assert_eq!(buf[(34, 4)].symbol(), "|");
+    assert_eq!(stats.marks_painted, 5);
+    assert_eq!(stats.marks_skipped_text, 0);
+    assert_eq!(stats.marks_clipped, 0);
+}
+
+#[test]
+fn sparse_jellyfish_row_keeps_a_safe_gap_over_text() {
+    let area = Rect::new(0, 0, 12, 6);
+    let mut lines = vec![Line::default(); usize::from(area.height)];
+    lines[2] = Line::from(Span::raw("   X"));
+    let mark = |x| AmbientMark {
+        x,
+        y: 2,
+        glyph: "|",
+        jellyfish: Some(0),
+        depth: Depth::Background,
+        style_mod: None,
+        brightness: None,
+    };
+    let frame = FrameMarks {
+        marks: vec![mark(0), mark(6)],
+    };
+    let (buf, stats) = paint_fixture(area, &lines, &frame);
+
+    assert_eq!(buf[(0, 2)].symbol(), "|");
+    assert_eq!(buf[(3, 2)].symbol(), "X");
+    assert_eq!(buf[(6, 2)].symbol(), "|");
+    assert_eq!(stats.marks_painted, 2);
+}
+
+#[test]
+fn fully_blocked_jellyfish_is_suppressed_and_accounted() {
+    let area = Rect::new(0, 0, 24, 8);
+    let mut lines = vec![Line::default(); usize::from(area.height)];
+    for line in lines.iter_mut().take(5).skip(2) {
+        *line = Line::from(Span::raw("X".repeat(24)));
+    }
+    let (buf, stats) = paint_fixture(area, &lines, &full_jellyfish_frame(10, 2));
+
+    assert_eq!(stats.marks_painted, 0);
+    assert_eq!(stats.marks_skipped_text, 5);
+    assert_eq!(stats.marks_clipped, 0);
+    assert_eq!(stats.cells_written, 0);
+    assert_eq!(stats.marks_built, stats.marks_skipped_text);
+    for row in 2..=4 {
+        for column in 0..area.width {
+            assert_eq!(buf[(column, row)].symbol(), "X");
+        }
+    }
+}
+
+#[test]
+fn too_wide_jellyfish_is_truthfully_clipped_as_a_group() {
+    let area = Rect::new(0, 0, 4, 8);
+    let lines = vec![Line::default(); usize::from(area.height)];
+    let (_, stats) = paint_fixture(area, &lines, &full_jellyfish_frame(0, 2));
+
+    assert_eq!(stats.marks_painted, 0);
+    assert_eq!(stats.marks_skipped_text, 0);
+    assert_eq!(stats.marks_clipped, 5);
+    assert_eq!(stats.marks_built, stats.marks_clipped);
+}

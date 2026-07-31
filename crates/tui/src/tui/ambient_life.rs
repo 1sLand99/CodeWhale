@@ -128,9 +128,8 @@ struct AmbientMark {
     x: u16,
     y: u16,
     glyph: &'static str,
-    /// Multi-row creature identity. When any part would clip or collide with
-    /// transcript text, every part is withheld for that frame so a jellyfish
-    /// never degrades into a detached dome or punctuation-like tentacles.
+    /// Multi-row creature identity. Every part relocates or is withheld as one
+    /// unit so a jellyfish never degrades into a detached dome or tentacles.
     jellyfish: Option<usize>,
     depth: Depth,
     style_mod: Option<Modifier>,
@@ -654,65 +653,176 @@ fn paint_marks(
         Clipped,
     }
 
-    // Jellyfish are multi-mark silhouettes. Preflight every part and apply a
-    // single decision to the group; otherwise a collision on only the
-    // tentacle row leaves a floating dome behind. Density is construction-
-    // bounded to at most two jellies per frame.
-    let mut jellyfish_skip: [Option<SkipReason>; 2] = [None, None];
-    for mark in frame.marks.iter().filter(|mark| mark.jellyfish.is_some()) {
-        let Some(slot) = mark
-            .jellyfish
-            .and_then(|index| jellyfish_skip.get_mut(index))
-        else {
+    #[derive(Clone, Copy)]
+    enum Placement {
+        Anchor { original: u16, placed: u16 },
+        Skip(SkipReason),
+    }
+    #[derive(Clone, Copy)]
+    struct RowBounds {
+        y: u16,
+        protected: Option<(usize, usize)>,
+    }
+
+    let mut placements: [Option<Placement>; 2] = [None, None];
+    let population_overflow = frame
+        .marks
+        .iter()
+        .filter_map(|mark| mark.jellyfish)
+        .any(|jellyfish| jellyfish >= placements.len());
+    debug_assert!(
+        !population_overflow,
+        "jellyfish population exceeded its bound"
+    );
+    for (jellyfish, placement) in placements.iter_mut().enumerate() {
+        let marks = || {
+            frame
+                .marks
+                .iter()
+                .filter(move |mark| mark.jellyfish == Some(jellyfish))
+        };
+        let Some(original) = marks().map(|mark| mark.x).min() else {
             continue;
         };
-        let mark_width = UnicodeWidthStr::width(mark.glyph);
-        if mark.x.saturating_add(mark_width as u16) > area.width {
-            *slot = Some(SkipReason::Clipped);
+        let mut rows: [Option<RowBounds>; MAX_FRAME_MARKS as usize] =
+            [None; MAX_FRAME_MARKS as usize];
+        let mut row_count = 0usize;
+        let mut row_overflow = false;
+        let mut group_end = 0u16;
+        for mark in marks() {
+            let offset = mark.x.saturating_sub(original);
+            let width = u16::try_from(UnicodeWidthStr::width(mark.glyph)).unwrap_or(u16::MAX);
+            group_end = group_end.max(offset.saturating_add(width));
+            if rows[..row_count]
+                .iter()
+                .flatten()
+                .all(|row| row.y != mark.y)
+            {
+                if row_count == rows.len() {
+                    debug_assert!(
+                        row_count < rows.len(),
+                        "jellyfish rows exceeded the ambient mark budget"
+                    );
+                    row_overflow = true;
+                    break;
+                }
+                rows[row_count] = Some(RowBounds {
+                    y: mark.y,
+                    protected: lines
+                        .get(usize::from(mark.y))
+                        .and_then(occupied_text_bounds),
+                });
+                row_count += 1;
+            }
+        }
+        if row_overflow {
+            *placement = Some(Placement::Skip(SkipReason::Clipped));
             continue;
         }
-        let protected = lines
-            .get(usize::from(mark.y))
-            .and_then(occupied_text_bounds);
-        let collides = protected.is_some_and(|(start, end)| {
-            usize::from(mark.x) < end.saturating_add(1)
-                && usize::from(mark.x) + mark_width > start.saturating_sub(1)
-        });
-        if collides && !matches!(slot, Some(SkipReason::Clipped)) {
-            *slot = Some(SkipReason::Text);
+        let Some(right_edge) = area.width.checked_sub(group_end) else {
+            *placement = Some(Placement::Skip(SkipReason::Clipped));
+            continue;
+        };
+
+        let mut best: Option<(u16, u16)> = None;
+        let mut consider = |candidate: i64| {
+            let Ok(candidate) = u16::try_from(candidate) else {
+                return;
+            };
+            let fits = candidate <= right_edge
+                && marks().all(|mark| {
+                    let x = candidate.saturating_add(mark.x.saturating_sub(original));
+                    let width = UnicodeWidthStr::width(mark.glyph);
+                    !rows[..row_count]
+                        .iter()
+                        .flatten()
+                        .find(|row| row.y == mark.y)
+                        .and_then(|row| row.protected)
+                        .is_some_and(|(start, end)| {
+                            usize::from(x) < end.saturating_add(1)
+                                && usize::from(x) + width > start.saturating_sub(1)
+                        })
+                });
+            if fits {
+                let ranked = (candidate.abs_diff(original), candidate);
+                if best.is_none_or(|current| ranked < current) {
+                    best = Some(ranked);
+                }
+            }
+        };
+        consider(i64::from(original));
+        consider(0);
+        consider(i64::from(right_edge));
+        for mark in marks() {
+            let Some((start, end)) = rows[..row_count]
+                .iter()
+                .flatten()
+                .find(|row| row.y == mark.y)
+                .and_then(|row| row.protected)
+            else {
+                continue;
+            };
+            let offset = mark.x.saturating_sub(original);
+            let mark_end = offset.saturating_add(
+                u16::try_from(UnicodeWidthStr::width(mark.glyph)).unwrap_or(u16::MAX),
+            );
+            if let Ok(start) = i64::try_from(start) {
+                consider(start - 1 - i64::from(mark_end));
+            }
+            if let Ok(end) = i64::try_from(end) {
+                consider(end + 1 - i64::from(offset));
+            }
         }
+        *placement = Some(match best {
+            Some((_, placed)) => Placement::Anchor { original, placed },
+            None => Placement::Skip(SkipReason::Text),
+        });
     }
 
     for mark in &frame.marks {
-        if let Some(reason) = mark
+        let mark_placement = mark
             .jellyfish
-            .and_then(|index| jellyfish_skip.get(index))
-            .copied()
-            .flatten()
-        {
-            match reason {
-                SkipReason::Text => stats.marks_skipped_text += 1,
-                SkipReason::Clipped => stats.marks_clipped += 1,
+            .map(|index| placements.get(index).copied().flatten());
+        let (mark_x, preflighted) = match mark_placement {
+            Some(None) => {
+                stats.marks_clipped += 1;
+                continue;
             }
-            continue;
-        }
-        let mark_width = UnicodeWidthStr::width(mark.glyph);
-        // Clipped is checked before text collision so a mark that fails
-        // both is charged to the bound it could never satisfy.
-        if mark.x.saturating_add(mark_width as u16) > area.width {
-            stats.marks_clipped += 1;
-            continue;
-        }
-        let protected = lines
-            .get(usize::from(mark.y))
-            .and_then(occupied_text_bounds);
-        let collides = protected.is_some_and(|(start, end)| {
-            usize::from(mark.x) < end.saturating_add(1)
-                && usize::from(mark.x) + mark_width > start.saturating_sub(1)
-        });
-        if collides {
-            stats.marks_skipped_text += 1;
-            continue;
+            Some(Some(Placement::Anchor { original, placed })) => (
+                placed
+                    .checked_add(mark.x.saturating_sub(original))
+                    .expect("preflight accepted a clipped jellyfish"),
+                true,
+            ),
+            Some(Some(Placement::Skip(SkipReason::Text))) => {
+                stats.marks_skipped_text += 1;
+                continue;
+            }
+            Some(Some(Placement::Skip(SkipReason::Clipped))) => {
+                stats.marks_clipped += 1;
+                continue;
+            }
+            None => (mark.x, false),
+        };
+        if !preflighted {
+            let mark_width = UnicodeWidthStr::width(mark.glyph);
+            // Clipped is checked before text collision so a mark that fails
+            // both is charged to the bound it could never satisfy.
+            if mark_x.saturating_add(mark_width as u16) > area.width {
+                stats.marks_clipped += 1;
+                continue;
+            }
+            let protected = lines
+                .get(usize::from(mark.y))
+                .and_then(occupied_text_bounds);
+            let collides = protected.is_some_and(|(start, end)| {
+                usize::from(mark_x) < end.saturating_add(1)
+                    && usize::from(mark_x) + mark_width > start.saturating_sub(1)
+            });
+            if collides {
+                stats.marks_skipped_text += 1;
+                continue;
+            }
         }
         stats.marks_painted += 1;
         let ink = if mark.depth.ink_index() == 1 {
@@ -721,7 +831,7 @@ fn paint_marks(
             inks.0
         };
         for (offset, ch) in mark.glyph.chars().enumerate() {
-            let cell = &mut buf[(area.x + mark.x + offset as u16, area.y + mark.y)];
+            let cell = &mut buf[(area.x + mark_x + offset as u16, area.y + mark.y)];
             // Glow language: lerp the mark's ink up from the water the cell
             // already sits in, at the entity's time-varying brightness.
             let fg = match (mark.brightness, cell.style().bg) {
