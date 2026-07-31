@@ -146,7 +146,6 @@
     "ConfigLabelAutoCompact": "Padatkan otomatis",
     "ConfigLabelAutoCompactThreshold": "Ambang pemadatan",
     "ConfigLabelMaxHistory": "Riwayat input",
-    "ConfigLabelPreferExternalPdftotext": "Pengekstrak teks PDF",
     "ConfigLabelMcpConfigPath": "Jalur konfig MCP",
     "ConfigLabelFleetSpawnDepth": "Kedalaman rekursi Fleet",
     "ConfigLabelGoalCommand": "Perintah tujuan",

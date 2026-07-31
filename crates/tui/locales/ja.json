@@ -148,7 +148,6 @@
     "ConfigLabelAutoCompact": "自動コンパクト",
     "ConfigLabelAutoCompactThreshold": "コンパクトしきい値",
     "ConfigLabelMaxHistory": "入力履歴",
-    "ConfigLabelPreferExternalPdftotext": "PDF テキスト抽出器",
     "ConfigLabelMcpConfigPath": "MCP 設定パス",
     "ConfigLabelFleetSpawnDepth": "Fleet 再帰深度",
     "ConfigLabelGoalCommand": "目標コマンド",

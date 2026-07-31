@@ -146,7 +146,6 @@
     "ConfigLabelAutoCompact": "ऑटो कॉम्पैक्ट",
     "ConfigLabelAutoCompactThreshold": "कॉम्पैक्ट सीमा",
     "ConfigLabelMaxHistory": "इनपुट इतिहास",
-    "ConfigLabelPreferExternalPdftotext": "PDF टेक्स्ट एक्सट्रैक्टर",
     "ConfigLabelMcpConfigPath": "MCP कॉन्फ़िग पथ",
     "ConfigLabelFleetSpawnDepth": "Fleet पुनरावृत्ति गहराई",
     "ConfigLabelGoalCommand": "गोल कमांड",

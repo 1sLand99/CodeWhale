@@ -146,7 +146,6 @@
     "ConfigLabelAutoCompact": "Auto-Komprimierung",
     "ConfigLabelAutoCompactThreshold": "Komprimierungs-Schwelle",
     "ConfigLabelMaxHistory": "Eingabeverlauf",
-    "ConfigLabelPreferExternalPdftotext": "PDF-Textextraktor",
     "ConfigLabelMcpConfigPath": "MCP-Konfigpfad",
     "ConfigLabelFleetSpawnDepth": "Fleet-Rekursionstiefe",
     "ConfigLabelGoalCommand": "Goal-Befehl",

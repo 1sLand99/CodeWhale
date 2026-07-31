@@ -148,7 +148,6 @@
     "ConfigLabelAutoCompact": "Tự động thu gọn",
     "ConfigLabelAutoCompactThreshold": "Ngưỡng thu gọn",
     "ConfigLabelMaxHistory": "Lịch sử nhập",
-    "ConfigLabelPreferExternalPdftotext": "Trình trích xuất văn bản PDF",
     "ConfigLabelMcpConfigPath": "Đường dẫn cấu hình MCP",
     "ConfigLabelFleetSpawnDepth": "Độ sâu đệ quy Fleet",
     "ConfigLabelGoalCommand": "Lệnh mục tiêu",

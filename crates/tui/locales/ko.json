@@ -148,7 +148,6 @@
     "ConfigLabelAutoCompact": "자동 압축",
     "ConfigLabelAutoCompactThreshold": "압축 임계값",
     "ConfigLabelMaxHistory": "입력 기록",
-    "ConfigLabelPreferExternalPdftotext": "PDF 텍스트 추출기",
     "ConfigLabelMcpConfigPath": "MCP 설정 경로",
     "ConfigLabelFleetSpawnDepth": "Fleet 재귀 깊이",
     "ConfigLabelGoalCommand": "목표 명령",

@@ -148,7 +148,6 @@
     "ConfigLabelAutoCompact": "自动压缩",
     "ConfigLabelAutoCompactThreshold": "压缩阈值",
     "ConfigLabelMaxHistory": "输入历史",
-    "ConfigLabelPreferExternalPdftotext": "PDF 文本提取器",
     "ConfigLabelMcpConfigPath": "MCP 配置路径",
     "ConfigLabelFleetSpawnDepth": "Fleet 递归深度",
     "ConfigLabelGoalCommand": "目标命令",

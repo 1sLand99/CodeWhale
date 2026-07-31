@@ -97,7 +97,7 @@ impl ToolSpec for ReadFileTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read a UTF-8 file from the workspace. Use this instead of `cat`, `head`, `tail`, or `sed -n '..p'` in `exec_shell` — it's faster, sandbox-aware, and skips the approval prompt. Plain text is returned as-is and records the file snapshot required before `edit_file` will make a narrow in-place edit. CodeWhale config files and file-backed credential stores cannot be read with this tool; use `codewhale config list` or `codewhale auth status` for safe inspection. PDFs are auto-extracted via the bundled pure-Rust extractor (no Poppler install required). Image screenshots are OCR-extracted when local OCR is available. Cannot read other non-PDF binaries.\n\nFor large files, use `start_line` and `max_lines` to read in chunks. By default, returns at most 200 lines (~16KB). If `truncated=\"true\"` in the response, use `next_start_line` to continue reading. For PDFs, use `pages` instead — `start_line`/`max_lines` only apply to text files."
+        "Read a UTF-8 file from the workspace. Use this instead of `cat`, `head`, `tail`, or `sed -n '..p'` in `exec_shell` — it's faster, sandbox-aware, and skips the approval prompt. Plain text is returned as-is and records the file snapshot required before `edit_file` will make a narrow in-place edit. CodeWhale config files and file-backed credential stores cannot be read with this tool; use `codewhale config list` or `codewhale auth status` for safe inspection. PDFs are text-extracted when the optional `pdftotext` executable (Poppler) is installed. Image screenshots are OCR-extracted when local OCR is available. Cannot read other non-PDF binaries.\n\nFor large files, use `start_line` and `max_lines` to read in chunks. By default, returns at most 200 lines (~16KB). If `truncated=\"true\"` in the response, use `next_start_line` to continue reading. For PDFs, use `pages` instead — `start_line`/`max_lines` only apply to text files."
     }
 
     fn input_schema(&self) -> Value {
@@ -144,7 +144,7 @@ impl ToolSpec for ReadFileTool {
         let pages = optional_str(&input, "pages");
 
         if is_pdf(&file_path)? {
-            return read_pdf(&file_path, pages);
+            return read_pdf(&file_path, pages, context.cancel_token.as_ref()).await;
         }
         if is_image_for_ocr(&file_path) {
             return read_image_via_ocr(&file_path, path_str);
@@ -497,7 +497,11 @@ fn clean_pdf_text(raw: &str) -> String {
     }
 }
 
-fn read_pdf(path: &Path, pages: Option<&str>) -> Result<ToolResult, ToolError> {
+async fn read_pdf(
+    path: &Path,
+    pages: Option<&str>,
+    cancel: Option<&CancellationToken>,
+) -> Result<ToolResult, ToolError> {
     // Validate the `pages` spec once, up front, so both extractor paths
     // surface the same error shape on bad input.
     let page_range = match pages {
@@ -512,31 +516,25 @@ fn read_pdf(path: &Path, pages: Option<&str>) -> Result<ToolResult, ToolError> {
         None => None,
     };
 
-    read_pdf_via_pdftotext(path, page_range)
+    read_pdf_via_pdftotext(path, page_range, cancel).await
 }
 
-fn read_pdf_via_pdftotext(
+async fn read_pdf_via_pdftotext(
     path: &Path,
     page_range: Option<(u32, u32)>,
+    cancel: Option<&CancellationToken>,
 ) -> Result<ToolResult, ToolError> {
-    let text = match super::pdf::extract_path(path, page_range) {
-        Ok(text) => text,
-        Err(super::pdf::PdfTextError::BinaryUnavailable) => {
-            return ToolResult::json(&json!({
-                "type": "binary_unavailable",
-                "path": path.display().to_string(),
-                "kind": "pdf",
-                "reason": "optional pdftotext executable is not installed",
-                "hint": "install Poppler (macOS: `brew install poppler`; Debian/Ubuntu: `apt install poppler-utils`)"
-            }))
-            .map_err(|e| {
-                ToolError::execution_failed(format!("failed to serialize response: {e}"))
-            });
-        }
-        Err(error) => {
-            return Err(ToolError::execution_failed(error.to_string()));
-        }
-    };
+    read_pdf_with_command(path, page_range, super::pdf::PdfTextCommand::system(cancel)).await
+}
+
+async fn read_pdf_with_command(
+    path: &Path,
+    page_range: Option<(u32, u32)>,
+    command: super::pdf::PdfTextCommand<'_>,
+) -> Result<ToolResult, ToolError> {
+    let text = super::pdf::extract_path(path, page_range, command)
+        .await
+        .map_err(super::pdf::into_tool_error)?;
     Ok(ToolResult::success(clean_pdf_text(&text)))
 }
 
@@ -1835,6 +1833,37 @@ mod tests {
         assert!(
             result.content.contains("Recursive Language Models"),
             "page-1 extraction must surface the title"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_file_missing_pdftotext_is_a_failed_typed_outcome() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let missing = temporary.path().join("definitely-not-pdftotext");
+        let input = temporary.path().join("input.pdf");
+        std::fs::write(&input, b"%PDF-1.7\n%%EOF").expect("fixture");
+
+        let error = read_pdf_with_command(
+            &input,
+            None,
+            super::super::pdf::PdfTextCommand::test(
+                missing.as_os_str(),
+                Duration::from_secs(1),
+                None,
+            ),
+        )
+        .await
+        .expect_err("missing helper must fail the tool call");
+        let payload = match &error {
+            ToolError::NotAvailable { message } => {
+                serde_json::from_str::<Value>(message).expect("structured unavailable payload")
+            }
+            other => panic!("unexpected error: {other:?}"),
+        };
+        assert_eq!(payload["type"], "binary_unavailable");
+        assert_eq!(
+            crate::tools::spec::ToolExecutionOutcome::from_legacy(Err(error)).status,
+            crate::tools::spec::ToolTerminalStatus::Failed
         );
     }
 

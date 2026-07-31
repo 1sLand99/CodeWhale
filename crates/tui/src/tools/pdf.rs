@@ -8,11 +8,25 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+use std::time::Duration;
+
+use serde_json::json;
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio_util::sync::CancellationToken;
+
+use super::spec::ToolError;
+
+const PDF_TEXT_TIMEOUT: Duration = Duration::from_secs(30);
+const PDF_PIPE_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_PDF_STDOUT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_PDF_STDERR_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum PdfTextError {
     BinaryUnavailable,
+    Cancelled,
+    TimedOut,
     Execution(String),
 }
 
@@ -22,23 +36,84 @@ impl fmt::Display for PdfTextError {
             Self::BinaryUnavailable => formatter.write_str(
                 "PDF text extraction requires the optional `pdftotext` executable (Poppler)",
             ),
+            Self::Cancelled => formatter.write_str("PDF text extraction was cancelled"),
+            Self::TimedOut => write!(
+                formatter,
+                "PDF text extraction timed out after {} seconds",
+                PDF_TEXT_TIMEOUT.as_secs()
+            ),
             Self::Execution(message) => formatter.write_str(message),
         }
     }
 }
 
-pub(super) fn extract_path(
+/// One typed mapping shared by local-file and fetched-PDF consumers.
+///
+/// The missing-binary message is deliberately a small JSON object. The
+/// `NotAvailable` variant gives the runtime a failed terminal status while
+/// callers that inspect the variant retain machine-readable recovery data.
+pub(super) fn into_tool_error(error: PdfTextError) -> ToolError {
+    match error {
+        PdfTextError::BinaryUnavailable => ToolError::not_available(
+            json!({
+                "type": "binary_unavailable",
+                "kind": "pdf",
+                "binary": "pdftotext",
+                "reason": "optional pdftotext executable is not installed",
+                "hint": "install Poppler and ensure pdftotext is on PATH"
+            })
+            .to_string(),
+        ),
+        PdfTextError::Cancelled => ToolError::cancelled("PDF text extraction was cancelled"),
+        PdfTextError::TimedOut => ToolError::Timeout {
+            seconds: PDF_TEXT_TIMEOUT.as_secs(),
+        },
+        PdfTextError::Execution(message) => ToolError::execution_failed(message),
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct PdfTextCommand<'a> {
+    binary: &'a OsStr,
+    timeout: Duration,
+    cancel: Option<&'a CancellationToken>,
+}
+
+impl<'a> PdfTextCommand<'a> {
+    pub(super) fn system(cancel: Option<&'a CancellationToken>) -> Self {
+        Self {
+            binary: OsStr::new("pdftotext"),
+            timeout: PDF_TEXT_TIMEOUT,
+            cancel,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn test(
+        binary: &'a OsStr,
+        timeout: Duration,
+        cancel: Option<&'a CancellationToken>,
+    ) -> Self {
+        Self {
+            binary,
+            timeout,
+            cancel,
+        }
+    }
+}
+
+pub(super) async fn extract_path(
     path: &Path,
     page_range: Option<(u32, u32)>,
+    command: PdfTextCommand<'_>,
 ) -> Result<String, PdfTextError> {
-    extract_path_with_binary(OsStr::new("pdftotext"), path, page_range)
+    extract_path_with_command(path, page_range, command).await
 }
 
-pub(super) fn extract_bytes(bytes: &[u8]) -> Result<String, PdfTextError> {
-    extract_bytes_with_binary(OsStr::new("pdftotext"), bytes)
-}
-
-fn extract_bytes_with_binary(binary: &OsStr, bytes: &[u8]) -> Result<String, PdfTextError> {
+pub(super) async fn extract_bytes(
+    bytes: &[u8],
+    command: PdfTextCommand<'_>,
+) -> Result<String, PdfTextError> {
     let mut input = tempfile::NamedTempFile::new().map_err(|error| {
         PdfTextError::Execution(format!("failed to stage fetched PDF: {error}"))
     })?;
@@ -48,15 +123,20 @@ fn extract_bytes_with_binary(binary: &OsStr, bytes: &[u8]) -> Result<String, Pdf
     input.flush().map_err(|error| {
         PdfTextError::Execution(format!("failed to stage fetched PDF: {error}"))
     })?;
-    extract_path_with_binary(binary, input.path(), None)
+    extract_path_with_command(input.path(), None, command).await
 }
 
-fn extract_path_with_binary(
-    binary: &OsStr,
+async fn extract_path_with_command(
     path: &Path,
     page_range: Option<(u32, u32)>,
+    request: PdfTextCommand<'_>,
 ) -> Result<String, PdfTextError> {
-    let mut command = Command::new(binary);
+    if request.cancel.is_some_and(CancellationToken::is_cancelled) {
+        return Err(PdfTextError::Cancelled);
+    }
+
+    let mut command = tokio::process::Command::new(request.binary);
+    crate::utils::suppress_tokio_console_window(&mut command);
     command.arg("-layout");
     if let Some((start, end)) = page_range {
         command.arg("-f").arg(start.to_string());
@@ -67,68 +147,260 @@ fn extract_path_with_binary(
         .arg("-")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
 
-    let output = command.output().map_err(|error| {
+    let mut child = command.spawn().map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             PdfTextError::BinaryUnavailable
         } else {
             PdfTextError::Execution(format!("failed to launch pdftotext: {error}"))
         }
     })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| PdfTextError::Execution("failed to capture pdftotext stdout".to_string()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| PdfTextError::Execution("failed to capture pdftotext stderr".to_string()))?;
+    let stdout_task = tokio::spawn(read_bounded(stdout, MAX_PDF_STDOUT_BYTES));
+    let stderr_task = tokio::spawn(read_bounded(stderr, MAX_PDF_STDERR_BYTES));
+
+    let status = tokio::select! {
+        result = child.wait() => result.map_err(|error| {
+            PdfTextError::Execution(format!("failed to wait for pdftotext: {error}"))
+        })?,
+        () = wait_for_cancellation(request.cancel) => {
+            terminate_child(&mut child).await;
+            finish_capture_tasks(stdout_task, stderr_task).await?;
+            return Err(PdfTextError::Cancelled);
+        }
+        () = tokio::time::sleep(request.timeout) => {
+            terminate_child(&mut child).await;
+            finish_capture_tasks(stdout_task, stderr_task).await?;
+            return Err(PdfTextError::TimedOut);
+        }
+    };
+    let (stdout, stderr) = finish_capture_tasks(stdout_task, stderr_task).await?;
+
+    if stdout.truncated {
         return Err(PdfTextError::Execution(format!(
-            "pdftotext failed (exit {:?}): {stderr}",
-            output.status.code()
+            "pdftotext output exceeded the {} byte safety limit",
+            MAX_PDF_STDOUT_BYTES
         )));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    if !status.success() {
+        let stderr_truncated = stderr.truncated;
+        let stderr = sanitized_text(&stderr.bytes);
+        let suffix = if stderr_truncated { " [truncated]" } else { "" };
+        let stderr = if stderr.is_empty() {
+            "no diagnostic output".to_string()
+        } else {
+            stderr
+        };
+        return Err(PdfTextError::Execution(format!(
+            "pdftotext failed (exit {:?}): {stderr}{suffix}",
+            status.code()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&stdout.bytes).into_owned())
+}
+
+async fn wait_for_cancellation(cancel: Option<&CancellationToken>) {
+    match cancel {
+        Some(cancel) => cancel.cancelled().await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+async fn terminate_child(child: &mut tokio::process::Child) {
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}
+
+struct BoundedOutput {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+async fn read_bounded(
+    mut reader: impl AsyncRead + Unpin,
+    max_bytes: usize,
+) -> std::io::Result<BoundedOutput> {
+    let mut bytes = Vec::with_capacity(max_bytes.min(8 * 1024));
+    let mut buffer = [0u8; 8 * 1024];
+    let mut truncated = false;
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        let remaining = max_bytes.saturating_sub(bytes.len());
+        let retained = read.min(remaining);
+        bytes.extend_from_slice(&buffer[..retained]);
+        truncated |= retained < read;
+    }
+    Ok(BoundedOutput { bytes, truncated })
+}
+
+async fn finish_capture_tasks(
+    mut stdout: tokio::task::JoinHandle<std::io::Result<BoundedOutput>>,
+    mut stderr: tokio::task::JoinHandle<std::io::Result<BoundedOutput>>,
+) -> Result<(BoundedOutput, BoundedOutput), PdfTextError> {
+    let joined = tokio::time::timeout(PDF_PIPE_DRAIN_TIMEOUT, async {
+        tokio::join!(&mut stdout, &mut stderr)
+    })
+    .await;
+    let (stdout, stderr) = match joined {
+        Ok(output) => output,
+        Err(_) => {
+            stdout.abort();
+            stderr.abort();
+            let _ = tokio::join!(stdout, stderr);
+            return Err(PdfTextError::Execution(
+                "pdftotext output pipes did not close after process termination".to_string(),
+            ));
+        }
+    };
+    let stdout = stdout
+        .map_err(|error| PdfTextError::Execution(format!("stdout reader failed: {error}")))?
+        .map_err(|error| PdfTextError::Execution(format!("stdout reader failed: {error}")))?;
+    let stderr = stderr
+        .map_err(|error| PdfTextError::Execution(format!("stderr reader failed: {error}")))?
+        .map_err(|error| PdfTextError::Execution(format!("stderr reader failed: {error}")))?;
+    Ok((stdout, stderr))
+}
+
+fn sanitized_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .trim()
+        .chars()
+        .map(|character| match character {
+            '\n' | '\t' => character,
+            character if character.is_control() => '\u{fffd}',
+            character => character,
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::spec::{ToolExecutionOutcome, ToolTerminalStatus};
 
-    #[test]
-    fn missing_binary_is_typed_without_inspecting_error_text() {
+    #[tokio::test]
+    async fn missing_binary_maps_to_bounded_failed_machine_contract() {
         let temporary = tempfile::tempdir().expect("tempdir");
         let missing = temporary.path().join("definitely-not-pdftotext");
         let input = temporary.path().join("input.pdf");
         std::fs::write(&input, b"%PDF-1.7\n%%EOF").expect("fixture");
+        let error = extract_path(
+            &input,
+            None,
+            PdfTextCommand::test(missing.as_os_str(), Duration::from_secs(1), None),
+        )
+        .await
+        .expect_err("missing binary");
+        assert_eq!(error, PdfTextError::BinaryUnavailable);
+
+        let error = into_tool_error(error);
+        let payload = match &error {
+            ToolError::NotAvailable { message } => {
+                assert!(message.len() < 512, "{message}");
+                serde_json::from_str::<serde_json::Value>(message).expect("JSON failure payload")
+            }
+            other => panic!("unexpected mapped error: {other:?}"),
+        };
+        assert_eq!(payload["type"], "binary_unavailable");
+        assert_eq!(payload["binary"], "pdftotext");
         assert_eq!(
-            extract_path_with_binary(missing.as_os_str(), &input, None),
-            Err(PdfTextError::BinaryUnavailable)
+            ToolExecutionOutcome::from_legacy(Err(error)).status,
+            ToolTerminalStatus::Failed
         );
     }
 
     #[cfg(unix)]
-    #[test]
-    fn shared_adapter_forwards_page_window_and_returns_stdout() {
+    fn executable_script(contents: &str) -> (tempfile::TempDir, std::path::PathBuf) {
         use std::os::unix::fs::PermissionsExt;
 
         let temporary = tempfile::tempdir().expect("tempdir");
         let binary = temporary.path().join("fake-pdftotext");
-        std::fs::write(
-            &binary,
-            "#!/bin/sh\nprintf 'args:%s\\n' \"$*\"\nprintf 'page one\\fpage two\\n'\n",
-        )
-        .expect("fake binary");
+        std::fs::write(&binary, contents).expect("fake binary");
         let mut permissions = std::fs::metadata(&binary).expect("metadata").permissions();
         permissions.set_mode(0o700);
         std::fs::set_permissions(&binary, permissions).expect("executable");
+        (temporary, binary)
+    }
 
-        let input = temporary.path().join("input.pdf");
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shared_adapter_forwards_page_window_and_returns_stdout() {
+        let (temporary, binary) = executable_script(
+            "#!/bin/sh\nprintf 'args:%s\\n' \"$*\"\nprintf 'page one\\fpage two\\n'\n",
+        );
+        let request = PdfTextCommand::test(binary.as_os_str(), Duration::from_secs(1), None);
+        let input = temporary.path().join("input with spaces.pdf");
         std::fs::write(&input, b"fixture bytes").expect("fixture");
-        let text = extract_path_with_binary(binary.as_os_str(), &input, Some((2, 4)))
+        let text = extract_path(&input, Some((2, 4)), request)
+            .await
             .expect("fake extraction");
         assert!(text.contains("-layout -f 2 -l 4"), "{text}");
         assert!(text.contains(input.to_string_lossy().as_ref()), "{text}");
         assert!(text.ends_with("page one\u{c}page two\n"), "{text:?}");
 
-        let staged = extract_bytes_with_binary(binary.as_os_str(), b"fetched fixture bytes")
+        let staged = extract_bytes(b"fetched fixture bytes", request)
+            .await
             .expect("fake fetched extraction");
         assert!(staged.contains("-layout"), "{staged}");
         assert!(staged.ends_with("page one\u{c}page two\n"), "{staged:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn child_execution_is_timeout_and_cancellation_bounded() {
+        let (temporary, binary) = executable_script("#!/bin/sh\nexec sleep 10\n");
+        let input = temporary.path().join("input.pdf");
+        std::fs::write(&input, b"fixture bytes").expect("fixture");
+        let started = std::time::Instant::now();
+        let error = extract_path(
+            &input,
+            None,
+            PdfTextCommand::test(binary.as_os_str(), Duration::from_millis(50), None),
+        )
+        .await
+        .expect_err("timeout");
+        assert_eq!(error, PdfTextError::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        let cancel = CancellationToken::new();
+        let cancel_after_spawn = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel_after_spawn.cancel();
+        });
+        let started = std::time::Instant::now();
+        let error = extract_path(
+            &input,
+            None,
+            PdfTextCommand::test(binary.as_os_str(), Duration::from_secs(10), Some(&cancel)),
+        )
+        .await
+        .expect_err("cancelled");
+        assert_eq!(error, PdfTextError::Cancelled);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn bounded_reader_drains_but_retains_only_the_prefix() {
+        let output = read_bounded(&b"0123456789"[..], 4).await.expect("read");
+        assert_eq!(output.bytes, b"0123");
+        assert!(output.truncated);
+    }
+
+    #[test]
+    fn stderr_sanitizer_removes_terminal_control_bytes() {
+        assert_eq!(sanitized_text(b"bad\x1b[31m\0\nnext"), "bad�[31m�\nnext");
     }
 }

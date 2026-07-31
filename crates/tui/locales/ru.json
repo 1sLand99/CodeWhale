@@ -146,7 +146,6 @@
     "ConfigLabelAutoCompact": "Автосжатие",
     "ConfigLabelAutoCompactThreshold": "Порог сжатия",
     "ConfigLabelMaxHistory": "История ввода",
-    "ConfigLabelPreferExternalPdftotext": "Извлечение текста из PDF",
     "ConfigLabelMcpConfigPath": "Путь к конфигурации MCP",
     "ConfigLabelFleetSpawnDepth": "Глубина рекурсии Fleet",
     "ConfigLabelGoalCommand": "Команда цели",

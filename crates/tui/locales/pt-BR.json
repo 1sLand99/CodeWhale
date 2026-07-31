@@ -148,7 +148,6 @@
     "ConfigLabelAutoCompact": "Compactação automática",
     "ConfigLabelAutoCompactThreshold": "Limite de compactação",
     "ConfigLabelMaxHistory": "Histórico de entrada",
-    "ConfigLabelPreferExternalPdftotext": "Extrator de texto PDF",
     "ConfigLabelMcpConfigPath": "Caminho da configuração MCP",
     "ConfigLabelFleetSpawnDepth": "Profundidade recursiva da Fleet",
     "ConfigLabelGoalCommand": "Comando de objetivo",

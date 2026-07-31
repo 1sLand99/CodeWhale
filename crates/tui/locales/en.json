@@ -148,7 +148,6 @@
     "ConfigLabelAutoCompact": "Auto compact",
     "ConfigLabelAutoCompactThreshold": "Compact threshold",
     "ConfigLabelMaxHistory": "Input history",
-    "ConfigLabelPreferExternalPdftotext": "PDF text extractor",
     "ConfigLabelMcpConfigPath": "MCP config path",
     "ConfigLabelFleetSpawnDepth": "Fleet recursion depth",
     "ConfigLabelGoalCommand": "Goal command",

@@ -8,12 +8,11 @@
 //! when the model wants to do its own parsing.
 
 use super::handle::query_jsonpath;
+use super::pdf::PdfTextCommand;
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec, optional_u64,
 };
-use super::web::extract::{
-    DocumentKind, ExtractedDocument, decode_response_body, extract_document,
-};
+use super::web::extract::{DocumentKind, ExtractedDocument, decode_response_body};
 use super::web::fetch::{
     DEFAULT_MAX_BYTES, DEFAULT_TIMEOUT, FetchOptions, HARD_MAX_BYTES, HARD_MAX_TIMEOUT, fetch,
 };
@@ -188,62 +187,16 @@ impl ToolSpec for FetchUrlTool {
             Some(body) => project_json_fields(body, &fetched.content_type, &requested_fields)?,
             None => None,
         };
-        let extraction =
-            if format == Format::Raw && super::web::extract::has_pdf_signature(&fetched.bytes) {
-                Ok(ExtractedDocument {
-                    kind: DocumentKind::Pdf,
-                    title: Some("PDF Document".to_string()),
-                    text: String::new(),
-                    markdown: String::new(),
-                    cleaned_html: None,
-                    pdf_pages: None,
-                    media_extension: None,
-                })
-            } else {
-                extract_document(&fetched.url, Some(&fetched.content_type), &fetched.bytes)
-            };
-        let extracted = match extraction {
-            Ok(document) => document,
-            Err(_error) if format == Format::Raw && is_declared_textual(&fetched.content_type) => {
-                let body_text = match body_text.as_ref() {
-                    Some(body_text) => body_text.clone(),
-                    None => decode_response_body(
-                        &fetched.bytes,
-                        Some(&fetched.content_type),
-                        is_declared_html(&fetched.content_type),
-                    )?,
-                };
-                ExtractedDocument {
-                    kind: DocumentKind::Text,
-                    title: None,
-                    text: body_text.clone(),
-                    markdown: body_text,
-                    cleaned_html: None,
-                    pdf_pages: None,
-                    media_extension: None,
-                }
-            }
-            Err(_error) if !is_success && is_declared_textual(&fetched.content_type) => {
-                let body_text = match body_text.as_ref() {
-                    Some(body_text) => body_text.clone(),
-                    None => decode_response_body(
-                        &fetched.bytes,
-                        Some(&fetched.content_type),
-                        is_declared_html(&fetched.content_type),
-                    )?,
-                };
-                ExtractedDocument {
-                    kind: DocumentKind::Text,
-                    title: None,
-                    text: body_text.clone(),
-                    markdown: body_text,
-                    cleaned_html: None,
-                    pdf_pages: None,
-                    media_extension: None,
-                }
-            }
-            Err(error) => return Err(error),
-        };
+        let extracted = extract_fetched_document(
+            format,
+            &fetched.url,
+            &fetched.content_type,
+            &fetched.bytes,
+            is_success,
+            body_text.as_deref(),
+            PdfTextCommand::system(context.cancel_token.as_ref()),
+        )
+        .await?;
 
         let citation_title = extracted.title.clone();
         let (processed, artifact_write) = render_extracted(
@@ -302,6 +255,69 @@ impl ToolSpec for FetchUrlTool {
             success: true,
             metadata,
         })
+    }
+}
+
+async fn extract_fetched_document(
+    format: Format,
+    url: &str,
+    content_type: &str,
+    bytes: &[u8],
+    is_success: bool,
+    decoded_body: Option<&str>,
+    pdf_command: PdfTextCommand<'_>,
+) -> Result<ExtractedDocument, ToolError> {
+    let has_pdf_signature = super::web::extract::has_pdf_signature(bytes);
+    if format == Format::Raw
+        && super::web::extract::is_pdf_response(url, Some(content_type), bytes)
+        && !has_pdf_signature
+    {
+        return Err(ToolError::execution_failed(
+            "Response claimed to be a PDF, but its bytes did not contain a PDF signature",
+        ));
+    }
+
+    let extraction = if format == Format::Raw && has_pdf_signature {
+        Ok(ExtractedDocument {
+            kind: DocumentKind::Pdf,
+            title: Some("PDF Document".to_string()),
+            text: String::new(),
+            markdown: String::new(),
+            cleaned_html: None,
+            pdf_pages: None,
+            media_extension: None,
+        })
+    } else {
+        super::web::extract::extract_document_with_pdf_command(
+            url,
+            Some(content_type),
+            bytes,
+            pdf_command,
+        )
+        .await
+    };
+    match extraction {
+        Ok(document) => Ok(document),
+        Err(_error)
+            if (format == Format::Raw || !is_success) && is_declared_textual(content_type) =>
+        {
+            let body_text = match decoded_body {
+                Some(body_text) => body_text.to_string(),
+                None => {
+                    decode_response_body(bytes, Some(content_type), is_declared_html(content_type))?
+                }
+            };
+            Ok(ExtractedDocument {
+                kind: DocumentKind::Text,
+                title: None,
+                text: body_text.clone(),
+                markdown: body_text,
+                cleaned_html: None,
+                pdf_pages: None,
+                media_extension: None,
+            })
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -561,7 +577,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_pdf_is_preserved_without_running_text_extraction() {
+    fn raw_pdf_production_path_preserves_exact_bytes_without_extractor() {
         let _lock = crate::artifacts::TEST_ARTIFACT_SESSIONS_GUARD
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -571,17 +587,21 @@ mod tests {
         ));
         let _restore = ArtifactRootRestore(prior);
         let bytes = b"%PDF-1.7\nraw fixture that is intentionally not parseable\n%%EOF";
-        assert!(super::super::web::extract::has_pdf_signature(bytes));
-
-        let document = ExtractedDocument {
-            kind: DocumentKind::Pdf,
-            title: Some("PDF Document".to_string()),
-            text: String::new(),
-            markdown: String::new(),
-            cleaned_html: None,
-            pdf_pages: None,
-            media_extension: None,
-        };
+        let missing = temporary.path().join("definitely-not-pdftotext");
+        let document = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(extract_fetched_document(
+                Format::Raw,
+                "https://example.com/raw.pdf",
+                "application/pdf",
+                bytes,
+                true,
+                None,
+                PdfTextCommand::test(missing.as_os_str(), Duration::from_millis(50), None),
+            ))
+            .expect("signed raw PDF must bypass the missing extractor");
         let (content, artifact) = render_extracted(
             "https://example.com/raw.pdf",
             "application/pdf",
@@ -596,6 +616,73 @@ mod tests {
         assert_eq!(
             std::fs::read(artifact.absolute_path).expect("artifact"),
             bytes
+        );
+    }
+
+    #[test]
+    fn raw_pdf_claims_without_signature_are_rejected_without_artifacts() {
+        let _lock = crate::artifacts::TEST_ARTIFACT_SESSIONS_GUARD
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let temporary = tempfile::tempdir().expect("artifact root");
+        let sessions = temporary.path().join("sessions");
+        let prior = crate::artifacts::set_test_artifact_sessions_root(Some(sessions.clone()));
+        let _restore = ArtifactRootRestore(prior);
+        let missing = temporary.path().join("definitely-not-pdftotext");
+        let request = PdfTextCommand::test(missing.as_os_str(), Duration::from_millis(50), None);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        for (url, content_type) in [
+            ("https://example.com/download", "application/pdf"),
+            ("https://example.com/spoof.pdf", "text/plain"),
+        ] {
+            let error = runtime
+                .block_on(extract_fetched_document(
+                    Format::Raw,
+                    url,
+                    content_type,
+                    b"plain text pretending to be a PDF",
+                    true,
+                    None,
+                    request,
+                ))
+                .expect_err("spoofed PDF claim");
+            assert!(error.to_string().contains("PDF signature"), "{error}");
+        }
+        assert!(
+            !sessions.exists(),
+            "rejected bytes must not create artifacts"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetched_pdf_missing_helper_is_a_failed_typed_outcome() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let missing = temporary.path().join("definitely-not-pdftotext");
+        let error = extract_fetched_document(
+            Format::Text,
+            "https://example.com/document.pdf",
+            "application/pdf",
+            b"%PDF-1.7\n%%EOF",
+            true,
+            None,
+            PdfTextCommand::test(missing.as_os_str(), Duration::from_secs(1), None),
+        )
+        .await
+        .expect_err("missing helper must fail the fetched PDF call");
+        let payload = match &error {
+            ToolError::NotAvailable { message } => {
+                serde_json::from_str::<Value>(message).expect("structured unavailable payload")
+            }
+            other => panic!("unexpected error: {other:?}"),
+        };
+        assert_eq!(payload["type"], "binary_unavailable");
+        assert_eq!(
+            crate::tools::spec::ToolExecutionOutcome::from_legacy(Err(error)).status,
+            crate::tools::spec::ToolTerminalStatus::Failed
         );
     }
 

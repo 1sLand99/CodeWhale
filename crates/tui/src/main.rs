@@ -4482,7 +4482,7 @@ async fn run_doctor(
 
     // PDF text extraction is an optional integration. Codewhale itself stays
     // a single required executable; file and web tools report a typed
-    // unavailable result when Poppler is not installed.
+    // failed `binary_unavailable` result when Poppler is not installed.
     match crate::dependencies::resolve_pdftotext() {
         Some(_) => println!(
             "  {} pdftotext: available → PDF text extraction enabled",
@@ -4490,7 +4490,7 @@ async fn run_doctor(
         ),
         None => {
             println!(
-                "  {} pdftotext: not found (optional; PDF reads return `binary_unavailable`)",
+                "  {} pdftotext: not found (optional; PDF text reads fail as `binary_unavailable`)",
                 "·".dimmed(),
             );
             match std::env::consts::OS {
