@@ -7,6 +7,17 @@ use codewhale_protocol::{
 use serde_json::{Value, json};
 
 #[test]
+fn mcp_tool_output_public_shape_remains_source_compatible() {
+    let output = ToolOutput::Mcp {
+        result: json!({"content": []}),
+    };
+    let ToolOutput::Mcp { result } = output else {
+        panic!("constructed MCP output changed variant")
+    };
+    assert_eq!(result, json!({"content": []}));
+}
+
+#[test]
 fn tool_output_success_accessor_has_function_and_mcp_parity() {
     let cases = [
         (
@@ -25,15 +36,13 @@ fn tool_output_success_accessor_has_function_and_mcp_parity() {
         ),
         (
             ToolOutput::Mcp {
-                result: json!({"kind": "mcp-success"}),
-                success: true,
+                result: json!({"kind": "mcp-success", "isError": false}),
             },
             true,
         ),
         (
             ToolOutput::Mcp {
-                result: json!({"kind": "mcp-failure"}),
-                success: false,
+                result: json!({"kind": "mcp-failure", "isError": true}),
             },
             false,
         ),
@@ -50,13 +59,12 @@ fn tool_output_success_accessor_has_function_and_mcp_parity() {
 }
 
 #[test]
-fn mcp_tool_output_false_round_trips_and_legacy_missing_success_defaults_true() {
+fn mcp_is_error_round_trips_and_legacy_bytes_remain_successful() {
     let failed = ToolOutput::Mcp {
-        result: json!({"message": "application failure"}),
-        success: false,
+        result: json!({"message": "application failure", "isError": true}),
     };
     let encoded = serde_json::to_string(&failed).expect("serialize failed MCP output");
-    assert!(encoded.contains(r#""success":false"#));
+    assert!(encoded.contains(r#""isError":true"#));
     let decoded: ToolOutput = serde_json::from_str(&encoded).expect("round-trip MCP output");
     assert!(!decoded.success());
 
