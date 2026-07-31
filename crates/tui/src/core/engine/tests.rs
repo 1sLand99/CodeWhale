@@ -3408,6 +3408,74 @@ async fn tool_call_budget_persists_across_model_steps_within_a_turn() {
     );
 }
 
+/// #4415 AC(c): a write-first named-file task carries a scoped-write
+/// authority envelope naming its exact files. The existing allowed-paths
+/// machinery (`ToolAuthorityEnvelope`, enforced at the registry boundary)
+/// permits mutating a named file and denies mutating anything outside it
+/// with a typed permission error, and the denied write never executes.
+///
+/// Seam: the envelope is a MUTATION boundary only — `read_file` outside the
+/// named files is NOT denied by policy today (read-only tools pass the
+/// envelope by design). Denying out-of-scope reads for write-first tasks is
+/// a #4415 follow-up; this test pins the current contract so the seam is
+/// explicit rather than assumed.
+#[tokio::test]
+async fn named_file_write_scope_denies_mutation_outside_the_named_files() {
+    let workspace = tempdir().expect("tempdir");
+    fs::create_dir_all(workspace.path().join("src")).expect("src dir");
+    fs::create_dir_all(workspace.path().join("docs")).expect("docs dir");
+    fs::write(workspace.path().join("docs/other.md"), "outside\n").expect("write fixture");
+    let envelope = crate::tools::spec::ToolAuthorityEnvelope {
+        schema_version: 1,
+        owner: "test-worker".to_string(),
+        authority: crate::tools::spec::ToolMutationAuthority::ScopedWrite,
+        network_access: None,
+        writable_roots: Vec::new(),
+        writable_files: vec!["src/named.rs".to_string()],
+        coordination_contracts: Vec::new(),
+    };
+    let context = crate::tools::ToolContext::new(workspace.path().to_path_buf())
+        .with_tool_authority(envelope)
+        .expect("valid envelope");
+    let mut registry = crate::tools::ToolRegistry::new(context);
+    registry.register(std::sync::Arc::new(crate::tools::file::ReadFileTool));
+    registry.register(std::sync::Arc::new(crate::tools::file::WriteFileTool));
+
+    // The named file is writable under the envelope.
+    let named = registry
+        .execute_full(
+            "write_file",
+            json!({"path": "src/named.rs", "content": "fn named() {}\n"}),
+        )
+        .await
+        .expect("mutation of the named file is permitted");
+    assert!(named.success, "{named:?}");
+    assert!(workspace.path().join("src/named.rs").exists());
+
+    // A mutation outside the named files is denied by policy and never runs.
+    let denied = registry
+        .execute_full(
+            "write_file",
+            json!({"path": "docs/other.md", "content": "rewritten\n"}),
+        )
+        .await
+        .expect_err("mutation outside the named files is denied");
+    assert!(denied.to_string().contains("authority envelope"), "{denied}");
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("docs/other.md")).expect("read back"),
+        "outside\n",
+        "the denied write must not have executed"
+    );
+
+    // Pin the read-side seam: a read outside the named files is allowed
+    // through the mutation-scoped envelope today.
+    let read = registry
+        .execute_full("read_file", json!({"path": "docs/other.md"}))
+        .await
+        .expect("reads are not path-scoped by the mutation envelope today");
+    assert!(read.content.contains("outside"), "{read:?}");
+}
+
 #[test]
 fn empty_allowed_tools_surface_is_empty_and_sends_no_tools_field() {
     let surface = policy_for_catalog(
