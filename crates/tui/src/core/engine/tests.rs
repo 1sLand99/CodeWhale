@@ -7494,6 +7494,7 @@ async fn run_shell_command_op_requests_approval_and_executes_shell() {
 
 #[tokio::test]
 async fn run_shell_command_op_skips_approval_when_auto_approved() {
+    let workspace = tempdir().expect("tempdir");
     let todos = crate::tools::todo::new_shared_todo_list();
     let plan = crate::tools::plan::new_shared_plan_state();
     let work = crate::work_graph::new_shared_work_runtime(todos, plan);
@@ -7503,6 +7504,8 @@ async fn run_shell_command_op_skips_approval_when_auto_approved() {
     };
     let (mut engine, handle) = Engine::new(
         EngineConfig {
+            workspace: workspace.path().to_path_buf(),
+            snapshots_enabled: false,
             runtime_services,
             ..EngineConfig::default()
         },
