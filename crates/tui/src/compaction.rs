@@ -109,6 +109,10 @@ impl Default for CompactionConfig {
 const MIN_SUMMARY_SEED_CHARS: usize = 80;
 const DEGENERATE_SUMMARY_REQUIRED_MARKERS: &[&str] =
     &["Primary request", "Pending tasks", "Current work"];
+const COMPACTION_LANGUAGE_CONTRACT: &str = "Use the natural language of the most recent \
+substantive user message for reasoning and user-facing prose. Keep code, identifiers, paths, \
+commands, logs, tool payloads, quotations, and the English structural labels verbatim. English \
+scaffolding is not a request to switch languages.";
 
 /// Failure kind for compaction LLM calls (deterministic vs transient).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1402,10 +1406,12 @@ pub async fn compact_messages(
              ## 💡 What to Do Next\n\n\
              You have just resumed from a context compaction. The conversation above was summarized to save space. \
              Review the summary, live state, and project instructions, then continue the same task. \
+             {language_contract} \
              Prefer exact paths and commands from the summary over re-discovery. \
              If you need more details about the summarized portion, ask the user to clarify.\n\n\
              ---\n\n\
-             Pinned messages follow:"
+             Pinned messages follow:",
+            language_contract = COMPACTION_LANGUAGE_CONTRACT,
         ),
         cache_control: if config.cache_summary {
             Some(CacheControl {
@@ -1861,7 +1867,9 @@ fn summary_instruction(word_limit: usize, focus: Option<&str>) -> String {
          If the conversation already contains an earlier compaction summary, treat it as \
          authoritative for the history it covers and carry its facts forward. Preserve exact \
          file paths, commands, and tool-result facts; abbreviate tool outputs only when they \
-         are repetitive. Do not call tools. Keep the whole briefing under {word_limit} words."
+         are repetitive. {language_contract} Do not call tools. Keep the whole briefing under \
+         {word_limit} words.",
+        language_contract = COMPACTION_LANGUAGE_CONTRACT,
     );
     if let Some(focus) = focus.map(str::trim).filter(|focus| !focus.is_empty()) {
         let _ = write!(
@@ -2499,6 +2507,7 @@ mod tests {
         assert!(brief.contains("under 500 words"), "{brief}");
         assert!(brief.contains("Do not call tools"), "{brief}");
         assert!(brief.contains("earlier compaction summary"), "{brief}");
+        assert!(brief.contains(COMPACTION_LANGUAGE_CONTRACT), "{brief}");
         assert!(!brief.contains("focus on:"), "{brief}");
 
         let focused = summary_instruction(500, Some("  the auth refactor  "));

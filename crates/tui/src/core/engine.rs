@@ -244,9 +244,6 @@ pub struct EngineConfig {
     /// When true, the model is instructed to respond in the current locale
     /// and a post-hoc translation layer replaces remaining English output.
     pub translation_enabled: bool,
-    /// Whether user-visible transcript rendering shows thinking blocks.
-    /// Prompt assembly uses this to avoid localizing hidden reasoning.
-    pub show_thinking: bool,
     pub verbosity: Option<String>,
     /// Maximum number of assistant steps before stopping.
     pub max_steps: u32,
@@ -403,7 +400,6 @@ impl Default for EngineConfig {
             instructions: Vec::new(),
             project_context_pack_enabled: false,
             translation_enabled: false,
-            show_thinking: true,
             // High backstop rather than a working ceiling: the in-turn
             // loop_guard that used to brake repetition is gone, so this only
             // exists to terminate a pathological runaway turn via
@@ -1082,7 +1078,6 @@ impl Engine {
                             config.active_route_limits,
                         ),
                     ),
-                    show_thinking: config.show_thinking,
                     verbosity: config.verbosity.as_deref(),
                     skills_scan_codewhale_only: config.skills_scan_codewhale_only,
                     plugin_registry: Some(plugin_registry.as_ref()),
@@ -1744,7 +1739,6 @@ impl Engine {
                         auto_approve,
                         approval_mode,
                         translation_enabled,
-                        show_thinking,
                         allowed_tools,
                         dynamic_tools,
                         hook_executor,
@@ -1767,7 +1761,6 @@ impl Engine {
                             auto_approve,
                             approval_mode,
                             translation_enabled,
-                            show_thinking,
                             allowed_tools,
                             dynamic_tools,
                             hook_executor,
@@ -1837,7 +1830,6 @@ impl Engine {
                                 self.session.auto_approve,
                                 self.session.approval_mode,
                                 self.config.translation_enabled,
-                                self.config.show_thinking,
                                 self.config.allowed_tools.clone(),
                                 dynamic_tools,
                                 self.config.hook_executor.clone(),
@@ -2383,7 +2375,6 @@ impl Engine {
                             self.session.auto_approve,
                             self.session.approval_mode,
                             self.config.translation_enabled,
-                            self.config.show_thinking,
                             self.config.allowed_tools.clone(),
                             Vec::new(),
                             self.config.hook_executor.clone(),
@@ -2949,7 +2940,6 @@ impl Engine {
                 self.session.auto_approve,
                 self.session.approval_mode,
                 self.config.translation_enabled,
-                self.config.show_thinking,
                 self.config.allowed_tools.clone(),
                 Vec::new(),
                 self.config.hook_executor.clone(),
@@ -3616,7 +3606,6 @@ impl Engine {
         auto_approve: bool,
         approval_mode: crate::tui::approval::ApprovalMode,
         translation_enabled: bool,
-        show_thinking: bool,
         allowed_tools: Option<Vec<String>>,
         dynamic_tools: Vec<DynamicToolSpec>,
         hook_executor: Option<std::sync::Arc<crate::hooks::HookExecutor>>,
@@ -3691,7 +3680,6 @@ impl Engine {
             goal_status,
             goal_token_budget,
             translation_enabled,
-            show_thinking,
             verbosity.clone(),
         );
         // #3947: an effective-mode change is never silent. The structured
@@ -3892,7 +3880,6 @@ impl Engine {
         self.session.reasoning_effort_auto = reasoning_effort_auto;
         self.session.auto_model = auto_model;
         self.config.translation_enabled = translation_enabled;
-        self.config.show_thinking = show_thinking;
         self.config.verbosity = verbosity;
 
         // Compose from the immutable values accepted for this turn. Preview
@@ -4911,7 +4898,6 @@ impl Engine {
                     &context.model,
                     context.route_limits,
                 )),
-                show_thinking: context.show_thinking,
                 verbosity: context.verbosity.as_deref(),
                 skills_scan_codewhale_only: self.config.skills_scan_codewhale_only,
                 plugin_registry: Some(self.plugin_registry.as_ref()),
@@ -4934,7 +4920,6 @@ impl Engine {
             self.config.goal_status,
             self.config.goal_token_budget,
             self.config.translation_enabled,
-            self.config.show_thinking,
             self.config.verbosity.clone(),
         )
     }
@@ -5518,7 +5503,7 @@ pub(crate) struct TurnMetadataSnapshot<'a> {
 /// Both production and `/preview-request` compose through this value. It owns
 /// every per-turn field resolved by submit or route planning that can change
 /// the stable system prompt, so a hypothetical route cannot accidentally
-/// inherit the installed turn's goal, translation, thinking, verbosity, mode,
+/// inherit the installed turn's goal, translation, verbosity, mode,
 /// model, or context window. Workspace-scoped prompt inputs remain engine
 /// configuration and are documented separately as snapshot dependencies.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5530,7 +5515,6 @@ pub(crate) struct NextTurnPromptContext {
     pub(crate) goal_objective: Option<String>,
     pub(crate) goal_token_budget: Option<u32>,
     pub(crate) translation_enabled: bool,
-    pub(crate) show_thinking: bool,
     pub(crate) verbosity: Option<String>,
 }
 
@@ -5545,7 +5529,6 @@ impl NextTurnPromptContext {
         goal_status: GoalStatus,
         goal_token_budget: Option<u32>,
         translation_enabled: bool,
-        show_thinking: bool,
         verbosity: Option<String>,
     ) -> Self {
         Self {
@@ -5558,7 +5541,6 @@ impl NextTurnPromptContext {
                 .flatten(),
             goal_token_budget,
             translation_enabled,
-            show_thinking,
             verbosity,
         }
     }

@@ -1126,7 +1126,6 @@ mod tests {
             GoalStatus::Active,
             None,
             false,
-            false,
             None,
         );
         let system_prompt = engine.compose_stable_system_prompt(&prompt_context);
@@ -1431,7 +1430,6 @@ mod tests {
                     GoalStatus::Active,
                     None,
                     false,
-                    false,
                     None,
                 );
                 Box::new(PreviewNextTurn {
@@ -1459,7 +1457,6 @@ mod tests {
         goal_objective: Option<String>,
         goal_status: GoalStatus,
         translation_enabled: bool,
-        show_thinking: bool,
         verbosity: Option<String>,
         requested_model: Option<String>,
         requested_reasoning: Option<String>,
@@ -1471,7 +1468,6 @@ mod tests {
                 goal_objective: None,
                 goal_status: GoalStatus::Active,
                 translation_enabled: false,
-                show_thinking: false,
                 verbosity: None,
                 requested_model: None,
                 requested_reasoning: None,
@@ -1490,7 +1486,6 @@ mod tests {
             goal_objective,
             goal_status,
             translation_enabled,
-            show_thinking,
             verbosity,
             requested_model,
             requested_reasoning,
@@ -1516,7 +1511,6 @@ mod tests {
             goal_status,
             None,
             translation_enabled,
-            show_thinking,
             verbosity.clone(),
         );
         let manifest = engine.build_request_manifest(preview_inputs).await;
@@ -1544,7 +1538,6 @@ mod tests {
                 false,
                 crate::tui::approval::ApprovalMode::Suggest,
                 translation_enabled,
-                show_thinking,
                 None,
                 Vec::new(),
                 None,
@@ -1771,7 +1764,6 @@ mod tests {
             "/translate explain this",
             PreviewWireFixture {
                 translation_enabled: true,
-                show_thinking: true,
                 verbosity: Some("concise".to_string()),
                 ..Default::default()
             },
@@ -2511,7 +2503,6 @@ mod tests {
                 false,
                 false,
                 crate::tui::approval::ApprovalMode::Suggest,
-                false,
                 false,
                 None,
                 Vec::new(),

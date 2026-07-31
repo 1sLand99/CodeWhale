@@ -4957,8 +4957,6 @@ impl RuntimeThreadManager {
             crate::settings::Settings::auto_compact_explicitly_configured(),
             settings.auto_compact_threshold_percent,
         );
-        let show_thinking = settings.show_thinking;
-
         let now = Utc::now();
         let turn_id = format!("turn_{}", &Uuid::new_v4().to_string()[..8]);
         compaction.runtime_cost_owner = Some(turn_id.clone());
@@ -5027,7 +5025,6 @@ impl RuntimeThreadManager {
             trust_mode,
             auto_approve,
             translation_enabled: false,
-            show_thinking,
             allowed_tools: None,
             dynamic_tools: req.dynamic_tools,
             hook_executor: None,
@@ -5529,7 +5526,6 @@ impl RuntimeThreadManager {
                     .collect(),
                 project_context_pack_enabled: cfg.project_context_pack_enabled(),
                 translation_enabled: false,
-                show_thinking: settings.show_thinking,
                 max_steps: 100,
                 max_subagents,
                 max_admitted_subagents: cfg

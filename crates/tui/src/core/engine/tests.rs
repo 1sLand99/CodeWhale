@@ -290,7 +290,6 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
             auto_approve: false,
             approval_mode: crate::tui::approval::ApprovalMode::Suggest,
             translation_enabled: false,
-            show_thinking: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -658,7 +657,6 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
             auto_approve: false,
             approval_mode: crate::tui::approval::ApprovalMode::Suggest,
             translation_enabled: false,
-            show_thinking: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -937,7 +935,6 @@ async fn saturated_mailbox_does_not_deadlock_goal_continuation_self_dispatch() {
             auto_approve: false,
             approval_mode: crate::tui::approval::ApprovalMode::Suggest,
             translation_enabled: false,
-            show_thinking: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -1065,7 +1062,6 @@ async fn queued_ordinary_turn_does_not_multiply_engine_goal_continuations() {
         auto_approve: false,
         approval_mode: crate::tui::approval::ApprovalMode::Suggest,
         translation_enabled: false,
-        show_thinking: false,
         allowed_tools: None,
         dynamic_tools: Vec::new(),
         hook_executor: None,
@@ -1659,7 +1655,6 @@ async fn cross_turn_token_budget_exhaustion_pauses_goal_and_refreshes_prompt() {
             auto_approve: false,
             approval_mode: crate::tui::approval::ApprovalMode::Suggest,
             translation_enabled: false,
-            show_thinking: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -2625,7 +2620,6 @@ async fn host_managed_engine_does_not_self_dispatch_goal_continuation() {
             auto_approve: false,
             approval_mode: crate::tui::approval::ApprovalMode::Suggest,
             translation_enabled: false,
-            show_thinking: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -2733,7 +2727,6 @@ async fn host_managed_engine_defers_idle_subagent_completion_to_explicit_turn() 
             auto_approve: false,
             approval_mode: crate::tui::approval::ApprovalMode::Suggest,
             translation_enabled: false,
-            show_thinking: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -3295,7 +3288,6 @@ fn active_goal_message_op(
         auto_approve: false,
         approval_mode: crate::tui::approval::ApprovalMode::Suggest,
         translation_enabled: false,
-        show_thinking: false,
         allowed_tools: None,
         dynamic_tools: Vec::new(),
         hook_executor: None,
@@ -3332,7 +3324,6 @@ fn external_user_message_op(content: &str, mode: AppMode, config: &Config) -> Op
         auto_approve: false,
         approval_mode: crate::tui::approval::ApprovalMode::Suggest,
         translation_enabled: false,
-        show_thinking: true,
         allowed_tools: None,
         dynamic_tools: Vec::new(),
         hook_executor: None,
@@ -7334,7 +7325,6 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
             auto_approve: false,
             approval_mode: crate::tui::approval::ApprovalMode::Suggest,
             translation_enabled: false,
-            show_thinking: true,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -7478,7 +7468,6 @@ async fn full_access_subagent_handoff_keeps_model_shell_free_of_approval_prompts
             auto_approve: false,
             approval_mode: crate::tui::approval::ApprovalMode::Bypass,
             translation_enabled: false,
-            show_thinking: true,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -7613,7 +7602,6 @@ async fn assert_full_access_model_tool_batch_is_blocked(
             auto_approve: true,
             approval_mode: crate::tui::approval::ApprovalMode::Bypass,
             translation_enabled: false,
-            show_thinking: true,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -7875,7 +7863,6 @@ async fn auto_review_auto_resolves_hallucinated_question_without_prompting() {
             auto_approve: false,
             approval_mode: crate::tui::approval::ApprovalMode::Auto,
             translation_enabled: false,
-            show_thinking: true,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -8061,7 +8048,6 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
             auto_approve: true,
             approval_mode: crate::tui::approval::ApprovalMode::Bypass,
             translation_enabled: false,
-            show_thinking: true,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -8202,7 +8188,6 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
             auto_approve: true,
             approval_mode: crate::tui::approval::ApprovalMode::Auto,
             translation_enabled: false,
-            show_thinking: true,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -8339,7 +8324,6 @@ async fn yolo_mode_executes_publish_like_shell_without_prompt() {
             auto_approve: true,
             approval_mode: crate::tui::approval::ApprovalMode::Bypass,
             translation_enabled: false,
-            show_thinking: true,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -8480,7 +8464,6 @@ async fn yolo_mode_does_not_prompt_for_mcp_action() {
             auto_approve: true,
             approval_mode: crate::tui::approval::ApprovalMode::Bypass,
             translation_enabled: false,
-            show_thinking: true,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -12204,12 +12187,11 @@ Extra padding so non-whitespace seed length clears the degenerate floor.";
 }
 
 #[test]
-fn engine_prompt_respects_hidden_thinking_config() {
+fn engine_prompt_keeps_reasoning_on_the_user_language_contract() {
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
         workspace: tmp.path().to_path_buf(),
         locale_tag: "zh-Hans".to_string(),
-        show_thinking: false,
         ..Default::default()
     };
     let (engine, _handle) = Engine::new(config, &Config::default());
@@ -12223,10 +12205,11 @@ fn engine_prompt_respects_hidden_thinking_config() {
         None => panic!("expected system prompt"),
     };
 
-    assert!(prompt.contains("## Hidden Thinking Language"));
+    assert!(prompt.contains("## Language"));
+    assert!(prompt.contains("latest\nuser message"));
     assert!(prompt.contains("reasoning_content"));
-    assert!(prompt.contains("English"));
-    assert!(!prompt.contains("## 语言再次提醒"));
+    assert!(prompt.contains("## 语言再次提醒"));
+    assert!(!prompt.contains("## Hidden Thinking Language"));
 }
 
 fn sync_runtime_system_prompt_override(engine: &mut Engine, system_prompt: SystemPrompt) {

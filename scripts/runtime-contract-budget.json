@@ -5,43 +5,43 @@
     "fixture_id": "representative-v1",
     "stages": {
       "base": {
-        "bytes": 11297,
-        "identity_sha256": "35625a5899dd5c684b947898828ed9b3c6c3f4d51cd5bf4b9102cffd03444237"
+        "bytes": 11279,
+        "identity_sha256": "1a0ff20c159e9ea6a6e6ebe151a6f06ad38cc8a1aff46666624723722ab145ea"
       },
       "project": {
-        "bytes": 11618,
+        "bytes": 11600,
         "delta_bytes": 321,
-        "identity_sha256": "1e7d2c65cebd968ac63175e851dc2fda1a67feedfbd6778174114187bc33e1a0"
+        "identity_sha256": "66063cf7e00526f977e717e4cfa07b4d1e7f65dcc84f21d87fd1c8f0614b9e11"
       },
       "instructions": {
-        "bytes": 11749,
+        "bytes": 11731,
         "delta_bytes": 131,
-        "identity_sha256": "0ad8e341f38ff21816fa77506beb089f854954c6690ae8bec959f466e2b33089"
+        "identity_sha256": "b31e1f2e2b2c0b5953f1b668dc8a5fc14e8515af459c0c1e3787336fb485ad22"
       },
       "skill": {
-        "bytes": 12899,
+        "bytes": 12881,
         "delta_bytes": 1150,
-        "identity_sha256": "0140c945c9ebc131520e58bf77c7c474dcf10302a8266b2e222e98442a05ecb8"
+        "identity_sha256": "879e4cf6d641eb12383a2db9069ca1959d90aa5942f3ddc2f0f487b04db977b5"
       },
       "memory": {
-        "bytes": 14548,
+        "bytes": 14530,
         "delta_bytes": 1649,
-        "identity_sha256": "cd1189fe2386131d04c3adb50b7eb1bcb78afef9205d4a71d4777db0fcaf8b4a"
+        "identity_sha256": "779ba5d57f6739527ca289f8831d4bbc73c24758acc58fd029763ff65e2d6c02"
       },
       "goal": {
-        "bytes": 14628,
+        "bytes": 14610,
         "delta_bytes": 80,
-        "identity_sha256": "5d5484ca839e4a196757abd045fc58055bd14670e3306ed9a3dfad53ddd96024"
+        "identity_sha256": "7402a55c1af9ff4735c927485c8c150e0fd70388a82ebe78e4d8c4db84b9b14d"
       },
       "handoff": {
-        "bytes": 15016,
+        "bytes": 14998,
         "delta_bytes": 388,
-        "identity_sha256": "03f267289140f567eeea6aab4b024be1be63595792da1e1796d958ab7545a306"
+        "identity_sha256": "435a6f18ed10c6891a107d8efa3d692ff3b10ec48a73742361c3daff248ec80f"
       }
     },
     "system_prompt_blocks": 6,
-    "total_bytes": 15016,
-    "total_tokens_est": 3754
+    "total_bytes": 14998,
+    "total_tokens_est": 3750
   },
   "schema_version": 1,
   "skill_discovery": {
@@ -62,22 +62,22 @@
         "mode_instructions_bytes": 805,
         "mode_instructions_tokens_est": 202,
         "system_prompt_blocks": 4,
-        "system_prompt_bytes": 11297,
-        "system_prompt_tokens_est": 2825
+        "system_prompt_bytes": 11279,
+        "system_prompt_tokens_est": 2820
       },
       "operate": {
         "mode_instructions_bytes": 2489,
         "mode_instructions_tokens_est": 623,
         "system_prompt_blocks": 4,
-        "system_prompt_bytes": 12981,
-        "system_prompt_tokens_est": 3246
+        "system_prompt_bytes": 12963,
+        "system_prompt_tokens_est": 3241
       },
       "plan": {
         "mode_instructions_bytes": 462,
         "mode_instructions_tokens_est": 116,
         "system_prompt_blocks": 4,
-        "system_prompt_bytes": 10954,
-        "system_prompt_tokens_est": 2739
+        "system_prompt_bytes": 10936,
+        "system_prompt_tokens_est": 2734
       }
     }
   },

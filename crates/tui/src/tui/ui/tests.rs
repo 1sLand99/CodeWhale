@@ -12060,16 +12060,9 @@ async fn dispatch_user_message_records_prompt_for_cancel_restore() {
         Some("fix this typo\nthen retry")
     );
     match engine.rx_op.recv().await.expect("send message op") {
-        crate::core::ops::Op::SendMessage {
-            content,
-            show_thinking,
-            ..
-        } => {
+        crate::core::ops::Op::SendMessage { content, .. } => {
             assert_eq!(content, "fix this typo\nthen retry");
-            assert!(
-                !show_thinking,
-                "dispatch must carry the user's hidden-thinking setting into the engine"
-            );
+            assert!(!app.show_thinking, "visibility remains TUI-owned");
         }
         other => panic!("expected SendMessage, got {other:?}"),
     }

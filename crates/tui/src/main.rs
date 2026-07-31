@@ -10562,7 +10562,6 @@ async fn run_exec_agent(
         },
         project_context_pack_enabled: execution_config.project_context_pack_enabled(),
         translation_enabled: false,
-        show_thinking: settings.show_thinking,
         max_steps: max_turns,
         max_subagents,
         max_admitted_subagents: execution_config
@@ -10703,7 +10702,6 @@ async fn run_exec_agent(
             trust_mode,
             auto_approve,
             translation_enabled: false,
-            show_thinking: settings.show_thinking,
             approval_mode: if auto_approve {
                 crate::tui::approval::ApprovalMode::Bypass
             } else {

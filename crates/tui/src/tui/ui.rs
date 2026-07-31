@@ -2364,7 +2364,6 @@ async fn build_preview_request_inputs(
                 app.hunt.verdict.goal_status(),
                 app.hunt.token_budget,
                 app.translation_enabled,
-                app.show_thinking,
                 app.verbosity.clone(),
             );
             posture(
@@ -2405,7 +2404,6 @@ fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         instructions: configured_instruction_sources(config),
         project_context_pack_enabled: config.project_context_pack_enabled(),
         translation_enabled: app.translation_enabled,
-        show_thinking: app.show_thinking,
         verbosity: app.verbosity.clone(),
         // Effectively unlimited. V4 has a 1M context window and the user
         // wants the model running until it's actually done. The previous cap
@@ -2561,7 +2559,6 @@ fn build_app_system_prompt_with_goal(
                 &app.model,
                 app.active_route_limits,
             )),
-            show_thinking: app.show_thinking,
             verbosity: app.verbosity.as_deref(),
             skills_scan_codewhale_only: app.skills_scan_codewhale_only,
             plugin_registry: Some(app.plugin_registry.as_ref()),
@@ -9829,7 +9826,6 @@ struct UserDispatchPrepare {
     auto_approve: bool,
     approval_mode: ApprovalMode,
     translation_enabled: bool,
-    show_thinking: bool,
     allowed_tools: Option<Vec<String>>,
     hook_executor: Option<Arc<HookExecutor>>,
     verbosity: Option<String>,
@@ -10121,7 +10117,6 @@ fn prepare_user_dispatch(
         auto_approve: app_auto_approve_enabled(app),
         approval_mode: app.approval_mode,
         translation_enabled: app.translation_enabled,
-        show_thinking: app.show_thinking,
         allowed_tools: app.active_allowed_tools.clone(),
         hook_executor: app.runtime_services.hook_executor.clone(),
         verbosity: app.verbosity.clone(),
@@ -10275,7 +10270,6 @@ async fn spawned_dispatch_inner(
             auto_approve: prepare.auto_approve,
             approval_mode: prepare.approval_mode,
             translation_enabled: prepare.translation_enabled,
-            show_thinking: prepare.show_thinking,
             allowed_tools: prepare.allowed_tools.clone(),
             dynamic_tools: Vec::new(),
             hook_executor: prepare.hook_executor.clone(),

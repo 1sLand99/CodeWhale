@@ -41,10 +41,6 @@ pub struct PromptSessionContext<'a> {
     /// longer prints context-window facts, but the field remains part of the
     /// session context contract for embedders and future runtime metadata.
     pub context_window_override: Option<u32>,
-    /// Whether the user-visible transcript renders thinking blocks.
-    /// When false, the prompt should not spend localization pressure on
-    /// `reasoning_content` the user will never see.
-    pub show_thinking: bool,
     /// Optional output-verbosity mode. `concise` appends a short output
     /// discipline block; unset keeps the normal conversational prompt.
     pub verbosity: Option<&'a str>,
@@ -74,7 +70,6 @@ impl Default for PromptSessionContext<'_> {
             translation_enabled: false,
             model_id: "codewhale",
             context_window_override: None,
-            show_thinking: true,
             verbosity: None,
             skills_scan_codewhale_only: false,
             plugin_registry: None,
@@ -174,25 +169,6 @@ fn translation_target_language_for_tag(locale_tag: &str) -> &'static str {
     } else {
         "English"
     }
-}
-
-fn hidden_thinking_language_instruction(locale_tag: &str) -> String {
-    let fallback_language = translation_target_language_for_tag(locale_tag);
-    format!(
-        "\
-## Hidden Thinking Language\n\
-\n\
-The user has disabled thinking display (`show_thinking = false`). If you emit \
-`reasoning_content`, keep that hidden internal thinking in English regardless \
-of the latest user-message language or `## Environment.lang`; the user will \
-not see it, so localizing hidden thinking only adds language switching.\n\
-\n\
-The final reply is still user-visible. Follow the normal `## Language` rule \
-for the final reply: mirror the latest user message, and use \
-{fallback_language} only when the user message is ambiguous. If the user \
-explicitly asks for a different thinking language, follow that explicit request \
-for the current turn."
-    )
 }
 
 /// Render a `## Environment` block listing the resolved locale tag,
@@ -1264,7 +1240,6 @@ pub fn system_prompt_for_mode_with_context_and_skills(
             translation_enabled: false,
             model_id: "codewhale",
             context_window_override: None,
-            show_thinking: true,
             verbosity: None,
             skills_scan_codewhale_only: false,
             plugin_registry: None,
@@ -1328,11 +1303,7 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
     // in English even though `lang: zh-Hans` is set" failure mode that
     // PR #1398 partially addressed. English (and unknown) locales get
     // `None` and keep the previous behavior unchanged.
-    let preamble = if session_context.show_thinking {
-        locale_reinforcement_preamble(session_context.locale_tag)
-    } else {
-        None
-    };
+    let preamble = locale_reinforcement_preamble(session_context.locale_tag);
 
     // 1–2. Mode prompt + project context.
     // `load_project_context_with_parents` generates an in-memory bounded
@@ -1478,22 +1449,10 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
         text: effective_authority_recap().trim().to_string(),
         cache_control: None,
     });
-    if let Some(closer) = session_context
-        .show_thinking
-        .then(|| locale_reinforcement_closer(session_context.locale_tag))
-        .flatten()
-    {
+    if let Some(closer) = locale_reinforcement_closer(session_context.locale_tag) {
         blocks.push(SystemBlock {
             block_type: "text".to_string(),
             text: closer.trim().to_string(),
-            cache_control: None,
-        });
-    } else if !session_context.show_thinking {
-        blocks.push(SystemBlock {
-            block_type: "text".to_string(),
-            text: hidden_thinking_language_instruction(session_context.locale_tag)
-                .trim()
-                .to_string(),
             cache_control: None,
         });
     }
@@ -1521,15 +1480,10 @@ fn render_route_fragment(session_context: &PromptSessionContext<'_>) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or("default");
     format!(
-        "model: {}\nverbosity: {}\ntranslation: {}\nshow_thinking: {}",
+        "model: {}\nverbosity: {}\ntranslation: {}",
         session_context.model_id.trim(),
         verbosity,
         if session_context.translation_enabled {
-            "on"
-        } else {
-            "off"
-        },
-        if session_context.show_thinking {
             "on"
         } else {
             "off"
@@ -2311,7 +2265,6 @@ start it",
                     translation_enabled: false,
                     model_id: "codewhale",
                     context_window_override: None,
-                    show_thinking: true,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
@@ -2437,7 +2390,6 @@ start it",
                     translation_enabled: false,
                     model_id: "codewhale",
                     context_window_override: None,
-                    show_thinking: true,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
@@ -2467,60 +2419,6 @@ start it",
     }
 
     #[test]
-    fn hidden_thinking_uses_english_reasoning_without_locale_bookends() {
-        let tmp = tempdir().expect("tempdir");
-        let text = system_prompt_flat_text(
-            &system_prompt_for_mode_with_context_skills_session_and_approval(
-                tmp.path(),
-                None,
-                None,
-                None,
-                PromptSessionContext {
-                    user_memory_block: None,
-                    goal_objective: None,
-                    project_context_pack_enabled: false,
-                    locale_tag: "zh-Hans",
-                    translation_enabled: false,
-                    model_id: "codewhale",
-                    context_window_override: None,
-                    show_thinking: false,
-                    verbosity: None,
-                    skills_scan_codewhale_only: false,
-                    plugin_registry: None,
-                    mode: crate::tui::app::AppMode::Agent,
-                },
-            ),
-        );
-
-        assert!(
-            text.contains("## Hidden Thinking Language"),
-            "hidden thinking prompt must include the request-side language override"
-        );
-        assert!(
-            text.contains("reasoning_content") && text.contains("English"),
-            "hidden thinking override must steer reasoning_content to English"
-        );
-        assert!(
-            text.contains("final reply") && text.contains("Simplified Chinese"),
-            "hidden thinking override must preserve the visible reply language"
-        );
-        assert!(
-            !text.contains("## 语言要求") && !text.contains("## 语言再次提醒"),
-            "hidden thinking prompt must not also ask for localized reasoning"
-        );
-
-        let hidden_pos = text
-            .find("## Hidden Thinking Language")
-            .expect("hidden thinking block present");
-        let hidden_header_end = hidden_pos + "## Hidden Thinking Language".len();
-        let after_hidden_body = &text[hidden_header_end..];
-        assert!(
-            !after_hidden_body.contains("\n## "),
-            "hidden thinking override must be the final top-level block; got: {after_hidden_body:?}",
-        );
-    }
-
-    #[test]
     fn system_prompt_skips_locale_preamble_for_english() {
         // English locale → no preamble injected. Asserts the
         // "preamble is opt-in for non-English" invariant.
@@ -2539,7 +2437,6 @@ start it",
                     translation_enabled: false,
                     model_id: "codewhale",
                     context_window_override: None,
-                    show_thinking: true,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
@@ -2640,7 +2537,6 @@ start it",
                     translation_enabled: false,
                     model_id: "codewhale",
                     context_window_override: None,
-                    show_thinking: true,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
@@ -2826,7 +2722,6 @@ start it",
                     translation_enabled: false,
                     model_id: "codewhale",
                     context_window_override: None,
-                    show_thinking: true,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
@@ -2857,7 +2752,6 @@ start it",
                     translation_enabled: false,
                     model_id: "codewhale",
                     context_window_override: None,
-                    show_thinking: true,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
@@ -2971,7 +2865,6 @@ start it",
                     translation_enabled: false,
                     model_id: "codewhale",
                     context_window_override: None,
-                    show_thinking: true,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
@@ -3003,7 +2896,6 @@ start it",
                     translation_enabled: false,
                     model_id: "codewhale",
                     context_window_override: None,
-                    show_thinking: true,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
@@ -3329,7 +3221,6 @@ start it",
                     translation_enabled: false,
                     model_id: "codewhale",
                     context_window_override: None,
-                    show_thinking: true,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
@@ -3366,7 +3257,6 @@ start it",
                     translation_enabled: false,
                     model_id: "codewhale",
                     context_window_override: None,
-                    show_thinking: true,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
@@ -3458,7 +3348,6 @@ start it",
                     translation_enabled: false,
                     model_id: "glm-5.2",
                     context_window_override: Some(1_000_000),
-                    show_thinking: true,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
@@ -4029,7 +3918,6 @@ start it",
                     translation_enabled: false,
                     model_id: "codewhale",
                     context_window_override: None,
-                    show_thinking: true,
                     verbosity: Some(" Concise "),
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
@@ -4074,7 +3962,6 @@ start it",
                 translation_enabled: false,
                 model_id: "deepseek-v4-pro",
                 context_window_override: None,
-                show_thinking: true,
                 verbosity: Some("concise"),
                 skills_scan_codewhale_only: false,
                 plugin_registry: None,
@@ -4124,7 +4011,6 @@ start it",
             translation_enabled: false,
             model_id: "codewhale",
             context_window_override: None,
-            show_thinking: true,
             verbosity: None,
             skills_scan_codewhale_only: false,
             plugin_registry: None,
