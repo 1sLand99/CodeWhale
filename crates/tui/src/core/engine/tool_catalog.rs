@@ -399,6 +399,10 @@ pub(super) struct ToolSurfacePolicy {
     pub(super) strict_tool_mode: bool,
     allowed_tools: Option<Vec<String>>,
     disallowed_tools: Option<Vec<String>>,
+    /// Hard per-turn cap on admitted tool calls (#4415). The turn loop copies
+    /// this limit into its own admission counter at turn start; `None` means
+    /// unlimited (the default), which keeps the admission gate inert.
+    pub(super) max_tool_calls: Option<u32>,
     questions_allowed: bool,
 }
 
@@ -413,6 +417,7 @@ impl ToolSurfacePolicy {
         strict_tool_mode: bool,
         allowed_tools: Option<Vec<String>>,
         disallowed_tools: Option<Vec<String>>,
+        max_tool_calls: Option<u32>,
         approval_mode: crate::tui::approval::ApprovalMode,
     ) -> Self {
         let mut catalog = tools.unwrap_or_default();
@@ -447,6 +452,7 @@ impl ToolSurfacePolicy {
             strict_tool_mode,
             allowed_tools,
             disallowed_tools,
+            max_tool_calls,
             questions_allowed,
         }
     }

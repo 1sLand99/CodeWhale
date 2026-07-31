@@ -3044,6 +3044,7 @@ fn policy_for_catalog(
         false,
         allowed_tools,
         disallowed_tools,
+        None,
         approval_mode,
     )
 }
@@ -3522,6 +3523,7 @@ fn test_tool_surface(
         engine.config.strict_tool_mode,
         engine.config.allowed_tools.clone(),
         engine.config.disallowed_tools.clone(),
+        engine.config.max_tool_calls,
         engine.session.approval_mode,
     )
 }

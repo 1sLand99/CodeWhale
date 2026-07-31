@@ -10617,6 +10617,7 @@ async fn run_exec_agent(
         goal_status: crate::tools::goal::GoalStatus::Active,
         allowed_tools: allowed_tools.clone(),
         disallowed_tools: disallowed_tools.clone(),
+        max_tool_calls: None,
         hook_executor: None,
         locale_tag: crate::localization::resolve_locale(&settings.locale)
             .tag()

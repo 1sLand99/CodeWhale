@@ -325,6 +325,11 @@ pub struct EngineConfig {
     /// Tool deny-list.  Deny always wins over allow (#3027).
     /// `None` means no tools are explicitly denied.
     pub disallowed_tools: Option<Vec<String>>,
+    /// Hard per-turn cap on admitted tool calls (#4415). `None` (the default)
+    /// means unlimited and leaves the turn admission gate inert. Task hosts
+    /// set this from the task's structured `max_tool_calls` constraint; the
+    /// per-turn counter itself lives in the turn loop, not here.
+    pub max_tool_calls: Option<u32>,
     /// Hook executor for control-plane hooks.
     /// `ToolCallBefore` hooks may deny a tool call with exit code 2.
     pub hook_executor: Option<std::sync::Arc<crate::hooks::HookExecutor>>,
@@ -437,6 +442,7 @@ impl Default for EngineConfig {
             goal_status: GoalStatus::Active,
             allowed_tools: None,
             disallowed_tools: None,
+            max_tool_calls: None,
             hook_executor: None,
             locale_tag: "en".to_string(),
             workshop: None,
@@ -3530,6 +3536,7 @@ impl Engine {
             self.config.strict_tool_mode,
             allowed_tools,
             self.config.disallowed_tools.clone(),
+            self.config.max_tool_calls,
             input_policy.approval_mode_for_session(),
         );
         TurnToolBuild {
