@@ -89,7 +89,10 @@ pub(super) fn build_responses_body_for_provider(
     // Reasoning configuration. The Codex Responses backend accepts
     // low/medium/high/xhigh, so provider-aware callers normalize inherited
     // DeepSeek-only values before request construction: "off" becomes
-    // "low", and CodeWhale's "auto" falls back to "medium".
+    // "low", and CodeWhale's "auto" falls back to "medium". DeepSeek's
+    // Responses API documents `reasoning.effort: "none"` to disable
+    // thinking, so its branch sends "none" for the off tier instead of
+    // collapsing it into low (see `responses_reasoning_effort`).
     if let Some(raw) = request.reasoning_effort.as_deref()
         && let Some(effort) = responses_reasoning_effort(raw, is_deepseek)
     {
@@ -745,7 +748,11 @@ fn responses_reasoning_effort(raw: &str, is_deepseek: bool) -> Option<&'static s
         return codex_responses_reasoning_effort(raw);
     }
     match raw.trim().to_ascii_lowercase().as_str() {
-        "off" | "disabled" | "none" | "false" | "minimal" | "low" => Some("low"),
+        // DeepSeek's Responses API documents `reasoning.effort: "none"` as the
+        // thinking-off tier; the picker offers Off for flash, so it must stay
+        // "none" on the wire instead of collapsing into low (still thinking).
+        "off" | "disabled" | "none" | "false" => Some("none"),
+        "minimal" | "low" => Some("low"),
         "xhigh" | "max" | "maximum" | "ultracode" => Some("max"),
         // DeepSeek maps both low and medium to its normal high tier in
         // thinking mode. Preserve explicit low for Codex compatibility, and
@@ -1405,6 +1412,15 @@ mod tests {
         assert_eq!(responses_reasoning_effort("high", true), Some("high"));
         assert_eq!(responses_reasoning_effort("xhigh", true), Some("max"));
         assert_eq!(responses_reasoning_effort("max", true), Some("max"));
+        // The off tier must disable thinking on the wire, not collapse into
+        // low: DeepSeek documents `reasoning.effort: "none"` as the off value.
+        assert_eq!(responses_reasoning_effort("off", true), Some("none"));
+        assert_eq!(responses_reasoning_effort("disabled", true), Some("none"));
+        assert_eq!(responses_reasoning_effort("none", true), Some("none"));
+        assert_eq!(responses_reasoning_effort("false", true), Some("none"));
+        // minimal stays a low tier for DeepSeek (undocumented label preserved
+        // for Codex compatibility).
+        assert_eq!(responses_reasoning_effort("minimal", true), Some("low"));
     }
 
     #[test]
