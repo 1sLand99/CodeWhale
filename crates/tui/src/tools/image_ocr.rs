@@ -68,7 +68,8 @@ impl ToolSpec for ImageOcrTool {
 }
 
 pub(crate) fn ocr_available() -> bool {
-    crate::dependencies::resolve_tesseract().is_some() || native_ocr_available()
+    std::env::var_os("CODEWHALE_LOCAL_OCR_UNAVAILABLE").is_none()
+        && (crate::dependencies::resolve_tesseract().is_some() || native_ocr_available())
 }
 
 pub(crate) fn ocr_image_path(image_path: &Path) -> Result<String, ToolError> {
@@ -127,8 +128,7 @@ fn ocr_with_tesseract(tesseract: &str, image_path: &Path) -> Result<String, Tool
 #[cfg(target_os = "macos")]
 fn native_ocr_available() -> bool {
     // Classes can exist at link time while runtime Vision is unusable
-    // (restricted CI hosts, missing entitlements, broken framework load).
-    // Probe the ObjC class table once so `ocr_available` matches real use.
+    // (restricted CI hosts); probe the ObjC class table once to match real use.
     macos_vision::vision_runtime_available()
 }
 

@@ -5868,6 +5868,10 @@ async fn measure_production_mode_tool_catalogs() -> serde_json::Value {
     // decision; a deliberately nonexistent PATH root makes its real dependency
     // probes return absent without inheriting the developer or CI host.
     let _path = EnvVarGuard::set("PATH", tmp.path().join("no-host-interpreters"));
+    // The macOS Vision OCR probe is a framework check that ignores PATH, so
+    // the profile neutralizes it explicitly: every host presents no local OCR
+    // capability here, matching the no-host-interpreters PATH pin above.
+    let _ocr = EnvVarGuard::set("CODEWHALE_LOCAL_OCR_UNAVAILABLE", "1");
 
     let api_config = Config {
         api_key: Some("local-runtime-contract-fixture".to_string()),
