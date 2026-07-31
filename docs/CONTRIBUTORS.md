@@ -28,6 +28,21 @@ notes, and relevant issue/PR comments.
 ## Contributors by time
 
 <details open>
+<summary><strong>v0.9.3 — DeepSeek Responses, canonical tools, and runtime hardening</strong></summary>
+
+- **[greyfreedom](https://github.com/greyfreedom)** (Turisla) — the documented
+  and tested authorization-order contract from PR #4980
+- **[nightt5879](https://github.com/nightt5879)** (Nightt) — foreground shell
+  detachment before steering from PR #4979
+- **[Watcher24](https://github.com/Watcher24)** — the macOS File Provider
+  sandbox report and reproduction in #4085
+- **[Fred Leitz / fleitz](https://github.com/fleitz)** — required
+  source-candidate credit for the canonical `Bash` no-`cwd` workspace fix and
+  regression in PR #4673 (issue #4674)
+
+</details>
+
+<details>
 <summary><strong>v0.9.2 — routing, workflow, localization, and inspectability</strong></summary>
 
 - **[greyfreedom](https://github.com/greyfreedom)** — exact repository-scoped
