@@ -146,6 +146,7 @@ def provider_kind_ids(config_rs: str) -> dict[str, str]:
     # Providers with non-fixed wire policy or custom auth behavior use manual
     # impls rather than the provider!() macro.
     for variant_name, id_literal in [
+        ("Deepseek", "deepseek"),
         ("DeepseekAnthropic", "deepseek-anthropic"),
         ("OpenaiCodex", "openai-codex"),
         ("Anthropic", "anthropic"),
