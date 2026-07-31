@@ -4,6 +4,7 @@
 release_crates=(
   codewhale-build-support
   codewhale-mcp
+  codewhale-paths
   codewhale-protocol
   codewhale-release
   codewhale-secrets
