@@ -1,9 +1,8 @@
 //! Canonical action-based wrapper for run/test/verifier tools.
 //!
 //! The model sees one tool: `Run` with an `action` parameter
-//! (tests | verifiers). Legacy names (`run_tests`, `run_verifiers`) stay
-//! registered as hidden compat aliases that force the action so saved
-//! transcripts replay correctly.
+//! (tests | verifiers). The per-action legacy execution aliases were removed
+//! in v0.9.3.
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -24,13 +23,6 @@ impl RunTool {
         Self {
             name,
             forced_action: None,
-        }
-    }
-
-    pub const fn alias(name: &'static str, action: &'static str) -> Self {
-        Self {
-            name,
-            forced_action: Some(action),
         }
     }
 

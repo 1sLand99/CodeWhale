@@ -589,10 +589,6 @@ impl ToolRegistryBuilder {
     pub fn with_file_tools(self) -> Self {
         use super::file_tool::FileTool;
         self.with_tool(Arc::new(FileTool::new("File")))
-            .with_tool(Arc::new(FileTool::alias("read_file", "read")))
-            .with_tool(Arc::new(FileTool::alias("write_file", "write")))
-            .with_tool(Arc::new(FileTool::alias("edit_file", "edit")))
-            .with_tool(Arc::new(FileTool::alias("list_dir", "list")))
     }
 
     /// Include only read-only file tools (read, list).
@@ -600,8 +596,6 @@ impl ToolRegistryBuilder {
     pub fn with_read_only_file_tools(self) -> Self {
         use super::file_tool::FileTool;
         self.with_tool(Arc::new(FileTool::read_only("File")))
-            .with_tool(Arc::new(FileTool::alias("read_file", "read")))
-            .with_tool(Arc::new(FileTool::alias("list_dir", "list")))
             .with_tool(Arc::new(
                 super::tool_result_retrieval::RetrieveToolResultTool,
             ))
@@ -609,18 +603,12 @@ impl ToolRegistryBuilder {
 
     /// Include shell execution tools.
     ///
-    /// Model sees one tool: `Bash` (#4625). Legacy `exec_shell*` / `exec_*`
-    /// spellings remain registered as hidden compat aliases for transcript replay.
+    /// Model and execution surfaces expose only `Bash` (#4625). Per-action
+    /// `exec_shell*` spellings were removed in v0.9.3.
     #[must_use]
     pub fn with_shell_tools(self) -> Self {
         use super::shell::BashTool;
         self.with_tool(Arc::new(BashTool::new("Bash")))
-            .with_tool(Arc::new(BashTool::alias("exec_shell", "run")))
-            .with_tool(Arc::new(BashTool::alias("exec_shell_wait", "wait")))
-            .with_tool(Arc::new(BashTool::alias("exec_wait", "wait")))
-            .with_tool(Arc::new(BashTool::alias("exec_shell_interact", "interact")))
-            .with_tool(Arc::new(BashTool::alias("exec_interact", "interact")))
-            .with_tool(Arc::new(BashTool::alias("exec_shell_cancel", "cancel")))
             .with_terminal_tools()
     }
 
@@ -648,30 +636,23 @@ impl ToolRegistryBuilder {
         self
     }
 
-    /// Include search tools (`grep_files`).
+    /// Search is part of the canonical `File` action surface.
     #[must_use]
     pub fn with_search_tools(self) -> Self {
-        use super::file_tool::FileTool;
-        self.with_tool(Arc::new(FileTool::alias("grep_files", "search_content")))
-            .with_tool(Arc::new(FileTool::alias("file_search", "search_name")))
+        self
     }
 
-    /// Include git inspection tools (`git_status`, `git_diff`).
+    /// Include the canonical `Git` inspection/history surface.
     #[must_use]
     pub fn with_git_tools(self) -> Self {
         use super::git_tool::GitTool;
         self.with_tool(Arc::new(GitTool::new("Git")))
-            .with_tool(Arc::new(GitTool::alias("git_status", "status")))
-            .with_tool(Arc::new(GitTool::alias("git_diff", "diff")))
     }
 
-    /// Include git history tools (`git_log`, `git_show`, `git_blame`).
+    /// Git history is part of the canonical `Git` action surface.
     #[must_use]
     pub fn with_git_history_tools(self) -> Self {
-        use super::git_tool::GitTool;
-        self.with_tool(Arc::new(GitTool::alias("git_log", "log")))
-            .with_tool(Arc::new(GitTool::alias("git_show", "show")))
-            .with_tool(Arc::new(GitTool::alias("git_blame", "blame")))
+        self
     }
 
     /// Include workspace diagnostics tool.
@@ -731,8 +712,6 @@ impl ToolRegistryBuilder {
     pub fn with_test_runner_tool(self) -> Self {
         use super::run_tool::RunTool;
         self.with_tool(Arc::new(RunTool::new("Run")))
-            .with_tool(Arc::new(RunTool::alias("run_tests", "tests")))
-            .with_tool(Arc::new(RunTool::alias("run_verifiers", "verifiers")))
     }
 
     /// Include structured data validation tool (`validate_data`).
@@ -751,10 +730,8 @@ impl ToolRegistryBuilder {
 
     /// Include durable task, gate, PR-attempt, GitHub, and automation tools.
     ///
-    /// Each family is one model-visible tool with an `action` parameter
-    /// (`tasks`, `github`, `automation`); the legacy per-action names stay
-    /// registered as hidden compat aliases so saved transcripts replay
-    /// (#4625 pattern, piagent phase B).
+    /// Each family is one tool with an `action` parameter (`tasks`, `github`,
+    /// `automation`). Per-action execution aliases were removed in v0.9.3.
     ///
     /// Shell-related task tools (`task_shell_start`, `task_shell_wait`) are
     /// *not* included here — use `with_runtime_task_shell_tools` to register
@@ -766,63 +743,8 @@ impl ToolRegistryBuilder {
         use super::tasks::TasksTool;
 
         self.with_tool(Arc::new(TasksTool::new("tasks")))
-            .with_tool(Arc::new(TasksTool::alias("task_create", "create")))
-            .with_tool(Arc::new(TasksTool::alias("task_list", "list")))
-            .with_tool(Arc::new(TasksTool::alias("task_read", "read")))
-            .with_tool(Arc::new(TasksTool::alias("task_cancel", "cancel")))
-            .with_tool(Arc::new(TasksTool::alias("task_gate_run", "gate_run")))
-            .with_tool(Arc::new(TasksTool::alias(
-                "pr_attempt_record",
-                "pr_attempt_record",
-            )))
-            .with_tool(Arc::new(TasksTool::alias(
-                "pr_attempt_list",
-                "pr_attempt_list",
-            )))
-            .with_tool(Arc::new(TasksTool::alias(
-                "pr_attempt_read",
-                "pr_attempt_read",
-            )))
-            .with_tool(Arc::new(TasksTool::alias(
-                "pr_attempt_preflight",
-                "pr_attempt_preflight",
-            )))
             .with_tool(Arc::new(GithubTool::new("github")))
-            .with_tool(Arc::new(GithubTool::alias(
-                "github_issue_context",
-                "issue_context",
-            )))
-            .with_tool(Arc::new(GithubTool::alias(
-                "github_pr_context",
-                "pr_context",
-            )))
-            .with_tool(Arc::new(GithubTool::alias("github_comment", "comment")))
-            .with_tool(Arc::new(GithubTool::alias(
-                "github_close_issue",
-                "close_issue",
-            )))
-            .with_tool(Arc::new(GithubTool::alias("github_close_pr", "close_pr")))
             .with_tool(Arc::new(AutomationTool::new("automation")))
-            .with_tool(Arc::new(AutomationTool::alias(
-                "automation_create",
-                "create",
-            )))
-            .with_tool(Arc::new(AutomationTool::alias("automation_list", "list")))
-            .with_tool(Arc::new(AutomationTool::alias("automation_read", "read")))
-            .with_tool(Arc::new(AutomationTool::alias(
-                "automation_update",
-                "update",
-            )))
-            .with_tool(Arc::new(AutomationTool::alias("automation_pause", "pause")))
-            .with_tool(Arc::new(AutomationTool::alias(
-                "automation_resume",
-                "resume",
-            )))
-            .with_tool(Arc::new(AutomationTool::alias(
-                "automation_delete",
-                "delete",
-            )))
-            .with_tool(Arc::new(AutomationTool::alias("automation_run", "run")))
     }
 
     /// Include shell-related task tools (`task_shell_start`, `task_shell_wait`).
@@ -842,8 +764,7 @@ impl ToolRegistryBuilder {
     /// without starting work, changing remotes, or mutating automation config.
     ///
     /// The model sees the same canonical `tasks` / `github` / `automation`
-    /// tools as the full surface, restricted to their read-only actions;
-    /// the legacy read-only names stay registered as hidden aliases.
+    /// tools as the full surface, restricted to their read-only actions.
     #[must_use]
     pub fn with_runtime_read_only_task_tools(self) -> Self {
         use super::automation::AutomationTool;
@@ -851,28 +772,8 @@ impl ToolRegistryBuilder {
         use super::tasks::TasksTool;
 
         self.with_tool(Arc::new(TasksTool::read_only("tasks")))
-            .with_tool(Arc::new(TasksTool::alias("task_list", "list")))
-            .with_tool(Arc::new(TasksTool::alias("task_read", "read")))
-            .with_tool(Arc::new(TasksTool::alias(
-                "pr_attempt_list",
-                "pr_attempt_list",
-            )))
-            .with_tool(Arc::new(TasksTool::alias(
-                "pr_attempt_read",
-                "pr_attempt_read",
-            )))
             .with_tool(Arc::new(GithubTool::read_only("github")))
-            .with_tool(Arc::new(GithubTool::alias(
-                "github_issue_context",
-                "issue_context",
-            )))
-            .with_tool(Arc::new(GithubTool::alias(
-                "github_pr_context",
-                "pr_context",
-            )))
             .with_tool(Arc::new(AutomationTool::read_only("automation")))
-            .with_tool(Arc::new(AutomationTool::alias("automation_list", "list")))
-            .with_tool(Arc::new(AutomationTool::alias("automation_read", "read")))
     }
 
     /// Include web search and fetch tools.
@@ -885,9 +786,6 @@ impl ToolRegistryBuilder {
         use super::web_run::WebRunTool;
         use super::web_tool::WebTool;
         self.with_tool(Arc::new(WebTool::new("Web")))
-            .with_tool(Arc::new(WebTool::alias("web_search", "search")))
-            .with_tool(Arc::new(WebTool::alias("fetch_url", "fetch")))
-            .with_tool(Arc::new(WebTool::alias("wait_for_dev_server", "wait")))
             .with_tool(Arc::new(WebRunTool))
     }
 
@@ -2301,10 +2199,8 @@ mod tests {
             .with_agent_tools_policy(crate::worker_profile::ShellPolicy::ReadOnly)
             .build(ctx);
 
-        assert!(
-            registry.contains("exec_shell"),
-            "read-only shell policy should expose shell tools; execution enforces mutating-command denial"
-        );
+        assert!(registry.contains("Bash"));
+        assert!(!registry.contains("exec_shell"));
         assert!(registry.contains("task_shell_start"));
         assert!(registry.contains("task_shell_wait"));
     }
@@ -2318,10 +2214,8 @@ mod tests {
             .with_agent_tools_policy(crate::worker_profile::ShellPolicy::Full)
             .build(ctx);
 
-        assert!(
-            registry.contains("exec_shell"),
-            "exec_shell should be included when the shell policy is Full"
-        );
+        assert!(registry.contains("Bash"));
+        assert!(!registry.contains("exec_shell"));
         assert!(
             registry.contains("task_shell_start"),
             "task_shell_start should be included when the shell policy is Full"
@@ -2332,16 +2226,13 @@ mod tests {
         );
     }
 
-    /// #2683 / #4625 — Legacy `exec_shell*` / `exec_*` names remain
-    /// callable (for saved transcript replay) but hidden from the
-    /// model-facing catalog. Only `Bash` is model-visible.
+    /// v0.9.3 removes the per-action shell aliases entirely.
     #[test]
-    fn shell_alias_tools_hidden_from_model_catalog() {
+    fn shell_surface_contains_only_the_canonical_bash_tool() {
         let tmp = tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
         let registry = ToolRegistryBuilder::new().with_shell_tools().build(ctx);
 
-        // Legacy aliases stay callable.
         for alias in [
             "exec_shell",
             "exec_wait",
@@ -2350,7 +2241,7 @@ mod tests {
             "exec_shell_interact",
             "exec_shell_cancel",
         ] {
-            assert!(registry.contains(alias), "{alias} should remain callable");
+            assert!(!registry.contains(alias), "{alias} must be removed");
         }
 
         let api_names: Vec<String> = registry
@@ -2365,7 +2256,7 @@ mod tests {
             "Bash should be model-visible"
         );
 
-        // All legacy aliases are hidden.
+        // Removed names also cannot leak back into the model catalog.
         for alias in [
             "exec_shell",
             "exec_wait",
@@ -2381,11 +2272,10 @@ mod tests {
         }
     }
 
-    /// Piagent phase B — each durable-work family exposes one canonical
-    /// action-parameterized tool (`tasks`, `github`, `automation`); the
-    /// legacy per-action names remain callable as hidden compat aliases.
+    /// Each durable-work family exposes one canonical action tool; v0.9.3
+    /// removes the per-action execution aliases.
     #[test]
-    fn runtime_task_families_expose_canonical_tools_with_hidden_aliases() {
+    fn runtime_task_families_expose_only_canonical_tools() {
         let tmp = tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
         let registry = ToolRegistryBuilder::new()
@@ -2416,9 +2306,8 @@ mod tests {
             "automation_delete",
             "automation_run",
         ];
-        // Legacy aliases stay callable.
         for alias in legacy_aliases {
-            assert!(registry.contains(alias), "{alias} should remain callable");
+            assert!(!registry.contains(alias), "{alias} must be removed");
         }
 
         let api_names: Vec<String> = registry
@@ -2434,7 +2323,7 @@ mod tests {
                 "{canonical} should be model-visible"
             );
         }
-        // All legacy aliases are hidden.
+        // Removed aliases also cannot leak back into the model catalog.
         for alias in legacy_aliases {
             assert!(
                 api_names.iter().all(|n| n != alias),
@@ -2443,12 +2332,10 @@ mod tests {
         }
     }
 
-    /// The Plan-mode read-only surface registers the same canonical tools
-    /// restricted to their read actions, plus hidden aliases for the legacy
-    /// read-only names only — write names stay unregistered, exactly as
-    /// before the unification.
+    /// The Plan-mode read-only surface registers only the canonical families,
+    /// restricted to their read actions.
     #[test]
-    fn read_only_task_surface_keeps_write_aliases_unregistered() {
+    fn read_only_task_surface_contains_no_per_action_aliases() {
         let tmp = tempdir().expect("tempdir");
         let ctx = ToolContext::new(tmp.path().to_path_buf());
         let registry = ToolRegistryBuilder::new()
@@ -2464,10 +2351,6 @@ mod tests {
             "github_pr_context",
             "automation_list",
             "automation_read",
-        ] {
-            assert!(registry.contains(name), "{name} should remain callable");
-        }
-        for name in [
             "task_create",
             "task_cancel",
             "task_gate_run",
@@ -2483,10 +2366,7 @@ mod tests {
             "automation_delete",
             "automation_run",
         ] {
-            assert!(
-                !registry.contains(name),
-                "{name} must stay unregistered on the read-only surface"
-            );
+            assert!(!registry.contains(name), "{name} must be removed");
         }
 
         let api_names: Vec<String> = registry

@@ -1,9 +1,8 @@
 //! Canonical action-based wrapper for git inspection tools.
 //!
 //! The model sees one tool: `Git` with an `action` parameter
-//! (status | diff | log | show | blame). Legacy names (`git_status`,
-//! `git_diff`, etc.) stay registered as hidden compat aliases that force the
-//! action so saved transcripts replay correctly.
+//! (status | diff | log | show | blame). The per-action legacy execution
+//! aliases were removed in v0.9.3.
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -24,13 +23,6 @@ impl GitTool {
         Self {
             name,
             forced_action: None,
-        }
-    }
-
-    pub const fn alias(name: &'static str, action: &'static str) -> Self {
-        Self {
-            name,
-            forced_action: Some(action),
         }
     }
 

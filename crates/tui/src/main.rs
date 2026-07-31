@@ -419,8 +419,8 @@ struct ExecArgs {
     /// Output format for exec mode
     #[arg(long, value_enum, default_value_t = ExecOutputFormat::Text)]
     output_format: ExecOutputFormat,
-    /// Comma-separated list of tools to allow (all others denied).
-    /// Lowercase catalog names: read_file, write_file, exec_shell, grep_files, etc.
+    /// Comma-separated list of canonical tools to allow (all others denied).
+    /// Names are case-insensitive: Bash, File, Git, Run, etc.
     #[arg(long, value_delimiter = ',')]
     allowed_tools: Option<Vec<String>>,
     /// Comma-separated list of tools to deny (deny wins over allow).
@@ -476,7 +476,7 @@ enum TuiAuthCommand {
 }
 
 const CODEWHALE_TOOL_SURFACE_ENV: &str = "CODEWHALE_TOOL_SURFACE";
-const SHELL_ONLY_EXEC_TOOLS: &[&str] = &["exec_shell", "exec_shell_wait", "exec_shell_interact"];
+const SHELL_ONLY_EXEC_TOOLS: &[&str] = &["bash"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExecToolSurface {
@@ -14020,9 +14020,9 @@ mod terminal_mode_tests {
             "codewhale",
             "exec",
             "--allowed-tools",
-            "read_file,grep_files",
+            "File,Git",
             "--disallowed-tools",
-            "exec_shell",
+            "Bash",
             "--max-turns",
             "7",
             "--append-system-prompt",
@@ -14037,11 +14037,11 @@ mod terminal_mode_tests {
 
         assert_eq!(
             args.allowed_tools.as_deref(),
-            Some(&["read_file".to_string(), "grep_files".to_string()][..])
+            Some(&["File".to_string(), "Git".to_string()][..])
         );
         assert_eq!(
             args.disallowed_tools.as_deref(),
-            Some(&["exec_shell".to_string()][..])
+            Some(&["Bash".to_string()][..])
         );
         assert_eq!(args.max_turns, Some(7));
         assert_eq!(args.append_system_prompt.as_deref(), Some("extra rules"));
@@ -14145,14 +14145,7 @@ mod terminal_mode_tests {
         let allowed_tools = resolve_exec_allowed_tools(None, exec_tool_surface_from_env())
             .expect("shell-only surface should set an allowlist");
 
-        assert_eq!(
-            allowed_tools,
-            vec![
-                "exec_shell".to_string(),
-                "exec_shell_wait".to_string(),
-                "exec_shell_interact".to_string(),
-            ]
-        );
+        assert_eq!(allowed_tools, vec!["bash".to_string()]);
     }
 
     #[test]
@@ -14160,16 +14153,13 @@ mod terminal_mode_tests {
         let _env_lock = crate::test_support::lock_test_env();
         let _surface =
             crate::test_support::EnvVarGuard::set(CODEWHALE_TOOL_SURFACE_ENV, "shell-only");
-        let explicit = vec![" Read_File ".to_string(), "GREP_FILES".to_string()];
+        let explicit = vec![" File ".to_string(), "GIT".to_string()];
 
         let allowed_tools =
             resolve_exec_allowed_tools(Some(&explicit), exec_tool_surface_from_env())
                 .expect("explicit allowlist should be preserved");
 
-        assert_eq!(
-            allowed_tools,
-            vec!["read_file".to_string(), "grep_files".to_string()]
-        );
+        assert_eq!(allowed_tools, vec!["file".to_string(), "git".to_string()]);
     }
 
     #[test]

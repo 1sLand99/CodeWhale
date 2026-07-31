@@ -2,9 +2,7 @@
 //!
 //! Unified surface (piagent phase B): the model sees one tool, `github`,
 //! with an `action` parameter routing to the per-action logic. The legacy
-//! `github_*` names stay registered as hidden compat aliases that force the
-//! action so saved transcripts replay correctly — the pattern `BashTool`
-//! established for `exec_shell*` in #4625.
+//! `github_*` execution aliases were removed in v0.9.3.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -70,6 +68,7 @@ impl GithubTool {
         }
     }
 
+    #[cfg(test)]
     pub const fn alias(name: &'static str, action: &'static str) -> Self {
         Self {
             name,

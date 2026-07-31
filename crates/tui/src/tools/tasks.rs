@@ -50,9 +50,8 @@ fn build_gate_command(command: &str, cwd: &Path) -> Command {
 /// Unified durable-task tool (piagent phase B).
 ///
 /// The model sees one tool, `tasks`, with an `action` parameter routing to
-/// the per-action logic below. Legacy `task_*` / `pr_attempt_*` names stay
-/// registered as hidden compat aliases that force the action so saved
-/// transcripts replay correctly — the pattern `BashTool` established in #4625.
+/// the per-action logic below. The per-action `task_*` / `pr_attempt_*`
+/// execution aliases were removed in v0.9.3.
 ///
 /// `TaskShellStartTool` / `TaskShellWaitTool` stay separate: the registry
 /// gates them behind `allow_shell` (see `with_runtime_task_shell_tools`),
@@ -98,6 +97,7 @@ impl TasksTool {
         }
     }
 
+    #[cfg(test)]
     pub const fn alias(name: &'static str, action: &'static str) -> Self {
         Self {
             name,

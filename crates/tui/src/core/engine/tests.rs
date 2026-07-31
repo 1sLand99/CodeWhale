@@ -9014,9 +9014,9 @@ fn turn_tool_registry_builder_keeps_plan_mode_read_only_for_files() {
         )
         .build(engine.build_tool_context(AppMode::Plan, false));
 
-    assert!(registry.contains("read_file"));
-    assert!(registry.contains("list_dir"));
     assert!(registry.contains("File"));
+    assert!(!registry.contains("read_file"));
+    assert!(!registry.contains("list_dir"));
     assert!(!registry.contains("write_file"));
     assert!(!registry.contains("edit_file"));
     assert!(!registry.contains("exec_shell"));
@@ -9031,8 +9031,9 @@ fn turn_tool_registry_builder_keeps_plan_mode_read_only_for_files() {
     assert!(registry.contains("create_goal"));
     assert!(registry.contains("get_goal"));
     assert!(registry.contains("update_goal"));
-    assert!(registry.contains("task_list"));
-    assert!(registry.contains("task_read"));
+    assert!(registry.contains("tasks"));
+    assert!(!registry.contains("task_list"));
+    assert!(!registry.contains("task_read"));
     assert!(registry.contains("handle_read"));
     let plan_state_tools = [
         "checklist_add",

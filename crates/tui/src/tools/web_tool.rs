@@ -1,9 +1,8 @@
 //! Canonical action-based wrapper for web tools.
 //!
 //! The model sees one tool: `Web` with an `action` parameter
-//! (search | fetch | wait). Legacy names (`web_search`, `fetch_url`,
-//! `wait_for_dev_server`) stay registered as hidden compat aliases that
-//! force the action so saved transcripts replay correctly.
+//! (search | fetch | wait). The per-action legacy execution aliases were
+//! removed in v0.9.3.
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -25,13 +24,6 @@ impl WebTool {
         Self {
             name,
             forced_action: None,
-        }
-    }
-
-    pub const fn alias(name: &'static str, action: &'static str) -> Self {
-        Self {
-            name,
-            forced_action: Some(action),
         }
     }
 
