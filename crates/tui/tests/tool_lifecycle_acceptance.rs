@@ -167,13 +167,14 @@ fn public_tool_lifecycle_should_show_running_tool(world: &mut ToolLifecycleWorld
         event.get("input").and_then(|input| input.get("path")),
         Some(&json!(row_value(&expected, "input")))
     );
+    assert_expected_action(event, &expected);
 }
 
 #[then("the public tool result should return directory entries:")]
 fn public_tool_result_should_return_directory_entries(world: &mut ToolLifecycleWorld, step: &Step) {
     let output = tool_result_output(world);
     let entries: Vec<Value> =
-        serde_json::from_str(output).expect("list_dir result should be JSON entries");
+        serde_json::from_str(output).expect("File.list result should be JSON entries");
 
     for row in data_table_rows(step) {
         let expected_name = row_value(&row, "entry");
@@ -187,7 +188,7 @@ fn public_tool_result_should_return_directory_entries(world: &mut ToolLifecycleW
                 entry.get("name").and_then(Value::as_str) == Some(expected_name.as_str())
                     && entry.get("is_dir").and_then(Value::as_bool) == Some(expected_is_dir)
             }),
-            "missing {expected_name} in list_dir result:\n{output}"
+            "missing {expected_name} in File.list result:\n{output}"
         );
     }
 }
@@ -356,7 +357,7 @@ fn codewhale_should_send_real_tool_error_back_to_mocked_llm(world: &mut ToolLife
 #[then("the public tool result should be an empty list")]
 fn public_tool_result_should_be_an_empty_list(world: &mut ToolLifecycleWorld) {
     let output = tool_result_output(world);
-    let value: Value = serde_json::from_str(output).expect("empty list_dir result should be JSON");
+    let value: Value = serde_json::from_str(output).expect("empty File.list result should be JSON");
     assert_eq!(value, json!([]), "empty workspace should return []");
     assert_eq!(
         tool_result_event(world)
@@ -413,6 +414,7 @@ fn public_tool_lifecycle_should_show_completed_tool(world: &mut ToolLifecycleWor
         tool_use.get("input").and_then(|input| input.get("path")),
         Some(&json!(row_value(&expected, "input")))
     );
+    assert_expected_action(tool_use, &expected);
 }
 
 #[then("the public tool lifecycle should show a failed tool:")]
@@ -429,6 +431,7 @@ fn public_tool_lifecycle_should_show_failed_tool(world: &mut ToolLifecycleWorld,
         tool_use.get("input").and_then(|input| input.get("path")),
         Some(&json!(row_value(&expected, "input")))
     );
+    assert_expected_action(tool_use, &expected);
 }
 
 #[then(regex = r#"^the public output should include "([^"]+)"$"#)]
@@ -927,6 +930,20 @@ fn row_value(row: &[(String, String)], header: &str) -> String {
     row.iter()
         .find_map(|(key, value)| (key == header).then(|| value.clone()))
         .unwrap_or_else(|| panic!("data table row missing {header} value"))
+}
+
+fn assert_expected_action(event: &Value, expected: &[(String, String)]) {
+    let Some(action) = expected
+        .iter()
+        .find_map(|(key, value)| (key == "action").then_some(value))
+    else {
+        return;
+    };
+    assert_eq!(
+        event.get("input").and_then(|input| input.get("action")),
+        Some(&json!(action)),
+        "canonical tool action should be visible in the lifecycle event"
+    );
 }
 
 fn codewhale_tui_binary() -> PathBuf {

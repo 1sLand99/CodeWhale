@@ -17,7 +17,7 @@ const HAPPY_PATH_TOOL_LOOP: [ScenarioStepKind; 6] = [
     ScenarioStepKind::Search,
     ScenarioStepKind::Edit,
     ScenarioStepKind::ApplyPatch,
-    ScenarioStepKind::ExecShell,
+    ScenarioStepKind::Bash,
 ];
 
 #[test]
@@ -86,8 +86,15 @@ fn acceptance_happy_path_records_simulated_llm_tool_plan() {
 
     for (record, kind) in records.iter().zip(HAPPY_PATH_TOOL_LOOP) {
         assert_eq!(
-            record.request.get("step").and_then(|value| value.as_str()),
+            record.request.get("tool").and_then(|value| value.as_str()),
             Some(kind.tool_name())
+        );
+        assert_eq!(
+            record
+                .request
+                .get("action")
+                .and_then(|value| value.as_str()),
+            kind.action()
         );
 
         let expected_kind = format!("{kind:?}");
