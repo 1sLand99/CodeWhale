@@ -1027,7 +1027,7 @@ async fn fetch_page(
         "web_run",
     )
     .await?;
-    page_from_fetched(payload, context)
+    page_from_fetched(payload, context).await
 }
 
 #[cfg(test)]
@@ -1049,10 +1049,10 @@ async fn fetch_page_with_initial_pin(
         initial_pin.flatten(),
     )
     .await?;
-    page_from_fetched(payload, context)
+    page_from_fetched(payload, context).await
 }
 
-fn page_from_fetched(
+async fn page_from_fetched(
     payload: super::web::fetch::FetchedPayload,
     context: &ToolContext,
 ) -> Result<WebPage, ToolError> {
@@ -1062,7 +1062,13 @@ fn page_from_fetched(
             payload.status
         )));
     }
-    let document = extract_document(&payload.url, Some(&payload.content_type), &payload.bytes)?;
+    let document = extract_document(
+        &payload.url,
+        Some(&payload.content_type),
+        &payload.bytes,
+        context.cancel_token.as_ref(),
+    )
+    .await?;
     let content_type = Some(payload.content_type);
     match document.kind {
         DocumentKind::Html => {

@@ -2,9 +2,7 @@
 //!
 //! Unified surface (piagent phase B): the model sees one tool, `automation`,
 //! with an `action` parameter routing to the per-action logic. The legacy
-//! `automation_*` names stay registered as hidden compat aliases that force
-//! the action so saved transcripts replay correctly — the same pattern
-//! `BashTool` established for `exec_shell*` in #4625.
+//! `automation_*` execution aliases were removed in v0.9.3.
 
 use std::path::PathBuf;
 
@@ -54,6 +52,7 @@ impl AutomationTool {
         }
     }
 
+    #[cfg(test)]
     pub const fn alias(name: &'static str, action: &'static str) -> Self {
         Self {
             name,

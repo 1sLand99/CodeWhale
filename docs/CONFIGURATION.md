@@ -2059,21 +2059,44 @@ To bootstrap missing MCP/skills paths, run `codewhale-tui setup --all`. You can
 also run `codewhale-tui setup --skills --local` to create a workspace-local
 `./skills` dir.
 
-`codewhale-tui doctor --json` prints a machine-readable report that skips the
-live API connectivity probe. Plain `doctor` keeps the existing hosted-provider
-connectivity check, but it does not contact loopback or self-hosted provider
-endpoints unless `--probe-local` is supplied. That opt-in request may start a
-desktop-managed local service such as Ollama. Top-level keys: `version`,
-`config_path`, `config_present`, `workspace`, `api_key.source`, `base_url`,
+Both plain `codewhale-tui doctor` and `doctor --json` are structural and
+offline by default. They do not check the release service, hosted provider
+APIs, local provider endpoints, or MCP processes, and they do not load a
+workspace credential `.env`. Use `--check-updates`,
+`--probe-api`, `--probe-local`, or `--probe-mcp` to opt into the corresponding
+live boundary; `--probe-local` may start a desktop-managed service such as
+Ollama. Only the explicit API/local probe paths may load workspace credential
+`.env` values. Live flags conflict with `--json`, so machine-readable doctor
+output is always offline. Top-level keys include `version`, `paths`, `secret_backend`,
+`config_path`, `config_present`, `workspace`, `api_key.source`,
+`api_key.availability`, `base_url`,
 `default_text_model`, `mcp`, `skills`, `tools`, `plugins`, `sandbox`,
-`platform`, `api_connectivity`, `capability`. CI consumers should rely on `api_key.source`
-(`env`/`config`/`missing`) rather than parsing the human-readable `doctor`
-text.
+`platform`, `api_connectivity`, and `capability`. CI consumers should rely on
+`api_key.source` (`config_declared`/`env_declared`/`external_auth_declared`/
+`secret_store_unprobed`/`secret_store_unavailable`/`oauth_unprobed`/
+`external_consent`/`none`/`local_runtime`/`unknown`) and
+`api_key.availability`
+(`present`/`not_required`/`not_probed`/`unavailable`/`unknown`) rather than parsing the
+human-readable `doctor` text. Source is declaration metadata, not proof that a
+credential exists or works. Only a non-empty, non-sentinel literal config value
+is structurally `present`; no-auth and local routes are `not_required`. Environment,
+external-auth, OAuth, consent, and secret-store declarations remain `not_probed`
+and cannot make structural Setup or Fleet readiness true. A secret-store sentinel
+on a named/custom endpoint that is prohibited from using the shared store is
+`secret_store_unavailable`/`unavailable`, while `unknown` remains reserved for
+the absence of a supported structural conclusion. Exact and whitespace-wrapped
+legacy sentinels are never treated as literal credentials. The structural
+loader still honors safe environment routing/model/policy fields, but it never
+materializes environment HTTP headers, sandbox API keys, or search API keys;
+only an explicit API/local probe switches to the normal credential-loading
+path. An opted-in update check also emits only typed generic failures: untrusted
+release metadata and transport errors are not echoed.
 
 If configuration loading or validation fails, `doctor --json` returns nonzero
-and prints a bounded, secret-redacted JSON error envelope with
+and prints a bounded JSON error envelope with
 `status = "error"` and `error.kind = "config_validation"`. It does not emit a
-normal route or capability report for an invalid configuration.
+normal route or capability report—or the underlying possibly sensitive error—
+for an invalid configuration.
 
 MCP entries are configuration diagnostics unless an explicit MCP command is
 run. `mcp.probe_scope` is `configuration`, `mcp.live_health_checked` is false,
@@ -2082,7 +2105,10 @@ and each server separates `checks.configuration` / `checks.command` from
 `checks.backend_tool_health`. The latter three remain `not_checked` in doctor
 output. Run `codewhale mcp validate` to explicitly start enabled servers and
 verify protocol initialization/discovery; backend health still requires an
-appropriate explicit tool call.
+appropriate explicit tool call. Doctor reports only safe structural MCP fields:
+URL userinfo/path/query/fragment and raw command arguments, environment values,
+header values, and token material are omitted. Provider URLs follow the same
+rule and expose only `scheme://host[:explicit-port]`.
 
 The `capability` key contains per-provider capability info derived from
 static knowledge (release docs, API guides) rather than live API probes.

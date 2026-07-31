@@ -443,7 +443,9 @@ done
     expect(registry).toContain('GitTool::new("Git")');
     expect(registry).toContain('RunTool::new("Run")');
     expect(registry).toContain('BashTool::new("Bash")');
-    expect(registry).toContain("hidden compat aliases for transcript replay");
+    expect(registry).not.toContain('BashTool::new("exec_shell")');
+    expect(registry).not.toContain('FileTool::new("read_file")');
+    expect(registry).not.toContain('FileTool::new("list_dir")');
     expect(toolsPage).not.toContain("read_file · list_dir");
     expect(toolsPage).not.toContain("rlm_open · rlm_eval");
     expect(toolsPage).not.toContain("docs/TOOL_LIFECYCLE.md");

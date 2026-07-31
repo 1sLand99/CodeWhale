@@ -4674,11 +4674,12 @@ fn provider_metadata_defaults_match_runtime_helpers() {
         if kind != ProviderKind::Custom {
             assert!(!provider.env_vars().is_empty());
         }
-        // OpenAI Codex (ChatGPT) speaks the Responses API; Anthropic and the
-        // Anthropic-compatible routes speak the native Messages API; every
+        // OpenAI Codex (ChatGPT) speaks the Responses API; DeepSeek and
+        // OpenCode Zen select a protocol per exact model offering; Anthropic
+        // and the Anthropic-compatible routes speak native Messages; every
         // other built-in provider is OpenAI-compatible Chat Completions.
         let expected_wire = match kind {
-            ProviderKind::OpencodeZen => None,
+            ProviderKind::Deepseek | ProviderKind::OpencodeZen => None,
             ProviderKind::OpenaiCodex => Some(provider::WireFormat::Responses),
             ProviderKind::Anthropic
             | ProviderKind::DeepseekAnthropic
@@ -6413,6 +6414,53 @@ fn siliconflow_custom_base_url_preserves_provider_model() {
     assert_eq!(resolved.provider, ProviderKind::Siliconflow);
     assert_eq!(resolved.base_url, "https://my-gateway.example/v1");
     assert_eq!(resolved.model, "DeepSeek-V4-Pro");
+}
+
+#[test]
+fn sentinel_config_values_fall_through_without_becoming_runtime_keys() {
+    let _lock = env_lock();
+    let _env = EnvGuard::without_deepseek_runtime_overrides();
+
+    for sentinel in [API_KEYRING_SENTINEL, "  __KEYRING__  "] {
+        let store = Arc::new(RecordingSecretsStore::with_value("stored-key"));
+        let secrets = Secrets::new(store.clone());
+        let mut official = ConfigToml::default();
+        official.providers.deepseek.api_key = Some(sentinel.to_string());
+        let resolved = official
+            .resolve_runtime_options_with_secrets(&CliRuntimeOverrides::default(), &secrets);
+        assert_eq!(resolved.api_key.as_deref(), Some("stored-key"));
+        assert_eq!(resolved.api_key_source, Some(RuntimeApiKeySource::Keyring));
+
+        let custom_store = Arc::new(RecordingSecretsStore::with_value("must-not-be-read"));
+        let custom_secrets = Secrets::new(custom_store.clone());
+        let mut custom = ConfigToml {
+            provider: ProviderKind::Openrouter,
+            ..ConfigToml::default()
+        };
+        custom.providers.openrouter.base_url = Some("https://gateway.example.test/v1".to_string());
+        custom.providers.openrouter.api_key = Some(sentinel.to_string());
+        let resolved = custom
+            .resolve_runtime_options_with_secrets(&CliRuntimeOverrides::default(), &custom_secrets);
+        assert_eq!(resolved.api_key, None);
+        assert_eq!(resolved.api_key_source, None);
+        assert!(custom_store.gets.lock().unwrap().is_empty());
+
+        let empty_store = Arc::new(RecordingSecretsStore {
+            gets: Mutex::new(Vec::new()),
+            value: None,
+        });
+        let empty_secrets = Secrets::new(empty_store);
+        let mut xiaomi = ConfigToml {
+            provider: ProviderKind::XiaomiMimo,
+            ..ConfigToml::default()
+        };
+        xiaomi.providers.xiaomi_mimo.api_key = Some(sentinel.to_string());
+        let resolved = xiaomi
+            .resolve_runtime_options_with_secrets(&CliRuntimeOverrides::default(), &empty_secrets);
+        assert_eq!(resolved.base_url, DEFAULT_XIAOMI_MIMO_BASE_URL);
+        assert_eq!(resolved.api_key, None);
+        assert_eq!(resolved.api_key_source, None);
+    }
 }
 
 #[test]

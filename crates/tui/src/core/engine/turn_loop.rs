@@ -19,6 +19,7 @@ use crate::runtime_handoff::{
     subagent_failure_runtime_message, waiting_for_subagents_runtime_message,
 };
 use crate::tools::spec::ToolTerminalStatus;
+use crate::tools::tool_call_budget::ToolCallBudget;
 
 const MAX_APPROVAL_INTENT_SUMMARY_CHARS: usize = 2_000;
 const TOOL_ERROR_DEGRADATION_THRESHOLD: u32 = 2;
@@ -363,14 +364,11 @@ impl Engine {
     pub(super) async fn handle_deepseek_turn(
         &mut self,
         turn: &mut TurnContext,
-        tool_registry: Option<&crate::tools::ToolRegistry>,
-        tools: Option<Vec<Tool>>,
-        mode: AppMode,
-        dynamic_active_tools: Vec<&'static str>,
+        tool_policy: ToolSurfacePolicy,
         // Out-of-request facts resolved once for this turn. `None` means the
         // caller captured none, and the projection reports every
         // registry-derived field as unknown rather than guessing.
-        tool_surface: Option<crate::tool_inspection::ToolSurfaceContext>,
+        inspection_surface: Option<crate::tool_inspection::ToolSurfaceContext>,
     ) -> (TurnOutcomeStatus, Option<String>) {
         // Only interactive TUI hosts own terminal chrome. Headless exec,
         // app-server, and stream-json stdout must remain byte-clean.
@@ -391,28 +389,17 @@ impl Engine {
         let mut read_repeat_guard = ReadRepeatGuard::default();
         let mut turn_error: Option<String> = None;
         let mut context_recovery_attempts = 0u8;
-        // Seed the turn's tool state from the shared planner so
-        // `/preview-request` and dispatch cannot disagree about which tools
-        // the next request would carry.
-        let tool_plan = plan_turn_tools(
-            tools,
-            mode,
-            &self.config.tools_always_load,
-            &dynamic_active_tools,
-            self.config.strict_tool_mode,
-        );
-        let tool_catalog = tool_plan.catalog;
-        if let Some(registry) = tool_registry {
-            let issues = tool_catalog_consistency_issues(&tool_catalog, registry);
-            if !issues.is_empty() {
-                tracing::warn!(
-                    target: "engine.tool_catalog",
-                    ?issues,
-                    "model/search tool catalog is inconsistent with the runtime registry"
-                );
-            }
-        }
-        let mut active_tool_names = tool_plan.active_names;
+        let mut tool_policy = tool_policy;
+        let mode = tool_policy.mode;
+        let strict_tool_mode = tool_policy.strict_tool_mode;
+        let tool_catalog = std::mem::take(&mut tool_policy.catalog);
+        let mut active_tool_names = std::mem::take(&mut tool_policy.active_names);
+        let tool_registry = Some(&tool_policy.registry);
+        // #4415: the turn's tool-call admission counter. It lives here —
+        // across every model step and batch of this turn — never in the
+        // catalog; the policy only carries the declared limit, and `None`
+        // (no declared budget) leaves the gate below inert.
+        let mut tool_call_budget = ToolCallBudget::new(tool_policy.max_tool_calls);
         let mut goal_continuations_this_turn = 0u32;
         // Outer stream-retry counter: when the chunked-transfer connection
         // dies mid-stream and either nothing useful was streamed (#103
@@ -633,11 +620,8 @@ impl Engine {
             // helper that seeded this turn and that `/preview-request`
             // reports, so a deferred tool activated mid-turn is reflected
             // identically in both places.
-            let active_tools = active_tools_for_request(
-                &tool_catalog,
-                &active_tool_names,
-                self.config.strict_tool_mode,
-            );
+            let active_tools =
+                active_tools_for_request(&tool_catalog, &active_tool_names, strict_tool_mode);
 
             // Resolve `auto` reasoning_effort to a concrete tier (#663).
             let effective_reasoning_effort = resolve_auto_effort(
@@ -757,7 +741,7 @@ impl Engine {
                 system: self.session.system_prompt.clone(),
                 tools: active_tools.clone(),
                 tool_choice: if active_tools.is_some() {
-                    if self.config.strict_tool_mode {
+                    if strict_tool_mode {
                         Some(json!("required"))
                     } else {
                         Some(json!({ "type": "auto" }))
@@ -777,7 +761,7 @@ impl Engine {
                     &turn.id,
                     turn.step,
                     request.tools.as_deref(),
-                    tool_surface.as_ref(),
+                    inspection_surface.as_ref(),
                 );
 
             // Stream the response. Keep the request around (cloned into the
@@ -1816,6 +1800,18 @@ impl Engine {
                 // clobbered by it.
                 let mut hook_requires_approval = false;
 
+                // #4415: hard per-turn tool-call budget. This gate runs first
+                // so the budget counts every proposed call in the batch: while
+                // calls remain, the call is admitted and the count decrements;
+                // once exhausted, the call is rejected with a typed reason and
+                // never executes — an over-budget batch is truncated to exactly
+                // the calls that still fit, in proposal order.
+                if let Err(exceeded) = tool_call_budget.admit()
+                    && blocked_error.is_none()
+                {
+                    blocked_error = Some(exceeded.into_tool_error(&tool_name));
+                }
+
                 if mode_blocks_command_execution(mode, &tool_name) {
                     blocked_error = Some(ToolError::permission_denied(format!(
                         "'{tool_name}' is not available in Plan mode — switch to Act mode (`/mode act`) to run commands and code."
@@ -1830,17 +1826,13 @@ impl Engine {
 
                 // #3027: deny wins over allow — check the deny-list first so a
                 // tool present in both lists is still blocked.
-                if blocked_error.is_none()
-                    && command_denies_tool(self.config.disallowed_tools.as_deref(), &tool_name)
-                {
+                if blocked_error.is_none() && tool_policy.denies_tool(&tool_name) {
                     blocked_error = Some(ToolError::permission_denied(format!(
                         "Tool '{tool_name}' is in the disallowed-tools list"
                     )));
                 }
 
-                if blocked_error.is_none()
-                    && !command_allows_tool(self.config.allowed_tools.as_deref(), &tool_name)
-                {
+                if blocked_error.is_none() && !tool_policy.passes_allow_list(&tool_name) {
                     blocked_error = Some(ToolError::permission_denied(format!(
                         "Tool '{tool_name}' is not in the allowed-tools list for the current command"
                     )));
@@ -2666,30 +2658,27 @@ impl Engine {
 
                         if tool_name == REQUEST_USER_INPUT_NAME {
                             let started_at = Instant::now();
-                            let result =
-                                if crate::core::authority::permission_posture_allows_questions(
-                                    self.session.approval_mode,
-                                ) {
-                                    match UserInputRequest::from_value(&tool_input) {
-                                        Ok(request) => self
-                                            .await_user_input(&tool_id, request)
-                                            .await
-                                            .and_then(|response| {
-                                                ToolResult::json(&response).map_err(|e| {
-                                                    ToolError::execution_failed(e.to_string())
-                                                })
-                                            }),
-                                        Err(err) => Err(err),
-                                    }
-                                } else {
-                                    Ok(ToolResult::success(
+                            let result = if tool_policy.allows_questions() {
+                                match UserInputRequest::from_value(&tool_input) {
+                                    Ok(request) => self
+                                        .await_user_input(&tool_id, request)
+                                        .await
+                                        .and_then(|response| {
+                                            ToolResult::json(&response).map_err(|e| {
+                                                ToolError::execution_failed(e.to_string())
+                                            })
+                                        }),
+                                    Err(err) => Err(err),
+                                }
+                            } else {
+                                Ok(ToolResult::success(
                                     "Auto-Review does not pause for user questions. Decide from the available context and continue autonomously.",
                                 )
                                 .with_metadata(json!({
                                     "auto_resolved": true,
                                     "permission_posture": "auto-review",
                                 })))
-                                };
+                            };
 
                             let _ = self
                                 .tx_event
@@ -3675,23 +3664,9 @@ mod stream_timeout_tests {
     }
 }
 
-pub(super) fn command_allows_tool(allowed_tools: Option<&[String]>, tool_name: &str) -> bool {
-    let Some(allowed_tools) = allowed_tools else {
-        return true;
-    };
-    // Symmetric with `command_denies_tool`: support a trailing `*` wildcard
-    // and lowercase both sides, so `allowed_tools = ["mcp_*"]` or `["ReadFile"]`
-    // work instead of silently matching nothing (which strips the whole
-    // catalog).
-    let tool_name = tool_name.to_ascii_lowercase();
-    allowed_tools.iter().any(|rule| {
-        let rule = rule.to_ascii_lowercase();
-        if let Some(prefix) = rule.strip_suffix('*') {
-            tool_name.starts_with(prefix)
-        } else {
-            tool_name == rule
-        }
-    })
+#[cfg(test)]
+fn command_allows_tool(allowed_tools: Option<&[String]>, tool_name: &str) -> bool {
+    tool_allowed(allowed_tools, tool_name)
 }
 
 /// Folded outcome of all `tool_call_before` hook results for one tool call
@@ -3876,21 +3851,9 @@ fn fold_tool_call_before_results(results: &[crate::hooks::HookResult]) -> ToolCa
     fold
 }
 
-/// Check whether `tool_name` is explicitly denied (#3027).
-/// Deny always wins over allow.
-pub(super) fn command_denies_tool(disallowed_tools: Option<&[String]>, tool_name: &str) -> bool {
-    let Some(disallowed_tools) = disallowed_tools else {
-        return false;
-    };
-    let tool_name = tool_name.to_ascii_lowercase();
-    disallowed_tools.iter().any(|rule| {
-        let rule = rule.to_ascii_lowercase();
-        if let Some(prefix) = rule.strip_suffix('*') {
-            tool_name.starts_with(prefix)
-        } else {
-            tool_name == rule
-        }
-    })
+#[cfg(test)]
+fn command_denies_tool(disallowed_tools: Option<&[String]>, tool_name: &str) -> bool {
+    tool_denied(disallowed_tools, tool_name)
 }
 
 fn resolve_tool_definition<'a>(
@@ -4395,13 +4358,13 @@ mod tests {
             .with_file_tools()
             .build(context);
         let catalog = registry.to_api_tools();
-        let mut tool_name = "ReadFile".to_string();
+        let mut tool_name = "file".to_string();
 
         let tool_def = resolve_tool_definition(&mut tool_name, &catalog, Some(&registry));
 
         assert!(tool_def.is_some());
-        assert_eq!(tool_name, "read_file");
-        let allowed = vec!["read_file".to_string()];
+        assert_eq!(tool_name, "File");
+        let allowed = vec!["File".to_string()];
         assert!(command_allows_tool(Some(&allowed), &tool_name));
     }
 

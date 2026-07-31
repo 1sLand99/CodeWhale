@@ -111,6 +111,53 @@ model = "k3[1m]"
 }
 
 #[test]
+fn doctor_json_omits_untrusted_config_validation_details() {
+    let fixture = TempDir::new().expect("fixture root");
+    let workspace = fixture.path().join("workspace");
+    let home = fixture.path().join("home");
+    let codewhale_home = fixture.path().join("isolated-codewhale-home");
+    fs::create_dir_all(&workspace).expect("workspace");
+    let config = workspace.join("untrusted-invalid.toml");
+    let config_bytes = br#"provider = "doctor-untrusted-provider-secret"
+api_key = "doctor-json-arbitrary-secret"
+"#;
+    fs::write(&config, config_bytes).expect("write invalid config");
+
+    let mut command = diagnostic_command(&workspace, &home);
+    command
+        .args([
+            "--config",
+            config.to_str().expect("config path"),
+            "doctor",
+            "--json",
+        ])
+        .env("CODEWHALE_HOME", &codewhale_home);
+    let output = command.output().expect("run invalid doctor json");
+
+    assert!(!output.status.success());
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("machine-readable doctor error");
+    assert_eq!(report["error"]["kind"], "config_validation");
+    assert_eq!(
+        report["error"]["message"],
+        "configuration validation failed; details omitted because configuration errors may contain credential material"
+    );
+    let all_output = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!all_output.contains("doctor-untrusted-provider-secret"));
+    assert!(!all_output.contains("doctor-json-arbitrary-secret"));
+    assert_eq!(
+        fs::read(&config).expect("read config after doctor"),
+        config_bytes
+    );
+    assert!(!home.exists());
+    assert!(!codewhale_home.exists());
+}
+
+#[test]
 fn doctor_json_reports_valid_kimi_code_k3_context_override_from_runtime_route() {
     let fixture = TempDir::new().expect("fixture root");
     let workspace = fixture.path().join("workspace");
@@ -235,8 +282,8 @@ fn diagnostics_read_home_legacy_settings_without_migrating_them() {
                     "doctor must report the legacy default mode\nstdout:\n{stdout}"
                 );
                 assert!(
-                    stdout.contains("prefer_external_pdftotext = true"),
-                    "doctor must report the legacy PDF preference\nstdout:\n{stdout}"
+                    !stdout.contains("prefer_external_pdftotext"),
+                    "doctor must not advertise the removed PDF preference\nstdout:\n{stdout}"
                 );
             }
             ["doctor", "--json"] => {
@@ -314,9 +361,10 @@ fn doctor_json_does_not_inherit_an_ambient_legacy_secret_from_an_explicit_home()
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("machine-readable doctor report");
     assert_eq!(
-        report["api_key"]["source"], "missing",
-        "doctor must not report an ambient legacy secret from outside an explicit home"
+        report["api_key"]["source"], "secret_store_unprobed",
+        "doctor must report only structural eligibility, not an ambient legacy secret from outside an explicit home"
     );
+    assert_eq!(report["api_key"]["availability"], "not_probed");
     assert_eq!(
         fs::read(&legacy).expect("read legacy secret after doctor"),
         legacy_before,
@@ -397,7 +445,7 @@ fn doctor_text_probe_uses_a_legacy_key_without_migrating_it() {
 }
 
 #[test]
-fn doctor_json_auth_scheme_reads_a_legacy_key_without_migrating_it() {
+fn doctor_json_reports_a_legacy_store_without_reading_or_migrating_it() {
     let fixture = TempDir::new().expect("fixture root");
     let workspace = fixture.path().join("workspace");
     let home = fixture.path().join("home");
@@ -432,9 +480,14 @@ fn doctor_json_auth_scheme_reads_a_legacy_key_without_migrating_it() {
     );
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("machine-readable doctor report");
-    assert_eq!(report["api_key"]["source"], "keyring");
-    assert_eq!(report["route"]["auth"]["scheme"], "api-key");
-    assert_eq!(report["route"]["auth"]["source"], "keyring");
+    assert_eq!(report["api_key"]["source"], "secret_store_unprobed");
+    assert_eq!(report["api_key"]["availability"], "not_probed");
+    assert_eq!(
+        report["route"]["auth"]["scheme"], "unknown",
+        "ordinary JSON doctor must not read the legacy key prefix to refine the Xiaomi scheme"
+    );
+    assert_eq!(report["route"]["auth"]["source"], "secret_store_unprobed");
+    assert_eq!(report["route"]["auth"]["availability"], "not_probed");
     assert!(
         !primary.exists(),
         "doctor --json must not migrate a legacy secret while classifying auth"
@@ -447,7 +500,7 @@ fn doctor_json_auth_scheme_reads_a_legacy_key_without_migrating_it() {
 }
 
 #[test]
-fn setup_status_reads_a_legacy_key_without_migrating_it() {
+fn setup_status_reports_a_legacy_store_without_reading_or_migrating_it() {
     let fixture = TempDir::new().expect("fixture root");
     let workspace = fixture.path().join("workspace");
     let home = fixture.path().join("home");
@@ -469,10 +522,14 @@ fn setup_status_reads_a_legacy_key_without_migrating_it() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("api_key: set via OS keyring"),
-        "stdout:\n{}",
-        String::from_utf8_lossy(&output.stdout)
+        stdout.contains("api_key: secret store eligible (store not probed)"),
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("credential availability: not_probed"),
+        "stdout:\n{stdout}"
     );
     assert!(
         !primary.exists(),

@@ -805,7 +805,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_and_doctor_share_static_server_path_classification() {
+    fn setup_resolves_server_path_while_doctor_stays_structural() {
         let temp = TempDir::new().expect("tempdir");
         let command = write_path_only_command(temp.path());
         let mut server = path_server(&command, temp.path());
@@ -815,6 +815,10 @@ mod tests {
             crate::doctor_check_mcp_server(&server),
             crate::McpServerDoctorStatus::Ok(_)
         ));
+        assert_eq!(
+            crate::doctor_mcp_command_status(&server),
+            crate::McpCommandAvailability::NotChecked
+        );
 
         server.command = Some("codewhale-setup-mcp-command-that-does-not-exist".to_string());
         assert_eq!(
@@ -823,8 +827,12 @@ mod tests {
         );
         assert!(matches!(
             crate::doctor_check_mcp_server(&server),
-            crate::McpServerDoctorStatus::Error(_) | crate::McpServerDoctorStatus::Warning(_)
+            crate::McpServerDoctorStatus::Ok(_)
         ));
+        assert_eq!(
+            crate::doctor_mcp_command_status(&server),
+            crate::McpCommandAvailability::NotChecked
+        );
     }
 
     #[test]

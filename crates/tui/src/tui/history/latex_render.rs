@@ -19,10 +19,12 @@ fn find_math_start(text: &str) -> Option<usize> {
         if byte == b'$' && !is_escaped(b, idx) {
             return Some(idx);
         }
-        if byte == b'\\' && !is_escaped(b, idx) && idx + 1 < b.len() {
-            if b[idx + 1] == b'(' || b[idx + 1] == b'[' {
-                return Some(idx);
-            }
+        if byte == b'\\'
+            && !is_escaped(b, idx)
+            && idx + 1 < b.len()
+            && (b[idx + 1] == b'(' || b[idx + 1] == b'[')
+        {
+            return Some(idx);
         }
     }
     None

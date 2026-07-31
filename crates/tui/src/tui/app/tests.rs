@@ -1456,7 +1456,6 @@ fn settings_default_provider_auth_check_uses_provider_scoped_key() {
         !app.onboarding_needs_api_key,
         "OpenAI provider config key should satisfy startup auth without a DeepSeek key"
     );
-    assert_ne!(app.onboarding, OnboardingState::ApiKey);
     assert!(!app.api_key_env_only);
 }
 
@@ -4342,15 +4341,6 @@ fn ssh_direct_clipboard_paste_points_to_terminal_owned_bracketed_paste() {
     assert!(hint.contains("SSH paste uses your local terminal"));
     assert!(hint.contains("Cmd+V on macOS"));
     assert!(hint.contains("Ctrl+Shift+V on Linux/Windows"));
-
-    app.ui_locale = Locale::Ja;
-    app.status_message = None;
-    assert!(!app.paste_api_key_from_clipboard());
-    assert!(app.api_key_input.is_empty());
-    assert_eq!(
-        app.status_message.as_deref(),
-        Some(tr(Locale::Ja, MessageId::ClipboardSshPasteHint).as_ref())
-    );
 }
 
 #[test]
@@ -5713,40 +5703,6 @@ fn agent_current_activity_bounds_redacts_and_strips_control_sequences() {
         1,
         "source text stays untouched"
     );
-}
-
-#[test]
-fn onboarding_submit_api_key_routes_non_deepseek_provider_table() -> std::io::Result<()> {
-    use crate::config::SavedCredential;
-    use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let _lock = lock_test_env();
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let temp_root = std::env::temp_dir().join(format!(
-        "codewhale-app-onboarding-provider-{}-{}",
-        std::process::id(),
-        nanos
-    ));
-    fs::create_dir_all(&temp_root)?;
-    let _home = EnvVarGuard::set("HOME", temp_root.to_string_lossy().as_ref());
-
-    let mut app = App::new(test_options(false), &Config::default());
-    app.onboarding_provider = ApiProvider::Openrouter;
-    app.api_key_input = "onboarding-openrouter-key".to_string();
-    let saved = app
-        .submit_api_key()
-        .expect("openrouter onboarding key should save");
-    let SavedCredential::ConfigFile(path) = saved else {
-        panic!("expected config file save, got {saved:?}");
-    };
-    let contents = fs::read_to_string(path)?;
-    assert!(contents.contains("openrouter"), "{contents}");
-    assert!(contents.contains("onboarding-openrouter-key"));
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

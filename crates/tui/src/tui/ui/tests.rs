@@ -22,6 +22,7 @@ use crate::tui::history::{
     ExecCell, ExecSource, GenericToolCell, HistoryCell, SubAgentCell, ToolCell, ToolStatus,
 };
 use crate::tui::hotbar::actions::{HotbarActionCategory, HotbarDispatch};
+use crate::tui::provider_picker::ProviderPickerView;
 use crate::tui::ui_text::truncate_line_to_width;
 use crate::tui::views::{HelpView, ModalView, ViewAction};
 use crate::working_set::Workspace;
@@ -31,6 +32,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 
@@ -989,6 +991,12 @@ impl ConfigPathEnvGuard {
             previous,
             _lock: lock,
         }
+    }
+
+    fn config_path(&self) -> PathBuf {
+        std::env::var_os("DEEPSEEK_CONFIG_PATH")
+            .map(PathBuf::from)
+            .expect("config path set")
     }
 }
 
@@ -2851,6 +2859,225 @@ fn create_test_app() -> App {
         skip_onboarding: false,
         ..crate::test_support::test_tui_options(PathBuf::from("."))
     })
+}
+
+#[derive(Clone, Default)]
+struct CapturedTrace(Arc<Mutex<Vec<u8>>>);
+
+struct CapturedTraceWriter(CapturedTrace);
+
+impl std::io::Write for CapturedTraceWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .0
+            .lock()
+            .expect("captured trace lock")
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl CapturedTrace {
+    fn record(&self, action: impl FnOnce()) -> String {
+        let writer = self.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_target(false)
+            .with_writer(move || CapturedTraceWriter(writer.clone()))
+            .finish();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        tracing::dispatcher::with_default(&dispatch, action);
+        String::from_utf8(self.0.lock().expect("captured trace lock").clone())
+            .expect("trace output is UTF-8")
+    }
+}
+
+fn credential_paste_sentinel() -> String {
+    [
+        "violet",
+        "otter",
+        "credential",
+        "paste",
+        "must",
+        "stay",
+        "private",
+        "7361",
+    ]
+    .join("-")
+}
+
+fn sensitive_prefixes(secret: &str) -> Vec<String> {
+    [8, 16, 24]
+        .into_iter()
+        .filter(|length| secret.chars().count() >= *length)
+        .map(|length| secret.chars().take(length).collect())
+        .collect()
+}
+
+fn render_test_app(app: &mut App, config: &Config, width: u16, height: u16) -> String {
+    let mut terminal =
+        Terminal::new(TestBackend::new(width, height)).expect("paste safety test terminal");
+    terminal
+        .draw(|frame| render(frame, app, config))
+        .expect("render paste safety surface");
+    terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>()
+}
+
+fn assert_sensitive_paste_absent(surface: &str, secret: &str, label: &str) {
+    assert!(
+        !surface.contains(secret),
+        "{label} exposed the complete pasted credential"
+    );
+    for prefix in sensitive_prefixes(secret) {
+        assert!(
+            !surface.contains(&prefix),
+            "{label} exposed a pasted credential prefix"
+        );
+    }
+}
+
+#[test]
+fn credential_paste_content_never_enters_traces_or_rendered_status() {
+    let _env = crate::test_support::lock_test_env();
+    let temp = TempDir::new().expect("isolated paste safety home");
+    let _home = crate::test_support::EnvVarGuard::set(
+        "CODEWHALE_HOME",
+        temp.path().to_string_lossy().as_ref(),
+    );
+    let _secret_backend = crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let _anthropic_key = crate::test_support::EnvVarGuard::remove("ANTHROPIC_API_KEY");
+    let config = Config::default();
+    let secret = credential_paste_sentinel();
+
+    let setup = ProviderPickerView::new_for_setup(
+        ApiProvider::Deepseek,
+        Some(ApiProvider::Anthropic),
+        &config,
+        None,
+    );
+    let missing_auth = ProviderPickerView::new_for_missing_auth(
+        ApiProvider::Deepseek,
+        ApiProvider::Anthropic,
+        &config,
+        None,
+    )
+    .expect("Anthropic missing-auth editor");
+    let mut onboarding = ProviderPickerView::new_for_onboarding(
+        ApiProvider::Deepseek,
+        Some(ApiProvider::Anthropic),
+        &config,
+        None,
+    );
+    assert!(matches!(
+        onboarding.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ViewAction::None
+    ));
+
+    for (label, picker, onboarding_state) in [
+        ("setup", setup, OnboardingState::None),
+        ("missing-auth", missing_auth, OnboardingState::None),
+        ("onboarding", onboarding, OnboardingState::Provider),
+    ] {
+        let mut app = create_test_app();
+        app.onboarding = onboarding_state;
+        app.view_stack.push(picker);
+        let logs = CapturedTrace::default().record(|| {
+            handle_bracketed_paste(&mut app, &secret);
+        });
+        assert!(app.bracketed_paste_seen, "{label}");
+        for (width, height) in [(80, 24), (120, 32)] {
+            let rendered = render_test_app(&mut app, &config, width, height);
+            assert_sensitive_paste_absent(
+                &rendered,
+                &secret,
+                &format!("{label} credential editor at {width}x{height}"),
+            );
+        }
+        assert_sensitive_paste_absent(&logs, &secret, &format!("{label} paste trace"));
+        assert_sensitive_paste_absent(
+            app.status_message.as_deref().unwrap_or_default(),
+            &secret,
+            &format!("{label} status"),
+        );
+    }
+}
+
+#[test]
+fn ordinary_clipboard_text_routes_to_provider_picker_without_typing_shortcut_or_leaking() {
+    let _env = crate::test_support::lock_test_env();
+    let home = TempDir::new().expect("isolated ordinary-paste home");
+    let _home = crate::test_support::EnvVarGuard::set(
+        "CODEWHALE_HOME",
+        home.path().to_string_lossy().as_ref(),
+    );
+    let _secret_backend = crate::test_support::EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let _openrouter_key = crate::test_support::EnvVarGuard::remove("OPENROUTER_API_KEY");
+    let config = Config::default();
+    let secret = credential_paste_sentinel();
+    let picker = ProviderPickerView::new_for_missing_auth(
+        ApiProvider::Deepseek,
+        ApiProvider::Openrouter,
+        &config,
+        None,
+    )
+    .expect("OpenRouter key editor");
+    let mut app = create_test_app();
+    app.onboarding = OnboardingState::Provider;
+    app.view_stack.push(picker);
+
+    let logs = CapturedTrace::default().record(|| {
+        assert!(paste_text_into_provider_picker(&mut app, &secret));
+    });
+
+    assert!(
+        app.input.is_empty(),
+        "credential paste leaked into composer"
+    );
+    assert_sensitive_paste_absent(&logs, &secret, "ordinary credential paste trace");
+    for (width, height) in [(80, 24), (120, 32)] {
+        let rendered = render_test_app(&mut app, &config, width, height);
+        assert_sensitive_paste_absent(
+            &rendered,
+            &secret,
+            &format!("ordinary credential paste at {width}x{height}"),
+        );
+        assert!(
+            rendered.contains('*'),
+            "masked draft missing at {width}x{height}"
+        );
+    }
+}
+
+#[test]
+fn ordinary_bracketed_paste_keeps_content_but_logs_only_metadata() {
+    let mut app = create_test_app();
+    app.onboarding = OnboardingState::None;
+    assert!(app.view_stack.is_empty());
+    let ordinary = ["ordinary", "composer", "paste", "7361"].join(" ");
+
+    let logs = CapturedTrace::default().record(|| {
+        handle_bracketed_paste(&mut app, &ordinary);
+    });
+
+    assert_eq!(app.input, ordinary);
+    assert!(app.bracketed_paste_seen);
+    assert!(logs.contains("Received bracketed paste event"), "{logs}");
+    assert!(logs.contains("paste_bytes"), "{logs}");
+    assert!(logs.contains("paste_chars"), "{logs}");
+    assert!(logs.contains(&ordinary.len().to_string()), "{logs}");
+    assert_sensitive_paste_absent(&logs, &ordinary, "ordinary paste trace");
 }
 
 #[test]
@@ -5710,6 +5937,188 @@ async fn provider_switch_from_mimo_to_openrouter_without_key_fails_before_dispat
         .expect("failed provider switch should add a system message");
     assert!(last_system_message.contains("OpenRouter API key not found"));
     assert!(last_system_message.contains("Provider unchanged (xiaomi-mimo)"));
+}
+
+#[tokio::test]
+async fn successful_custom_provider_activation_completes_onboarding() {
+    let config_env = ConfigPathEnvGuard::new();
+    let mut app = create_test_app();
+    app.config_path = Some(config_env.config_path());
+    app.onboarding = OnboardingState::Provider;
+    app.onboarding_needs_api_key = true;
+    app.onboarding_missing_key_recovery = true;
+    app.trust_mode = true;
+    let mut engine = mock_engine_handle();
+    let mut config = Config::default();
+
+    let switched = apply_provider_picker_custom_provider(
+        &mut app,
+        &mut engine.handle,
+        &mut config,
+        "fixture-local".to_string(),
+        "http://127.0.0.1:19493/v1".to_string(),
+        Some("fixture-model".to_string()),
+        None,
+    )
+    .await;
+    assert!(switched);
+    complete_provider_picker_onboarding_if_switched(&mut app, ApiProvider::Custom, switched);
+
+    assert_eq!(app.api_provider, ApiProvider::Custom);
+    assert_ne!(
+        app.onboarding,
+        OnboardingState::Provider,
+        "a successfully activated custom route must complete provider onboarding"
+    );
+}
+
+#[tokio::test]
+async fn failed_custom_provider_activation_stays_in_onboarding_recovery() {
+    let config_env = ConfigPathEnvGuard::new();
+    let blocked_parent = config_env._tmp.path().join("not-a-directory");
+    std::fs::write(&blocked_parent, "fixture").expect("create blocking file");
+    let mut app = create_test_app();
+    app.config_path = Some(blocked_parent.join("config.toml"));
+    app.onboarding = OnboardingState::Provider;
+    app.onboarding_needs_api_key = true;
+    let mut engine = mock_engine_handle();
+    let mut config = Config::default();
+
+    let switched = apply_provider_picker_custom_provider(
+        &mut app,
+        &mut engine.handle,
+        &mut config,
+        "fixture-local".to_string(),
+        "http://127.0.0.1:19493/v1".to_string(),
+        Some("fixture-model".to_string()),
+        None,
+    )
+    .await;
+    complete_provider_picker_onboarding_if_switched(&mut app, ApiProvider::Custom, switched);
+
+    assert!(!switched);
+    assert_eq!(app.onboarding, OnboardingState::Provider);
+    assert_eq!(app.api_provider, ApiProvider::Deepseek);
+}
+
+#[tokio::test]
+async fn successful_native_xai_oauth_activation_completes_onboarding() {
+    let config_env = ConfigPathEnvGuard::new();
+    let codewhale_home = config_env
+        ._tmp
+        .path()
+        .canonicalize()
+        .expect("canonical temp root")
+        .join("xai-success-home");
+    let _codewhale_home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+    let mut app = create_test_app();
+    app.config_path = Some(config_env.config_path());
+    app.onboarding = OnboardingState::Provider;
+    app.onboarding_needs_api_key = true;
+    app.onboarding_missing_key_recovery = true;
+    app.trust_mode = true;
+    let mut engine = mock_engine_handle();
+    let mut config = Config::default();
+    let pending =
+        crate::xai_oauth::pending_device_login_for_test("fixture-access", "fixture-refresh");
+
+    let switched = apply_codewhale_owned_xai_login(
+        &mut app,
+        &mut engine.handle,
+        &mut config,
+        pending,
+        "fixture xAI login complete",
+    )
+    .await;
+    complete_provider_picker_onboarding_if_switched(&mut app, ApiProvider::Xai, switched);
+
+    assert!(
+        switched,
+        "xAI switch failed: status={:?}, history={:?}, config={:?}, saved={:?}",
+        app.status_message,
+        app.history,
+        config.provider_config_for(ApiProvider::Xai),
+        std::fs::read_to_string(config_env.config_path())
+    );
+    assert_eq!(app.api_provider, ApiProvider::Xai);
+    assert_ne!(app.onboarding, OnboardingState::Provider);
+    let xai = config
+        .provider_config_for(ApiProvider::Xai)
+        .expect("activated xAI slot");
+    assert_eq!(xai.auth_mode.as_deref(), Some("oauth"));
+    assert!(
+        xai.api_key.is_none(),
+        "OAuth activation must not invent an API key"
+    );
+}
+
+#[tokio::test]
+async fn failed_native_xai_oauth_activation_stays_in_onboarding_recovery() {
+    let config_env = ConfigPathEnvGuard::new();
+    let codewhale_home = config_env
+        ._tmp
+        .path()
+        .canonicalize()
+        .expect("canonical temp root")
+        .join("xai-failure-home");
+    let _codewhale_home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+    let mut app = create_test_app();
+    app.config_path = Some(config_env.config_path());
+    app.onboarding = OnboardingState::Provider;
+    app.onboarding_needs_api_key = true;
+    let mut engine = mock_engine_handle();
+    let mut config = Config::default();
+    let pending = crate::xai_oauth::pending_device_login_for_test("", "fixture-refresh");
+
+    let switched = apply_codewhale_owned_xai_login(
+        &mut app,
+        &mut engine.handle,
+        &mut config,
+        pending,
+        "fixture xAI login complete",
+    )
+    .await;
+    complete_provider_picker_onboarding_if_switched(&mut app, ApiProvider::Xai, switched);
+
+    assert!(!switched);
+    assert_eq!(app.onboarding, OnboardingState::Provider);
+    assert_eq!(app.api_provider, ApiProvider::Deepseek);
+}
+
+#[tokio::test]
+async fn xai_api_key_confirmation_saves_only_the_selected_xai_slot() {
+    let config_env = ConfigPathEnvGuard::new();
+    let mut app = create_test_app();
+    app.config_path = Some(config_env.config_path());
+    let mut engine = mock_engine_handle();
+    let mut config = Config::default();
+    let identity = picker_provider_identity(&config, ApiProvider::Xai, None).expect("xAI identity");
+
+    let switched = apply_provider_picker_setup_confirmed(
+        &mut app,
+        &mut engine.handle,
+        &mut config,
+        identity,
+        "violet-otter-key".to_string(),
+        crate::config::DEFAULT_XAI_MODEL.to_string(),
+        None,
+        None,
+    )
+    .await;
+
+    assert!(switched);
+    let xai = config
+        .provider_config_for(ApiProvider::Xai)
+        .expect("saved xAI slot");
+    assert_eq!(xai.auth_mode.as_deref(), Some("api_key"));
+    assert_eq!(xai.api_key.as_deref(), Some("violet-otter-key"));
+    assert!(
+        config.api_key.is_none(),
+        "xAI key must not enter the root slot"
+    );
+    let saved = std::fs::read_to_string(config_env.config_path()).expect("saved config");
+    assert!(saved.contains("[providers.xai]"));
+    assert!(!saved.contains("auth_mode = \"oauth\""));
 }
 
 #[tokio::test]
@@ -11651,16 +12060,9 @@ async fn dispatch_user_message_records_prompt_for_cancel_restore() {
         Some("fix this typo\nthen retry")
     );
     match engine.rx_op.recv().await.expect("send message op") {
-        crate::core::ops::Op::SendMessage {
-            content,
-            show_thinking,
-            ..
-        } => {
+        crate::core::ops::Op::SendMessage { content, .. } => {
             assert_eq!(content, "fix this typo\nthen retry");
-            assert!(
-                !show_thinking,
-                "dispatch must carry the user's hidden-thinking setting into the engine"
-            );
+            assert!(!app.show_thinking, "visibility remains TUI-owned");
         }
         other => panic!("expected SendMessage, got {other:?}"),
     }
@@ -12137,99 +12539,31 @@ async fn inline_skill_request_keeps_instruction_when_busy_queueing() {
 }
 
 #[test]
-fn api_key_validation_warns_without_blocking_unusual_formats() {
-    let config = Config::default();
-    assert!(matches!(
-        crate::tui::onboarding::validate_api_key_for_onboarding(&config, ApiProvider::Deepseek, "",),
-        crate::tui::onboarding::ApiKeyValidation::Reject(_)
-    ));
-    assert!(matches!(
-        crate::tui::onboarding::validate_api_key_for_onboarding(
-            &config,
-            ApiProvider::Deepseek,
-            "sk short",
-        ),
-        crate::tui::onboarding::ApiKeyValidation::Reject(_)
-    ));
-    assert!(matches!(
-        crate::tui::onboarding::validate_api_key_for_onboarding(
-            &config,
-            ApiProvider::Deepseek,
-            "short-key",
-        ),
-        crate::tui::onboarding::ApiKeyValidation::Accept { warning: Some(_) }
-    ));
-    assert!(matches!(
-        crate::tui::onboarding::validate_api_key_for_onboarding(
-            &config,
-            ApiProvider::Deepseek,
-            "averylongkeywithoutdash123456",
-        ),
-        crate::tui::onboarding::ApiKeyValidation::Accept { warning: Some(_) }
-    ));
-    assert!(matches!(
-        crate::tui::onboarding::validate_api_key_for_onboarding(
-            &config,
-            ApiProvider::Deepseek,
-            "sk-valid-format-1234567890",
-        ),
-        crate::tui::onboarding::ApiKeyValidation::Accept { warning: None }
-    ));
-}
-
-#[tokio::test]
-async fn onboarding_empty_key_activates_and_persists_keyless_local_provider() {
-    let _home = SettingsHomeGuard::new();
+fn onboarding_after_provider_setup_does_not_repeat_language_step() {
     let mut app = create_test_app();
-    app.onboarding = OnboardingState::ApiKey;
-    app.onboarding_needs_api_key = true;
-    app.onboarding_provider = ApiProvider::Ollama;
-    app.onboarding_missing_key_recovery = false;
-    app.onboarding_had_api_key_step = true;
-    app.trust_mode = true;
-    app.api_key_input.clear();
-    let mut config = Config::default();
-    let mut engine = mock_engine_handle();
-
-    assert!(submit_keyless_onboarding_provider(&mut app, &mut engine.handle, &mut config).await);
-
-    assert_eq!(app.api_provider, ApiProvider::Ollama);
-    assert_eq!(config.provider.as_deref(), Some("ollama"));
-    assert_eq!(app.onboarding, OnboardingState::MentalModels);
-    assert!(!app.onboarding_needs_api_key);
-    assert!(!app.api_key_env_only);
-    assert!(!app.offline_mode);
-    let config_path = std::env::var("DEEPSEEK_CONFIG_PATH").expect("isolated config path");
-    let saved = std::fs::read_to_string(config_path).expect("persisted provider config");
-    assert!(saved.contains("provider = \"ollama\""), "{saved}");
-}
-
-#[test]
-fn onboarding_after_api_key_save_does_not_repeat_language_step() {
-    let mut app = create_test_app();
-    app.onboarding = OnboardingState::ApiKey;
+    app.onboarding = OnboardingState::Provider;
     app.onboarding_needs_api_key = false;
     app.onboarding_missing_key_recovery = false;
     app.trust_mode = true;
     app.status_message = Some("saved".to_string());
 
-    crate::tui::onboarding::advance_onboarding_after_api_key(&mut app);
+    crate::tui::onboarding::advance_onboarding_after_provider(&mut app);
 
     assert_eq!(app.onboarding, OnboardingState::MentalModels);
     assert_eq!(app.status_message, None);
 }
 
 #[test]
-fn onboarding_after_api_key_save_routes_to_trust_when_needed() {
+fn onboarding_after_provider_setup_routes_to_trust_when_needed() {
     let tmpdir = TempDir::new().expect("tempdir");
     let mut app = create_test_app();
     app.workspace = tmpdir.path().to_path_buf();
-    app.onboarding = OnboardingState::ApiKey;
+    app.onboarding = OnboardingState::Provider;
     app.onboarding_needs_api_key = false;
     app.onboarding_missing_key_recovery = false;
     app.trust_mode = false;
 
-    crate::tui::onboarding::advance_onboarding_after_api_key(&mut app);
+    crate::tui::onboarding::advance_onboarding_after_provider(&mut app);
 
     assert_eq!(app.onboarding, OnboardingState::TrustDirectory);
 }
@@ -12237,11 +12571,11 @@ fn onboarding_after_api_key_save_routes_to_trust_when_needed() {
 #[test]
 fn missing_key_recovery_skips_first_run_mental_models() {
     let mut app = create_test_app();
-    app.onboarding = OnboardingState::ApiKey;
+    app.onboarding = OnboardingState::Provider;
     app.onboarding_missing_key_recovery = true;
     app.trust_mode = true;
 
-    crate::tui::onboarding::advance_onboarding_after_api_key(&mut app);
+    crate::tui::onboarding::advance_onboarding_after_provider(&mut app);
 
     assert_eq!(app.onboarding, OnboardingState::Tips);
 }
@@ -12251,11 +12585,11 @@ fn missing_key_recovery_still_requires_workspace_trust() {
     let tmpdir = TempDir::new().expect("tempdir");
     let mut app = create_test_app();
     app.workspace = tmpdir.path().to_path_buf();
-    app.onboarding = OnboardingState::ApiKey;
+    app.onboarding = OnboardingState::Provider;
     app.onboarding_missing_key_recovery = true;
     app.trust_mode = false;
 
-    crate::tui::onboarding::advance_onboarding_after_api_key(&mut app);
+    crate::tui::onboarding::advance_onboarding_after_provider(&mut app);
 
     assert_eq!(app.onboarding, OnboardingState::TrustDirectory);
 }
@@ -12264,23 +12598,40 @@ fn missing_key_recovery_still_requires_workspace_trust() {
 fn mental_models_backtracks_to_the_last_first_run_decision() {
     let mut app = create_test_app();
     app.onboarding = OnboardingState::MentalModels;
-    app.onboarding_had_api_key_step = false;
+    app.onboarding_had_provider_step = false;
     app.onboarding_had_trust_step = true;
     crate::tui::onboarding::back_from_mental_models(&mut app);
     assert_eq!(app.onboarding, OnboardingState::TrustDirectory);
 
     app.onboarding = OnboardingState::MentalModels;
     app.onboarding_had_trust_step = false;
-    app.onboarding_had_api_key_step = true;
+    app.onboarding_had_provider_step = true;
     crate::tui::onboarding::back_from_mental_models(&mut app);
-    assert_eq!(app.onboarding, OnboardingState::ApiKey);
+    assert_eq!(app.onboarding, OnboardingState::Provider);
 
     // With neither optional step, the last decision before the primer is the
     // appearance step (#3937), not language.
     app.onboarding = OnboardingState::MentalModels;
-    app.onboarding_had_api_key_step = false;
+    app.onboarding_had_provider_step = false;
     crate::tui::onboarding::back_from_mental_models(&mut app);
     assert_eq!(app.onboarding, OnboardingState::Appearance);
+}
+
+#[tokio::test]
+async fn mental_models_back_reopens_the_canonical_provider_picker() {
+    let mut app = create_test_app();
+    app.onboarding = OnboardingState::MentalModels;
+    app.onboarding_had_provider_step = true;
+    app.onboarding_had_trust_step = false;
+    app.onboarding_provider = ApiProvider::Openrouter;
+    let config = Config::default();
+    let engine = mock_engine_handle();
+
+    crate::tui::onboarding::back_from_mental_models(&mut app);
+    open_onboarding_provider_picker(&mut app, &config, &engine.handle, true).await;
+
+    assert_eq!(app.onboarding, OnboardingState::Provider);
+    assert_eq!(app.view_stack.top_kind(), Some(ModalKind::ProviderPicker));
 }
 
 // ---- Issue #4763: provider onboarding must never be a trap ----
@@ -12361,11 +12712,11 @@ fn appearance_step_hands_every_key_including_escape_to_the_theme_picker() {
     );
 }
 
-/// #3927: the offline exit must be reachable from both credential steps even
-/// while the provider picker owns the keys — otherwise the only advertised way
+/// #3927: the offline exit must be reachable from provider setup even while
+/// the provider picker owns the keys — otherwise the only advertised way
 /// out of a modal the user cannot satisfy is to quit.
 #[test]
-fn explore_offline_shortcut_escapes_the_provider_picker_from_both_credential_steps() {
+fn explore_offline_shortcut_escapes_the_provider_picker() {
     let ctrl_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
 
     assert_eq!(
@@ -12376,12 +12727,7 @@ fn explore_offline_shortcut_escapes_the_provider_picker_from_both_credential_ste
         ),
         OnboardingKeyRoute::ExploreOffline,
     );
-    assert_eq!(
-        onboarding_key_route(OnboardingState::ApiKey, None, &ctrl_o),
-        OnboardingKeyRoute::ExploreOffline,
-    );
-
-    // It is scoped to the credential steps: elsewhere it stays an ordinary key.
+    // It is scoped to provider setup: elsewhere it stays an ordinary key.
     assert_eq!(
         onboarding_key_route(OnboardingState::Language, None, &ctrl_o),
         OnboardingKeyRoute::Legacy,
@@ -12391,11 +12737,15 @@ fn explore_offline_shortcut_escapes_the_provider_picker_from_both_credential_ste
         OnboardingKeyRoute::Legacy,
     );
 
-    // A bare "o" is text on the API-key screen and must never trigger it.
+    // A bare "o" remains provider-picker input and must never trigger it.
     let plain_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE);
     assert_eq!(
-        onboarding_key_route(OnboardingState::ApiKey, None, &plain_o),
-        OnboardingKeyRoute::Legacy,
+        onboarding_key_route(
+            OnboardingState::Provider,
+            Some(ModalKind::ProviderPicker),
+            &plain_o,
+        ),
+        OnboardingKeyRoute::ProviderPicker,
     );
 }
 
@@ -12419,14 +12769,6 @@ fn onboarding_escape_is_routed_to_the_provider_picker_not_intercepted() {
         onboarding_key_route(OnboardingState::Provider, None, &esc),
         OnboardingKeyRoute::Legacy,
         "without the picker the legacy onboarding switch still handles Escape"
-    );
-    assert_eq!(
-        onboarding_key_route(
-            OnboardingState::ApiKey,
-            Some(ModalKind::ProviderPicker),
-            &esc
-        ),
-        OnboardingKeyRoute::Legacy,
     );
     assert_eq!(
         onboarding_key_route(OnboardingState::None, Some(ModalKind::ProviderPicker), &esc),
@@ -12458,22 +12800,6 @@ fn external_grant_reuse_completes_provider_onboarding() {
     assert_eq!(app.onboarding_provider, crate::config::ApiProvider::Xai);
     assert!(!app.onboarding_needs_api_key);
     assert!(!app.offline_mode);
-}
-
-#[test]
-fn api_key_escape_returns_to_provider_step() {
-    let mut app = create_test_app();
-    app.onboarding = OnboardingState::ApiKey;
-    app.api_key_input = "sk-test-value".to_string();
-    app.api_key_cursor = 4;
-    app.status_message = Some("editing".to_string());
-
-    back_from_api_key_onboarding(&mut app);
-
-    assert_eq!(app.onboarding, OnboardingState::Provider);
-    assert!(app.api_key_input.is_empty());
-    assert_eq!(app.api_key_cursor, 0);
-    assert_eq!(app.status_message, None);
 }
 
 #[test]
@@ -12571,32 +12897,6 @@ fn prompt_override_notice_surfaces_in_transcript_and_toast() {
             .text
             .contains(prompts::BASE_PROMPT_OVERRIDE_OPT_IN_ENV)
     );
-}
-
-#[test]
-fn api_key_paste_shortcut_is_not_plain_text_input() {
-    let ctrl_v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
-    assert!(crate::tui::key_shortcuts::is_paste_shortcut(&ctrl_v));
-    assert!(!crate::tui::key_shortcuts::is_text_input_key(&ctrl_v));
-
-    let legacy_ctrl_v = KeyEvent::new(KeyCode::Char('\u{16}'), KeyModifiers::NONE);
-    assert!(crate::tui::key_shortcuts::is_paste_shortcut(&legacy_ctrl_v));
-    assert!(!crate::tui::key_shortcuts::is_text_input_key(
-        &legacy_ctrl_v
-    ));
-
-    let shifted = KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT);
-    assert!(crate::tui::key_shortcuts::is_text_input_key(&shifted));
-}
-
-#[test]
-fn international_layout_glyphs_remain_plain_text_input() {
-    for ch in ['\u{00e7}', '\u{00bf}'] {
-        let key = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE);
-        assert!(crate::tui::key_shortcuts::is_text_input_key(&key));
-        assert!(!crate::tui::shell_key_routing::is_help_shortcut(&key));
-        assert!(!crate::tui::shell_key_routing::is_context_inspector_shortcut(&key));
-    }
 }
 
 #[test]

@@ -9,13 +9,12 @@ description = "Terminal UI for open-source and open-weight coding models"
 default-run = "codewhale-tui"
 
 [features]
-default = ["tui", "json", "toml", "pdf"]
+default = ["tui", "json", "toml"]
 tui = ["dep:schemaui", "schemaui/tui", "json", "toml"]
 web = ["dep:schemaui", "schemaui/web", "json", "toml"]
 json = ["schemaui/json"]
 toml = ["schemaui/toml"]
 long-running-tests = []
-pdf = ["dep:pdf-extract"]
 
 [[bin]]
 name = "codewhale-tui"
@@ -24,15 +23,16 @@ path = "src/main.rs"
 [dependencies]
 ahash = "0.8"
 anyhow.workspace = true
-codewhale-config = { path = "../config", version = "0.9.2" }
-codewhale-execpolicy = { path = "../execpolicy", version = "0.9.2" }
-codewhale-lane = { path = "../lane", version = "0.9.2" }
-codewhale-protocol = { path = "../protocol", version = "0.9.2" }
-codewhale-release = { path = "../release", version = "0.9.2" }
-codewhale-secrets = { path = "../secrets", version = "0.9.2" }
-codewhale-tools = { path = "../tools", version = "0.9.2" }
-codewhale-workflow = { path = "../workflow", version = "0.9.2" }
-codewhale-workflow-js = { path = "../workflow-js", version = "0.9.2" }
+codewhale-config = { path = "../config", version = "0.9.3" }
+codewhale-execpolicy = { path = "../execpolicy", version = "0.9.3" }
+codewhale-lane = { path = "../lane", version = "0.9.3" }
+codewhale-paths = { path = "../paths", version = "0.9.3" }
+codewhale-protocol = { path = "../protocol", version = "0.9.3" }
+codewhale-release = { path = "../release", version = "0.9.3" }
+codewhale-secrets = { path = "../secrets", version = "0.9.3" }
+codewhale-tools = { path = "../tools", version = "0.9.3" }
+codewhale-workflow = { path = "../workflow", version = "0.9.3" }
+codewhale-workflow-js = { path = "../workflow-js", version = "0.9.3" }
 schemaui = { version = "0.12.0", default-features = false, optional = true }
 async-stream = "0.3.6"
 async-trait.workspace = true
@@ -87,7 +87,6 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 htmd = "0.5.4"
 lru = "0.18"
 parking_lot = "0.12"
-pdf-extract = { version = "0.12", optional = true }
 readability = { version = "0.3.0", default-features = false }
 tar = "0.4"
 flate2 = "1.1"
@@ -98,7 +97,7 @@ shell-words = "1.1.1"
 mimalloc.workspace = true
 
 [build-dependencies]
-codewhale-build-support = { path = "../build-support", version = "0.9.2" }
+codewhale-build-support = { path = "../build-support", version = "0.9.3" }
 
 [dev-dependencies]
 cucumber = "0.23.0"

@@ -1,6 +1,5 @@
 //! Onboarding flow rendering and helpers.
 
-pub mod api_key;
 pub mod language;
 pub mod mental_models;
 pub mod trust_directory;
@@ -16,7 +15,6 @@ use ratatui::{
     widgets::{Block, Borders, Padding, Paragraph, Wrap},
 };
 
-use crate::config::ApiProvider;
 use crate::palette;
 use crate::tui::app::{App, OnboardingState};
 
@@ -41,7 +39,6 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         OnboardingState::Language => language::lines(app),
         OnboardingState::Appearance => appearance_lines(app),
         OnboardingState::Provider => provider_lines(app),
-        OnboardingState::ApiKey => api_key::lines(app),
         OnboardingState::TrustDirectory => trust_directory::lines(app),
         OnboardingState::MentalModels => mental_models::lines(app),
         OnboardingState::Tips => tips_lines(app),
@@ -79,11 +76,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 /// Position and length of the first-run spine.
 ///
 /// Welcome, Language, Appearance (#3937), Mental Models, and Tips are always
-/// shown; the credential pair and the trust screen are conditional.
+/// shown; provider setup and the trust screen are conditional.
 fn onboarding_step(app: &App) -> (usize, usize) {
     let mut total = 5;
-    if app.onboarding_had_api_key_step {
-        total += 2;
+    if app.onboarding_had_provider_step {
+        total += 1;
     }
     if app.onboarding_had_trust_step {
         total += 1;
@@ -94,10 +91,9 @@ fn onboarding_step(app: &App) -> (usize, usize) {
         OnboardingState::Language => 2,
         OnboardingState::Appearance => 3,
         OnboardingState::Provider => 4,
-        OnboardingState::ApiKey => 5,
         OnboardingState::TrustDirectory => {
-            if app.onboarding_had_api_key_step {
-                6
+            if app.onboarding_had_provider_step {
+                5
             } else {
                 4
             }
@@ -273,75 +269,6 @@ pub fn mark_trusted(workspace: &Path) -> anyhow::Result<PathBuf> {
     crate::config::save_workspace_trust(workspace)
 }
 
-// ── API key validation and state-machine transitions ─────────────────
-
-/// Result of inspecting an API-key string entered during onboarding.
-///
-/// `Accept` always lets the user proceed; the optional `warning` is shown
-/// as a non-blocking status message (short keys, unusual formats, etc.).
-/// `Reject` blocks the keystroke flow until the user fixes the input.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ApiKeyValidation {
-    Accept { warning: Option<String> },
-    Reject(String),
-}
-
-/// Whether onboarding may activate `provider` without saving an API key.
-///
-/// Keep this aligned with the runtime's self-hosted provider contract. A local
-/// server can still opt into bearer authentication with
-/// `auth_mode = "api_key"`, in which case onboarding must require a key too.
-#[must_use]
-pub fn onboarding_provider_allows_empty_api_key(
-    config: &crate::config::Config,
-    provider: ApiProvider,
-) -> bool {
-    provider.is_self_hosted()
-        && !crate::config::auth_mode_requires_api_key(
-            config.auth_mode_for_provider(provider).as_deref(),
-        )
-}
-
-/// Validate an API key entered during onboarding. Empty input is accepted only
-/// for a truly keyless self-hosted route. Other whitespace-only or
-/// whitespace-containing keys are rejected; short or hyphen-less keys are
-/// accepted with a warning so unusual provider key formats still work.
-#[must_use]
-pub fn validate_api_key_for_onboarding(
-    config: &crate::config::Config,
-    provider: ApiProvider,
-    api_key: &str,
-) -> ApiKeyValidation {
-    let trimmed = api_key.trim();
-    if trimmed.is_empty() {
-        if onboarding_provider_allows_empty_api_key(config, provider) {
-            return ApiKeyValidation::Accept { warning: None };
-        }
-        return ApiKeyValidation::Reject("API key cannot be empty.".to_string());
-    }
-    if trimmed.contains(char::is_whitespace) {
-        return ApiKeyValidation::Reject(
-            "API key appears malformed (contains whitespace).".to_string(),
-        );
-    }
-    if trimmed.len() < 16 {
-        return ApiKeyValidation::Accept {
-            warning: Some(
-                "API key looks short. Double-check it, but unusual formats are allowed."
-                    .to_string(),
-            ),
-        };
-    }
-    if !trimmed.contains('-') {
-        return ApiKeyValidation::Accept {
-            warning: Some(
-                "API key format looks unusual. Check that the full key was copied.".to_string(),
-            ),
-        };
-    }
-    ApiKeyValidation::Accept { warning: None }
-}
-
 /// Welcome → Language transition. Clears the status message bar.
 pub fn advance_onboarding_from_welcome(app: &mut App) {
     app.status_message = None;
@@ -356,7 +283,7 @@ pub fn advance_onboarding_after_language(app: &mut App) {
 
 /// Appearance → next step. Exactly the routing the language step used to
 /// perform: the appearance step is inserted into the spine, it replaces
-/// nothing. Routes to Provider/ApiKey when the session lacks a key, to
+/// nothing. Routes to Provider setup when the session lacks a key, to
 /// TrustDirectory when the workspace is untrusted, otherwise to the
 /// mental-model primer.
 pub fn advance_onboarding_after_appearance(app: &mut App) {
@@ -370,16 +297,16 @@ pub fn advance_onboarding_after_appearance(app: &mut App) {
     }
 }
 
-/// Take the explicit "explore offline" exit advertised on the Provider and
-/// API-key screens (#3927).
+/// Take the explicit "explore offline" exit advertised by Provider setup
+/// (#3927).
 ///
 /// The contract this encodes, in full:
 ///
 /// * **No provider is selected and no route is activated.** This function must
 ///   never reach `switch_provider`, never persist `provider`, and never write a
 ///   credential. Callers pass only `&mut App`, which makes that structural.
-/// * **Draft secrets are dropped**, so an abandoned half-typed key cannot
-///   linger in memory or be re-submitted by a later Enter.
+/// * **No draft secret is owned by `App`.** The caller closes the canonical
+///   picker before entering this transition, dropping its private draft.
 /// * **`onboarding_needs_api_key` stays true**, because nothing was supplied.
 ///   The launch surface, `/setup`, and doctor keep telling the truth.
 /// * **The remaining onboarding steps still run** — trust, then the mental
@@ -387,14 +314,12 @@ pub fn advance_onboarding_after_appearance(app: &mut App) {
 ///   not an early exit.
 /// * Queue semantics are inherited from `offline_mode`, untouched here.
 pub fn choose_offline_explore(app: &mut App) {
-    app.api_key_input.clear();
-    app.api_key_cursor = 0;
     app.api_key_env_only = false;
     app.onboarding_needs_api_key = true;
     app.onboarding_explore_offline = true;
     app.offline_mode = true;
     // `advance_*` clears the status bar, so the label is applied after it.
-    advance_onboarding_after_api_key(app);
+    advance_onboarding_after_provider(app);
     app.status_message = Some(
         app.tr(crate::localization::MessageId::OnboardOfflineNotice)
             .into_owned(),
@@ -410,7 +335,7 @@ pub fn clear_offline_explore_on_route_activation(app: &mut App) {
     app.onboarding_explore_offline = false;
 }
 
-pub fn advance_onboarding_after_api_key(app: &mut App) {
+pub fn advance_onboarding_after_provider(app: &mut App) {
     app.status_message = None;
     if !app.trust_mode && needs_trust(&app.workspace) {
         app.onboarding = OnboardingState::TrustDirectory;
@@ -425,8 +350,8 @@ pub fn back_from_mental_models(app: &mut App) {
     app.status_message = None;
     app.onboarding = if app.onboarding_had_trust_step {
         OnboardingState::TrustDirectory
-    } else if app.onboarding_had_api_key_step {
-        OnboardingState::ApiKey
+    } else if app.onboarding_had_provider_step {
+        OnboardingState::Provider
     } else {
         OnboardingState::Appearance
     };
@@ -461,34 +386,10 @@ fn provider_lines(app: &App) -> Vec<ratatui::text::Line<'static>> {
     ]
 }
 
-/// Re-validate the current `api_key_input` and project the result onto
-/// `app.status_message`. `show_empty_error` reports the "cannot be empty"
-/// message even when the input has not been touched yet (used right
-/// before submission); otherwise an empty input clears the status bar.
-pub fn sync_api_key_validation_status(
-    app: &mut App,
-    config: &crate::config::Config,
-    show_empty_error: bool,
-) {
-    if app.api_key_input.trim().is_empty() && !show_empty_error {
-        app.status_message = None;
-        return;
-    }
-
-    match validate_api_key_for_onboarding(config, app.onboarding_provider, &app.api_key_input) {
-        ApiKeyValidation::Accept { warning } => {
-            app.status_message = warning;
-        }
-        ApiKeyValidation::Reject(message) => {
-            app.status_message = Some(message);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, ProviderConfig, ProvidersConfig};
+    use crate::config::Config;
     use crate::localization::Locale;
     use crate::tui::app::{App, TuiOptions};
     use std::path::PathBuf;
@@ -653,38 +554,37 @@ mod tests {
     fn the_step_counter_grows_with_the_spine_instead_of_overflowing() {
         // The shortest first run: no key step, no trust step.
         let mut app = test_app_with_locale(Locale::En);
-        app.onboarding_had_api_key_step = false;
+        app.onboarding_had_provider_step = false;
         app.onboarding_had_trust_step = false;
         app.onboarding = OnboardingState::Appearance;
         let (step, total) = onboarding_step(&app);
         assert_eq!((step, total), (3, 5));
 
-        // The longest: credential pair plus trust.
-        app.onboarding_had_api_key_step = true;
+        // The longest: provider setup plus trust.
+        app.onboarding_had_provider_step = true;
         app.onboarding_had_trust_step = true;
         for (state, expected) in [
             (OnboardingState::Welcome, 1),
             (OnboardingState::Language, 2),
             (OnboardingState::Appearance, 3),
             (OnboardingState::Provider, 4),
-            (OnboardingState::ApiKey, 5),
-            (OnboardingState::TrustDirectory, 6),
-            (OnboardingState::MentalModels, 7),
-            (OnboardingState::Tips, 8),
+            (OnboardingState::TrustDirectory, 5),
+            (OnboardingState::MentalModels, 6),
+            (OnboardingState::Tips, 7),
         ] {
             app.onboarding = state;
             let (step, total) = onboarding_step(&app);
             assert_eq!(step, expected, "{state:?}");
-            assert_eq!(total, 8, "{state:?}");
+            assert_eq!(total, 7, "{state:?}");
             assert!(step <= total, "{state:?} overflowed the counter");
         }
     }
 
     #[test]
-    fn back_from_the_primer_returns_to_appearance_when_there_was_no_key_step() {
+    fn back_from_the_primer_returns_to_appearance_when_there_was_no_provider_step() {
         let mut app = test_app_with_locale(Locale::En);
         app.onboarding = OnboardingState::MentalModels;
-        app.onboarding_had_api_key_step = false;
+        app.onboarding_had_provider_step = false;
         app.onboarding_had_trust_step = false;
 
         back_from_mental_models(&mut app);
@@ -737,10 +637,8 @@ mod tests {
         let mut app = test_app_with_locale(Locale::En);
         let provider_before = app.api_provider;
         let model_before = app.model.clone();
-        app.onboarding = OnboardingState::ApiKey;
+        app.onboarding = OnboardingState::Provider;
         app.onboarding_needs_api_key = true;
-        app.api_key_input = "sk-hostile-draft-value".to_string();
-        app.api_key_cursor = app.api_key_input.len();
         app.trust_mode = true;
 
         choose_offline_explore(&mut app);
@@ -748,9 +646,6 @@ mod tests {
         // No provider selected, no route activated.
         assert_eq!(app.api_provider, provider_before);
         assert_eq!(app.model, model_before);
-        // The draft secret is gone, and never reachable from a later Enter.
-        assert!(app.api_key_input.is_empty());
-        assert_eq!(app.api_key_cursor, 0);
         assert!(!app.api_key_env_only);
         // The install still honestly reports that no credential exists.
         assert!(app.onboarding_needs_api_key);
@@ -759,18 +654,14 @@ mod tests {
     }
 
     #[test]
-    fn explore_offline_never_leaks_the_draft_secret_into_the_label() {
+    fn explore_offline_label_contains_only_recovery_guidance() {
         let mut app = test_app_with_locale(Locale::En);
-        let hostile = "sk-\u{202e}../../etc/passwd\u{0000}AKIAIOSFODNN7EXAMPLE";
-        app.onboarding = OnboardingState::ApiKey;
-        app.api_key_input = hostile.to_string();
+        app.onboarding = OnboardingState::Provider;
         app.trust_mode = true;
 
         choose_offline_explore(&mut app);
 
         let label = app.status_message.clone().expect("offline label");
-        assert!(!label.contains("AKIA"), "label leaked a token: {label}");
-        assert!(!label.contains("passwd"), "label leaked a path: {label}");
         assert!(
             label.contains("/provider"),
             "label must name recovery: {label}"
@@ -778,8 +669,6 @@ mod tests {
 
         app.onboarding = OnboardingState::Tips;
         let tips = flattened(tips_lines(&app));
-        assert!(!tips.contains("AKIA"), "tips leaked a token: {tips}");
-        assert!(!tips.contains(hostile));
         assert!(tips.contains("/provider"));
     }
 
@@ -819,18 +708,14 @@ mod tests {
     }
 
     #[test]
-    fn provider_and_api_key_screens_both_advertise_the_offline_choice() {
+    fn provider_screen_advertises_the_offline_choice() {
         let app = test_app_with_locale(Locale::En);
         let provider = flattened(provider_lines(&app));
-        let api_key = flattened(api_key::lines(&app));
-
-        for body in [&provider, &api_key] {
-            assert!(
-                body.contains("Ctrl+O"),
-                "offline exit must be advertised: {body}"
-            );
-            assert!(body.contains("offline"), "{body}");
-        }
+        assert!(
+            provider.contains("Ctrl+O"),
+            "offline exit must be advertised: {provider}"
+        );
+        assert!(provider.contains("offline"), "{provider}");
     }
 
     #[test]
@@ -857,76 +742,5 @@ mod tests {
             assert!(tr(*locale, MessageId::OnboardOfflineNotice).contains("/provider"));
             assert!(tr(*locale, MessageId::OnboardOfflineOption).contains("Ctrl+O"));
         }
-    }
-
-    #[test]
-    fn validate_rejects_empty_or_whitespace() {
-        let config = Config::default();
-        assert!(matches!(
-            validate_api_key_for_onboarding(&config, ApiProvider::Deepseek, ""),
-            ApiKeyValidation::Reject(_)
-        ));
-        assert!(matches!(
-            validate_api_key_for_onboarding(&config, ApiProvider::Deepseek, "   "),
-            ApiKeyValidation::Reject(_)
-        ));
-        assert!(matches!(
-            validate_api_key_for_onboarding(&config, ApiProvider::Deepseek, "sk live abc"),
-            ApiKeyValidation::Reject(_)
-        ));
-    }
-
-    #[test]
-    fn validate_accepts_empty_for_every_keyless_self_hosted_provider() {
-        let config = Config::default();
-        for provider in [ApiProvider::Ollama, ApiProvider::Sglang, ApiProvider::Vllm] {
-            assert_eq!(
-                validate_api_key_for_onboarding(&config, provider, ""),
-                ApiKeyValidation::Accept { warning: None },
-                "{} should keep its keyless runtime contract",
-                provider.as_str()
-            );
-        }
-    }
-
-    #[test]
-    fn explicit_local_api_key_auth_keeps_empty_input_blocking() {
-        let config = Config {
-            providers: Some(ProvidersConfig {
-                ollama: ProviderConfig {
-                    auth_mode: Some("api_key".to_string()),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        assert!(matches!(
-            validate_api_key_for_onboarding(&config, ApiProvider::Ollama, ""),
-            ApiKeyValidation::Reject(_)
-        ));
-    }
-
-    #[test]
-    fn validate_warns_on_short_or_no_hyphen_keys_but_accepts() {
-        let config = Config::default();
-        match validate_api_key_for_onboarding(&config, ApiProvider::Deepseek, "abc123") {
-            ApiKeyValidation::Accept { warning: Some(_) } => {}
-            _ => panic!("expected accept-with-warning"),
-        }
-        match validate_api_key_for_onboarding(&config, ApiProvider::Deepseek, "abcdefghijklmnop") {
-            ApiKeyValidation::Accept { warning: Some(_) } => {}
-            _ => panic!("expected accept-with-warning"),
-        }
-    }
-
-    #[test]
-    fn validate_accepts_well_formed_key() {
-        let config = Config::default();
-        assert_eq!(
-            validate_api_key_for_onboarding(&config, ApiProvider::Deepseek, "sk-1234567890abcdef",),
-            ApiKeyValidation::Accept { warning: None }
-        );
     }
 }

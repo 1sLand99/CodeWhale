@@ -1,10 +1,11 @@
 #![allow(clippy::uninlined_format_args)]
 
+mod credential_handoff;
 mod metrics;
 #[cfg(not(target_env = "ohos"))]
 mod update;
 
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,8 +18,9 @@ use codewhale_app_server::{
     AppServerOptions, run as run_app_server, run_stdio as run_app_server_stdio,
 };
 use codewhale_config::{
-    CliRuntimeOverrides, ConfigStore, ConfigToml, ProviderKind, ProviderSource,
-    ResolvedRuntimeOptions, RuntimeApiKeySource, provider_base_url_is_official,
+    CliRuntimeOverrides, ConfigApiKeyValueKind, ConfigStore, ConfigToml, ProviderKind,
+    ProviderSource, ResolvedRuntimeOptions, RuntimeApiKeySource, classify_config_api_key_value,
+    provider_base_url_is_official,
 };
 use codewhale_execpolicy::{AskForApproval, ExecPolicyContext, ExecPolicyEngine};
 use codewhale_mcp::{McpServerDefinition, run_stdio_server};
@@ -1433,6 +1435,11 @@ enum AuthCommand {
         #[arg(long, value_enum)]
         provider: ProviderArg,
     },
+    /// Pipe the runtime-effective API key to a local client; refuses terminals.
+    PrintApiKey {
+        #[arg(long, value_enum)]
+        provider: ProviderArg,
+    },
     /// Delete a provider's key from config and secret-store storage.
     Clear {
         #[arg(long, value_enum)]
@@ -1653,6 +1660,15 @@ fn run() -> Result<()> {
         return run_lane_log_proxy_command(args);
     }
 
+    let pipe_api_key_handoff = matches!(
+        &command,
+        Some(Commands::Auth(AuthArgs {
+            command: AuthCommand::PrintApiKey { .. }
+        }))
+    );
+    if pipe_api_key_handoff {
+        credential_handoff::prepare_stdout(io::stdout().is_terminal())?;
+    }
     let runtime_provider = top_level_provider_override(cli.provider.as_deref(), command.as_ref())?;
     let uses_raw_tui_provider = cli.provider.is_some() && runtime_provider.is_none();
     let runtime_overrides = CliRuntimeOverrides {
@@ -1676,7 +1692,13 @@ fn run() -> Result<()> {
         return delegate_to_tui(&cli, &resolved_runtime, passthrough);
     }
 
-    let mut store = ConfigStore::load(cli.config.clone())?;
+    let mut store = ConfigStore::load(cli.config.clone()).map_err(|error| {
+        if pipe_api_key_handoff {
+            anyhow!("unavailable credential")
+        } else {
+            error
+        }
+    })?;
     match command {
         Some(Commands::Run(args)) => {
             let resolved_runtime = resolve_runtime_for_dispatch(&mut store, &runtime_overrides);
@@ -2266,7 +2288,8 @@ fn provider_config_api_key(store: &ConfigStore, provider: ProviderKind) -> Optio
     let root = (provider == ProviderKind::Deepseek)
         .then_some(store.config.api_key.as_deref())
         .flatten();
-    slot.or(root).filter(|v| !v.trim().is_empty())
+    slot.or(root)
+        .filter(|value| classify_config_api_key_value(value) == ConfigApiKeyValueKind::Literal)
 }
 
 fn provider_config_set(store: &ConfigStore, provider: ProviderKind) -> bool {
@@ -3395,6 +3418,13 @@ fn run_auth_command_with_secrets_and_runtime(
             );
             Ok(())
         }
+        AuthCommand::PrintApiKey { provider } => {
+            let provider: ProviderKind = provider.into();
+            let mut stdout = io::stdout().lock();
+            credential_handoff::handoff_secret_line(&mut stdout, io::stdout().is_terminal(), || {
+                credential_handoff::resolve_api_key(store, secrets, provider, runtime_overrides)
+            })
+        }
         AuthCommand::Clear { provider } => {
             let provider: ProviderKind = provider.into();
             if provider == ProviderKind::Xai {
@@ -3510,6 +3540,8 @@ fn prompt_api_key(slot: &str) -> Result<String> {
 fn run_auth_migrate(store: &mut ConfigStore, secrets: &Secrets, dry_run: bool) -> Result<()> {
     let mut migrated: Vec<(ProviderKind, &'static str)> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
+    let literal =
+        |value: &String| classify_config_api_key_value(value) == ConfigApiKeyValueKind::Literal;
 
     for provider in ProviderKind::ALL {
         let slot = provider_slot(provider);
@@ -3519,11 +3551,11 @@ fn run_auth_migrate(store: &mut ConfigStore, secrets: &Secrets, dry_run: bool) -
             .for_provider(provider)
             .api_key
             .clone()
-            .filter(|v| !v.trim().is_empty());
+            .filter(literal);
         let from_root = (provider == ProviderKind::Deepseek)
             .then(|| store.config.api_key.clone())
             .flatten()
-            .filter(|v| !v.trim().is_empty());
+            .filter(literal);
         let value = from_provider_block.or(from_root);
         let Some(value) = value else { continue };
 
@@ -4669,20 +4701,20 @@ mod tests {
         })
     }
 
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|p| p.into_inner())
     }
 
-    struct ScopedEnvVar {
+    pub(crate) struct ScopedEnvVar {
         name: &'static str,
         previous: Option<OsString>,
     }
 
     impl ScopedEnvVar {
-        fn set(name: &'static str, value: &str) -> Self {
+        pub(crate) fn set(name: &'static str, value: &str) -> Self {
             let previous = std::env::var_os(name);
             // Safety: tests using this helper serialize with env_lock() and
             // restore the original value in Drop.
@@ -4690,7 +4722,7 @@ mod tests {
             Self { name, previous }
         }
 
-        fn remove(name: &'static str) -> Self {
+        pub(crate) fn remove(name: &'static str) -> Self {
             let previous = std::env::var_os(name);
             // Safety: tests using this helper serialize with env_lock() and
             // restore the original value in Drop.
@@ -7398,6 +7430,11 @@ model = "qwen-2.5-7b"
         assert!(output.contains("route:"));
         assert!(output.contains("model:"));
         assert!(!output.contains("sk-arcee-9999"));
+
+        for sentinel in [codewhale_config::API_KEYRING_SENTINEL, "  __KEYRING__  "] {
+            store.config.providers.arcee.api_key = Some(sentinel.to_string());
+            assert_eq!(provider_config_api_key(&store, ProviderKind::Arcee), None);
+        }
 
         let _ = std::fs::remove_file(path);
     }

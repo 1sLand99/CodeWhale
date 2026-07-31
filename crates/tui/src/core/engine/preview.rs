@@ -12,8 +12,8 @@
 //! - **Never `session.last_tool_catalog`.** That value is one turn stale and
 //!   stores the pre-activation catalog, so it cannot describe what the *next*
 //!   request would send. The catalog is rebuilt through
-//!   [`Engine::build_turn_tool_registry_and_catalog`] and narrowed through
-//!   [`plan_turn_tools`] — the same two calls a real turn makes.
+//!   [`Engine::build_turn_tool_registry_and_catalog`], which returns the same
+//!   typed policy a real turn consumes.
 //! - **Never invent a route.** For fixed routes, the host resolves the next
 //!   turn through the same shared planner production dispatch uses. Auto would
 //!   require a model-classifier call, so the human preview stops before the
@@ -315,20 +315,13 @@ impl Engine {
             )
             .await;
 
-        // Exactly the narrowing the turn loop applies before building its
-        // request — including deferred-tool activation and strict mode.
-        let plan = plan_turn_tools(
-            build.catalog,
-            input_policy.mode,
-            &self.config.tools_always_load,
-            &input_policy.dynamic_active_tools,
-            self.config.strict_tool_mode,
-        );
-        let active_tools = plan.active.clone().unwrap_or_default();
+        // The build owns the exact same initial subset dispatch consumes.
+        let surface = &build.surface;
+        let active_tools = surface.active.clone().unwrap_or_default();
         let active_catalog_sha256 = active_tool_catalog_sha256(&active_tools);
 
-        let tool_choice = plan.active.as_ref().map(|_| {
-            if self.config.strict_tool_mode {
+        let tool_choice = surface.active.as_ref().map(|_| {
+            if surface.strict_tool_mode {
                 json!("required")
             } else {
                 json!({ "type": "auto" })
@@ -340,8 +333,8 @@ impl Engine {
         // turn", which is the failure mode this command exists to avoid.
         let tools = match build.mcp.server_count() {
             Some(mcp_server_count) => Availability::Exact(ToolSurfaceFacts {
-                catalog_tool_count: plan.catalog.len(),
-                deferred_tool_count: plan
+                catalog_tool_count: surface.catalog.len(),
+                deferred_tool_count: surface
                     .catalog
                     .iter()
                     .filter(|tool| tool.defer_loading.unwrap_or(false))
@@ -353,7 +346,7 @@ impl Engine {
                     route_context.capability_profile().tool_surface_budget
                 ),
                 standard_and_full_surfaces_collapsed: standard_and_full_collapse(
-                    &plan.catalog,
+                    &surface.catalog,
                     &self.config.tools_always_load,
                 ),
                 mcp_server_count,
@@ -508,7 +501,7 @@ impl Engine {
             messages: outbound_messages,
             max_tokens: effective_max_output_tokens_for_route(provider, &model, limits),
             system: system_prompt,
-            tools: plan.active.clone(),
+            tools: surface.active.clone(),
             tool_choice: tool_choice.clone(),
             metadata: None,
             thinking: None,
@@ -1126,7 +1119,6 @@ mod tests {
             GoalStatus::Active,
             None,
             false,
-            false,
             None,
         );
         let system_prompt = engine.compose_stable_system_prompt(&prompt_context);
@@ -1203,8 +1195,8 @@ mod tests {
             .await;
         assert!(
             build
+                .surface
                 .catalog
-                .expect("catalog")
                 .iter()
                 .any(|tool| tool.name == "agent"),
             "the planned route client must make sub-agent tools available"
@@ -1431,7 +1423,6 @@ mod tests {
                     GoalStatus::Active,
                     None,
                     false,
-                    false,
                     None,
                 );
                 Box::new(PreviewNextTurn {
@@ -1452,13 +1443,29 @@ mod tests {
         }
     }
 
-    /// Session-section labels the default `inputs()` fixture hard-codes to the
-    /// DeepSeek route. The exact-route matrix must report the model and
-    /// reasoning tier the user actually asked that route for.
-    #[derive(Default)]
-    struct PreviewSessionOverrides {
+    /// Typed controls for the preview/wire parity fixture. Defaults mirror the
+    /// ordinary active DeepSeek turn; individual tests override only the
+    /// production context they are proving.
+    struct PreviewWireFixture {
+        goal_objective: Option<String>,
+        goal_status: GoalStatus,
+        translation_enabled: bool,
+        verbosity: Option<String>,
         requested_model: Option<String>,
         requested_reasoning: Option<String>,
+    }
+
+    impl Default for PreviewWireFixture {
+        fn default() -> Self {
+            Self {
+                goal_objective: None,
+                goal_status: GoalStatus::Active,
+                translation_enabled: false,
+                verbosity: None,
+                requested_model: None,
+                requested_reasoning: None,
+            }
+        }
     }
 
     async fn assert_preview_matches_first_wire_body(
@@ -1466,22 +1473,25 @@ mod tests {
         server: &wiremock::MockServer,
         planned: crate::turn_route_plan::PlannedTurnRoute,
         prompt: &str,
-        goal_objective: Option<String>,
-        goal_status: GoalStatus,
-        translation_enabled: bool,
-        show_thinking: bool,
-        verbosity: Option<String>,
-        overrides: PreviewSessionOverrides,
+        fixture: PreviewWireFixture,
     ) -> (RequestManifest, serde_json::Value) {
+        let PreviewWireFixture {
+            goal_objective,
+            goal_status,
+            translation_enabled,
+            verbosity,
+            requested_model,
+            requested_reasoning,
+        } = fixture;
         let production_route = planned.route.clone();
         let compaction = planned.compaction.clone();
         let reasoning_effort = planned.effective_reasoning_effort.clone();
         let reasoning_effort_auto = planned.auto_controls_reasoning;
         let mut preview_inputs = inputs(false, Some(planned), prompt);
-        if let Some(requested_model) = overrides.requested_model {
+        if let Some(requested_model) = requested_model {
             preview_inputs.requested_model = requested_model;
         }
-        if let Some(requested_reasoning) = overrides.requested_reasoning {
+        if let Some(requested_reasoning) = requested_reasoning {
             preview_inputs.requested_reasoning = requested_reasoning;
         }
         let next = preview_inputs.next_turn.as_mut().expect("planned preview");
@@ -1494,7 +1504,6 @@ mod tests {
             goal_status,
             None,
             translation_enabled,
-            show_thinking,
             verbosity.clone(),
         );
         let manifest = engine.build_request_manifest(preview_inputs).await;
@@ -1522,7 +1531,6 @@ mod tests {
                 false,
                 crate::tui::approval::ApprovalMode::Suggest,
                 translation_enabled,
-                show_thinking,
                 None,
                 Vec::new(),
                 None,
@@ -1604,12 +1612,7 @@ mod tests {
             &server,
             planned,
             prompt,
-            None,
-            GoalStatus::Active,
-            false,
-            false,
-            None,
-            PreviewSessionOverrides::default(),
+            PreviewWireFixture::default(),
         )
         .await;
         let body_text = first_wire_body.to_string();
@@ -1752,12 +1755,11 @@ mod tests {
             &server,
             planned,
             "/translate explain this",
-            None,
-            GoalStatus::Active,
-            true,
-            true,
-            Some("concise".to_string()),
-            PreviewSessionOverrides::default(),
+            PreviewWireFixture {
+                translation_enabled: true,
+                verbosity: Some("concise".to_string()),
+                ..Default::default()
+            },
         )
         .await;
     }
@@ -1799,12 +1801,7 @@ mod tests {
             &server,
             planned,
             prompt,
-            None,
-            GoalStatus::Active,
-            false,
-            false,
-            None,
-            PreviewSessionOverrides::default(),
+            PreviewWireFixture::default(),
         )
         .await;
         assert!(
@@ -1865,12 +1862,7 @@ mod tests {
             &server,
             planned,
             prompt,
-            None,
-            GoalStatus::Active,
-            false,
-            false,
-            None,
-            PreviewSessionOverrides::default(),
+            PreviewWireFixture::default(),
         )
         .await;
 
@@ -2133,14 +2125,10 @@ mod tests {
             &server,
             planned,
             prompt,
-            None,
-            GoalStatus::Active,
-            false,
-            false,
-            None,
-            PreviewSessionOverrides {
+            PreviewWireFixture {
                 requested_model: Some(route.model.to_string()),
                 requested_reasoning: Some(route.requested_reasoning_label.to_string()),
+                ..Default::default()
             },
         )
         .await;
@@ -2508,7 +2496,6 @@ mod tests {
                 false,
                 false,
                 crate::tui::approval::ApprovalMode::Suggest,
-                false,
                 false,
                 None,
                 Vec::new(),

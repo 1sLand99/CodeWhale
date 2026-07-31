@@ -22,33 +22,10 @@
 export const RELEASE_CONTRIBUTORS: string[] = [
   "@greyfreedom",
   "@nightt5879",
-  "@XhesicaFrost",
-  "@cyq1017",
-  "@snail-vs",
-  "@SparkofSpike",
-  "@GTC2080",
-  "@h3c-hexin",
-  "@atmosuwiryo",
-  "@M-Maciej",
-  "@raphamorim",
-  "@LI-Jialu",
-  "@kobihikri",
-  "@EvanProgramming",
-  "@adity982",
-  "@vibecoding-skills",
 ];
 
 /** Contributors who helped with reports, reproductions, and verification. */
 export const RELEASE_HELPERS: string[] = [
+  "@Watcher24",
   "@fleitz",
-  "@LmeSzinc",
-  "@antarikshraya",
-  "@eugenicum",
-  "@whp233",
-  "@redjade75723",
-  "@hardy922",
-  "@JayBeest",
-  "@elijahchan2019",
-  "@cy2311",
-  "@wywsoor",
 ];

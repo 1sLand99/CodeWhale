@@ -1113,13 +1113,91 @@ fn apply_env_overrides_sets_search_api_key() {
     unsafe { env::set_var("DEEPSEEK_SEARCH_API_KEY", "search-env-key") };
     let mut config = Config::default();
 
-    apply_env_overrides(&mut config);
+    apply_env_overrides(&mut config, ConfigEnvironmentPolicy::Runtime);
 
     unsafe { EnvGuard::restore_var("DEEPSEEK_SEARCH_API_KEY", prev) };
     assert_eq!(
         config.search.and_then(|search| search.api_key),
         Some("search-env-key".to_string())
     );
+}
+
+#[test]
+fn structural_config_load_keeps_safe_environment_overrides_but_omits_secret_values() {
+    let _guard = lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config_path = temp.path().join("config.toml");
+    fs::write(&config_path, "").expect("empty config");
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", temp.path().join("home"));
+    let _profile = EnvVarGuard::remove("CODEWHALE_PROFILE");
+    let _legacy_profile = EnvVarGuard::remove("DEEPSEEK_PROFILE");
+    let _managed = EnvVarGuard::remove("CODEWHALE_MANAGED_CONFIG_PATH");
+    let _legacy_managed = EnvVarGuard::remove("DEEPSEEK_MANAGED_CONFIG_PATH");
+    let _requirements = EnvVarGuard::remove("CODEWHALE_REQUIREMENTS_PATH");
+    let _legacy_requirements = EnvVarGuard::remove("DEEPSEEK_REQUIREMENTS_PATH");
+    let _headers = EnvVarGuard::set(
+        "CODEWHALE_HTTP_HEADERS",
+        "Authorization=structural-header-secret",
+    );
+    let _legacy_headers = EnvVarGuard::set(
+        "DEEPSEEK_HTTP_HEADERS",
+        "Authorization=legacy-structural-header-secret",
+    );
+    let _sandbox_key = EnvVarGuard::set("CODEWHALE_SANDBOX_API_KEY", "structural-sandbox-secret");
+    let _legacy_sandbox_key = EnvVarGuard::set(
+        "DEEPSEEK_SANDBOX_API_KEY",
+        "legacy-structural-sandbox-secret",
+    );
+    let _search_key = EnvVarGuard::set("CODEWHALE_SEARCH_API_KEY", "structural-search-secret");
+    let _legacy_search_key =
+        EnvVarGuard::set("DEEPSEEK_SEARCH_API_KEY", "legacy-structural-search-secret");
+    let _base_url = EnvVarGuard::set("CODEWHALE_BASE_URL", "https://safe.example:8443/v1");
+    let _allow_shell = EnvVarGuard::set("CODEWHALE_ALLOW_SHELL", "false");
+
+    let runtime = Config::load(Some(config_path.clone()), None).expect("runtime config");
+    assert!(runtime.http_headers.is_some());
+    assert_eq!(
+        runtime.sandbox_api_key.as_deref(),
+        Some("structural-sandbox-secret")
+    );
+    assert_eq!(
+        runtime
+            .search
+            .as_ref()
+            .and_then(|search| search.api_key.as_deref()),
+        Some("structural-search-secret")
+    );
+
+    let structural = Config::load_structural(Some(config_path), None).expect("structural config");
+    assert!(structural.http_headers.is_none());
+    assert!(structural.sandbox_api_key.is_none());
+    assert!(
+        structural
+            .search
+            .as_ref()
+            .and_then(|search| search.api_key.as_deref())
+            .is_none()
+    );
+    assert_eq!(
+        structural.base_url.as_deref(),
+        Some("https://safe.example:8443/v1")
+    );
+    assert_eq!(structural.allow_shell, Some(false));
+
+    let rendered = format!("{structural:?}");
+    for sentinel in [
+        "structural-header-secret",
+        "legacy-structural-header-secret",
+        "structural-sandbox-secret",
+        "legacy-structural-sandbox-secret",
+        "structural-search-secret",
+        "legacy-structural-search-secret",
+    ] {
+        assert!(
+            !rendered.contains(sentinel),
+            "structural config retained {sentinel}"
+        );
+    }
 }
 
 #[test]
@@ -1136,7 +1214,7 @@ fn apply_env_overrides_sets_search_base_url() {
     };
     let mut config = Config::default();
 
-    apply_env_overrides(&mut config);
+    apply_env_overrides(&mut config, ConfigEnvironmentPolicy::Runtime);
 
     unsafe {
         EnvGuard::restore_var("CODEWHALE_SEARCH_BASE_URL", prev_codewhale);
@@ -1165,7 +1243,7 @@ fn codewhale_search_base_url_env_wins_over_legacy_alias() {
     }
     let mut config = Config::default();
 
-    apply_env_overrides(&mut config);
+    apply_env_overrides(&mut config, ConfigEnvironmentPolicy::Runtime);
 
     unsafe {
         EnvGuard::restore_var("CODEWHALE_SEARCH_BASE_URL", prev_codewhale);
@@ -2660,6 +2738,40 @@ fn save_deepseek_key_uses_isolated_file_store_without_plaintext_config() -> Resu
         codewhale_secrets::Secrets::auto_detect().get("deepseek")?,
         Some("deepseek-test-credential".to_string())
     );
+    Ok(())
+}
+
+#[test]
+fn whitespace_codewhale_home_never_opens_ambient_file_secret_store() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let ambient_home = temp_root.path().join("ambient-home");
+    let config_path = temp_root.path().join("isolated-config.toml");
+    fs::create_dir_all(&ambient_home)?;
+    let _home = EnvVarGuard::set("HOME", &ambient_home);
+    let _userprofile = EnvVarGuard::set("USERPROFILE", &ambient_home);
+    let _codewhale_home_unset = EnvVarGuard::remove("CODEWHALE_HOME");
+    let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let _config_path = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", &config_path);
+    let ambient_store = codewhale_secrets::Secrets::file_backed();
+    ambient_store.set("deepseek", "ambient-secret-sentinel")?;
+    let ambient_secret_path = ambient_home
+        .join(".codewhale")
+        .join("secrets")
+        .join("secrets.json");
+    let before = fs::read(&ambient_secret_path)?;
+    let _whitespace_home = EnvVarGuard::set("CODEWHALE_HOME", " \t ");
+
+    let read = provider_secret_store_api_key(&Config::default(), ApiProvider::Deepseek);
+    let saved = save_api_key("replacement-secret-sentinel")?;
+    let after = fs::read(&ambient_secret_path)?;
+
+    assert_eq!(
+        read, None,
+        "whitespace must not opt tests into ambient reads"
+    );
+    assert_eq!(saved, SavedCredential::ConfigFile(config_path));
+    assert_eq!(after, before, "ambient file secret store was modified");
     Ok(())
 }
 
@@ -4377,6 +4489,126 @@ fn deepseek_api_key_ignores_sentinel_placeholder() -> Result<()> {
 }
 
 #[test]
+fn provider_sentinel_falls_through_to_route_env_then_fixture_store() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let codewhale_home = temp_root.path().join("isolated-codewhale");
+    fs::create_dir_all(&codewhale_home)?;
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+    let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let config_path = temp_root.path().join("config.toml");
+    let secrets = codewhale_secrets::Secrets::auto_detect();
+
+    for sentinel in [API_KEYRING_SENTINEL, "  __KEYRING__  "] {
+        fs::write(
+            &config_path,
+            format!("provider = \"openai\"\n\n[providers.openai]\napi_key = {sentinel:?}\n"),
+        )?;
+        let config = Config::load(Some(config_path.clone()), None)?;
+        assert_eq!(
+            config
+                .provider_config()
+                .and_then(|entry| entry.api_key.as_deref())
+                .map(classify_config_api_key_value),
+            Some(ConfigApiKeyValueKind::SecretStoreSentinel)
+        );
+        assert!(!active_provider_has_config_api_key(&config));
+        assert!(!has_api_key_for(&config, ApiProvider::Openai));
+
+        secrets.set("openai", "FIXTURE-STORED-KEY")?;
+        assert_eq!(
+            config.deepseek_api_key()?,
+            "FIXTURE-STORED-KEY",
+            "{sentinel:?} must fall through to the allowed fixture store"
+        );
+        assert!(active_provider_has_config_api_key(&config));
+        assert!(has_api_key_for(&config, ApiProvider::Openai));
+        secrets.delete("openai")?;
+
+        let _route_env = EnvVarGuard::set("OFFICIAL_SENTINEL_ROUTE_KEY", "FIXTURE-ENV-KEY");
+        fs::write(
+            &config_path,
+            format!(
+                "provider = \"openai\"\n\n[providers.openai]\napi_key = {sentinel:?}\napi_key_env = \"OFFICIAL_SENTINEL_ROUTE_KEY\"\n"
+            ),
+        )?;
+        let config = Config::load(Some(config_path.clone()), None)?;
+        assert_eq!(
+            config.deepseek_api_key()?,
+            "FIXTURE-ENV-KEY",
+            "route-bound api_key_env must outrank the store after {sentinel:?}"
+        );
+        assert!(!active_provider_has_config_api_key(&config));
+        assert!(active_provider_has_env_api_key(&config));
+
+        fs::write(&config_path, format!("api_key = {sentinel:?}\n"))?;
+        let root = Config::load(Some(config_path.clone()), None)?;
+        assert!(!active_provider_has_config_api_key(&root));
+        assert!(!has_api_key_for(&root, ApiProvider::Deepseek));
+        secrets.set("deepseek", "FIXTURE-DEEPSEEK-STORED-KEY")?;
+        assert_eq!(
+            root.deepseek_api_key()?,
+            "FIXTURE-DEEPSEEK-STORED-KEY",
+            "root {sentinel:?} must also fall through to the allowed fixture store"
+        );
+        assert!(active_provider_has_config_api_key(&root));
+        secrets.delete("deepseek")?;
+    }
+    Ok(())
+}
+
+#[test]
+fn custom_route_sentinel_is_never_a_key_and_requires_a_route_binding() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let config_path = temp_root.path().join("config.toml");
+
+    for sentinel in [API_KEYRING_SENTINEL, "  __KEYRING__  "] {
+        fs::write(
+            &config_path,
+            format!(
+                "provider = \"acme\"\n\n[providers.acme]\nkind = \"openai-compatible\"\nbase_url = \"https://acme.example.test/v1\"\nmodel = \"acme-model\"\napi_key = {sentinel:?}\n"
+            ),
+        )?;
+        let config = Config::load(Some(config_path.clone()), None)?;
+        assert!(config.should_skip_secret_store_for_provider(ApiProvider::Custom));
+        let error = config
+            .deepseek_api_key()
+            .expect_err("named custom sentinel must not become a bearer key");
+        assert!(error.to_string().contains("must be bound explicitly"));
+        assert!(!active_provider_has_config_api_key(&config));
+        assert!(!has_api_key_for(&config, ApiProvider::Custom));
+
+        let _route_env = EnvVarGuard::set("CUSTOM_SENTINEL_ROUTE_KEY", "FIXTURE-CUSTOM-ENV-KEY");
+        fs::write(
+            &config_path,
+            format!(
+                "provider = \"acme\"\n\n[providers.acme]\nkind = \"openai-compatible\"\nbase_url = \"https://acme.example.test/v1\"\nmodel = \"acme-model\"\napi_key = {sentinel:?}\napi_key_env = \"CUSTOM_SENTINEL_ROUTE_KEY\"\n"
+            ),
+        )?;
+        let config = Config::load(Some(config_path.clone()), None)?;
+        assert_eq!(config.deepseek_api_key()?, "FIXTURE-CUSTOM-ENV-KEY");
+        assert!(!active_provider_has_config_api_key(&config));
+        assert!(active_provider_has_env_api_key(&config));
+    }
+
+    fs::write(
+        &config_path,
+        format!(
+            "provider = \"openrouter\"\n\n[providers.openrouter]\nbase_url = \"https://gateway.example.test/v1\"\napi_key = {API_KEYRING_SENTINEL:?}\n"
+        ),
+    )?;
+    let custom_endpoint = Config::load(Some(config_path), None)?;
+    assert!(custom_endpoint.should_skip_secret_store_for_provider(ApiProvider::Openrouter));
+    assert!(custom_endpoint.deepseek_api_key().is_err());
+    assert!(!active_provider_has_config_api_key(&custom_endpoint));
+    assert!(!has_api_key_for(&custom_endpoint, ApiProvider::Openrouter));
+    Ok(())
+}
+
+#[test]
 fn default_user_paths_use_codewhale_home_for_fresh_installs() -> Result<()> {
     let _lock = lock_test_env();
     let nanos = SystemTime::now()
@@ -4414,6 +4646,10 @@ fn default_user_paths_use_codewhale_home_for_fresh_installs() -> Result<()> {
         config.memory_path(),
         temp_root.join(".codewhale").join("memory.md")
     );
+    assert_eq!(
+        config.skills_dir(),
+        temp_root.join(".codewhale").join("skills")
+    );
 
     Ok(())
 }
@@ -4435,6 +4671,7 @@ fn default_user_paths_preserve_existing_legacy_files() -> Result<()> {
     for name in ["config.toml", "mcp.json", "notes.txt", "memory.md"] {
         fs::write(legacy_home.join(name), "")?;
     }
+    fs::create_dir_all(legacy_home.join("skills"))?;
     let _guard = EnvGuard::new(&temp_root);
 
     unsafe {
@@ -4449,7 +4686,82 @@ fn default_user_paths_preserve_existing_legacy_files() -> Result<()> {
     assert_eq!(config.mcp_config_path(), legacy_home.join("mcp.json"));
     assert_eq!(config.notes_path(), legacy_home.join("notes.txt"));
     assert_eq!(config.memory_path(), legacy_home.join("memory.md"));
+    assert_eq!(config.skills_dir(), legacy_home.join("skills"));
 
+    Ok(())
+}
+
+#[test]
+fn explicit_codewhale_home_isolates_all_config_owned_user_paths() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let ambient_home = temp_root.path().join("ambient-home");
+    let explicit_home = temp_root.path().join("explicit-home");
+    let ambient_legacy = ambient_home.join(".deepseek");
+    fs::create_dir_all(ambient_legacy.join("skills"))?;
+    for name in ["mcp.json", "notes.txt", "memory.md"] {
+        fs::write(ambient_legacy.join(name), "legacy")?;
+    }
+    let _home = EnvVarGuard::set("HOME", &ambient_home);
+    let _userprofile = EnvVarGuard::set("USERPROFILE", &ambient_home);
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &explicit_home);
+
+    assert_eq!(default_skills_dir(), Some(explicit_home.join("skills")));
+    assert_eq!(
+        default_mcp_config_path(),
+        Some(explicit_home.join("mcp.json"))
+    );
+    assert_eq!(default_notes_path(), Some(explicit_home.join("notes.txt")));
+    assert_eq!(default_memory_path(), Some(explicit_home.join("memory.md")));
+    Ok(())
+}
+
+#[test]
+fn whitespace_codewhale_home_keeps_ambient_legacy_config_path_fallbacks() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let ambient_home = temp_root.path().join("ambient-home");
+    let ambient_legacy = ambient_home.join(".deepseek");
+    fs::create_dir_all(ambient_legacy.join("skills"))?;
+    for name in ["mcp.json", "notes.txt", "memory.md"] {
+        fs::write(ambient_legacy.join(name), "legacy")?;
+    }
+    let _home = EnvVarGuard::set("HOME", &ambient_home);
+    let _userprofile = EnvVarGuard::set("USERPROFILE", &ambient_home);
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", " \t ");
+
+    assert_eq!(default_skills_dir(), Some(ambient_legacy.join("skills")));
+    assert_eq!(
+        default_mcp_config_path(),
+        Some(ambient_legacy.join("mcp.json"))
+    );
+    assert_eq!(default_notes_path(), Some(ambient_legacy.join("notes.txt")));
+    assert_eq!(
+        default_memory_path(),
+        Some(ambient_legacy.join("memory.md"))
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn non_unicode_codewhale_home_is_preserved_by_config_owned_user_paths() -> Result<()> {
+    use std::os::unix::ffi::OsStringExt;
+
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let explicit_home = temp_root
+        .path()
+        .join(OsString::from_vec(b"codewhale-\xff-home".to_vec()));
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &explicit_home);
+
+    assert_eq!(default_skills_dir(), Some(explicit_home.join("skills")));
+    assert_eq!(
+        default_mcp_config_path(),
+        Some(explicit_home.join("mcp.json"))
+    );
+    assert_eq!(default_notes_path(), Some(explicit_home.join("notes.txt")));
+    assert_eq!(default_memory_path(), Some(explicit_home.join("memory.md")));
     Ok(())
 }
 
@@ -4690,7 +5002,7 @@ fn apply_env_overrides_ignores_empty_api_key() -> Result<()> {
         api_key: Some("from-config-file".to_string()),
         ..Default::default()
     };
-    apply_env_overrides(&mut config);
+    apply_env_overrides(&mut config, ConfigEnvironmentPolicy::Runtime);
 
     assert_eq!(config.api_key.as_deref(), Some("from-config-file"));
     config.validate()?;
@@ -4716,7 +5028,7 @@ fn apply_env_overrides_does_not_copy_api_key_into_config() -> Result<()> {
         env::set_var("DEEPSEEK_API_KEY", "env-key");
     }
     let mut config = Config::default();
-    apply_env_overrides(&mut config);
+    apply_env_overrides(&mut config, ConfigEnvironmentPolicy::Runtime);
 
     assert_eq!(config.api_key, None);
     assert_eq!(config.deepseek_api_key()?, "env-key");
@@ -10842,6 +11154,14 @@ fn k3_and_kimi_k3_never_cross_products_and_fail_visibly() {
         DEFAULT_KIMI_CODE_BASE_URL,
         KIMI_CODE_K3_MODEL
     ));
+}
+
+#[test]
+fn unknown_models_pass_through_on_canonical_moonshot_endpoints() {
+    for base_url in [DEFAULT_KIMI_CODE_BASE_URL, DEFAULT_MOONSHOT_BASE_URL] {
+        validate_kimi_code_api_model_id(ApiProvider::Moonshot, base_url, "future-kimi-model")
+            .expect("unknown model IDs remain provider-owned");
+    }
 }
 
 #[test]

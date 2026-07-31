@@ -247,6 +247,26 @@ jobs:
       - name: Check dead-code budget
         if: needs.changes.outputs.heavy == 'true'
         run: python3 scripts/check-dead-code-budget.py
+      # Provider-free local measurement. The checker forces Cargo offline and
+      # the measurement script runs only locked, ignored Rust metric tests.
+      - name: Check runtime-contract budget
+        if: needs.changes.outputs.heavy == 'true'
+        run: python3 scripts/check-runtime-contract-budget.py
+      # Provider-free paused-consumer measurement of the production
+      # persistence request channel. RSS is sampled only on macOS; every host
+      # enforces the accepted/retained request and payload contract.
+      - name: Test persistence-backlog checker
+        if: needs.changes.outputs.heavy == 'true'
+        run: python3 scripts/test_check_persistence_backlog_budget.py
+      - name: Check persistence-backlog budget
+        if: needs.changes.outputs.heavy == 'true'
+        run: python3 scripts/check-persistence-backlog-budget.py
+      # Source-only ownership ratchet. Deletion and line-neutral consolidation
+      # pass; new packages/binaries/thousand-line module paths, a larger maximum
+      # module, or aggregate owned Rust growth require reviewed updates.
+      - name: Check source-structure budget
+        if: needs.changes.outputs.heavy == 'true'
+        run: python3 scripts/check-source-structure-budget.py
       - name: Check README translations stay in sync
         if: github.event_name != 'schedule'
         run: python3 scripts/check-readme-translations.py
@@ -362,6 +382,12 @@ jobs:
       - name: Run tests
         if: needs.changes.outputs.heavy == 'true' && (matrix.os != 'ubuntu-latest' || github.event_name == 'workflow_dispatch')
         run: cargo test --workspace --all-features --locked
+      # The Ubuntu lint lane validates non-RSS backlog fields. Run the same
+      # source-bound measurement on macOS so loss or growth of RSS evidence
+      # fails closed instead of becoming an unsupported-field skip.
+      - name: Check persistence-backlog RSS budget
+        if: needs.changes.outputs.heavy == 'true' && matrix.os == 'macos-latest'
+        run: python3 scripts/check-persistence-backlog-budget.py
       - name: Run isolated Skills Manager PTY acceptance
         # This real-PTY scenario is deterministic in a fresh process (10/10
         # locally) but can inherit event starvation after the full qa_pty

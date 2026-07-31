@@ -77,7 +77,7 @@ fn binary_exits_without_crashing(world: &mut EvalSmokeWorld) {
     // (run_eval in main.rs uses `bail!("...")` for non-successful scenarios).
     // This is expected behavior: the eval runs a multi-step scenario offline
     // (List, Read, Search, Edit, ApplyPatch, ExecShell) and the overall
-    // metrics.success reflects all steps, not just ExecShell. The ExecShell
+    // metrics.success reflects all steps, not just Bash. The Bash
     // step itself succeeds — see `json_report_contains_execution_steps`.
     //
     // What we verify here:
@@ -110,20 +110,17 @@ fn json_report_contains_execution_steps(world: &mut EvalSmokeWorld) {
         .and_then(|value| value.as_array())
         .expect("eval report should have a 'steps' array");
 
-    // Find the ExecShell step and verify it contains the expected output
+    // Find the Bash step and verify it contains the expected output
     let exec_step = steps
         .iter()
-        .find(|step| step.get("kind").and_then(|v| v.as_str()) == Some("ExecShell"))
-        .expect("eval report should have an ExecShell step");
+        .find(|step| step.get("kind").and_then(|v| v.as_str()) == Some("Bash"))
+        .expect("eval report should have a Bash step");
 
     let step_success = exec_step
         .get("success")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    assert!(
-        step_success,
-        "ExecShell step should succeed, got: {exec_step:?}"
-    );
+    assert!(step_success, "Bash step should succeed, got: {exec_step:?}");
 
     let output = exec_step
         .get("output")
@@ -131,7 +128,7 @@ fn json_report_contains_execution_steps(world: &mut EvalSmokeWorld) {
         .unwrap_or("");
     assert!(
         output.contains("eval-smoke-test"),
-        "ExecShell output should contain the shell command echo, got: {output}"
+        "Bash output should contain the shell command echo, got: {output}"
     );
 }
 

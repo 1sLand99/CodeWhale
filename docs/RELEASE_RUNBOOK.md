@@ -16,6 +16,7 @@ Current packaging note:
 - Supporting crates published from this workspace:
   - `codewhale-build-support`
   - `codewhale-mcp`
+  - `codewhale-paths`
   - `codewhale-protocol`
   - `codewhale-release`
   - `codewhale-secrets`

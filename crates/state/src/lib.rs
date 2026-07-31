@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use codewhale_paths::{CODEWHALE_APP_DIR, LEGACY_APP_DIR, codewhale_home_override};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1788,7 +1789,13 @@ impl StateStore {
     }
 }
 
-fn default_state_db_path() -> PathBuf {
+/// Resolve the default SQLite state path without opening or creating it.
+///
+/// An explicit `CODEWHALE_HOME` always yields `<override>/state.db` and blocks
+/// ambient legacy fallback. Without an override, an existing legacy database
+/// remains readable until it is migrated.
+#[must_use]
+pub fn default_state_db_path() -> PathBuf {
     // $CODEWHALE_HOME is a hard override of the base data directory
     // (docs/CONFIGURATION.md): when set, the state DB lives under it and we do
     // NOT fall back to the legacy ~/.deepseek path — silent fallback would
@@ -1798,30 +1805,15 @@ fn default_state_db_path() -> PathBuf {
     if let Some(overridden) = codewhale_home_override() {
         return overridden.join("state.db");
     }
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let home = codewhale_paths::user_home().unwrap_or_else(|| PathBuf::from("."));
     // Prefer the CodeWhale directory, falling back to legacy DeepSeek path
     // so existing installs don't lose their session history.
-    let primary = home.join(".codewhale").join("state.db");
-    if primary.exists() || !home.join(".deepseek").join("state.db").exists() {
+    let primary = home.join(CODEWHALE_APP_DIR).join("state.db");
+    if primary.exists() || !home.join(LEGACY_APP_DIR).join("state.db").exists() {
         primary
     } else {
-        home.join(".deepseek").join("state.db")
+        home.join(LEGACY_APP_DIR).join("state.db")
     }
-}
-
-/// Resolve `$CODEWHALE_HOME` as a hard override of the data directory root.
-///
-/// Returns the path verbatim (the env var IS the home dir, matching
-/// `codewhale_home()` in config — `$CODEWHALE_HOME=/data/cw` means the home is
-/// `/data/cw`, not `/data/cw/.codewhale`). Returns `None` when unset/empty so
-/// callers can branch on "explicit override" vs "default home + legacy
-/// fallback." Mirrors config's helper without taking a dependency on it (state
-/// is a low-level leaf crate; config cannot be a dependency here without
-/// inverting the layering).
-fn codewhale_home_override() -> Option<PathBuf> {
-    std::env::var_os("CODEWHALE_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
 }
 
 fn bool_to_i64(value: bool) -> i64 {
@@ -2439,17 +2431,12 @@ mod tests {
     }
 
     #[test]
-    fn codewhale_home_override_none_when_empty() {
+    fn codewhale_home_override_none_when_whitespace_only() {
         let _lock = CODEWHALE_HOME_TEST_LOCK.lock().unwrap();
         let _g = CodeWhaleHomeGuard::set("   ");
-        // The helper filters empty values (after the OsString check). Note:
-        // var_os returns the raw "   ", and our filter only catches truly-empty,
-        // so this documents that whitespace-only is NOT treated as unset at the
-        // override layer (config's codewhale_home trims; we don't here — the
-        // branch is "was it set at all").
         assert!(
-            codewhale_home_override().is_some(),
-            "non-empty (even whitespace) counts as set; trimming is the caller's job"
+            codewhale_home_override().is_none(),
+            "whitespace-only CODEWHALE_HOME must not establish isolation"
         );
     }
 

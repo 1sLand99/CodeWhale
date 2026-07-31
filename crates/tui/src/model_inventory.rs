@@ -401,11 +401,10 @@ fn auth_source_for_provider(config: &Config, provider: ApiProvider) -> Option<Mo
         {
             return Some(ModelAuthSource::Env);
         }
-        return (configured
-            .api_key
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-            || crate::config::explicit_cli_api_key_override().is_some())
+        return (configured.api_key.as_deref().is_some_and(|value| {
+            crate::config::classify_config_api_key_value(value)
+                == crate::config::ConfigApiKeyValueKind::Literal
+        }) || crate::config::explicit_cli_api_key_override().is_some())
         .then_some(ModelAuthSource::Config);
     }
     if provider_uses_oauth_cli(config, provider) {

@@ -2,8 +2,7 @@
 //!
 //! The model sees one tool: `File` with an `action` parameter
 //! (read | list | search_name | search_content | write | edit | patch).
-//! Legacy names (`read_file`, `write_file`, etc.) stay registered as hidden
-//! compat aliases that force the action so saved transcripts replay correctly.
+//! The per-action legacy execution aliases were removed in v0.9.3.
 
 use async_trait::async_trait;
 use serde_json::{Value, json};

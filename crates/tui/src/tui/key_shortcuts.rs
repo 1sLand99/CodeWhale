@@ -192,19 +192,6 @@ pub(super) fn is_paste_shortcut(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
-/// Whether the key event represents a user typing a printable
-/// character into the composer (no modifier that would turn it into
-/// a shortcut).
-pub(super) fn is_text_input_key(key: &KeyEvent) -> bool {
-    if matches!(key.code, KeyCode::Char(c) if c.is_control()) {
-        return false;
-    }
-
-    !key.modifiers.contains(KeyModifiers::CONTROL)
-        && !key.modifiers.contains(KeyModifiers::ALT)
-        && !key.modifiers.contains(KeyModifiers::SUPER)
-}
-
 /// `Ctrl+H` is the legacy ASCII backspace many terminals still emit
 /// when the user presses Backspace. Disallows Alt/Super so it doesn't
 /// shadow window-management combos.

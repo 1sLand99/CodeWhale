@@ -10,6 +10,7 @@
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
+use crate::config::ApiProvider;
 use crate::llm_client::StreamEventBox;
 use crate::logging;
 use crate::models::{
@@ -27,13 +28,41 @@ use super::{
 pub(super) const CODEX_RESPONSES_PATH: &str = "/codex/responses";
 
 /// Build the Responses API request body from a `MessageRequest`.
+#[cfg(test)]
 pub(super) fn build_responses_body(request: &MessageRequest) -> Value {
+    build_responses_body_for_provider(request, ApiProvider::OpenaiCodex)
+}
+
+/// Build a provider-aware Responses API request body.
+///
+/// DeepSeek-V4-Flash-0731 implements the Responses wire shape but is stateless
+/// and exposes plain reasoning text rather than OpenAI encrypted summaries.
+/// Keep those exact-route differences here instead of leaking them into the
+/// provider-neutral message model.
+pub(super) fn build_responses_body_for_provider(
+    request: &MessageRequest,
+    provider: ApiProvider,
+) -> Value {
+    let is_deepseek = matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN);
     let model = &request.model;
     let mut body = json!({
         "model": model,
         "stream": true,
-        "store": false,
     });
+    if !is_deepseek {
+        body["store"] = json!(false);
+    }
+    if is_deepseek {
+        if request.max_tokens > 0 {
+            body["max_output_tokens"] = json!(request.max_tokens);
+        }
+        if let Some(temperature) = request.temperature {
+            body["temperature"] = json!(temperature);
+        }
+        if let Some(top_p) = request.top_p {
+            body["top_p"] = json!(top_p);
+        }
+    }
 
     // Instructions (system prompt). The Codex Responses backend rejects
     // requests without instructions, so fall back to a minimal system
@@ -44,7 +73,7 @@ pub(super) fn build_responses_body(request: &MessageRequest) -> Value {
     body["instructions"] = json!(instructions);
 
     // Convert messages to Responses input items.
-    let input = convert_messages_to_responses_input(request);
+    let input = convert_messages_to_responses_input(request, is_deepseek);
     body["input"] = json!(input);
 
     // Convert tools to Responses function tools.
@@ -62,16 +91,23 @@ pub(super) fn build_responses_body(request: &MessageRequest) -> Value {
     // DeepSeek-only values before request construction: "off" becomes
     // "low", and CodeWhale's "auto" falls back to "medium".
     if let Some(raw) = request.reasoning_effort.as_deref()
-        && let Some(effort) = codex_responses_reasoning_effort(raw)
+        && let Some(effort) = responses_reasoning_effort(raw, is_deepseek)
     {
-        body["reasoning"] = json!({
-            "effort": effort,
-            "summary": "auto",
-        });
+        body["reasoning"] = if is_deepseek {
+            json!({ "effort": effort })
+        } else {
+            json!({
+                "effort": effort,
+                "summary": "auto",
+            })
+        };
     }
 
-    // Include reasoning summaries in the stream.
-    body["include"] = json!(["reasoning.encrypted_content"]);
+    // OpenAI Codex can replay encrypted reasoning. DeepSeek exposes plain
+    // `reasoning_text` and does not support `include`.
+    if !is_deepseek {
+        body["include"] = json!(["reasoning.encrypted_content"]);
+    }
 
     body
 }
@@ -379,7 +415,7 @@ impl DeepSeekClient {
                                     current_block_index = None;
                                 }
                             }
-                            "response.completed" => {
+                            "response.completed" | "response.incomplete" => {
                                 if let Some(resp) = event.get("response") {
                                     if let Some(usage_val) = resp.get("usage") {
                                         usage_data =
@@ -403,8 +439,12 @@ impl DeepSeekClient {
                                         usage: usage_data.take(),
                                     });
                                 }
+                                // DeepSeek terminates semantic Responses
+                                // streams with this event and deliberately does
+                                // not send `data: [DONE]`.
+                                done = true;
                             }
-                            "error" | "response.failed" | "response.incomplete" => {
+                            "error" | "response.failed" => {
                                 let (code, msg) = responses_event_error_details(&event);
                                 yield Err(anyhow::anyhow!(
                                     "Responses API error [{code}]: {msg}"
@@ -548,7 +588,7 @@ impl DeepSeekClient {
 }
 
 /// Convert CodeWhale messages to Responses API input items.
-fn convert_messages_to_responses_input(request: &MessageRequest) -> Vec<Value> {
+fn convert_messages_to_responses_input(request: &MessageRequest, is_deepseek: bool) -> Vec<Value> {
     let mut items = Vec::new();
 
     for msg in &request.messages {
@@ -625,13 +665,23 @@ fn convert_messages_to_responses_input(request: &MessageRequest) -> Vec<Value> {
                             }));
                         }
                         ContentBlock::Thinking { thinking, .. } => {
-                            items.push(json!({
-                                "type": "reasoning",
-                                "summary": [{
-                                    "type": "summary_text",
-                                    "text": thinking,
-                                }],
-                            }));
+                            items.push(if is_deepseek {
+                                json!({
+                                    "type": "reasoning",
+                                    "content": [{
+                                        "type": "reasoning_text",
+                                        "text": thinking,
+                                    }],
+                                })
+                            } else {
+                                json!({
+                                    "type": "reasoning",
+                                    "summary": [{
+                                        "type": "summary_text",
+                                        "text": thinking,
+                                    }],
+                                })
+                            });
                         }
                         _ => {}
                     }
@@ -687,6 +737,20 @@ fn codex_responses_reasoning_effort(raw: &str) -> Option<&'static str> {
         "high" => Some("high"),
         "xhigh" | "max" | "maximum" | "ultracode" => Some("xhigh"),
         _ => Some("medium"),
+    }
+}
+
+fn responses_reasoning_effort(raw: &str, is_deepseek: bool) -> Option<&'static str> {
+    if !is_deepseek {
+        return codex_responses_reasoning_effort(raw);
+    }
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "off" | "disabled" | "none" | "false" | "minimal" | "low" => Some("low"),
+        "xhigh" | "max" | "maximum" | "ultracode" => Some("max"),
+        // DeepSeek maps both low and medium to its normal high tier in
+        // thinking mode. Preserve explicit low for Codex compatibility, and
+        // normalize every remaining/automatic tier to a documented value.
+        _ => Some("high"),
     }
 }
 
@@ -1011,6 +1075,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn responses_stream_finishes_on_semantic_terminal_event_without_done_marker() {
+        let server = MockServer::start().await;
+        let sse_body = concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n\n",
+        );
+        Mock::given(method("POST"))
+            .and(path(CODEX_RESPONSES_PATH))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "text/event-stream")
+                    .set_body_string(sse_body),
+            )
+            .mount(&server)
+            .await;
+
+        let client = {
+            let _env_lock = crate::test_support::lock_test_env();
+            let _codex_token =
+                crate::test_support::EnvVarGuard::set("OPENAI_CODEX_ACCESS_TOKEN", "test-token");
+            let _legacy_codex_token =
+                crate::test_support::EnvVarGuard::remove("CODEX_ACCESS_TOKEN");
+            DeepSeekClient::new(&test_codex_config(&server)).unwrap()
+        };
+        let mut stream = client
+            .handle_responses_stream(
+                &client
+                    .prepare_outbound_request(minimal_responses_request(), true)
+                    .expect("responses request prepares"),
+            )
+            .await
+            .expect("semantic Responses stream opens");
+
+        let mut saw_stop = false;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(event) = stream.next().await {
+                if matches!(event.unwrap(), StreamEvent::MessageStop) {
+                    saw_stop = true;
+                }
+            }
+        })
+        .await
+        .expect("terminal event ends the stream without [DONE]");
+        assert!(saw_stop);
+    }
+
+    #[tokio::test]
     async fn responses_stream_fails_fast_on_non_retryable_provider_error() {
         let server = MockServer::start().await;
         let attempts = Arc::new(AtomicUsize::new(0));
@@ -1215,6 +1326,57 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_flash_responses_body_uses_stateless_0731_contract() {
+        let mut request = minimal_responses_request();
+        request.model = "deepseek-v4-flash".to_string();
+        request.reasoning_effort = Some("xhigh".to_string());
+        request.temperature = Some(1.0);
+        request.top_p = Some(0.95);
+        request.messages.insert(
+            0,
+            Message {
+                role: "assistant".to_string(),
+                content: vec![ContentBlock::Thinking {
+                    thinking: "preserve this tool-loop reasoning".to_string(),
+                    signature: None,
+                }],
+            },
+        );
+
+        let body = build_responses_body_for_provider(&request, ApiProvider::Deepseek);
+
+        assert_eq!(body["model"], "deepseek-v4-flash");
+        assert_eq!(body["max_output_tokens"], 128);
+        assert_eq!(body["temperature"], 1.0);
+        assert!(
+            (body["top_p"].as_f64().expect("top_p number") - 0.95).abs() < 1e-6,
+            "{}",
+            body["top_p"]
+        );
+        assert_eq!(body.pointer("/reasoning/effort"), Some(&json!("max")));
+        assert!(body.pointer("/reasoning/summary").is_none());
+        assert!(body.get("include").is_none());
+        assert!(body.get("store").is_none());
+        assert_eq!(
+            body.pointer("/input/0/content/0/type"),
+            Some(&json!("reasoning_text"))
+        );
+        assert_eq!(
+            body.pointer("/input/0/content/0/text"),
+            Some(&json!("preserve this tool-loop reasoning"))
+        );
+    }
+
+    #[test]
+    fn deepseek_responses_reasoning_effort_uses_documented_labels() {
+        assert_eq!(responses_reasoning_effort("low", true), Some("low"));
+        assert_eq!(responses_reasoning_effort("medium", true), Some("high"));
+        assert_eq!(responses_reasoning_effort("high", true), Some("high"));
+        assert_eq!(responses_reasoning_effort("xhigh", true), Some("max"));
+        assert_eq!(responses_reasoning_effort("max", true), Some("max"));
+    }
+
+    #[test]
     fn codex_responses_body_uses_responses_reasoning_not_deepseek_thinking() {
         let request = MessageRequest {
             model: "gpt-5.5".to_string(),
@@ -1410,7 +1572,7 @@ mod tests {
             top_p: None,
         };
 
-        let input = convert_messages_to_responses_input(&request);
+        let input = convert_messages_to_responses_input(&request, false);
 
         assert_eq!(input[0]["type"], "function_call");
         assert_eq!(input[0]["call_id"], "call_abc");
@@ -1445,7 +1607,7 @@ mod tests {
             top_p: None,
         };
 
-        let input = convert_messages_to_responses_input(&request);
+        let input = convert_messages_to_responses_input(&request, false);
 
         assert_eq!(input[0]["type"], "function_call");
         assert_eq!(input[0]["name"], to_api_tool_name("web.run"));

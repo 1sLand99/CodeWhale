@@ -10,6 +10,230 @@ fn test_runtime_dir() -> PathBuf {
     std::env::temp_dir().join(format!("deepseek-runtime-threads-{}", Uuid::new_v4()))
 }
 
+const EVENT_PROCESS_ROLE_ENV: &str = "CODEWHALE_TEST_EVENT_PROCESS_ROLE";
+const EVENT_PROCESS_ROOT_ENV: &str = "CODEWHALE_TEST_EVENT_PROCESS_ROOT";
+const EVENT_PROCESS_THREAD_ENV: &str = "CODEWHALE_TEST_EVENT_PROCESS_THREAD";
+const EVENT_PROCESS_SIGNAL_ENV: &str = "CODEWHALE_TEST_EVENT_PROCESS_SIGNAL";
+const EVENT_PROCESS_START_ENV: &str = "CODEWHALE_TEST_EVENT_PROCESS_START";
+const EVENT_PROCESS_WORKER_ENV: &str = "CODEWHALE_TEST_EVENT_PROCESS_WORKER";
+const EVENT_PROCESS_COUNT_ENV: &str = "CODEWHALE_TEST_EVENT_PROCESS_COUNT";
+const EVENT_PROCESS_HELPER: &str = "runtime_threads::tests::runtime_event_process_child_helper";
+
+#[test]
+#[ignore = "spawned by real cross-process Runtime event tests"]
+fn runtime_event_process_child_helper() {
+    let Ok(role) = std::env::var(EVENT_PROCESS_ROLE_ENV) else {
+        return;
+    };
+    let root = PathBuf::from(
+        std::env::var_os(EVENT_PROCESS_ROOT_ENV).expect("event child needs a store root"),
+    );
+    let thread_id = std::env::var(EVENT_PROCESS_THREAD_ENV).expect("event child needs a thread id");
+    let signal = PathBuf::from(
+        std::env::var_os(EVENT_PROCESS_SIGNAL_ENV).expect("event child needs a signal path"),
+    );
+    let store = RuntimeThreadStore::open(root).expect("event child opens Runtime store");
+
+    match role.as_str() {
+        "writer" => {
+            let start = PathBuf::from(
+                std::env::var_os(EVENT_PROCESS_START_ENV)
+                    .expect("event writer needs a start barrier"),
+            );
+            let worker =
+                std::env::var(EVENT_PROCESS_WORKER_ENV).expect("event writer needs a worker id");
+            let count = std::env::var(EVENT_PROCESS_COUNT_ENV)
+                .expect("event writer needs a count")
+                .parse::<u64>()
+                .expect("event writer count must be numeric");
+            std::fs::write(&signal, b"ready").expect("announce ready event writer");
+            wait_for_runtime_event_test_file(&start, "writer start barrier");
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build event writer runtime");
+            runtime.block_on(async {
+                for index in 0..count {
+                    store
+                        .append_event(
+                            &thread_id,
+                            None,
+                            None,
+                            "process.event",
+                            json!({ "worker": worker, "index": index }),
+                        )
+                        .await
+                        .expect("append cross-process Runtime event");
+                }
+            });
+        }
+        "holder" => {
+            store
+                .with_event_transaction(Duration::from_secs(5), || {
+                    std::fs::write(&signal, b"locked").expect("announce held event lock");
+                    std::thread::sleep(Duration::from_secs(60));
+                    Ok(())
+                })
+                .expect("hold Runtime event transaction");
+        }
+        "torn" => {
+            store
+                .with_event_transaction(Duration::from_secs(5), || {
+                    let mut state = load_runtime_store_state(&store.state_path)?;
+                    let seq = state.next_seq;
+                    state.next_seq = seq.checked_add(1).context("reserve torn event sequence")?;
+                    write_json_atomic(&store.state_path, &state)?;
+                    let path = store.events_path(&thread_id)?;
+                    let mut file =
+                        open_runtime_store_file(&path, "torn Runtime event fixture", |options| {
+                            options.create(true).append(true);
+                        })?;
+                    let record = RuntimeEventRecord {
+                        schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
+                        seq,
+                        timestamp: Utc::now(),
+                        thread_id: thread_id.clone(),
+                        turn_id: None,
+                        item_id: None,
+                        event: "torn.process.event".to_string(),
+                        payload: json!({}),
+                    };
+                    file.write_all(&serde_json::to_vec(&record)?)?;
+                    file.flush()?;
+                    file.sync_all()?;
+                    std::fs::write(&signal, b"torn").expect("announce torn event append");
+                    std::thread::sleep(Duration::from_secs(60));
+                    Ok(())
+                })
+                .expect("hold torn Runtime event transaction");
+        }
+        "phantom" => {
+            store
+                .with_event_transaction(Duration::from_secs(5), || {
+                    let path = store.events_path(&thread_id)?;
+                    let mut append = open_runtime_store_file(
+                        &path,
+                        "phantom Runtime event fixture",
+                        |options| {
+                            options.create(true).append(true);
+                        },
+                    )?;
+                    let rollback = open_runtime_store_file(
+                        &path,
+                        "phantom Runtime event rollback",
+                        |options| {
+                            options.write(true);
+                        },
+                    )?;
+                    validate_same_runtime_store_file_handles(&append, &rollback, &path)?;
+                    let original_len = append.metadata()?.len();
+                    serde_json::to_writer(
+                        &mut append,
+                        &RuntimeEventRecord {
+                            schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
+                            seq: 999,
+                            timestamp: Utc::now(),
+                            thread_id: thread_id.clone(),
+                            turn_id: None,
+                            item_id: None,
+                            event: "phantom.process.event".to_string(),
+                            payload: json!({}),
+                        },
+                    )?;
+                    append.write_all(b"\n")?;
+                    append.flush()?;
+                    std::fs::write(&signal, b"visible").expect("announce rollback candidate");
+                    std::thread::sleep(Duration::from_millis(300));
+                    rollback_failed_event_append_handle(&rollback, original_len)
+                })
+                .expect("roll back phantom Runtime event");
+        }
+        other => panic!("unknown Runtime event child role {other}"),
+    }
+}
+
+fn wait_for_runtime_event_test_file(path: &Path, label: &str) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !path.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {label} at {}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn spawn_runtime_event_child(
+    role: &str,
+    root: &Path,
+    thread_id: &str,
+    signal: &Path,
+) -> RuntimeEventChildGuard {
+    let mut command = std::process::Command::new(
+        std::env::current_exe().expect("current test executable for Runtime event child"),
+    );
+    command
+        .arg(EVENT_PROCESS_HELPER)
+        .args(["--exact", "--ignored", "--test-threads", "1"])
+        .env(EVENT_PROCESS_ROLE_ENV, role)
+        .env(EVENT_PROCESS_ROOT_ENV, root)
+        .env(EVENT_PROCESS_THREAD_ENV, thread_id)
+        .env(EVENT_PROCESS_SIGNAL_ENV, signal)
+        .env(EVENT_PROCESS_START_ENV, root.join("process-writers.start"))
+        .env(EVENT_PROCESS_WORKER_ENV, signal.as_os_str())
+        .env(EVENT_PROCESS_COUNT_ENV, "8")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    RuntimeEventChildGuard::new(command.spawn().expect("spawn Runtime event child"))
+}
+
+struct RuntimeEventChildGuard(Option<std::process::Child>);
+
+impl RuntimeEventChildGuard {
+    const fn new(child: std::process::Child) -> Self {
+        Self(Some(child))
+    }
+
+    fn wait_success(mut self, label: &str) {
+        use wait_timeout::ChildExt as _;
+
+        let outcome = self
+            .0
+            .as_mut()
+            .expect("Runtime event child is present")
+            .wait_timeout(Duration::from_secs(30));
+        match outcome {
+            Ok(Some(status)) => {
+                self.0.take();
+                assert!(status.success(), "{label} failed with {status}");
+            }
+            Ok(None) => panic!("timed out waiting for {label}"),
+            Err(error) => panic!("failed waiting for {label}: {error}"),
+        }
+    }
+
+    fn kill_and_reap(mut self) -> std::io::Result<std::process::ExitStatus> {
+        let child = self.0.as_mut().expect("Runtime event child is present");
+        let kill = child.kill();
+        let status = child.wait();
+        if status.is_ok() {
+            self.0.take();
+        }
+        kill.and(status)
+    }
+}
+
+impl Drop for RuntimeEventChildGuard {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 fn test_manager_config(data_dir: PathBuf) -> RuntimeThreadManagerConfig {
     RuntimeThreadManagerConfig {
         task_data_dir: data_dir.clone(),
@@ -598,7 +822,8 @@ async fn caller_cancellation_after_engine_acceptance_keeps_owned_turn_lifecycle(
 
     // Block the first start-event append so the public future remains
     // cancellable after the operation has entered the engine mailbox.
-    let event_state_guard = manager.store.state.lock().await;
+    let mut event_lock = fd_lock::RwLock::new(manager.store.open_event_lock()?);
+    let event_state_guard = event_lock.try_write()?;
     let start_manager = manager.clone();
     let thread_id = thread.id.clone();
     let start_task = tokio::spawn(async move {
@@ -866,7 +1091,8 @@ async fn compact_lifecycle_outlives_caller_and_preserves_concurrent_thread_updat
         .await?;
     // Once capacity is released, block the acknowledgement events so the
     // API future can be dropped after the engine accepted the operation.
-    let event_state_guard = manager.store.state.lock().await;
+    let mut event_lock = fd_lock::RwLock::new(manager.store.open_event_lock()?);
+    let event_state_guard = event_lock.try_write()?;
     let mut saw_compact = false;
     for _ in 0..33 {
         if matches!(
@@ -2374,6 +2600,242 @@ fn store_load_thread_rejects_newer_schema_version() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn runtime_event_sequences_serialize_across_real_processes() -> Result<()> {
+    let dir = test_runtime_dir();
+    let store = RuntimeThreadStore::open(dir.clone())?;
+    let thread_id = "thr_process_writers";
+    let start = dir.join("process-writers.start");
+    let writer_count = 4_u64;
+    let events_per_writer = 8_u64;
+    let mut children = Vec::new();
+
+    for worker in 0..writer_count {
+        let signal = dir.join(format!("process-writer-{worker}.ready"));
+        children.push((
+            spawn_runtime_event_child("writer", &dir, thread_id, &signal),
+            signal,
+        ));
+    }
+    for (_, signal) in &children {
+        wait_for_runtime_event_test_file(signal, "event writer readiness");
+    }
+    // The children already opened their stores before this barrier. The old
+    // store-local sequence cache therefore allocated duplicates deterministically.
+    std::fs::write(&start, b"go")?;
+    for (child, _) in children {
+        child.wait_success("cross-process event writer");
+    }
+
+    let events = store.events_since(thread_id, None)?;
+    let expected = writer_count * events_per_writer;
+    assert_eq!(u64::try_from(events.len())?, expected);
+    assert_eq!(
+        events.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        (1..=expected).collect::<Vec<_>>()
+    );
+    let identities = events
+        .iter()
+        .map(|event| {
+            (
+                event.payload["worker"].as_str().unwrap().to_string(),
+                event.payload["index"].as_u64().unwrap(),
+            )
+        })
+        .collect::<HashSet<_>>();
+    assert_eq!(u64::try_from(identities.len())?, expected);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    assert_eq!(runtime.block_on(store.current_seq())?, expected);
+    assert_eq!(
+        load_runtime_store_state(&store.state_path)?.next_seq,
+        expected + 1
+    );
+
+    std::fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[test]
+fn runtime_event_lock_timeout_is_non_mutating_and_holder_death_releases_lock() -> Result<()> {
+    let dir = test_runtime_dir();
+    let store = RuntimeThreadStore::open(dir.clone())?;
+    let thread_id = "thr_process_holder";
+    let signal = dir.join("process-holder.ready");
+    let child = spawn_runtime_event_child("holder", &dir, thread_id, &signal);
+    wait_for_runtime_event_test_file(&signal, "held Runtime event lock");
+
+    let state_before = std::fs::read(&store.state_path)?;
+    let event_path = store.events_path(thread_id)?;
+    let started = Instant::now();
+    let error = store
+        .append_event_transaction(
+            thread_id.to_string(),
+            None,
+            None,
+            "must.timeout".to_string(),
+            json!({}),
+            Duration::from_millis(75),
+        )
+        .expect_err("contended Runtime event transaction must time out");
+    let elapsed = started.elapsed();
+    assert!(error.downcast_ref::<RuntimeEventLockTimeout>().is_some());
+    assert!(
+        elapsed >= Duration::from_millis(75),
+        "returned too early: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "timeout was unbounded: {elapsed:?}"
+    );
+    assert_eq!(std::fs::read(&store.state_path)?, state_before);
+    assert!(!event_path.exists());
+
+    let status = child.kill_and_reap()?;
+    assert!(
+        !status.success(),
+        "killed lock holder unexpectedly succeeded"
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let committed = runtime.block_on(store.append_event(
+        thread_id,
+        None,
+        None,
+        "after.holder.death",
+        json!({}),
+    ))?;
+    assert_eq!(committed.seq, 1);
+
+    std::fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[test]
+fn killed_torn_append_is_repaired_and_preserves_reserved_gap() -> Result<()> {
+    let dir = test_runtime_dir();
+    let store = RuntimeThreadStore::open(dir.clone())?;
+    let thread_id = "thr_process_torn";
+    let signal = dir.join("process-torn.ready");
+    let child = spawn_runtime_event_child("torn", &dir, thread_id, &signal);
+    wait_for_runtime_event_test_file(&signal, "durable torn Runtime event tail");
+    let status = child.kill_and_reap()?;
+    assert!(
+        !status.success(),
+        "killed torn writer unexpectedly succeeded"
+    );
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let committed = runtime.block_on(store.append_event(
+        thread_id,
+        None,
+        None,
+        "after.torn.death",
+        json!({}),
+    ))?;
+    assert_eq!(committed.seq, 2);
+    assert_eq!(runtime.block_on(store.current_seq())?, 2);
+    let events = store.events_since(thread_id, None)?;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].seq, 2);
+    let raw = std::fs::read(store.events_path(thread_id)?)?;
+    assert_eq!(raw.last(), Some(&b'\n'));
+    for line in raw
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        serde_json::from_slice::<RuntimeEventRecord>(line)?;
+    }
+
+    std::fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[test]
+fn event_reader_never_observes_cross_process_rollback_candidate() -> Result<()> {
+    let dir = test_runtime_dir();
+    let store = RuntimeThreadStore::open(dir.clone())?;
+    let thread_id = "thr_process_phantom";
+    let signal = dir.join("process-phantom.ready");
+    let child = spawn_runtime_event_child("phantom", &dir, thread_id, &signal);
+    wait_for_runtime_event_test_file(&signal, "visible rollback candidate");
+
+    let started = Instant::now();
+    assert!(store.events_since(thread_id, None)?.is_empty());
+    assert!(
+        started.elapsed() >= Duration::from_millis(200),
+        "reader did not wait for rollback disposition"
+    );
+    child.wait_success("phantom rollback child");
+    assert!(store.events_since(thread_id, None)?.is_empty());
+
+    std::fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn event_history_lock_wait_does_not_block_tokio_worker() -> Result<()> {
+    let dir = test_runtime_dir();
+    let manager = test_manager(dir.clone())?;
+    let thread_id = "thr_async_history_wait";
+    let signal = dir.join("async-history-holder.ready");
+    let child = spawn_runtime_event_child("holder", &dir, thread_id, &signal);
+    wait_for_runtime_event_test_file(&signal, "async history lock holder");
+
+    let history = manager.events_since_async(thread_id, None);
+    tokio::pin!(history);
+    tokio::select! {
+        result = &mut history => panic!("history lock wait returned early: {result:?}"),
+        () = sleep(Duration::from_millis(50)) => {}
+    }
+    let status = child.kill_and_reap()?;
+    assert!(!status.success(), "killed history lock holder succeeded");
+    assert!(history.await?.is_empty());
+
+    std::fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+#[test]
+fn runtime_event_sequence_exhaustion_fails_before_mutation() -> Result<()> {
+    let dir = test_runtime_dir();
+    let store = RuntimeThreadStore::open(dir.clone())?;
+    store.with_event_transaction(Duration::from_secs(1), || {
+        write_json_atomic(
+            &store.state_path,
+            &RuntimeStoreState {
+                schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
+                next_seq: u64::MAX,
+            },
+        )
+    })?;
+    let state_before = std::fs::read(&store.state_path)?;
+    let thread_id = "thr_sequence_exhausted";
+    let error = store
+        .append_event_transaction(
+            thread_id.to_string(),
+            None,
+            None,
+            "must.not.append".to_string(),
+            json!({}),
+            Duration::from_secs(1),
+        )
+        .expect_err("u64 sequence exhaustion must fail closed");
+    assert!(
+        format!("{error:#}").contains("Runtime event sequence exhausted"),
+        "unexpected exhaustion error: {error:#}"
+    );
+    assert_eq!(std::fs::read(&store.state_path)?, state_before);
+    assert!(!store.events_path(thread_id)?.exists());
+
+    std::fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn store_open_truncates_only_torn_final_event_record_and_preserves_sequence_gap() {
     let dir = test_runtime_dir();
@@ -2630,7 +3092,7 @@ fn store_open_rejects_symlinked_state_file() {
 
 #[cfg(unix)]
 #[test]
-fn event_append_rollback_rejects_a_swapped_symlink_target() -> Result<()> {
+fn event_append_rollback_handle_rejects_a_swapped_symlink_target() -> Result<()> {
     let dir = test_runtime_dir();
     std::fs::create_dir_all(&dir)?;
     let outside = dir.join("outside.jsonl");
@@ -2638,8 +3100,10 @@ fn event_append_rollback_rejects_a_swapped_symlink_target() -> Result<()> {
     std::fs::write(&outside, b"must-remain-intact\n")?;
     std::os::unix::fs::symlink(&outside, &events_path)?;
 
-    let error = rollback_failed_event_append(&events_path, 0)
-        .expect_err("rollback followed a swapped symlink target");
+    let error = open_runtime_store_file(&events_path, "Runtime event rollback", |options| {
+        options.write(true);
+    })
+    .expect_err("rollback followed a swapped symlink target");
     assert!(format!("{error:#}").contains("must not be a symlink"));
     assert_eq!(std::fs::read(&outside)?, b"must-remain-intact\n");
     std::fs::remove_dir_all(&dir)?;

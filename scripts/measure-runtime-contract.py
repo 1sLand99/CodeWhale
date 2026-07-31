@@ -16,7 +16,10 @@ def run_metric(test_name: str, marker: str) -> dict:
     cmd = [
         "cargo",
         "test",
+        "--locked",
         "-p",
+        "codewhale-tui",
+        "--bin",
         "codewhale-tui",
         test_name,
         "--",
@@ -26,6 +29,9 @@ def run_metric(test_name: str, marker: str) -> dict:
     ]
     proc = subprocess.run(cmd, text=True, capture_output=True, check=False)
     sys.stderr.write(proc.stderr)
+    if proc.returncode != 0:
+        sys.stdout.write(proc.stdout)
+        proc.check_returncode()
 
     combined = proc.stdout.splitlines() + proc.stderr.splitlines()
     for line in combined:
@@ -38,15 +44,27 @@ def run_metric(test_name: str, marker: str) -> dict:
 
 def main() -> int:
     tool_metrics = run_metric(
-        "print_agent_tool_catalog_metrics",
+        "print_mode_tool_catalog_metrics",
         "TOOL_CATALOG_METRICS ",
     )
     prompt_metrics = run_metric(
-        "print_agent_runtime_contract_metrics",
+        "print_mode_runtime_contract_metrics",
         "RUNTIME_CONTRACT_METRICS ",
+    )
+    representative_context_metrics = run_metric(
+        "print_representative_runtime_context_metrics",
+        "REPRESENTATIVE_CONTEXT_METRICS ",
+    )
+    skill_discovery_metrics = run_metric(
+        "print_skill_discovery_turn_metrics",
+        "SKILL_DISCOVERY_METRICS ",
     )
 
     receipt = {
+        "document_kind": "codewhale.runtime_contract_receipt",
+        "schema_version": 1,
+        "representative_context": representative_context_metrics,
+        "skill_discovery": skill_discovery_metrics,
         "tool_catalog": tool_metrics,
         "system_prompt": prompt_metrics,
     }

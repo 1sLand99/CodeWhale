@@ -49,17 +49,6 @@ pub(crate) fn byte_index_at_char(text: &str, char_index: usize) -> usize {
         .unwrap_or_else(|| text.len())
 }
 
-pub(crate) fn remove_char_at(text: &mut String, char_index: usize) -> bool {
-    let start = byte_index_at_char(text, char_index);
-    if start >= text.len() {
-        return false;
-    }
-    let ch = text[start..].chars().next().unwrap();
-    let end = start + ch.len_utf8();
-    text.replace_range(start..end, "");
-    true
-}
-
 /// Remove the chars in `[start_char, end_char)`. Returns true when anything
 /// was removed. Range endpoints are clamped to the text length.
 fn remove_char_range(text: &mut String, start_char: usize, end_char: usize) -> bool {
@@ -114,10 +103,6 @@ fn normalize_paste_text(text: &str) -> String {
     } else {
         text.to_string()
     }
-}
-
-pub(crate) fn sanitize_api_key_text(text: &str) -> String {
-    text.chars().filter(|c| !c.is_control()).collect()
 }
 
 fn strip_raw_mouse_report_runs(input: &str, cursor: usize) -> Option<(String, usize)> {

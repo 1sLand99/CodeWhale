@@ -109,6 +109,10 @@ impl Default for CompactionConfig {
 const MIN_SUMMARY_SEED_CHARS: usize = 80;
 const DEGENERATE_SUMMARY_REQUIRED_MARKERS: &[&str] =
     &["Primary request", "Pending tasks", "Current work"];
+const COMPACTION_LANGUAGE_CONTRACT: &str = "Use the natural language of the most recent \
+substantive user message for reasoning and user-facing prose. Keep code, identifiers, paths, \
+commands, logs, tool payloads, quotations, and the English structural labels verbatim. English \
+scaffolding is not a request to switch languages.";
 
 /// Failure kind for compaction LLM calls (deterministic vs transient).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1051,6 +1055,17 @@ pub struct CompactionResult {
 
 /// Classify a compaction LLM failure for the retry / input-ladder policy.
 fn classify_compaction_failure(e: &anyhow::Error) -> CompactionFailureKind {
+    if let Some(error) = llm_error_in_chain(e) {
+        return match error {
+            crate::llm_client::LlmError::ContextLengthError(_) => {
+                CompactionFailureKind::ContextOverflow
+            }
+            crate::llm_client::LlmError::QuotaExhausted(_) => CompactionFailureKind::Deterministic,
+            error if error.is_retryable() => CompactionFailureKind::Transient,
+            _ => CompactionFailureKind::Deterministic,
+        };
+    }
+
     let text = e.to_string();
     if is_context_window_error_message(&text) {
         return CompactionFailureKind::ContextOverflow;
@@ -1062,6 +1077,19 @@ fn classify_compaction_failure(e: &anyhow::Error) -> CompactionFailureKind {
         | crate::error_taxonomy::ErrorCategory::Timeout => CompactionFailureKind::Transient,
         _ => CompactionFailureKind::Deterministic,
     }
+}
+
+fn llm_error_in_chain(error: &anyhow::Error) -> Option<&crate::llm_client::LlmError> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<crate::llm_client::LlmError>())
+}
+
+fn should_retry_cache_aligned_with_formatted(error: &anyhow::Error) -> bool {
+    !matches!(
+        llm_error_in_chain(error),
+        Some(crate::llm_client::LlmError::QuotaExhausted(_))
+    )
 }
 
 /// Record and render a compaction failure as actionable, credential-safe text.
@@ -1085,18 +1113,24 @@ pub fn report_compaction_failure(
         error = %safe_raw,
         "context compaction failed"
     );
-    let lower = raw.to_ascii_lowercase();
-    let plan_exhausted = lower.contains("usage limit")
-        || lower.contains("insufficient_quota")
-        || lower.contains("insufficientquota")
-        || lower.contains("quota exhausted")
-        || lower.contains("quota has been exceeded");
-
-    let detail = if plan_exhausted {
-        "provider plan quota exhausted — switch provider/model or renew the provider plan"
-            .to_string()
-    } else {
-        match crate::error_taxonomy::classify_error_message(&raw) {
+    let detail = match llm_error_in_chain(error) {
+        Some(crate::llm_client::LlmError::QuotaExhausted(_)) => {
+            "provider plan quota exhausted — switch provider/model or renew the provider plan"
+                .to_string()
+        }
+        Some(crate::llm_client::LlmError::RateLimited { .. }) => {
+            "provider rate limit blocked compaction — retry after the limit resets or switch provider/model"
+                .to_string()
+        }
+        Some(crate::llm_client::LlmError::AuthenticationError(_)) => {
+            "provider authentication failed — sign in or replace the credential, then retry"
+                .to_string()
+        }
+        Some(crate::llm_client::LlmError::AuthorizationError(_)) => {
+            "provider authorization rejected compaction — verify account access or switch provider/model"
+                .to_string()
+        }
+        _ => match crate::error_taxonomy::classify_error_message(&raw) {
             crate::error_taxonomy::ErrorCategory::RateLimit => {
                 "provider rate limit blocked compaction — retry after the limit resets or switch provider/model"
                     .to_string()
@@ -1110,7 +1144,7 @@ pub fn report_compaction_failure(
                     .to_string()
             }
             _ => safe_raw,
-        }
+        },
     };
 
     format!("{prefix}: {detail}")
@@ -1372,10 +1406,12 @@ pub async fn compact_messages(
              ## 💡 What to Do Next\n\n\
              You have just resumed from a context compaction. The conversation above was summarized to save space. \
              Review the summary, live state, and project instructions, then continue the same task. \
+             {language_contract} \
              Prefer exact paths and commands from the summary over re-discovery. \
              If you need more details about the summarized portion, ask the user to clarify.\n\n\
              ---\n\n\
-             Pinned messages follow:"
+             Pinned messages follow:",
+            language_contract = COMPACTION_LANGUAGE_CONTRACT,
         ),
         cache_control: if config.cache_summary {
             Some(CacheControl {
@@ -1563,9 +1599,10 @@ async fn create_summary(
         // subsequence (pinned messages removed from the middle), which can
         // exceed the window OR violate strict role-ordering (a non-transient
         // InvalidInput). Fall back to the bounded formatted summary on ANY
-        // cache-aligned failure rather than aborting compaction entirely and
-        // letting context keep growing.
-        Err(err) if used_cache_aligned => {
+        // request-shape failure rather than aborting compaction entirely and
+        // letting context keep growing. Durable plan-quota exhaustion is not a
+        // request-shape failure and must not issue a second provider request.
+        Err(err) if used_cache_aligned && should_retry_cache_aligned_with_formatted(&err) => {
             logging::warn(format!(
                 "Cache-aligned compaction summary failed ({err}); retrying with \
                  bounded formatted summary input"
@@ -1830,7 +1867,9 @@ fn summary_instruction(word_limit: usize, focus: Option<&str>) -> String {
          If the conversation already contains an earlier compaction summary, treat it as \
          authoritative for the history it covers and carry its facts forward. Preserve exact \
          file paths, commands, and tool-result facts; abbreviate tool outputs only when they \
-         are repetitive. Do not call tools. Keep the whole briefing under {word_limit} words."
+         are repetitive. {language_contract} Do not call tools. Keep the whole briefing under \
+         {word_limit} words.",
+        language_contract = COMPACTION_LANGUAGE_CONTRACT,
     );
     if let Some(focus) = focus.map(str::trim).filter(|focus| !focus.is_empty()) {
         let _ = write!(
@@ -2089,6 +2128,10 @@ pub fn merge_system_prompts(
 }
 
 #[cfg(test)]
+#[path = "compaction/tests.rs"]
+mod quota_tests;
+
+#[cfg(test)]
 mod tests {
     use crate::models::{ImageUrlContent, Message};
 
@@ -2222,36 +2265,6 @@ mod tests {
     }
 
     #[test]
-    fn compaction_failure_names_plan_exhaustion_behind_auth_prefix() {
-        let error = anyhow::anyhow!(
-            "[auth] Authorization failed: You've reached your usage limit for this billing cycle"
-        );
-
-        let message = report_compaction_failure(
-            "Manual context compaction failed",
-            "compact_fixture",
-            false,
-            &error,
-        );
-
-        assert_eq!(
-            message,
-            "Manual context compaction failed: provider plan quota exhausted — switch provider/model or renew the provider plan"
-        );
-        assert!(!message.contains("Authorization failed"));
-    }
-
-    #[test]
-    fn compaction_failure_keeps_unknown_diagnostic() {
-        let error = anyhow::anyhow!("summary response was structurally empty");
-
-        assert_eq!(
-            report_compaction_failure("Auto-compaction failed", "compact_fixture", true, &error,),
-            "Auto-compaction failed: summary response was structurally empty"
-        );
-    }
-
-    #[test]
     fn prune_tool_results_preserves_prefix_bytes_when_reverse_prune_is_enough() {
         let older_verbose = "old ".repeat(SUMMARY_TOOL_RESULT_SNIPPET_CHARS + 40);
         let newer_verbose = "new ".repeat(SUMMARY_TOOL_RESULT_SNIPPET_CHARS + 40);
@@ -2331,33 +2344,6 @@ mod tests {
             panic!("expected latest tool result");
         };
         assert_eq!(latest, &second);
-    }
-
-    #[test]
-    fn is_transient_error_detects_network_issues() {
-        let timeout_err = anyhow::anyhow!("Connection timeout");
-        assert!(is_transient_error(&timeout_err));
-
-        let rate_limit_err = anyhow::anyhow!("429 Too Many Requests");
-        assert!(is_transient_error(&rate_limit_err));
-
-        let service_err = anyhow::anyhow!("503 Service Unavailable");
-        assert!(is_transient_error(&service_err));
-
-        let network_err = anyhow::anyhow!("network error: connection refused");
-        assert!(is_transient_error(&network_err));
-    }
-
-    #[test]
-    fn is_transient_error_rejects_permanent_errors() {
-        let auth_err = anyhow::anyhow!("401 Unauthorized: Invalid API key");
-        assert!(!is_transient_error(&auth_err));
-
-        let parse_err = anyhow::anyhow!("Failed to parse JSON response");
-        assert!(!is_transient_error(&parse_err));
-
-        let validation_err = anyhow::anyhow!("Invalid request: missing required field");
-        assert!(!is_transient_error(&validation_err));
     }
 
     #[test]
@@ -2500,24 +2486,6 @@ mod tests {
     }
 
     #[test]
-    fn classify_compaction_failure_splits_overflow_transient_and_deterministic() {
-        let overflow = anyhow::anyhow!("prompt is too long for this model's context window");
-        assert_eq!(
-            classify_compaction_failure(&overflow),
-            CompactionFailureKind::ContextOverflow
-        );
-        let network = anyhow::anyhow!("connection timed out contacting api");
-        // Taxonomy may map timeout/network; if not, still not overflow.
-        let kind = classify_compaction_failure(&network);
-        assert_ne!(kind, CompactionFailureKind::ContextOverflow);
-        let auth = anyhow::anyhow!("401 unauthorized: invalid api key");
-        assert_eq!(
-            classify_compaction_failure(&auth),
-            CompactionFailureKind::Deterministic
-        );
-    }
-
-    #[test]
     fn summary_instruction_is_a_structured_successor_brief_with_optional_focus() {
         let brief = summary_instruction(500, None);
         for section in [
@@ -2539,6 +2507,7 @@ mod tests {
         assert!(brief.contains("under 500 words"), "{brief}");
         assert!(brief.contains("Do not call tools"), "{brief}");
         assert!(brief.contains("earlier compaction summary"), "{brief}");
+        assert!(brief.contains(COMPACTION_LANGUAGE_CONTRACT), "{brief}");
         assert!(!brief.contains("focus on:"), "{brief}");
 
         let focused = summary_instruction(500, Some("  the auth refactor  "));

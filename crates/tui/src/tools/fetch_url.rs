@@ -8,12 +8,11 @@
 //! when the model wants to do its own parsing.
 
 use super::handle::query_jsonpath;
+use super::pdf::PdfTextCommand;
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec, optional_u64,
 };
-use super::web::extract::{
-    DocumentKind, ExtractedDocument, decode_response_body, extract_document,
-};
+use super::web::extract::{DocumentKind, ExtractedDocument, decode_response_body};
 use super::web::fetch::{
     DEFAULT_MAX_BYTES, DEFAULT_TIMEOUT, FetchOptions, HARD_MAX_BYTES, HARD_MAX_TIMEOUT, fetch,
 };
@@ -188,51 +187,16 @@ impl ToolSpec for FetchUrlTool {
             Some(body) => project_json_fields(body, &fetched.content_type, &requested_fields)?,
             None => None,
         };
-        let extracted =
-            match extract_document(&fetched.url, Some(&fetched.content_type), &fetched.bytes) {
-                Ok(document) => document,
-                Err(_error)
-                    if format == Format::Raw && is_declared_textual(&fetched.content_type) =>
-                {
-                    let body_text = match body_text.as_ref() {
-                        Some(body_text) => body_text.clone(),
-                        None => decode_response_body(
-                            &fetched.bytes,
-                            Some(&fetched.content_type),
-                            is_declared_html(&fetched.content_type),
-                        )?,
-                    };
-                    ExtractedDocument {
-                        kind: DocumentKind::Text,
-                        title: None,
-                        text: body_text.clone(),
-                        markdown: body_text,
-                        cleaned_html: None,
-                        pdf_pages: None,
-                        media_extension: None,
-                    }
-                }
-                Err(_error) if !is_success && is_declared_textual(&fetched.content_type) => {
-                    let body_text = match body_text.as_ref() {
-                        Some(body_text) => body_text.clone(),
-                        None => decode_response_body(
-                            &fetched.bytes,
-                            Some(&fetched.content_type),
-                            is_declared_html(&fetched.content_type),
-                        )?,
-                    };
-                    ExtractedDocument {
-                        kind: DocumentKind::Text,
-                        title: None,
-                        text: body_text.clone(),
-                        markdown: body_text,
-                        cleaned_html: None,
-                        pdf_pages: None,
-                        media_extension: None,
-                    }
-                }
-                Err(error) => return Err(error),
-            };
+        let extracted = extract_fetched_document(
+            format,
+            &fetched.url,
+            &fetched.content_type,
+            &fetched.bytes,
+            is_success,
+            body_text.as_deref(),
+            PdfTextCommand::system(context.cancel_token.as_ref()),
+        )
+        .await?;
 
         let citation_title = extracted.title.clone();
         let (processed, artifact_write) = render_extracted(
@@ -291,6 +255,61 @@ impl ToolSpec for FetchUrlTool {
             success: true,
             metadata,
         })
+    }
+}
+
+async fn extract_fetched_document(
+    format: Format,
+    url: &str,
+    content_type: &str,
+    bytes: &[u8],
+    is_success: bool,
+    decoded_body: Option<&str>,
+    pdf_command: PdfTextCommand<'_>,
+) -> Result<ExtractedDocument, ToolError> {
+    let extraction = if format == Format::Raw
+        && super::web::extract::validate_pdf_response(url, Some(content_type), bytes)?
+    {
+        Ok(ExtractedDocument {
+            kind: DocumentKind::Pdf,
+            title: Some("PDF Document".to_string()),
+            text: String::new(),
+            markdown: String::new(),
+            cleaned_html: None,
+            pdf_pages: None,
+            media_extension: None,
+        })
+    } else {
+        super::web::extract::extract_document_with_pdf_command(
+            url,
+            Some(content_type),
+            bytes,
+            pdf_command,
+        )
+        .await
+    };
+    match extraction {
+        Ok(document) => Ok(document),
+        Err(_error)
+            if (format == Format::Raw || !is_success) && is_declared_textual(content_type) =>
+        {
+            let body_text = match decoded_body {
+                Some(body_text) => body_text.to_string(),
+                None => {
+                    decode_response_body(bytes, Some(content_type), is_declared_html(content_type))?
+                }
+            };
+            Ok(ExtractedDocument {
+                kind: DocumentKind::Text,
+                title: None,
+                text: body_text.clone(),
+                markdown: body_text,
+                cleaned_html: None,
+                pdf_pages: None,
+                media_extension: None,
+            })
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -484,6 +503,10 @@ fn project_json_fields(
     }
     Ok(Some(out))
 }
+
+#[cfg(test)]
+#[path = "fetch_url/tests.rs"]
+mod pdf_tests;
 
 #[cfg(test)]
 mod tests {

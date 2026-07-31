@@ -4,14 +4,14 @@
 //! Prompts are assembled from composable layers loaded at compile time from
 //! the single [`text`] module:
 //!   constitution + personality overlay → `message[0]` (byte-stable).
-//!   mode delta + tool taxonomy + approval policy → request-time runtime metadata.
+//!   mode delta + approval policy → request-time runtime metadata.
+//! Tool availability comes only from the per-turn model catalog.
 //!
 //! Keeping every layer's text in one module makes prompt tuning a
 //! single-file operation.
 
 use crate::models::{SystemBlock, SystemPrompt};
 use crate::project_context::{ProjectContext, load_project_context_with_parents};
-use crate::tui::app::AppMode;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
@@ -41,10 +41,6 @@ pub struct PromptSessionContext<'a> {
     /// longer prints context-window facts, but the field remains part of the
     /// session context contract for embedders and future runtime metadata.
     pub context_window_override: Option<u32>,
-    /// Whether the user-visible transcript renders thinking blocks.
-    /// When false, the prompt should not spend localization pressure on
-    /// `reasoning_content` the user will never see.
-    pub show_thinking: bool,
     /// Optional output-verbosity mode. `concise` appends a short output
     /// discipline block; unset keeps the normal conversational prompt.
     pub verbosity: Option<&'a str>,
@@ -74,7 +70,6 @@ impl Default for PromptSessionContext<'_> {
             translation_enabled: false,
             model_id: "codewhale",
             context_window_override: None,
-            show_thinking: true,
             verbosity: None,
             skills_scan_codewhale_only: false,
             plugin_registry: None,
@@ -174,25 +169,6 @@ fn translation_target_language_for_tag(locale_tag: &str) -> &'static str {
     } else {
         "English"
     }
-}
-
-fn hidden_thinking_language_instruction(locale_tag: &str) -> String {
-    let fallback_language = translation_target_language_for_tag(locale_tag);
-    format!(
-        "\
-## Hidden Thinking Language\n\
-\n\
-The user has disabled thinking display (`show_thinking = false`). If you emit \
-`reasoning_content`, keep that hidden internal thinking in English regardless \
-of the latest user-message language or `## Environment.lang`; the user will \
-not see it, so localizing hidden thinking only adds language switching.\n\
-\n\
-The final reply is still user-visible. Follow the normal `## Language` rule \
-for the final reply: mirror the latest user message, and use \
-{fallback_language} only when the user message is ambiguous. If the user \
-explicitly asks for a different thinking language, follow that explicit request \
-for the current turn."
-    )
 }
 
 /// Render a `## Environment` block listing the resolved locale tag,
@@ -452,8 +428,8 @@ static PROMPT_OVERRIDE_NOTICES: LazyLock<Mutex<Vec<String>>> =
 /// Context passed to an embedder-provided static prompt composer.
 ///
 /// This hook only replaces the byte-stable base/personality prompt segment.
-/// Mode deltas, approval policy, tool taxonomy, Core Execution, and the
-/// Compaction Relay stay owned by Codewhale's system prompt assembly.
+/// Mode deltas, approval policy, Core Execution, and the Compaction Relay stay
+/// owned by Codewhale's system prompt assembly.
 #[non_exhaustive]
 #[derive(Debug)]
 pub struct StaticPromptCtx<'a> {
@@ -585,8 +561,8 @@ pub fn set_static_prompt_composer_override(
 // custom embedder build.
 //
 // Scope is deliberately narrow: only the byte-stable base prompt segment is
-// user-overridable. Mode deltas, approval policy, tool taxonomy, Core
-// Execution, and the Compaction Relay stay owned by the runtime assembly (see
+// user-overridable. Mode deltas, approval policy, Core Execution, and the
+// Compaction Relay stay owned by the runtime assembly (see
 // `StaticPromptCtx`), so an override cannot strip safety-relevant guidance.
 // A missing or empty file is a no-op — the bundled constant is used — so this
 // is fully backward compatible.
@@ -1060,15 +1036,6 @@ impl Personality {
 
 // ── Composition ───────────────────────────────────────────────────────
 
-/// Compose the full system prompt in deterministic order:
-///   1. tool taxonomy  — compact hints generated from the eager core tools
-///   2. constitution.md — core identity, toolbox, execution contract
-///   3. personality    — voice and tone overlay
-///   4. mode delta     — mode-specific permissions and workflow
-///   5. approval policy — tool-approval behavior
-///
-/// Each layer is separated by a blank line for readability in the
-/// rendered prompt (the model sees them as contiguous sections).
 /// Substitute the model id for embedder-supplied prompt overrides that still
 /// template it. The bundled constitution is deliberately model-agnostic and
 /// carries no model-fact placeholders.
@@ -1078,60 +1045,6 @@ fn apply_model_template(
     _context_window_override: Option<u32>,
 ) -> String {
     prompt.replace("{model_id}", model_id)
-}
-
-const TOOL_TAXONOMY_DISCOVERY: &[&str] = &["File"];
-const TOOL_TAXONOMY_GIT: &[&str] = &["Git"];
-const TOOL_TAXONOMY_VERIFICATION: &[&str] = &["Run"];
-
-/// Return the core tool taxonomy body **without** a markdown heading.
-/// Suitable for embedding under a mode-specific sub-heading in the
-/// Runtime Policy Reference without producing a broken heading hierarchy.
-pub(crate) fn render_core_tool_taxonomy_body(mode: AppMode) -> String {
-    let core_tools = core_taxonomy_tools_for_mode(mode);
-    let mut sentences = Vec::new();
-
-    if let Some(discovery) = render_core_tool_group(TOOL_TAXONOMY_DISCOVERY, &core_tools) {
-        sentences.push(format!("Use {discovery} for discovery."));
-    }
-    if let Some(git) = render_core_tool_group(TOOL_TAXONOMY_GIT, &core_tools) {
-        sentences.push(format!("Use {git} for git inspection."));
-    }
-    if let Some(verification) = render_core_tool_group(TOOL_TAXONOMY_VERIFICATION, &core_tools) {
-        sentences.push(format!("Use {verification} for verification."));
-    }
-    if core_tools.contains(&"Run") {
-        sentences.push(
-            "For long build/test/lint suites, call `Run` with `action: \"verifiers\"` and `background: true`, then continue independent inspection."
-                .to_string(),
-        );
-    }
-
-    debug_assert!(
-        !sentences.is_empty(),
-        "core tool taxonomy has no active tool groups"
-    );
-    sentences.join(" ")
-}
-
-fn core_taxonomy_tools_for_mode(mode: AppMode) -> Vec<&'static str> {
-    let core_tools = crate::core::engine::default_active_native_tool_names();
-    core_tools
-        .iter()
-        .copied()
-        .filter(|tool| mode != AppMode::Plan || *tool != "Run")
-        .collect()
-}
-
-fn render_core_tool_group(group: &[&str], core_tools: &[&str]) -> Option<String> {
-    let rendered = group
-        .iter()
-        .copied()
-        .filter(|tool| core_tools.contains(tool))
-        .map(|tool| format!("`{tool}`"))
-        .collect::<Vec<_>>()
-        .join("/");
-    (!rendered.is_empty()).then_some(rendered)
 }
 
 /// Authority recap block — appended at the end of the system prompt,
@@ -1264,7 +1177,6 @@ pub fn system_prompt_for_mode_with_context_and_skills(
             translation_enabled: false,
             model_id: "codewhale",
             context_window_override: None,
-            show_thinking: true,
             verbosity: None,
             skills_scan_codewhale_only: false,
             plugin_registry: None,
@@ -1328,11 +1240,7 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
     // in English even though `lang: zh-Hans` is set" failure mode that
     // PR #1398 partially addressed. English (and unknown) locales get
     // `None` and keep the previous behavior unchanged.
-    let preamble = if session_context.show_thinking {
-        locale_reinforcement_preamble(session_context.locale_tag)
-    } else {
-        None
-    };
+    let preamble = locale_reinforcement_preamble(session_context.locale_tag);
 
     // 1–2. Mode prompt + project context.
     // `load_project_context_with_parents` generates an in-memory bounded
@@ -1478,22 +1386,10 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
         text: effective_authority_recap().trim().to_string(),
         cache_control: None,
     });
-    if let Some(closer) = session_context
-        .show_thinking
-        .then(|| locale_reinforcement_closer(session_context.locale_tag))
-        .flatten()
-    {
+    if let Some(closer) = locale_reinforcement_closer(session_context.locale_tag) {
         blocks.push(SystemBlock {
             block_type: "text".to_string(),
             text: closer.trim().to_string(),
-            cache_control: None,
-        });
-    } else if !session_context.show_thinking {
-        blocks.push(SystemBlock {
-            block_type: "text".to_string(),
-            text: hidden_thinking_language_instruction(session_context.locale_tag)
-                .trim()
-                .to_string(),
             cache_control: None,
         });
     }
@@ -1521,15 +1417,10 @@ fn render_route_fragment(session_context: &PromptSessionContext<'_>) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or("default");
     format!(
-        "model: {}\nverbosity: {}\ntranslation: {}\nshow_thinking: {}",
+        "model: {}\nverbosity: {}\ntranslation: {}",
         session_context.model_id.trim(),
         verbosity,
         if session_context.translation_enabled {
-            "on"
-        } else {
-            "off"
-        },
-        if session_context.show_thinking {
             "on"
         } else {
             "off"
@@ -1795,13 +1686,10 @@ mod tests {
         for phrase in [
             "Execute the user's task autonomously",
             "Keep `work_update` current",
+            "when it is present",
+            "If it is absent",
             "verify load-bearing child",
             "never manufacture completion sentinels",
-            // Live progress upkeep (2026-07-23 user report: models wrote the
-            // list once and never updated it while working).
-            "exactly one item in_progress before you
-start it",
-            "never batch completions",
         ] {
             assert!(
                 AGENT_MODE.contains(phrase),
@@ -2048,51 +1936,12 @@ start it",
     }
 
     #[test]
-    fn composed_prompt_no_longer_inlines_tool_taxonomy() {
+    fn composed_prompt_does_not_claim_tool_availability() {
         let prompt =
             compose_prompt_with_approval_model_and_shell(Personality::Calm, "deepseek-v4-pro");
-        // The core tool taxonomy (grep_files / git_status / run_tests hints)
-        // is no longer prepended as a standalone "## Core Tool Taxonomy" block.
-        // It now lives inside the "## Runtime Policy Reference" section of the
-        // system prompt, scoped under each mode sub-heading.
         assert!(!prompt.contains("## Core Tool Taxonomy"));
         assert!(!prompt.contains("## Toolbox"));
         assert!(prompt.contains("You are Codewhale"));
-    }
-
-    #[test]
-    fn plan_prompt_taxonomy_omits_run_tests() {
-        let taxonomy = render_core_tool_taxonomy_body(AppMode::Plan);
-        // Plan taxonomy should omit execution tools (verified at the source).
-        assert!(
-            taxonomy.contains("for discovery") && taxonomy.contains("for git inspection"),
-            "Plan taxonomy should keep read-only discovery and git guidance"
-        );
-        assert!(
-            !taxonomy.contains("run_tests")
-                && !taxonomy.contains("run_verifiers")
-                && !taxonomy.contains("exec_shell"),
-            "Plan taxonomy must not mention run_tests, run_verifiers, or exec_shell"
-        );
-        // The taxonomy block is rendered correctly but no longer inlined
-        // into the base system prompt — it lives inside the
-        // "## Runtime Policy Reference" section of the system prompt,
-        // scoped under each mode sub-heading.
-    }
-
-    #[test]
-    fn core_tool_taxonomy_only_references_default_active_tools() {
-        let core_tools = crate::core::engine::default_active_native_tool_names();
-        for tool in TOOL_TAXONOMY_DISCOVERY
-            .iter()
-            .chain(TOOL_TAXONOMY_GIT)
-            .chain(TOOL_TAXONOMY_VERIFICATION)
-        {
-            assert!(
-                core_tools.contains(tool),
-                "tool taxonomy references {tool}, but it is not in the eager native-tool list"
-            );
-        }
     }
 
     #[test]
@@ -2220,8 +2069,10 @@ start it",
     #[test]
     fn plan_mode_prompt_uses_one_progress_surface() {
         assert!(
-            PLAN_MODE.contains("canonical list in `work_update`"),
-            "Plan mode must keep progress in the canonical list"
+            PLAN_MODE.contains("When `work_update` is present")
+                && PLAN_MODE.contains("canonical list there")
+                && PLAN_MODE.contains("otherwise keep progress in your response"),
+            "Plan mode must condition progress guidance on the live catalog"
         );
         assert!(!PLAN_MODE.contains("call `update_plan`"));
         assert!(
@@ -2311,7 +2162,6 @@ start it",
                     translation_enabled: false,
                     model_id: "codewhale",
                     context_window_override: None,
-                    show_thinking: true,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
@@ -2437,7 +2287,6 @@ start it",
                     translation_enabled: false,
                     model_id: "codewhale",
                     context_window_override: None,
-                    show_thinking: true,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
@@ -2467,60 +2316,6 @@ start it",
     }
 
     #[test]
-    fn hidden_thinking_uses_english_reasoning_without_locale_bookends() {
-        let tmp = tempdir().expect("tempdir");
-        let text = system_prompt_flat_text(
-            &system_prompt_for_mode_with_context_skills_session_and_approval(
-                tmp.path(),
-                None,
-                None,
-                None,
-                PromptSessionContext {
-                    user_memory_block: None,
-                    goal_objective: None,
-                    project_context_pack_enabled: false,
-                    locale_tag: "zh-Hans",
-                    translation_enabled: false,
-                    model_id: "codewhale",
-                    context_window_override: None,
-                    show_thinking: false,
-                    verbosity: None,
-                    skills_scan_codewhale_only: false,
-                    plugin_registry: None,
-                    mode: crate::tui::app::AppMode::Agent,
-                },
-            ),
-        );
-
-        assert!(
-            text.contains("## Hidden Thinking Language"),
-            "hidden thinking prompt must include the request-side language override"
-        );
-        assert!(
-            text.contains("reasoning_content") && text.contains("English"),
-            "hidden thinking override must steer reasoning_content to English"
-        );
-        assert!(
-            text.contains("final reply") && text.contains("Simplified Chinese"),
-            "hidden thinking override must preserve the visible reply language"
-        );
-        assert!(
-            !text.contains("## 语言要求") && !text.contains("## 语言再次提醒"),
-            "hidden thinking prompt must not also ask for localized reasoning"
-        );
-
-        let hidden_pos = text
-            .find("## Hidden Thinking Language")
-            .expect("hidden thinking block present");
-        let hidden_header_end = hidden_pos + "## Hidden Thinking Language".len();
-        let after_hidden_body = &text[hidden_header_end..];
-        assert!(
-            !after_hidden_body.contains("\n## "),
-            "hidden thinking override must be the final top-level block; got: {after_hidden_body:?}",
-        );
-    }
-
-    #[test]
     fn system_prompt_skips_locale_preamble_for_english() {
         // English locale → no preamble injected. Asserts the
         // "preamble is opt-in for non-English" invariant.
@@ -2539,7 +2334,6 @@ start it",
                     translation_enabled: false,
                     model_id: "codewhale",
                     context_window_override: None,
-                    show_thinking: true,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
@@ -2576,13 +2370,6 @@ start it",
             !contains_cjk(BASE_PROMPT),
             "base prompt must not contain static CJK priming tokens"
         );
-        for mode in [AppMode::Agent, AppMode::Plan, AppMode::Yolo] {
-            let taxonomy = render_core_tool_taxonomy_body(mode);
-            assert!(
-                !contains_cjk(&taxonomy),
-                "tool taxonomy must not contain static CJK priming tokens: {taxonomy:?}"
-            );
-        }
         // Do not assert on arbitrary CJK in the full system prompt: project
         // context may legitimately contain localized file names, README text,
         // or user-authored instructions. The locale bookend markers above are
@@ -2640,7 +2427,6 @@ start it",
                     translation_enabled: false,
                     model_id: "codewhale",
                     context_window_override: None,
-                    show_thinking: true,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
@@ -2826,7 +2612,6 @@ start it",
                     translation_enabled: false,
                     model_id: "codewhale",
                     context_window_override: None,
-                    show_thinking: true,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
@@ -2857,7 +2642,6 @@ start it",
                     translation_enabled: false,
                     model_id: "codewhale",
                     context_window_override: None,
-                    show_thinking: true,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
@@ -2971,7 +2755,6 @@ start it",
                     translation_enabled: false,
                     model_id: "codewhale",
                     context_window_override: None,
-                    show_thinking: true,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
@@ -3003,7 +2786,6 @@ start it",
                     translation_enabled: false,
                     model_id: "codewhale",
                     context_window_override: None,
-                    show_thinking: true,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
@@ -3177,18 +2959,18 @@ start it",
         let prompt = AGENT_MODE.replace("\r\n", "\n").replace('\r', "\n");
         for must in [
             "autonomously",
-            "`File`",
-            "`Git`",
-            "`Run`",
-            "`Bash`",
+            "tools in the current catalog",
             "work_update",
-            "Delegate independent work",
+            "current catalog includes delegation",
             "Do not announce the mode",
         ] {
             assert!(
                 prompt.contains(must),
                 "compressed agent mode missing invariant {must:?}"
             );
+        }
+        for unavailable_claim in ["`File`", "`Git`", "`Run`", "`Bash`"] {
+            assert!(!prompt.contains(unavailable_claim));
         }
         // Procedural PowerShell manuals must not live in the mode delta.
         for forbidden in ["Invoke-Expression", "pwsh.exe -NoLogo", "ProcessStartInfo"] {
@@ -3329,7 +3111,6 @@ start it",
                     translation_enabled: false,
                     model_id: "codewhale",
                     context_window_override: None,
-                    show_thinking: true,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
@@ -3366,7 +3147,6 @@ start it",
                     translation_enabled: false,
                     model_id: "codewhale",
                     context_window_override: None,
-                    show_thinking: true,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
@@ -3383,8 +3163,9 @@ start it",
         let prompt = compose_prompt(Personality::Calm);
         assert!(!prompt.contains("Tool Selection Guide"));
         for tool in ["`File`", "`Git`", "`Run`", "`Bash`"] {
-            assert!(AGENT_MODE.contains(tool));
+            assert!(!AGENT_MODE.contains(tool));
         }
+        assert!(AGENT_MODE.contains("tools in the current catalog"));
         for legacy in ["read_file", "git_status", "run_tests", "exec_shell"] {
             assert!(!AGENT_MODE.contains(legacy));
         }
@@ -3458,7 +3239,6 @@ start it",
                     translation_enabled: false,
                     model_id: "glm-5.2",
                     context_window_override: Some(1_000_000),
-                    show_thinking: true,
                     verbosity: None,
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
@@ -3602,7 +3382,7 @@ start it",
 
     #[test]
     fn prompt_bounds_explore_without_tiny_cap_for_implementers() {
-        assert!(AGENT_MODE.contains("Delegate independent work"));
+        assert!(AGENT_MODE.contains("current catalog includes delegation"));
         assert!(!AGENT_MODE.contains("3-5 tool calls"));
         assert!(!AGENT_MODE.contains("No fan-out without a fan-in owner"));
     }
@@ -3623,17 +3403,18 @@ start it",
     fn operate_mode_prompt_keeps_multitask_simple_and_async() {
         for phrase in [
             "ordinary messages",
-            "small or tightly coupled tasks directly",
-            "Dispatching background workers is the default",
-            "queued user message as a new task",
-            "approval, sandbox, and repository policies",
-            "lifecycle claims stay exact",
+            "coordination capabilities present in the current catalog",
+            "When worker dispatch is available",
+            "When background execution is available",
+            "queued user messages as new tasks",
+            "Preserve approval",
+            "settled work from verified work",
             "internal control-plane mechanics",
-            "Goal first",
+            "When goal control is available",
             "Dispatch is not completion",
-            "verification evidence",
-            "best-of-n",
-            "parent stays free",
+            "verification capabilities",
+            "When an ordered Workflow capability is present",
+            "keep the parent responsive",
         ] {
             assert!(
                 OPERATE_MODE.contains(phrase),
@@ -4029,7 +3810,6 @@ start it",
                     translation_enabled: false,
                     model_id: "codewhale",
                     context_window_override: None,
-                    show_thinking: true,
                     verbosity: Some(" Concise "),
                     skills_scan_codewhale_only: false,
                     plugin_registry: None,
@@ -4074,7 +3854,6 @@ start it",
                 translation_enabled: false,
                 model_id: "deepseek-v4-pro",
                 context_window_override: None,
-                show_thinking: true,
                 verbosity: Some("concise"),
                 skills_scan_codewhale_only: false,
                 plugin_registry: None,
@@ -4124,7 +3903,6 @@ start it",
             translation_enabled: false,
             model_id: "codewhale",
             context_window_override: None,
-            show_thinking: true,
             verbosity: None,
             skills_scan_codewhale_only: false,
             plugin_registry: None,

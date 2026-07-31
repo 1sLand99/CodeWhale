@@ -6,11 +6,9 @@
 
 use std::sync::OnceLock;
 
-#[cfg(feature = "pdf")]
-use std::fmt::Display;
-
 use encoding_rs::{Encoding, UTF_8, UTF_16BE, UTF_16LE};
 use regex::Regex;
+use tokio_util::sync::CancellationToken;
 
 use crate::tools::spec::ToolError;
 
@@ -61,10 +59,26 @@ static WHITESPACE_RE: OnceLock<Regex> = OnceLock::new();
 /// changing how an already-started document is decoded.
 const HTML_ENCODING_SNIFF_BYTES: usize = 1_024;
 
-pub(crate) fn extract_document(
+pub(crate) async fn extract_document(
     url: &str,
     content_type: Option<&str>,
     bytes: &[u8],
+    cancel: Option<&CancellationToken>,
+) -> Result<ExtractedDocument, ToolError> {
+    extract_document_with_pdf_command(
+        url,
+        content_type,
+        bytes,
+        super::super::pdf::PdfTextCommand::system(cancel),
+    )
+    .await
+}
+
+pub(crate) async fn extract_document_with_pdf_command(
+    url: &str,
+    content_type: Option<&str>,
+    bytes: &[u8],
+    pdf_command: super::super::pdf::PdfTextCommand<'_>,
 ) -> Result<ExtractedDocument, ToolError> {
     let declared = normalized_content_type(content_type);
     let declared = declared.as_deref();
@@ -81,19 +95,8 @@ pub(crate) fn extract_document(
         });
     }
 
-    if looks_like_pdf(bytes) || declared == Some("application/pdf") || url_is_pdf(url) {
-        if looks_like_pdf(bytes) && declared_media_family(declared).is_some() {
-            return Err(ToolError::execution_failed(format!(
-                "Response media type `{}` did not match its PDF bytes",
-                declared.unwrap_or("unknown")
-            )));
-        }
-        if !looks_like_pdf(bytes) {
-            return Err(ToolError::execution_failed(
-                "Response claimed to be a PDF, but its bytes did not contain a PDF signature",
-            ));
-        }
-        return extract_pdf(bytes);
+    if validate_pdf_response(url, content_type, bytes)? {
+        return extract_pdf(bytes, pdf_command).await;
     }
 
     if let Some(signature) = sniff_media(bytes) {
@@ -155,6 +158,29 @@ pub(crate) fn extract_document(
         "Unsupported binary response type `{}`; use a dedicated download tool",
         declared.unwrap_or("unknown")
     )))
+}
+
+pub(crate) fn validate_pdf_response(
+    url: &str,
+    content_type: Option<&str>,
+    bytes: &[u8],
+) -> Result<bool, ToolError> {
+    let declared = normalized_content_type(content_type);
+    let declared = declared.as_deref();
+    let signed = looks_like_pdf(bytes);
+    if signed && declared_media_family(declared).is_some() {
+        return Err(ToolError::execution_failed(format!(
+            "Response media type `{}` did not match its PDF bytes",
+            declared.unwrap_or("unknown")
+        )));
+    }
+    let claimed = signed || declared == Some("application/pdf") || url_is_pdf(url);
+    if claimed && !signed {
+        return Err(ToolError::execution_failed(
+            "Response claimed to be a PDF, but its bytes did not contain a PDF signature",
+        ));
+    }
+    Ok(claimed)
 }
 
 fn extract_html(url: &str, html: &str) -> Result<ExtractedDocument, ToolError> {
@@ -711,10 +737,13 @@ fn sniff_media(bytes: &[u8]) -> Option<MediaSignature> {
     Some(signature)
 }
 
-#[cfg(feature = "pdf")]
-fn extract_pdf(bytes: &[u8]) -> Result<ExtractedDocument, ToolError> {
-    let text = guard_pdf_extract(|| pdf_extract::extract_text_from_mem(bytes))
-        .map_err(|err| ToolError::execution_failed(format!("PDF extract failed: {err}")))?;
+async fn extract_pdf(
+    bytes: &[u8],
+    command: super::super::pdf::PdfTextCommand<'_>,
+) -> Result<ExtractedDocument, ToolError> {
+    let text = super::super::pdf::extract_bytes(bytes, command)
+        .await
+        .map_err(super::super::pdf::into_tool_error)?;
     let pages = split_pdf_pages(&text);
     let text = pages
         .iter()
@@ -732,41 +761,6 @@ fn extract_pdf(bytes: &[u8]) -> Result<ExtractedDocument, ToolError> {
     })
 }
 
-#[cfg(not(feature = "pdf"))]
-fn extract_pdf(_bytes: &[u8]) -> Result<ExtractedDocument, ToolError> {
-    Err(ToolError::execution_failed(
-        "PDF extraction is unavailable in this build",
-    ))
-}
-
-#[cfg(feature = "pdf")]
-fn guard_pdf_extract<T, E, F>(extract: F) -> Result<T, String>
-where
-    E: Display,
-    F: FnOnce() -> Result<T, E>,
-{
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(extract)) {
-        Ok(Ok(value)) => Ok(value),
-        Ok(Err(err)) => Err(err.to_string()),
-        Err(payload) => Err(format!(
-            "extractor panicked: {}",
-            panic_payload_message(payload.as_ref())
-        )),
-    }
-}
-
-#[cfg(feature = "pdf")]
-fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        (*message).to_string()
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.clone()
-    } else {
-        "unknown panic".to_string()
-    }
-}
-
-#[cfg(feature = "pdf")]
 fn split_pdf_pages(text: &str) -> Vec<Vec<String>> {
     text.split('\x0C')
         .map(|page| {
@@ -783,14 +777,15 @@ fn split_pdf_pages(text: &str) -> Vec<Vec<String>> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn html_becomes_readable_markdown_without_page_chrome() {
+    #[tokio::test]
+    async fn html_becomes_readable_markdown_without_page_chrome() {
         let html = br#"<!doctype html><html><head><title>Whale &amp; Signal</title></head><body>
             <nav>Products Pricing Log in Cookies</nav>
             <article><h1>Fetch once</h1><p>This is the important article body with enough words to be useful.</p>
             <a href="/proof">Read the proof</a></article>
             <footer>Privacy Cookies Terms</footer></body></html>"#;
-        let document = extract_document("https://example.com/post", Some("text/html"), html)
+        let document = extract_document("https://example.com/post", Some("text/html"), html, None)
+            .await
             .expect("extract html");
 
         assert_eq!(document.kind, DocumentKind::Html);
@@ -805,25 +800,28 @@ mod tests {
         assert!(!document.markdown.contains("Privacy Cookies"));
     }
 
-    #[test]
-    fn sparse_document_uses_article_fallback() {
+    #[tokio::test]
+    async fn sparse_document_uses_article_fallback() {
         let html = br#"<html><head><title>Fallback</title></head><body><nav>cookie banner</nav>
             <article><h2>Small source</h2><p>Five useful words survive this compact article fallback path.</p></article>
             </body></html>"#;
-        let document = extract_document("https://example.com/short", Some("text/html"), html)
+        let document = extract_document("https://example.com/short", Some("text/html"), html, None)
+            .await
             .expect("extract fallback");
 
         assert!(document.markdown.contains("## Small source"));
         assert!(!document.markdown.contains("cookie banner"));
     }
 
-    #[test]
-    fn javascript_shell_returns_actionable_error() {
+    #[tokio::test]
+    async fn javascript_shell_returns_actionable_error() {
         let error = extract_document(
             "https://example.com/app",
             Some("text/html"),
             b"<html><body><div id='root'></div><script>boot()</script></body></html>",
+            None,
         )
+        .await
         .expect_err("empty app shell must fail");
 
         let message = error.to_string();
@@ -831,14 +829,16 @@ mod tests {
         assert!(message.contains("browser automation"));
     }
 
-    #[test]
-    fn markdown_passes_through_unchanged() {
+    #[tokio::test]
+    async fn markdown_passes_through_unchanged() {
         let body = b"# Release note\n\nA complete markdown response remains intact.\n";
         let document = extract_document(
             "https://example.com/release.md",
             Some("text/markdown; charset=utf-8"),
             body,
+            None,
         )
+        .await
         .expect("extract markdown");
 
         assert_eq!(document.kind, DocumentKind::Markdown);
@@ -846,13 +846,15 @@ mod tests {
         assert_eq!(document.title.as_deref(), Some("Release note"));
     }
 
-    #[test]
-    fn media_requires_matching_magic_bytes() {
+    #[tokio::test]
+    async fn media_requires_matching_magic_bytes() {
         let error = extract_document(
             "https://example.com/not-image.png",
             Some("image/png"),
             b"<html>not really an image</html>",
+            None,
         )
+        .await
         .expect_err("spoofed media must fail");
         assert!(error.to_string().contains("did not match"));
 
@@ -862,42 +864,50 @@ mod tests {
             "https://example.com/image",
             Some("application/octet-stream"),
             &png,
+            None,
         )
+        .await
         .expect("sniff png");
         assert_eq!(document.kind, DocumentKind::Media);
         assert_eq!(document.media_extension, Some("png"));
     }
 
-    #[test]
-    fn arbitrary_binary_is_rejected() {
+    #[tokio::test]
+    async fn arbitrary_binary_is_rejected() {
         let error = extract_document(
             "https://example.com/archive.bin",
             Some("application/octet-stream"),
             b"PK\x03\x04archive bytes",
+            None,
         )
+        .await
         .expect_err("archive must be rejected");
         assert!(error.to_string().contains("Unsupported binary response"));
     }
 
-    #[test]
-    fn empty_success_body_is_valid_text() {
+    #[tokio::test]
+    async fn empty_success_body_is_valid_text() {
         let document = extract_document(
             "https://example.com/no-content",
             Some("application/octet-stream"),
             b"",
+            None,
         )
+        .await
         .expect("empty body");
         assert_eq!(document.kind, DocumentKind::Text);
         assert!(document.text.is_empty());
     }
 
-    #[test]
-    fn content_type_matching_is_case_insensitive() {
+    #[tokio::test]
+    async fn content_type_matching_is_case_insensitive() {
         let document = extract_document(
             "https://example.com/document",
             Some("Application/JSON; Charset=UTF-8"),
             br#"{"status":"ok"}"#,
+            None,
         )
+        .await
         .expect("mixed-case JSON content type");
 
         assert_eq!(document.kind, DocumentKind::Text);
@@ -1060,35 +1070,35 @@ mod tests {
         assert!(error.to_string().contains("NUL bytes"));
     }
 
-    #[test]
-    fn extensionless_html_sniff_skips_leading_comments_and_xml_declarations() {
+    #[tokio::test]
+    async fn extensionless_html_sniff_skips_leading_comments_and_xml_declarations() {
         let cases = [
             r#"<!-- deployment marker --><html><head><meta charset="windows-1252"><title>Café release notes</title></head><body><article><h1>Café release notes</h1><p>This extensionless page contains enough meaningful text for deterministic extraction.</p></article></body></html>"#,
             r#"<?xml version="1.0"?><!-- marker --><head><meta charset="windows-1252"><title>Café release notes</title></head><body><article><h1>Café release notes</h1><p>This extensionless page contains enough meaningful text for deterministic extraction.</p></article></body>"#,
         ];
         for html in cases {
             let (bytes, _, _) = encoding_rs::WINDOWS_1252.encode(html);
-            let document = extract_document("https://example.com/extensionless", None, &bytes)
-                .expect("leading declarations preserve extensionless HTML sniffing");
+            let document =
+                extract_document("https://example.com/extensionless", None, &bytes, None)
+                    .await
+                    .expect("leading declarations preserve extensionless HTML sniffing");
             assert_eq!(document.kind, DocumentKind::Html);
             assert_eq!(document.title.as_deref(), Some("Café release notes"));
         }
     }
 
-    #[test]
-    fn svg_requires_and_accepts_svg_markup_signature() {
+    #[tokio::test]
+    async fn svg_requires_and_accepts_svg_markup_signature() {
         let svg = br#"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"></svg>"#;
-        let document = extract_document("https://example.com/diagram", Some("image/svg+xml"), svg)
-            .expect("sniff svg");
+        let document = extract_document(
+            "https://example.com/diagram",
+            Some("image/svg+xml"),
+            svg,
+            None,
+        )
+        .await
+        .expect("sniff svg");
         assert_eq!(document.kind, DocumentKind::Media);
         assert_eq!(document.media_extension, Some("svg"));
-    }
-
-    #[cfg(feature = "pdf")]
-    #[test]
-    fn pdf_panic_is_contained() {
-        let error = guard_pdf_extract::<(), &str, _>(|| panic!("malformed pdf"))
-            .expect_err("panic must be captured");
-        assert!(error.contains("extractor panicked: malformed pdf"));
     }
 }

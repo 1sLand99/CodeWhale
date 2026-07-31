@@ -7,6 +7,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-07-31
+
+This is the Codewhale v0.9.3 source candidate. It is not a published release
+until the matching tag, packages, checksums, and release assets exist.
+
+DeepSeek V4 Flash is now a first-class Codewhale route, and the agent-facing
+tool surface has been reduced to the canonical action tools that current
+models actually need. This release also hardens credential, authorization,
+durability, compaction, and macOS File Provider boundaries while deleting
+stale runtime and dependency surface.
+
+### Added
+
+- Native `deepseek-v4-flash` support over DeepSeek's Responses API, including
+  stateless reasoning-item replay, semantic SSE terminal events, structured
+  function calls and outputs, `apply_patch`, and model-aware wire-format
+  selection. Exact current Flash IDs use Responses; future direct
+  `deepseek-vN-*` model IDs inherit that route conservatively, while custom
+  DeepSeek-compatible endpoints retain Chat Completions unless configured
+  otherwise.
+- A pipe-only `codewhale auth print-api-key` handoff for explicitly selected
+  providers. It shares Codewhale's home-scoped credential authority, refuses
+  terminal output, and prevents sentinel placeholders from becoming live
+  credentials.
+- Per-turn `max_tool_calls` enforcement at the engine admission gate, plus a
+  named-file write scope with a separate read seam. The runtime now rejects
+  over-budget calls before execution and keeps the operator's write boundary
+  explicit (#4415).
+- Runtime-contract, source-structure, and persistence-backlog ratchets that
+  name drift instead of allowing large ownership surfaces to grow silently
+  (#3921, #4785).
+
+### Changed
+
+- Model-visible built-ins now use the canonical `Bash`, `File`, and `Run`
+  action schemas. `apply_patch` remains available as the one direct custom
+  edit tool supported by DeepSeek Responses. The bundled stop-ship workflow,
+  Fleet fixtures, shell shortcut, and engine tests use the same canonical
+  vocabulary.
+- Canonical `File { action: "write" }` requests now pass through the same
+  semantic repo-law checks as the former write path. Approval, Full Access,
+  and workflow execution cannot bypass the repository safety floor by choosing
+  the canonical schema.
+- Codewhale home resolution is shared across the CLI, TUI, state, and secret
+  stores. `doctor` is offline by default, distinguishes credential source from
+  availability, and reports one consistent path snapshot.
+- Durable runtime event writes are serialized across simultaneous processes,
+  blocking history waits move off async workers, and provider quota exhaustion
+  remains typed and retryable through compaction (#4522).
+- Skill discovery caches the merged catalog behind watched-mtime validation;
+  large skill, engine, subagent, UI, and ambient-ocean test blocks now live in
+  owned test seams.
+- Reasoning summaries stay in the user's language, complete jellyfish
+  silhouettes relocate around transcript text, and cached ocean frames include
+  their palette identity (#4807).
+- The authorization-order contract now documents and tests how modes, hooks,
+  permission rules, safety floors, repo law, approvals, and sandboxing compose
+  (PR #4980).
+
+### Fixed
+
+- macOS sandbox extensions cover CloudStorage/File Provider workspaces without
+  broadening unrelated paths; thanks @Watcher24 for the #4085 report and
+  reproduction.
+- Foreground shell state detaches before steering, so an interrupted command
+  cannot keep owning the composer (PR #4979).
+- MCP application-level failures and malformed error envelopes fail closed
+  instead of looking like successful tool output.
+- Optional PDF failures are truthful and PDF classification no longer misses
+  supported inputs.
+- Bracketed-paste contents are redacted from traces, and credential diagnostics
+  never treat placeholder sentinels as usable keys.
+
+### Removed
+
+- The legacy callable aliases `exec_shell`, `run_shell_command`, `read_file`,
+  `write_file`, `list_dir`, `grep_files`, `file_search`, and the duplicate
+  Work/RLM registrations. Historical transcript and policy semantics remain
+  readable, but new model turns receive only the canonical action surface.
+- The bundled PDF parser dependency chain, replacing it with the smaller
+  optional extraction boundary tracked by #4382.
+
+### Contributors
+
+- [Turisla](https://github.com/greyfreedom) (`@greyfreedom`) documented and
+  locked the authorization-order contract in PR #4980.
+- [Nightt](https://github.com/nightt5879) (`@nightt5879`) fixed foreground
+  shell detachment before steering in PR #4979.
+- [Watcher24](https://github.com/Watcher24) (`@Watcher24`) provided the macOS
+  File Provider report and reproduction for #4085.
+- [Fred Leitz](https://github.com/fleitz) (`@fleitz`) retains required
+  source-candidate credit for the canonical `Bash` workspace fix from PR #4673
+  and issue #4674.
+
 ## [0.9.2] - 2026-07-29
 
 This is the Codewhale v0.9.2 source candidate. It is not a published release
@@ -2951,64 +3045,6 @@ folds in several community contributions.
 - Better tool-denial and provider error messages harvested from PR #2933
   (#3020).
 
-
-## [0.8.57] - 2026-06-10
-
-### Added
-
-- **Turns now survive system sleep.** When the host suspends mid-stream, the
-  connection used to die on wake with `Stream read error: error decoding
-  response body` and the turn was lost (#2990). The engine now stamps stream
-  progress with both monotonic and wall-clock time; a large divergence on a
-  stream error identifies a sleep/wake cycle, and the request is silently
-  re-issued (up to the existing 3-retry budget) instead of failing the turn.
-- **One-command release prep.** `./scripts/release/prepare-release.sh X.Y.Z`
-  bumps the workspace version, every internal crate dependency pin, the npm
-  wrapper, and the README install-tag examples, refreshes `Cargo.lock`,
-  regenerates the embedded TUI changelog slice and web facts, and runs
-  `check-versions.sh` — the v0.8.56 release needed nine follow-up commits for
-  exactly these sync points.
-- `.github/CODEOWNERS` and `.github/dependabot.yml` (weekly cargo +
-  github-actions updates, monthly npm for `web/`).
-
-### Changed
-
-- **The changelog went on a diet.** Root `CHANGELOG.md` now carries recent
-  releases (v0.8.40+); older entries moved to `docs/CHANGELOG_ARCHIVE.md`.
-  `crates/tui/CHANGELOG.md` — embedded into every binary for `/change` — is a
-  generated 15-release slice (`scripts/sync-changelog.sh`), no longer a
-  357 KB manual byte-for-byte copy (~300 KB smaller binaries).
-- GitHub Release bodies are generated from the tagged version's changelog
-  section (`scripts/release/generate-release-body.sh`) instead of a
-  hardcoded workflow blob with a hand-pasted contributor list.
-- `check-versions.sh` now also gates `web/lib/facts.generated.ts` and the
-  README install-tag examples; the CNB mirror pipeline validates the pushed
-  tag against `Cargo.toml` before generating release notes.
-- Docs reorganized: internal design notes moved under `docs/rfcs/`; stale
-  internal docs (old audits, handoffs, region-specific VM notes) removed.
-- Agent-facing polish: the system prompt environment block reports
-  `codewhale_version` (was `deepseek_version`), the legacy
-  `.deepseek/instructions.md` path is no longer advertised in the prompt
-  (still honored for back-compat), and oversized instruction files are
-  truncated with an explicit `[…truncated: N bytes omitted]` marker instead
-  of a bare ellipsis.
-
-### Fixed
-
-- **Docker images build again.** The release `docker` job failed for v0.8.56
-  because the Dockerfile still copied the pre-rebrand `deepseek` /
-  `deepseek-tui` binaries; they are now symlinks to the codewhale binaries
-  inside the image, so legacy container entrypoints keep working.
-- `.devcontainer/devcontainer.json` used the pre-rebrand container name,
-  mount path, and `deepseek` remote user.
-- Stale `--bin deepseek` examples, `DeepSeek-TUI` strings in `/change`
-  output, and pre-rebrand doc comments.
-
-### Removed
-
-- Unused dependencies: `tracing-appender` and `zeroize` (TUI crate),
-  `rustls` (release crate); the orphaned `vendor/schemaui-0.12.0` lockfile
-  leftover and a machine-specific one-off `scripts/verify_task.sh`.
 
 ---
 

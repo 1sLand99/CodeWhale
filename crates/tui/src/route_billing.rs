@@ -937,8 +937,11 @@ fn visible_minimax_credential_is_plan_shaped(
     // 1. An explicit `[providers.minimax*] api_key` is file-owned route truth.
     if let Some(key) = provider_config
         .and_then(|config| config.api_key.as_deref())
+        .filter(|key| {
+            crate::config::classify_config_api_key_value(key)
+                == crate::config::ConfigApiKeyValueKind::Literal
+        })
         .map(str::trim)
-        .filter(|key| !key.is_empty() && *key != crate::config::API_KEYRING_SENTINEL)
     {
         return Some(is_plan_shaped(key));
     }
@@ -1008,11 +1011,10 @@ fn xiaomi_is_explicit_pay_as_you_go(config: Option<&ProviderConfig>) -> bool {
             "pay_as_you_go" | "payg" | "paygo" | "api" | "standard" | "default"
         );
     }
-    if let Some(api_key) = config
-        .api_key
-        .as_deref()
-        .filter(|key| !key.trim().is_empty())
-    {
+    if let Some(api_key) = config.api_key.as_deref().filter(|key| {
+        crate::config::classify_config_api_key_value(key)
+            == crate::config::ConfigApiKeyValueKind::Literal
+    }) {
         return !api_key.trim_start().starts_with("tp-");
     }
     config.base_url.as_deref().is_some_and(|base_url| {
@@ -2344,18 +2346,20 @@ mod tests {
             );
             // The legacy keyring placeholder is not a credential and carries
             // no product prefix.
-            let sentinel = config_with(
-                provider,
-                ProviderConfig {
-                    api_key: Some(crate::config::API_KEYRING_SENTINEL.to_string()),
-                    ..ProviderConfig::default()
-                },
-            );
-            assert_eq!(
-                for_route(&sentinel, provider),
-                BillingPresentation::Unknown,
-                "{provider:?} keyring sentinel is not a pay-as-you-go proof"
-            );
+            for sentinel in [crate::config::API_KEYRING_SENTINEL, "  __KEYRING__  "] {
+                let sentinel = config_with(
+                    provider,
+                    ProviderConfig {
+                        api_key: Some(sentinel.to_string()),
+                        ..ProviderConfig::default()
+                    },
+                );
+                assert_eq!(
+                    for_route(&sentinel, provider),
+                    BillingPresentation::Unknown,
+                    "{provider:?} keyring sentinel is not a pay-as-you-go proof"
+                );
+            }
             let chip = usage_chip(
                 for_route(&opaque, provider),
                 provider,

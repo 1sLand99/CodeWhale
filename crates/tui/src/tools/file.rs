@@ -11,11 +11,8 @@ use super::spec::{
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::borrow::Cow;
-#[cfg(feature = "pdf")]
-use std::fmt::Display;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -100,7 +97,7 @@ impl ToolSpec for ReadFileTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read a UTF-8 file from the workspace. Use this instead of `cat`, `head`, `tail`, or `sed -n '..p'` in `exec_shell` — it's faster, sandbox-aware, and skips the approval prompt. Plain text is returned as-is and records the file snapshot required before `edit_file` will make a narrow in-place edit. CodeWhale config files and file-backed credential stores cannot be read with this tool; use `codewhale config list` or `codewhale auth status` for safe inspection. PDFs are auto-extracted via the bundled pure-Rust extractor (no Poppler install required). Image screenshots are OCR-extracted when local OCR is available. Cannot read other non-PDF binaries.\n\nFor large files, use `start_line` and `max_lines` to read in chunks. By default, returns at most 200 lines (~16KB). If `truncated=\"true\"` in the response, use `next_start_line` to continue reading. For PDFs, use `pages` instead — `start_line`/`max_lines` only apply to text files."
+        "Read a UTF-8 file from the workspace. Use this instead of `cat`, `head`, `tail`, or `sed -n '..p'` in `exec_shell` — it's faster, sandbox-aware, and skips the approval prompt. Plain text is returned as-is and records the file snapshot required before `edit_file` will make a narrow in-place edit. CodeWhale config files and file-backed credential stores cannot be read with this tool; use `codewhale config list` or `codewhale auth status` for safe inspection. PDFs are text-extracted when the optional `pdftotext` executable (Poppler) is installed. Image screenshots are OCR-extracted when local OCR is available. Cannot read other non-PDF binaries.\n\nFor large files, use `start_line` and `max_lines` to read in chunks. By default, returns at most 200 lines (~16KB). If `truncated=\"true\"` in the response, use `next_start_line` to continue reading. For PDFs, use `pages` instead — `start_line`/`max_lines` only apply to text files."
     }
 
     fn input_schema(&self) -> Value {
@@ -146,8 +143,14 @@ impl ToolSpec for ReadFileTool {
         }
         let pages = optional_str(&input, "pages");
 
-        if is_pdf(&file_path)? {
-            return read_pdf(&file_path, pages);
+        if let Some(result) = read_pdf_if_detected(
+            &file_path,
+            pages,
+            super::pdf::PdfTextCommand::system(context.cancel_token.as_ref()),
+        )
+        .await?
+        {
+            return Ok(result);
         }
         if is_image_for_ocr(&file_path) {
             return read_image_via_ocr(&file_path, path_str);
@@ -399,28 +402,21 @@ fn read_image_via_ocr(path: &Path, requested_path: &str) -> Result<ToolResult, T
     )))
 }
 
-/// Detect a PDF by extension OR by sniffing the `%PDF-` magic bytes.
-/// Files without an extension are still recognized as PDFs when the header
-/// matches.
+/// Detect an existing PDF by extension or by sniffing `%PDF` magic bytes.
 fn is_pdf(path: &Path) -> Result<bool, ToolError> {
-    if path
+    let extension_matches = path
         .extension()
         .and_then(|e| e.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
-    {
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"));
+    let mut file = fs::File::open(path).map_err(|error| {
+        ToolError::execution_failed(format!("Failed to read {}: {error}", path.display()))
+    })?;
+    if extension_matches {
         return Ok(true);
     }
-    // Sniff first 4 bytes. Don't error if the file doesn't exist — let the
-    // caller's `read_to_string` produce the canonical not-found error.
     let mut buf = [0u8; 4];
-    let result = match fs::File::open(path) {
-        Ok(mut f) => {
-            use std::io::Read;
-            f.read_exact(&mut buf).map(|_| buf)
-        }
-        Err(_) => return Ok(false),
-    };
-    Ok(matches!(result, Ok(b) if &b == b"%PDF"))
+    use std::io::Read;
+    Ok(file.read_exact(&mut buf).is_ok() && &buf == b"%PDF")
 }
 
 fn is_image_for_ocr(path: &Path) -> bool {
@@ -500,7 +496,14 @@ fn clean_pdf_text(raw: &str) -> String {
     }
 }
 
-fn read_pdf(path: &Path, pages: Option<&str>) -> Result<ToolResult, ToolError> {
+async fn read_pdf_if_detected(
+    path: &Path,
+    pages: Option<&str>,
+    command: super::pdf::PdfTextCommand<'_>,
+) -> Result<Option<ToolResult>, ToolError> {
+    if !is_pdf(path)? {
+        return Ok(None);
+    }
     // Validate the `pages` spec once, up front, so both extractor paths
     // surface the same error shape on bad input.
     let page_range = match pages {
@@ -515,157 +518,19 @@ fn read_pdf(path: &Path, pages: Option<&str>) -> Result<ToolResult, ToolError> {
         None => None,
     };
 
-    // Default to the bundled pure-Rust `pdf-extract` reader: it removes
-    // the install-poppler prerequisite that bit every new user, and the
-    // crate is already a workspace dep (used by `web_run`'s URL fetch
-    // path). Users with column-heavy / complex-table PDFs (academic
-    // papers, financial filings) can opt into the historical
-    // `pdftotext -layout` route by setting
-    // `prefer_external_pdftotext = true` in `~/.codewhale/settings.toml`
-    // (legacy: `~/.config/deepseek/settings.toml`).
-    let prefer_external = crate::settings::Settings::load()
-        .map(|s| s.prefer_external_pdftotext)
-        .unwrap_or(false);
-
-    if prefer_external {
-        read_pdf_via_pdftotext(path, page_range)
-    } else {
-        #[cfg(feature = "pdf")]
-        {
-            read_pdf_via_pdf_extract(path, page_range)
-        }
-        #[cfg(not(feature = "pdf"))]
-        {
-            read_pdf_via_pdftotext(path, page_range)
-        }
-    }
+    read_pdf_with_command(path, page_range, command)
+        .await
+        .map(Some)
 }
 
-#[cfg(feature = "pdf")]
-fn read_pdf_via_pdf_extract(
+async fn read_pdf_with_command(
     path: &Path,
     page_range: Option<(u32, u32)>,
+    command: super::pdf::PdfTextCommand<'_>,
 ) -> Result<ToolResult, ToolError> {
-    let text = if let Some((start, end)) = page_range {
-        // Page-by-page extraction so we can slice the requested window
-        // without dragging every page through the caller's context.
-        // pdf-extract returns pages in document order; `start`/`end` are
-        // 1-indexed inclusive (validated above), so we convert to a
-        // 0-indexed half-open slice with bounds clamping.
-        let pages = guard_pdf_extract(|| pdf_extract::extract_text_by_pages(path)).map_err(|e| {
-            ToolError::execution_failed(format!(
-                "pdf-extract failed on {}: {e} (set `prefer_external_pdftotext = true` in settings.toml to retry via pdftotext)",
-                path.display()
-            ))
-        })?;
-        let total = pages.len();
-        if total == 0 {
-            String::new()
-        } else {
-            let start_idx = (start as usize).saturating_sub(1).min(total);
-            let end_idx = (end as usize).min(total);
-            if start_idx >= end_idx {
-                String::new()
-            } else {
-                pages[start_idx..end_idx].join("\n")
-            }
-        }
-    } else {
-        // Call extract_text_by_pages even when the caller wants every page:
-        // extract_text uses an internal codepath that can hang on certain PDF
-        // cross-reference tables or font encodings (#2641). The per-page path
-        // avoids that hang and produces identical output when joined.
-        guard_pdf_extract(|| pdf_extract::extract_text_by_pages(path))
-            .map(|pages| pages.join("\n"))
-            .map_err(|e| {
-                ToolError::execution_failed(format!(
-                    "pdf-extract failed on {}: {e} (set `prefer_external_pdftotext = true` in settings.toml to retry via pdftotext)",
-                    path.display()
-                ))
-            })?
-    };
-    Ok(ToolResult::success(clean_pdf_text(&text)))
-}
-
-fn guard_pdf_extract<T, E, F>(extract: F) -> Result<T, String>
-where
-    E: Display,
-    F: FnOnce() -> Result<T, E>,
-{
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(extract)) {
-        Ok(Ok(value)) => Ok(value),
-        Ok(Err(err)) => Err(err.to_string()),
-        Err(payload) => Err(format!(
-            "extractor panicked: {}",
-            panic_payload_message(payload.as_ref())
-        )),
-    }
-}
-
-fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        (*message).to_string()
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.clone()
-    } else {
-        "unknown panic".to_string()
-    }
-}
-
-fn read_pdf_via_pdftotext(
-    path: &Path,
-    page_range: Option<(u32, u32)>,
-) -> Result<ToolResult, ToolError> {
-    let mut cmd = Command::new("pdftotext");
-    cmd.arg("-layout");
-
-    if let Some((start, end)) = page_range {
-        cmd.arg("-f").arg(start.to_string());
-        cmd.arg("-l").arg(end.to_string());
-    }
-
-    cmd.arg(path).arg("-"); // output to stdout
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Structured "binary unavailable" — only reachable when the
-            // user explicitly opted into the external path. Hints back at
-            // both the install command and the in-tree default.
-            return ToolResult::json(&json!({
-                "type": "binary_unavailable",
-                "path": path.display().to_string(),
-                "kind": "pdf",
-                "reason": "pdftotext not installed (prefer_external_pdftotext = true in settings)",
-                "hint": "install poppler (macOS: `brew install poppler`; Debian/Ubuntu: `apt install poppler-utils`) — or unset `prefer_external_pdftotext` to use the bundled pure-Rust extractor"
-            }))
-            .map_err(|e| {
-                ToolError::execution_failed(format!("failed to serialize response: {e}"))
-            });
-        }
-        Err(e) => {
-            return Err(ToolError::execution_failed(format!(
-                "failed to launch pdftotext: {e}"
-            )));
-        }
-    };
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| ToolError::execution_failed(format!("pdftotext failed to complete: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(ToolError::execution_failed(format!(
-            "pdftotext failed (exit {:?}): {stderr}",
-            output.status.code()
-        )));
-    }
-
-    let text = String::from_utf8_lossy(&output.stdout).to_string();
+    let text = super::pdf::extract_path(path, page_range, command)
+        .await
+        .map_err(super::pdf::into_tool_error)?;
     Ok(ToolResult::success(clean_pdf_text(&text)))
 }
 
@@ -1448,6 +1313,10 @@ fn list_dir_timeout(timeout: Duration) -> ToolError {
 // === Unit Tests ===
 
 #[cfg(test)]
+#[path = "file/tests.rs"]
+mod pdf_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
@@ -1949,71 +1818,11 @@ mod tests {
         assert_eq!(cleaned, "   indented line\nregular line");
     }
 
-    #[test]
-    fn read_pdf_via_pdf_extract_finds_known_title() {
-        // Skip when the fixture isn't checked out (sparse clones, shallow
-        // worktrees). Local dev + CI both have it.
-        if !sample_pdf_present() {
-            // Fixture not present (sparse / shallow checkout). Silent
-            // skip — `cargo test` reports the same `ok` either way.
-            return;
-        }
-        let path = std::path::PathBuf::from(SAMPLE_PDF_PATH);
-        let result = read_pdf_via_pdf_extract(&path, None).expect("extract whole PDF");
-        assert!(result.success);
-        assert!(
-            result.content.contains("Recursive Language Models"),
-            "pdf-extract should recover the document title; got prefix {:?}",
-            result.content.chars().take(200).collect::<String>()
-        );
-    }
-
-    #[test]
-    fn read_pdf_via_pdf_extract_respects_pages_window() {
-        if !sample_pdf_present() {
-            // Fixture not present (sparse / shallow checkout). Silent
-            // skip — `cargo test` reports the same `ok` either way.
-            return;
-        }
-        let path = std::path::PathBuf::from(SAMPLE_PDF_PATH);
-        let single = read_pdf_via_pdf_extract(&path, Some((1, 1))).expect("single page");
-        let two = read_pdf_via_pdf_extract(&path, Some((1, 2))).expect("two pages");
-        assert!(single.success);
-        assert!(two.success);
-        // A two-page slice must be at least as long as the one-page slice
-        // (most documents have non-trivial body text past page 1).
-        assert!(
-            two.content.len() >= single.content.len(),
-            "expected pages 1-2 ({} bytes) >= page 1 ({} bytes)",
-            two.content.len(),
-            single.content.len()
-        );
-        // Title text lives on page 1 — must survive the window crop.
-        assert!(single.content.contains("Recursive Language Models"));
-    }
-
-    #[test]
-    fn pdf_extract_panic_is_returned_as_tool_error_text() {
-        let err = guard_pdf_extract(|| -> Result<String, &'static str> {
-            panic!("assertion failed: name == \"Identity-H\"");
-        })
-        .expect_err("panic should become an error");
-
-        assert!(err.contains("extractor panicked"));
-        assert!(err.contains("Identity-H"));
-    }
-
     #[tokio::test]
-    async fn read_file_pdf_path_uses_pdf_extract_by_default() {
-        if !sample_pdf_present() {
-            // Fixture not present (sparse / shallow checkout). Silent
-            // skip — `cargo test` reports the same `ok` either way.
+    async fn read_file_pdf_path_uses_optional_pdftotext_adapter() {
+        if !sample_pdf_present() || crate::dependencies::resolve_pdftotext().is_none() {
             return;
         }
-        // The fixture lives outside the tui crate, so we point ToolContext
-        // at the workspace root and read by relative path. This exercises
-        // the full ReadFileTool::execute → is_pdf → read_pdf dispatch on
-        // the bundled extractor (no pdftotext required on the test host).
         let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../");
         let ctx = ToolContext::new(workspace);
         let result = ReadFileTool
@@ -2025,92 +1834,6 @@ mod tests {
             result.content.contains("Recursive Language Models"),
             "page-1 extraction must surface the title"
         );
-    }
-
-    struct ConfigPathEnvGuard {
-        prior: Option<std::ffi::OsString>,
-    }
-    impl ConfigPathEnvGuard {
-        fn capture() -> Self {
-            Self {
-                prior: std::env::var_os("DEEPSEEK_CONFIG_PATH"),
-            }
-        }
-    }
-    impl Drop for ConfigPathEnvGuard {
-        fn drop(&mut self) {
-            // Safety: scoped to test process; reverts to the captured value.
-            match &self.prior {
-                Some(v) => unsafe { std::env::set_var("DEEPSEEK_CONFIG_PATH", v) },
-                None => unsafe { std::env::remove_var("DEEPSEEK_CONFIG_PATH") },
-            }
-        }
-    }
-
-    #[test]
-    fn read_pdf_routes_to_pdftotext_when_setting_opted_in() {
-        // Two concerns in one test: with `prefer_external_pdftotext = true`
-        // the dispatch must (a) call pdftotext when present, and (b) return
-        // the structured `binary_unavailable` response when pdftotext is
-        // missing.
-        // Sync test (calls `read_pdf` directly, not the async ReadFileTool
-        // wrapper) so the env-var lock is never held across an `.await`.
-        // Must hold the process-wide env lock, not a module-local one:
-        // other test modules redirect `DEEPSEEK_CONFIG_PATH`/`HOME` under
-        // `lock_test_env`, and a module-local mutex would let this test's
-        // redirect interleave with theirs.
-        let _lock = crate::test_support::lock_test_env();
-        let _guard = ConfigPathEnvGuard::capture();
-
-        let tmp = tempdir().expect("tempdir");
-        let config_dir = tmp.path().join("cfg");
-        fs::create_dir_all(&config_dir).unwrap();
-        let config_path = config_dir.join("config.toml");
-        fs::write(&config_path, "").unwrap();
-        // The sibling settings.toml is what Settings::load() reads.
-        fs::write(
-            config_dir.join("settings.toml"),
-            "prefer_external_pdftotext = true\n",
-        )
-        .unwrap();
-        // Safety: serialised by the process-wide test env lock; reverted by guard.
-        unsafe {
-            std::env::set_var("DEEPSEEK_CONFIG_PATH", &config_path);
-        }
-
-        let pdf_path = tmp.path().join("doc.pdf");
-        fs::write(&pdf_path, b"%PDF-1.7\n%%EOF").unwrap();
-        let outcome = read_pdf(&pdf_path, None);
-
-        let pdftotext_present = Command::new("pdftotext")
-            .arg("-v")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok();
-
-        if pdftotext_present {
-            // pdftotext on a stub `%PDF-1.7\n%%EOF` cannot find a real
-            // trailer/xref table and fails with `exit 1`. That failure
-            // text mentions pdftotext explicitly — proof we routed
-            // through Poppler rather than falling back to the bundled
-            // extractor. Validate by inspecting the error message.
-            let err = outcome.expect_err("malformed PDF must surface the pdftotext error");
-            let msg = err.to_string();
-            assert!(
-                msg.contains("pdftotext"),
-                "error message must reference pdftotext; got {msg}"
-            );
-        } else {
-            let result = outcome.expect("binary_unavailable is a structured success, not an Err");
-            assert!(result.success);
-            assert!(result.content.contains("binary_unavailable"));
-            assert!(result.content.contains("pdftotext"));
-            assert!(
-                result.content.contains("prefer_external_pdftotext"),
-                "hint must reference the opt-in flag the user set"
-            );
-        }
     }
 
     #[tokio::test]

@@ -1,0 +1,297 @@
+{
+  "_comment": "One-way numeric ceilings and exact structural identities for the provider-free runtime contract. Decreases pass; increases or identity changes fail. Lock in decreases with: python3 scripts/check-runtime-contract-budget.py --update",
+  "document_kind": "codewhale.runtime_contract_budget",
+  "representative_context": {
+    "fixture_id": "representative-v1",
+    "stages": {
+      "base": {
+        "bytes": 11276,
+        "identity_sha256": "97bd3dbb0c3abccc560e97547d6d94a51553fcc319f77f617b95cb1c15a0b07d"
+      },
+      "goal": {
+        "bytes": 14607,
+        "delta_bytes": 80,
+        "identity_sha256": "4c46a340f126b3cc13bfd939ea643452b365b452051c0ed7ce30c44a432dd739"
+      },
+      "handoff": {
+        "bytes": 14995,
+        "delta_bytes": 388,
+        "identity_sha256": "72cb7f323828193f0515a9a68ce68fb1825d5bfa1617b03d03cfb2eead81d0dd"
+      },
+      "instructions": {
+        "bytes": 11728,
+        "delta_bytes": 131,
+        "identity_sha256": "39c3f2fb4f58a05a05afa9917a99dadd2002fd27c8a3342b0542d7cdb7d649de"
+      },
+      "memory": {
+        "bytes": 14527,
+        "delta_bytes": 1649,
+        "identity_sha256": "661944eb773653ef047e1d8d2d1512c5bc7be60fa8f33d224b439edc60ef0e1d"
+      },
+      "project": {
+        "bytes": 11597,
+        "delta_bytes": 321,
+        "identity_sha256": "07a84f222831b4ae963a7bc84a2931a9f4e4a2227ec699260bba84dcb341001c"
+      },
+      "skill": {
+        "bytes": 12878,
+        "delta_bytes": 1150,
+        "identity_sha256": "0060208dc8e2c6034e0c1fc0d1b67a1d2d2487922128b145a3c3e3c1543ac857"
+      }
+    },
+    "system_prompt_blocks": 6,
+    "total_bytes": 14995,
+    "total_tokens_est": 3749
+  },
+  "schema_version": 1,
+  "skill_discovery": {
+    "first_delta": {
+      "directories_visited": 1,
+      "root_discovery_calls": 1,
+      "skill_md_read_attempts": 1
+    },
+    "second_delta": {
+      "directories_visited": 0,
+      "root_discovery_calls": 0,
+      "skill_md_read_attempts": 0
+    }
+  },
+  "system_prompt": {
+    "modes": {
+      "act": {
+        "mode_instructions_bytes": 802,
+        "mode_instructions_tokens_est": 201,
+        "system_prompt_blocks": 4,
+        "system_prompt_bytes": 11276,
+        "system_prompt_tokens_est": 2819
+      },
+      "operate": {
+        "mode_instructions_bytes": 1671,
+        "mode_instructions_tokens_est": 418,
+        "system_prompt_blocks": 4,
+        "system_prompt_bytes": 12145,
+        "system_prompt_tokens_est": 3037
+      },
+      "plan": {
+        "mode_instructions_bytes": 517,
+        "mode_instructions_tokens_est": 130,
+        "system_prompt_blocks": 4,
+        "system_prompt_bytes": 10991,
+        "system_prompt_tokens_est": 2748
+      }
+    }
+  },
+  "tool_catalog": {
+    "modes": {
+      "act": {
+        "active": {
+          "bytes": 20185,
+          "identity_sha256": "669ce9c314867be9009e48999bf398f0e7dc8933c0234f28eeba7ea7d57a087e",
+          "tokens_est": 5047,
+          "tool_names": [
+            "Bash",
+            "File",
+            "Git",
+            "Run",
+            "agent",
+            "tasks",
+            "tool_search",
+            "work_update"
+          ],
+          "tools": 8
+        },
+        "full": {
+          "bytes": 66792,
+          "identity_sha256": "2852a9cf06fdb53fcf3cf9662dece713c341a28370f5137c4e9bfc853503ec69",
+          "tokens_est": 16698,
+          "tool_names": [
+            "Bash",
+            "File",
+            "Git",
+            "Run",
+            "Web",
+            "agent",
+            "agents/coordinate",
+            "agents/followup",
+            "agents/interrupt",
+            "agents/list",
+            "agents/message",
+            "agents/wait",
+            "automation",
+            "create_goal",
+            "diagnostics",
+            "fim_edit",
+            "finance",
+            "get_goal",
+            "github",
+            "handle_read",
+            "load_skill",
+            "lsp",
+            "note",
+            "notify",
+            "project_map",
+            "request_user_input",
+            "retrieve_tool_result",
+            "revert_turn",
+            "review",
+            "rlm",
+            "slop_ledger_append",
+            "slop_ledger_export",
+            "slop_ledger_query",
+            "slop_ledger_update",
+            "speech",
+            "task_shell_start",
+            "task_shell_wait",
+            "tasks",
+            "terminal/cancel",
+            "terminal/reset",
+            "terminal/run",
+            "terminal/send",
+            "terminal/wait",
+            "tool_search",
+            "tts",
+            "update_goal",
+            "validate_data",
+            "verify",
+            "web.run",
+            "work_update",
+            "workflow"
+          ],
+          "tools": 51
+        }
+      },
+      "operate": {
+        "active": {
+          "bytes": 20185,
+          "identity_sha256": "669ce9c314867be9009e48999bf398f0e7dc8933c0234f28eeba7ea7d57a087e",
+          "tokens_est": 5047,
+          "tool_names": [
+            "Bash",
+            "File",
+            "Git",
+            "Run",
+            "agent",
+            "tasks",
+            "tool_search",
+            "work_update"
+          ],
+          "tools": 8
+        },
+        "full": {
+          "bytes": 66792,
+          "identity_sha256": "2852a9cf06fdb53fcf3cf9662dece713c341a28370f5137c4e9bfc853503ec69",
+          "tokens_est": 16698,
+          "tool_names": [
+            "Bash",
+            "File",
+            "Git",
+            "Run",
+            "Web",
+            "agent",
+            "agents/coordinate",
+            "agents/followup",
+            "agents/interrupt",
+            "agents/list",
+            "agents/message",
+            "agents/wait",
+            "automation",
+            "create_goal",
+            "diagnostics",
+            "fim_edit",
+            "finance",
+            "get_goal",
+            "github",
+            "handle_read",
+            "load_skill",
+            "lsp",
+            "note",
+            "notify",
+            "project_map",
+            "request_user_input",
+            "retrieve_tool_result",
+            "revert_turn",
+            "review",
+            "rlm",
+            "slop_ledger_append",
+            "slop_ledger_export",
+            "slop_ledger_query",
+            "slop_ledger_update",
+            "speech",
+            "task_shell_start",
+            "task_shell_wait",
+            "tasks",
+            "terminal/cancel",
+            "terminal/reset",
+            "terminal/run",
+            "terminal/send",
+            "terminal/wait",
+            "tool_search",
+            "tts",
+            "update_goal",
+            "validate_data",
+            "verify",
+            "web.run",
+            "work_update",
+            "workflow"
+          ],
+          "tools": 51
+        }
+      },
+      "plan": {
+        "active": {
+          "bytes": 15118,
+          "identity_sha256": "e1c0ec4c8caf7799e406a2352cb7caba53468abb50e50a88a8e04f52f7942200",
+          "tokens_est": 3780,
+          "tool_names": [
+            "File",
+            "Git",
+            "agent",
+            "tasks",
+            "tool_search",
+            "work_update"
+          ],
+          "tools": 6
+        },
+        "full": {
+          "bytes": 40637,
+          "identity_sha256": "c111c4d1bdfe325a77971b2373459db38d62b28642793cda9fd025e056a73131",
+          "tokens_est": 10160,
+          "tool_names": [
+            "File",
+            "Git",
+            "Web",
+            "agent",
+            "agents/coordinate",
+            "agents/followup",
+            "agents/interrupt",
+            "agents/list",
+            "agents/message",
+            "agents/wait",
+            "automation",
+            "create_goal",
+            "diagnostics",
+            "get_goal",
+            "github",
+            "handle_read",
+            "load_skill",
+            "notify",
+            "request_user_input",
+            "retrieve_tool_result",
+            "review",
+            "slop_ledger_export",
+            "slop_ledger_query",
+            "tasks",
+            "tool_search",
+            "update_goal",
+            "validate_data",
+            "web.run",
+            "work_update",
+            "workflow"
+          ],
+          "tools": 30
+        }
+      }
+    },
+    "surface_profile": "production-default-builtins-no-mcp-no-host-interpreters-v1"
+  }
+}

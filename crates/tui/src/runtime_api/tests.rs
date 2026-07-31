@@ -33,6 +33,23 @@ fn ci_scaled(base: Duration) -> Duration {
 
 struct MockExecutor;
 
+#[cfg(unix)]
+#[test]
+fn runtime_session_fallback_retains_non_unicode_explicit_home_boundary() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let _lock = lock_test_env();
+    let tmp = tempfile::tempdir().expect("temporary root");
+    let home = tmp.path().join("home");
+    let explicit = tmp.path().join(std::ffi::OsString::from_vec(
+        b"codewhale-\xff-home".to_vec(),
+    ));
+    let _home = EnvVarGuard::set("HOME", &home);
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &explicit);
+
+    assert_eq!(fallback_sessions_dir(), explicit.join("sessions"));
+}
+
 #[test]
 fn thread_route_credential_error_is_bad_request_not_not_found() {
     let credential = map_thread_err(anyhow::anyhow!("DeepSeek API key not found"));

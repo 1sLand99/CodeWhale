@@ -265,13 +265,10 @@ fn configured_heavy_command_limit() -> usize {
 }
 
 fn admission_root() -> PathBuf {
-    if let Some(home) = std::env::var_os("CODEWHALE_HOME")
-        .map(PathBuf::from)
-        .filter(|path| !path.as_os_str().is_empty())
-    {
+    if let Some(home) = codewhale_paths::codewhale_home_override() {
         return home.join("resource-admission");
     }
-    if let Some(home) = crate::config::effective_home_dir() {
+    if let Some(home) = codewhale_paths::user_home() {
         return home.join(".codewhale").join("resource-admission");
     }
     std::env::temp_dir().join("codewhale-resource-admission")
@@ -392,6 +389,22 @@ mod tests {
     }
 
     const NOMINAL_PROBE: StaticMemoryProbe = StaticMemoryProbe(Some(0.9));
+
+    #[test]
+    fn whitespace_codewhale_home_uses_shared_user_home_for_admission_state() {
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::tempdir().expect("temporary root");
+        let home = tmp.path().join("home");
+        let userprofile = tmp.path().join("userprofile");
+        let _home = crate::test_support::EnvVarGuard::set("HOME", &home);
+        let _userprofile = crate::test_support::EnvVarGuard::set("USERPROFILE", &userprofile);
+        let _codewhale_home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", " \t ");
+
+        assert_eq!(
+            admission_root(),
+            home.join(".codewhale").join("resource-admission")
+        );
+    }
 
     #[test]
     fn memory_pressure_classification_and_effective_limit() {

@@ -30,10 +30,10 @@ use subagent_limits::{resolve_subagent_api_timeout_secs, resolve_subagent_heartb
 mod models;
 pub use models::*;
 
-/// Legacy placeholder written into `api_key` when the real credential lives in
-/// the secret store. It is not a credential and must never be treated as one —
-/// including by billing classification, which reads credential *shape* only.
-pub(crate) const API_KEYRING_SENTINEL: &str = "__KEYRING__";
+#[cfg(test)]
+pub(crate) use codewhale_config::API_KEYRING_SENTINEL;
+pub(crate) use codewhale_config::{ConfigApiKeyValueKind, classify_config_api_key_value};
+
 pub const DEFAULT_ZAI_PROVIDER_MAX_CONCURRENCY: usize = 3;
 pub const MAX_PROVIDER_REQUEST_CONCURRENCY: usize = 64;
 
@@ -3784,6 +3784,28 @@ impl Config {
     /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn load(path: Option<PathBuf>, profile: Option<&str>) -> Result<Self> {
+        Self::load_with_environment_policy(path, profile, ConfigEnvironmentPolicy::Runtime)
+    }
+
+    /// Load configuration for a structural diagnostic without materializing
+    /// secret-bearing environment values into the returned configuration.
+    ///
+    /// This still applies the ordinary safe routing, model, and policy
+    /// overrides so doctor describes the runtime the user selected. Provider
+    /// credentials are resolved only inside an explicit live-probe boundary.
+    pub(crate) fn load_structural(path: Option<PathBuf>, profile: Option<&str>) -> Result<Self> {
+        Self::load_with_environment_policy(
+            path,
+            profile,
+            ConfigEnvironmentPolicy::StructuralDiagnostic,
+        )
+    }
+
+    fn load_with_environment_policy(
+        path: Option<PathBuf>,
+        profile: Option<&str>,
+        environment_policy: ConfigEnvironmentPolicy,
+    ) -> Result<Self> {
         let path = resolve_load_config_path(path);
         let mut config = if let Some(path) = path.as_ref() {
             if path.exists() {
@@ -3806,7 +3828,7 @@ impl Config {
             Config::default()
         };
 
-        apply_env_overrides(&mut config);
+        apply_env_overrides(&mut config, environment_policy);
         apply_managed_overrides(&mut config)?;
         apply_requirements(&mut config)?;
         normalize_model_config(&mut config);
@@ -3877,12 +3899,16 @@ impl Config {
             );
         }
         let active_provider = self.api_provider();
-        validate_kimi_code_api_model_id(
+        match validate_kimi_code_api_model_id(
             active_provider,
             &self.deepseek_base_url(),
             &self.default_model(),
-        )
-        .map_err(anyhow::Error::msg)?;
+        ) {
+            Err(error) if error == KIMI_CODE_CLAUDE_ALIAS_GUIDANCE => {
+                return Err(SafeConfigDiagnostic::KimiCodeClaudeAlias.into());
+            }
+            result => result.map_err(anyhow::Error::msg)?,
+        }
         if let Some(ref key) = self.api_key
             && key.trim().is_empty()
         {
@@ -5012,7 +5038,10 @@ impl Config {
         let base = if provider == ApiProvider::XiaomiMimo {
             let config_api_key = self
                 .provider_config_for(provider)
-                .and_then(|entry| entry.api_key.as_deref());
+                .and_then(|entry| entry.api_key.as_deref())
+                .filter(|value| {
+                    classify_config_api_key_value(value) == ConfigApiKeyValueKind::Literal
+                });
             let mode = self
                 .provider_config_for(provider)
                 .and_then(|entry| entry.mode.as_deref());
@@ -5437,8 +5466,7 @@ impl Config {
         if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN)
             && self.config_credentials_are_bound_to_provider_endpoint(provider)
             && let Some(configured) = self.api_key.as_ref()
-            && !configured.trim().is_empty()
-            && configured != API_KEYRING_SENTINEL
+            && classify_config_api_key_value(configured) == ConfigApiKeyValueKind::Literal
         {
             return Ok(configured.clone());
         }
@@ -5503,7 +5531,7 @@ impl Config {
                 .provider_config_string_with_runtime_fallback(provider, |entry| {
                     entry.api_key.clone()
                 })
-            && !configured.trim().is_empty()
+            && classify_config_api_key_value(&configured) == ConfigApiKeyValueKind::Literal
         {
             return Ok(configured);
         }
@@ -5511,8 +5539,7 @@ impl Config {
             && self.uses_legacy_literal_custom_route()
             && self.config_credentials_are_bound_to_provider_endpoint(provider)
             && let Some(configured) = self.api_key.as_ref()
-            && !configured.trim().is_empty()
-            && configured != API_KEYRING_SENTINEL
+            && classify_config_api_key_value(configured) == ConfigApiKeyValueKind::Literal
         {
             return Ok(configured.clone());
         }
@@ -6267,6 +6294,24 @@ impl Config {
     }
 }
 
+/// Controls whether configuration loading may copy secret-bearing environment
+/// values into the in-memory configuration.
+///
+/// Structural diagnostics intentionally retain safe environment routing and
+/// policy fields while refusing values that could be secrets when later
+/// rendered or included in an error path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigEnvironmentPolicy {
+    Runtime,
+    StructuralDiagnostic,
+}
+
+impl ConfigEnvironmentPolicy {
+    const fn permits_secret_bearing_values(self) -> bool {
+        matches!(self, Self::Runtime)
+    }
+}
+
 fn root_deepseek_model_is_foreign_to_direct_provider(provider: ApiProvider, model: &str) -> bool {
     if matches!(
         provider,
@@ -6583,20 +6628,20 @@ fn codewhale_env_var(
     }
 }
 
-fn apply_env_overrides(config: &mut Config) {
+fn apply_env_overrides(config: &mut Config, policy: ConfigEnvironmentPolicy) {
     #[cfg(test)]
     {
         crate::test_support::with_test_env_lock(|| {
-            apply_env_overrides_unlocked(config);
+            apply_env_overrides_unlocked(config, policy);
         })
     }
     #[cfg(not(test))]
     {
-        apply_env_overrides_unlocked(config);
+        apply_env_overrides_unlocked(config, policy);
     }
 }
 
-fn apply_env_overrides_unlocked(config: &mut Config) {
+fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPolicy) {
     if let Ok(value) = codewhale_env_var("CODEWHALE_PROVIDER", "DEEPSEEK_PROVIDER") {
         config.provider = Some(value);
     }
@@ -7072,8 +7117,9 @@ fn apply_env_overrides_unlocked(config: &mut Config) {
             .telecomjs
             .base_url = Some(value);
     }
-    if let Ok(value) =
-        std::env::var("CODEWHALE_HTTP_HEADERS").or_else(|_| std::env::var("DEEPSEEK_HTTP_HEADERS"))
+    if policy.permits_secret_bearing_values()
+        && let Ok(value) = std::env::var("CODEWHALE_HTTP_HEADERS")
+            .or_else(|_| std::env::var("DEEPSEEK_HTTP_HEADERS"))
         && let Ok(headers) = parse_http_headers(&value)
         && !headers.is_empty()
     {
@@ -7492,8 +7538,9 @@ fn apply_env_overrides_unlocked(config: &mut Config) {
     {
         config.sandbox_url = Some(value);
     }
-    if let Ok(value) = std::env::var("CODEWHALE_SANDBOX_API_KEY")
-        .or_else(|_| std::env::var("DEEPSEEK_SANDBOX_API_KEY"))
+    if policy.permits_secret_bearing_values()
+        && let Ok(value) = std::env::var("CODEWHALE_SANDBOX_API_KEY")
+            .or_else(|_| std::env::var("DEEPSEEK_SANDBOX_API_KEY"))
     {
         config.sandbox_api_key = Some(value);
     }
@@ -7502,8 +7549,9 @@ fn apply_env_overrides_unlocked(config: &mut Config) {
     {
         config.managed_config_path = Some(value);
     }
-    if let Ok(value) = std::env::var("CODEWHALE_SEARCH_API_KEY")
-        .or_else(|_| std::env::var("DEEPSEEK_SEARCH_API_KEY"))
+    if policy.permits_secret_bearing_values()
+        && let Ok(value) = std::env::var("CODEWHALE_SEARCH_API_KEY")
+            .or_else(|_| std::env::var("DEEPSEEK_SEARCH_API_KEY"))
         && !value.trim().is_empty()
     {
         config
@@ -8065,21 +8113,18 @@ pub(crate) const MOONSHOT_DIRECT_PLATFORM_MODELS: [&str; 3] = [
     MOONSHOT_KIMI_K2_6_MODEL,
 ];
 
+pub(crate) const KIMI_CODE_CLAUDE_ALIAS_GUIDANCE: &str = "Kimi Code model `k3[1m]` is a Claude Code environment convention, not an API model id. Use model = \"k3\". If your Kimi Code plan includes 1M context, also set context_window = 1048576; otherwise keep the 262144 safe default.";
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SafeConfigDiagnostic {
+    #[error("{}", KIMI_CODE_CLAUDE_ALIAS_GUIDANCE)]
+    KimiCodeClaudeAlias,
+}
+
 /// Fail closed on known-bad model/endpoint pairings (#4687).
 ///
-/// The two canonical endpoints each enforce their explicit model set:
-///
-/// - Exact Kimi Code membership endpoint (api.kimi.com/coding/v1): reject
-///   Claude Code's `k3[1m]` context hint and the known direct-platform ids
-///   (`kimi-k3`, `kimi-k2.7-code`, `kimi-k2.6`); the managed roster (`k3`,
-///   `kimi-for-coding`, `kimi-for-coding-highspeed`) is accepted.
-/// - Exact Moonshot direct platform endpoint (api.moonshot.ai/v1): reject the
-///   membership-only ids (`k3`, `kimi-for-coding`,
-///   `kimi-for-coding-highspeed`); they are membership products, not
-///   direct-platform catalog models.
-///
-/// Custom Moonshot-compatible gateways are left alone: only the two canonical
-/// endpoints enforce the documented model IDs.
+/// Canonical endpoints reject `k3[1m]` and known membership/direct cross-pairings.
+/// Unknown IDs and custom Moonshot-compatible gateways remain pass-through.
 pub(crate) fn validate_kimi_code_api_model_id(
     provider: ApiProvider,
     base_url: &str,
@@ -8095,10 +8140,7 @@ pub(crate) fn validate_kimi_code_api_model_id(
 
     if moonshot_base_url_is_exact_kimi_code(base_url) {
         if model.eq_ignore_ascii_case("k3[1m]") {
-            return Err(
-                "Kimi Code model `k3[1m]` is a Claude Code environment convention, not an API model id. Use model = \"k3\". If your Kimi Code plan includes 1M context, also set context_window = 1048576; otherwise keep the 262144 safe default."
-                    .to_string(),
-            );
+            return Err(KIMI_CODE_CLAUDE_ALIAS_GUIDANCE.to_string());
         }
         for direct_id in MOONSHOT_DIRECT_PLATFORM_MODELS {
             if model.eq_ignore_ascii_case(direct_id) {
@@ -8271,50 +8313,15 @@ pub(crate) fn provider_config_uses_kimi_imported_token(config: &ProviderConfig) 
         .is_some_and(auth_mode_uses_kimi_imported_token)
 }
 
-pub(crate) fn auth_mode_uses_kimi_imported_token(mode: &str) -> bool {
-    matches!(
-        normalize_auth_mode(mode).as_str(),
-        "kimi" | "kimi_oauth" | "kimi_cli" | "oauth"
-    )
-}
+pub(crate) use codewhale_config::{
+    auth_mode_disables_api_key, auth_mode_requires_api_key, auth_mode_uses_kimi_imported_token,
+};
 
 fn provider_config_uses_xai_oauth(config: &ProviderConfig) -> bool {
     config
         .auth_mode
         .as_deref()
         .is_some_and(crate::xai_oauth::auth_mode_uses_xai_oauth)
-}
-
-fn normalize_auth_mode(mode: &str) -> String {
-    mode.trim().to_ascii_lowercase().replace(['-', ' '], "_")
-}
-
-pub(crate) fn auth_mode_requires_api_key(auth_mode: Option<&str>) -> bool {
-    matches!(
-        auth_mode
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(|value| value.to_ascii_lowercase()),
-        Some(value)
-            if matches!(
-                value.as_str(),
-                "api_key" | "api-key" | "apikey" | "bearer" | "bearer-token"
-            )
-    )
-}
-
-pub(crate) fn auth_mode_disables_api_key(auth_mode: Option<&str>) -> bool {
-    matches!(
-        auth_mode
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(|value| value.to_ascii_lowercase()),
-        Some(value)
-            if matches!(
-                value.as_str(),
-                "none" | "off" | "disabled" | "no_auth" | "no-auth" | "anonymous"
-            )
-    )
 }
 
 /// Whether a base URL points at a loopback/unspecified host, i.e. a local
@@ -9142,7 +9149,7 @@ fn credential_secret_store_for_save() -> Option<codewhale_secrets::Secrets> {
 
 #[cfg(test)]
 fn credential_secret_store_for_save() -> Option<codewhale_secrets::Secrets> {
-    let isolated_home = std::env::var_os("CODEWHALE_HOME").is_some_and(|value| !value.is_empty());
+    let isolated_home = codewhale_paths::codewhale_home_is_explicit();
     let explicit_backend = std::env::var_os("CODEWHALE_SECRET_BACKEND")
         .or_else(|| std::env::var_os("DEEPSEEK_SECRET_BACKEND"))
         .is_some_and(|value| !value.is_empty());
@@ -9320,7 +9327,9 @@ pub fn active_provider_has_config_api_key(config: &Config) -> bool {
     if config.config_credentials_are_bound_to_provider_endpoint(provider)
         && config
             .provider_config_string_with_runtime_fallback(provider, |entry| entry.api_key.clone())
-            .is_some_and(|k| !k.trim().is_empty() && k != API_KEYRING_SENTINEL)
+            .is_some_and(|key| {
+                classify_config_api_key_value(&key) == ConfigApiKeyValueKind::Literal
+            })
     {
         return true;
     }
@@ -9335,7 +9344,7 @@ pub fn active_provider_has_config_api_key(config: &Config) -> bool {
         && config
             .api_key
             .as_ref()
-            .is_some_and(|k| !k.trim().is_empty() && k != API_KEYRING_SENTINEL)
+            .is_some_and(|key| classify_config_api_key_value(key) == ConfigApiKeyValueKind::Literal)
 }
 
 #[must_use]
@@ -9421,7 +9430,9 @@ pub fn has_api_key_for(config: &Config, provider: ApiProvider) -> bool {
     if config.config_credentials_are_bound_to_provider_endpoint(provider)
         && config
             .provider_config_string_with_runtime_fallback(provider, |entry| entry.api_key.clone())
-            .is_some_and(|k| !k.trim().is_empty() && k != API_KEYRING_SENTINEL)
+            .is_some_and(|key| {
+                classify_config_api_key_value(&key) == ConfigApiKeyValueKind::Literal
+            })
     {
         return true;
     }
@@ -9441,7 +9452,7 @@ pub fn has_api_key_for(config: &Config, provider: ApiProvider) -> bool {
         && config
             .api_key
             .as_ref()
-            .is_some_and(|k| !k.trim().is_empty() && k != API_KEYRING_SENTINEL)
+            .is_some_and(|key| classify_config_api_key_value(key) == ConfigApiKeyValueKind::Literal)
     {
         return true;
     }
@@ -9576,6 +9587,7 @@ fn provider_config_is_explicit(entry: &ProviderConfig) -> bool {
 /// DeepSeek goes through [`save_api_key`]. Other providers write
 /// `[providers.<name>] api_key = "..."` to `~/.codewhale/config.toml`.
 /// Returns the config file path.
+#[cfg(test)]
 pub fn save_api_key_for(provider: ApiProvider, api_key: &str) -> Result<PathBuf> {
     save_api_key_for_identity(
         &ProviderIdentity {
@@ -10088,20 +10100,6 @@ pub(crate) fn provider_secret_store_api_key(
     provider_secret_store_api_key_with_mode(config, provider, false)
 }
 
-/// Read the durable secret-store layer for a diagnostic without migration or
-/// any write-capable store handle.
-///
-/// Doctor and setup-status output need to report whether a saved credential is
-/// present, but must not turn that inspection into a legacy-store migration.
-/// Normal runtime and authentication paths use [`provider_secret_store_api_key`]
-/// and retain their existing migration behavior.
-pub(crate) fn provider_secret_store_api_key_read_only(
-    config: &Config,
-    provider: ApiProvider,
-) -> Option<String> {
-    provider_secret_store_api_key_with_mode(config, provider, true)
-}
-
 fn provider_secret_store_api_key_with_mode(
     config: &Config,
     provider: ApiProvider,
@@ -10119,7 +10117,7 @@ fn provider_secret_store_api_key_with_mode(
     // Secret-store regressions opt in with an isolated CODEWHALE_HOME and an
     // explicit backend, matching the secrets crate's own test discipline.
     #[cfg(test)]
-    if std::env::var_os("CODEWHALE_HOME").is_none()
+    if !codewhale_paths::codewhale_home_is_explicit()
         || std::env::var_os("CODEWHALE_SECRET_BACKEND").is_none()
     {
         return None;

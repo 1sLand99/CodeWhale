@@ -106,10 +106,22 @@ enum PendingOfflineQueue {
 // Handle (held by the TUI)
 // ---------------------------------------------------------------------------
 
+type PersistRequestSender = mpsc::UnboundedSender<PersistRequest>;
+type PersistRequestReceiver = mpsc::UnboundedReceiver<PersistRequest>;
+
+/// Single construction seam for the production persistence request channel.
+///
+/// The ignored backlog measurement uses this same factory with the receiver
+/// deliberately paused, so a later bounded-channel change cannot leave the
+/// baseline measuring an obsolete representation.
+fn persistence_request_channel() -> (PersistRequestSender, PersistRequestReceiver) {
+    mpsc::unbounded_channel()
+}
+
 /// Lightweight handle that the UI holds to queue persistence work.
 #[derive(Debug, Clone)]
 pub struct PersistActorHandle {
-    tx: mpsc::UnboundedSender<PersistRequest>,
+    tx: PersistRequestSender,
 }
 
 impl PersistActorHandle {
@@ -159,7 +171,7 @@ pub fn try_persist(request: PersistRequest) -> bool {
 pub fn spawn_persistence_actor(
     manager: SessionManager,
 ) -> (PersistActorHandle, tokio::task::JoinHandle<()>) {
-    let (tx, mut rx) = mpsc::unbounded_channel::<PersistRequest>();
+    let (tx, mut rx) = persistence_request_channel();
     let handle = PersistActorHandle { tx };
 
     let task = spawn_supervised(
@@ -345,6 +357,10 @@ fn log_flush_failures(report: &FlushReport) {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "persistence_actor/tests.rs"]
+mod backlog_measurement_tests;
 
 #[cfg(test)]
 mod tests {

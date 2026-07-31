@@ -2756,9 +2756,8 @@ async fn execute_foreground_via_background(
 /// Unified shell tool (#4625).
 ///
 /// The model sees one tool: `Bash` with an `action` parameter
-/// (run | wait | interact | cancel). Legacy names (`exec_shell`,
-/// `exec_shell_wait`, etc.) stay registered as hidden compat aliases
-/// that force the action so saved transcripts replay correctly.
+/// (run | wait | interact | cancel). The per-action `exec_shell*` execution
+/// aliases were removed in v0.9.3.
 pub struct BashTool {
     name: &'static str,
     forced_action: Option<&'static str>,

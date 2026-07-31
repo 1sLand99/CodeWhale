@@ -16,7 +16,8 @@ use axum::http::{HeaderName, StatusCode};
 use axum::response::IntoResponse;
 use codewhale_agent::ModelRegistry;
 use codewhale_config::{
-    ConfigToml, ProviderKind, auth_mode_disables_api_key, is_upstream_auth_header,
+    ConfigApiKeyValueKind, ConfigToml, ProviderKind, auth_mode_disables_api_key,
+    classify_config_api_key_value, is_upstream_auth_header,
     provider::WireFormat,
     provider_base_url_is_official, provider_preserves_custom_base_url_model,
     route::{LogicalModelRef, RouteError, RouteRequest, RouteResolver},
@@ -192,7 +193,9 @@ fn resolve_upstream_api_key(
 ) -> Option<String> {
     if auth_disabled {
         None
-    } else if let Some(configured) = configured {
+    } else if let Some(configured) = configured
+        .filter(|value| classify_config_api_key_value(value) == ConfigApiKeyValueKind::Literal)
+    {
         Some(configured.to_string())
     } else if allow_ambient {
         ambient_provider_env()
@@ -1042,6 +1045,16 @@ api_key = {provider_api_key:?}
 
         assert_eq!(api_key, None);
         assert!(!ambient_was_read.get());
+        for sentinel in [codewhale_config::API_KEYRING_SENTINEL, "  __KEYRING__  "] {
+            assert_eq!(
+                resolve_upstream_api_key(Some(sentinel), false, false, || unreachable!()),
+                None
+            );
+            assert_eq!(
+                resolve_upstream_api_key(Some(sentinel), false, true, || Some("ambient".into())),
+                Some("ambient".to_string())
+            );
+        }
     }
 
     #[test]

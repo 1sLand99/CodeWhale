@@ -811,21 +811,19 @@ impl FleetSetupView {
                         // selection must mint the read capability and validate
                         // only this exact provider/model. Hand off to the host
                         // so rendering stays I/O-free.
-                        if let Some((provider_id, model)) = self.model_routes.get(idx) {
-                            if let Some(provider) = crate::config::ApiProvider::parse(provider_id) {
-                                if crate::tui::provider_picker::external_consent_target_for_provider(
-                                    provider,
-                                )
-                                .is_some()
-                                {
-                                    return ViewAction::Emit(
-                                        ViewEvent::FleetSetupExternalConsentActivationRequested {
-                                            provider_id: provider_id.clone(),
-                                            model: model.clone(),
-                                        },
-                                    );
-                                }
-                            }
+                        if let Some((provider_id, model)) = self.model_routes.get(idx)
+                            && let Some(provider) = crate::config::ApiProvider::parse(provider_id)
+                            && crate::tui::provider_picker::external_consent_target_for_provider(
+                                provider,
+                            )
+                            .is_some()
+                        {
+                            return ViewAction::Emit(
+                                ViewEvent::FleetSetupExternalConsentActivationRequested {
+                                    provider_id: provider_id.clone(),
+                                    model: model.clone(),
+                                },
+                            );
                         }
                     }
                     Some(FleetModelRowState::Blocked { .. }) => {

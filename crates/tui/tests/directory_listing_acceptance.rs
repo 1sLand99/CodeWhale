@@ -9,7 +9,7 @@ use tempfile::TempDir;
 const FEATURE_NAME: &str = "Directory listing acceptance";
 const FEATURE_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/tests/features/list_dir_happy_path.feature"
+    "/tests/features/file_list_happy_path.feature"
 );
 const HAPPY_PATH_SCENARIO: &str = "Happy path lists a workspace directory";
 
@@ -54,8 +54,12 @@ fn user_asks(world: &mut DirectoryListingWorld, prompt: String) {
     world.fixture_records = read_jsonl_records(&record_dir.path().join("offline-tool-loop.jsonl"));
 }
 
-#[then(regex = r#"^the simulated LLM should call the "([^"]+)" tool$"#)]
-fn simulated_llm_should_call_tool(world: &mut DirectoryListingWorld, expected_tool: String) {
+#[then(regex = r#"^the simulated LLM should call the "([^"]+)" tool with action "([^"]+)"$"#)]
+fn simulated_llm_should_call_tool(
+    world: &mut DirectoryListingWorld,
+    expected_tool: String,
+    expected_action: String,
+) {
     let first_step = first_report_step(world);
 
     assert_eq!(
@@ -67,6 +71,10 @@ fn simulated_llm_should_call_tool(world: &mut DirectoryListingWorld, expected_to
         Some(expected_tool.as_str())
     );
     assert_eq!(
+        first_step.get("action").and_then(|value| value.as_str()),
+        Some(expected_action.as_str())
+    );
+    assert_eq!(
         first_step.get("success").and_then(|value| value.as_bool()),
         Some(true)
     );
@@ -74,13 +82,20 @@ fn simulated_llm_should_call_tool(world: &mut DirectoryListingWorld, expected_to
     let first_record = world
         .fixture_records
         .first()
-        .expect("recorded list_dir fixture");
+        .expect("recorded File.list fixture");
     assert_eq!(
         first_record
             .get("request")
-            .and_then(|request| request.get("step"))
-            .and_then(|step| step.as_str()),
+            .and_then(|request| request.get("tool"))
+            .and_then(|tool| tool.as_str()),
         Some(expected_tool.as_str())
+    );
+    assert_eq!(
+        first_record
+            .get("request")
+            .and_then(|request| request.get("action"))
+            .and_then(|action| action.as_str()),
+        Some(expected_action.as_str())
     );
 }
 
@@ -90,12 +105,12 @@ fn tool_output_should_include(world: &mut DirectoryListingWorld, step: &Step) {
     let list_output = first_step
         .get("output")
         .and_then(|value| value.as_str())
-        .expect("list_dir output");
+        .expect("File.list output");
 
     for expected_entry in data_table_column(step, "entry") {
         assert!(
             list_output.contains(&expected_entry),
-            "list_dir output should include {expected_entry}: {list_output}"
+            "File.list output should include {expected_entry}: {list_output}"
         );
     }
 }

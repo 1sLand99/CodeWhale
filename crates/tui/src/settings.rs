@@ -474,17 +474,6 @@ pub struct Settings {
     ///   *do* support DEC 2026; it is purely a rendering-quality knob,
     ///   not a correctness one.
     pub synchronized_output: String,
-    /// Prefer the external `pdftotext` binary (Poppler) over the bundled
-    /// pure-Rust `pdf-extract` extractor for PDF reads in `read_file`.
-    /// Pure-Rust extraction is the v0.8.32 default because it removes the
-    /// install-poppler-first hurdle most users hit, but `pdftotext -layout`
-    /// still wins for column-heavy or complex-table PDFs (academic papers
-    /// laid out in two columns, financial filings, etc.). Set to `true` to
-    /// route every PDF read through `pdftotext` instead — when the binary
-    /// is missing in that mode the tool returns the structured
-    /// `binary_unavailable` response with an install hint, matching the
-    /// pre-v0.8.32 behavior.
-    pub prefer_external_pdftotext: bool,
     /// Follow symbolic links during workspace file discovery walks (`@`-mention
     /// completion, fuzzy resolve, and the file-index builder). When `false`
     /// (default) symlinked directories are skipped, which keeps walks fast and
@@ -583,7 +572,6 @@ impl Default for Settings {
             // surfaces do not compete with a second spinner.
             status_indicator: "cw".to_string(),
             synchronized_output: "auto".to_string(),
-            prefer_external_pdftotext: false,
             workspace_follow_symlinks: false,
             feature_intro_shown: false,
             yolo_deprecation_shown: false,
@@ -1276,9 +1264,6 @@ impl Settings {
                 }
                 self.synchronized_output = normalized.to_string();
             }
-            "prefer_external_pdftotext" | "external_pdftotext" | "pdftotext" => {
-                self.prefer_external_pdftotext = parse_bool(value)?;
-            }
             "workspace_follow_symlinks" | "follow_symlinks" => {
                 self.workspace_follow_symlinks = parse_bool(value)?;
             }
@@ -1489,10 +1474,6 @@ impl Settings {
             self.synchronized_output
         ));
         lines.push(format!(
-            "  prefer_external_pdftotext: {}",
-            self.prefer_external_pdftotext
-        ));
-        lines.push(format!(
             "  workspace_follow_symlinks: {}",
             self.workspace_follow_symlinks
         ));
@@ -1671,10 +1652,6 @@ impl Settings {
             (
                 "synchronized_output",
                 "DEC 2026 synchronized output: auto, on, off (set off if your terminal flickers)",
-            ),
-            (
-                "prefer_external_pdftotext",
-                "Route PDF reads through Poppler's pdftotext instead of the bundled pure-Rust extractor: on/off (default off)",
             ),
             (
                 "workspace_follow_symlinks",

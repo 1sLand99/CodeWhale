@@ -1,10 +1,98 @@
 use codewhale_protocol::{
     AppRequest, EventFrame, ThreadGoal, ThreadGoalProgressParams, ThreadGoalSetParams,
-    ThreadGoalStatus, ThreadListParams, ThreadRequest, ThreadResumeParams, UserInputAnswerEvent,
-    UserInputOptionEvent, UserInputQuestionEvent, UserInputRequestEvent,
+    ThreadGoalStatus, ThreadListParams, ThreadRequest, ThreadResumeParams, ToolOutput,
+    UserInputAnswerEvent, UserInputOptionEvent, UserInputQuestionEvent, UserInputRequestEvent,
     runtime::{RUNTIME_EVENT_ENVELOPE_SCHEMA_VERSION, RuntimeEventEnvelope},
 };
 use serde_json::{Value, json};
+
+#[test]
+fn mcp_tool_output_public_shape_remains_source_compatible() {
+    let output = ToolOutput::Mcp {
+        result: json!({"content": []}),
+    };
+    let ToolOutput::Mcp { result } = output else {
+        panic!("constructed MCP output changed variant")
+    };
+    assert_eq!(result, json!({"content": []}));
+}
+
+#[test]
+fn tool_output_success_accessor_has_function_and_mcp_parity() {
+    let cases = [
+        (
+            ToolOutput::Function {
+                body: Some(json!({"kind": "function-success"})),
+                success: true,
+            },
+            true,
+        ),
+        (
+            ToolOutput::Function {
+                body: Some(json!({"kind": "function-failure"})),
+                success: false,
+            },
+            false,
+        ),
+        (
+            ToolOutput::Mcp {
+                result: json!({"kind": "mcp-success", "isError": false}),
+            },
+            true,
+        ),
+        (
+            ToolOutput::Mcp {
+                result: json!({"kind": "mcp-failure", "isError": true}),
+            },
+            false,
+        ),
+    ];
+
+    assert_eq!(
+        serde_json::to_string(&cases[0].0).expect("serialize successful function output"),
+        r#"{"type":"function","body":{"kind":"function-success"},"success":true}"#,
+        "successful Function output must retain its existing wire shape"
+    );
+    for (output, expected) in cases {
+        assert_eq!(output.success(), expected, "output: {output:?}");
+    }
+}
+
+#[test]
+fn mcp_is_error_round_trips_and_legacy_bytes_remain_successful() {
+    let failed = ToolOutput::Mcp {
+        result: json!({"message": "application failure", "isError": true}),
+    };
+    let encoded = serde_json::to_string(&failed).expect("serialize failed MCP output");
+    assert!(encoded.contains(r#""isError":true"#));
+    let decoded: ToolOutput = serde_json::from_str(&encoded).expect("round-trip MCP output");
+    assert!(!decoded.success());
+
+    let legacy = r#"{"type":"mcp","result":{"message":"legacy success"}}"#;
+    let decoded: ToolOutput = serde_json::from_str(legacy).expect("deserialize legacy MCP output");
+    assert!(decoded.success());
+    assert_eq!(
+        serde_json::to_string(&decoded).expect("re-serialize legacy MCP output"),
+        legacy,
+        "success=true must preserve the legacy MCP wire representation"
+    );
+}
+
+#[test]
+fn mcp_is_error_metadata_fails_closed_when_present_but_not_boolean() {
+    for malformed in [
+        Value::Null,
+        json!("unknown"),
+        json!(1),
+        json!({"unexpected": true}),
+        json!([false]),
+    ] {
+        let output = ToolOutput::Mcp {
+            result: json!({"content": [], "isError": malformed}),
+        };
+        assert!(!output.success(), "malformed output: {output:?}");
+    }
+}
 
 #[test]
 fn thread_resume_params_round_trip() {

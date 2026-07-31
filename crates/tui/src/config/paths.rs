@@ -1,8 +1,8 @@
 //! Filesystem path resolution helpers for config/cache/workspace locations.
 //!
 //! Pure path-building helpers extracted verbatim from `config.rs`. They depend
-//! only on `std`, `dirs`, and `shellexpand` plus one another, so they form a
-//! clean leaf. `config.rs` pulls them back in (`use paths::{...}`) for the
+//! only on `std`, `codewhale-paths`, and `shellexpand` plus one another, so they
+//! form a clean leaf. `config.rs` pulls them back in (`use paths::{...}`) for the
 //! workspace-trust and config-loading logic that stays there, and re-exports
 //! the two `pub(crate)` entry points (`effective_home_dir`, `expand_path`) so
 //! external `crate::config::` callers resolve unchanged (#3311).
@@ -43,10 +43,7 @@ fn default_config_path_from_environment() -> Option<PathBuf> {
 }
 
 pub(crate) fn codewhale_home_dir() -> Option<PathBuf> {
-    std::env::var_os("CODEWHALE_HOME").and_then(|path| {
-        let path = PathBuf::from(path);
-        (!path.as_os_str().is_empty()).then_some(path)
-    })
+    codewhale_paths::codewhale_home_override()
 }
 
 pub(crate) fn home_config_path() -> Option<PathBuf> {
@@ -162,44 +159,31 @@ pub(crate) fn expand_path(path: &str) -> PathBuf {
 }
 
 pub(crate) fn default_skills_dir() -> Option<PathBuf> {
-    effective_home_dir().map(|home| home.join(".codewhale").join("skills"))
+    default_user_state_path("skills")
 }
 
 pub(crate) fn default_mcp_config_path() -> Option<PathBuf> {
-    effective_home_dir().map(|home| {
-        let primary = home.join(".codewhale").join("mcp.json");
-        if primary.exists() {
-            return primary;
-        }
-        let legacy = home.join(".deepseek").join("mcp.json");
-        if legacy.exists() {
-            return legacy;
-        }
-        primary
-    })
+    default_user_state_path("mcp.json")
 }
 
 pub(crate) fn default_notes_path() -> Option<PathBuf> {
-    effective_home_dir().map(|home| {
-        let primary = home.join(".codewhale").join("notes.txt");
-        if primary.exists() {
-            return primary;
-        }
-        let legacy = home.join(".deepseek").join("notes.txt");
-        if legacy.exists() {
-            return legacy;
-        }
-        primary
-    })
+    default_user_state_path("notes.txt")
 }
 
 pub(crate) fn default_memory_path() -> Option<PathBuf> {
+    default_user_state_path("memory.md")
+}
+
+fn default_user_state_path(name: &str) -> Option<PathBuf> {
+    if let Some(home) = codewhale_home_dir() {
+        return Some(home.join(name));
+    }
     effective_home_dir().map(|home| {
-        let primary = home.join(".codewhale").join("memory.md");
+        let primary = home.join(".codewhale").join(name);
         if primary.exists() {
             return primary;
         }
-        let legacy = home.join(".deepseek").join("memory.md");
+        let legacy = home.join(".deepseek").join(name);
         if legacy.exists() {
             return legacy;
         }

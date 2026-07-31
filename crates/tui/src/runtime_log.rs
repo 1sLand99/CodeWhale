@@ -216,8 +216,8 @@ pub(crate) fn log_directory() -> Option<PathBuf> {
     // check the env var directly rather than codewhale_home()'s Ok/Err because
     // that helper succeeds (returns $HOME/.codewhale) even when the override is
     // unset, which would short-circuit the legacy fallback below.
-    if let Some(home) = std::env::var_os("CODEWHALE_HOME").filter(|value| !value.is_empty()) {
-        return Some(PathBuf::from(home).join("logs"));
+    if let Some(home) = codewhale_paths::codewhale_home_override() {
+        return Some(home.join("logs"));
     }
     let resolve = |base: PathBuf| -> Option<PathBuf> {
         let primary = base.join(".codewhale").join("logs");
@@ -230,17 +230,7 @@ pub(crate) fn log_directory() -> Option<PathBuf> {
         }
         Some(primary)
     };
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
-        && !home.as_os_str().is_empty()
-    {
-        return resolve(home);
-    }
-    if let Some(userprofile) = std::env::var_os("USERPROFILE").map(PathBuf::from)
-        && !userprofile.as_os_str().is_empty()
-    {
-        return resolve(userprofile);
-    }
-    crate::config::effective_home_dir().and_then(resolve)
+    codewhale_paths::user_home().and_then(resolve)
 }
 
 fn log_file_name(date: &str, pid: u32) -> String {
@@ -369,6 +359,38 @@ fn redirect_stderr_to(
 mod tests {
     use super::*;
     use std::fs::FileTimes;
+
+    #[test]
+    fn whitespace_home_override_is_consistent_across_tui_state_entry_points() {
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempfile::TempDir::new().expect("temporary root");
+        let home = tmp.path().join("home");
+        let userprofile = tmp.path().join("userprofile");
+        let _home = crate::test_support::EnvVarGuard::set("HOME", &home);
+        let _userprofile = crate::test_support::EnvVarGuard::set("USERPROFILE", &userprofile);
+        let _codewhale_home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", " \t ");
+        let _config_path = crate::test_support::EnvVarGuard::remove("CODEWHALE_CONFIG_PATH");
+        let _legacy_config_path = crate::test_support::EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
+        let primary = home.join(".codewhale");
+
+        assert_eq!(crate::config::effective_home_dir(), Some(home.clone()));
+        assert_eq!(
+            crate::config::workspace_trust_config_candidate_paths(),
+            vec![
+                primary.join("config.toml"),
+                home.join(".deepseek").join("config.toml")
+            ]
+        );
+        assert_eq!(log_directory(), Some(primary.join("logs")));
+        assert_eq!(
+            crate::automation_manager::default_automations_dir(),
+            primary.join("automations")
+        );
+        assert_eq!(
+            crate::session_manager::default_sessions_dir().expect("session directory"),
+            primary.join("sessions")
+        );
+    }
 
     fn set_modified(path: &Path, modified: SystemTime) {
         let file = OpenOptions::new().write(true).open(path).unwrap();

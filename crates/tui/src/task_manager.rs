@@ -540,7 +540,8 @@ impl TaskExecutor for EngineTaskExecutor {
 
             let batch = match self
                 .runtime_threads
-                .events_since(&thread.id, Some(seen_seq))
+                .events_since_async(&thread.id, Some(seen_seq))
+                .await
             {
                 Ok(batch) => batch,
                 Err(err) => {
@@ -1854,7 +1855,10 @@ pub fn default_tasks_dir() -> PathBuf {
             return PathBuf::from(path);
         }
     }
-    crate::config::effective_home_dir()
+    if let Some(home) = codewhale_paths::codewhale_home_override() {
+        return home.join("tasks");
+    }
+    codewhale_paths::user_home()
         .map(|home| default_tasks_dir_for_home(&home))
         .unwrap_or_else(|| PathBuf::from(".codewhale").join("tasks"))
 }
@@ -1894,6 +1898,7 @@ pub async fn wait_for_terminal_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{EnvVarGuard, lock_test_env};
     use std::fs;
     use tokio::time::Duration;
 
@@ -2452,6 +2457,91 @@ mod tests {
         assert_eq!(
             default_tasks_dir_for_home(home),
             home.join(".codewhale").join("tasks")
+        );
+    }
+
+    #[test]
+    fn task_and_runtime_roots_honor_explicit_codewhale_home() {
+        let _lock = lock_test_env();
+        let temp_root = tempfile::tempdir().unwrap();
+        let ambient_home = temp_root.path().join("ambient-home");
+        let explicit_home = temp_root.path().join("explicit-home");
+        std::fs::create_dir_all(ambient_home.join(".deepseek").join("tasks")).unwrap();
+        let _home = EnvVarGuard::set("HOME", &ambient_home);
+        let _userprofile = EnvVarGuard::set("USERPROFILE", &ambient_home);
+        let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &explicit_home);
+        let _tasks_override = EnvVarGuard::remove("CODEWHALE_TASKS_DIR");
+        let _legacy_tasks_override = EnvVarGuard::remove("DEEPSEEK_TASKS_DIR");
+        let _runtime_override = EnvVarGuard::remove("CODEWHALE_RUNTIME_DIR");
+        let _legacy_runtime_override = EnvVarGuard::remove("DEEPSEEK_RUNTIME_DIR");
+
+        let task_root = default_tasks_dir();
+        let task_manager =
+            TaskManagerConfig::from_runtime(&Config::default(), PathBuf::from("."), None, None);
+        let runtime = RuntimeThreadManagerConfig::from_task_data_dir(task_manager.data_dir.clone());
+
+        assert_eq!(task_root, explicit_home.join("tasks"));
+        assert_eq!(task_manager.data_dir, task_root);
+        assert_eq!(runtime.task_data_dir, task_root);
+        assert_eq!(
+            runtime.data_dir,
+            explicit_home.join("tasks").join("runtime")
+        );
+    }
+
+    #[test]
+    fn whitespace_codewhale_home_keeps_ambient_legacy_task_and_runtime_fallbacks() {
+        let _lock = lock_test_env();
+        let temp_root = tempfile::tempdir().unwrap();
+        let ambient_home = temp_root.path().join("ambient-home");
+        let legacy_tasks = ambient_home.join(".deepseek").join("tasks");
+        std::fs::create_dir_all(&legacy_tasks).unwrap();
+        let _home = EnvVarGuard::set("HOME", &ambient_home);
+        let _userprofile = EnvVarGuard::set("USERPROFILE", &ambient_home);
+        let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", " \t ");
+        let _tasks_override = EnvVarGuard::remove("CODEWHALE_TASKS_DIR");
+        let _legacy_tasks_override = EnvVarGuard::remove("DEEPSEEK_TASKS_DIR");
+        let _runtime_override = EnvVarGuard::remove("CODEWHALE_RUNTIME_DIR");
+        let _legacy_runtime_override = EnvVarGuard::remove("DEEPSEEK_RUNTIME_DIR");
+
+        let task_root = default_tasks_dir();
+        let task_manager =
+            TaskManagerConfig::from_runtime(&Config::default(), PathBuf::from("."), None, None);
+        let runtime = RuntimeThreadManagerConfig::from_task_data_dir(task_manager.data_dir.clone());
+
+        assert_eq!(task_root, legacy_tasks);
+        assert_eq!(task_manager.data_dir, task_root);
+        assert_eq!(runtime.task_data_dir, task_root);
+        assert_eq!(runtime.data_dir, task_root.join("runtime"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_unicode_codewhale_home_is_preserved_by_task_and_runtime_roots() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _lock = lock_test_env();
+        let temp_root = tempfile::tempdir().unwrap();
+        let explicit_home = temp_root.path().join(std::ffi::OsString::from_vec(
+            b"codewhale-\xff-home".to_vec(),
+        ));
+        let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &explicit_home);
+        let _tasks_override = EnvVarGuard::remove("CODEWHALE_TASKS_DIR");
+        let _legacy_tasks_override = EnvVarGuard::remove("DEEPSEEK_TASKS_DIR");
+        let _runtime_override = EnvVarGuard::remove("CODEWHALE_RUNTIME_DIR");
+        let _legacy_runtime_override = EnvVarGuard::remove("DEEPSEEK_RUNTIME_DIR");
+
+        let task_root = default_tasks_dir();
+        let task_manager =
+            TaskManagerConfig::from_runtime(&Config::default(), PathBuf::from("."), None, None);
+        let runtime = RuntimeThreadManagerConfig::from_task_data_dir(task_manager.data_dir.clone());
+
+        assert_eq!(task_root, explicit_home.join("tasks"));
+        assert_eq!(task_manager.data_dir, task_root);
+        assert_eq!(runtime.task_data_dir, task_root);
+        assert_eq!(
+            runtime.data_dir,
+            explicit_home.join("tasks").join("runtime")
         );
     }
 }

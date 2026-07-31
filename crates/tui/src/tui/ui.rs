@@ -83,6 +83,7 @@ use crate::tools::shell::{ShellJobSnapshot, ShellStatus};
 use crate::tools::spec::{RuntimeToolServices, ToolResult};
 use crate::tools::subagent::{MailboxMessage, SubAgentStatus, subagent_progress_tool_display_name};
 use crate::tui::auto_router;
+use crate::tui::clipboard::ClipboardContent;
 use crate::tui::color_compat::ColorCompatBackend;
 use crate::tui::command_palette::{
     CommandPaletteView, build_entries_with_plugins as build_command_palette_entries,
@@ -816,13 +817,6 @@ fn advance_after_trust_directory_choice(app: &mut App) {
     }
 }
 
-fn back_from_api_key_onboarding(app: &mut App) {
-    app.onboarding = OnboardingState::Provider;
-    app.api_key_input.clear();
-    app.api_key_cursor = 0;
-    app.status_message = None;
-}
-
 /// Where a key goes while onboarding owns the screen (#4763).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OnboardingKeyRoute {
@@ -834,9 +828,9 @@ enum OnboardingKeyRoute {
     /// Escape belongs to the picker so its revert path runs; the shell must
     /// not pop the modal and strand a previewed-but-unsaved theme.
     ThemePicker,
-    /// Take the advertised offline exit (#3927). Reachable from the Provider
-    /// and API-key steps even while the provider picker owns the screen, so
-    /// the choice is never hidden behind a modal the user cannot satisfy.
+    /// Take the advertised offline exit (#3927). Reachable from Provider
+    /// setup even while the provider picker owns the screen, so the choice is
+    /// never hidden behind a modal the user cannot satisfy.
     ExploreOffline,
     /// Fall through to the legacy onboarding key switch.
     Legacy,
@@ -844,8 +838,8 @@ enum OnboardingKeyRoute {
 
 /// Ctrl+O — the one gesture that selects "explore offline".
 ///
-/// A plain letter cannot be used: the API-key screen is a text field and would
-/// swallow it into the draft secret.
+/// A plain letter cannot be used: the provider picker key-entry stage is a
+/// text field and would swallow it into the draft secret.
 fn is_explore_offline_shortcut(key: &KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O'))
         && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -871,11 +865,7 @@ fn onboarding_key_route(
     }
     // Checked before the picker claim: the offline exit must stay reachable
     // from behind a modal the user cannot satisfy.
-    if matches!(
-        onboarding,
-        OnboardingState::Provider | OnboardingState::ApiKey
-    ) && is_explore_offline_shortcut(key)
-    {
+    if onboarding == OnboardingState::Provider && is_explore_offline_shortcut(key) {
         return OnboardingKeyRoute::ExploreOffline;
     }
     if onboarding == OnboardingState::Provider && top_kind == Some(ModalKind::ProviderPicker) {
@@ -929,29 +919,17 @@ fn complete_provider_picker_onboarding(app: &mut App, provider: ApiProvider) {
     app.onboarding_needs_api_key = false;
     app.api_key_env_only = false;
     app.offline_mode = false;
-    onboarding::advance_onboarding_after_api_key(app);
+    onboarding::advance_onboarding_after_provider(app);
 }
 
-async fn submit_keyless_onboarding_provider(
+fn complete_provider_picker_onboarding_if_switched(
     app: &mut App,
-    engine_handle: &mut EngineHandle,
-    config: &mut Config,
-) -> bool {
-    let provider = app.onboarding_provider;
-    if !onboarding::onboarding_provider_allows_empty_api_key(config, provider) {
-        return false;
+    provider: ApiProvider,
+    switched: bool,
+) {
+    if switched && app.onboarding == OnboardingState::Provider {
+        complete_provider_picker_onboarding(app, provider);
     }
-    if !switch_provider(app, engine_handle, config, provider, None).await {
-        return false;
-    }
-
-    app.api_key_input.clear();
-    app.api_key_cursor = 0;
-    app.onboarding_needs_api_key = false;
-    app.api_key_env_only = false;
-    app.offline_mode = false;
-    onboarding::advance_onboarding_after_api_key(app);
-    true
 }
 
 fn surface_prompt_override_notices(app: &mut App) {
@@ -2386,7 +2364,6 @@ async fn build_preview_request_inputs(
                 app.hunt.verdict.goal_status(),
                 app.hunt.token_budget,
                 app.translation_enabled,
-                app.show_thinking,
                 app.verbosity.clone(),
             );
             posture(
@@ -2427,16 +2404,13 @@ fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         instructions: configured_instruction_sources(config),
         project_context_pack_enabled: config.project_context_pack_enabled(),
         translation_enabled: app.translation_enabled,
-        show_thinking: app.show_thinking,
         verbosity: app.verbosity.clone(),
-        // Effectively unlimited. V4 has a 1M context window and the user
-        // wants the model running until it's actually done. The previous cap
-        // of 100 hit the ceiling on long multi-step plans (wide refactors,
-        // sub-agent orchestration) and presented as the agent "giving up
-        // mid-task". `u32::MAX` is the type ceiling; users can still
-        // interrupt with Ctrl+C / Esc, and a turn naturally ends when the
-        // model stops emitting tool calls. A real runaway is rare and
-        // human-noticeable; we trust the operator over a hard step cap.
+        // Effectively unlimited: the previous cap of 100 hit the ceiling on
+        // long multi-step plans (wide refactors, sub-agent orchestration) and
+        // presented as the agent "giving up mid-task". `u32::MAX` is the type
+        // ceiling; users can still interrupt with Ctrl+C / Esc, and a turn
+        // naturally ends when the model stops emitting tool calls. A real
+        // runaway is rare and human-noticeable; we trust the operator.
         max_steps: u32::MAX,
         max_subagents,
         max_admitted_subagents: config
@@ -2460,6 +2434,7 @@ fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         subagent_token_budget: config.subagent_token_budget_for_provider(provider),
         allowed_tools: app.active_allowed_tools.clone(),
         disallowed_tools: None,
+        max_tool_calls: None,
         hook_executor: app.runtime_services.hook_executor.clone(),
         network_policy: config.network.clone().map(|toml_cfg| {
             crate::network_policy::NetworkPolicyDecider::with_default_audit(toml_cfg.into_runtime())
@@ -2583,7 +2558,6 @@ fn build_app_system_prompt_with_goal(
                 &app.model,
                 app.active_route_limits,
             )),
-            show_thinking: app.show_thinking,
             verbosity: app.verbosity.as_deref(),
             skills_scan_codewhale_only: app.skills_scan_codewhale_only,
             plugin_registry: Some(app.plugin_registry.as_ref()),
@@ -3002,6 +2976,61 @@ fn toggle_settings_view(app: &mut App) {
         app.view_stack.push(ConfigView::new_for_app(app));
     }
     app.needs_redraw = true;
+}
+
+/// Route text from either clipboard transport into the canonical provider
+/// picker. Keeping this small seam pure lets tests exercise ordinary
+/// Cmd/Ctrl+V without reading the developer's real clipboard.
+fn paste_text_into_provider_picker(app: &mut App, text: &str) -> bool {
+    if app.view_stack.top_kind() != Some(ModalKind::ProviderPicker) {
+        return false;
+    }
+    let _ = app.view_stack.handle_paste(text);
+    true
+}
+
+/// Read an ordinary Cmd/Ctrl+V clipboard shortcut for the provider picker.
+/// Images are deliberately consumed but ignored: an open credential modal
+/// must never leak unsupported clipboard content into the composer beneath it.
+fn paste_provider_picker_from_clipboard(app: &mut App) -> bool {
+    if app.view_stack.top_kind() != Some(ModalKind::ProviderPicker) {
+        return false;
+    }
+    if app.clipboard.requires_terminal_paste() {
+        app.status_message = Some(app.tr(MessageId::ClipboardSshPasteHint).into_owned());
+        return true;
+    }
+    if let Some(ClipboardContent::Text(text)) = app.clipboard.read(app.workspace.as_path()) {
+        let _ = paste_text_into_provider_picker(app, &text);
+    }
+    true
+}
+
+/// Route one terminal bracketed-paste event without exposing its contents.
+///
+/// Keeping the routing in one function makes the credential and ordinary
+/// composer paths exercise the same observability boundary.
+fn handle_bracketed_paste(app: &mut App, text: &str) {
+    tracing::debug!(
+        paste_bytes = text.len(),
+        paste_chars = text.chars().count(),
+        "Received bracketed paste event"
+    );
+    // Once a real bracketed-paste event has been observed in this session,
+    // the rapid-keystroke heuristic in paste_burst is redundant — disable it
+    // so fast typing / IME commits / autocomplete bursts don't get
+    // mis-classified as a paste.
+    app.bracketed_paste_seen = true;
+    if app.is_history_search_active() {
+        app.history_search_insert_str(text);
+    } else if paste_text_into_provider_picker(app, text) || app.view_stack.handle_paste(text) {
+        // Modal consumed the paste (e.g. provider picker key entry).
+    } else if !app.view_stack.is_empty() {
+        // A non-consumed modal is open — don't leak paste into composer.
+    } else {
+        // Paste into main input.
+        app.insert_paste_text(text);
+    }
 }
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -5455,31 +5484,7 @@ async fn run_event_loop(
 
             // Handle bracketed paste events
             if let Event::Paste(text) = &evt {
-                tracing::debug!(
-                    paste_len = text.len(),
-                    preview = %text.chars().take(80).collect::<String>(),
-                    "Received bracketed paste event"
-                );
-                // Once a real bracketed-paste event has been observed in
-                // this session, the rapid-keystroke heuristic in
-                // paste_burst is redundant — disable it so fast typing /
-                // IME commits / autocomplete bursts don't get
-                // mis-classified as a paste.
-                app.bracketed_paste_seen = true;
-                if app.onboarding == OnboardingState::ApiKey {
-                    // Paste into API key input
-                    app.insert_api_key_str(text);
-                    onboarding::sync_api_key_validation_status(app, config, false);
-                } else if app.is_history_search_active() {
-                    app.history_search_insert_str(text);
-                } else if app.view_stack.handle_paste(text) {
-                    // Modal consumed the paste (e.g. provider picker key entry)
-                } else if !app.view_stack.is_empty() {
-                    // A non-consumed modal is open — don't leak paste into composer
-                } else {
-                    // Paste into main input
-                    app.insert_paste_text(text);
-                }
+                handle_bracketed_paste(app, text);
                 continue;
             }
 
@@ -5905,6 +5910,12 @@ async fn run_event_loop(
                 // `ProviderPickerDismissed` runs the same non-mutating
                 // onboarding back-transition the shell used to force.
                 OnboardingKeyRoute::ProviderPicker => {
+                    if key_shortcuts::is_paste_shortcut(&key)
+                        && paste_provider_picker_from_clipboard(app)
+                    {
+                        app.needs_redraw = true;
+                        continue;
+                    }
                     let events = app.view_stack.handle_key(key);
                     app.needs_redraw = true;
                     if handle_view_events_boxed(
@@ -5958,9 +5969,6 @@ async fn run_event_loop(
                         let _ = engine_handle.send(Op::Shutdown).await;
                         return Ok(());
                     }
-                    KeyCode::Esc if app.onboarding == OnboardingState::ApiKey => {
-                        back_from_api_key_onboarding(app);
-                    }
                     KeyCode::Esc if app.onboarding == OnboardingState::Provider => {
                         back_from_provider_onboarding(app);
                     }
@@ -5976,6 +5984,7 @@ async fn run_event_loop(
                     }
                     KeyCode::Esc if app.onboarding == OnboardingState::MentalModels => {
                         onboarding::back_from_mental_models(app);
+                        open_onboarding_provider_picker(app, config, &engine_handle, true).await;
                     }
                     _ if app.onboarding == OnboardingState::MentalModels
                         && is_permission_cycle_shortcut(&key) =>
@@ -6041,64 +6050,6 @@ async fn run_event_loop(
                             open_onboarding_provider_picker(app, config, &engine_handle, false)
                                 .await;
                         }
-                        OnboardingState::ApiKey => {
-                            let key = app.api_key_input.trim().to_string();
-                            if let onboarding::ApiKeyValidation::Reject(message) =
-                                onboarding::validate_api_key_for_onboarding(
-                                    config,
-                                    app.onboarding_provider,
-                                    &key,
-                                )
-                            {
-                                app.status_message = Some(message);
-                                continue;
-                            }
-                            if key.is_empty() {
-                                let _ = submit_keyless_onboarding_provider(
-                                    app,
-                                    &mut engine_handle,
-                                    config,
-                                )
-                                .await;
-                                continue;
-                            }
-                            match app.submit_api_key() {
-                                Ok(saved) => {
-                                    // Surface where the key landed so the
-                                    // user can verify the shared config
-                                    // file path before the welcome
-                                    // screen advances. The toast queue
-                                    // outlives the onboarding state
-                                    // transition, so it stays visible on
-                                    // the next screen too.
-                                    app.push_status_toast(
-                                        format!("API key saved to {}", saved.describe()),
-                                        StatusToastLevel::Info,
-                                        Some(4_000),
-                                    );
-                                    app.status_message = None;
-                                    mirror_saved_api_key_in_config(
-                                        config,
-                                        app.onboarding_provider,
-                                        key.clone(),
-                                    );
-                                    switch_provider(
-                                        app,
-                                        &mut engine_handle,
-                                        config,
-                                        app.onboarding_provider,
-                                        None,
-                                    )
-                                    .await;
-                                    app.offline_mode = false;
-
-                                    onboarding::advance_onboarding_after_api_key(app);
-                                }
-                                Err(e) => {
-                                    app.status_message = Some(e.to_string());
-                                }
-                            }
-                        }
                         OnboardingState::TrustDirectory => {
                             // Trusting a workspace is a security boundary, so it
                             // must be a deliberate choice. Enter — the "advance"
@@ -6144,32 +6095,6 @@ async fn run_event_loop(
                     KeyCode::Esc if app.onboarding == OnboardingState::TrustDirectory => {
                         let _ = engine_handle.send(Op::Shutdown).await;
                         return Ok(());
-                    }
-                    KeyCode::Backspace if app.onboarding == OnboardingState::ApiKey => {
-                        app.delete_api_key_char();
-                        onboarding::sync_api_key_validation_status(app, config, false);
-                    }
-                    KeyCode::Char('h')
-                        if key_shortcuts::is_ctrl_h_backspace(&key)
-                            && app.onboarding == OnboardingState::ApiKey =>
-                    {
-                        app.delete_api_key_char();
-                        onboarding::sync_api_key_validation_status(app, config, false);
-                    }
-                    _ if key_shortcuts::is_paste_shortcut(&key)
-                        && app.onboarding == OnboardingState::ApiKey =>
-                    {
-                        // Cmd+V / Ctrl+V paste (bracketed paste handled above)
-                        if app.paste_api_key_from_clipboard() {
-                            onboarding::sync_api_key_validation_status(app, config, false);
-                        }
-                    }
-                    KeyCode::Char(c)
-                        if app.onboarding == OnboardingState::ApiKey
-                            && key_shortcuts::is_text_input_key(&key) =>
-                    {
-                        app.insert_api_key_char(c);
-                        onboarding::sync_api_key_validation_status(app, config, false);
                     }
                     _ => {}
                 }
@@ -6429,6 +6354,12 @@ async fn run_event_loop(
             }
 
             if !app.view_stack.is_empty() {
+                if key_shortcuts::is_paste_shortcut(&key)
+                    && paste_provider_picker_from_clipboard(app)
+                {
+                    app.needs_redraw = true;
+                    continue;
+                }
                 let closing_work_inspector = app.work_surface.opened.is_some()
                     && app.view_stack.top_kind() == Some(ModalKind::Pager);
                 let events = app.view_stack.handle_key(key);
@@ -9894,7 +9825,6 @@ struct UserDispatchPrepare {
     auto_approve: bool,
     approval_mode: ApprovalMode,
     translation_enabled: bool,
-    show_thinking: bool,
     allowed_tools: Option<Vec<String>>,
     hook_executor: Option<Arc<HookExecutor>>,
     verbosity: Option<String>,
@@ -10186,7 +10116,6 @@ fn prepare_user_dispatch(
         auto_approve: app_auto_approve_enabled(app),
         approval_mode: app.approval_mode,
         translation_enabled: app.translation_enabled,
-        show_thinking: app.show_thinking,
         allowed_tools: app.active_allowed_tools.clone(),
         hook_executor: app.runtime_services.hook_executor.clone(),
         verbosity: app.verbosity.clone(),
@@ -10340,7 +10269,6 @@ async fn spawned_dispatch_inner(
             auto_approve: prepare.auto_approve,
             approval_mode: prepare.approval_mode,
             translation_enabled: prepare.translation_enabled,
-            show_thinking: prepare.show_thinking,
             allowed_tools: prepare.allowed_tools.clone(),
             dynamic_tools: Vec::new(),
             hook_executor: prepare.hook_executor.clone(),
@@ -12280,7 +12208,9 @@ async fn apply_command_result(
                 }
             }
             AppAction::OpenProviderPicker => {
-                if app.view_stack.top_kind() != Some(ModalKind::ProviderPicker) {
+                if app.onboarding == OnboardingState::Provider {
+                    open_onboarding_provider_picker(app, config, engine_handle, true).await;
+                } else if app.view_stack.top_kind() != Some(ModalKind::ProviderPicker) {
                     let runtime_status = query_provider_runtime_status(engine_handle).await;
                     app.view_stack.push(
                         crate::tui::provider_picker::ProviderPickerView::new_with_runtime_status_and_memory(
@@ -12311,7 +12241,8 @@ async fn apply_command_result(
                 }
             }
             AppAction::StartXaiDeviceLogin => {
-                run_xai_device_login_from_tui(terminal, app, engine_handle, config).await?;
+                let _switched =
+                    run_xai_device_login_from_tui(terminal, app, engine_handle, config).await?;
             }
             AppAction::OpenModePicker => {
                 if app.view_stack.top_kind() != Some(ModalKind::ModePicker) {
@@ -15061,21 +14992,20 @@ async fn handle_view_events(
                 // Refresh the Fleet setup view from a snapshot built against the
                 // updated health state so the activated row becomes Ready
                 // without closing the modal.
-                if app.view_stack.top_kind() == Some(crate::tui::views::ModalKind::FleetSetup) {
-                    if let Some(view) = app.view_stack.pop() {
-                        let mut restored = view;
-                        if let Some(fleet_setup) = restored
-                            .as_any_mut()
-                            .downcast_mut::<crate::tui::views::fleet_setup::FleetSetupView>(
-                        ) {
-                            let fresh =
-                                crate::tui::views::fleet_setup::FleetSetupSnapshot::from_app(
-                                    app, config,
-                                );
-                            fleet_setup.refresh_from_snapshot(fresh);
-                        }
-                        app.view_stack.push_boxed(restored);
+                if app.view_stack.top_kind() == Some(crate::tui::views::ModalKind::FleetSetup)
+                    && let Some(view) = app.view_stack.pop()
+                {
+                    let mut restored = view;
+                    if let Some(fleet_setup) = restored
+                        .as_any_mut()
+                        .downcast_mut::<crate::tui::views::fleet_setup::FleetSetupView>(
+                    ) {
+                        let fresh = crate::tui::views::fleet_setup::FleetSetupSnapshot::from_app(
+                            app, config,
+                        );
+                        fleet_setup.refresh_from_snapshot(fresh);
                     }
+                    app.view_stack.push_boxed(restored);
                 }
                 app.needs_redraw = true;
             }
@@ -15562,7 +15492,7 @@ async fn handle_view_events(
                 model,
                 api_key_env,
             } => {
-                apply_provider_picker_custom_provider(
+                let switched = apply_provider_picker_custom_provider(
                     app,
                     engine_handle,
                     config,
@@ -15572,10 +15502,13 @@ async fn handle_view_events(
                     api_key_env,
                 )
                 .await;
+                complete_provider_picker_onboarding_if_switched(app, ApiProvider::Custom, switched);
                 refresh_config_view_if_open(app, "provider");
             }
             ViewEvent::ProviderPickerXaiOAuthRequested => {
-                run_xai_device_login_from_tui(terminal, app, engine_handle, config).await?;
+                let switched =
+                    run_xai_device_login_from_tui(terminal, app, engine_handle, config).await?;
+                complete_provider_picker_onboarding_if_switched(app, ApiProvider::Xai, switched);
             }
             ViewEvent::ProviderPickerExternalConsentConfirmed {
                 provider,
@@ -16322,7 +16255,7 @@ async fn apply_provider_picker_custom_provider(
     base_url: String,
     model: Option<String>,
     api_key_env: Option<String>,
-) {
+) -> bool {
     let written = match crate::config_persistence::persist_custom_provider(
         app.config_path.as_deref(),
         &provider_id,
@@ -16336,7 +16269,7 @@ async fn apply_provider_picker_custom_provider(
                 content: format!("Failed to save custom provider {provider_id}: {err}"),
             });
             app.status_message = Some("Custom provider was not saved.".to_string());
-            return;
+            return false;
         }
     };
 
@@ -16362,7 +16295,7 @@ async fn apply_provider_picker_custom_provider(
         "Custom provider {provider_id} saved to {}",
         written.display()
     ));
-    switch_provider(app, engine_handle, config, ApiProvider::Custom, model).await;
+    switch_provider(app, engine_handle, config, ApiProvider::Custom, model).await
 }
 
 async fn apply_provider_picker_api_key(
@@ -16736,7 +16669,7 @@ async fn apply_codewhale_owned_xai_login(
     config: &mut Config,
     pending: crate::xai_oauth::PendingXaiDeviceLogin,
     status_prefix: &str,
-) {
+) -> bool {
     match crate::xai_oauth::activate_device_login(
         pending,
         app.config_path.as_deref(),
@@ -16757,11 +16690,11 @@ async fn apply_codewhale_owned_xai_login(
                     ApiProvider::Xai.as_str()
                 ),
             });
-            return;
+            return false;
         }
     }
 
-    switch_provider(app, engine_handle, config, ApiProvider::Xai, None).await;
+    switch_provider(app, engine_handle, config, ApiProvider::Xai, None).await
 }
 
 async fn run_xai_device_login_from_tui(
@@ -16769,7 +16702,7 @@ async fn run_xai_device_login_from_tui(
     app: &mut App,
     engine_handle: &mut EngineHandle,
     config: &mut Config,
-) -> Result<()> {
+) -> Result<bool> {
     pause_terminal(
         terminal,
         app.use_alt_screen,
@@ -16785,7 +16718,7 @@ async fn run_xai_device_login_from_tui(
         app.synchronized_output_enabled,
     )?;
 
-    match login_result {
+    let switched = match login_result {
         Ok(pending) => {
             apply_codewhale_owned_xai_login(
                 app,
@@ -16794,7 +16727,7 @@ async fn run_xai_device_login_from_tui(
                 pending,
                 "xAI device login complete",
             )
-            .await;
+            .await
         }
         Err(err) => {
             let message = format!("xAI device login failed: {err}");
@@ -16802,10 +16735,11 @@ async fn run_xai_device_login_from_tui(
                 content: message.clone(),
             });
             app.status_message = Some(message);
+            false
         }
-    }
+    };
     app.needs_redraw = true;
-    Ok(())
+    Ok(switched)
 }
 
 fn apply_loaded_session(
@@ -18778,6 +18712,9 @@ auth_mode = "kimi_oauth"
 [providers.openrouter]
 # openrouter-table-comment
 base_url = "https://mock.openrouter.test/v1"
+
+[providers.anthropic]
+api_key = "fixture-other-provider-key"
 "#,
         )
         .expect("seed config");
@@ -18785,6 +18722,11 @@ base_url = "https://mock.openrouter.test/v1"
         let mut app = create_test_app();
         let mut engine = mock_engine_handle();
         let mut config = openrouter_config("https://mock.openrouter.test/v1");
+        config
+            .providers
+            .get_or_insert_with(ProvidersConfig::default)
+            .anthropic
+            .api_key = Some("fixture-other-provider-key".to_string());
         let model = "deepseek/deepseek-v4-pro".to_string();
         let identity = picker_provider_identity(&config, ApiProvider::Openrouter, None)
             .expect("OpenRouter identity");
@@ -18829,6 +18771,16 @@ base_url = "https://mock.openrouter.test/v1"
         assert!(saved.contains("[providers.openrouter]"));
         assert!(saved.contains("api_key = \"sk-confirmed\""));
         assert!(saved.contains(&format!("model = \"{model}\"")));
+        assert!(saved.contains("[providers.anthropic]"));
+        assert!(saved.contains("api_key = \"fixture-other-provider-key\""));
+        assert_eq!(
+            config
+                .providers
+                .as_ref()
+                .and_then(|providers| providers.anthropic.api_key.as_deref()),
+            Some("fixture-other-provider-key"),
+            "saving OpenRouter must not overwrite a different provider slot"
+        );
     }
 
     #[tokio::test]

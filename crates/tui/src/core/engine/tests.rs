@@ -9,7 +9,7 @@ use super::turn_loop::{
 use crate::config::ApiProvider;
 use crate::models::{SystemBlock, Usage};
 use crate::prompts::{
-    PromptSessionContext, system_prompt_flat_text,
+    InstructionSource, PromptSessionContext, system_prompt_flat_text,
     system_prompt_for_mode_with_context_skills_and_session,
 };
 use crate::test_support::{EnvVarGuard, lock_test_env};
@@ -24,6 +24,25 @@ use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 const WORKING_SET_SUMMARY_MARKER: &str = "## Repo Working Set";
+const REPRESENTATIVE_FIXTURE_ID: &str = "representative-v1";
+const REPRESENTATIVE_PROJECT_AUTHORITY: &str = "REPRESENTATIVE_PROJECT_AUTHORITY";
+const REPRESENTATIVE_PROJECT_AUTHORITY_BODY: &str = concat!(
+    "# Representative Project Authority\n\n",
+    "REPRESENTATIVE_PROJECT_AUTHORITY\n\n",
+    "- Keep all work local to the isolated fixture workspace.\n",
+    "- Treat the checked-in repository instructions as the authority for edits.\n",
+    "- Preserve unrelated files and report unsupported checks as unrun.\n",
+    "- Prefer one owner for each runtime fact and delete duplicated derivations.\n",
+    "- Use deterministic provider-free tests before claiming a behavior is verified.\n",
+    "- Keep durable state atomic, recoverable, and explicit about unavailable facts.\n",
+    "- Do not contact remotes, providers, registries, or production services.\n",
+    "- Record exact measurements and distinguish source proof from installed proof.\n",
+);
+const REPRESENTATIVE_INLINE_INSTRUCTIONS: &str = "REPRESENTATIVE_INLINE_INSTRUCTIONS";
+const REPRESENTATIVE_SKILL_DESCRIPTION: &str = "REPRESENTATIVE_SKILL_DESCRIPTION";
+const REPRESENTATIVE_MEMORY_CHECKPOINT: &str = "REPRESENTATIVE_MEMORY_CHECKPOINT";
+const REPRESENTATIVE_GOAL_OBJECTIVE: &str = "REPRESENTATIVE_GOAL_OBJECTIVE";
+const REPRESENTATIVE_HANDOFF_RELAY: &str = "REPRESENTATIVE_HANDOFF_RELAY";
 
 #[test]
 fn custom_route_identity_change_rebuilds_client_for_new_named_endpoint() {
@@ -271,7 +290,6 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
             auto_approve: false,
             approval_mode: crate::tui::approval::ApprovalMode::Suggest,
             translation_enabled: false,
-            show_thinking: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -639,7 +657,6 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
             auto_approve: false,
             approval_mode: crate::tui::approval::ApprovalMode::Suggest,
             translation_enabled: false,
-            show_thinking: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -918,7 +935,6 @@ async fn saturated_mailbox_does_not_deadlock_goal_continuation_self_dispatch() {
             auto_approve: false,
             approval_mode: crate::tui::approval::ApprovalMode::Suggest,
             translation_enabled: false,
-            show_thinking: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -1046,7 +1062,6 @@ async fn queued_ordinary_turn_does_not_multiply_engine_goal_continuations() {
         auto_approve: false,
         approval_mode: crate::tui::approval::ApprovalMode::Suggest,
         translation_enabled: false,
-        show_thinking: false,
         allowed_tools: None,
         dynamic_tools: Vec::new(),
         hook_executor: None,
@@ -1640,7 +1655,6 @@ async fn cross_turn_token_budget_exhaustion_pauses_goal_and_refreshes_prompt() {
             auto_approve: false,
             approval_mode: crate::tui::approval::ApprovalMode::Suggest,
             translation_enabled: false,
-            show_thinking: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -2606,7 +2620,6 @@ async fn host_managed_engine_does_not_self_dispatch_goal_continuation() {
             auto_approve: false,
             approval_mode: crate::tui::approval::ApprovalMode::Suggest,
             translation_enabled: false,
-            show_thinking: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -2714,7 +2727,6 @@ async fn host_managed_engine_defers_idle_subagent_completion_to_explicit_turn() 
             auto_approve: false,
             approval_mode: crate::tui::approval::ApprovalMode::Suggest,
             translation_enabled: false,
-            show_thinking: false,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -3017,27 +3029,48 @@ fn catalog_tool(name: &str) -> Tool {
     }
 }
 
+fn policy_for_catalog(
+    catalog: Vec<Tool>,
+    allowed_tools: Option<Vec<String>>,
+    disallowed_tools: Option<Vec<String>>,
+    approval_mode: crate::tui::approval::ApprovalMode,
+) -> ToolSurfacePolicy {
+    ToolSurfacePolicy::new(
+        crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(PathBuf::from("."))),
+        Some(catalog),
+        AppMode::Agent,
+        &HashSet::new(),
+        &[],
+        false,
+        allowed_tools,
+        disallowed_tools,
+        None,
+        approval_mode,
+    )
+}
+
 #[test]
 fn tool_catalog_filter_applies_allow_and_deny_gates() {
     // #3027 AC1: the advertised catalog must not contain tools the execution
     // gates would deny; deny wins over allow.
-    let mut catalog = vec![
+    let catalog = vec![
         catalog_tool("read_file"),
         catalog_tool("exec_shell"),
         catalog_tool("grep_files"),
     ];
-    filter_tool_catalog_for_gates(
-        &mut catalog,
-        Some(&["read_file".to_string(), "exec_shell".to_string()][..]),
-        Some(&["exec_shell".to_string()][..]),
+    let surface = policy_for_catalog(
+        catalog,
+        Some(vec!["read_file".to_string(), "exec_shell".to_string()]),
+        Some(vec!["exec_shell".to_string()]),
+        crate::tui::approval::ApprovalMode::Suggest,
     );
-    let names: Vec<&str> = catalog.iter().map(|t| t.name.as_str()).collect();
+    let names: Vec<&str> = surface.catalog.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(names, ["read_file"]);
 }
 
 #[test]
 fn tool_catalog_shell_only_benchmark_surface_hides_native_tools() {
-    let mut catalog = vec![
+    let catalog = vec![
         catalog_tool("exec_shell"),
         catalog_tool("exec_shell_wait"),
         catalog_tool("exec_shell_interact"),
@@ -3053,9 +3086,14 @@ fn tool_catalog_shell_only_benchmark_surface_hides_native_tools() {
         "exec_shell_interact".to_string(),
     ];
 
-    filter_tool_catalog_for_gates(&mut catalog, Some(&shell_only), None);
+    let surface = policy_for_catalog(
+        catalog,
+        Some(shell_only.to_vec()),
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
 
-    let names: Vec<&str> = catalog.iter().map(|t| t.name.as_str()).collect();
+    let names: Vec<&str> = surface.catalog.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(
         names,
         ["exec_shell", "exec_shell_wait", "exec_shell_interact"]
@@ -3064,9 +3102,406 @@ fn tool_catalog_shell_only_benchmark_surface_hides_native_tools() {
 
 #[test]
 fn tool_catalog_filter_is_inert_without_gates() {
-    let mut catalog = vec![catalog_tool("read_file"), catalog_tool("exec_shell")];
-    filter_tool_catalog_for_gates(&mut catalog, None, None);
-    assert_eq!(catalog.len(), 2);
+    let surface = policy_for_catalog(
+        vec![catalog_tool("read_file"), catalog_tool("exec_shell")],
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    assert!(surface.catalog.iter().any(|tool| tool.name == "read_file"));
+    assert!(surface.catalog.iter().any(|tool| tool.name == "exec_shell"));
+}
+
+#[test]
+fn tool_surface_policy_never_reintroduces_denied_synthetic_tools() {
+    let denied = vec![
+        TOOL_SEARCH_NAME.to_string(),
+        CODE_EXECUTION_TOOL_NAME.to_string(),
+        JS_EXECUTION_TOOL_NAME.to_string(),
+    ];
+    let surface = policy_for_catalog(
+        vec![
+            catalog_tool("read_file"),
+            catalog_tool(CODE_EXECUTION_TOOL_NAME),
+            catalog_tool(JS_EXECUTION_TOOL_NAME),
+        ],
+        Some(vec![
+            TOOL_SEARCH_NAME.to_string(),
+            CODE_EXECUTION_TOOL_NAME.to_string(),
+            JS_EXECUTION_TOOL_NAME.to_string(),
+        ]),
+        Some(denied),
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+
+    for denied_name in [
+        TOOL_SEARCH_NAME,
+        CODE_EXECUTION_TOOL_NAME,
+        JS_EXECUTION_TOOL_NAME,
+    ] {
+        assert!(surface.denies_tool(denied_name));
+        assert!(surface.passes_allow_list(denied_name));
+        assert!(
+            !surface.allows_tool(denied_name),
+            "deny must win over allow for {denied_name}"
+        );
+        assert!(
+            surface.catalog.iter().all(|tool| tool.name != denied_name),
+            "{denied_name} must not reappear after policy narrowing"
+        );
+        assert!(!surface.active_names.contains(denied_name));
+    }
+}
+
+#[tokio::test]
+async fn denied_synthetic_tool_is_blocked_by_the_same_turn_policy_at_execution() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::tool_call_turn(
+            "call-denied-search",
+            TOOL_SEARCH_NAME,
+            r#"{"query":"File"}"#,
+        ),
+        canned::simple_text_turn("Denied tool handled."),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let policy = policy_for_catalog(
+        vec![catalog_tool("read_file")],
+        Some(vec![TOOL_SEARCH_NAME.to_string()]),
+        Some(vec![TOOL_SEARCH_NAME.to_string()]),
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    assert!(!policy.allows_tool(TOOL_SEARCH_NAME));
+    let mut turn = crate::core::turn::TurnContext::new(4);
+
+    let (status, error) = engine.handle_deepseek_turn(&mut turn, policy, None).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+
+    let mut events = handle.rx_event.write().await;
+    let denied = std::iter::from_fn(|| events.try_recv().ok()).find_map(|event| match event {
+        Event::ToolCallComplete { name, result, .. } if name == TOOL_SEARCH_NAME => Some(result),
+        _ => None,
+    });
+    let error = denied
+        .expect("denied synthetic tool completion")
+        .expect_err("denied synthetic tool must not execute");
+    assert!(
+        error.to_string().contains("disallowed-tools list"),
+        "{error:?}"
+    );
+}
+
+/// Compose one assistant turn that proposes `calls` as a single parallel
+/// tool-call batch: `(call_id, tool_name, args_json)` per block, in order.
+fn tool_batch_turn(calls: &[(&str, &str, &str)]) -> Vec<crate::models::StreamEvent> {
+    use crate::llm_client::mock::canned;
+
+    let mut events = vec![canned::message_start("mock_tool_batch")];
+    for (index, (call_id, tool_name, args_json)) in calls.iter().enumerate() {
+        let index = u32::try_from(index).expect("test batch index fits u32");
+        events.push(canned::tool_use_block_start(index, call_id, tool_name));
+        events.push(canned::tool_input_delta(index, args_json));
+        events.push(canned::block_stop(index));
+    }
+    events.push(canned::message_delta("tool_use", None));
+    events.push(canned::message_stop());
+    events
+}
+
+/// Drive one engine turn against the scripted `mock` turns with a registry
+/// that only serves `read_file`, collecting every `ToolCallComplete` event as
+/// `(call_id, result)` in emission order.
+async fn run_budgeted_read_turn(
+    workspace: &Path,
+    max_tool_calls: Option<u32>,
+    mock: std::sync::Arc<crate::llm_client::mock::MockLlmClient>,
+) -> (
+    TurnOutcomeStatus,
+    Option<String>,
+    Vec<(String, Result<ToolResult, ToolError>)>,
+) {
+    let mut engine_config = deterministic_engine_config(workspace);
+    engine_config.max_tool_calls = max_tool_calls;
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, handle) =
+        Engine::new_with_model_client(engine_config, &Config::default(), client);
+    let context = crate::tools::ToolContext::new(workspace.to_path_buf());
+    let mut registry = crate::tools::ToolRegistry::new(context);
+    registry.register(std::sync::Arc::new(crate::tools::file::ReadFileTool));
+    let tools = Some(registry.to_api_tools_with_cache(true));
+    let surface = test_tool_surface(&engine, registry, tools, AppMode::Agent);
+    let mut turn = crate::core::turn::TurnContext::new(4);
+
+    let (status, error) = engine.handle_deepseek_turn(&mut turn, surface, None).await;
+    let mut events = handle.rx_event.write().await;
+    let completions = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            Event::ToolCallComplete { id, result, .. } => Some((id, result)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    (status, error, completions)
+}
+
+/// #4415 AC(a): an 8-call cap admits exactly 8 calls; the 9th is rejected
+/// with the typed reason carrying `remaining=0` and is never executed.
+#[tokio::test]
+async fn tool_call_budget_admits_exactly_the_cap_and_rejects_the_ninth() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mut calls = Vec::new();
+    for index in 1..=9 {
+        let name = format!("fixture-{index}.txt");
+        fs::write(workspace.path().join(&name), format!("fixture-{index}\n"))
+            .expect("write fixture");
+        calls.push((
+            format!("call-{index}"),
+            "read_file".to_string(),
+            format!(r#"{{"path":"{name}"}}"#),
+        ));
+    }
+    let call_refs = calls
+        .iter()
+        .map(|(id, name, args)| (id.as_str(), name.as_str(), args.as_str()))
+        .collect::<Vec<_>>();
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        tool_batch_turn(&call_refs),
+        canned::simple_text_turn("done"),
+    ]));
+
+    let (status, error, completions) =
+        run_budgeted_read_turn(workspace.path(), Some(8), mock.clone()).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert_eq!(mock.call_count(), 2, "batch turn then the final text turn");
+    assert_eq!(
+        completions.len(),
+        9,
+        "every proposed call reports a completion"
+    );
+
+    for (id, result) in &completions {
+        let index = id.strip_prefix("call-").expect("call id");
+        if index == "9" {
+            let rejection = result.as_ref().expect_err("the 9th call must be rejected");
+            let reason = rejection.to_string();
+            assert!(reason.contains("budget of 8"), "{reason}");
+            assert!(reason.contains("remaining=0"), "{reason}");
+            assert!(reason.contains("not executed"), "{reason}");
+        } else {
+            let outcome = result.as_ref().expect("calls within budget execute");
+            assert!(
+                outcome.content.contains(&format!("fixture-{index}")),
+                "call {id} must return its file contents: {outcome:?}"
+            );
+        }
+    }
+}
+
+/// #4415 AC(b): a 4-call parallel batch proposed with 2 calls remaining is
+/// truncated to the first 2 calls in proposal order; the excess 2 are
+/// rejected with the same typed reason, and the batch is counted in full.
+#[tokio::test]
+async fn tool_call_budget_truncates_an_over_budget_parallel_batch() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mut calls = Vec::new();
+    for index in 1..=4 {
+        let name = format!("fixture-{index}.txt");
+        fs::write(workspace.path().join(&name), format!("fixture-{index}\n"))
+            .expect("write fixture");
+        calls.push((
+            format!("call-{index}"),
+            "read_file".to_string(),
+            format!(r#"{{"path":"{name}"}}"#),
+        ));
+    }
+    let call_refs = calls
+        .iter()
+        .map(|(id, name, args)| (id.as_str(), name.as_str(), args.as_str()))
+        .collect::<Vec<_>>();
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        tool_batch_turn(&call_refs),
+        canned::simple_text_turn("done"),
+    ]));
+
+    let (status, error, completions) =
+        run_budgeted_read_turn(workspace.path(), Some(2), mock.clone()).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert_eq!(mock.call_count(), 2, "batch turn then the final text turn");
+    assert_eq!(completions.len(), 4);
+
+    let mut admitted = 0;
+    for (id, result) in &completions {
+        match id.as_str() {
+            "call-1" | "call-2" => {
+                admitted += 1;
+                assert!(result.is_ok(), "{id} must execute: {result:?}");
+            }
+            "call-3" | "call-4" => {
+                let rejection = result.as_ref().expect_err("excess calls are rejected");
+                let reason = rejection.to_string();
+                assert!(reason.contains("budget of 2"), "{reason}");
+                assert!(reason.contains("remaining=0"), "{reason}");
+            }
+            other => panic!("unexpected call id {other}"),
+        }
+    }
+    assert_eq!(admitted, 2, "exactly the remaining 2 calls are admitted");
+}
+
+/// #4415: the budget is per-turn, not per-batch — a counter that survives
+/// every model step of the turn. A full 8-call first batch leaves the next
+/// step's single call with `remaining=0`.
+#[tokio::test]
+async fn tool_call_budget_persists_across_model_steps_within_a_turn() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mut first_batch = Vec::new();
+    for index in 1..=8 {
+        let name = format!("fixture-{index}.txt");
+        fs::write(workspace.path().join(&name), format!("fixture-{index}\n"))
+            .expect("write fixture");
+        first_batch.push((
+            format!("call-{index}"),
+            "read_file".to_string(),
+            format!(r#"{{"path":"{name}"}}"#),
+        ));
+    }
+    let first_refs = first_batch
+        .iter()
+        .map(|(id, name, args)| (id.as_str(), name.as_str(), args.as_str()))
+        .collect::<Vec<_>>();
+    fs::write(workspace.path().join("fixture-9.txt"), "fixture-9\n").expect("write fixture");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        tool_batch_turn(&first_refs),
+        canned::tool_call_turn("call-9", "read_file", r#"{"path":"fixture-9.txt"}"#),
+        canned::simple_text_turn("done"),
+    ]));
+
+    let (status, error, completions) =
+        run_budgeted_read_turn(workspace.path(), Some(8), mock.clone()).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert_eq!(
+        mock.call_count(),
+        3,
+        "two tool steps then the final text turn"
+    );
+    assert_eq!(completions.len(), 9);
+
+    let (id, ninth) = completions
+        .iter()
+        .find(|(id, _)| id == "call-9")
+        .expect("the ninth call still reports a completion");
+    assert_eq!(id, "call-9");
+    let reason = ninth
+        .as_ref()
+        .expect_err("ninth call exceeds the turn budget");
+    let reason = reason.to_string();
+    assert!(reason.contains("remaining=0"), "{reason}");
+    assert!(
+        completions
+            .iter()
+            .filter(|(id, result)| id != "call-9" && result.is_ok())
+            .count()
+            == 8,
+        "the first batch of 8 all executed: {completions:?}"
+    );
+}
+
+/// #4415 AC(c): a write-first named-file task carries a scoped-write
+/// authority envelope naming its exact files. The existing allowed-paths
+/// machinery (`ToolAuthorityEnvelope`, enforced at the registry boundary)
+/// permits mutating a named file and denies mutating anything outside it
+/// with a typed permission error, and the denied write never executes.
+///
+/// Seam: the envelope is a MUTATION boundary only — `read_file` outside the
+/// named files is NOT denied by policy today (read-only tools pass the
+/// envelope by design). Denying out-of-scope reads for write-first tasks is
+/// a #4415 follow-up; this test pins the current contract so the seam is
+/// explicit rather than assumed.
+#[tokio::test]
+async fn named_file_write_scope_denies_mutation_outside_the_named_files() {
+    let workspace = tempdir().expect("tempdir");
+    fs::create_dir_all(workspace.path().join("src")).expect("src dir");
+    fs::create_dir_all(workspace.path().join("docs")).expect("docs dir");
+    fs::write(workspace.path().join("docs/other.md"), "outside\n").expect("write fixture");
+    let envelope = crate::tools::spec::ToolAuthorityEnvelope {
+        schema_version: 1,
+        owner: "test-worker".to_string(),
+        authority: crate::tools::spec::ToolMutationAuthority::ScopedWrite,
+        network_access: None,
+        writable_roots: Vec::new(),
+        writable_files: vec!["src/named.rs".to_string()],
+        coordination_contracts: Vec::new(),
+    };
+    let context = crate::tools::ToolContext::new(workspace.path().to_path_buf())
+        .with_tool_authority(envelope)
+        .expect("valid envelope");
+    let mut registry = crate::tools::ToolRegistry::new(context);
+    registry.register(std::sync::Arc::new(crate::tools::file::ReadFileTool));
+    registry.register(std::sync::Arc::new(crate::tools::file::WriteFileTool));
+
+    // The named file is writable under the envelope.
+    let named = registry
+        .execute_full(
+            "write_file",
+            json!({"path": "src/named.rs", "content": "fn named() {}\n"}),
+        )
+        .await
+        .expect("mutation of the named file is permitted");
+    assert!(named.success, "{named:?}");
+    assert!(workspace.path().join("src/named.rs").exists());
+
+    // A mutation outside the named files is denied by policy and never runs.
+    let denied = registry
+        .execute_full(
+            "write_file",
+            json!({"path": "docs/other.md", "content": "rewritten\n"}),
+        )
+        .await
+        .expect_err("mutation outside the named files is denied");
+    assert!(
+        denied.to_string().contains("authority envelope"),
+        "{denied}"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.path().join("docs/other.md")).expect("read back"),
+        "outside\n",
+        "the denied write must not have executed"
+    );
+
+    // Pin the read-side seam: a read outside the named files is allowed
+    // through the mutation-scoped envelope today.
+    let read = registry
+        .execute_full("read_file", json!({"path": "docs/other.md"}))
+        .await
+        .expect("reads are not path-scoped by the mutation envelope today");
+    assert!(read.content.contains("outside"), "{read:?}");
+}
+
+#[test]
+fn empty_allowed_tools_surface_is_empty_and_sends_no_tools_field() {
+    let surface = policy_for_catalog(
+        vec![catalog_tool("read_file")],
+        Some(Vec::new()),
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+
+    assert!(surface.catalog.is_empty());
+    assert!(surface.active_names.is_empty());
+    assert!(surface.active.is_none());
+    assert!(!surface.allows_tool("read_file"));
 }
 
 /// The turn-start capture carries mode/workspace/working-set state only. Work
@@ -3276,7 +3711,6 @@ fn active_goal_message_op(
         auto_approve: false,
         approval_mode: crate::tui::approval::ApprovalMode::Suggest,
         translation_enabled: false,
-        show_thinking: false,
         allowed_tools: None,
         dynamic_tools: Vec::new(),
         hook_executor: None,
@@ -3313,7 +3747,6 @@ fn external_user_message_op(content: &str, mode: AppMode, config: &Config) -> Op
         auto_approve: false,
         approval_mode: crate::tui::approval::ApprovalMode::Suggest,
         translation_enabled: false,
-        show_thinking: true,
         allowed_tools: None,
         dynamic_tools: Vec::new(),
         hook_executor: None,
@@ -3366,6 +3799,26 @@ impl crate::core::model_client::ModelClient for BlockingModelClient {
     }
 }
 
+fn test_tool_surface(
+    engine: &Engine,
+    registry: crate::tools::ToolRegistry,
+    tools: Option<Vec<crate::models::Tool>>,
+    mode: AppMode,
+) -> ToolSurfacePolicy {
+    ToolSurfacePolicy::new(
+        registry,
+        tools,
+        mode,
+        &engine.config.tools_always_load,
+        &[],
+        engine.config.strict_tool_mode,
+        engine.config.allowed_tools.clone(),
+        engine.config.disallowed_tools.clone(),
+        engine.config.max_tool_calls,
+        engine.session.approval_mode,
+    )
+}
+
 #[tokio::test]
 async fn tool_request_snapshot_matches_the_exact_mock_request_payload() {
     use crate::llm_client::mock::{MockLlmClient, canned};
@@ -3382,18 +3835,10 @@ async fn tool_request_snapshot_matches_the_exact_mock_request_payload() {
     let mut registry = crate::tools::ToolRegistry::new(context);
     registry.register(std::sync::Arc::new(crate::tools::file::ReadFileTool));
     let tools = Some(registry.to_api_tools_with_cache(true));
+    let surface = test_tool_surface(&engine, registry, tools, AppMode::Agent);
     let mut turn = crate::core::turn::TurnContext::new(4);
 
-    let (status, error) = engine
-        .handle_deepseek_turn(
-            &mut turn,
-            Some(&registry),
-            tools,
-            AppMode::Agent,
-            Vec::new(),
-            None,
-        )
-        .await;
+    let (status, error) = engine.handle_deepseek_turn(&mut turn, surface, None).await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
 
     let request = mock.last_request().expect("mock request");
@@ -3434,10 +3879,11 @@ async fn snapshot_for_catalog(
         &Config::default(),
         client,
     );
+    let registry =
+        crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(workspace.to_path_buf()));
+    let surface = test_tool_surface(&engine, registry, catalog, AppMode::Agent);
     let mut turn = crate::core::turn::TurnContext::new(2);
-    let (status, error) = engine
-        .handle_deepseek_turn(&mut turn, None, catalog, AppMode::Agent, Vec::new(), None)
-        .await;
+    let (status, error) = engine.handle_deepseek_turn(&mut turn, surface, None).await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
     let mut events = handle.rx_event.write().await;
     std::iter::from_fn(|| events.try_recv().ok())
@@ -3497,18 +3943,10 @@ async fn request_snapshots_advance_to_the_latest_tool_step() {
     let mut registry = crate::tools::ToolRegistry::new(context);
     registry.register(std::sync::Arc::new(crate::tools::file::ReadFileTool));
     let tools = Some(registry.to_api_tools_with_cache(true));
+    let surface = test_tool_surface(&engine, registry, tools, AppMode::Agent);
     let mut turn = crate::core::turn::TurnContext::new(4);
 
-    let (status, error) = engine
-        .handle_deepseek_turn(
-            &mut turn,
-            Some(&registry),
-            tools,
-            AppMode::Agent,
-            Vec::new(),
-            None,
-        )
-        .await;
+    let (status, error) = engine.handle_deepseek_turn(&mut turn, surface, None).await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
     let mut events = handle.rx_event.write().await;
     let snapshots = std::iter::from_fn(|| events.try_recv().ok())
@@ -3566,17 +4004,11 @@ async fn request_snapshot_reports_registry_provenance_for_the_transmitted_catalo
         synthetic_names: synthetic_names.clone(),
         provider: engine.tool_surface_provider_receipt(),
     };
+    let policy = test_tool_surface(&engine, registry, tools, AppMode::Agent);
 
     let mut turn = crate::core::turn::TurnContext::new(4);
     let (status, error) = engine
-        .handle_deepseek_turn(
-            &mut turn,
-            Some(&registry),
-            tools,
-            AppMode::Agent,
-            Vec::new(),
-            Some(surface),
-        )
+        .handle_deepseek_turn(&mut turn, policy, Some(surface))
         .await;
     assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
 
@@ -3673,7 +4105,11 @@ async fn injected_model_drives_real_engine_navigation_trajectory() {
     )
     .expect("write fixture");
     let mock = std::sync::Arc::new(MockLlmClient::new(vec![
-        canned::tool_call_turn("call-read", "read_file", r#"{"path":"README.md"}"#),
+        canned::tool_call_turn(
+            "call-read",
+            "File",
+            r#"{"action":"read","path":"README.md"}"#,
+        ),
         canned::simple_text_turn("Navigation complete."),
     ]));
     let client: crate::core::model_client::SharedModelClient = mock.clone();
@@ -3710,8 +4146,8 @@ async fn injected_model_drives_real_engine_navigation_trajectory() {
                 );
                 saw_unreceipted_injected_route = true;
             }
-            Event::ToolCallComplete { name, result, .. } if name == "read_file" => {
-                let result = result.expect("read_file result");
+            Event::ToolCallComplete { name, result, .. } if name == "File" => {
+                let result = result.expect("File.read result");
                 assert!(result.success, "{result:?}");
                 assert!(result.content.contains("navigation-seam-proof"));
                 saw_read = true;
@@ -3760,11 +4196,11 @@ async fn injected_model_duplicate_reads_execute_once_and_close_both_tool_ids() {
     fs::write(workspace.path().join("README.md"), "coalesced-read-proof\n").expect("write fixture");
     let duplicate_read_turn = vec![
         canned::message_start("mock_msg_duplicate_read"),
-        canned::tool_use_block_start(0, "call-read-1", "read_file"),
-        canned::tool_input_delta(0, r#"{"path":"README.md"}"#),
+        canned::tool_use_block_start(0, "call-read-1", "File"),
+        canned::tool_input_delta(0, r#"{"action":"read","path":"README.md"}"#),
         canned::block_stop(0),
-        canned::tool_use_block_start(1, "call-read-2", "read_file"),
-        canned::tool_input_delta(1, r#"{"path":"README.md"}"#),
+        canned::tool_use_block_start(1, "call-read-2", "File"),
+        canned::tool_input_delta(1, r#"{"action":"read","path":"README.md"}"#),
         canned::block_stop(1),
         canned::message_delta("tool_use", None),
         canned::message_stop(),
@@ -3798,7 +4234,7 @@ async fn injected_model_duplicate_reads_execute_once_and_close_both_tool_ids() {
         match event {
             Event::ToolCallComplete {
                 id, name, result, ..
-            } if name == "read_file" => {
+            } if name == "File" => {
                 results.insert(id, result.expect("read result"));
             }
             Event::TurnComplete { status, error, .. } => {
@@ -3889,18 +4325,10 @@ async fn coalesced_raw_read_error_touches_working_set_once() {
         let mut registry = crate::tools::ToolRegistry::new(context);
         registry.register(std::sync::Arc::new(crate::tools::file::ReadFileTool));
         let tools = Some(registry.to_api_tools_with_cache(true));
+        let surface = test_tool_surface(&engine, registry, tools, AppMode::Agent);
         let mut turn = crate::core::turn::TurnContext::new(8);
 
-        let (status, error) = engine
-            .handle_deepseek_turn(
-                &mut turn,
-                Some(&registry),
-                tools,
-                AppMode::Agent,
-                Vec::new(),
-                None,
-            )
-            .await;
+        let (status, error) = engine.handle_deepseek_turn(&mut turn, surface, None).await;
 
         assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
         engine
@@ -3926,7 +4354,7 @@ async fn injected_model_receives_malformed_tool_feedback_and_recovers() {
 
     let workspace = tempdir().expect("tempdir");
     let mock = std::sync::Arc::new(MockLlmClient::new(vec![
-        canned::tool_call_turn("call-bad-read", "read_file", "{}"),
+        canned::tool_call_turn("call-bad-read", "File", r#"{"action":"read"}"#),
         canned::simple_text_turn("Recovered after validation feedback."),
     ]));
     let client: crate::core::model_client::SharedModelClient = mock.clone();
@@ -3953,7 +4381,7 @@ async fn injected_model_receives_malformed_tool_feedback_and_recovers() {
         .expect("timed out waiting for malformed trajectory")
     {
         match event {
-            Event::ToolCallComplete { name, result, .. } if name == "read_file" => {
+            Event::ToolCallComplete { name, result, .. } if name == "File" => {
                 validation_feedback = Some(match result {
                     Ok(result) => result.content,
                     Err(error) => error.to_string(),
@@ -5828,109 +6256,659 @@ fn tools_always_load_overrides_default_native_deferral() {
     assert!(!should_default_defer_tool("git_blame", &always_load));
 }
 
-#[test]
-#[ignore = "one-shot metric for scripts/measure-tool-catalog.py"]
-#[allow(clippy::print_stderr)]
-fn print_agent_tool_catalog_metrics() {
-    let tmp = tempdir().expect("tempdir");
-    let context = crate::tools::ToolContext::new(tmp.path().to_path_buf());
-    let client = DeepSeekClient::new(&Config {
-        api_key: Some("test-key".to_string()),
-        ..Config::default()
+fn tool_catalog_surface_metrics(catalog: &[Tool]) -> serde_json::Value {
+    let serialized = serde_json::to_vec(catalog).expect("serialize canonical tool catalog");
+    let mut tool_names = catalog
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect::<Vec<_>>();
+    tool_names.sort();
+    let identity_sha256 = crate::hashing::sha256_hex(tool_names.join("\0").as_bytes());
+    serde_json::json!({
+        "tools": catalog.len(),
+        "bytes": serialized.len(),
+        "tokens_est": serialized.len().div_ceil(4),
+        "tool_names": tool_names,
+        "identity_sha256": identity_sha256,
     })
-    .expect("stub client");
-    let manager = crate::tools::subagent::new_shared_subagent_manager(tmp.path().to_path_buf(), 8);
-    let runtime = crate::tools::subagent::SubAgentRuntime::new(
-        client,
-        DEFAULT_TEXT_MODEL.to_string(),
-        context.clone(),
-        true,
-        None,
-        manager.clone(),
-    );
-    let registry = crate::tools::ToolRegistryBuilder::new()
-        .with_agent_tools(true)
-        // Exercise the complete default-active policy. Production registers
-        // this opt-in tool only when user memory is enabled.
-        .with_remember_tool()
-        .with_todo_tool(new_shared_todo_list())
-        .with_plan_tool(new_shared_plan_state())
-        .with_review_tool(None, DEFAULT_TEXT_MODEL.to_string())
-        .with_rlm_tool(None, DEFAULT_TEXT_MODEL.to_string())
-        .with_notify_tool()
-        .with_subagent_tools(manager, runtime)
-        .build(context);
-    let baseline_catalog = registry.to_api_tools_with_cache(true);
-    let baseline_json = serde_json::to_vec(&baseline_catalog).expect("serialize baseline");
+}
 
-    let always_load = HashSet::new();
-    let mut catalog = build_model_tool_catalog(
-        baseline_catalog.clone(),
-        vec![],
-        AppMode::Agent,
-        &always_load,
-    );
-    ensure_advanced_tooling(&mut catalog, AppMode::Agent, &always_load);
-    let active = initial_active_tools(&catalog);
-    let active_catalog = active_tools_for_step(&catalog, &active);
-    let active_json = serde_json::to_vec(&active_catalog).expect("serialize active");
-    let reduction_percent = if baseline_json.is_empty() {
-        0.0
-    } else {
-        100.0 * (baseline_json.len().saturating_sub(active_json.len())) as f64
-            / baseline_json.len() as f64
+async fn measure_production_mode_tool_catalogs() -> serde_json::Value {
+    let _env_lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).expect("create isolated home");
+    let _home = EnvVarGuard::set("HOME", &home);
+    let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", home.join(".codewhale"));
+    // Interpreter-backed advanced tools are intentionally excluded from this
+    // cross-platform built-in profile. The production planner still owns that
+    // decision; a deliberately nonexistent PATH root makes its real dependency
+    // probes return absent without inheriting the developer or CI host.
+    let _path = EnvVarGuard::set("PATH", tmp.path().join("no-host-interpreters"));
+    // The macOS Vision OCR probe is a framework check that ignores PATH, so
+    // the profile neutralizes it explicitly: every host presents no local OCR
+    // capability here, matching the no-host-interpreters PATH pin above.
+    let _ocr = EnvVarGuard::set("CODEWHALE_LOCAL_OCR_UNAVAILABLE", "1");
+
+    let api_config = Config {
+        api_key: Some("local-runtime-contract-fixture".to_string()),
+        default_text_model: Some(DEFAULT_TEXT_MODEL.to_string()),
+        ..Config::default()
     };
+    let mut mode_metrics = serde_json::Map::new();
+    for (mode_name, mode) in [
+        ("plan", AppMode::Plan),
+        ("act", AppMode::Agent),
+        ("operate", AppMode::Operate),
+    ] {
+        let workspace = tmp.path().join(mode_name);
+        fs::create_dir_all(&workspace).expect("create isolated mode workspace");
+        let engine_config = EngineConfig {
+            workspace,
+            allow_shell: true,
+            ..EngineConfig::default()
+        };
+        let (mut engine, _handle) = Engine::new(engine_config, &api_config);
+        // MCP catalogs depend on configured external servers. This receipt owns
+        // the canonical provider-free built-in profile and exercises the same
+        // production builder/planner with MCP explicitly disabled.
+        engine.config.features.disable(Feature::Mcp);
+        let route = TurnRouteContext {
+            provider: ApiProvider::Deepseek,
+            model: DEFAULT_TEXT_MODEL.to_string(),
+            capabilities: codewhale_config::route::RouteCapabilities::default(),
+            limits: None,
+            client: engine.deepseek_client.clone(),
+            api_config: Box::new(api_config.clone()),
+            locale_tag: engine.config.locale_tag.clone(),
+            role_models: engine.subagent_role_models(),
+            fleet_roster: engine.config.fleet_roster.clone(),
+            auto_model: false,
+            reasoning_effort: None,
+            reasoning_effort_auto: false,
+        };
+        let policy = crate::core::authority::TurnAuthority::from_effective_fields(
+            mode,
+            true,
+            false,
+            false,
+            crate::tui::approval::ApprovalMode::Suggest,
+        );
+        let build = engine
+            .build_turn_tool_registry_and_catalog(
+                &policy,
+                &[],
+                None,
+                SubAgentWiring::Inert,
+                McpAccess::PassiveSnapshot,
+                route,
+                "",
+            )
+            .await;
+        let active = build.surface.active.clone().unwrap_or_default();
+        mode_metrics.insert(
+            mode_name.to_string(),
+            serde_json::json!({
+                "full": tool_catalog_surface_metrics(&build.surface.catalog),
+                "active": tool_catalog_surface_metrics(&active),
+            }),
+        );
+    }
 
-    eprintln!(
+    serde_json::json!({
+        "surface_profile": "production-default-builtins-no-mcp-no-host-interpreters-v1",
+        "modes": mode_metrics,
+    })
+}
+
+fn metric_tool_names<'a>(
+    payload: &'a serde_json::Value,
+    mode: &str,
+    surface: &str,
+) -> HashSet<&'a str> {
+    payload["modes"][mode][surface]["tool_names"]
+        .as_array()
+        .expect("tool names array")
+        .iter()
+        .map(|name| name.as_str().expect("tool name string"))
+        .collect()
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn runtime_contract_tool_metric_uses_canonical_mode_surfaces() {
+    let payload = measure_production_mode_tool_catalogs().await;
+    let plan = metric_tool_names(&payload, "plan", "full");
+    for required in [
+        "create_goal",
+        "get_goal",
+        "update_goal",
+        "slop_ledger_query",
+        "slop_ledger_export",
+    ] {
+        assert!(plan.contains(required), "Plan must include {required}");
+    }
+    for forbidden in [
+        "Bash",
+        "Run",
+        "fim_edit",
+        "verify",
+        "slop_ledger_append",
+        "slop_ledger_update",
+    ] {
+        assert!(!plan.contains(forbidden), "Plan must exclude {forbidden}");
+    }
+
+    for mode in ["act", "operate"] {
+        let full = metric_tool_names(&payload, mode, "full");
+        for required in [
+            "Bash",
+            "Run",
+            "create_goal",
+            "get_goal",
+            "update_goal",
+            "verify",
+            "fim_edit",
+            "slop_ledger_append",
+            "slop_ledger_query",
+            "slop_ledger_update",
+            "slop_ledger_export",
+        ] {
+            assert!(full.contains(required), "{mode} must include {required}");
+        }
+    }
+
+    let plan_active = metric_tool_names(&payload, "plan", "active");
+    assert!(!plan_active.contains("Bash"));
+    assert!(!plan_active.contains("Run"));
+}
+
+#[tokio::test]
+#[ignore = "one-shot metric for scripts/measure-tool-catalog.py"]
+#[allow(clippy::await_holding_lock)]
+#[allow(clippy::print_stdout)]
+async fn print_mode_tool_catalog_metrics() {
+    println!(
         "TOOL_CATALOG_METRICS {}",
-        serde_json::json!({
-            "baseline_tools": baseline_catalog.len(),
-            "baseline_bytes": baseline_json.len(),
-            "baseline_tokens_est": baseline_json.len().div_ceil(4),
-            "active_tools": active_catalog.len(),
-            "active_bytes": active_json.len(),
-            "active_tokens_est": active_json.len().div_ceil(4),
-            "reduction_percent": reduction_percent,
-            "active_tool_names": active_catalog.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
-        })
+        measure_production_mode_tool_catalogs().await
     );
 }
 
 #[test]
 #[ignore = "one-shot metric for scripts/measure-runtime-contract.py"]
 #[allow(clippy::print_stdout)]
-fn print_agent_runtime_contract_metrics() {
+fn print_mode_runtime_contract_metrics() {
+    let _env_lock = lock_test_env();
     let tmp = tempdir().expect("tempdir");
-    let workspace = tmp.path().to_path_buf();
-    let session_context = PromptSessionContext::default();
-    let prompt = system_prompt_for_mode_with_context_skills_and_session(
-        &workspace,
-        None,
-        None,
-        None,
-        session_context,
-    );
-    let flat_prompt = system_prompt_flat_text(&prompt);
-    let prompt_bytes = flat_prompt.len();
-    let prompt_tokens_est = prompt_bytes.div_ceil(4);
-
-    // Mode runtime instructions are delivered as per-turn metadata; measure
-    // them separately so prompt-size work does not forget the volatile surface.
-    let mode_bytes = crate::prompts::AGENT_MODE.len();
-    let mode_tokens_est = mode_bytes.div_ceil(4);
+    let workspace = tmp.path().join("workspace");
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&workspace).expect("create isolated workspace");
+    fs::create_dir_all(&home).expect("create isolated home");
+    let _home = EnvVarGuard::set("HOME", &home);
+    let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
+    let codewhale_home = home.join(".codewhale");
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+    // Keep the model-visible shell fact stable across developer and CI hosts.
+    // ShellDispatcher recognizes this token without executing a shell.
+    let _shell = EnvVarGuard::set("SHELL", "bash");
+    let mut mode_metrics = serde_json::Map::new();
+    for (mode_name, mode, mode_instructions) in [
+        ("plan", AppMode::Plan, crate::prompts::PLAN_MODE),
+        ("act", AppMode::Agent, crate::prompts::AGENT_MODE),
+        ("operate", AppMode::Operate, crate::prompts::OPERATE_MODE),
+    ] {
+        let prompt = system_prompt_for_mode_with_context_skills_and_session(
+            &workspace,
+            None,
+            None,
+            None,
+            PromptSessionContext {
+                mode,
+                ..PromptSessionContext::default()
+            },
+        );
+        let prompt_bytes = system_prompt_flat_text(&prompt).len();
+        let prompt_blocks = match &prompt {
+            crate::models::SystemPrompt::Blocks(blocks) => blocks.len(),
+            _ => 1,
+        };
+        mode_metrics.insert(
+            mode_name.to_string(),
+            serde_json::json!({
+                "system_prompt_bytes": prompt_bytes,
+                "system_prompt_tokens_est": prompt_bytes.div_ceil(4),
+                "system_prompt_blocks": prompt_blocks,
+                "mode_instructions_bytes": mode_instructions.len(),
+                "mode_instructions_tokens_est": mode_instructions.len().div_ceil(4),
+            }),
+        );
+    }
 
     println!(
         "RUNTIME_CONTRACT_METRICS {}",
         serde_json::json!({
-            "system_prompt_bytes": prompt_bytes,
-            "system_prompt_tokens_est": prompt_tokens_est,
-            "system_prompt_blocks": match prompt {
-                crate::models::SystemPrompt::Blocks(blocks) => blocks.len(),
-                _ => 1,
-            },
-            "agent_mode_instructions_bytes": mode_bytes,
-            "agent_mode_instructions_tokens_est": mode_tokens_est,
+            "modes": mode_metrics,
         })
+    );
+}
+
+fn representative_prompt(
+    workspace: &Path,
+    skills_dir: &Path,
+    instructions: Option<&[InstructionSource]>,
+    user_memory_block: Option<&str>,
+    goal_objective: Option<&str>,
+) -> crate::models::SystemPrompt {
+    system_prompt_for_mode_with_context_skills_and_session(
+        workspace,
+        None,
+        Some(skills_dir),
+        instructions,
+        PromptSessionContext {
+            user_memory_block,
+            goal_objective,
+            skills_scan_codewhale_only: true,
+            mode: AppMode::Agent,
+            ..PromptSessionContext::default()
+        },
+    )
+}
+
+fn prompt_block_count(prompt: &crate::models::SystemPrompt) -> usize {
+    match prompt {
+        crate::models::SystemPrompt::Blocks(blocks) => blocks.len(),
+        crate::models::SystemPrompt::Text(_) => 1,
+    }
+}
+
+#[derive(Debug)]
+struct RepresentativePromptStage {
+    name: &'static str,
+    flat: String,
+    normalized: String,
+}
+
+fn normalize_representative_prompt(text: &str, workspace: &Path, home: &Path) -> String {
+    let mut replacements = Vec::new();
+    for (path, replacement) in [(workspace, "<WORKSPACE>"), (home, "<HOME>")] {
+        replacements.push((path.to_path_buf(), replacement));
+        if let Ok(canonical) = path.canonicalize() {
+            replacements.push((canonical, replacement));
+        }
+    }
+    replacements.sort_by(|(left, _), (right, _)| {
+        right
+            .to_string_lossy()
+            .len()
+            .cmp(&left.to_string_lossy().len())
+            .then_with(|| left.cmp(right))
+    });
+    replacements.dedup_by(|(left, _), (right, _)| left == right);
+
+    let normalized =
+        replacements
+            .into_iter()
+            .fold(text.to_string(), |normalized, (path, replacement)| {
+                normalized.replace(path.to_string_lossy().as_ref(), replacement)
+            });
+    // The environment block truthfully reports the host OS per render; the
+    // contract tracks content stability modulo host facts, so pin it here.
+    normalized.replace(
+        &format!("- platform: {}", std::env::consts::OS),
+        "- platform: <PLATFORM>",
+    )
+}
+
+fn representative_stage(
+    name: &'static str,
+    prompt: crate::models::SystemPrompt,
+    workspace: &Path,
+    home: &Path,
+) -> RepresentativePromptStage {
+    let flat = system_prompt_flat_text(&prompt);
+    let normalized = normalize_representative_prompt(&flat, workspace, home);
+    RepresentativePromptStage {
+        name,
+        flat,
+        normalized,
+    }
+}
+
+fn measure_representative_runtime_context()
+-> (serde_json::Value, Vec<RepresentativePromptStage>, String) {
+    let _env_lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().join("workspace");
+    let home = tmp.path().join("home");
+    let skills_dir = workspace.join(".codewhale").join("skills");
+    fs::create_dir_all(&workspace).expect("create isolated workspace");
+    fs::create_dir_all(&home).expect("create isolated home");
+
+    let _home = EnvVarGuard::set("HOME", &home);
+    let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
+    let codewhale_home = home.join(".codewhale");
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+    // Keep the model-visible shell fact stable across developer and CI hosts.
+    let _shell = EnvVarGuard::set("SHELL", "bash");
+
+    let mut stages = vec![representative_stage(
+        "base",
+        representative_prompt(&workspace, &skills_dir, None, None, None),
+        &workspace,
+        &home,
+    )];
+
+    fs::write(
+        workspace.join("AGENTS.md"),
+        REPRESENTATIVE_PROJECT_AUTHORITY_BODY,
+    )
+    .expect("write representative project authority");
+    stages.push(representative_stage(
+        "project",
+        representative_prompt(&workspace, &skills_dir, None, None, None),
+        &workspace,
+        &home,
+    ));
+
+    let instructions = [InstructionSource::Inline {
+        name: "embedded:representative-v1".to_string(),
+        content: REPRESENTATIVE_INLINE_INSTRUCTIONS.to_string(),
+    }];
+    stages.push(representative_stage(
+        "instructions",
+        representative_prompt(&workspace, &skills_dir, Some(&instructions), None, None),
+        &workspace,
+        &home,
+    ));
+
+    let skill_dir = skills_dir.join("representative-skill");
+    fs::create_dir_all(&skill_dir).expect("create representative skill directory");
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        format!(
+            "---\nname: representative-skill\ndescription: {REPRESENTATIVE_SKILL_DESCRIPTION}\n---\nExercise the deterministic runtime-contract fixture.\n"
+        ),
+    )
+    .expect("write representative skill");
+    stages.push(representative_stage(
+        "skill",
+        representative_prompt(&workspace, &skills_dir, Some(&instructions), None, None),
+        &workspace,
+        &home,
+    ));
+
+    let memory_block = format!("## Memory\n\n- {REPRESENTATIVE_MEMORY_CHECKPOINT}");
+    stages.push(representative_stage(
+        "memory",
+        representative_prompt(
+            &workspace,
+            &skills_dir,
+            Some(&instructions),
+            Some(&memory_block),
+            None,
+        ),
+        &workspace,
+        &home,
+    ));
+    stages.push(representative_stage(
+        "goal",
+        representative_prompt(
+            &workspace,
+            &skills_dir,
+            Some(&instructions),
+            Some(&memory_block),
+            Some(REPRESENTATIVE_GOAL_OBJECTIVE),
+        ),
+        &workspace,
+        &home,
+    ));
+
+    fs::write(
+        workspace.join(crate::prompts::HANDOFF_RELATIVE_PATH),
+        format!("# Representative Relay\n\n{REPRESENTATIVE_HANDOFF_RELAY}\n"),
+    )
+    .expect("write representative handoff");
+    let final_prompt = representative_prompt(
+        &workspace,
+        &skills_dir,
+        Some(&instructions),
+        Some(&memory_block),
+        Some(REPRESENTATIVE_GOAL_OBJECTIVE),
+    );
+    let final_blocks = prompt_block_count(&final_prompt);
+    stages.push(representative_stage(
+        "handoff",
+        final_prompt,
+        &workspace,
+        &home,
+    ));
+    let repeated_flat = system_prompt_flat_text(&representative_prompt(
+        &workspace,
+        &skills_dir,
+        Some(&instructions),
+        Some(&memory_block),
+        Some(REPRESENTATIVE_GOAL_OBJECTIVE),
+    ));
+
+    let mut stage_metrics = serde_json::Map::new();
+    for (index, stage) in stages.iter().enumerate() {
+        let mut metrics = serde_json::json!({
+            "bytes": stage.flat.len(),
+            "identity_sha256": crate::hashing::sha256_hex(stage.normalized.as_bytes()),
+        });
+        if let Some(previous) = index.checked_sub(1).and_then(|i| stages.get(i)) {
+            metrics["delta_bytes"] = serde_json::json!(
+                stage
+                    .flat
+                    .len()
+                    .checked_sub(previous.flat.len())
+                    .unwrap_or_else(|| panic!(
+                        "representative {} stage unexpectedly shrank prompt",
+                        stage.name
+                    ))
+            );
+        }
+        stage_metrics.insert(stage.name.to_string(), metrics);
+    }
+    let final_stage = stages.last().expect("handoff stage");
+    let payload = serde_json::json!({
+        "fixture_id": REPRESENTATIVE_FIXTURE_ID,
+        "stages": stage_metrics,
+        "total_bytes": final_stage.flat.len(),
+        "total_tokens_est": final_stage.flat.len().div_ceil(4),
+        "system_prompt_blocks": final_blocks,
+        "prompts_byte_identical": final_stage.flat == repeated_flat,
+    });
+
+    (payload, stages, repeated_flat)
+}
+
+#[test]
+fn representative_runtime_context_fixture_is_stable_and_contains_expected_markers() {
+    let (payload, stages, repeated_prompt) = measure_representative_runtime_context();
+    let (second_payload, second_stages, _) = measure_representative_runtime_context();
+    let final_stage = stages.last().expect("handoff stage");
+    assert_eq!(payload["fixture_id"], REPRESENTATIVE_FIXTURE_ID);
+    assert_eq!(final_stage.flat, repeated_prompt);
+    assert_eq!(payload["prompts_byte_identical"], true);
+    for (first, second) in stages.iter().zip(&second_stages) {
+        assert_eq!(first.name, second.name);
+        assert_eq!(first.normalized, second.normalized);
+        assert_eq!(
+            payload["stages"][first.name]["identity_sha256"],
+            second_payload["stages"][second.name]["identity_sha256"],
+            "representative {} digest must be stable across temp roots",
+            first.name
+        );
+    }
+    for pair in stages.windows(2) {
+        let [previous, current] = pair else {
+            unreachable!("stage windows always contain two entries")
+        };
+        assert_eq!(
+            payload["stages"][current.name]["delta_bytes"],
+            current.flat.len() - previous.flat.len(),
+            "representative {} delta must be computed from its adjacent stages",
+            current.name
+        );
+    }
+    let markers = [
+        REPRESENTATIVE_PROJECT_AUTHORITY,
+        REPRESENTATIVE_INLINE_INSTRUCTIONS,
+        REPRESENTATIVE_SKILL_DESCRIPTION,
+        REPRESENTATIVE_MEMORY_CHECKPOINT,
+        REPRESENTATIVE_GOAL_OBJECTIVE,
+        REPRESENTATIVE_HANDOFF_RELAY,
+    ];
+    for (stage_index, stage) in stages.iter().enumerate() {
+        for (marker_index, marker) in markers.iter().enumerate() {
+            let expected = usize::from(marker_index < stage_index);
+            assert_eq!(
+                stage.flat.matches(marker).count(),
+                expected,
+                "representative {} stage has the wrong count for {marker}",
+                stage.name
+            );
+        }
+    }
+    let fixture_sources = [
+        REPRESENTATIVE_PROJECT_AUTHORITY,
+        REPRESENTATIVE_INLINE_INSTRUCTIONS,
+        REPRESENTATIVE_SKILL_DESCRIPTION,
+        REPRESENTATIVE_MEMORY_CHECKPOINT,
+        REPRESENTATIVE_GOAL_OBJECTIVE,
+        REPRESENTATIVE_HANDOFF_RELAY,
+    ]
+    .join("\n")
+    .to_ascii_lowercase();
+    for secret_shape in ["sk-", "api_key=", "password=", "bearer "] {
+        assert!(
+            !fixture_sources.contains(secret_shape),
+            "representative fixture must not contain secret-shaped values"
+        );
+    }
+}
+
+#[test]
+#[ignore = "one-shot metric for scripts/measure-runtime-contract.py"]
+#[allow(clippy::print_stdout)]
+fn print_representative_runtime_context_metrics() {
+    let (payload, _, _) = measure_representative_runtime_context();
+    println!("REPRESENTATIVE_CONTEXT_METRICS {payload}");
+}
+
+fn measure_unchanged_prompt_skill_discovery() -> (
+    crate::skills::SkillDiscoveryMetrics,
+    crate::skills::SkillDiscoveryMetrics,
+    bool,
+) {
+    let _env_lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().join("workspace");
+    let home = tmp.path().join("home");
+    let skills_dir = workspace.join(".codewhale").join("skills");
+    let skill = skills_dir.join("receipt-demo");
+    fs::create_dir_all(&skill).expect("create skill directory");
+    fs::create_dir_all(&home).expect("create isolated home");
+    fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: receipt-demo\ndescription: Hermetic measurement skill\n---\nMeasure discovery.\n",
+    )
+    .expect("write skill");
+
+    let _home = EnvVarGuard::set("HOME", &home);
+    let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
+    let codewhale_home = home.join(".codewhale");
+    let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
+
+    crate::skills::clear_skill_discovery_cache();
+    crate::skills::reset_discovery_metrics();
+    let start = crate::skills::discovery_metrics_snapshot();
+    let first_prompt = system_prompt_for_mode_with_context_skills_and_session(
+        &workspace,
+        None,
+        Some(&skills_dir),
+        None,
+        PromptSessionContext::default(),
+    );
+    let after_first = crate::skills::discovery_metrics_snapshot();
+    let second_prompt = system_prompt_for_mode_with_context_skills_and_session(
+        &workspace,
+        None,
+        Some(&skills_dir),
+        None,
+        PromptSessionContext::default(),
+    );
+    let after_second = crate::skills::discovery_metrics_snapshot();
+
+    let first = after_first.delta_since(start);
+    let second = after_second.delta_since(after_first);
+    let first_flat = system_prompt_flat_text(&first_prompt);
+    let second_flat = system_prompt_flat_text(&second_prompt);
+    (first, second, first_flat == second_flat)
+}
+
+#[test]
+fn unchanged_prompt_skill_discovery_baseline_caches_the_second_turn() {
+    let (first, second, prompts_byte_identical) = measure_unchanged_prompt_skill_discovery();
+    let first_expected = crate::skills::SkillDiscoveryMetrics {
+        root_discovery_calls: 1,
+        directories_visited: 1,
+        skill_md_read_attempts: 1,
+    };
+    assert_eq!(first, first_expected);
+    assert_eq!(second, crate::skills::SkillDiscoveryMetrics::default());
+    assert!(prompts_byte_identical);
+}
+
+fn skill_discovery_metric_payload(
+    first: crate::skills::SkillDiscoveryMetrics,
+    second: crate::skills::SkillDiscoveryMetrics,
+    prompts_byte_identical: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "first_delta": {
+            "root_discovery_calls": first.root_discovery_calls,
+            "directories_visited": first.directories_visited,
+            "skill_md_read_attempts": first.skill_md_read_attempts,
+        },
+        "second_delta": {
+            "root_discovery_calls": second.root_discovery_calls,
+            "directories_visited": second.directories_visited,
+            "skill_md_read_attempts": second.skill_md_read_attempts,
+        },
+        "prompts_byte_identical": prompts_byte_identical,
+    })
+}
+
+#[test]
+fn skill_discovery_metric_payload_accepts_cached_second_turn() {
+    let first = crate::skills::SkillDiscoveryMetrics {
+        root_discovery_calls: 1,
+        directories_visited: 1,
+        skill_md_read_attempts: 1,
+    };
+    let payload = skill_discovery_metric_payload(
+        first,
+        crate::skills::SkillDiscoveryMetrics::default(),
+        true,
+    );
+    assert_eq!(payload["first_delta"]["root_discovery_calls"], 1);
+    assert_eq!(payload["second_delta"]["root_discovery_calls"], 0);
+    assert_eq!(payload["second_delta"]["directories_visited"], 0);
+    assert_eq!(payload["second_delta"]["skill_md_read_attempts"], 0);
+}
+
+#[test]
+#[ignore = "one-shot metric for scripts/measure-runtime-contract.py"]
+#[allow(clippy::print_stdout)]
+fn print_skill_discovery_turn_metrics() {
+    let (first, second, prompts_byte_identical) = measure_unchanged_prompt_skill_discovery();
+
+    println!(
+        "SKILL_DISCOVERY_METRICS {}",
+        skill_discovery_metric_payload(first, second, prompts_byte_identical)
     );
 }
 
@@ -6111,16 +7089,22 @@ fn auto_review_hides_question_tool_while_other_postures_keep_it() {
         (ApprovalMode::Bypass, true),
         (ApprovalMode::Never, true),
     ] {
-        let mut catalog = vec![api_tool("read_file"), api_tool(REQUEST_USER_INPUT_NAME)];
-        filter_tool_catalog_for_permission_posture(&mut catalog, posture);
+        let surface = policy_for_catalog(
+            vec![api_tool("read_file"), api_tool(REQUEST_USER_INPUT_NAME)],
+            None,
+            None,
+            posture,
+        );
         assert_eq!(
-            catalog
+            surface
+                .catalog
                 .iter()
                 .any(|tool| tool.name == REQUEST_USER_INPUT_NAME),
             expected,
             "{posture:?}"
         );
-        assert!(catalog.iter().any(|tool| tool.name == "read_file"));
+        assert_eq!(surface.allows_questions(), expected, "{posture:?}");
+        assert!(surface.catalog.iter().any(|tool| tool.name == "read_file"));
     }
 }
 
@@ -6140,10 +7124,15 @@ fn legacy_yolo_auto_shape_keeps_question_tool_as_effective_full_access() {
         crate::tui::approval::ApprovalMode::Bypass
     );
 
-    let mut catalog = vec![api_tool("read_file"), api_tool(REQUEST_USER_INPUT_NAME)];
-    filter_tool_catalog_for_permission_posture(&mut catalog, authority.approval_mode_for_session());
+    let surface = policy_for_catalog(
+        vec![api_tool("read_file"), api_tool(REQUEST_USER_INPUT_NAME)],
+        None,
+        None,
+        authority.approval_mode_for_session(),
+    );
     assert!(
-        catalog
+        surface
+            .catalog
             .iter()
             .any(|tool| tool.name == REQUEST_USER_INPUT_NAME),
         "effective Full Access must keep the question tool"
@@ -6320,9 +7309,7 @@ fn deferred_tool_preflight_guides_rlm_open_misnamed_source_fields() {
 
 #[test]
 fn model_catalog_exposes_work_update_as_sole_progress_surface() {
-    // #4132: ordinary progress is one model-visible tool. Legacy checklist_* /
-    // todo_* spellings stay registry-callable for replay but must not appear in
-    // the deferred model catalog (so there is no deferred-preflight path for them).
+    // #4132: ordinary progress is one model-visible and executable tool.
     let (engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
     let registry = engine
         .build_turn_tool_registry_builder(
@@ -6353,7 +7340,7 @@ fn model_catalog_exposes_work_update_as_sole_progress_surface() {
         !catalog_names.contains("update_plan"),
         "retired Strategy/Plan must stay replay-only"
     );
-    for hidden in [
+    for retired in [
         "checklist_write",
         "checklist_add",
         "checklist_update",
@@ -6364,16 +7351,16 @@ fn model_catalog_exposes_work_update_as_sole_progress_surface() {
         "todo_list",
     ] {
         assert!(
-            registry.contains(hidden),
-            "{hidden} must remain callable for transcript replay"
+            !registry.contains(retired),
+            "{retired} must no longer be callable"
         );
         assert!(
-            !catalog_names.contains(hidden),
-            "{hidden} must stay hidden from the model catalog"
+            !catalog_names.contains(retired),
+            "{retired} must not appear in the model catalog"
         );
         assert!(
             preflight_requested_deferred_tool(
-                hidden,
+                retired,
                 &json!({
                     "todos": [
                         { "content": "should not hydrate hidden alias", "status": "completed" }
@@ -6383,7 +7370,7 @@ fn model_catalog_exposes_work_update_as_sole_progress_surface() {
                 &mut active.clone(),
             )
             .is_none(),
-            "{hidden} must not have a deferred catalog preflight path"
+            "{retired} must not have a deferred catalog preflight path"
         );
     }
 }
@@ -6466,14 +7453,15 @@ async fn run_shell_command_op_requests_approval_and_executes_shell() {
             Event::ToolCallStarted { id, name, input } => {
                 saw_started = true;
                 assert!(id.starts_with(USER_SHELL_TOOL_ID_PREFIX));
-                assert_eq!(name, "exec_shell");
+                assert_eq!(name, "Bash");
+                assert_eq!(input["action"], json!("run"));
                 assert_eq!(input["command"], json!("echo bang-ok"));
                 assert_eq!(input["source"], json!("user"));
             }
             Event::ApprovalRequired { id, tool_name, .. } => {
                 saw_approval = true;
                 assert!(id.starts_with(USER_SHELL_TOOL_ID_PREFIX));
-                assert_eq!(tool_name, "exec_shell");
+                assert_eq!(tool_name, "Bash");
                 handle_for_approval
                     .approve_tool_call(id)
                     .await
@@ -6482,7 +7470,7 @@ async fn run_shell_command_op_requests_approval_and_executes_shell() {
             Event::ToolCallComplete { id, name, result } => {
                 saw_complete = true;
                 assert!(id.starts_with(USER_SHELL_TOOL_ID_PREFIX));
-                assert_eq!(name, "exec_shell");
+                assert_eq!(name, "Bash");
                 let result = result.expect("shell result");
                 assert!(result.success, "{result:?}");
                 assert!(result.content.contains("bang-ok"), "{result:?}");
@@ -6506,6 +7494,7 @@ async fn run_shell_command_op_requests_approval_and_executes_shell() {
 
 #[tokio::test]
 async fn run_shell_command_op_skips_approval_when_auto_approved() {
+    let workspace = tempdir().expect("tempdir");
     let todos = crate::tools::todo::new_shared_todo_list();
     let plan = crate::tools::plan::new_shared_plan_state();
     let work = crate::work_graph::new_shared_work_runtime(todos, plan);
@@ -6515,6 +7504,8 @@ async fn run_shell_command_op_skips_approval_when_auto_approved() {
     };
     let (mut engine, handle) = Engine::new(
         EngineConfig {
+            workspace: workspace.path().to_path_buf(),
+            snapshots_enabled: false,
             runtime_services,
             ..EngineConfig::default()
         },
@@ -6695,8 +7686,8 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
 
     let tool_call_sse = concat!(
         "data: {\"id\":\"chatcmpl-operate-tools\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
-        "{\"index\":0,\"id\":\"call_operate_shell\",\"type\":\"function\",\"function\":{\"name\":\"exec_shell\",",
-        "\"arguments\":\"{\\\"command\\\":\\\"echo operate-approved > operate-mode-approved.txt\\\"}\"}}",
+        "{\"index\":0,\"id\":\"call_operate_shell\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",",
+        "\"arguments\":\"{\\\"action\\\":\\\"run\\\",\\\"command\\\":\\\"echo operate-approved > operate-mode-approved.txt\\\"}\"}}",
         "]},\"finish_reason\":null}]}\n\n",
         "data: {\"id\":\"chatcmpl-operate-tools\",\"choices\":[{\"index\":0,\"delta\":{},",
         "\"finish_reason\":\"tool_calls\"}]}\n\n",
@@ -6770,7 +7761,6 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
             auto_approve: false,
             approval_mode: crate::tui::approval::ApprovalMode::Suggest,
             translation_enabled: false,
-            show_thinking: true,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -6791,13 +7781,13 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
         match event {
             Event::ApprovalRequired { id, tool_name, .. } => {
                 saw_approval = true;
-                assert_eq!(tool_name, "exec_shell");
+                assert_eq!(tool_name, "Bash");
                 handle_for_approval
                     .approve_tool_call(id)
                     .await
                     .expect("approve Operate shell");
             }
-            Event::ToolCallComplete { name, result, .. } if name == "exec_shell" => {
+            Event::ToolCallComplete { name, result, .. } if name == "Bash" => {
                 saw_shell_result = true;
                 let result = result.expect("approved Operate shell result");
                 assert!(result.success, "{result:?}");
@@ -6838,8 +7828,8 @@ async fn full_access_subagent_handoff_keeps_model_shell_free_of_approval_prompts
 
     let tool_call_sse = concat!(
         "data: {\"id\":\"chatcmpl-yolo\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
-        "{\"index\":0,\"id\":\"call_yolo\",\"type\":\"function\",\"function\":{\"name\":\"exec_shell\",",
-        "\"arguments\":\"{\\\"command\\\":\\\"echo yolo-model-ask-rule\\\"}\"}}",
+        "{\"index\":0,\"id\":\"call_yolo\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",",
+        "\"arguments\":\"{\\\"action\\\":\\\"run\\\",\\\"command\\\":\\\"echo yolo-model-ask-rule\\\"}\"}}",
         "]},\"finish_reason\":null}]}\n\n",
         "data: {\"id\":\"chatcmpl-yolo\",\"choices\":[{\"index\":0,\"delta\":{},",
         "\"finish_reason\":\"tool_calls\"}]}\n\n",
@@ -6914,7 +7904,6 @@ async fn full_access_subagent_handoff_keeps_model_shell_free_of_approval_prompts
             auto_approve: false,
             approval_mode: crate::tui::approval::ApprovalMode::Bypass,
             translation_enabled: false,
-            show_thinking: true,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -6934,7 +7923,7 @@ async fn full_access_subagent_handoff_keeps_model_shell_free_of_approval_prompts
             Event::ApprovalRequired { .. } => {
                 panic!("Full Access child handoff must not prompt for an ordinary shell call");
             }
-            Event::ToolCallComplete { name, result, .. } if name == "exec_shell" => {
+            Event::ToolCallComplete { name, result, .. } if name == "Bash" => {
                 saw_complete = true;
                 let result = result.expect("shell result");
                 assert!(result.success, "{result:?}");
@@ -7049,7 +8038,6 @@ async fn assert_full_access_model_tool_batch_is_blocked(
             auto_approve: true,
             approval_mode: crate::tui::approval::ApprovalMode::Bypass,
             translation_enabled: false,
-            show_thinking: true,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -7129,11 +8117,11 @@ async fn full_access_blocks_non_bypassable_registered_tools_at_engine_boundary()
                 json!({"server": start_probe, "name": "must-not-start"}),
             ),
             (
-                "rlm_eval",
-                json!({"name": "missing-context", "code": rlm_probe}),
+                "rlm",
+                json!({"action": "eval", "name": "missing-context", "code": rlm_probe}),
             ),
         ],
-        &[("start_mcp_server", denial), ("rlm_eval", denial)],
+        &[("start_mcp_server", denial), ("rlm", denial)],
         denial,
     )
     .await;
@@ -7174,7 +8162,8 @@ async fn full_access_permission_allow_cannot_bypass_repo_law() {
         ]),
         ..EngineConfig::default()
     };
-    let tool_input = json!({"path": "CHANGELOG.md", "content": "must not be written\n"});
+    let tool_input =
+        json!({"action": "write", "path": "CHANGELOG.md", "content": "must not be written\n"});
     assert_eq!(
         file_tool_ask_rule_decision(
             &engine_config,
@@ -7189,12 +8178,12 @@ async fn full_access_permission_allow_cannot_bypass_repo_law() {
 
     assert_full_access_model_tool_batch_is_blocked(
         engine_config,
-        vec![("write_file", tool_input)],
+        vec![("File", tool_input)],
         &[(
-            "write_file",
-            "Repository law blocked tool 'write_file' in Full Access: Repo law holds this write: \"Release notes need human review\"",
+            "File",
+            "Repository law blocked tool 'File' in Full Access: Repo law holds this write: \"Release notes need human review\"",
         )],
-        "Repository law blocked tool 'write_file' in Full Access: Repo law holds this write:",
+        "Repository law blocked tool 'File' in Full Access: Repo law holds this write:",
     )
     .await;
 
@@ -7311,7 +8300,6 @@ async fn auto_review_auto_resolves_hallucinated_question_without_prompting() {
             auto_approve: false,
             approval_mode: crate::tui::approval::ApprovalMode::Auto,
             translation_enabled: false,
-            show_thinking: true,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -7396,6 +8384,7 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
     let allow_rule = codewhale_execpolicy::ToolAskRule::exec_shell(command.clone())
         .into_exact_workspace_allow(workspace.path().to_string_lossy().into_owned());
     let tool_input = json!({
+        "action": "run",
         "command": command,
         "background": true,
     });
@@ -7409,7 +8398,7 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
                 "index": 0,
                 "id": "call_bg",
                 "type": "function",
-                "function": {"name": "exec_shell", "arguments": arguments},
+                "function": {"name": "Bash", "arguments": arguments},
             }]},
             "finish_reason": serde_json::Value::Null,
         }],
@@ -7497,7 +8486,6 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
             auto_approve: true,
             approval_mode: crate::tui::approval::ApprovalMode::Bypass,
             translation_enabled: false,
-            show_thinking: true,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -7519,7 +8507,7 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
                 panic!("Full Access safety holds must fail closed without prompting")
             }
             Event::ToolCallComplete { name, result, .. } => {
-                if name == "exec_shell" {
+                if name == "Bash" {
                     saw_tool_result = true;
                     let err = result.expect_err("blocked shell should not execute");
                     assert!(
@@ -7565,8 +8553,8 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
 
     let tool_call_sse = concat!(
         "data: {\"id\":\"chatcmpl-bgok\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
-        "{\"index\":0,\"id\":\"call_bgok\",\"type\":\"function\",\"function\":{\"name\":\"exec_shell\",",
-        "\"arguments\":\"{\\\"command\\\":\\\"echo bg-yolo-no-prompt\\\",\\\"background\\\":true}\"}}",
+        "{\"index\":0,\"id\":\"call_bgok\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",",
+        "\"arguments\":\"{\\\"action\\\":\\\"run\\\",\\\"command\\\":\\\"echo bg-yolo-no-prompt\\\",\\\"background\\\":true}\"}}",
         "]},\"finish_reason\":null}]}\n\n",
         "data: {\"id\":\"chatcmpl-bgok\",\"choices\":[{\"index\":0,\"delta\":{},",
         "\"finish_reason\":\"tool_calls\"}]}\n\n",
@@ -7638,7 +8626,6 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
             auto_approve: true,
             approval_mode: crate::tui::approval::ApprovalMode::Auto,
             translation_enabled: false,
-            show_thinking: true,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -7660,7 +8647,7 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
                 panic!("YOLO mode must not prompt for an ordinary background shell command");
             }
             Event::ToolCallComplete { name, result, .. } => {
-                if name == "exec_shell" {
+                if name == "Bash" {
                     saw_tool_result = true;
                     let result = result.expect("shell result");
                     assert!(result.success, "{result:?}");
@@ -7702,8 +8689,8 @@ async fn yolo_mode_executes_publish_like_shell_without_prompt() {
 
     let tool_call_sse = concat!(
         "data: {\"id\":\"chatcmpl-publish\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
-        "{\"index\":0,\"id\":\"call_publish\",\"type\":\"function\",\"function\":{\"name\":\"exec_shell\",",
-        "\"arguments\":\"{\\\"command\\\":\\\"git push origin main\\\",\\\"background\\\":true}\"}}",
+        "{\"index\":0,\"id\":\"call_publish\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",",
+        "\"arguments\":\"{\\\"action\\\":\\\"run\\\",\\\"command\\\":\\\"git push origin main\\\",\\\"background\\\":true}\"}}",
         "]},\"finish_reason\":null}]}\n\n",
         "data: {\"id\":\"chatcmpl-publish\",\"choices\":[{\"index\":0,\"delta\":{},",
         "\"finish_reason\":\"tool_calls\"}]}\n\n",
@@ -7775,7 +8762,6 @@ async fn yolo_mode_executes_publish_like_shell_without_prompt() {
             auto_approve: true,
             approval_mode: crate::tui::approval::ApprovalMode::Bypass,
             translation_enabled: false,
-            show_thinking: true,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -7803,7 +8789,7 @@ async fn yolo_mode_executes_publish_like_shell_without_prompt() {
                      (#4595); got prompt for {tool_name}: {description}"
                 );
             }
-            Event::ToolCallComplete { name, .. } if name == "exec_shell" => {
+            Event::ToolCallComplete { name, .. } if name == "Bash" => {
                 // Execution outcome is irrelevant (the tempdir is not a git
                 // repo); the contract is that it ran without a prompt.
                 saw_tool_complete = true;
@@ -7916,7 +8902,6 @@ async fn yolo_mode_does_not_prompt_for_mcp_action() {
             auto_approve: true,
             approval_mode: crate::tui::approval::ApprovalMode::Bypass,
             translation_enabled: false,
-            show_thinking: true,
             allowed_tools: None,
             dynamic_tools: Vec::new(),
             hook_executor: None,
@@ -7992,7 +8977,7 @@ async fn run_shell_command_op_preserves_plan_mode_shell_block() {
             }
             Event::ToolCallComplete { name, result, .. } => {
                 saw_complete = true;
-                assert_eq!(name, "exec_shell");
+                assert_eq!(name, "Bash");
                 let err = result.expect_err("plan shell should fail");
                 assert!(
                     err.to_string().contains("unavailable in Plan mode"),
@@ -8037,9 +9022,9 @@ fn turn_tool_registry_builder_keeps_plan_mode_read_only_for_files() {
         )
         .build(engine.build_tool_context(AppMode::Plan, false));
 
-    assert!(registry.contains("read_file"));
-    assert!(registry.contains("list_dir"));
     assert!(registry.contains("File"));
+    assert!(!registry.contains("read_file"));
+    assert!(!registry.contains("list_dir"));
     assert!(!registry.contains("write_file"));
     assert!(!registry.contains("edit_file"));
     assert!(!registry.contains("exec_shell"));
@@ -8054,8 +9039,9 @@ fn turn_tool_registry_builder_keeps_plan_mode_read_only_for_files() {
     assert!(registry.contains("create_goal"));
     assert!(registry.contains("get_goal"));
     assert!(registry.contains("update_goal"));
-    assert!(registry.contains("task_list"));
-    assert!(registry.contains("task_read"));
+    assert!(registry.contains("tasks"));
+    assert!(!registry.contains("task_list"));
+    assert!(!registry.contains("task_read"));
     assert!(registry.contains("handle_read"));
     let plan_state_tools = [
         "checklist_add",
@@ -8309,7 +9295,7 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
         trust_mode: bool,
         auto_approve: bool,
         approval_mode: ApprovalMode,
-        exec_shell_available: bool,
+        bash_available: bool,
         plan_hint: bool,
     }
 
@@ -8324,7 +9310,7 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
             trust_mode: false,
             auto_approve: false,
             approval_mode: ApprovalMode::Suggest,
-            exec_shell_available: false,
+            bash_available: false,
             plan_hint: true,
         },
         ModeCase {
@@ -8337,7 +9323,7 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
             trust_mode: false,
             auto_approve: false,
             approval_mode: ApprovalMode::Suggest,
-            exec_shell_available: true,
+            bash_available: true,
             plan_hint: false,
         },
         ModeCase {
@@ -8350,7 +9336,7 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
             trust_mode: true,
             auto_approve: true,
             approval_mode: ApprovalMode::Bypass,
-            exec_shell_available: true,
+            bash_available: true,
             plan_hint: false,
         },
         ModeCase {
@@ -8363,7 +9349,7 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
             trust_mode: false,
             auto_approve: false,
             approval_mode: ApprovalMode::Suggest,
-            exec_shell_available: true,
+            bash_available: true,
             plan_hint: false,
         },
         ModeCase {
@@ -8376,7 +9362,7 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
             trust_mode: false,
             auto_approve: false,
             approval_mode: ApprovalMode::Suggest,
-            exec_shell_available: true,
+            bash_available: true,
             plan_hint: false,
         },
         ModeCase {
@@ -8391,7 +9377,7 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
             trust_mode: true,
             auto_approve: true,
             approval_mode: ApprovalMode::Bypass,
-            exec_shell_available: true,
+            bash_available: true,
             plan_hint: false,
         },
     ];
@@ -8495,9 +9481,14 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
             .build(context);
         assert!(registry.contains("agent"), "{}", case.name);
         assert_eq!(
-            registry.contains("exec_shell"),
-            case.exec_shell_available,
+            registry.contains("Bash"),
+            case.bash_available,
             "{}",
+            case.name
+        );
+        assert!(
+            !registry.contains("exec_shell"),
+            "{}: retired exec_shell must remain absent",
             case.name
         );
 
@@ -11640,12 +12631,11 @@ Extra padding so non-whitespace seed length clears the degenerate floor.";
 }
 
 #[test]
-fn engine_prompt_respects_hidden_thinking_config() {
+fn engine_prompt_keeps_reasoning_on_the_user_language_contract() {
     let tmp = tempdir().expect("tempdir");
     let config = EngineConfig {
         workspace: tmp.path().to_path_buf(),
         locale_tag: "zh-Hans".to_string(),
-        show_thinking: false,
         ..Default::default()
     };
     let (engine, _handle) = Engine::new(config, &Config::default());
@@ -11659,10 +12649,11 @@ fn engine_prompt_respects_hidden_thinking_config() {
         None => panic!("expected system prompt"),
     };
 
-    assert!(prompt.contains("## Hidden Thinking Language"));
+    assert!(prompt.contains("## Language"));
+    assert!(prompt.contains("latest\nuser message"));
     assert!(prompt.contains("reasoning_content"));
-    assert!(prompt.contains("English"));
-    assert!(!prompt.contains("## 语言再次提醒"));
+    assert!(prompt.contains("## 语言再次提醒"));
+    assert!(!prompt.contains("## Hidden Thinking Language"));
 }
 
 fn sync_runtime_system_prompt_override(engine: &mut Engine, system_prompt: SystemPrompt) {

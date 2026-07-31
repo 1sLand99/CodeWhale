@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+#[cfg(test)]
 use crate::mcp::McpPool;
 use crate::model_profile::ToolSurfaceBudget;
 use crate::models::Tool;
@@ -103,9 +104,8 @@ fn cached_fallbacks() -> &'static [CachedFallback] {
 }
 
 /// Membership index over [`DEFAULT_ACTIVE_NATIVE_TOOLS`], built once for the
-/// process lifetime. The array stays the source of truth for *ordered*
-/// iteration (see [`tool_catalog_consistency_issues`] and
-/// `engine::default_active_native_tool_names`); this set only accelerates the
+/// process lifetime. The array stays the source of truth for ordered
+/// inspection; this set only accelerates the
 /// hot membership check in [`should_default_defer_tool`], which runs once per
 /// catalog tool on every catalog rebuild (i.e. per turn) — an O(n·m) linear
 /// scan over the array collapses to O(1) hashed lookups.
@@ -379,30 +379,127 @@ pub(super) fn active_tools_for_step(catalog: &[Tool], active: &HashSet<String>) 
     active_tool_list_from_catalog(catalog, active)
 }
 
-/// The exact tool state the next model request would carry.
+/// One turn's executable and model-visible tool contract.
 ///
-/// This is the single answer to "what tools would the next turn send?".
-/// [`super::turn_loop`] seeds its mutable per-step state from it, and
-/// `/preview-request` reports [`Self::active`] verbatim. Nothing else may
-/// re-derive tool selection — in particular, the session's *last* catalog is
-/// both stale and pre-activation, so it is never a substitute for this.
-#[derive(Debug, Clone)]
-pub(super) struct TurnToolPlan {
-    /// Full catalog after mode/always-load repair, including deferred tools.
+/// The catalog is also the prompt's only availability taxonomy: stable prompt
+/// prose deliberately does not enumerate tool names. Keeping the concrete
+/// registry, searchable catalog, initial request subset, and command gates in
+/// one value prevents preview, dispatch, and execution from reconstructing
+/// different surfaces from mutable engine configuration.
+pub(super) struct ToolSurfacePolicy {
+    /// Runtime registry that executes native and plugin tools.
+    pub(super) registry: crate::tools::ToolRegistry,
+    /// Full model-facing catalog, including deferred entries.
     pub(super) catalog: Vec<Tool>,
     /// Names active at the start of the turn.
     pub(super) active_names: HashSet<String>,
-    /// The catalog subset that would actually be serialized into the request.
-    /// `None` when the turn would send no `tools` field at all.
+    /// Exact initial `tools` field. `None` means no field is sent.
     pub(super) active: Option<Vec<Tool>>,
+    pub(super) mode: AppMode,
+    pub(super) strict_tool_mode: bool,
+    allowed_tools: Option<Vec<String>>,
+    disallowed_tools: Option<Vec<String>>,
+    /// Hard per-turn cap on admitted tool calls (#4415). The turn loop copies
+    /// this limit into its own admission counter at turn start; `None` means
+    /// unlimited (the default), which keeps the admission gate inert.
+    pub(super) max_tool_calls: Option<u32>,
+    questions_allowed: bool,
+}
+
+impl ToolSurfacePolicy {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new(
+        registry: crate::tools::ToolRegistry,
+        tools: Option<Vec<Tool>>,
+        mode: AppMode,
+        always_load: &HashSet<String>,
+        dynamic_active_tools: &[&'static str],
+        strict_tool_mode: bool,
+        allowed_tools: Option<Vec<String>>,
+        disallowed_tools: Option<Vec<String>>,
+        max_tool_calls: Option<u32>,
+        approval_mode: crate::tui::approval::ApprovalMode,
+    ) -> Self {
+        let mut catalog = tools.unwrap_or_default();
+        if !catalog.is_empty() {
+            ensure_advanced_tooling(&mut catalog, mode, always_load);
+        }
+
+        // Synthetic tools are injected before narrowing. Doing this after the
+        // retain would re-advertise tool_search/code execution despite an
+        // explicit command gate.
+        catalog.retain(|tool| {
+            !tool_denied(disallowed_tools.as_deref(), &tool.name)
+                && tool_allowed(allowed_tools.as_deref(), &tool.name)
+        });
+        let questions_allowed =
+            super::super::authority::permission_posture_allows_questions(approval_mode);
+        if !questions_allowed {
+            catalog.retain(|tool| tool.name != REQUEST_USER_INPUT_NAME);
+        }
+
+        let mut active_names = initial_active_tools(&catalog);
+        active_names.extend(dynamic_active_tools.iter().map(|name| (*name).to_string()));
+        active_names.retain(|name| catalog.iter().any(|tool| tool.name == *name));
+        let active = active_tools_for_request(&catalog, &active_names, strict_tool_mode);
+
+        Self {
+            registry,
+            catalog,
+            active_names,
+            active,
+            mode,
+            strict_tool_mode,
+            allowed_tools,
+            disallowed_tools,
+            max_tool_calls,
+            questions_allowed,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn allows_tool(&self, name: &str) -> bool {
+        !self.denies_tool(name) && self.passes_allow_list(name)
+    }
+
+    pub(super) fn passes_allow_list(&self, name: &str) -> bool {
+        tool_allowed(self.allowed_tools.as_deref(), name)
+    }
+
+    pub(super) fn denies_tool(&self, name: &str) -> bool {
+        tool_denied(self.disallowed_tools.as_deref(), name)
+    }
+
+    pub(super) fn allows_questions(&self) -> bool {
+        self.questions_allowed
+    }
+}
+
+pub(super) fn tool_allowed(allowed_tools: Option<&[String]>, tool_name: &str) -> bool {
+    let Some(allowed_tools) = allowed_tools else {
+        return true;
+    };
+    tool_matches_any_rule(allowed_tools, tool_name)
+}
+
+pub(super) fn tool_denied(disallowed_tools: Option<&[String]>, tool_name: &str) -> bool {
+    disallowed_tools.is_some_and(|rules| tool_matches_any_rule(rules, tool_name))
+}
+
+fn tool_matches_any_rule(rules: &[String], tool_name: &str) -> bool {
+    let tool_name = tool_name.to_ascii_lowercase();
+    rules.iter().any(|rule| {
+        let rule = rule.to_ascii_lowercase();
+        rule.strip_suffix('*')
+            .map_or_else(|| tool_name == rule, |prefix| tool_name.starts_with(prefix))
+    })
 }
 
 /// The `tools` field of one outbound request, from a catalog and the set of
 /// currently-active tool names.
 ///
-/// Shared by [`plan_turn_tools`] (turn seed and `/preview-request`) and by the
-/// per-step rebuild inside the turn loop, so activating a deferred tool
-/// mid-turn goes through exactly one code path.
+/// Shared by [`ToolSurfacePolicy`] and the per-step rebuild inside the turn
+/// loop, so activating a deferred tool mid-turn goes through one code path.
 pub(super) fn active_tools_for_request(
     catalog: &[Tool],
     active: &HashSet<String>,
@@ -416,32 +513,6 @@ pub(super) fn active_tools_for_request(
         crate::tools::schema_sanitize::prepare_tools_for_strict_mode(&mut tools);
     }
     Some(tools)
-}
-
-/// Compute [`TurnToolPlan`] from a freshly built catalog.
-///
-/// `tools` is the catalog produced by `build_model_tool_catalog_with_surface`
-/// plus the gate and permission-posture filters — i.e. exactly the value the
-/// engine hands to `handle_deepseek_turn`.
-pub(super) fn plan_turn_tools(
-    tools: Option<Vec<Tool>>,
-    mode: AppMode,
-    always_load: &HashSet<String>,
-    dynamic_active_tools: &[&'static str],
-    strict_tool_mode: bool,
-) -> TurnToolPlan {
-    let mut catalog = tools.unwrap_or_default();
-    if !catalog.is_empty() {
-        ensure_advanced_tooling(&mut catalog, mode, always_load);
-    }
-    let mut active_names = initial_active_tools(&catalog);
-    active_names.extend(dynamic_active_tools.iter().map(|name| (*name).to_string()));
-    let active = active_tools_for_request(&catalog, &active_names, strict_tool_mode);
-    TurnToolPlan {
-        catalog,
-        active_names,
-        active,
-    }
 }
 
 fn tool_search_haystack(tool: &Tool) -> String {
@@ -676,12 +747,14 @@ pub(super) fn default_synthetic_catalog_tool_names() -> Vec<String> {
     names
 }
 
+#[cfg(test)]
 fn is_synthetic_catalog_tool(name: &str) -> bool {
     is_tool_search_tool(name)
         || matches!(name, CODE_EXECUTION_TOOL_NAME | JS_EXECUTION_TOOL_NAME)
         || McpPool::is_mcp_tool(name)
 }
 
+#[cfg(test)]
 pub(super) fn tool_catalog_consistency_issues(
     catalog: &[Tool],
     registry: &crate::tools::ToolRegistry,

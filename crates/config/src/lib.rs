@@ -75,6 +75,26 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 pub const CONFIG_FILE_NAME: &str = "config.toml";
 pub const PERMISSIONS_FILE_NAME: &str = "permissions.toml";
 
+/// Secret-store routing metadata; never credential material.
+pub const API_KEYRING_SENTINEL: &str = "__KEYRING__";
+
+/// Canonical structural classification for configured API-key values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigApiKeyValueKind {
+    Empty,
+    SecretStoreSentinel,
+    Literal,
+}
+
+#[must_use]
+pub fn classify_config_api_key_value(value: &str) -> ConfigApiKeyValueKind {
+    match value.trim() {
+        "" => ConfigApiKeyValueKind::Empty,
+        API_KEYRING_SENTINEL => ConfigApiKeyValueKind::SecretStoreSentinel,
+        _ => ConfigApiKeyValueKind::Literal,
+    }
+}
+
 fn http_headers_are_effectively_empty(headers: &BTreeMap<String, String>) -> bool {
     !headers
         .iter()
@@ -2504,7 +2524,9 @@ impl ConfigToml {
         let explicit_api_key_for_endpoint = cli
             .api_key
             .as_deref()
-            .or(from_file.as_deref())
+            .or(from_file.as_deref().filter(|value| {
+                classify_config_api_key_value(value) == ConfigApiKeyValueKind::Literal
+            }))
             .or(xiaomi_mimo_env_api_key.as_deref());
         let base_url = if provider == ProviderKind::XiaomiMimo {
             resolve_xiaomi_mimo_base_url(
@@ -2585,7 +2607,9 @@ impl ConfigToml {
         } else if uses_kimi_imported_token && !custom_endpoint {
             (None, None)
         } else if (!custom_endpoint || base_url_from_file)
-            && let Some(value) = from_file.clone().filter(|v| !v.trim().is_empty())
+            && let Some(value) = from_file.clone().filter(|value| {
+                classify_config_api_key_value(value) == ConfigApiKeyValueKind::Literal
+            })
         {
             (Some(value), Some(RuntimeApiKeySource::ConfigFile))
         } else if !custom_endpoint
@@ -3770,7 +3794,9 @@ fn env_api_key_for_provider(provider: ProviderKind) -> Option<String> {
     codewhale_secrets::env_for(provider.as_str())
 }
 
-fn auth_mode_requires_api_key(auth_mode: Option<&str>) -> bool {
+/// Whether an authentication mode requires API-key material.
+#[must_use]
+pub fn auth_mode_requires_api_key(auth_mode: Option<&str>) -> bool {
     matches!(
         auth_mode
             .map(str::trim)
@@ -3800,7 +3826,9 @@ pub fn auth_mode_disables_api_key(auth_mode: Option<&str>) -> bool {
     )
 }
 
-fn auth_mode_uses_kimi_imported_token(auth_mode: &str) -> bool {
+/// Whether an authentication mode selects Kimi's imported bearer token.
+#[must_use]
+pub fn auth_mode_uses_kimi_imported_token(auth_mode: &str) -> bool {
     matches!(
         auth_mode
             .trim()
@@ -4391,32 +4419,14 @@ pub fn default_secrets() -> &'static Secrets {
 // New installs write to ~/.codewhale/. Existing installs with only
 // ~/.deepseek/ continue working without data loss.
 
-/// Canonical CodeWhale app directory name under $HOME.
-pub const CODEWHALE_APP_DIR: &str = ".codewhale";
-
-/// Legacy DeepSeek-branded app directory name (compatibility fallback).
-pub const LEGACY_APP_DIR: &str = ".deepseek";
+pub use codewhale_paths::{CODEWHALE_APP_DIR, LEGACY_APP_DIR};
 
 /// Resolve the primary CodeWhale home directory.
 ///
 /// `$CODEWHALE_HOME` takes precedence when set. Otherwise defaults to
 /// `$HOME/.codewhale`. This is the write target for new product state.
 pub fn codewhale_home() -> Result<PathBuf> {
-    if let Some(path) = codewhale_home_env_override() {
-        return Ok(path);
-    }
-    let home = effective_home_dir().context("failed to resolve home directory")?;
-    Ok(home.join(CODEWHALE_APP_DIR))
-}
-
-fn codewhale_home_env_override() -> Option<PathBuf> {
-    let val = std::env::var("CODEWHALE_HOME").ok()?;
-    let trimmed = val.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(trimmed))
-    }
+    codewhale_paths::codewhale_home().context("failed to resolve home directory")
 }
 
 /// Whether `$CODEWHALE_HOME` is set to a non-empty value.
@@ -4424,22 +4434,14 @@ fn codewhale_home_env_override() -> Option<PathBuf> {
 /// An explicit CodeWhale home is an isolation boundary: state/config resolvers
 /// must not fall back to ambient legacy `~/.deepseek` data outside that root.
 pub fn codewhale_home_is_explicit() -> bool {
-    codewhale_home_env_override().is_some()
+    codewhale_paths::codewhale_home_is_explicit()
 }
 
 /// Resolve the legacy DeepSeek home directory (`$HOME/.deepseek`).
 ///
 /// Always returns the legacy path regardless of whether it exists.
 pub fn legacy_deepseek_home() -> Result<PathBuf> {
-    let home = effective_home_dir().context("failed to resolve home directory")?;
-    Ok(home.join(LEGACY_APP_DIR))
-}
-
-fn effective_home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(dirs::home_dir)
+    codewhale_paths::legacy_deepseek_home().context("failed to resolve home directory")
 }
 
 /// Reject state subdirs that could escape the state root via path injection.
@@ -4482,7 +4484,7 @@ fn ensure_safe_state_subdir(subdir: &str) -> Result<()> {
 /// from the legacy path for users who haven't migrated yet.
 pub fn resolve_state_dir(subdir: &str) -> Result<PathBuf> {
     ensure_safe_state_subdir(subdir)?;
-    let explicit_codewhale_home = codewhale_home_env_override().is_some();
+    let explicit_codewhale_home = codewhale_home_is_explicit();
     let primary = codewhale_home()?.join(subdir);
     if explicit_codewhale_home || primary.exists() {
         return Ok(primary);
@@ -4554,7 +4556,7 @@ impl StateMigration {
 /// tests and future UI surfaces that want to render the notice themselves.
 pub fn ensure_state_dir_with_migration(subdir: &str) -> Result<(PathBuf, Option<StateMigration>)> {
     ensure_safe_state_subdir(subdir)?;
-    let explicit_codewhale_home = codewhale_home_env_override().is_some();
+    let explicit_codewhale_home = codewhale_home_is_explicit();
     let dir = codewhale_home()?.join(subdir);
     let migration = if !explicit_codewhale_home {
         migrate_legacy_state_dir(&dir, subdir)?

@@ -1255,7 +1255,7 @@ pub fn default_sessions_dir() -> std::io::Result<PathBuf> {
 }
 
 fn merge_missing_legacy_session_entries(primary: &Path) -> io::Result<usize> {
-    if codewhale_home_is_explicit() {
+    if codewhale_paths::codewhale_home_is_explicit() {
         return Ok(0);
     }
 
@@ -1267,12 +1267,6 @@ fn merge_missing_legacy_session_entries(primary: &Path) -> io::Result<usize> {
     }
 
     copy_missing_dir_entries(&legacy, primary)
-}
-
-fn codewhale_home_is_explicit() -> bool {
-    std::env::var("CODEWHALE_HOME")
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
 }
 
 fn copy_missing_dir_entries(src: &Path, dst: &Path) -> io::Result<usize> {
@@ -2220,6 +2214,34 @@ mod tests {
         let dir = default_sessions_dir().expect("default session dir");
         assert_eq!(dir, explicit_home.join("sessions"));
         assert!(!dir.join("legacy-visible.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_unicode_codewhale_home_is_still_an_explicit_session_boundary() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _lock = crate::test_support::lock_test_env();
+        let tmp = tempdir().expect("tempdir");
+        let home = tmp.path().join("home");
+        let explicit_home = tmp.path().join(std::ffi::OsString::from_vec(
+            b"codewhale-\xff-home".to_vec(),
+        ));
+        let _home = crate::test_support::EnvVarGuard::set("HOME", &home);
+        let _codewhale_home =
+            crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &explicit_home);
+
+        let legacy_sessions = home.join(".deepseek").join("sessions");
+        fs::create_dir_all(&legacy_sessions).expect("legacy sessions");
+        fs::write(legacy_sessions.join("ambient.json"), "ambient").expect("ambient legacy session");
+        let safe_primary = tmp.path().join("safe-primary");
+        fs::create_dir_all(&safe_primary).expect("safe primary");
+
+        assert_eq!(
+            merge_missing_legacy_session_entries(&safe_primary).expect("merge decision"),
+            0
+        );
+        assert!(!safe_primary.join("ambient.json").exists());
     }
 
     #[test]

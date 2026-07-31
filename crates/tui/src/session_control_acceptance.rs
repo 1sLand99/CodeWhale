@@ -835,10 +835,12 @@ mod tests {
 
     #[test]
     fn auto_resume_candidate_walk_is_bounded() {
-        assert!(
-            crate::session_resume::MAX_AUTO_RESUME_CANDIDATES <= 16,
-            "a damaged sessions directory must not turn startup into a long scan"
-        );
+        const {
+            assert!(
+                crate::session_resume::MAX_AUTO_RESUME_CANDIDATES <= 16,
+                "a damaged sessions directory must not turn startup into a long scan"
+            );
+        }
     }
 
     #[test]
