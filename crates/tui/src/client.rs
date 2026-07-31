@@ -776,6 +776,25 @@ pub(crate) fn api_url(base_url: &str, path: &str) -> String {
     api_url_with_suffix(base_url, path, None)
 }
 
+fn responses_api_url(base_url: &str, provider: ApiProvider) -> String {
+    let normalized = base_url.trim_end_matches('/').to_ascii_lowercase();
+    let official_deepseek = matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN)
+        && matches!(
+            normalized.as_str(),
+            "https://api.deepseek.com"
+                | "https://api.deepseek.com/v1"
+                | "https://api.deepseek.com/beta"
+                | "https://api.deepseeki.com"
+                | "https://api.deepseeki.com/v1"
+                | "https://api.deepseeki.com/beta"
+        );
+    if official_deepseek {
+        format!("{}/responses", unversioned_base_url(base_url))
+    } else {
+        api_url(base_url, "responses")
+    }
+}
+
 pub(super) fn api_url_with_suffix(base_url: &str, path: &str, path_suffix: Option<&str>) -> String {
     let path = path.trim_start_matches('/');
     if path.starts_with("beta/") {
@@ -976,7 +995,10 @@ impl DeepSeekClient {
     /// Create a DeepSeek client from CLI configuration.
     pub fn new(config: &Config) -> Result<Self> {
         let api_provider = config.api_provider();
-        if api_provider == ApiProvider::OpencodeZen {
+        let model_aware = api_provider.metadata().is_some_and(|provider| {
+            provider.wire_policy() == codewhale_config::provider::WirePolicy::ModelAware
+        });
+        if model_aware {
             let route = crate::route_runtime::resolve_runtime_route(config, api_provider, None)
                 .map_err(anyhow::Error::msg)?;
             return Self::from_candidate(&route.config, &route.candidate);
@@ -1213,7 +1235,10 @@ impl DeepSeekClient {
     }
 
     fn bind_request_to_protocol(&self, mut request: MessageRequest) -> Result<MessageRequest> {
-        if self.api_provider != ApiProvider::OpencodeZen {
+        let model_aware = self.api_provider.metadata().is_some_and(|provider| {
+            provider.wire_policy() == codewhale_config::provider::WirePolicy::ModelAware
+        });
+        if !model_aware {
             return Ok(request);
         }
 
@@ -1221,7 +1246,7 @@ impl DeepSeekClient {
         let candidate = RESOLVER
             .get_or_init(RouteResolver::new)
             .resolve(&RouteRequest {
-                explicit_provider: ApiProvider::OpencodeZen.kind(),
+                explicit_provider: self.api_provider.kind(),
                 model_selector: Some(LogicalModelRef::from(request.model.as_str())),
                 saved_provider_model: None,
                 base_url_override: Some(self.base_url.clone()),
@@ -1230,7 +1255,8 @@ impl DeepSeekClient {
             .map_err(anyhow::Error::msg)?;
         if candidate.protocol() != self.wire_format {
             bail!(
-                "OpenCode Zen model {:?} uses {:?}, but this client is bound to {:?}; resolve a new model route before sending",
+                "{} model {:?} uses {:?}, but this client is bound to {:?}; resolve a new model route before sending",
+                self.api_provider.display_name(),
                 request.model,
                 candidate.protocol(),
                 self.wire_format
@@ -1701,12 +1727,13 @@ impl DeepSeekClient {
                 ))
             }
             WireFormat::Responses => {
-                let body = responses::build_responses_body(&request);
+                let body =
+                    responses::build_responses_body_for_provider(&request, self.api_provider);
                 let is_codex = self.api_provider == ApiProvider::OpenaiCodex;
                 let url = if is_codex {
                     format!("{}{}", self.base_url, responses::CODEX_RESPONSES_PATH)
                 } else {
-                    api_url(&self.base_url, "responses")
+                    responses_api_url(&self.base_url, self.api_provider)
                 };
                 let shape = if is_codex {
                     RouteShape::CodexResponses
@@ -9154,6 +9181,47 @@ mod tests {
         assert_eq!(from_candidate.base_url, from_new.base_url);
         assert_eq!(from_candidate.default_model, from_new.default_model);
         assert_eq!(from_candidate.api_provider, from_new.api_provider);
+    }
+
+    #[test]
+    fn official_deepseek_flash_binds_responses_request_and_endpoint() {
+        let (_config, route) =
+            deepseek_route_for_test("https://api.deepseek.com/beta", "deepseek-v4-flash");
+        assert_eq!(route.candidate.protocol(), WireFormat::Responses);
+
+        let client = DeepSeekClient::new(&route.config).expect("Flash client resolves");
+        assert_eq!(client.wire_format, WireFormat::Responses);
+
+        let prepared = client
+            .prepare_outbound_request(
+                MessageRequest {
+                    model: "deepseek-v4-flash".to_string(),
+                    messages: vec![Message {
+                        role: "user".to_string(),
+                        content: vec![ContentBlock::Text {
+                            text: "hello".to_string(),
+                            cache_control: None,
+                        }],
+                    }],
+                    max_tokens: 64,
+                    system: None,
+                    tools: None,
+                    tool_choice: None,
+                    metadata: None,
+                    thinking: None,
+                    reasoning_effort: Some("max".to_string()),
+                    stream: Some(true),
+                    temperature: None,
+                    top_p: None,
+                },
+                true,
+            )
+            .expect("Flash Responses request prepares");
+
+        assert_eq!(prepared.dialect, WireDialect::OpenAiResponses);
+        assert_eq!(prepared.endpoint.url, "https://api.deepseek.com/responses");
+        assert_eq!(prepared.body["model"], "deepseek-v4-flash");
+        assert_eq!(prepared.body["reasoning"]["effort"], "max");
     }
 
     #[test]

@@ -14,7 +14,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::candidate::PricingSku;
-use super::capabilities::RouteCapabilities;
+use super::capabilities::{CapabilityState, RouteCapabilities};
 use super::ids::{ModelId, ProviderId, WireModelId};
 
 /// Token limits for one resolved route/offering.
@@ -144,6 +144,53 @@ pub(crate) const OPENCODE_ZEN_CHAT_MODELS: &[&str] = &[
 /// identity: their sole claim is the documented wire model and endpoint key.
 #[must_use]
 pub fn bundled_offerings() -> Vec<ProviderModelOffering> {
+    // DeepSeek's 2026-07-31 production Flash update added a native Responses
+    // endpoint without changing the model id. Pro remains Chat Completions
+    // until its announced Responses rollout. These exact-route transport facts
+    // cannot be represented by the Models.dev-shaped fallback asset.
+    let deepseek = ProviderId::from("deepseek");
+    let documented_capabilities = RouteCapabilities {
+        image_input: CapabilityState::Unsupported,
+        reasoning: CapabilityState::Supported,
+        native_tool_calls: CapabilityState::Supported,
+        structured_output: CapabilityState::Supported,
+        parallel_tool_calls: CapabilityState::Supported,
+        streaming: CapabilityState::Supported,
+        prompt_caching: CapabilityState::Supported,
+        // The endpoint supports native web search, but Codewhale does not yet
+        // replay `web_search_call` items on this stateless route. Keep the
+        // executable capability honest until that loop is implemented.
+        server_side_web_search: CapabilityState::Unknown,
+        ..RouteCapabilities::default()
+    };
+    let documented_limits = RouteLimits {
+        context_tokens: Some(1_000_000),
+        input_tokens: None,
+        output_tokens: Some(384_000),
+    };
+    let mut offerings = vec![
+        ProviderModelOffering {
+            provider: deepseek.clone(),
+            canonical_model: Some(ModelId::from("deepseek-v4-pro")),
+            wire_model_id: WireModelId::from("deepseek-v4-pro"),
+            endpoint_key: "chat".to_string(),
+            default_for_provider: true,
+            limits: documented_limits,
+            capabilities: documented_capabilities,
+            pricing: PricingSku::UnknownOrStale,
+        },
+        ProviderModelOffering {
+            provider: deepseek,
+            canonical_model: Some(ModelId::from("deepseek-v4-flash")),
+            wire_model_id: WireModelId::from("deepseek-v4-flash"),
+            endpoint_key: "responses".to_string(),
+            default_for_provider: false,
+            limits: documented_limits,
+            capabilities: documented_capabilities,
+            pricing: PricingSku::UnknownOrStale,
+        },
+    ];
+
     let provider = ProviderId::from("opencode-zen");
     let groups = [
         ("responses", OPENCODE_ZEN_RESPONSES_MODELS),
@@ -151,20 +198,18 @@ pub fn bundled_offerings() -> Vec<ProviderModelOffering> {
         ("chat", OPENCODE_ZEN_CHAT_MODELS),
     ];
 
-    groups
-        .into_iter()
-        .flat_map(|(endpoint_key, models)| {
-            let provider = provider.clone();
-            models.iter().map(move |model| ProviderModelOffering {
-                provider: provider.clone(),
-                canonical_model: None,
-                wire_model_id: WireModelId::from(*model),
-                endpoint_key: endpoint_key.to_string(),
-                default_for_provider: *model == "gpt-5.5",
-                limits: RouteLimits::default(),
-                capabilities: RouteCapabilities::default(),
-                pricing: PricingSku::UnknownOrStale,
-            })
+    offerings.extend(groups.into_iter().flat_map(|(endpoint_key, models)| {
+        let provider = provider.clone();
+        models.iter().map(move |model| ProviderModelOffering {
+            provider: provider.clone(),
+            canonical_model: None,
+            wire_model_id: WireModelId::from(*model),
+            endpoint_key: endpoint_key.to_string(),
+            default_for_provider: *model == "gpt-5.5",
+            limits: RouteLimits::default(),
+            capabilities: RouteCapabilities::default(),
+            pricing: PricingSku::UnknownOrStale,
         })
-        .collect()
+    }));
+    offerings
 }

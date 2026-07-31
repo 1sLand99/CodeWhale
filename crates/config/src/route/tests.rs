@@ -276,7 +276,7 @@ fn descriptor_for_every_kind_has_nonempty_transport_facts() {
 fn descriptor_protocol_matches_provider_wire() {
     for kind in ProviderKind::ALL {
         let d = ProviderDescriptor::for_kind(kind);
-        if kind == ProviderKind::OpencodeZen {
+        if matches!(kind, ProviderKind::Deepseek | ProviderKind::OpencodeZen) {
             assert_eq!(d.wire_policy(), crate::provider::WirePolicy::ModelAware);
             assert_eq!(
                 d.protocol_for_endpoint("chat"),
@@ -286,6 +286,14 @@ fn descriptor_protocol_matches_provider_wire() {
                 d.protocol_for_endpoint("responses"),
                 Some(RequestProtocol::Responses)
             );
+            if kind == ProviderKind::Deepseek {
+                assert_eq!(
+                    d.protocol_for_endpoint("messages"),
+                    Some(RequestProtocol::AnthropicMessages)
+                );
+                assert_eq!(d.protocol_for_endpoint("models/gemini"), None);
+                continue;
+            }
             assert_eq!(
                 d.protocol_for_endpoint("messages"),
                 Some(RequestProtocol::AnthropicMessages)
@@ -326,6 +334,56 @@ fn resolver_explicit_provider_scoped_model_maps_to_wire_id() {
         out.canonical_model().map(ModelId::as_str),
         Some("deepseek-v4-pro")
     );
+}
+
+#[test]
+fn resolver_routes_only_official_deepseek_flash_over_responses() {
+    let resolver = RouteResolver::new();
+
+    let flash = resolver
+        .resolve(&req(
+            Some(ProviderKind::Deepseek),
+            Some("deepseek-v4-flash"),
+        ))
+        .expect("official Flash route resolves");
+    assert_eq!(flash.protocol(), RequestProtocol::Responses);
+    assert_eq!(flash.endpoint().endpoint_key, "responses");
+
+    let pro = resolver
+        .resolve(&req(Some(ProviderKind::Deepseek), Some("deepseek-v4-pro")))
+        .expect("official Pro route resolves");
+    assert_eq!(pro.protocol(), RequestProtocol::ChatCompletions);
+    assert_eq!(pro.endpoint().endpoint_key, "chat");
+
+    let future = resolver
+        .resolve(&req(
+            Some(ProviderKind::Deepseek),
+            Some("deepseek-v5-future"),
+        ))
+        .expect("unknown future model preserves direct-provider pass-through");
+    assert_eq!(future.protocol(), RequestProtocol::Responses);
+    assert_eq!(future.endpoint().endpoint_key, "responses");
+
+    let legacy_unknown = resolver
+        .resolve(&req(
+            Some(ProviderKind::Deepseek),
+            Some("deepseek-coder-future"),
+        ))
+        .expect("unknown unversioned model preserves historical Chat pass-through");
+    assert_eq!(legacy_unknown.protocol(), RequestProtocol::ChatCompletions);
+    assert_eq!(legacy_unknown.endpoint().endpoint_key, "chat");
+
+    let custom = resolver
+        .resolve(&RouteRequest {
+            explicit_provider: Some(ProviderKind::Deepseek),
+            model_selector: Some(LogicalModelRef::from("deepseek-v4-flash")),
+            saved_provider_model: None,
+            base_url_override: Some("https://compatible.example/v1".to_string()),
+            limit_overrides: Vec::new(),
+        })
+        .expect("custom compatible Flash route remains pass-through");
+    assert_eq!(custom.protocol(), RequestProtocol::ChatCompletions);
+    assert_eq!(custom.endpoint().endpoint_key, "chat");
 }
 
 #[test]

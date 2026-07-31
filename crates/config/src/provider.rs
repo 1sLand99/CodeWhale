@@ -554,17 +554,57 @@ macro_rules! provider {
     };
 }
 
-provider!(
-    Deepseek,
-    Deepseek,
-    "deepseek",
-    "DeepSeek",
-    DEFAULT_DEEPSEEK_BASE_URL,
-    DEFAULT_DEEPSEEK_MODEL,
-    ["DEEPSEEK_API_KEY"],
-    "deepseek",
-    aliases: ["deep-seek", "deepseek-cn", "deepseek_china", "deepseekcn", "deepseek-china"]
-);
+/// Official DeepSeek route.
+///
+/// DeepSeek-V4-Flash-0731 is served over the Responses API while V4 Pro
+/// remains on Chat Completions until DeepSeek enables Responses support for
+/// it. Keep this provider model-aware so selecting Flash changes the actual
+/// wire contract instead of only changing the `model` string.
+pub struct Deepseek;
+
+impl Provider for Deepseek {
+    fn id(&self) -> &'static str {
+        "deepseek"
+    }
+
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::Deepseek
+    }
+
+    fn display_name(&self) -> &'static str {
+        "DeepSeek"
+    }
+
+    fn default_base_url(&self) -> &'static str {
+        DEFAULT_DEEPSEEK_BASE_URL
+    }
+
+    fn default_model(&self) -> &'static str {
+        DEFAULT_DEEPSEEK_MODEL
+    }
+
+    fn env_vars(&self) -> &'static [&'static str] {
+        &["DEEPSEEK_API_KEY"]
+    }
+
+    fn provider_config_key(&self) -> &'static str {
+        "deepseek"
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &[
+            "deep-seek",
+            "deepseek-cn",
+            "deepseek_china",
+            "deepseekcn",
+            "deepseek-china",
+        ]
+    }
+
+    fn wire_policy(&self) -> WirePolicy {
+        WirePolicy::ModelAware
+    }
+}
 
 /// Opt-in DeepSeek route that speaks the Anthropic Messages wire protocol.
 pub struct DeepseekAnthropic;

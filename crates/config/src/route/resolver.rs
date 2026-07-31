@@ -190,9 +190,16 @@ impl RouteResolver {
             classify(provider_kind)
         };
         let model_aware = descriptor.wire_policy() == WirePolicy::ModelAware;
+        // A model-aware protocol row is an exact provider-endpoint fact.
+        // OpenCode Zen's published roster is closed; DeepSeek's direct route
+        // deliberately preserves its existing future-model pass-through and
+        // sends unknown bare ids over Chat until an exact Responses row exists.
+        // Custom compatible endpoints also retain Chat pass-through.
+        let require_catalog_match =
+            model_aware && !custom_endpoint && provider_kind != ProviderKind::Deepseek;
         let mut selected = if is_auto {
             match default_offering {
-                None if model_aware => {
+                None if require_catalog_match => {
                     return Err(RouteError::UnsupportedModelProtocol {
                         provider: provider_id.clone(),
                         model: descriptor.default_wire_model().as_str().to_string(),
@@ -208,9 +215,22 @@ impl RouteResolver {
                 &provider_id,
                 &logical_model,
                 class,
-                model_aware,
+                require_catalog_match,
             )?
         };
+        if provider_kind == ProviderKind::Deepseek {
+            if custom_endpoint {
+                selected.endpoint_key = "chat".to_string();
+            } else if selected.canonical_model.is_none()
+                && deepseek_versioned_model_prefers_responses(selected.wire_model_id.as_str())
+            {
+                // DeepSeek introduced its native agent wire on V4 Flash. Keep
+                // exact catalog rows authoritative (notably V4 Pro => Chat),
+                // while allowing future versioned direct models to adopt the
+                // new Responses surface without a Codewhale release.
+                selected.endpoint_key = "responses".to_string();
+            }
+        }
         if custom_endpoint {
             // A documented first-party server tool is an endpoint-owned fact.
             // Reusing a provider enum/model id against a custom compatible
@@ -328,14 +348,6 @@ impl RouteResolver {
             }
         }
 
-        if require_catalog_match {
-            return Err(RouteError::UnsupportedModelProtocol {
-                provider: provider_id.clone(),
-                model: raw.to_string(),
-                endpoint_key: "unproven".to_string(),
-            });
-        }
-
         // No catalog match. Apply class-specific pass-through rules.
         match class {
             ProviderClass::StrictDirect => {
@@ -354,6 +366,13 @@ impl RouteResolver {
                         model: raw.to_string(),
                     });
                 }
+                if require_catalog_match {
+                    return Err(RouteError::UnsupportedModelProtocol {
+                        provider: provider_id.clone(),
+                        model: raw.to_string(),
+                        endpoint_key: "unproven".to_string(),
+                    });
+                }
                 // A bare, unknown model on a strict direct provider is passed
                 // through verbatim (the provider validates it server-side). No
                 // offering matched, so pricing is honestly unknown (#3085).
@@ -363,6 +382,13 @@ impl RouteResolver {
             // endpoints legitimately accept arbitrary / prefixed ids verbatim.
             ProviderClass::Aggregator | ProviderClass::LocalOrCustom => {
                 let _ = provider_kind;
+                if require_catalog_match {
+                    return Err(RouteError::UnsupportedModelProtocol {
+                        provider: provider_id.clone(),
+                        model: raw.to_string(),
+                        endpoint_key: "unproven".to_string(),
+                    });
+                }
                 // No offering matched: pricing is honestly unknown (#3085).
                 Ok(ResolvedOffering::unknown(WireModelId::from(raw)))
             }
@@ -486,6 +512,15 @@ fn request_uses_custom_endpoint(
 ) -> bool {
     base_url_override
         .is_some_and(|base_url| provider_preserves_custom_base_url_model(descriptor.kind, base_url))
+}
+
+fn deepseek_versioned_model_prefers_responses(model: &str) -> bool {
+    model
+        .trim()
+        .to_ascii_lowercase()
+        .strip_prefix("deepseek-v")
+        .and_then(|suffix| suffix.chars().next())
+        .is_some_and(|first| first.is_ascii_digit())
 }
 
 /// True when `base_url` is an `http://` endpoint whose host is NOT loopback
