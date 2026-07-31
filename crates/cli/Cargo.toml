@@ -43,6 +43,7 @@ mimalloc.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 tracing.workspace = true
+zeroize = "1.8.2"
 
 [build-dependencies]
 codewhale-build-support = { path = "../build-support", version = "0.9.2" }

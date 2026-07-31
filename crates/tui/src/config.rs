@@ -8313,50 +8313,15 @@ pub(crate) fn provider_config_uses_kimi_imported_token(config: &ProviderConfig) 
         .is_some_and(auth_mode_uses_kimi_imported_token)
 }
 
-pub(crate) fn auth_mode_uses_kimi_imported_token(mode: &str) -> bool {
-    matches!(
-        normalize_auth_mode(mode).as_str(),
-        "kimi" | "kimi_oauth" | "kimi_cli" | "oauth"
-    )
-}
+pub(crate) use codewhale_config::{
+    auth_mode_disables_api_key, auth_mode_requires_api_key, auth_mode_uses_kimi_imported_token,
+};
 
 fn provider_config_uses_xai_oauth(config: &ProviderConfig) -> bool {
     config
         .auth_mode
         .as_deref()
         .is_some_and(crate::xai_oauth::auth_mode_uses_xai_oauth)
-}
-
-fn normalize_auth_mode(mode: &str) -> String {
-    mode.trim().to_ascii_lowercase().replace(['-', ' '], "_")
-}
-
-pub(crate) fn auth_mode_requires_api_key(auth_mode: Option<&str>) -> bool {
-    matches!(
-        auth_mode
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(|value| value.to_ascii_lowercase()),
-        Some(value)
-            if matches!(
-                value.as_str(),
-                "api_key" | "api-key" | "apikey" | "bearer" | "bearer-token"
-            )
-    )
-}
-
-pub(crate) fn auth_mode_disables_api_key(auth_mode: Option<&str>) -> bool {
-    matches!(
-        auth_mode
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(|value| value.to_ascii_lowercase()),
-        Some(value)
-            if matches!(
-                value.as_str(),
-                "none" | "off" | "disabled" | "no_auth" | "no-auth" | "anonymous"
-            )
-    )
 }
 
 /// Whether a base URL points at a loopback/unspecified host, i.e. a local

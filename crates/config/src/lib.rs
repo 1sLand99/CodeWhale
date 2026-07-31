@@ -3794,7 +3794,9 @@ fn env_api_key_for_provider(provider: ProviderKind) -> Option<String> {
     codewhale_secrets::env_for(provider.as_str())
 }
 
-fn auth_mode_requires_api_key(auth_mode: Option<&str>) -> bool {
+/// Whether an authentication mode requires API-key material.
+#[must_use]
+pub fn auth_mode_requires_api_key(auth_mode: Option<&str>) -> bool {
     matches!(
         auth_mode
             .map(str::trim)
@@ -3824,7 +3826,9 @@ pub fn auth_mode_disables_api_key(auth_mode: Option<&str>) -> bool {
     )
 }
 
-fn auth_mode_uses_kimi_imported_token(auth_mode: &str) -> bool {
+/// Whether an authentication mode selects Kimi's imported bearer token.
+#[must_use]
+pub fn auth_mode_uses_kimi_imported_token(auth_mode: &str) -> bool {
     matches!(
         auth_mode
             .trim()

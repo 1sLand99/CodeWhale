@@ -1,10 +1,11 @@
 #![allow(clippy::uninlined_format_args)]
 
+mod credential_handoff;
 mod metrics;
 #[cfg(not(target_env = "ohos"))]
 mod update;
 
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1431,6 +1432,11 @@ enum AuthCommand {
     /// Report the effective credential route for a provider. Never prints a
     /// credential; reports the source layer or structural OAuth/repair state.
     Get {
+        #[arg(long, value_enum)]
+        provider: ProviderArg,
+    },
+    /// Pipe the runtime-effective API key to a local client; refuses terminals.
+    PrintApiKey {
         #[arg(long, value_enum)]
         provider: ProviderArg,
     },
@@ -3396,6 +3402,13 @@ fn run_auth_command_with_secrets_and_runtime(
                 auth_get_line_with_runtime(store, secrets, provider, runtime_overrides)
             );
             Ok(())
+        }
+        AuthCommand::PrintApiKey { provider } => {
+            let provider: ProviderKind = provider.into();
+            let mut stdout = io::stdout().lock();
+            credential_handoff::handoff_secret_line(&mut stdout, io::stdout().is_terminal(), || {
+                credential_handoff::resolve_api_key(store, secrets, provider, runtime_overrides)
+            })
         }
         AuthCommand::Clear { provider } => {
             let provider: ProviderKind = provider.into();
