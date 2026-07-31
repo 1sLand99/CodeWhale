@@ -46,7 +46,9 @@ use tracing;
 use windows::Win32::System::Console::{GetConsoleMode, GetStdHandle, SetConsoleMode};
 
 use crate::audit::log_sensitive_event;
-use crate::automation_manager::{AutomationManager, AutomationSchedulerConfig, spawn_scheduler};
+use crate::automation_manager::{
+    AutomationManager, AutomationSchedulerConfig, AutomationStatus, spawn_scheduler,
+};
 use crate::client::{
     CacheWarmupKey, DeepSeekClient, PromptInspection, build_cache_warmup_request,
     inspect_prompt_for_request,
@@ -2722,6 +2724,166 @@ async fn refresh_active_task_panel(app: &mut App, task_manager: &SharedTaskManag
             crate::tui::behavioral_tips::BehavioralTip::BackgroundJobReceipt,
         );
     changed || tip_shown
+}
+
+async fn handle_automation_list(app: &mut App) {
+    let Some(automations) = app.runtime_services.automations.clone() else {
+        app.add_message(HistoryCell::System {
+            content: "Automation manager is not available in this session.".to_string(),
+        });
+        return;
+    };
+    let manager = automations.lock().await;
+    match manager.list_automations() {
+        Ok(records) if records.is_empty() => {
+            app.add_message(HistoryCell::System {
+                content: "No scheduled automations. Use the `automation` tool to create one.".to_string(),
+            });
+        }
+        Ok(records) => {
+            let mut lines = Vec::new();
+            for record in records {
+                let status = match record.status {
+                    AutomationStatus::Active => "active",
+                    AutomationStatus::Paused => "paused",
+                };
+                let next = record
+                    .next_run_at
+                    .map(|t| t.to_rfc3339())
+                    .unwrap_or_else(|| "-".to_string());
+                lines.push(format!(
+                    "{}  [{}]  {}  (next: {})",
+                    record.id, status, record.name, next
+                ));
+            }
+            app.add_message(HistoryCell::System {
+                content: format!("Scheduled automations:\n{}", lines.join("\n")),
+            });
+        }
+        Err(error) => {
+            app.add_message(HistoryCell::System {
+                content: format!("Failed to list automations: {error}"),
+            });
+        }
+    }
+}
+
+async fn handle_automation_show(app: &mut App, id: &str) {
+    let Some(automations) = app.runtime_services.automations.clone() else {
+        app.add_message(HistoryCell::System {
+            content: "Automation manager is not available in this session.".to_string(),
+        });
+        return;
+    };
+    let manager = automations.lock().await;
+    match manager.get_automation(id) {
+        Ok(record) => {
+            let status = match record.status {
+                AutomationStatus::Active => "active",
+                AutomationStatus::Paused => "paused",
+            };
+            let runs = manager
+                .list_runs(id, Some(5))
+                .map(|runs| {
+                    runs.iter()
+                        .map(|run| {
+                            format!(
+                                "  {:?}  {}  (task {})",
+                                run.status,
+                                run.scheduled_for.to_rfc3339(),
+                                run.task_id.as_deref().unwrap_or("-")
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_else(|_| "  (runs unavailable)".to_string());
+            app.add_message(HistoryCell::System {
+                content: format!(
+                    "Automation {} [{}]\n  name: {}\n  rrule: {}\n  next: {}\n  last: {}\nrecent runs:\n{}",
+                    record.id,
+                    status,
+                    record.name,
+                    record.rrule,
+                    record
+                        .next_run_at
+                        .map(|t| t.to_rfc3339())
+                        .unwrap_or_else(|| "-".to_string()),
+                    record
+                        .last_run_at
+                        .map(|t| t.to_rfc3339())
+                        .unwrap_or_else(|| "-".to_string()),
+                    runs
+                ),
+            });
+        }
+        Err(error) => {
+            app.add_message(HistoryCell::System {
+                content: format!("Automation {id} not found: {error}"),
+            });
+        }
+    }
+}
+
+async fn handle_automation_mutate(app: &mut App, id: &str, action: &str) {
+    let Some(automations) = app.runtime_services.automations.clone() else {
+        app.add_message(HistoryCell::System {
+            content: "Automation manager is not available in this session.".to_string(),
+        });
+        return;
+    };
+    let manager = automations.lock().await;
+    let result = match action {
+        "pause" => manager.pause_automation(id),
+        "resume" => manager.resume_automation(id),
+        "delete" => manager.delete_automation(id),
+        _ => {
+            app.add_message(HistoryCell::System {
+                content: format!("Unknown automation action {action}"),
+            });
+            return;
+        }
+    };
+    match result {
+        Ok(record) => {
+            app.add_message(HistoryCell::System {
+                content: format!(
+                    "Automation {} {} (status: {:?})",
+                    record.name, action, record.status
+                ),
+            });
+        }
+        Err(error) => {
+            app.add_message(HistoryCell::System {
+                content: format!("Failed to {action} automation {id}: {error}"),
+            });
+        }
+    }
+}
+
+async fn handle_automation_run(app: &mut App, id: &str, task_manager: &SharedTaskManager) {
+    let Some(automations) = app.runtime_services.automations.clone() else {
+        app.add_message(HistoryCell::System {
+            content: "Automation manager is not available in this session.".to_string(),
+        });
+        return;
+    };
+    match crate::automation_manager::run_now_shared(&automations, id, task_manager).await {
+        Ok(run) => {
+            app.add_message(HistoryCell::System {
+                content: format!(
+                    "Automation {id} run enqueued: {:?} (task {})",
+                    run.status,
+                    run.task_id.as_deref().unwrap_or("-")
+                ),
+            });
+        }
+        Err(error) => {
+            app.add_message(HistoryCell::System {
+                content: format!("Failed to run automation {id}: {error}"),
+            });
+        }
+    }
 }
 
 fn newly_completed_id<'a>(
@@ -12462,6 +12624,24 @@ async fn apply_command_result(
                     }
                 }
                 refresh_active_task_panel(app, task_manager).await;
+            }
+            AppAction::AutomationList => {
+                handle_automation_list(app).await;
+            }
+            AppAction::AutomationShow { id } => {
+                handle_automation_show(app, &id).await;
+            }
+            AppAction::AutomationPause { id } => {
+                handle_automation_mutate(app, &id, "pause").await;
+            }
+            AppAction::AutomationResume { id } => {
+                handle_automation_mutate(app, &id, "resume").await;
+            }
+            AppAction::AutomationDelete { id } => {
+                handle_automation_mutate(app, &id, "delete").await;
+            }
+            AppAction::AutomationRun { id } => {
+                handle_automation_run(app, &id, task_manager).await;
             }
             AppAction::ShellJob(action) => {
                 handle_shell_job_action(app, action);

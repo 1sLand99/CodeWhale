@@ -988,6 +988,28 @@ pub enum AppAction {
     TaskCancel {
         id: String,
     },
+    /// List durable scheduled automations (name, status, next run).
+    AutomationList,
+    /// Show one automation plus its recent run records.
+    AutomationShow {
+        id: String,
+    },
+    /// Pause one automation by id.
+    AutomationPause {
+        id: String,
+    },
+    /// Resume one automation by id.
+    AutomationResume {
+        id: String,
+    },
+    /// Delete one automation by id.
+    AutomationDelete {
+        id: String,
+    },
+    /// Run one automation now (enqueues a durable task).
+    AutomationRun {
+        id: String,
+    },
     ShellJob(ShellJobAction),
     Mcp(McpUiAction),
     /// Switch to a different config profile without restarting.
