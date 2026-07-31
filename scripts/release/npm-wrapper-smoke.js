@@ -156,7 +156,14 @@ async function main() {
       }
       console.log(`Using preassembled release assets from ${releaseAssetsDir}`);
     } else {
-      await runCommand(process.execPath, [prepareAssetsScript, releaseAssetsDir]);
+      const prepareArgs = [prepareAssetsScript, releaseAssetsDir];
+      const cargoTargetDir = String(process.env.CARGO_TARGET_DIR || "").trim();
+      if (cargoTargetDir) {
+        prepareArgs.push(
+          path.join(path.resolve(repoRoot, cargoTargetDir), "release"),
+        );
+      }
+      await runCommand(process.execPath, prepareArgs);
     }
     const served = await serveDirectory(releaseAssetsDir);
     server = served.server;
