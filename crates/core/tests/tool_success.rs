@@ -19,19 +19,19 @@ use codewhale_tools::{
 use serde_json::json;
 use uuid::Uuid;
 
-struct ApplicationFailureTool;
+struct FixtureTool {
+    kind: ToolKind,
+    output: ToolOutput,
+}
 
 #[async_trait]
-impl ToolHandler for ApplicationFailureTool {
+impl ToolHandler for FixtureTool {
     fn kind(&self) -> ToolKind {
-        ToolKind::Function
+        self.kind
     }
 
     async fn handle(&self, _invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
-        Ok(ToolOutput::Function {
-            body: Some(json!({"message": "application failure remains visible"})),
-            success: false,
-        })
+        Ok(self.output.clone())
     }
 }
 
@@ -49,27 +49,31 @@ impl HookSink for RecordingSink {
     }
 }
 
-#[tokio::test]
-async fn invoke_tool_preserves_application_failure_as_a_tool_result() {
+async fn invoke_fixture(
+    name: &str,
+    kind: ToolKind,
+    payload: ToolPayload,
+    output: ToolOutput,
+) -> (serde_json::Value, Vec<HookEvent>) {
     let mut registry = ToolRegistry::default();
     registry
         .register(
             ToolDescriptor {
-                name: "application_failure_tool".into(),
+                name: name.into(),
                 input_schema: json!({"type":"object"}),
                 output_schema: json!({"type":"object"}),
                 supports_parallel_tool_calls: true,
                 timeout_ms: None,
             },
-            Arc::new(ApplicationFailureTool),
+            Arc::new(FixtureTool { kind, output }),
         )
-        .expect("register application-failure tool");
+        .expect("register fixture tool");
 
     let recording = Arc::new(RecordingSink::default());
     let mut hooks = HookDispatcher::default();
     hooks.add_sink(recording.clone());
     let state_path = std::env::temp_dir().join(format!(
-        "codewhale-core-tool-success-{}.db",
+        "codewhale-core-tool-success-{name}-{}.db",
         Uuid::new_v4().simple()
     ));
     let runtime = Runtime::new(
@@ -84,10 +88,8 @@ async fn invoke_tool_preserves_application_failure_as_a_tool_result() {
     let result = runtime
         .invoke_tool(
             ToolCall {
-                name: "application_failure_tool".into(),
-                payload: ToolPayload::Function {
-                    arguments: "{}".into(),
-                },
+                name: name.into(),
+                payload,
                 source: ToolCallSource::Direct,
                 raw_tool_call_id: None,
             },
@@ -96,6 +98,40 @@ async fn invoke_tool_preserves_application_failure_as_a_tool_result() {
         )
         .await
         .expect("application failure remains a transport-successful tool result");
+    let events = recording.0.lock().expect("recording hook lock").clone();
+    (result, events)
+}
+
+fn assert_failed_lifecycle(events: &[HookEvent], expected_tool: &str) {
+    let terminal = events
+        .iter()
+        .find_map(|event| match event {
+            HookEvent::ToolLifecycle {
+                tool_name,
+                phase,
+                payload,
+                ..
+            } if tool_name == expected_tool && phase == "failed" => Some(payload),
+            _ => None,
+        })
+        .expect("failed application lifecycle hook");
+    assert_eq!(terminal["ok"], false);
+}
+
+#[tokio::test]
+async fn invoke_tool_preserves_application_failure_as_a_tool_result() {
+    let (result, events) = invoke_fixture(
+        "application_failure_tool",
+        ToolKind::Function,
+        ToolPayload::Function {
+            arguments: "{}".into(),
+        },
+        ToolOutput::Function {
+            body: Some(json!({"message": "application failure remains visible"})),
+            success: false,
+        },
+    )
+    .await;
 
     assert_eq!(result["ok"], false);
     assert_eq!(result["status"], "failed");
@@ -108,19 +144,43 @@ async fn invoke_tool_preserves_application_failure_as_a_tool_result() {
     );
     assert_eq!(result["events"][1]["event"], "tool_call_result");
     assert_eq!(result["events"][1]["output"]["success"], false);
+    assert_failed_lifecycle(&events, "application_failure_tool");
+}
 
-    let events = recording.0.lock().expect("recording hook lock");
-    let terminal = events
-        .iter()
-        .find_map(|event| match event {
-            HookEvent::ToolLifecycle {
-                tool_name,
-                phase,
-                payload,
-                ..
-            } if tool_name == "application_failure_tool" && phase == "failed" => Some(payload),
-            _ => None,
-        })
-        .expect("failed application lifecycle hook");
-    assert_eq!(terminal["ok"], false);
+#[tokio::test]
+async fn invoke_tool_fails_closed_for_malformed_mcp_error_metadata() {
+    let malformed_result = json!({
+        "content": [{"type": "text", "text": "malformed failure remains visible"}],
+        "isError": "unknown"
+    });
+    let (result, events) = invoke_fixture(
+        "malformed_mcp_failure_tool",
+        ToolKind::Mcp,
+        ToolPayload::Mcp {
+            server: "fixture".into(),
+            tool: "malformed".into(),
+            raw_arguments: json!({}),
+            raw_tool_call_id: None,
+        },
+        ToolOutput::Mcp {
+            result: malformed_result,
+        },
+    )
+    .await;
+
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["status"], "failed");
+    assert!(result.get("error").is_none());
+    assert_eq!(result["output"]["type"], "mcp");
+    assert_eq!(result["output"]["result"]["isError"], "unknown");
+    assert_eq!(
+        result["output"]["result"]["content"][0]["text"],
+        "malformed failure remains visible"
+    );
+    assert_eq!(result["events"][1]["event"], "tool_call_result");
+    assert_eq!(
+        result["events"][1]["output"]["result"]["isError"],
+        "unknown"
+    );
+    assert_failed_lifecycle(&events, "malformed_mcp_failure_tool");
 }

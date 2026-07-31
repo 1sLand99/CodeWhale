@@ -79,6 +79,22 @@ fn mcp_is_error_round_trips_and_legacy_bytes_remain_successful() {
 }
 
 #[test]
+fn mcp_is_error_metadata_fails_closed_when_present_but_not_boolean() {
+    for malformed in [
+        Value::Null,
+        json!("unknown"),
+        json!(1),
+        json!({"unexpected": true}),
+        json!([false]),
+    ] {
+        let output = ToolOutput::Mcp {
+            result: json!({"content": [], "isError": malformed}),
+        };
+        assert!(!output.success(), "malformed output: {output:?}");
+    }
+}
+
+#[test]
 fn thread_resume_params_round_trip() {
     let request = ThreadRequest::Resume(ThreadResumeParams {
         thread_id: "thread-123".to_string(),

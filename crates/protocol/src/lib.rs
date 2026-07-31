@@ -469,12 +469,14 @@ pub enum ToolOutput {
 impl ToolOutput {
     /// Returns the tool's application-level success independently of transport.
     ///
-    /// MCP defines a literal top-level `isError: true` as application failure;
-    /// omitted or false metadata retains the protocol's successful default.
+    /// MCP success requires the top-level `isError` field to be omitted or the
+    /// literal boolean `false`; malformed present metadata fails closed.
     pub fn success(&self) -> bool {
         match self {
             Self::Function { success, .. } => *success,
-            Self::Mcp { result } => result.get("isError").and_then(Value::as_bool) != Some(true),
+            Self::Mcp { result } => {
+                matches!(result.get("isError"), None | Some(Value::Bool(false)))
+            }
         }
     }
 }
