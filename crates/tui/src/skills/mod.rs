@@ -34,6 +34,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{OnceLock, RwLock};
 
 use crate::logging;
 
@@ -267,6 +268,18 @@ pub struct SkillRegistry {
     warnings: Vec<String>,
 }
 
+/// One cached discovery's watched filesystem entries: a path and the
+/// modification time observed during the validating walk. `None` means the
+/// path was unreadable at walk time; any later readability or mtime change
+/// invalidates the entry.
+pub(crate) type WatchedPaths = Vec<(PathBuf, Option<std::time::SystemTime>)>;
+
+pub(crate) fn mtime_of(path: &Path) -> Option<std::time::SystemTime> {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+}
+
 impl SkillRegistry {
     /// Maximum directory-traversal depth when discovering skills.
     ///
@@ -295,14 +308,23 @@ impl SkillRegistry {
     /// the walk finite when a skills layout contains cycles.
     #[must_use]
     pub fn discover(dir: &Path) -> Self {
+        Self::discover_watched(dir).0
+    }
+
+    /// Discover skills like [`Self::discover`], also returning the watched
+    /// filesystem set (every visited directory and every parsed `SKILL.md`)
+    /// with its modification time. The discovery cache validates hits by
+    /// re-stat()ing only this set instead of re-walking every root.
+    pub(crate) fn discover_watched(dir: &Path) -> (Self, WatchedPaths) {
         #[cfg(test)]
         record_root_discovery_call();
         let mut registry = Self::default();
+        let mut watched = WatchedPaths::default();
         let Ok(canonical_dir) = fs::canonicalize(dir) else {
-            return registry;
+            return (registry, watched);
         };
         if !canonical_dir.is_dir() {
-            return registry;
+            return (registry, watched);
         }
 
         let mut visited = HashSet::new();
@@ -310,7 +332,14 @@ impl SkillRegistry {
         registry
             .skills
             .sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
-        registry
+        watched.extend(visited.iter().map(|p| (p.clone(), mtime_of(p))));
+        watched.extend(
+            registry
+                .skills
+                .iter()
+                .map(|skill| (skill.path.clone(), mtime_of(&skill.path))),
+        );
+        (registry, watched)
     }
 
     fn discover_recursive(
@@ -974,9 +1003,33 @@ pub(crate) fn discover_from_directories_with_plugins(
     dirs: impl IntoIterator<Item = PathBuf>,
     plugins: Option<&crate::plugins::PluginRegistry>,
 ) -> SkillRegistry {
+    let dirs: Vec<PathBuf> = dirs.into_iter().collect();
+    // The watched-validated cache covers the disk-walk merge. Plugin skills
+    // merge from the in-memory plugin registry per call, so plugin state
+    // changes apply immediately and the cache needs no plugin identity.
+    let merged = cached_merged_discovery(dirs);
+    merge_plugin_skills(merged, plugins)
+}
+
+fn merge_plugin_skills(
+    mut merged: SkillRegistry,
+    plugins: Option<&crate::plugins::PluginRegistry>,
+) -> SkillRegistry {
+    if let Some(plugins) = plugins {
+        merge_active_plugin_skills(&mut merged, plugins);
+    }
+    merged
+}
+
+/// Merge every directory's registry with first-match-wins precedence,
+/// collecting each directory's watched filesystem set for cache validation.
+fn merge_watched_directories(dirs: Vec<PathBuf>) -> (SkillRegistry, WatchedPaths) {
     let mut merged = SkillRegistry::default();
+    let mut watched = WatchedPaths::default();
     for dir in dirs {
-        let registry = SkillRegistry::discover(&dir);
+        watched.push((dir.clone(), mtime_of(&dir)));
+        let (registry, dir_watched) = SkillRegistry::discover_watched(&dir);
+        watched.extend(dir_watched);
         for skill in registry.skills {
             if let Some(existing) = merged.skills.iter().find(|s| s.name == skill.name) {
                 merged.push_warning(format!(
@@ -993,9 +1046,66 @@ pub(crate) fn discover_from_directories_with_plugins(
             merged.warnings.push(warning);
         }
     }
-    if let Some(plugins) = plugins {
-        merge_active_plugin_skills(&mut merged, plugins);
+    (merged, watched)
+}
+
+/// One cached merged discovery: the resolved registry plus the watched
+/// filesystem entries a hit must re-stat before reuse.
+struct DiscoveryCacheEntry {
+    watched: WatchedPaths,
+    registry: SkillRegistry,
+}
+
+/// Bound the cache so distinct workspaces/modes cannot grow it without
+/// limit; a full cache is simply cleared on the next miss.
+const MAX_DISCOVERY_CACHE_ENTRIES: usize = 8;
+
+fn discovery_cache() -> &'static RwLock<HashMap<Vec<PathBuf>, DiscoveryCacheEntry>> {
+    static CACHE: OnceLock<RwLock<HashMap<Vec<PathBuf>, DiscoveryCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Drop every cached merged discovery. Called after any skill
+/// install/uninstall/update so the next build re-walks from disk.
+pub fn clear_skill_discovery_cache() {
+    discovery_cache()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
+
+/// Merged discovery for one resolved directory set, cached by that set.
+/// A hit re-stats only the watched entries (each visited directory and
+/// parsed `SKILL.md`); any mtime or readability change re-walks fully.
+fn cached_merged_discovery(dirs: Vec<PathBuf>) -> SkillRegistry {
+    {
+        let read = discovery_cache()
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = read.get(&dirs) {
+            if entry
+                .watched
+                .iter()
+                .all(|(path, mtime)| mtime_of(path) == *mtime)
+            {
+                return entry.registry.clone();
+            }
+        }
     }
+    let (merged, watched) = merge_watched_directories(dirs.clone());
+    let mut write = discovery_cache()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if write.len() >= MAX_DISCOVERY_CACHE_ENTRIES {
+        write.clear();
+    }
+    write.insert(
+        dirs,
+        DiscoveryCacheEntry {
+            watched,
+            registry: merged.clone(),
+        },
+    );
     merged
 }
 

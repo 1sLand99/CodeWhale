@@ -2100,6 +2100,7 @@ impl App {
     }
 
     pub fn refresh_skill_cache(&mut self) {
+        crate::skills::clear_skill_discovery_cache();
         let skills_dir = self.skills_dir.clone();
         let cached_skills = Self::discover_cached_skills(
             &self.workspace,

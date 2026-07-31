@@ -1447,3 +1447,141 @@ fn plugin_skills_are_qualified_and_denied_until_trusted_and_enabled() {
         "a missing authority lock must remove plugin instructions from the prompt catalogue"
     );
 }
+
+// --- #3921 merged discovery cache -----------------------------------------
+
+fn discovery_delta_since(earlier: super::SkillDiscoveryMetrics) -> super::SkillDiscoveryMetrics {
+    super::discovery_metrics_snapshot().delta_since(earlier)
+}
+
+#[test]
+fn cached_discovery_reuses_unchanged_registry_without_rewalking() {
+    super::clear_skill_discovery_cache();
+    let tmpdir = TempDir::new().unwrap();
+    let skills_root = tmpdir.path().join("skills");
+    write_skill(&skills_root, "demo", "A demo skill", "Instructions");
+    let dirs = vec![skills_root];
+
+    super::reset_discovery_metrics();
+    let first = super::discover_from_directories_with_plugins(dirs.clone(), None);
+    let walked = discovery_delta_since(super::SkillDiscoveryMetrics::default());
+    let second = super::discover_from_directories_with_plugins(dirs, None);
+    let rewalked = discovery_delta_since(walked);
+
+    assert_eq!(walked.root_discovery_calls, 1);
+    assert_eq!(rewalked, super::SkillDiscoveryMetrics::default());
+    assert_eq!(first.len(), second.len());
+    assert_eq!(first.list()[0].description, second.list()[0].description);
+}
+
+#[test]
+fn cached_discovery_picks_up_added_skill_on_next_call() {
+    super::clear_skill_discovery_cache();
+    let tmpdir = TempDir::new().unwrap();
+    let skills_root = tmpdir.path().join("skills");
+    write_skill(&skills_root, "demo", "A demo skill", "Instructions");
+    let dirs = vec![skills_root.clone()];
+
+    let first = super::discover_from_directories_with_plugins(dirs.clone(), None);
+    assert_eq!(first.len(), 1);
+
+    write_skill(&skills_root, "added", "A later skill", "More");
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let second = super::discover_from_directories_with_plugins(dirs, None);
+    assert_eq!(second.len(), 2);
+    assert!(second.get("added").is_some());
+}
+
+#[test]
+fn cached_discovery_picks_up_skill_content_edits() {
+    super::clear_skill_discovery_cache();
+    let tmpdir = TempDir::new().unwrap();
+    let skills_root = tmpdir.path().join("skills");
+    write_skill(&skills_root, "demo", "Original description", "Instructions");
+    let dirs = vec![skills_root.clone()];
+
+    let first = super::discover_from_directories_with_plugins(dirs.clone(), None);
+    assert_eq!(first.list()[0].description, "Original description");
+
+    write_skill(&skills_root, "demo", "Edited description", "Instructions");
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let second = super::discover_from_directories_with_plugins(dirs, None);
+    assert_eq!(second.list()[0].description, "Edited description");
+}
+
+#[test]
+fn cached_discovery_drops_removed_skills() {
+    super::clear_skill_discovery_cache();
+    let tmpdir = TempDir::new().unwrap();
+    let skills_root = tmpdir.path().join("skills");
+    write_skill(&skills_root, "keep", "Keep me", "Instructions");
+    write_skill(&skills_root, "drop", "Drop me", "Instructions");
+    let dirs = vec![skills_root.clone()];
+
+    let first = super::discover_from_directories_with_plugins(dirs.clone(), None);
+    assert_eq!(first.len(), 2);
+
+    std::fs::remove_dir_all(skills_root.join("drop")).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let second = super::discover_from_directories_with_plugins(dirs, None);
+    assert_eq!(second.len(), 1);
+    assert!(second.get("drop").is_none());
+}
+
+#[test]
+fn clear_skill_discovery_cache_forces_a_fresh_walk() {
+    super::clear_skill_discovery_cache();
+    let tmpdir = TempDir::new().unwrap();
+    let skills_root = tmpdir.path().join("skills");
+    write_skill(&skills_root, "demo", "A demo skill", "Instructions");
+    let dirs = vec![skills_root];
+
+    let _ = super::discover_from_directories_with_plugins(dirs.clone(), None);
+    super::clear_skill_discovery_cache();
+
+    super::reset_discovery_metrics();
+    let _ = super::discover_from_directories_with_plugins(dirs, None);
+    let rewalked = discovery_delta_since(super::SkillDiscoveryMetrics::default());
+    assert_eq!(rewalked.root_discovery_calls, 1);
+}
+
+#[test]
+fn workspace_and_dir_entry_point_shares_the_same_cache() {
+    let _env_lock = crate::test_support::lock_test_env();
+    super::clear_skill_discovery_cache();
+    let tmpdir = TempDir::new().unwrap();
+    let home = tmpdir.path().join("home");
+    let workspace = tmpdir.path().join("workspace");
+    let skills_dir = tmpdir.path().join("configured-skills");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    write_skill(
+        &skills_dir,
+        "configured",
+        "Configured skill",
+        "Instructions",
+    );
+    let _home = crate::test_support::EnvVarGuard::set("HOME", &home);
+    let _userprofile = crate::test_support::EnvVarGuard::set("USERPROFILE", &home);
+    let _codewhale_home =
+        crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.join(".codewhale"));
+
+    super::reset_discovery_metrics();
+    let first = super::discover_for_workspace_and_dir_with_mode(
+        &workspace,
+        &skills_dir,
+        super::SkillDiscoveryMode::Compatible,
+    );
+    let walked = discovery_delta_since(super::SkillDiscoveryMetrics::default());
+    let second = super::discover_for_workspace_and_dir_with_mode(
+        &workspace,
+        &skills_dir,
+        super::SkillDiscoveryMode::Compatible,
+    );
+    let rewalked = discovery_delta_since(walked);
+
+    assert!(walked.root_discovery_calls >= 1);
+    assert_eq!(rewalked, super::SkillDiscoveryMetrics::default());
+    assert_eq!(first.len(), second.len());
+    assert!(second.get("configured").is_some());
+}
