@@ -4105,7 +4105,11 @@ async fn injected_model_drives_real_engine_navigation_trajectory() {
     )
     .expect("write fixture");
     let mock = std::sync::Arc::new(MockLlmClient::new(vec![
-        canned::tool_call_turn("call-read", "read_file", r#"{"path":"README.md"}"#),
+        canned::tool_call_turn(
+            "call-read",
+            "File",
+            r#"{"action":"read","path":"README.md"}"#,
+        ),
         canned::simple_text_turn("Navigation complete."),
     ]));
     let client: crate::core::model_client::SharedModelClient = mock.clone();
@@ -4142,8 +4146,8 @@ async fn injected_model_drives_real_engine_navigation_trajectory() {
                 );
                 saw_unreceipted_injected_route = true;
             }
-            Event::ToolCallComplete { name, result, .. } if name == "read_file" => {
-                let result = result.expect("read_file result");
+            Event::ToolCallComplete { name, result, .. } if name == "File" => {
+                let result = result.expect("File.read result");
                 assert!(result.success, "{result:?}");
                 assert!(result.content.contains("navigation-seam-proof"));
                 saw_read = true;
@@ -4192,11 +4196,11 @@ async fn injected_model_duplicate_reads_execute_once_and_close_both_tool_ids() {
     fs::write(workspace.path().join("README.md"), "coalesced-read-proof\n").expect("write fixture");
     let duplicate_read_turn = vec![
         canned::message_start("mock_msg_duplicate_read"),
-        canned::tool_use_block_start(0, "call-read-1", "read_file"),
-        canned::tool_input_delta(0, r#"{"path":"README.md"}"#),
+        canned::tool_use_block_start(0, "call-read-1", "File"),
+        canned::tool_input_delta(0, r#"{"action":"read","path":"README.md"}"#),
         canned::block_stop(0),
-        canned::tool_use_block_start(1, "call-read-2", "read_file"),
-        canned::tool_input_delta(1, r#"{"path":"README.md"}"#),
+        canned::tool_use_block_start(1, "call-read-2", "File"),
+        canned::tool_input_delta(1, r#"{"action":"read","path":"README.md"}"#),
         canned::block_stop(1),
         canned::message_delta("tool_use", None),
         canned::message_stop(),
@@ -4230,7 +4234,7 @@ async fn injected_model_duplicate_reads_execute_once_and_close_both_tool_ids() {
         match event {
             Event::ToolCallComplete {
                 id, name, result, ..
-            } if name == "read_file" => {
+            } if name == "File" => {
                 results.insert(id, result.expect("read result"));
             }
             Event::TurnComplete { status, error, .. } => {
@@ -4350,7 +4354,7 @@ async fn injected_model_receives_malformed_tool_feedback_and_recovers() {
 
     let workspace = tempdir().expect("tempdir");
     let mock = std::sync::Arc::new(MockLlmClient::new(vec![
-        canned::tool_call_turn("call-bad-read", "read_file", "{}"),
+        canned::tool_call_turn("call-bad-read", "File", r#"{"action":"read"}"#),
         canned::simple_text_turn("Recovered after validation feedback."),
     ]));
     let client: crate::core::model_client::SharedModelClient = mock.clone();
@@ -4377,7 +4381,7 @@ async fn injected_model_receives_malformed_tool_feedback_and_recovers() {
         .expect("timed out waiting for malformed trajectory")
     {
         match event {
-            Event::ToolCallComplete { name, result, .. } if name == "read_file" => {
+            Event::ToolCallComplete { name, result, .. } if name == "File" => {
                 validation_feedback = Some(match result {
                     Ok(result) => result.content,
                     Err(error) => error.to_string(),
@@ -7305,9 +7309,7 @@ fn deferred_tool_preflight_guides_rlm_open_misnamed_source_fields() {
 
 #[test]
 fn model_catalog_exposes_work_update_as_sole_progress_surface() {
-    // #4132: ordinary progress is one model-visible tool. Legacy checklist_* /
-    // todo_* spellings stay registry-callable for replay but must not appear in
-    // the deferred model catalog (so there is no deferred-preflight path for them).
+    // #4132: ordinary progress is one model-visible and executable tool.
     let (engine, _handle) = Engine::new(EngineConfig::default(), &Config::default());
     let registry = engine
         .build_turn_tool_registry_builder(
@@ -7338,7 +7340,7 @@ fn model_catalog_exposes_work_update_as_sole_progress_surface() {
         !catalog_names.contains("update_plan"),
         "retired Strategy/Plan must stay replay-only"
     );
-    for hidden in [
+    for retired in [
         "checklist_write",
         "checklist_add",
         "checklist_update",
@@ -7349,16 +7351,16 @@ fn model_catalog_exposes_work_update_as_sole_progress_surface() {
         "todo_list",
     ] {
         assert!(
-            registry.contains(hidden),
-            "{hidden} must remain callable for transcript replay"
+            !registry.contains(retired),
+            "{retired} must no longer be callable"
         );
         assert!(
-            !catalog_names.contains(hidden),
-            "{hidden} must stay hidden from the model catalog"
+            !catalog_names.contains(retired),
+            "{retired} must not appear in the model catalog"
         );
         assert!(
             preflight_requested_deferred_tool(
-                hidden,
+                retired,
                 &json!({
                     "todos": [
                         { "content": "should not hydrate hidden alias", "status": "completed" }
@@ -7368,7 +7370,7 @@ fn model_catalog_exposes_work_update_as_sole_progress_surface() {
                 &mut active.clone(),
             )
             .is_none(),
-            "{hidden} must not have a deferred catalog preflight path"
+            "{retired} must not have a deferred catalog preflight path"
         );
     }
 }
@@ -7451,14 +7453,15 @@ async fn run_shell_command_op_requests_approval_and_executes_shell() {
             Event::ToolCallStarted { id, name, input } => {
                 saw_started = true;
                 assert!(id.starts_with(USER_SHELL_TOOL_ID_PREFIX));
-                assert_eq!(name, "exec_shell");
+                assert_eq!(name, "Bash");
+                assert_eq!(input["action"], json!("run"));
                 assert_eq!(input["command"], json!("echo bang-ok"));
                 assert_eq!(input["source"], json!("user"));
             }
             Event::ApprovalRequired { id, tool_name, .. } => {
                 saw_approval = true;
                 assert!(id.starts_with(USER_SHELL_TOOL_ID_PREFIX));
-                assert_eq!(tool_name, "exec_shell");
+                assert_eq!(tool_name, "Bash");
                 handle_for_approval
                     .approve_tool_call(id)
                     .await
@@ -7467,7 +7470,7 @@ async fn run_shell_command_op_requests_approval_and_executes_shell() {
             Event::ToolCallComplete { id, name, result } => {
                 saw_complete = true;
                 assert!(id.starts_with(USER_SHELL_TOOL_ID_PREFIX));
-                assert_eq!(name, "exec_shell");
+                assert_eq!(name, "Bash");
                 let result = result.expect("shell result");
                 assert!(result.success, "{result:?}");
                 assert!(result.content.contains("bang-ok"), "{result:?}");
@@ -7680,8 +7683,8 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
 
     let tool_call_sse = concat!(
         "data: {\"id\":\"chatcmpl-operate-tools\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
-        "{\"index\":0,\"id\":\"call_operate_shell\",\"type\":\"function\",\"function\":{\"name\":\"exec_shell\",",
-        "\"arguments\":\"{\\\"command\\\":\\\"echo operate-approved > operate-mode-approved.txt\\\"}\"}}",
+        "{\"index\":0,\"id\":\"call_operate_shell\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",",
+        "\"arguments\":\"{\\\"action\\\":\\\"run\\\",\\\"command\\\":\\\"echo operate-approved > operate-mode-approved.txt\\\"}\"}}",
         "]},\"finish_reason\":null}]}\n\n",
         "data: {\"id\":\"chatcmpl-operate-tools\",\"choices\":[{\"index\":0,\"delta\":{},",
         "\"finish_reason\":\"tool_calls\"}]}\n\n",
@@ -7775,13 +7778,13 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
         match event {
             Event::ApprovalRequired { id, tool_name, .. } => {
                 saw_approval = true;
-                assert_eq!(tool_name, "exec_shell");
+                assert_eq!(tool_name, "Bash");
                 handle_for_approval
                     .approve_tool_call(id)
                     .await
                     .expect("approve Operate shell");
             }
-            Event::ToolCallComplete { name, result, .. } if name == "exec_shell" => {
+            Event::ToolCallComplete { name, result, .. } if name == "Bash" => {
                 saw_shell_result = true;
                 let result = result.expect("approved Operate shell result");
                 assert!(result.success, "{result:?}");
@@ -7822,8 +7825,8 @@ async fn full_access_subagent_handoff_keeps_model_shell_free_of_approval_prompts
 
     let tool_call_sse = concat!(
         "data: {\"id\":\"chatcmpl-yolo\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
-        "{\"index\":0,\"id\":\"call_yolo\",\"type\":\"function\",\"function\":{\"name\":\"exec_shell\",",
-        "\"arguments\":\"{\\\"command\\\":\\\"echo yolo-model-ask-rule\\\"}\"}}",
+        "{\"index\":0,\"id\":\"call_yolo\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",",
+        "\"arguments\":\"{\\\"action\\\":\\\"run\\\",\\\"command\\\":\\\"echo yolo-model-ask-rule\\\"}\"}}",
         "]},\"finish_reason\":null}]}\n\n",
         "data: {\"id\":\"chatcmpl-yolo\",\"choices\":[{\"index\":0,\"delta\":{},",
         "\"finish_reason\":\"tool_calls\"}]}\n\n",
@@ -7917,7 +7920,7 @@ async fn full_access_subagent_handoff_keeps_model_shell_free_of_approval_prompts
             Event::ApprovalRequired { .. } => {
                 panic!("Full Access child handoff must not prompt for an ordinary shell call");
             }
-            Event::ToolCallComplete { name, result, .. } if name == "exec_shell" => {
+            Event::ToolCallComplete { name, result, .. } if name == "Bash" => {
                 saw_complete = true;
                 let result = result.expect("shell result");
                 assert!(result.success, "{result:?}");
@@ -8111,11 +8114,11 @@ async fn full_access_blocks_non_bypassable_registered_tools_at_engine_boundary()
                 json!({"server": start_probe, "name": "must-not-start"}),
             ),
             (
-                "rlm_eval",
-                json!({"name": "missing-context", "code": rlm_probe}),
+                "rlm",
+                json!({"action": "eval", "name": "missing-context", "code": rlm_probe}),
             ),
         ],
-        &[("start_mcp_server", denial), ("rlm_eval", denial)],
+        &[("start_mcp_server", denial), ("rlm", denial)],
         denial,
     )
     .await;
@@ -8156,7 +8159,8 @@ async fn full_access_permission_allow_cannot_bypass_repo_law() {
         ]),
         ..EngineConfig::default()
     };
-    let tool_input = json!({"path": "CHANGELOG.md", "content": "must not be written\n"});
+    let tool_input =
+        json!({"action": "write", "path": "CHANGELOG.md", "content": "must not be written\n"});
     assert_eq!(
         file_tool_ask_rule_decision(
             &engine_config,
@@ -8171,12 +8175,12 @@ async fn full_access_permission_allow_cannot_bypass_repo_law() {
 
     assert_full_access_model_tool_batch_is_blocked(
         engine_config,
-        vec![("write_file", tool_input)],
+        vec![("File", tool_input)],
         &[(
-            "write_file",
-            "Repository law blocked tool 'write_file' in Full Access: Repo law holds this write: \"Release notes need human review\"",
+            "File",
+            "Repository law blocked tool 'File' in Full Access: Repo law holds this write: \"Release notes need human review\"",
         )],
-        "Repository law blocked tool 'write_file' in Full Access: Repo law holds this write:",
+        "Repository law blocked tool 'File' in Full Access: Repo law holds this write:",
     )
     .await;
 
@@ -8377,6 +8381,7 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
     let allow_rule = codewhale_execpolicy::ToolAskRule::exec_shell(command.clone())
         .into_exact_workspace_allow(workspace.path().to_string_lossy().into_owned());
     let tool_input = json!({
+        "action": "run",
         "command": command,
         "background": true,
     });
@@ -8390,7 +8395,7 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
                 "index": 0,
                 "id": "call_bg",
                 "type": "function",
-                "function": {"name": "exec_shell", "arguments": arguments},
+                "function": {"name": "Bash", "arguments": arguments},
             }]},
             "finish_reason": serde_json::Value::Null,
         }],
@@ -8499,7 +8504,7 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
                 panic!("Full Access safety holds must fail closed without prompting")
             }
             Event::ToolCallComplete { name, result, .. } => {
-                if name == "exec_shell" {
+                if name == "Bash" {
                     saw_tool_result = true;
                     let err = result.expect_err("blocked shell should not execute");
                     assert!(
@@ -8545,8 +8550,8 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
 
     let tool_call_sse = concat!(
         "data: {\"id\":\"chatcmpl-bgok\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
-        "{\"index\":0,\"id\":\"call_bgok\",\"type\":\"function\",\"function\":{\"name\":\"exec_shell\",",
-        "\"arguments\":\"{\\\"command\\\":\\\"echo bg-yolo-no-prompt\\\",\\\"background\\\":true}\"}}",
+        "{\"index\":0,\"id\":\"call_bgok\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",",
+        "\"arguments\":\"{\\\"action\\\":\\\"run\\\",\\\"command\\\":\\\"echo bg-yolo-no-prompt\\\",\\\"background\\\":true}\"}}",
         "]},\"finish_reason\":null}]}\n\n",
         "data: {\"id\":\"chatcmpl-bgok\",\"choices\":[{\"index\":0,\"delta\":{},",
         "\"finish_reason\":\"tool_calls\"}]}\n\n",
@@ -8639,7 +8644,7 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
                 panic!("YOLO mode must not prompt for an ordinary background shell command");
             }
             Event::ToolCallComplete { name, result, .. } => {
-                if name == "exec_shell" {
+                if name == "Bash" {
                     saw_tool_result = true;
                     let result = result.expect("shell result");
                     assert!(result.success, "{result:?}");
@@ -8681,8 +8686,8 @@ async fn yolo_mode_executes_publish_like_shell_without_prompt() {
 
     let tool_call_sse = concat!(
         "data: {\"id\":\"chatcmpl-publish\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
-        "{\"index\":0,\"id\":\"call_publish\",\"type\":\"function\",\"function\":{\"name\":\"exec_shell\",",
-        "\"arguments\":\"{\\\"command\\\":\\\"git push origin main\\\",\\\"background\\\":true}\"}}",
+        "{\"index\":0,\"id\":\"call_publish\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",",
+        "\"arguments\":\"{\\\"action\\\":\\\"run\\\",\\\"command\\\":\\\"git push origin main\\\",\\\"background\\\":true}\"}}",
         "]},\"finish_reason\":null}]}\n\n",
         "data: {\"id\":\"chatcmpl-publish\",\"choices\":[{\"index\":0,\"delta\":{},",
         "\"finish_reason\":\"tool_calls\"}]}\n\n",
@@ -8781,7 +8786,7 @@ async fn yolo_mode_executes_publish_like_shell_without_prompt() {
                      (#4595); got prompt for {tool_name}: {description}"
                 );
             }
-            Event::ToolCallComplete { name, .. } if name == "exec_shell" => {
+            Event::ToolCallComplete { name, .. } if name == "Bash" => {
                 // Execution outcome is irrelevant (the tempdir is not a git
                 // repo); the contract is that it ran without a prompt.
                 saw_tool_complete = true;
@@ -8969,7 +8974,7 @@ async fn run_shell_command_op_preserves_plan_mode_shell_block() {
             }
             Event::ToolCallComplete { name, result, .. } => {
                 saw_complete = true;
-                assert_eq!(name, "exec_shell");
+                assert_eq!(name, "Bash");
                 let err = result.expect_err("plan shell should fail");
                 assert!(
                     err.to_string().contains("unavailable in Plan mode"),
@@ -9287,7 +9292,7 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
         trust_mode: bool,
         auto_approve: bool,
         approval_mode: ApprovalMode,
-        exec_shell_available: bool,
+        bash_available: bool,
         plan_hint: bool,
     }
 
@@ -9302,7 +9307,7 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
             trust_mode: false,
             auto_approve: false,
             approval_mode: ApprovalMode::Suggest,
-            exec_shell_available: false,
+            bash_available: false,
             plan_hint: true,
         },
         ModeCase {
@@ -9315,7 +9320,7 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
             trust_mode: false,
             auto_approve: false,
             approval_mode: ApprovalMode::Suggest,
-            exec_shell_available: true,
+            bash_available: true,
             plan_hint: false,
         },
         ModeCase {
@@ -9328,7 +9333,7 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
             trust_mode: true,
             auto_approve: true,
             approval_mode: ApprovalMode::Bypass,
-            exec_shell_available: true,
+            bash_available: true,
             plan_hint: false,
         },
         ModeCase {
@@ -9341,7 +9346,7 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
             trust_mode: false,
             auto_approve: false,
             approval_mode: ApprovalMode::Suggest,
-            exec_shell_available: true,
+            bash_available: true,
             plan_hint: false,
         },
         ModeCase {
@@ -9354,7 +9359,7 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
             trust_mode: false,
             auto_approve: false,
             approval_mode: ApprovalMode::Suggest,
-            exec_shell_available: true,
+            bash_available: true,
             plan_hint: false,
         },
         ModeCase {
@@ -9369,7 +9374,7 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
             trust_mode: true,
             auto_approve: true,
             approval_mode: ApprovalMode::Bypass,
-            exec_shell_available: true,
+            bash_available: true,
             plan_hint: false,
         },
     ];
@@ -9473,9 +9478,14 @@ fn mode_invariant_matrix_covers_context_catalog_subagents_and_prompt_metadata() 
             .build(context);
         assert!(registry.contains("agent"), "{}", case.name);
         assert_eq!(
-            registry.contains("exec_shell"),
-            case.exec_shell_available,
+            registry.contains("Bash"),
+            case.bash_available,
             "{}",
+            case.name
+        );
+        assert!(
+            !registry.contains("exec_shell"),
+            "{}: retired exec_shell must remain absent",
             case.name
         );
 

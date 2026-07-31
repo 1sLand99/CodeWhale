@@ -59,9 +59,9 @@ fn rlm_kernel_error_result(
 
 /// Unified RLM session tool.
 ///
-/// One struct, one input schema: the canonical `rlm` tool plus hidden legacy
-/// aliases carrying a `forced_action`. `client` is only exercised by the
-/// `eval` action (child sub-RLM queries); other actions ignore it.
+/// One struct and one input schema for the canonical `rlm` tool. `client` is
+/// only exercised by the `eval` action (child sub-RLM queries); other actions
+/// ignore it.
 pub struct RlmTool {
     name: &'static str,
     forced_action: Option<&'static str>,
@@ -78,6 +78,7 @@ impl RlmTool {
         }
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn alias(name: &'static str, action: &'static str, client: Option<DeepSeekClient>) -> Self {
         Self {

@@ -184,7 +184,7 @@ fn spawn_approval_fixture_server() -> anyhow::Result<(String, std::thread::JoinH
                                 "index":0,
                                 "id":"call_approval_pty",
                                 "type":"function",
-                                "function":{"name":"write_file","arguments":"{\"path\":\"approval-proof.txt\",\"content\":\"must-not-write\"}"}
+                                "function":{"name":"File","arguments":"{\"action\":\"write\",\"path\":\"approval-proof.txt\",\"content\":\"must-not-write\"}"}
                             }]},"finish_reason":null}]
                         })
                     ),
@@ -1326,7 +1326,7 @@ fn approval_modal_keeps_wheel_for_review_and_denies_without_side_effect() -> any
         .spawn()?;
     enter_launch_session(&mut h)?;
 
-    let prompt = "Request the fixture write_file call; do not change its arguments.";
+    let prompt = "Request the fixture File.write call; do not change its arguments.";
     // This is a whole prompt, not simulated human typing. Send it as the
     // bracketed paste a real terminal would emit so the raw-key paste-burst
     // heuristic cannot absorb the following Enter as a pasted newline.
@@ -1376,7 +1376,7 @@ fn approval_modal_keeps_wheel_for_review_and_denies_without_side_effect() -> any
     }
     assert!(
         !denied_path.exists(),
-        "denied approval executed its write_file side effect: {}",
+        "denied approval executed its File.write side effect: {}",
         denied_path.display()
     );
 

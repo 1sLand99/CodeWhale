@@ -4789,7 +4789,7 @@ fn test_subagent_tool_registry_reports_unavailable_tools() {
         runtime,
         FleetRole::Scout,
         Some(vec![
-            "read_file".to_string(),
+            "File".to_string(),
             "update_goal".to_string(),
             "missing_tool".to_string(),
         ]),
@@ -5277,14 +5277,7 @@ async fn plan_parent_profile_narrows_even_implementer_child_to_read_only() {
 
     let names = tool_names(registry.tools_for_model(&FleetRole::Builder));
     assert!(names.contains("agent"), "Plan children may still delegate");
-    for name in [
-        "write_file",
-        "edit_file",
-        "apply_patch",
-        "fim_edit",
-        "exec_shell",
-        "task_shell_start",
-    ] {
+    for name in ["apply_patch", "fim_edit", "Bash", "task_shell_start"] {
         assert!(
             !names.contains(name),
             "Plan parent profile must hide child capability {name}"
@@ -5294,8 +5287,12 @@ async fn plan_parent_profile_narrows_even_implementer_child_to_read_only() {
     let err = registry
         .execute(
             "agent_test",
-            "write_file",
-            json!({"path": "plan-parent-write.txt", "content": "denied"}),
+            "File",
+            json!({
+                "action": "write",
+                "path": "plan-parent-write.txt",
+                "content": "denied"
+            }),
         )
         .await
         .expect_err("Plan parent profile must block writes even for implementer children");
@@ -7997,13 +7994,17 @@ async fn subagent_registry_blocks_approval_tools_without_parent_auto_approve() {
     let registry = SubAgentToolRegistry::new(
         runtime,
         FleetRole::Worker,
-        Some(vec!["exec_shell".to_string()]),
+        Some(vec!["Bash".to_string()]),
         Arc::new(Mutex::new(TodoList::new())),
         Arc::new(Mutex::new(PlanState::default())),
     );
 
     let err = registry
-        .execute("agent_test", "exec_shell", json!({"command": "echo hi"}))
+        .execute(
+            "agent_test",
+            "Bash",
+            json!({"action": "run", "command": "echo hi"}),
+        )
         .await
         .expect_err("approval-gated child tool should be blocked");
 
@@ -8040,8 +8041,8 @@ async fn prompt_only_general_cannot_mutate_under_parent_auto_approve() {
     let write_error = registry
         .execute(
             "agent_test",
-            "write_file",
-            json!({"path": "forbidden.txt", "content": "no"}),
+            "File",
+            json!({"action": "write", "path": "forbidden.txt", "content": "no"}),
         )
         .await
         .expect_err("read-only General must not write under auto approval");
@@ -8049,8 +8050,8 @@ async fn prompt_only_general_cannot_mutate_under_parent_auto_approve() {
     let shell_error = registry
         .execute(
             "agent_test",
-            "exec_shell",
-            json!({"command": "touch shell.txt"}),
+            "Bash",
+            json!({"action": "run", "command": "touch shell.txt"}),
         )
         .await
         .expect_err("read-only General must not receive mutating shell");
@@ -8119,8 +8120,7 @@ async fn child_write_tool_fails_closed_outside_registered_scope() {
         "agent_scoped".into(),
         "implementer".into(),
         Some(vec![
-            "write_file".into(),
-            "exec_shell".into(),
+            "File".into(),
             "Bash".into(),
             "Run".into(),
             "agents/coordinate".into(),
@@ -8133,8 +8133,8 @@ async fn child_write_tool_fails_closed_outside_registered_scope() {
     registry
         .execute(
             "agent_scoped",
-            "write_file",
-            json!({"path": "src/ok.txt", "content": "ok"}),
+            "File",
+            json!({"action": "write", "path": "src/ok.txt", "content": "ok"}),
         )
         .await
         .expect("in-scope write");
@@ -8216,8 +8216,8 @@ async fn child_write_tool_fails_closed_outside_registered_scope() {
     let err = registry
         .execute(
             "agent_scoped",
-            "write_file",
-            json!({"path": "docs/no.txt", "content": "no"}),
+            "File",
+            json!({"action": "write", "path": "docs/no.txt", "content": "no"}),
         )
         .await
         .expect_err("out-of-scope write must fail")
@@ -8227,18 +8227,11 @@ async fn child_write_tool_fails_closed_outside_registered_scope() {
         "{err}"
     );
     assert!(!tmp.path().join("docs/no.txt").exists());
-    for (tool_name, input, target) in [
-        (
-            "exec_shell",
-            json!({"command": "touch outside/compat.txt"}),
-            "outside/compat.txt",
-        ),
-        (
-            "Bash",
-            json!({"action": "run", "command": "touch outside/canonical.txt"}),
-            "outside/canonical.txt",
-        ),
-    ] {
+    for (tool_name, input, target) in [(
+        "Bash",
+        json!({"action": "run", "command": "touch outside/canonical.txt"}),
+        "outside/canonical.txt",
+    )] {
         let shell_err = registry
             .execute("agent_scoped", tool_name, input)
             .await
@@ -8336,8 +8329,8 @@ async fn implementer_delegation_allows_suggest_write_without_parent_auto_approve
     // Issue #1828: implementer agents could not write files even when their
     // whole job is to land code changes, because the registry blocked every
     // approval-gated tool when the parent ran in `suggest` mode. The
-    // hardened gate (#1833) delegates `Suggest`-level tools (write_file,
-    // edit_file, apply_patch) to write-capable roles.
+    // hardened gate (#1833) delegates `Suggest`-level File edits and
+    // apply_patch to write-capable roles.
     let tmp = tempdir().expect("tempdir");
     let workspace = tmp.path().to_path_buf();
     let mut runtime = stub_runtime();
@@ -8354,8 +8347,8 @@ async fn implementer_delegation_allows_suggest_write_without_parent_auto_approve
     let result = registry
         .execute(
             "agent_test",
-            "write_file",
-            json!({"path": "delegated.txt", "content": "hello"}),
+            "File",
+            json!({"action": "write", "path": "delegated.txt", "content": "hello"}),
         )
         .await
         .expect("delegated write should be allowed for implementer");
@@ -8390,8 +8383,12 @@ async fn workflow_accept_edits_allows_general_file_write_without_parent_auto_app
     let result = registry
         .execute(
             "agent_test",
-            "write_file",
-            json!({"path": "workflow_edit.txt", "content": "from workflow"}),
+            "File",
+            json!({
+                "action": "write",
+                "path": "workflow_edit.txt",
+                "content": "from workflow"
+            }),
         )
         .await
         .expect("workflow accept_edits should allow general write");
@@ -8401,7 +8398,11 @@ async fn workflow_accept_edits_allows_general_file_write_without_parent_auto_app
     assert!(!result.contains("requires approval"), "{result}");
 
     let err = registry
-        .execute("agent_test", "exec_shell", json!({"command": "echo hi"}))
+        .execute(
+            "agent_test",
+            "Bash",
+            json!({"action": "run", "command": "echo hi"}),
+        )
         .await
         .expect_err("shell must still require parent auto-approve");
     assert!(
@@ -8428,8 +8429,8 @@ async fn general_delegation_still_blocks_suggest_write_without_parent_auto_appro
     let err = registry
         .execute(
             "agent_test",
-            "write_file",
-            json!({"path": "general.txt", "content": "ok"}),
+            "File",
+            json!({"action": "write", "path": "general.txt", "content": "ok"}),
         )
         .await
         .expect_err("general agent should not silently gain write permission");
@@ -8465,8 +8466,12 @@ async fn explore_role_still_blocks_suggest_writes_without_parent_auto_approve() 
     let err = registry
         .execute(
             "agent_test",
-            "write_file",
-            json!({"path": "should_not_appear.txt", "content": "denied"}),
+            "File",
+            json!({
+                "action": "write",
+                "path": "should_not_appear.txt",
+                "content": "denied"
+            }),
         )
         .await
         .expect_err("explore agents must not write");
@@ -8529,7 +8534,7 @@ async fn explore_role_blocks_writes_even_under_parent_auto_approve() {
 
 #[tokio::test]
 async fn delegated_write_role_still_blocks_required_tools() {
-    // Required-level tools (exec_shell, etc.) remain gated behind parent
+    // Required-level tools such as Bash remain gated behind parent
     // auto-approve regardless of role. Implementer can write files, but it
     // still can't bypass shell approval just because it's a "write" role.
     let tmp = tempdir().expect("tempdir");
@@ -8539,13 +8544,17 @@ async fn delegated_write_role_still_blocks_required_tools() {
     let registry = SubAgentToolRegistry::new(
         runtime,
         FleetRole::Builder,
-        Some(vec!["exec_shell".to_string()]),
+        Some(vec!["Bash".to_string()]),
         Arc::new(Mutex::new(TodoList::new())),
         Arc::new(Mutex::new(PlanState::default())),
     );
 
     let err = registry
-        .execute("agent_test", "exec_shell", json!({"command": "echo hi"}))
+        .execute(
+            "agent_test",
+            "Bash",
+            json!({"action": "run", "command": "echo hi"}),
+        )
         .await
         .expect_err("Required-level shell must still need parent auto-approve");
     assert!(
@@ -8572,14 +8581,14 @@ async fn auto_approved_parent_runs_required_tools_in_subagent() {
         Arc::new(Mutex::new(PlanState::default())),
     );
 
-    // Calling exec_shell with interactive=true is what we block via the
+    // Calling Bash with interactive=true is what we block via the
     // separate terminal-takeover guard; pick the simpler write-file path
     // to assert that approval gating is off when auto_approve is set.
     registry
         .execute(
             "agent_test",
-            "write_file",
-            json!({"path": "auto.txt", "content": "auto"}),
+            "File",
+            json!({"action": "write", "path": "auto.txt", "content": "auto"}),
         )
         .await
         .expect("auto-approved parent should allow writes");
@@ -9015,22 +9024,29 @@ async fn root_operate_dispatch_delegates_builtin_verification_but_not_shell() {
     );
 
     registry
-        .execute("agent_test", "run_tests", json!({}))
+        .execute("agent_test", "Run", json!({"action": "tests"}))
         .await
         .expect("parent-approved Operate worker should run built-in tests");
 
     let targeted_err = registry
         .execute(
             "agent_test",
-            "run_tests",
-            json!({"args": "--manifest-path ../outside/Cargo.toml"}),
+            "Run",
+            json!({
+                "action": "tests",
+                "args": "--manifest-path ../outside/Cargo.toml"
+            }),
         )
         .await
         .expect_err("raw Cargo argv must stay approval-gated");
     assert!(targeted_err.to_string().contains("requires approval"));
 
     let shell_err = registry
-        .execute("agent_test", "exec_shell", json!({"command": "echo nope"}))
+        .execute(
+            "agent_test",
+            "Bash",
+            json!({"action": "run", "command": "echo nope"}),
+        )
         .await
         .expect_err("Operate verification delegation must not grant raw shell");
     assert!(shell_err.to_string().contains("requires approval"));
@@ -9038,8 +9054,11 @@ async fn root_operate_dispatch_delegates_builtin_verification_but_not_shell() {
     let custom_err = registry
         .execute(
             "agent_test",
-            "run_verifiers",
-            json!({"commands": [{"name": "custom", "program": "echo", "args": ["nope"]}]}),
+            "Run",
+            json!({
+                "action": "verifiers",
+                "commands": [{"name": "custom", "program": "echo", "args": ["nope"]}]
+            }),
         )
         .await
         .expect_err("Operate verification delegation must not grant custom commands");
@@ -13103,7 +13122,7 @@ fn a_network_denied_child_cannot_address_a_remote_location_through_any_tool() {
     }
 }
 
-/// A read-only member keeps `Run`/`run_verifiers` so it can do its job, but the
+/// A read-only member keeps `Run.verifiers` so it can do its job, but the
 /// `commands` array spawns arbitrary programs — `bash -lc 'rm -rf src'` is the
 /// raw shell the deny list just removed, re-entered through the door left open
 /// for honest verification. The tool stays; the escape hatch does not.
@@ -13111,20 +13130,26 @@ fn a_network_denied_child_cannot_address_a_remote_location_through_any_tool() {
 fn a_read_only_member_cannot_smuggle_commands_through_the_verifier_surface() {
     for (name, input) in [
         (
-            "run_verifiers",
-            json!({"commands": [{"name": "x", "program": "bash", "args": ["-lc", "rm -rf src"]}]}),
+            "Run",
+            json!({
+                "action": "verifiers",
+                "commands": [{
+                    "name": "x",
+                    "program": "bash",
+                    "args": ["-lc", "rm -rf src"]
+                }]
+            }),
         ),
         (
             "Run",
-            json!({"action": "verifiers", "commands": [{"name": "x", "program": "sh"}]}),
-        ),
-        (
-            "run_tests",
-            json!({"args": "--manifest-path /tmp/evil.toml"}),
+            json!({"action": "tests", "args": "--manifest-path /tmp/evil.toml"}),
         ),
         ("Run", json!({"action": "tests", "args": "--all"})),
         // Wrong-typed values fail closed rather than reading as "absent".
-        ("run_verifiers", json!({"commands": "bash -lc whoami"})),
+        (
+            "Run",
+            json!({"action": "verifiers", "commands": "bash -lc whoami"}),
+        ),
     ] {
         assert!(
             reject_unbounded_verification(name, &input, false).is_err(),
@@ -13134,10 +13159,13 @@ fn a_read_only_member_cannot_smuggle_commands_through_the_verifier_surface() {
 
     // The bounded default form — what the member is actually for — still runs.
     for (name, input) in [
-        ("run_verifiers", json!({})),
-        ("run_verifiers", json!({"commands": [], "level": "full"})),
+        ("Run", json!({"action": "verifiers"})),
+        (
+            "Run",
+            json!({"action": "verifiers", "commands": [], "level": "full"}),
+        ),
         ("Run", json!({"action": "verifiers", "profile": "rust"})),
-        ("run_tests", json!({"args": "   "})),
+        ("Run", json!({"action": "tests", "args": "   "})),
         ("Run", json!({"action": "tests", "all_features": true})),
         // Unrelated tools are none of this guard's business.
         ("write_file", json!({"path": "a", "content": "b"})),
@@ -13156,14 +13184,20 @@ fn a_read_only_member_cannot_smuggle_commands_through_the_verifier_surface() {
 #[test]
 fn a_shell_capable_read_only_member_keeps_test_selection_arguments() {
     for (name, input) in [
-        ("run_tests", json!({"args": "-p codewhale-tui"})),
+        (
+            "Run",
+            json!({"action": "tests", "args": "-p codewhale-tui"}),
+        ),
         (
             "Run",
             json!({"action": "tests", "args": "--lib fleet::exact"}),
         ),
         (
-            "run_tests",
-            json!({"args": "--workspace --test-threads=1 -- --skip slow"}),
+            "Run",
+            json!({
+                "action": "tests",
+                "args": "--workspace --test-threads=1 -- --skip slow"
+            }),
         ),
     ] {
         assert!(
@@ -13180,12 +13214,21 @@ fn a_shell_capable_read_only_member_keeps_test_selection_arguments() {
 
     // Shell authority does not buy a command line.
     for (name, input) in [
-        ("run_tests", json!({"args": "--manifest-path ../evil.toml"})),
-        ("run_tests", json!({"args": "--config target.runner=sh"})),
-        ("run_tests", json!({"args": "a; rm -rf ."})),
         (
-            "run_verifiers",
-            json!({"commands": [{"name": "x", "program": "bash"}]}),
+            "Run",
+            json!({"action": "tests", "args": "--manifest-path ../evil.toml"}),
+        ),
+        (
+            "Run",
+            json!({"action": "tests", "args": "--config target.runner=sh"}),
+        ),
+        ("Run", json!({"action": "tests", "args": "a; rm -rf ."})),
+        (
+            "Run",
+            json!({
+                "action": "verifiers",
+                "commands": [{"name": "x", "program": "bash"}]
+            }),
         ),
     ] {
         assert!(
@@ -13361,10 +13404,12 @@ fn a_verifier_runs_bounded_test_selections_and_nothing_else_at_dispatch() {
     let (_tmp, registry) = read_only_with_shell_registry();
 
     for (name, input) in [
-        ("run_tests", json!({})),
-        ("run_tests", json!({"args": "-p codewhale-tui exact_fleet"})),
+        ("Run", json!({"action": "tests"})),
+        (
+            "Run",
+            json!({"action": "tests", "args": "-p codewhale-tui exact_fleet"}),
+        ),
         ("Run", json!({"action": "tests", "args": "--lib --exact"})),
-        ("run_verifiers", json!({})),
         ("Run", json!({"action": "verifiers"})),
     ] {
         assert!(
@@ -13375,12 +13420,21 @@ fn a_verifier_runs_bounded_test_selections_and_nothing_else_at_dispatch() {
 
     for (name, input) in [
         // Arbitrary execution, however it is spelled.
-        ("Bash", json!({"command": "cargo test"})),
-        ("run_tests", json!({"args": "--manifest-path ../evil.toml"})),
-        ("run_tests", json!({"args": "--lib && curl https://x.test"})),
+        ("Bash", json!({"action": "run", "command": "cargo test"})),
         (
-            "run_verifiers",
-            json!({"commands": [{"name": "x", "program": "bash", "args": ["-lc", "id"]}]}),
+            "Run",
+            json!({"action": "tests", "args": "--manifest-path ../evil.toml"}),
+        ),
+        (
+            "Run",
+            json!({"action": "tests", "args": "--lib && curl https://x.test"}),
+        ),
+        (
+            "Run",
+            json!({
+                "action": "verifiers",
+                "commands": [{"name": "x", "program": "bash", "args": ["-lc", "id"]}]
+            }),
         ),
         // …and workspace mutation, through the canonical write family.
         (
@@ -13404,7 +13458,7 @@ fn the_verifier_catalog_offers_the_verification_surface_and_no_shell() {
     let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
 
     assert!(
-        names.contains(&"run_tests") || names.contains(&"Run"),
+        names.contains(&"Run"),
         "a verifier must be offered its verification gate: {names:?}"
     );
     for absent in ["Bash", "exec_shell", "write_file", "start_mcp_server"] {
@@ -13423,10 +13477,13 @@ async fn a_verifier_is_refused_arbitrary_execution_at_the_real_execute_boundary(
     let (_tmp, registry) = read_only_with_shell_registry();
 
     for (name, input) in [
-        ("Bash", json!({"command": "rm -rf src"})),
+        ("Bash", json!({"action": "run", "command": "rm -rf src"})),
         (
-            "run_verifiers",
-            json!({"commands": [{"name": "x", "program": "bash", "args": ["-lc", "id"]}]}),
+            "Run",
+            json!({
+                "action": "verifiers",
+                "commands": [{"name": "x", "program": "bash", "args": ["-lc", "id"]}]
+            }),
         ),
     ] {
         let result = registry.execute("agent-1", name, input.clone()).await;
@@ -13504,11 +13561,9 @@ fn bounded_read_only_and_verification_paths_survive_the_ceiling() {
         ("tasks", json!({"action": "pr_attempt_list"})),
         ("automation", json!({"action": "list"})),
         ("automation", json!({"action": "read", "id": "a1"})),
-        ("run_verifiers", json!({})),
-        ("run_verifiers", json!({"commands": []})),
-        ("run_tests", json!({})),
         ("Run", json!({"action": "tests"})),
         ("Run", json!({"action": "verifiers"})),
+        ("Run", json!({"action": "verifiers", "commands": []})),
     ] {
         assert!(
             registry.envelope_refusal(name, &input).is_none(),

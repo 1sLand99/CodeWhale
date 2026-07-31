@@ -1250,8 +1250,8 @@ impl Engine {
             seq = self.turn_counter
         );
         let tool_id = turn_id.clone();
-        let tool_name = "exec_shell".to_string();
-        let tool_input = json!({ "command": command, "source": "user" });
+        let tool_name = "Bash".to_string();
+        let tool_input = json!({ "action": "run", "command": command, "source": "user" });
         let snapshot_prompt = tool_input["command"]
             .as_str()
             .unwrap_or_default()
@@ -1302,11 +1302,11 @@ impl Engine {
 
         let result = if mode == AppMode::Plan {
             Err(ToolError::permission_denied(
-                "Tool 'exec_shell' is unavailable in Plan mode".to_string(),
+                "Tool 'Bash' is unavailable in Plan mode".to_string(),
             ))
         } else if !self.config.features.enabled(Feature::ShellTool) {
             Err(ToolError::not_available(
-                "Tool 'exec_shell' is disabled by feature flag".to_string(),
+                "Tool 'Bash' is disabled by feature flag".to_string(),
             ))
         } else if let Some(spec) = registry.get(&tool_name) {
             let mut approval_required = spec.approval_requirement_for(&tool_input)
@@ -1464,7 +1464,7 @@ impl Engine {
             }
         } else {
             Err(ToolError::not_available(
-                "tool 'exec_shell' is not registered".to_string(),
+                "tool 'Bash' is not registered".to_string(),
             ))
         };
 

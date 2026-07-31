@@ -4358,13 +4358,13 @@ mod tests {
             .with_file_tools()
             .build(context);
         let catalog = registry.to_api_tools();
-        let mut tool_name = "ReadFile".to_string();
+        let mut tool_name = "file".to_string();
 
         let tool_def = resolve_tool_definition(&mut tool_name, &catalog, Some(&registry));
 
         assert!(tool_def.is_some());
-        assert_eq!(tool_name, "read_file");
-        let allowed = vec!["read_file".to_string()];
+        assert_eq!(tool_name, "File");
+        let allowed = vec!["File".to_string()];
         assert!(command_allows_tool(Some(&allowed), &tool_name));
     }
 

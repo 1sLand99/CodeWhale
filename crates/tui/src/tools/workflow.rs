@@ -2778,8 +2778,8 @@ fn leaf_allowed_tools(spec: &LeafSpec) -> Result<Option<Vec<String>>, ToolError>
 
 fn read_only_allowed_tools(agent_type: AgentType) -> &'static [&'static str] {
     match agent_type {
-        AgentType::Verifier => &["list_dir", "read_file", "grep_files", "file_search"],
-        _ => &["list_dir", "read_file", "grep_files", "file_search"],
+        AgentType::Verifier => &["File"],
+        _ => &["File"],
     }
 }
 

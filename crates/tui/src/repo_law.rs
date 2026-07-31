@@ -25,12 +25,10 @@ use serde_json::Value;
 use crate::project_context::{RepoLawAction, RepoLawRule, load_repo_law_rules};
 use crate::tools::apply_patch::{NormalizedApplyPatchInput, normalize_apply_patch_input};
 
-/// Tools whose inputs name filesystem write targets we can hold. Any
-/// write-capable tool MUST be listed here — the gate fails open for tools it
-/// does not recognize, so a new write tool without an entry silently evades
-/// repo law. `fim_edit` was such a hole (it declares WritesFiles, takes a
-/// `path`, and `fs::write`s to it) until it was added here.
-const WRITE_TOOLS: &[&str] = &["write_file", "edit_file", "apply_patch", "fim_edit"];
+/// Semantic write actions whose inputs name filesystem targets we can hold.
+/// Canonical action families are resolved to this policy vocabulary before the
+/// check, so removing callable compatibility aliases cannot open a law bypass.
+const WRITE_POLICY_ACTIONS: &[&str] = &["write_file", "edit_file", "apply_patch", "fim_edit"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RepoLawPlanDecision {
@@ -49,7 +47,9 @@ pub(crate) fn repo_law_plan_decision(
     tool_name: &str,
     tool_input: &Value,
 ) -> Option<RepoLawPlanDecision> {
-    if !WRITE_TOOLS.contains(&tool_name) {
+    let policy_action =
+        crate::tools::canonical_action::canonical_action_alias(tool_name, tool_input);
+    if !WRITE_POLICY_ACTIONS.contains(&policy_action) {
         return None;
     }
     let targets = write_target_paths(workspace, tool_input);
@@ -273,6 +273,35 @@ mod tests {
             reason.contains("Release notes need human review"),
             "{reason}"
         );
+    }
+
+    #[test]
+    fn canonical_file_write_and_edit_actions_receive_the_same_holds() {
+        let tmp = TempDir::new().unwrap();
+        write_law(tmp.path(), LAW);
+
+        let blocked = repo_law_plan_decision(
+            tmp.path(),
+            "File",
+            &json!({
+                "action": "write",
+                "path": "crates/protocol/wire.rs",
+                "content": "x"
+            }),
+        );
+        assert!(matches!(blocked, Some(RepoLawPlanDecision::Block(_))));
+
+        let held = repo_law_plan_decision(
+            tmp.path(),
+            "File",
+            &json!({
+                "action": "edit",
+                "path": "CHANGELOG.md",
+                "search": "before",
+                "replace": "after"
+            }),
+        );
+        assert!(matches!(held, Some(RepoLawPlanDecision::ForcePrompt(_))));
     }
 
     #[test]
