@@ -885,6 +885,7 @@ dependencies = [
  "codewhale-secrets",
  "codewhale-state",
  "codewhale-workflow",
+ "console",
  "dirs",
  "libc",
  "mimalloc",
@@ -897,6 +898,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "webbrowser",
  "windows 0.62.2",
  "zeroize",
 ]
