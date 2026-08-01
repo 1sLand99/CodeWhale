@@ -2,6 +2,11 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use clap::Parser;
+use codewhale_secrets::account::{
+    ACCOUNT_SESSION_SCHEMA_VERSION, AccountSession as AuthSession,
+    account_auth_slot as cloud_auth_slot,
+    account_file_session_store_opted_in_value as file_session_store_opted_in_value,
+};
 use codewhale_secrets::{InMemoryKeyringStore, KeyringStore};
 use serde_json::json;
 
@@ -430,6 +435,109 @@ fn status_refreshes_once_on_unauthorized_and_never_displays_tokens() {
 }
 
 #[test]
+fn non_terminal_refresh_responses_preserve_the_local_session() {
+    for status in [403, 429, 500, 503] {
+        let (secrets, _) = test_secrets();
+        let transport = FakeTransport::new(vec![
+            response(401, json!({ "code": "access_token_expired" })),
+            response(status, json!({ "code": "temporarily_unavailable" })),
+        ]);
+        let client = CloudClient::new(&transport, &secrets, "default", "https://api.codewhale.net");
+        client
+            .save_auth(auth(
+                "access-old-secret",
+                "refresh-still-valid",
+                "acct-refresh",
+            ))
+            .unwrap();
+
+        let error = client
+            .me()
+            .err()
+            .expect("refresh response should fail the request")
+            .to_string();
+        assert!(error.contains(&format!("HTTP {status}")));
+        assert_eq!(
+            client
+                .load_auth()
+                .unwrap()
+                .expect("retryable refresh failure must preserve the session")
+                .bundle
+                .refresh_token,
+            "refresh-still-valid"
+        );
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].path, "/api/me");
+        assert_eq!(requests[1].path, "/api/auth/refresh");
+    }
+}
+
+#[test]
+fn refresh_transport_failure_preserves_the_local_session() {
+    let (secrets, _) = test_secrets();
+    let transport = FakeTransport::new(vec![response(
+        401,
+        json!({ "code": "access_token_expired" }),
+    )]);
+    let client = CloudClient::new(&transport, &secrets, "default", "https://api.codewhale.net");
+    client
+        .save_auth(auth(
+            "access-old-secret",
+            "refresh-still-valid",
+            "acct-refresh",
+        ))
+        .unwrap();
+
+    let error = client
+        .me()
+        .err()
+        .expect("refresh transport should fail")
+        .to_string();
+    assert!(error.contains("fake transport exhausted"));
+    assert_eq!(
+        client
+            .load_auth()
+            .unwrap()
+            .expect("transport failure must preserve the session")
+            .bundle
+            .refresh_token,
+        "refresh-still-valid"
+    );
+    let requests = transport.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].path, "/api/auth/refresh");
+}
+
+#[test]
+fn terminal_refresh_auth_failures_clear_the_local_session() {
+    let (secrets, _) = test_secrets();
+    let transport = FakeTransport::new(vec![
+        response(401, json!({ "code": "access_token_expired" })),
+        response(401, json!({ "code": "invalid_refresh_token" })),
+    ]);
+    let client = CloudClient::new(&transport, &secrets, "default", "https://api.codewhale.net");
+    client
+        .save_auth(auth(
+            "access-old-secret",
+            "refresh-terminal-secret",
+            "acct-refresh",
+        ))
+        .unwrap();
+
+    let error = client
+        .me()
+        .err()
+        .expect("terminal refresh response should fail the request")
+        .to_string();
+    assert!(error.contains("session expired"));
+    assert!(
+        client.load_auth().unwrap().is_none(),
+        "HTTP 401 must clear the terminal session"
+    );
+}
+
+#[test]
 fn set_list_and_remove_use_account_routes_without_secret_output() {
     let (temp, config) = test_config();
     let _keep_temp = temp;
@@ -614,6 +722,46 @@ fn logout_recovers_from_a_corrupt_local_session_record() {
             .unwrap()
             .contains("not-json-and-not-a-token")
     );
+}
+
+#[test]
+fn logout_clears_obsolete_or_wrong_origin_session_records() {
+    let canonical_api_base = "https://api.codewhale.net";
+    for (case, schema_version, stored_api_base) in [
+        (
+            "obsolete schema",
+            ACCOUNT_SESSION_SCHEMA_VERSION.saturating_add(1),
+            canonical_api_base,
+        ),
+        (
+            "wrong origin",
+            ACCOUNT_SESSION_SCHEMA_VERSION,
+            "https://other.codewhale.net",
+        ),
+    ] {
+        let (secrets, store) = test_secrets();
+        let slot = cloud_auth_slot("default", canonical_api_base);
+        let raw = serde_json::to_string(&StoredCloudAuth {
+            schema_version,
+            api_base: stored_api_base.to_string(),
+            bundle: auth("access-obsolete", "refresh-obsolete", "acct-obsolete"),
+        })
+        .unwrap();
+        store.set(&slot, &raw).unwrap();
+        let transport = FakeTransport::new(vec![]);
+        let client = CloudClient::new(&transport, &secrets, "default", canonical_api_base);
+
+        assert!(
+            client.load_auth().unwrap().is_none(),
+            "{case} must continue to load as signed out"
+        );
+        assert!(!client.logout().unwrap());
+        assert!(
+            store.get(&slot).unwrap().is_none(),
+            "logout must scrub the {case} record"
+        );
+        assert!(transport.requests().is_empty());
+    }
 }
 
 #[test]

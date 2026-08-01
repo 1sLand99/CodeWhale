@@ -21,11 +21,6 @@ use codewhale_secrets::account::{
     StoredAccountAuth as StoredCloudAuth, normalize_account_profile as normalized_profile,
     secure_account_session_secrets, validate_account_auth_bundle as validate_auth_bundle,
 };
-#[cfg(test)]
-use codewhale_secrets::account::{
-    AccountSession as AuthSession, account_auth_slot as cloud_auth_slot,
-    account_file_session_store_opted_in_value as file_session_store_opted_in_value,
-};
 use reqwest::Url;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -394,7 +389,12 @@ impl<'a, T: CloudTransport> CloudClient<'a, T> {
     fn logout(&self) -> Result<bool> {
         let stored = match self.load_auth() {
             Ok(Some(stored)) => stored,
-            Ok(None) => return Ok(false),
+            Ok(None) => {
+                // `load` deliberately treats obsolete-schema and wrong-origin
+                // records as signed out. Logout must still scrub their slot.
+                self.clear_auth()?;
+                return Ok(false);
+            }
             Err(_) => {
                 // Logout is also the recovery path for a corrupt or obsolete
                 // local record, so it must remain able to remove that record.
@@ -445,9 +445,13 @@ impl<'a, T: CloudTransport> CloudClient<'a, T> {
                 refresh_token: &stored.bundle.refresh_token,
             })?),
         })?;
-        if refresh.status != 200 {
-            self.clear_auth()?;
-            bail!("The Codewhale account session expired. Run `codewhale account login` again");
+        match refresh.status {
+            200 => {}
+            401 => {
+                self.clear_auth()?;
+                bail!("The Codewhale account session expired. Run `codewhale account login` again");
+            }
+            _ => return Err(response_error(&refresh)),
         }
         let mut next: AuthBundle = parse_json_body(&refresh.body)?;
         validate_auth_bundle(&next)?;
