@@ -4783,8 +4783,8 @@ overflow report and `/theme` picker edge-wrapping patch in #1814.
 
 Older releases (v0.8.39 and earlier) are archived in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).
 
-[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.4...HEAD
-[0.9.4]: https://github.com/Hmbown/CodeWhale/compare/v0.9.3...v0.9.4
+[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.3...HEAD
+[0.9.4]: https://github.com/Hmbown/CodeWhale/compare/v0.9.3...HEAD
 [0.9.3]: https://github.com/Hmbown/CodeWhale/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/Hmbown/CodeWhale/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/Hmbown/CodeWhale/compare/v0.9.0...v0.9.1
