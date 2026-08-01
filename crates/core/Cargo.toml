@@ -10,14 +10,14 @@ description = "Core runtime boundaries for Codewhale"
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
-codewhale-agent = { path = "../agent", version = "0.9.3" }
-codewhale-config = { path = "../config", version = "0.9.3" }
-codewhale-execpolicy = { path = "../execpolicy", version = "0.9.3" }
-codewhale-hooks = { path = "../hooks", version = "0.9.3" }
-codewhale-mcp = { path = "../mcp", version = "0.9.3" }
-codewhale-protocol = { path = "../protocol", version = "0.9.3" }
-codewhale-state = { path = "../state", version = "0.9.3" }
-codewhale-tools = { path = "../tools", version = "0.9.3" }
+codewhale-agent = { path = "../agent", version = "0.9.4" }
+codewhale-config = { path = "../config", version = "0.9.4" }
+codewhale-execpolicy = { path = "../execpolicy", version = "0.9.4" }
+codewhale-hooks = { path = "../hooks", version = "0.9.4" }
+codewhale-mcp = { path = "../mcp", version = "0.9.4" }
+codewhale-protocol = { path = "../protocol", version = "0.9.4" }
+codewhale-state = { path = "../state", version = "0.9.4" }
+codewhale-tools = { path = "../tools", version = "0.9.4" }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["time"] }
 tracing.workspace = true

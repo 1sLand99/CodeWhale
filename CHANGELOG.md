@@ -7,23 +7,116 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-08-01
+
+This is the Codewhale v0.9.4 source candidate. It is not a published release
+until the matching tag, packages, checksums, and release assets exist.
+
+This candidate makes tool output and session recovery calmer, adds account,
+Workflow-search, automation, handoff, and math-rendering surfaces, and closes
+release blockers across permissions, DeepSeek Responses, SQLite, File edits,
+terminal width, and Windows installation.
+
 ### Added
 
-- Added a provider-neutral `WorkflowSearchSpec` authoring and freeze boundary
-  for experimental search inside Workflow, plus structured 2–16 candidate
-  generation in the best-of-N starter. Searches bind the baseline, requested
-  and resolved model ids, public evidence, evaluator identity, gates, scoring,
-  budget, and review-only integration policy before admission.
+- Managed Codewhale account commands (`account login`, `status`, `logout`, and
+  `keys`) with browser device flow, profile- and origin-scoped secure sessions,
+  refresh/revocation, redacted BYOK-vault management, and a token-free Runtime
+  account receipt. Provider authentication remains separate, and `cloud`
+  remains a compatibility alias.
+- `/automation` operator controls to list, inspect, pause, resume, delete, and
+  run durable automations. Creation remains on the approval-gated
+  model-visible `automation` tool.
+- A provider-neutral `WorkflowSearchSpec` authoring and freeze boundary, plus
+  structured 2–16-candidate experimental search in the best-of-N Workflow
+  starter. It freezes baseline, route, evidence, evaluator, gate, score, budget,
+  and review policy before admission; it validates gate/scoring commands but
+  does not execute or certify them itself.
+- The bundled generation-9 `handoff` skill for compact, decision-ready
+  continuation across sessions.
+- Expanded terminal LaTeX rendering for aligned and matrix environments,
+  cases, arrays, text/font/accent commands, brackets, symbols, and
+  command-aware scripts (PR #4981).
+- Exact 40-character build provenance and secure account-session capability
+  receipts on `/v1/runtime/info`; unknown source provenance continues to fail
+  closed.
+- Acceptance-level Gherkin coverage locking the existing user-command
+  precedence, alias shadowing, fallback, and invalid-command error contract
+  (PR #4992).
 
 ### Changed
 
-- Workflow scale documentation now matches the runtime: up to 1,000 tasks per
-  run, admitted at most 16 live at a time (additional `task()` calls block on
-  the host's per-run concurrency gate, then route through Fleet).
-  `BranchTournament` keeps its historical cost-first default and supports
-  explicit score-first ordering. Runtime-owned hidden gates, benchmark scoring,
-  and clean replay remain an explicit host seam rather than being inferred from
-  worker self-reports.
+- Tool results now render as ordinary bounded previews with real expansion;
+  storage, retention-ledger, and internal evidence language no longer leak into
+  normal transcripts.
+- Prose wrapping, goal state, modal questions, composer-tail behavior, and
+  ambient motion now follow one deterministic interface contract across narrow
+  terminals and fast streams.
+- Scout and reviewer Fleet roles gain network access and the bounded
+  verification surface for real reconnaissance while retaining the no-write,
+  no-raw-shell security floor.
+- Workflow runs may describe up to 1,000 tasks while admitting at most 16 live
+  tasks at once through the host concurrency gate. Tournament ordering now
+  supports explicit score-first selection while retaining its cost-first
+  default.
+- Runtime permission compatibility inputs resolve to one live
+  `permission_posture`. Auto-Review can proceed without approval or structured
+  question modals, unresolved holds fail closed, and a call planned under stale
+  authority is retried after a posture change (PR #5025).
+- Duplicate and drifting per-turn metadata has been removed in favor of
+  runtime-owned authority, and large inline account and skill tests now live in
+  owned test seams.
+- Updated Ratatui to 0.30.2, globset to 0.4.19, clap-complete to 4.6.8,
+  futures-util to 0.3.33, libc to 0.2.189, actions/stale to 11.0.0, and
+  docker/login-action to 4.5.2. The locked graph also includes the
+  event-listener 5.4.2 fix for RUSTSEC-2026-0221.
+
+### Fixed
+
+- DeepSeek Responses now sends `reasoning.effort: "none"` for the Off tier,
+  shows a truthful notice instead of silently discarding server-side
+  `web_search_call` items, and parses cache-hit, cache-miss, cache-write, and
+  pricing telemetry while retaining the OpenAI-style nested fallback.
+- File edits now explain no-op and missing-search failures, reject newly
+  unbalanced C/C++ preprocessor replacements, handle the reported
+  CRLF/non-ASCII cases, and safely relocate stale unified-diff hunks only when
+  whole-file context is unique (PRs #5008 and #5030).
+- Circled digits, enclosed alphanumerics, and keycap graphemes use consistent
+  two-column measurement in Codewhale, Ratatui, and CJK terminals, preventing
+  missing-character and phantom-space corruption (PR #5001).
+- SQLite connections install their busy timeout before locking setup and avoid
+  rewriting persistent WAL mode on every open, removing the concurrent-open
+  release-gate failure.
+- The Windows installer preserves long current-user `PATH` values, their
+  registry type, and unrelated entries across install and uninstall (PR #5006).
+- Provider configuration no longer contains user-reachable panic paths when
+  metadata or prior credential state is missing.
+- Resuming a session restores composer text only from a same-session persisted
+  draft; submitted prompts and internal background-runtime envelopes remain in
+  history instead of appearing in the composer (PR #5029).
+- Shared CI now handles bot-authored issue-link checks, provisions cargo-deny's
+  toolchain, and fetches the locked test graph before offline runtime-budget
+  validation.
+
+### Removed
+
+- The default model-facing SlopLedger implementation, its storage-oriented
+  transcript language, and the `/debt`, `/cleanup`, `/slop`, and `/canzha`
+  command surface.
+
+### Contributors
+
+- [Sh1Zuku](https://github.com/SparkofSpike) (`@SparkofSpike`) contributed
+  LaTeX rendering in PR #4981, completed circled-digit/keycap width handling in
+  PR #5001, and delivered actionable File-edit recovery in PR #5008.
+- [XhesicaFrost](https://github.com/XhesicaFrost) (`@XhesicaFrost`) fixed long
+  Windows user-PATH preservation in PR #5006.
+- [Paulo Aboim Pinto](https://github.com/aboimpinto) (`@aboimpinto`) added the
+  user-command dispatch acceptance contract in PR #4992.
+- [DracheTek](https://github.com/DracheTek) (`@DracheTek`) provided the
+  multilingual, CRLF-heavy File-edit failure report in issue #5003.
+- [An Ziwu](https://github.com/MuRongMoQing) (`@MuRongMoQing`) reported the
+  Windows PATH-overwrite defect in issue #4685.
 
 ## [0.9.3] - 2026-07-31
 
@@ -4690,7 +4783,8 @@ overflow report and `/theme` picker edge-wrapping patch in #1814.
 
 Older releases (v0.8.39 and earlier) are archived in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).
 
-[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.4...HEAD
+[0.9.4]: https://github.com/Hmbown/CodeWhale/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/Hmbown/CodeWhale/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/Hmbown/CodeWhale/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/Hmbown/CodeWhale/compare/v0.9.0...v0.9.1

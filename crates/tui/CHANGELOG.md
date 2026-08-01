@@ -7,17 +7,116 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-08-01
+
+This is the Codewhale v0.9.4 source candidate. It is not a published release
+until the matching tag, packages, checksums, and release assets exist.
+
+This candidate makes tool output and session recovery calmer, adds account,
+Workflow-search, automation, handoff, and math-rendering surfaces, and closes
+release blockers across permissions, DeepSeek Responses, SQLite, File edits,
+terminal width, and Windows installation.
+
 ### Added
 
-- Added a Workflow experimental-search authoring foundation and structured
-  search option to the bundled best-of-N recipe. This remains Workflow/Fleet,
-  never a new mode or scheduler, and never auto-applies a winner.
-- `codewhale account login`, `status`, `logout`, and `keys` connect a CLI
-  profile to the managed Codewhale account through the browser device flow.
-  Sessions use the OS credential manager, remote BYOK values are never printed,
-  and `codewhale cloud ...` remains a compatibility alias. Provider-facing
-  `codewhale auth` and the legacy local `codewhale login` keep their existing
-  behavior.
+- Managed Codewhale account commands (`account login`, `status`, `logout`, and
+  `keys`) with browser device flow, profile- and origin-scoped secure sessions,
+  refresh/revocation, redacted BYOK-vault management, and a token-free Runtime
+  account receipt. Provider authentication remains separate, and `cloud`
+  remains a compatibility alias.
+- `/automation` operator controls to list, inspect, pause, resume, delete, and
+  run durable automations. Creation remains on the approval-gated
+  model-visible `automation` tool.
+- A provider-neutral `WorkflowSearchSpec` authoring and freeze boundary, plus
+  structured 2–16-candidate experimental search in the best-of-N Workflow
+  starter. It freezes baseline, route, evidence, evaluator, gate, score, budget,
+  and review policy before admission; it validates gate/scoring commands but
+  does not execute or certify them itself.
+- The bundled generation-9 `handoff` skill for compact, decision-ready
+  continuation across sessions.
+- Expanded terminal LaTeX rendering for aligned and matrix environments,
+  cases, arrays, text/font/accent commands, brackets, symbols, and
+  command-aware scripts (PR #4981).
+- Exact 40-character build provenance and secure account-session capability
+  receipts on `/v1/runtime/info`; unknown source provenance continues to fail
+  closed.
+- Acceptance-level Gherkin coverage locking the existing user-command
+  precedence, alias shadowing, fallback, and invalid-command error contract
+  (PR #4992).
+
+### Changed
+
+- Tool results now render as ordinary bounded previews with real expansion;
+  storage, retention-ledger, and internal evidence language no longer leak into
+  normal transcripts.
+- Prose wrapping, goal state, modal questions, composer-tail behavior, and
+  ambient motion now follow one deterministic interface contract across narrow
+  terminals and fast streams.
+- Scout and reviewer Fleet roles gain network access and the bounded
+  verification surface for real reconnaissance while retaining the no-write,
+  no-raw-shell security floor.
+- Workflow runs may describe up to 1,000 tasks while admitting at most 16 live
+  tasks at once through the host concurrency gate. Tournament ordering now
+  supports explicit score-first selection while retaining its cost-first
+  default.
+- Runtime permission compatibility inputs resolve to one live
+  `permission_posture`. Auto-Review can proceed without approval or structured
+  question modals, unresolved holds fail closed, and a call planned under stale
+  authority is retried after a posture change (PR #5025).
+- Duplicate and drifting per-turn metadata has been removed in favor of
+  runtime-owned authority, and large inline account and skill tests now live in
+  owned test seams.
+- Updated Ratatui to 0.30.2, globset to 0.4.19, clap-complete to 4.6.8,
+  futures-util to 0.3.33, libc to 0.2.189, actions/stale to 11.0.0, and
+  docker/login-action to 4.5.2. The locked graph also includes the
+  event-listener 5.4.2 fix for RUSTSEC-2026-0221.
+
+### Fixed
+
+- DeepSeek Responses now sends `reasoning.effort: "none"` for the Off tier,
+  shows a truthful notice instead of silently discarding server-side
+  `web_search_call` items, and parses cache-hit, cache-miss, cache-write, and
+  pricing telemetry while retaining the OpenAI-style nested fallback.
+- File edits now explain no-op and missing-search failures, reject newly
+  unbalanced C/C++ preprocessor replacements, handle the reported
+  CRLF/non-ASCII cases, and safely relocate stale unified-diff hunks only when
+  whole-file context is unique (PRs #5008 and #5030).
+- Circled digits, enclosed alphanumerics, and keycap graphemes use consistent
+  two-column measurement in Codewhale, Ratatui, and CJK terminals, preventing
+  missing-character and phantom-space corruption (PR #5001).
+- SQLite connections install their busy timeout before locking setup and avoid
+  rewriting persistent WAL mode on every open, removing the concurrent-open
+  release-gate failure.
+- The Windows installer preserves long current-user `PATH` values, their
+  registry type, and unrelated entries across install and uninstall (PR #5006).
+- Provider configuration no longer contains user-reachable panic paths when
+  metadata or prior credential state is missing.
+- Resuming a session restores composer text only from a same-session persisted
+  draft; submitted prompts and internal background-runtime envelopes remain in
+  history instead of appearing in the composer (PR #5029).
+- Shared CI now handles bot-authored issue-link checks, provisions cargo-deny's
+  toolchain, and fetches the locked test graph before offline runtime-budget
+  validation.
+
+### Removed
+
+- The default model-facing SlopLedger implementation, its storage-oriented
+  transcript language, and the `/debt`, `/cleanup`, `/slop`, and `/canzha`
+  command surface.
+
+### Contributors
+
+- [Sh1Zuku](https://github.com/SparkofSpike) (`@SparkofSpike`) contributed
+  LaTeX rendering in PR #4981, completed circled-digit/keycap width handling in
+  PR #5001, and delivered actionable File-edit recovery in PR #5008.
+- [XhesicaFrost](https://github.com/XhesicaFrost) (`@XhesicaFrost`) fixed long
+  Windows user-PATH preservation in PR #5006.
+- [Paulo Aboim Pinto](https://github.com/aboimpinto) (`@aboimpinto`) added the
+  user-command dispatch acceptance contract in PR #4992.
+- [DracheTek](https://github.com/DracheTek) (`@DracheTek`) provided the
+  multilingual, CRLF-heavy File-edit failure report in issue #5003.
+- [An Ziwu](https://github.com/MuRongMoQing) (`@MuRongMoQing`) reported the
+  Windows PATH-overwrite defect in issue #4685.
 
 ## [0.9.3] - 2026-07-31
 
@@ -2981,82 +3080,6 @@ folds in several community contributions.
 - Paulo Aboim Pinto (@aboimpinto) for the staged command-boundary design and
   Layer 3 registry/parser extraction in PR #2888, plus the #2851/#2791/#2870
   architecture stream that guided the grouped command areas in #3055.
-
-## [0.8.58] - 2026-06-11
-
-### Added
-
-- **Native Anthropic provider.** A dedicated Messages API adapter
-  (`/v1/messages` with `x-api-key` auth) replaces OpenAI-dialect shims for
-  Claude models: adaptive thinking with `output_config.effort` shaping,
-  prompt-cache breakpoints (capped at 4, earliest dropped), signed-thinking
-  replay via `signature_delta`, normalized cache-hit/miss usage telemetry,
-  and SSE error envelopes. `claude-opus-4-8`, `claude-sonnet-4-6`, and
-  `claude-haiku-4-5` join the model registry; configure with
-  `ANTHROPIC_API_KEY` (#3014).
-- **Hooks v2.** `tool_call_before` hooks can now return a JSON decision —
-  `{"decision": "allow"|"deny"|"ask", "reason", "updatedInput",
-  "additionalContext"}` — with deny > ask > allow precedence across multiple
-  hooks, last-writer-wins input rewriting, and concatenated context. Exit
-  code 2 remains a legacy hard deny. Hooks support glob matchers and
-  project-local `.codewhale/hooks.toml` (#3026).
-- **Clickable sidebar.** Background-job rows show/cancel on click, the
-  Ctrl+K hint row runs `/jobs cancel-all`, and agent rows open `/subagents`;
-  row actions are built in the same pass as the rendered lines so a click
-  can never target the wrong job (#3028).
-- OSC 8 out-of-band hyperlink infrastructure with per-region open/close
-  sequences that survive partial redraws (#3029).
-- `codewhale exec` gains `--allowed-tools`, `--disallowed-tools` (deny wins),
-  `--max-turns`, and `--append-system-prompt` (#3027).
-- Constitution prompt source: YAML source-of-truth plus Python renderer for
-  the system prompt, with the active prompt now served from
-  `constitution.md` (#3015, renderer reconciliation still tracked).
-- Agent-task issue template, labels, and runner protocol (#3021); remote
-  smoke-test droplet loop hardening — gh CLI, swapfile, agent sessions
-  (#3022).
-
-### Changed
-
-- **Sub-agent routing is provider-aware.** DeepSeek ids are no longer
-  hardcoded into model validation; routing works from per-provider
-  big/cheap candidates, the network router is skipped when a provider has
-  no cheap tier, and spawn-time model requests are validated against the
-  active provider (#3018).
-- Model-specific facts in the system prompt (context window, sub-agent
-  pricing, thinking notes, architecture characteristics) are now templated
-  per-model instead of hardcoded DeepSeek V4 claims, in both `base.md` and
-  `constitution.md` (#3025).
-- Provider capability lookups for Moonshot/OpenAI/Atlascloud resolve from
-  per-model registry rows (bare and vendor-prefixed ids) instead of
-  hardcoded 64K-era floors (#3023).
-- Reasoning-effort now reaches Atlascloud (DeepSeek dialect), Moonshot
-  (`thinking` enable/disable), and Ollama (`think` param) (#3024); Moonshot/
-  Kimi models joined the reasoning-content provider and model gates (#3016).
-- Transcript polish: compact tool-call cells without boilerplate (#3031),
-  internal turn/agent ids hidden behind stable labels (#3030), and Ctrl+B
-  now backgrounds the running foreground shell directly instead of opening
-  a menu (#3032).
-- The Tasks sidebar separates "Model reasoning" from "Background commands",
-  and `auth list` reports the same active-credential source as
-  `auth status` for openai-codex.
-
-### Fixed
-
-- **TUI freeze under sub-agent load.** Rapid `AgentProgress` events
-  saturated the render loop and starved terminal input; progress-driven
-  repaints are now throttled to one per 100ms (#3033).
-- **Hooks on Windows.** Hook commands were passed to `cmd /C` through
-  CRT-style argument quoting, which injected literal `\"` sequences that
-  cmd.exe never unescapes — JSON decisions could not parse. Commands now
-  reach cmd.exe verbatim via `raw_arg`.
-- Codex Responses: assistant tool results are converted to
-  `function_call_output` items (multi-turn tool calling previously broke),
-  tool schemas are sanitized for the Responses API, and `maximum` effort
-  maps to `xhigh` (#3019, #3017 — both partially; retry/backoff and
-  per-tool strict mode remain open).
-- Better tool-denial and provider error messages harvested from PR #2933
-  (#3020).
-
 
 ---
 
