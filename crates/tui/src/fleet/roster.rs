@@ -426,7 +426,8 @@ mod tests {
             ("alpha".to_string(), config_profile("builder", None)),
         ]));
 
-        let roster = FleetRoster::load(&config, tmp.path());
+        // Isolate from ambient personal agent profiles on developer machines.
+        let roster = FleetRoster::load_with_personal_dir(&config, tmp.path(), None);
 
         let ids: Vec<&str> = roster.members().iter().map(|m| m.id.as_str()).collect();
         assert_eq!(
@@ -591,7 +592,12 @@ mod tests {
             "id = \"scout\"\nrole_hint = \"scout\"\nprovider = \"deepseek\"\nmodel = \"deepseek-v4-flash\"\n",
         );
 
-        let roster = FleetRoster::load(&FleetConfigToml::default(), tmp.path());
+        // Isolate from ambient personal agent profiles on developer machines.
+        let roster = FleetRoster::load_with_personal_dir(
+            &FleetConfigToml::default(),
+            tmp.path(),
+            None,
+        );
 
         let scout = roster.get("scout").expect("valid scout remains visible");
         assert_eq!(scout.origin, ProfileOrigin::Workspace);
