@@ -1234,6 +1234,49 @@ impl DeepSeekClient {
         redact_model_bound_text(text, &self.model_bound_secret_values)
     }
 
+    /// Resolve `model` through the central route resolver and rebuild this
+    /// client when a ModelAware provider maps it to a different wire protocol
+    /// than the one bound at construction (#5042). `Ok(None)` means the
+    /// existing binding is already correct for `model`. Mirrors the
+    /// resolution in `bind_request_to_protocol`, but at a seam where the
+    /// caller can still rebind instead of failing the first send.
+    pub(crate) fn rebound_for_model_protocol(
+        &self,
+        config: Option<&Config>,
+        model: &str,
+    ) -> Result<Option<Self>> {
+        let model_aware = self.api_provider.metadata().is_some_and(|provider| {
+            provider.wire_policy() == codewhale_config::provider::WirePolicy::ModelAware
+        });
+        if !model_aware {
+            return Ok(None);
+        }
+        static RESOLVER: OnceLock<RouteResolver> = OnceLock::new();
+        let candidate = RESOLVER
+            .get_or_init(RouteResolver::new)
+            .resolve(&RouteRequest {
+                explicit_provider: self.api_provider.kind(),
+                model_selector: Some(LogicalModelRef::from(model)),
+                saved_provider_model: None,
+                base_url_override: Some(self.base_url.clone()),
+                limit_overrides: Vec::new(),
+            })
+            .map_err(anyhow::Error::msg)?;
+        if candidate.protocol() == self.wire_format {
+            return Ok(None);
+        }
+        let config = config.ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} model {:?} uses {:?}, but this client is bound to {:?} and no configuration is available to rebuild it",
+                self.api_provider.display_name(),
+                model,
+                candidate.protocol(),
+                self.wire_format
+            )
+        })?;
+        Self::from_candidate(config, &candidate).map(Some)
+    }
+
     fn bind_request_to_protocol(&self, mut request: MessageRequest) -> Result<MessageRequest> {
         let model_aware = self.api_provider.metadata().is_some_and(|provider| {
             provider.wire_policy() == codewhale_config::provider::WirePolicy::ModelAware
@@ -9222,6 +9265,33 @@ mod tests {
         assert_eq!(prepared.endpoint.url, "https://api.deepseek.com/responses");
         assert_eq!(prepared.body["model"], "deepseek-v4-flash");
         assert_eq!(prepared.body["reasoning"]["effort"], "max");
+    }
+
+    #[test]
+    fn rebinding_a_chat_bound_client_for_flash_switches_to_responses() {
+        // #5042: fleet dispatch binds the child client before the profile
+        // model is resolved; a chat-bound DeepSeek client asked to run flash
+        // must be rebuilt on the Responses protocol by the central resolver
+        // instead of failing deterministically at first send.
+        let (_config, route) =
+            deepseek_route_for_test("https://api.deepseek.com/beta", "deepseek-v4-pro");
+        let client = DeepSeekClient::new(&route.config).expect("pro client resolves");
+        assert_eq!(client.wire_format, WireFormat::ChatCompletions);
+
+        let rebound = client
+            .rebound_for_model_protocol(Some(&route.config), "deepseek-v4-flash")
+            .expect("flash rebind resolves")
+            .expect("flash requires a different protocol");
+        assert_eq!(rebound.wire_format, WireFormat::Responses);
+        assert_eq!(rebound.default_model, "deepseek-v4-flash");
+
+        assert!(
+            client
+                .rebound_for_model_protocol(Some(&route.config), "deepseek-v4-pro")
+                .expect("pro rebind resolves")
+                .is_none(),
+            "a matching protocol must not rebuild the client"
+        );
     }
 
     #[test]

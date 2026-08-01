@@ -9053,9 +9053,16 @@ fn stub_runtime() -> SubAgentRuntime {
 
     let workspace = std::env::temp_dir().join("codewhale-test-stub");
     let context = ToolContext::new(workspace.clone());
+    // A real session always carries its config; spawn-time protocol
+    // rebinding (#5042) needs it to rebuild the client for model-aware
+    // routes such as deepseek-v4-flash.
+    let stub_config = crate::config::Config {
+        api_key: Some("test-key".to_string()),
+        ..crate::config::Config::default()
+    };
     SubAgentRuntime {
         client: stub_client(),
-        api_config: None,
+        api_config: Some(std::sync::Arc::new(stub_config)),
         model: "deepseek-v4-flash".to_string(),
         locale_tag: "en".to_string(),
         auto_model: false,

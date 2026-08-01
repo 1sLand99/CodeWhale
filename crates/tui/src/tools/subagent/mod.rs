@@ -7209,6 +7209,23 @@ async fn spawn_subagent_from_input(
     let effective_model =
         ensure_subagent_model_for_provider(&child_runtime, &route.model_route, route.model)?;
     child_runtime.model = effective_model.clone();
+    // #5042: the child client was bound before the final model was known. A
+    // ModelAware provider (e.g. DeepSeek: pro=chat, flash=responses) can map
+    // the resolved model to a different wire protocol, so delegate to the
+    // same central resolver the main session uses and rebuild the client now
+    // instead of failing deterministically on the child's first send.
+    if let Some(rebound) = child_runtime
+        .client
+        .rebound_for_model_protocol(child_runtime.api_config.as_deref(), &effective_model)
+        .map_err(|err| {
+            ToolError::execution_failed(format!(
+                "fleet dispatch could not bind the wire protocol for model \
+                 {effective_model:?}: {err:#}"
+            ))
+        })?
+    {
+        child_runtime.client = rebound;
+    }
     child_runtime.reasoning_effort = route.reasoning_effort.clone();
     child_runtime.reasoning_effort_auto = false;
     let model_route = route.model_route;
