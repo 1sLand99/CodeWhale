@@ -759,24 +759,25 @@ mod tests {
 
     #[test]
     fn detail_shows_posture_routing_and_origin() {
-        // Built-in reviewer: read-only review worker, shell read-only,
-        // inherits the session route.
+        // Built-in reviewer: read-only recon worker with the full shell
+        // posture needed for the bounded verification surface. The runtime
+        // clamp still removes raw shell because the role cannot write.
         let reviewer = FleetRoster::built_ins_only()
             .get("reviewer")
             .unwrap()
             .clone();
         assert_eq!(
             member_posture(&reviewer),
-            "reviewer worker · read-only · shell read-only"
+            "reviewer worker · read-only · shell full"
         );
         assert_eq!(member_routing(&reviewer), "inherit session route");
 
-        // Built-in scout: no setup means the session route, just like every
-        // other built-in role.
+        // Built-in scout has the same recon posture and inherits the session
+        // route, just like every other built-in role without a route pin.
         let scout = FleetRoster::built_ins_only().get("scout").unwrap().clone();
         assert_eq!(
             member_posture(&scout),
-            "scout worker · read-only · shell read-only"
+            "scout worker · read-only · shell full"
         );
         assert_eq!(member_routing(&scout), "inherit session route");
 
