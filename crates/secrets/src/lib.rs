@@ -11,6 +11,9 @@
 //! explicit at the call site.
 #![deny(missing_docs)]
 
+/// Shared secure-storage contract for the Codewhale account session.
+pub mod account;
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};

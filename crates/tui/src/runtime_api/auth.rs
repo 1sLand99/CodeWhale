@@ -71,10 +71,18 @@ pub(super) async fn require_runtime_token(
     req: Request,
     next: Next,
 ) -> Response {
+    if runtime_request_is_authorized(&req, &state) {
+        next.run(req).await
+    } else {
+        runtime_token_required_response()
+    }
+}
+
+pub(super) fn runtime_request_is_authorized(req: &Request, state: &RuntimeApiState) -> bool {
     let Some(expected) = state.runtime_token.as_deref() else {
-        return next.run(req).await;
+        return true;
     };
-    let cookie_authorized = request_has_runtime_cookie(&req, expected)
+    let cookie_authorized = request_has_runtime_cookie(req, expected)
         || state.web.as_ref().is_some_and(|web| {
             web.matches_session_cookie(
                 req.headers()
@@ -82,14 +90,8 @@ pub(super) async fn require_runtime_token(
                     .and_then(|value| value.to_str().ok()),
             )
         });
-    let authorized = request_has_header_runtime_token(&req, expected)
-        || (cookie_authorized && web_cookie_request_is_same_origin(&req, &state));
-
-    if authorized {
-        next.run(req).await
-    } else {
-        runtime_token_required_response()
-    }
+    request_has_header_runtime_token(req, expected)
+        || (cookie_authorized && web_cookie_request_is_same_origin(req, state))
 }
 
 fn request_has_header_runtime_token(req: &Request, expected: &str) -> bool {

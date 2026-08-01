@@ -1027,10 +1027,12 @@ dependencies = [
 name = "codewhale-secrets"
 version = "0.9.3"
 dependencies = [
+ "chrono",
  "codewhale-paths",
  "keyring",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
