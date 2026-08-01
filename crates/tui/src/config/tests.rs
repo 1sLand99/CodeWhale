@@ -11284,3 +11284,39 @@ fn readiness_and_inventory_classify_the_resolved_route_not_the_session_host() ->
     assert!(config.provider_uses_custom_endpoint(ApiProvider::Deepseek));
     Ok(())
 }
+
+#[test]
+fn configured_inactive_provider_reads_its_secret_store_key() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp = tempfile::tempdir()?;
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", temp.path());
+    let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let _moonshot = EnvVarGuard::remove("MOONSHOT_API_KEY");
+    let _kimi = EnvVarGuard::remove("KIMI_API_KEY");
+
+    // The state guided setup leaves behind: auth_mode saved to config, the
+    // key saved to the secret store only — and the operator then switches
+    // the active provider away (#5033).
+    let mut providers = ProvidersConfig::default();
+    providers.moonshot = ProviderConfig {
+        auth_mode: Some("api_key".to_string()),
+        ..Default::default()
+    };
+    let config = Config {
+        provider: Some("deepseek".to_string()),
+        providers: Some(providers),
+        ..Default::default()
+    };
+
+    assert!(
+        !has_api_key_for(&config, ApiProvider::Moonshot),
+        "no stored key yet: the configured provider must still read as unconfigured"
+    );
+
+    codewhale_secrets::Secrets::auto_detect().set("moonshot", "kimi-test-credential")?;
+    assert!(
+        has_api_key_for(&config, ApiProvider::Moonshot),
+        "a configured-but-inactive provider with a stored key must read as configured (#5033)"
+    );
+    Ok(())
+}

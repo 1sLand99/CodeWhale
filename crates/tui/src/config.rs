@@ -9444,14 +9444,26 @@ pub fn has_api_key_for(config: &Config, provider: ApiProvider) -> bool {
     {
         return true;
     }
-    // Probe only the active provider during startup/picker readiness. This is
-    // sufficient for standalone-TUI parity without walking every account in an
-    // explicitly selected system keyring when rendering the provider catalog.
-    if provider == config.api_provider()
-        && !config.should_skip_secret_store_for_provider(provider)
-        && provider_secret_store_api_key(config, provider).is_some()
-    {
-        return true;
+    // Probe the active provider, plus any provider whose persisted
+    // `[providers.<name>]` table carries the marker the secret-store save
+    // path itself writes (an api-key auth mode with no config literal). A
+    // configured-but-inactive provider must not render as unconfigured just
+    // because the operator switched providers after saving its key (#5033).
+    // The probe stays bounded to explicitly configured providers, and the
+    // non-active case is strictly read-only so rendering the catalog never
+    // migrates a legacy store or opens a write-capable backend.
+    if !config.should_skip_secret_store_for_provider(provider) {
+        if provider == config.api_provider() {
+            if provider_secret_store_api_key(config, provider).is_some() {
+                return true;
+            }
+        } else if config
+            .provider_config_for(provider)
+            .is_some_and(|entry| auth_mode_requires_api_key(entry.auth_mode.as_deref()))
+            && provider_secret_store_api_key_with_mode(config, provider, true).is_some()
+        {
+            return true;
+        }
     }
 
     if (matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN)
