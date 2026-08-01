@@ -205,9 +205,7 @@ impl WorkerRuntimeProfile {
             // Raw shell stays denied by the clamp (write && shell == Full
             // is required for it), so this widens capability without
             // widening mutation authority.
-            FleetRole::Scout | FleetRole::Reviewer => {
-                (PermissionSet::recon(), ShellPolicy::Full)
-            }
+            FleetRole::Scout | FleetRole::Reviewer => (PermissionSet::recon(), ShellPolicy::Full),
             // Planner: analysis only, no shell.
             FleetRole::Planner => (PermissionSet::read_only(), ShellPolicy::None),
             // Consultant: counsel only. Reads to ground its advice; never acts on
