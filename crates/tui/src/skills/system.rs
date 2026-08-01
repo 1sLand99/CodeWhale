@@ -10,7 +10,9 @@ use std::path::Path;
 /// Generation 7 adds the explicit-only `help` router (#4698 parity slice).
 /// Generation 8 adds the explicit-only `contributor-onboarding` path
 /// requested by @JayBeest (#4227).
-const BUNDLED_SKILL_VERSION: &str = "8";
+/// Generation 9 adds the `handoff` workflow skill (baton-pass for
+/// continuous operate-mode operations).
+const BUNDLED_SKILL_VERSION: &str = "9";
 
 // ── system & extension (meta) ───────────────────────────────────────────────
 const SKILL_CREATOR_BODY: &str = include_str!("../../assets/skills/skill-creator/SKILL.md");
@@ -22,6 +24,7 @@ const FLEET_MANAGER_BODY: &str = include_str!("../../assets/skills/fleet-manager
 const HELP_BODY: &str = include_str!("../../assets/skills/help/SKILL.md");
 
 // ── end-user workflows ──────────────────────────────────────────────────────
+const HANDOFF_BODY: &str = include_str!("../../assets/skills/handoff/SKILL.md");
 const BEST_OF_N_BODY: &str = include_str!("../../assets/skills/best-of-n/SKILL.md");
 const INTERVIEW_BODY: &str = include_str!("../../assets/skills/interview/SKILL.md");
 const PLAN_BODY: &str = include_str!("../../assets/skills/plan/SKILL.md");
@@ -104,6 +107,11 @@ const BUNDLED_SKILLS: &[BundledSkill] = &[
         introduced_in: 7,
     },
     // End-user workflows
+    BundledSkill {
+        name: "handoff",
+        body: HANDOFF_BODY,
+        introduced_in: 9,
+    },
     BundledSkill {
         name: "best-of-n",
         body: BEST_OF_N_BODY,
@@ -551,7 +559,7 @@ mod tests {
             .find(|skill| skill.name == "contributor-onboarding")
             .expect("contributor-onboarding must be bundled");
         assert_eq!(skill.introduced_in, 8);
-        assert_eq!(BUNDLED_SKILL_VERSION, "8");
+        assert_eq!(BUNDLED_SKILL_VERSION, "9");
 
         let body = skill.body;
         assert!(body.contains("invocation: explicit-only"));
@@ -813,6 +821,24 @@ mod tests {
         }
         let ver = fs::read_to_string(marker_file(&tmp)).unwrap();
         assert_eq!(ver.trim(), BUNDLED_SKILL_VERSION);
+    }
+
+    #[test]
+    fn version_bump_from_v8_adds_handoff_without_recreating_deleted_skills() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(marker_file(&tmp), "8").unwrap();
+
+        install_system_skills(tmp.path()).unwrap();
+
+        assert!(skill_file(&tmp, "handoff").is_file());
+        assert!(
+            !skill_file(&tmp, "delegate").exists(),
+            "an intentionally absent older skill must stay absent"
+        );
+        assert_eq!(
+            fs::read_to_string(marker_file(&tmp)).unwrap().trim(),
+            BUNDLED_SKILL_VERSION
+        );
     }
 
     #[test]
