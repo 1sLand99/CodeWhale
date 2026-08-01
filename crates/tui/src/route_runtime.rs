@@ -466,6 +466,16 @@ pub(crate) fn resolve_runtime_route_for_identity(
     let provider = identity.provider;
     let mut route_config = prepared_route_config(config, &identity, model_selector);
     let saved_provider_model = configured_model_for_route(&route_config, provider);
+    // #5034: with no explicit selector and no saved model, a Codex route
+    // would fall back to the resolver's static seed offering. Prefer the
+    // live Codex roster head so a provider switch lands on the current
+    // flagship model; a missing/stale roster keeps the seed offering.
+    let roster_preferred = (provider == ApiProvider::OpenaiCodex
+        && model_selector.is_none()
+        && saved_provider_model.is_none())
+    .then(|| model_roster().preferred_model_id().map(str::to_string))
+    .flatten();
+    let model_selector = model_selector.or(roster_preferred.as_deref());
     let resolution = resolve_route_candidate_with_context_metadata(
         provider,
         model_selector,
@@ -611,6 +621,41 @@ mod tests {
             ),
             128_000
         );
+    }
+
+    #[test]
+    fn codex_switch_without_saved_model_prefers_fresh_roster_head() {
+        // #5034: switching to openai-codex with no saved model must land on
+        // the roster's current flagship, not the static seed constant.
+        let _lock = crate::test_support::lock_test_env();
+        let codex_home = tempfile::tempdir().expect("Codex home");
+        let _home = crate::test_support::EnvVarGuard::set("CODEX_HOME", codex_home.path());
+        std::fs::write(
+            codex_home.path().join("models_cache.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "fetched_at": chrono::Utc::now(),
+                "models": [
+                    {"slug": "gpt-test-flagship", "priority": 1, "context_window": 256000},
+                    {"slug": crate::config::DEFAULT_OPENAI_CODEX_MODEL, "priority": 7}
+                ]
+            }))
+            .expect("serialize cache"),
+        )
+        .expect("write cache");
+
+        let config = crate::config::Config::default();
+        let route = resolve_runtime_route(&config, ApiProvider::OpenaiCodex, None)
+            .expect("codex route resolves");
+        assert_eq!(route.model, "gpt-test-flagship");
+
+        // An explicit selector or saved provider model still wins.
+        let explicit = resolve_runtime_route(
+            &config,
+            ApiProvider::OpenaiCodex,
+            Some(crate::config::DEFAULT_OPENAI_CODEX_MODEL),
+        )
+        .expect("explicit codex route resolves");
+        assert_eq!(explicit.model, crate::config::DEFAULT_OPENAI_CODEX_MODEL);
     }
 
     #[test]

@@ -6462,6 +6462,12 @@ fn openai_codex_default_model_falls_back_to_codex_model() {
     // global `default_text_model` is validated to DeepSeek IDs (or "auto"),
     // so with the Codex provider it must resolve to the Codex default
     // instead of leaking a DeepSeek id the backend rejects.
+    // Isolate from any ambient developer Codex roster: the seed fallback is
+    // asserted here; the fresh-roster preference (#5034) is covered by
+    // codex_switch_without_saved_model_prefers_fresh_roster_head.
+    let _lock = lock_test_env();
+    let empty_codex_home = tempfile::tempdir().expect("empty codex home");
+    let _codex_home = EnvVarGuard::set("CODEX_HOME", empty_codex_home.path());
     let with_deepseek_default = Config {
         provider: Some("openai-codex".to_string()),
         default_text_model: Some(DEFAULT_TEXT_MODEL.to_string()),

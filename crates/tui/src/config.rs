@@ -4822,6 +4822,13 @@ impl Config {
         // leak through and be rejected by the backend. An explicit
         // `[providers.openai_codex] model` is honored by the block above.
         if provider == ApiProvider::OpenaiCodex {
+            // Prefer the live Codex roster head over the static seed so a
+            // provider switch lands on the current flagship model instead of
+            // a stale constant (#5034). Missing/stale/invalid rosters keep
+            // the seed default.
+            if let Some(preferred) = crate::codex_model_cache::model_roster().preferred_model_id() {
+                return preferred.to_string();
+            }
             return DEFAULT_OPENAI_CODEX_MODEL.to_string();
         }
 

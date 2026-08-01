@@ -82,6 +82,17 @@ impl CodexModelRoster {
             .iter()
             .find(|model| model.id.eq_ignore_ascii_case(id.trim()))
     }
+
+    /// The roster's preferred model: the highest-priority entry of a fresh
+    /// roster. Missing/stale/invalid rosters yield `None` so callers keep
+    /// the static seed default (#5034).
+    #[must_use]
+    pub(crate) fn preferred_model_id(&self) -> Option<&str> {
+        if self.freshness != CodexModelCacheFreshness::Fresh {
+            return None;
+        }
+        self.models.first().map(|model| model.id.as_str())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -282,6 +293,27 @@ mod tests {
 
         assert_eq!(roster.freshness, CodexModelCacheFreshness::Missing);
         assert_eq!(roster.model_ids(), [DEFAULT_OPENAI_CODEX_MODEL]);
+    }
+
+    #[test]
+    fn preferred_model_is_the_fresh_roster_head_only() {
+        let home = tempfile::tempdir().expect("temp CODEX_HOME");
+        write_fixture(home.path());
+
+        let fresh =
+            load_model_roster_from_home_at(home.path(), fixture_time() + Duration::minutes(30));
+        assert_eq!(fresh.preferred_model_id(), Some("gpt-test-primary"));
+
+        // Stale and missing rosters must keep the static seed default so a
+        // provider switch never trusts outdated route knowledge (#5034).
+        let stale =
+            load_model_roster_from_home_at(home.path(), fixture_time() + Duration::days(365));
+        assert_eq!(stale.preferred_model_id(), None);
+        let missing = load_model_roster_from_home_at(
+            tempfile::tempdir().expect("empty home").path(),
+            fixture_time(),
+        );
+        assert_eq!(missing.preferred_model_id(), None);
     }
 
     #[test]
