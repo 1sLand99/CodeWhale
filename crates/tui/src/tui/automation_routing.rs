@@ -113,7 +113,7 @@ fn format_list(records: &[AutomationRecord]) -> String {
                 "{}  [{}]  {}  (next: {})",
                 record.id,
                 status_label(record.status),
-                record.name,
+                display_text(&record.name),
                 timestamp(record.next_run_at)
             )
         })
@@ -138,16 +138,47 @@ fn format_detail(record: &AutomationRecord, runs: Option<&[AutomationRunRecord]>
             .join("\n"),
         None => "  (runs unavailable)".to_string(),
     };
-    format!(
-        "Automation {} [{}]\n  name: {}\n  rrule: {}\n  next: {}\n  last: {}\nrecent runs:\n{}",
-        record.id,
-        status_label(record.status),
-        record.name,
-        record.rrule,
-        timestamp(record.next_run_at),
-        timestamp(record.last_run_at),
-        runs
-    )
+    let mut lines = vec![
+        format!("Automation {} [{}]", record.id, status_label(record.status)),
+        format!("  name: {}", display_text(&record.name)),
+        "  prompt:".to_string(),
+    ];
+    lines.extend(
+        display_text(&record.prompt)
+            .lines()
+            .map(|line| format!("    {line}")),
+    );
+    lines.extend(
+        record
+            .cwds
+            .iter()
+            .map(|cwd| format!("  cwd: {}", display_text(&crate::utils::display_path(cwd)))),
+    );
+    if let Some(mode) = record.mode.as_deref() {
+        lines.push(format!("  mode: {}", display_text(mode)));
+    }
+    if let Some(allow_shell) = record.allow_shell {
+        lines.push(format!("  allow_shell: {allow_shell}"));
+    }
+    if let Some(trust_mode) = record.trust_mode {
+        lines.push(format!("  trust_mode: {trust_mode}"));
+    }
+    if let Some(auto_approve) = record.auto_approve {
+        lines.push(format!("  auto_approve: {auto_approve}"));
+    }
+    lines.extend([
+        format!("  rrule: {}", record.rrule),
+        format!("  next: {}", timestamp(record.next_run_at)),
+        format!("  last: {}", timestamp(record.last_run_at)),
+        format!("recent runs:\n{runs}"),
+    ]);
+    lines.join("\n")
+}
+
+fn display_text(value: &str) -> String {
+    let mut visible = String::with_capacity(value.len());
+    crate::tui::osc8::strip_ansi_into(value, &mut visible);
+    codewhale_config::persistence::redact_secrets(&visible)
 }
 
 fn format_run_enqueued(id: &str, run: &AutomationRunRecord) -> String {
@@ -215,5 +246,48 @@ mod tests {
         assert!(text.contains("Automation auto_1 [active]"));
         assert!(text.contains("rrule: FREQ=DAILY"));
         assert!(text.contains("recent runs:"));
+    }
+
+    #[test]
+    fn detail_exposes_configured_execution_contract_and_redacts_prompt() {
+        let mut automation = record(AutomationStatus::Active);
+        automation.prompt = "Run release checks\napi_key = \"sk-audit-secret-value\"".to_string();
+        automation.cwds = vec!["release-workspace".into()];
+        automation.mode = Some("agent".to_string());
+        automation.allow_shell = Some(true);
+        automation.trust_mode = Some(false);
+        automation.auto_approve = Some(true);
+
+        let text = format_detail(&automation, Some(&[]));
+
+        assert!(text.contains("  prompt:\n    Run release checks"));
+        assert!(text.contains("[redacted]"));
+        assert!(!text.contains("sk-audit-secret-value"));
+        assert!(text.contains("  cwd: release-workspace"));
+        assert!(text.contains("  mode: agent"));
+        assert!(text.contains("  allow_shell: true"));
+        assert!(text.contains("  trust_mode: false"));
+        assert!(text.contains("  auto_approve: true"));
+    }
+
+    #[test]
+    fn list_stays_compact_and_detail_omits_unset_execution_overrides() {
+        let automation = record(AutomationStatus::Paused);
+
+        let list = format_list(std::slice::from_ref(&automation));
+        assert!(!list.contains(&automation.prompt));
+        assert!(!list.contains("prompt:"));
+        assert!(!list.contains("cwd:"));
+        assert!(!list.contains("mode:"));
+        assert!(!list.contains("allow_shell:"));
+        assert!(!list.contains("trust_mode:"));
+        assert!(!list.contains("auto_approve:"));
+
+        let detail = format_detail(&automation, Some(&[]));
+        assert!(!detail.contains("cwd:"));
+        assert!(!detail.contains("mode:"));
+        assert!(!detail.contains("allow_shell:"));
+        assert!(!detail.contains("trust_mode:"));
+        assert!(!detail.contains("auto_approve:"));
     }
 }
