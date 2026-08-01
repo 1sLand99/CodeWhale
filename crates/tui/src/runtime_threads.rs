@@ -1941,8 +1941,6 @@ fn runtime_compaction_config(
 struct ActiveTurnState {
     turn_id: String,
     interrupt_requested: bool,
-    auto_approve: bool,
-    trust_mode: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3002,32 +3000,49 @@ impl RuntimeThreadManager {
     }
 
     async fn remember_thread_auto_approve(&self, thread_id: &str) {
-        {
+        let thread = {
             let _thread_mutation = self.store.thread_mutation.lock();
             let Ok(mut thread) = self.store.load_thread(thread_id) else {
                 return;
             };
-            if thread.auto_approve {
-                return;
+            if !thread.auto_approve || thread.permission_posture.as_deref() != Some("full_access") {
+                thread.auto_approve = true;
+                thread.permission_posture = Some("full_access".to_string());
+                thread.updated_at = Utc::now();
+                if let Err(err) = self.store.save_thread(&thread) {
+                    tracing::warn!(
+                        "Failed to persist full-access posture for thread {}: {}",
+                        thread_id,
+                        err
+                    );
+                    return;
+                }
             }
-            thread.auto_approve = true;
-            thread.updated_at = Utc::now();
-            if let Err(err) = self.store.save_thread(&thread) {
-                tracing::warn!(
-                    "Failed to persist auto_approve flip for thread {}: {}",
-                    thread_id,
-                    err
-                );
-            }
-        }
+            thread
+        };
 
-        {
-            let mut active = self.active.lock().await;
-            if let Some(state) = active.engines.get_mut(thread_id)
-                && let Some(turn) = state.active_turn.as_mut()
-            {
-                turn.auto_approve = true;
-            }
+        let engine = {
+            let active = self.active.lock().await;
+            active
+                .engines
+                .get(thread_id)
+                .map(|state| state.engine.clone())
+        };
+        if let Some(engine) = engine {
+            let configured_sandbox_mode = self.read_config().sandbox_mode.clone();
+            let policy = RuntimePolicyProjection::from_persisted(
+                &thread.mode,
+                thread.permission_posture.as_deref(),
+                thread.auto_approve,
+            );
+            let _ = engine.try_send(Op::ChangeMode {
+                mode: policy.mode,
+                allow_shell: thread.allow_shell,
+                trust_mode: thread.trust_mode,
+                auto_approve: policy.auto_approve(),
+                approval_mode: policy.permission,
+                configured_sandbox_mode,
+            });
         }
     }
 
@@ -3721,7 +3736,8 @@ impl RuntimeThreadManager {
             bail!("workspace must not be empty");
         }
 
-        let (thread, changes, evicted_engine) = {
+        let configured_sandbox_mode = self.read_config().sandbox_mode.clone();
+        let (thread, changes, evicted_engine, posture_engine) = {
             // Take the active guard first so a workspace mutation can check
             // and evict the cached engine atomically with the durable update.
             // Using the same order as start/compact avoids lock inversion.
@@ -3736,24 +3752,10 @@ impl RuntimeThreadManager {
                 || req.permission_posture.is_some()
                 || req.auto_approve.is_some()
             {
-                let requested_mode = req.mode.as_deref().unwrap_or(&thread.mode);
-                let requested_permission = if req.permission_posture.is_some() {
-                    req.permission_posture.as_deref()
-                } else if req.auto_approve.is_some()
-                    || req.mode.as_deref().is_some_and(|mode| {
-                        matches!(
-                            mode.trim().to_ascii_lowercase().as_str(),
-                            "yolo" | "4" | "bypass" | "bypass-permissions" | "bypasspermissions"
-                        )
-                    })
-                {
-                    None
-                } else {
-                    thread.permission_posture.as_deref()
-                };
-                Some(RuntimePolicyProjection::from_request(
-                    requested_mode,
-                    requested_permission,
+                Some(runtime_policy_with_overrides(
+                    &thread,
+                    req.mode.as_deref(),
+                    req.permission_posture.as_deref(),
                     req.auto_approve,
                 )?)
             } else {
@@ -3842,6 +3844,16 @@ impl RuntimeThreadManager {
                 bail!("workspace cannot be changed while the thread has an active turn");
             }
 
+            // A posture/mode edit must reach the live engine even while a
+            // turn is running. EngineHandle publishes the authority snapshot
+            // before queueing ChangeMode; the turn loop applies that pending
+            // update before the next tool batch.
+            let posture_changed = changes.contains_key("auto_approve")
+                || changes.contains_key("permission_posture")
+                || changes.contains_key("trust_mode")
+                || changes.contains_key("allow_shell")
+                || changes.contains_key("mode");
+
             let evicted_engine = if changes.is_empty() {
                 None
             } else {
@@ -3854,11 +3866,35 @@ impl RuntimeThreadManager {
                     None
                 }
             };
-            (thread, changes, evicted_engine)
+            let posture_engine = if posture_changed && !workspace_changed {
+                active.engines.get(id).map(|state| state.engine.clone())
+            } else {
+                None
+            };
+            (thread, changes, evicted_engine, posture_engine)
         };
 
         if let Some(engine) = evicted_engine {
             let _ = engine.send(Op::Shutdown).await;
+        }
+
+        // Keep the live engine session converged with the thread record.
+        // Idle engines apply it immediately; a running turn applies it at
+        // the next mid-turn drain (before the next tool batch).
+        if let Some(engine) = posture_engine {
+            let policy = RuntimePolicyProjection::from_persisted(
+                &thread.mode,
+                thread.permission_posture.as_deref(),
+                thread.auto_approve,
+            );
+            let _ = engine.try_send(Op::ChangeMode {
+                mode: policy.mode,
+                allow_shell: thread.allow_shell,
+                trust_mode: thread.trust_mode,
+                auto_approve: policy.auto_approve(),
+                approval_mode: policy.permission,
+                configured_sandbox_mode: configured_sandbox_mode.clone(),
+            });
         }
 
         if !changes.is_empty() {
@@ -4925,32 +4961,18 @@ impl RuntimeThreadManager {
         }
 
         let thread = self.get_thread(thread_id).await?;
-        let requested_mode = req.mode.as_deref().unwrap_or(&thread.mode);
         let policy =
             if req.mode.is_some() || req.permission_posture.is_some() || req.auto_approve.is_some()
             {
-                let requested_permission = if req.permission_posture.is_some() {
-                    req.permission_posture.as_deref()
-                } else if req.auto_approve.is_some()
-                    || req.mode.as_deref().is_some_and(|mode| {
-                        matches!(
-                            mode.trim().to_ascii_lowercase().as_str(),
-                            "yolo" | "4" | "bypass" | "bypass-permissions" | "bypasspermissions"
-                        )
-                    })
-                {
-                    None
-                } else {
-                    thread.permission_posture.as_deref()
-                };
-                RuntimePolicyProjection::from_request(
-                    requested_mode,
-                    requested_permission,
+                runtime_policy_with_overrides(
+                    &thread,
+                    req.mode.as_deref(),
+                    req.permission_posture.as_deref(),
                     req.auto_approve,
                 )?
             } else {
                 RuntimePolicyProjection::from_persisted(
-                    requested_mode,
+                    &thread.mode,
                     thread.permission_posture.as_deref(),
                     thread.auto_approve,
                 )
@@ -5033,6 +5055,7 @@ impl RuntimeThreadManager {
         } else {
             route
         };
+        let configured_sandbox_mode = route.config.sandbox_mode.clone();
         let provider = route.identity.provider;
         let provider_identity = route.identity.clone();
         let model = route.model.clone();
@@ -5152,8 +5175,6 @@ impl RuntimeThreadManager {
             state.active_turn = Some(ActiveTurnState {
                 turn_id: turn_id.clone(),
                 interrupt_requested: false,
-                auto_approve,
-                trust_mode,
             });
             state.route_identity = provider_identity;
             state.route_model.clone_from(&model);
@@ -5185,6 +5206,14 @@ impl RuntimeThreadManager {
             // point the engine owns the operation and the spawned task owns
             // lifecycle events, monitoring, and terminal cleanup even if the
             // HTTP/client future is dropped.
+            engine.publish_turn_authority(
+                mode,
+                allow_shell,
+                trust_mode,
+                auto_approve,
+                policy.permission,
+                configured_sandbox_mode,
+            );
             let _sender = permit.send(op);
             touch_lru(&mut active.lru, thread_id);
             self.spawn_claimed_turn_monitor(
@@ -5361,6 +5390,7 @@ impl RuntimeThreadManager {
         } else {
             route
         };
+        let configured_sandbox_mode = route.config.sandbox_mode.clone();
         let route_provider = route.identity.provider;
         let route_identity = route.identity.clone();
         let route_model = route.model.clone();
@@ -5446,8 +5476,6 @@ impl RuntimeThreadManager {
             state.active_turn = Some(ActiveTurnState {
                 turn_id: turn_id.clone(),
                 interrupt_requested: false,
-                auto_approve: current_thread.auto_approve,
-                trust_mode: current_thread.trust_mode,
             });
             state.route_identity = route_identity;
             state.route_model = route_model;
@@ -5472,6 +5500,19 @@ impl RuntimeThreadManager {
             }
 
             self.register_runtime_usage_sink(&turn_id);
+            let policy = RuntimePolicyProjection::from_persisted(
+                &current_thread.mode,
+                current_thread.permission_posture.as_deref(),
+                current_thread.auto_approve,
+            );
+            engine.publish_turn_authority(
+                policy.mode,
+                current_thread.allow_shell,
+                current_thread.trust_mode,
+                policy.auto_approve(),
+                policy.permission,
+                configured_sandbox_mode,
+            );
             let _sender = permit.send(op);
             touch_lru(&mut active.lru, thread_id);
             self.spawn_claimed_turn_monitor(
@@ -6624,12 +6665,16 @@ impl RuntimeThreadManager {
                     intent_summary,
                     ..
                 } => {
-                    let Some((auto_approve, trust_mode)) =
-                        self.active_turn_flags(&thread_id, &turn_id).await
+                    let Some(authority) = self
+                        .active_turn_authority(&thread_id, &turn_id, &engine)
+                        .await
                     else {
                         let _ = engine.deny_tool_call(&id).await;
                         continue;
                     };
+                    let auto_approve = authority.auto_approve;
+                    let trust_mode = authority.trust_mode;
+                    let approval_mode = authority.approval_mode;
 
                     let pending_request = PendingApprovalRequest {
                         id: id.clone(),
@@ -6685,6 +6730,31 @@ impl RuntimeThreadManager {
                         } else {
                             let _ = engine.deny_tool_call(id).await;
                         }
+                        continue;
+                    }
+
+                    // Auto-Review never opens an approval modal. The engine
+                    // resolves gated tools under Auto itself, so reaching
+                    // this branch means a host injected the event directly:
+                    // fail closed (the audit trail stays authoritative)
+                    // instead of pausing the turn.
+                    if approval_mode == crate::tui::approval::ApprovalMode::Auto {
+                        self.emit_event(
+                            &thread_id,
+                            Some(&turn_id),
+                            None,
+                            "approval.decided",
+                            json!({
+                                "approval_id": id,
+                                "decision": "deny",
+                                "remember": false,
+                                "auto": true,
+                                "posture": "auto_review",
+                            }),
+                        )
+                        .await
+                        .ok();
+                        let _ = engine.deny_tool_call(id).await;
                         continue;
                     }
 
@@ -6807,10 +6877,16 @@ impl RuntimeThreadManager {
                         }),
                     )
                     .await?;
-                    let (auto_approve, trust_mode) = self
-                        .active_turn_flags(&thread_id, &turn_id)
+                    let authority = self
+                        .active_turn_authority(&thread_id, &turn_id, &engine)
                         .await
-                        .unwrap_or((false, false));
+                        .unwrap_or(crate::core::engine::RuntimePermissionAuthority {
+                            auto_approve: false,
+                            trust_mode: false,
+                            approval_mode: crate::tui::approval::ApprovalMode::Suggest,
+                        });
+                    let auto_approve = authority.auto_approve;
+                    let trust_mode = authority.trust_mode;
                     match Self::approval_decision(auto_approve, trust_mode, true) {
                         RuntimeApprovalDecision::RetryWithFullAccess => {
                             let _ = engine
@@ -7116,6 +7192,22 @@ impl RuntimeThreadManager {
         Ok(turn.turn_id == turn_id && turn.interrupt_requested)
     }
 
+    async fn active_turn_authority(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        engine: &EngineHandle,
+    ) -> Option<crate::core::engine::RuntimePermissionAuthority> {
+        let active = self.active.lock().await;
+        let state = active.engines.get(thread_id)?;
+        let turn = state.active_turn.as_ref()?;
+        if turn.turn_id != turn_id {
+            return None;
+        }
+        Some(engine.runtime_permission_authority())
+    }
+
+    #[cfg(test)]
     async fn active_turn_flags(&self, thread_id: &str, turn_id: &str) -> Option<(bool, bool)> {
         let active = self.active.lock().await;
         let state = active.engines.get(thread_id)?;
@@ -7123,7 +7215,8 @@ impl RuntimeThreadManager {
         if turn.turn_id != turn_id {
             return None;
         }
-        Some((turn.auto_approve, turn.trust_mode))
+        let authority = state.engine.runtime_permission_authority();
+        Some((authority.auto_approve, authority.trust_mode))
     }
 
     async fn active_turn_id(&self, thread_id: &str) -> Option<String> {
@@ -7562,6 +7655,35 @@ fn enforce_lru_capacity(
         break;
     }
     evicted
+}
+
+/// Merge per-request compatibility inputs with a thread's canonical policy.
+/// A mode-only edit must preserve the effective posture of a legacy record
+/// even when that record predates `permission_posture`.
+fn runtime_policy_with_overrides(
+    thread: &ThreadRecord,
+    mode: Option<&str>,
+    permission_posture: Option<&str>,
+    auto_approve: Option<bool>,
+) -> Result<RuntimePolicyProjection> {
+    let requested_mode = mode.unwrap_or(&thread.mode);
+    let legacy_bypass_mode = mode.is_some_and(|mode| {
+        matches!(
+            mode.trim().to_ascii_lowercase().as_str(),
+            "yolo" | "4" | "bypass" | "bypass-permissions" | "bypasspermissions"
+        )
+    });
+    let inherited = RuntimePolicyProjection::from_persisted(
+        &thread.mode,
+        thread.permission_posture.as_deref(),
+        thread.auto_approve,
+    );
+    let requested_permission = match permission_posture {
+        Some(explicit) => Some(explicit),
+        None if auto_approve.is_some() || legacy_bypass_mode => None,
+        None => Some(inherited.permission_wire()),
+    };
+    RuntimePolicyProjection::from_request(requested_mode, requested_permission, auto_approve)
 }
 
 /// Compatibility parser retained for focused Runtime tests.
