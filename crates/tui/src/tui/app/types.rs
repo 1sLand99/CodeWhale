@@ -1019,7 +1019,10 @@ pub enum AutomationAction {
     Show(String),
     Pause(String),
     Resume(String),
-    Delete(String),
+    Delete {
+        id: String,
+        confirmation: Option<String>,
+    },
     Run(String),
 }
 

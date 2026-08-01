@@ -1428,6 +1428,48 @@ pub enum MessageId {
     StartupDefaultSubjectThinking,
     StartupDefaultSubjectModel,
     StartupDefaultSubjectAll,
+    // Durable scheduled automation operator receipts.
+    AutomationUsage,
+    AutomationManagerUnavailable,
+    AutomationListFailed,
+    AutomationActionFailed,
+    AutomationEmpty,
+    AutomationListHeading,
+    AutomationNoun,
+    AutomationStatusLabel,
+    AutomationStatusActive,
+    AutomationStatusPaused,
+    AutomationRunStatusQueued,
+    AutomationRunStatusRunning,
+    AutomationRunStatusCompleted,
+    AutomationRunStatusFailed,
+    AutomationRunStatusCanceled,
+    AutomationActionInspect,
+    AutomationActionPause,
+    AutomationActionResume,
+    AutomationActionDelete,
+    AutomationActionRun,
+    AutomationActionPaused,
+    AutomationActionResumed,
+    AutomationNextLabel,
+    AutomationNameLabel,
+    AutomationPromptLabel,
+    AutomationCwdLabel,
+    AutomationModeLabel,
+    AutomationAllowShellLabel,
+    AutomationTrustModeLabel,
+    AutomationAutoApproveLabel,
+    AutomationRruleLabel,
+    AutomationLastLabel,
+    AutomationRecentRunsLabel,
+    AutomationNoRuns,
+    AutomationRunsUnavailable,
+    AutomationTaskLabel,
+    AutomationMutationReceipt,
+    AutomationRunEnqueued,
+    AutomationDeletePreview,
+    AutomationDeleteConfirmationStale,
+    AutomationDeleted,
 }
 
 #[allow(dead_code)]
@@ -2685,6 +2727,47 @@ pub const ALL_MESSAGE_IDS: &[MessageId] = &[
     MessageId::StartupDefaultSubjectThinking,
     MessageId::StartupDefaultSubjectModel,
     MessageId::StartupDefaultSubjectAll,
+    MessageId::AutomationUsage,
+    MessageId::AutomationManagerUnavailable,
+    MessageId::AutomationListFailed,
+    MessageId::AutomationActionFailed,
+    MessageId::AutomationEmpty,
+    MessageId::AutomationListHeading,
+    MessageId::AutomationNoun,
+    MessageId::AutomationStatusLabel,
+    MessageId::AutomationStatusActive,
+    MessageId::AutomationStatusPaused,
+    MessageId::AutomationRunStatusQueued,
+    MessageId::AutomationRunStatusRunning,
+    MessageId::AutomationRunStatusCompleted,
+    MessageId::AutomationRunStatusFailed,
+    MessageId::AutomationRunStatusCanceled,
+    MessageId::AutomationActionInspect,
+    MessageId::AutomationActionPause,
+    MessageId::AutomationActionResume,
+    MessageId::AutomationActionDelete,
+    MessageId::AutomationActionRun,
+    MessageId::AutomationActionPaused,
+    MessageId::AutomationActionResumed,
+    MessageId::AutomationNextLabel,
+    MessageId::AutomationNameLabel,
+    MessageId::AutomationPromptLabel,
+    MessageId::AutomationCwdLabel,
+    MessageId::AutomationModeLabel,
+    MessageId::AutomationAllowShellLabel,
+    MessageId::AutomationTrustModeLabel,
+    MessageId::AutomationAutoApproveLabel,
+    MessageId::AutomationRruleLabel,
+    MessageId::AutomationLastLabel,
+    MessageId::AutomationRecentRunsLabel,
+    MessageId::AutomationNoRuns,
+    MessageId::AutomationRunsUnavailable,
+    MessageId::AutomationTaskLabel,
+    MessageId::AutomationMutationReceipt,
+    MessageId::AutomationRunEnqueued,
+    MessageId::AutomationDeletePreview,
+    MessageId::AutomationDeleteConfirmationStale,
+    MessageId::AutomationDeleted,
 ];
 
 pub fn tr(locale: Locale, id: MessageId) -> Cow<'static, str> {
@@ -3133,6 +3216,36 @@ mod tests {
         for locale in Locale::shipped_complete() {
             let pack = raw_locale_messages(*locale);
             for key in &coordination_keys {
+                let english_value = english
+                    .get(*key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_else(|| panic!("English {key} must be a string"));
+                let translated = pack
+                    .get(*key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_else(|| panic!("{} is missing raw key {key}", locale.tag()));
+                assert_eq!(
+                    message_placeholders(translated),
+                    message_placeholders(english_value),
+                    "{} changed placeholders for {key}",
+                    locale.tag()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn automation_complete_packs_have_raw_key_and_placeholder_parity() {
+        let english = raw_locale_messages(Locale::En);
+        let automation_keys = english
+            .keys()
+            .filter(|key| key.starts_with("Automation"))
+            .collect::<Vec<_>>();
+        assert_eq!(automation_keys.len(), 41);
+
+        for locale in Locale::shipped_complete() {
+            let pack = raw_locale_messages(*locale);
+            for key in &automation_keys {
                 let english_value = english
                     .get(*key)
                     .and_then(serde_json::Value::as_str)
