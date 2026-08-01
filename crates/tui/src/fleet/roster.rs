@@ -593,11 +593,8 @@ mod tests {
         );
 
         // Isolate from ambient personal agent profiles on developer machines.
-        let roster = FleetRoster::load_with_personal_dir(
-            &FleetConfigToml::default(),
-            tmp.path(),
-            None,
-        );
+        let roster =
+            FleetRoster::load_with_personal_dir(&FleetConfigToml::default(), tmp.path(), None);
 
         let scout = roster.get("scout").expect("valid scout remains visible");
         assert_eq!(scout.origin, ProfileOrigin::Workspace);

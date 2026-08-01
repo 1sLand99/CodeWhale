@@ -828,6 +828,7 @@ mod tests {
             &worker,
             "auto",
             workspace,
+            workspace,
             &[],
             None,
         )

@@ -971,6 +971,51 @@ fn headless_worker_registration_enforces_live_claims_and_projects_context() {
 }
 
 #[test]
+fn isolated_worktree_workers_skip_the_coordination_process_lock() {
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().canonicalize().expect("canonical workspace");
+
+    let holder = SubAgentManager::new(workspace.clone(), 4).require_coordination_process_lock();
+    holder
+        .ensure_coordination_process_lock()
+        .expect("holder owns the lock");
+
+    let mut contender =
+        SubAgentManager::new(workspace.clone(), 4).require_coordination_process_lock();
+    contender
+        .ensure_coordination_process_lock()
+        .expect_err("second manager must not own the lock");
+
+    let shared = make_write_worker_spec("shared-writer", workspace.clone(), "src/shared");
+    contender
+        .preflight_worker_coordination(&shared)
+        .expect_err("shared-workspace writer fails closed without the lock");
+
+    let mut isolated = make_write_worker_spec("isolated-writer", workspace.clone(), "src/iso");
+    isolated
+        .launch_manifest
+        .as_mut()
+        .expect("launch manifest")
+        .worktree = true;
+    contender
+        .preflight_worker_coordination(&isolated)
+        .expect("isolated-worktree writer preflights without the lock");
+    contender
+        .register_worker_with_coordination(isolated)
+        .expect("isolated-worktree writer registers without the lock");
+
+    // Once the previous owner exits, a manager that failed earlier must
+    // acquire the lock on retry instead of replaying a memoized failure.
+    drop(holder);
+    contender
+        .ensure_coordination_process_lock()
+        .expect("lock acquisition retries after the holder exits");
+    contender
+        .preflight_worker_coordination(&shared)
+        .expect("shared-workspace writer proceeds once the lock is held");
+}
+
+#[test]
 fn neutral_reconciliation_requires_the_nearest_common_planner() {
     let tmp = tempdir().expect("tempdir");
     let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 8);

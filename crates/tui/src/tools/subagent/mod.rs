@@ -2652,8 +2652,7 @@ pub struct SubAgentManager {
     #[allow(dead_code)] // Stored for future workspace-scoped operations
     workspace: PathBuf,
     state_path: Option<PathBuf>,
-    coordination_process_lock: Option<CoordinationProcessLock>,
-    coordination_process_lock_error: Option<String>,
+    coordination_process_lock: std::sync::Mutex<Option<CoordinationProcessLock>>,
     coordination_process_lock_required: bool,
     max_steps: Option<u32>,
     max_agents: usize,
@@ -2705,8 +2704,7 @@ impl SubAgentManager {
             coordination: CoordinationLedger::default(),
             workspace,
             state_path: None,
-            coordination_process_lock: None,
-            coordination_process_lock_error: None,
+            coordination_process_lock: std::sync::Mutex::new(None),
             coordination_process_lock_required: false,
             max_steps: None,
             max_agents,
@@ -3178,29 +3176,36 @@ impl SubAgentManager {
 
     fn require_coordination_process_lock(mut self) -> Self {
         self.coordination_process_lock_required = true;
-        match CoordinationProcessLock::acquire(&self.workspace) {
-            Ok(lock) => {
-                self.coordination_process_lock = Some(lock);
-                self.coordination_process_lock_error = None;
-            }
-            Err(error) => {
-                self.coordination_process_lock = None;
-                self.coordination_process_lock_error = Some(error.to_string());
-            }
-        }
+        *self
+            .coordination_process_lock
+            .get_mut()
+            .expect("coordination lock slot poisoned") =
+            CoordinationProcessLock::acquire(&self.workspace).ok();
         self
     }
 
+    /// A failed acquisition is never terminal: the previous owner may have
+    /// exited since the last attempt, and the flock is held on an open fd —
+    /// deleting the lock file does not release it, so the only correct
+    /// recovery is to re-attempt acquisition on each use (#5036).
     fn ensure_coordination_process_lock(&self) -> Result<(), String> {
-        if !self.coordination_process_lock_required || self.coordination_process_lock.is_some() {
+        if !self.coordination_process_lock_required {
             return Ok(());
         }
-        Err(self
-            .coordination_process_lock_error
-            .clone()
-            .unwrap_or_else(|| {
-                "delegated coordination requires one manager process per workspace".to_string()
-            }))
+        let mut slot = self
+            .coordination_process_lock
+            .lock()
+            .expect("coordination lock slot poisoned");
+        if slot.is_some() {
+            return Ok(());
+        }
+        match CoordinationProcessLock::acquire(&self.workspace) {
+            Ok(lock) => {
+                *slot = Some(lock);
+                Ok(())
+            }
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     #[must_use]
@@ -3623,10 +3628,15 @@ impl SubAgentManager {
     /// anything until `register_worker_with_coordination` runs under the same
     /// manager write lock.
     pub fn preflight_worker_coordination(&mut self, spec: &AgentWorkerSpec) -> Result<(), String> {
-        self.ensure_coordination_process_lock()?;
         let Some((claim, isolated_worktree)) = worker_coordination_claim(spec)? else {
             return Ok(());
         };
+        // Isolated-worktree builders mutate their own checkout, not the
+        // shared workspace, so they must not contend for the per-workspace
+        // coordination process lock (#5036).
+        if !isolated_worktree {
+            self.ensure_coordination_process_lock()?;
+        }
         let active_owners = self.active_coordination_owners();
         let mut probe = self.coordination.clone();
         match probe.register_claim(claim.clone(), isolated_worktree, |owner| {
@@ -3662,10 +3672,16 @@ impl SubAgentManager {
         &mut self,
         mut spec: AgentWorkerSpec,
     ) -> Result<(), String> {
-        self.ensure_coordination_process_lock()?;
+        let claim = worker_coordination_claim(&spec)?;
+        // Same isolation rule as `preflight_worker_coordination` (#5036).
+        let isolated_worktree = claim
+            .as_ref()
+            .is_some_and(|(_, isolated_worktree)| *isolated_worktree);
+        if !isolated_worktree {
+            self.ensure_coordination_process_lock()?;
+        }
         let previous_worker_records = self.worker_records.clone();
         let previous_coordination = self.coordination.clone();
-        let claim = worker_coordination_claim(&spec)?;
         let persisted_claim = claim
             .map(|(claim, isolated_worktree)| {
                 let active_owners = self.active_coordination_owners();
@@ -3698,7 +3714,20 @@ impl SubAgentManager {
                 manifest.prompt = spec.objective.clone();
             }
         }
+        let worker_id_for_log = spec.worker_id.clone();
         self.register_worker(spec);
+        if isolated_worktree && self.ensure_coordination_process_lock().is_err() {
+            // This process does not own the durable coordination state and an
+            // isolated-worktree builder must not be blocked on it: register
+            // in memory only and leave the durable ledger to the lock owner.
+            // The persist-layer lock check stays intact (#5036).
+            tracing::warn!(
+                target: "subagent",
+                worker = %worker_id_for_log,
+                "registered isolated-worktree worker in memory only; delegated coordination lock is owned elsewhere"
+            );
+            return Ok(());
+        }
         if let Err(error) = self.persist_state_synchronously() {
             self.worker_records = previous_worker_records;
             self.coordination = previous_coordination;
@@ -4863,8 +4892,12 @@ impl SubAgentManager {
         runtime.worker_profile = runtime_profile.clone();
         let write_capable = runtime_profile.permissions.write;
         if write_capable {
-            self.ensure_coordination_process_lock()
-                .map_err(anyhow::Error::msg)?;
+            // Isolated-worktree children mutate their own checkout, so they
+            // do not contend for the shared-workspace process lock (#5036).
+            if !options.isolated_worktree {
+                self.ensure_coordination_process_lock()
+                    .map_err(anyhow::Error::msg)?;
+            }
             if self.coordination_process_lock_required && self.state_path.is_none() {
                 return Err(anyhow!(
                     "write-capable sub-agent launch requires a durable coordination state path"

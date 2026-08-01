@@ -171,6 +171,24 @@ fn validate_fleet_reasoning_effort(
 /// and task-level role/loadout intent are composed into the existing
 /// `AgentWorkerSpec` / `WorkerRuntimeProfile` pair, then optionally intersected
 /// with a parent profile when the caller has one.
+/// A worker workspace is isolated when it is a linked git worktree that sits
+/// outside the coordinating manager's workspace (and does not contain it):
+/// its mutations cannot overlap the shared checkout, so its launch manifest
+/// must not claim the shared-workspace coordination scope (#5036).
+fn worker_workspace_is_isolated(
+    coordination_workspace: &std::path::Path,
+    worker_workspace: &std::path::Path,
+) -> bool {
+    let canonical =
+        |path: &std::path::Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let manager = canonical(coordination_workspace);
+    let worker = canonical(worker_workspace);
+    if worker == manager || worker.starts_with(&manager) || manager.starts_with(&worker) {
+        return false;
+    }
+    worker.join(".git").is_file()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn fleet_task_to_worker_spec_with_profiles(
     worker_id: &str,
@@ -179,6 +197,7 @@ pub fn fleet_task_to_worker_spec_with_profiles(
     _worker_spec: &FleetWorkerSpec,
     model: &str,
     workspace: &std::path::Path,
+    coordination_workspace: &std::path::Path,
     agent_profiles: &[AgentProfile],
     parent_runtime_profile: Option<&WorkerRuntimeProfile>,
 ) -> Result<AgentWorkerSpec> {
@@ -231,7 +250,7 @@ pub fn fleet_task_to_worker_spec_with_profiles(
         profile: runtime_profile.clone(),
         prompt: objective.clone(),
         cwd: Some(workspace.display().to_string()),
-        worktree: false,
+        worktree: worker_workspace_is_isolated(coordination_workspace, workspace),
         writable_roots,
         writable_files: Vec::new(),
         coordination_contracts,
@@ -1277,6 +1296,30 @@ mod tests {
     use codewhale_protocol::fleet::{FleetHostSpec, FleetWorkspaceRequirements};
     use std::path::{Path, PathBuf};
 
+    #[test]
+    fn worker_workspace_isolation_requires_linked_worktree_outside_manager() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manager = tmp.path().join("manager");
+        std::fs::create_dir_all(manager.join("sub")).expect("manager dirs");
+        let worktree = tmp.path().join("worktrees").join("wt-1");
+        std::fs::create_dir_all(&worktree).expect("worktree dir");
+
+        assert!(!worker_workspace_is_isolated(&manager, &manager));
+        assert!(!worker_workspace_is_isolated(
+            &manager,
+            &manager.join("sub")
+        ));
+        // An external directory without a worktree gitfile stays shared.
+        assert!(!worker_workspace_is_isolated(&manager, &worktree));
+
+        std::fs::write(
+            worktree.join(".git"),
+            "gitdir: /elsewhere/.git/worktrees/wt-1\n",
+        )
+        .expect("gitfile");
+        assert!(worker_workspace_is_isolated(&manager, &worktree));
+    }
+
     fn fleet_task(id: &str, worker: Option<FleetTaskWorkerProfile>) -> FleetTaskSpec {
         FleetTaskSpec {
             id: id.to_string(),
@@ -1324,6 +1367,7 @@ mod tests {
             &worker,
             "auto",
             Path::new("/tmp"),
+            Path::new("/tmp"),
             &[],
             None,
         )
@@ -1336,6 +1380,7 @@ mod tests {
             &fleet_task("write", None),
             &worker,
             "auto",
+            Path::new("/tmp"),
             Path::new("/tmp"),
             &[],
             None,
@@ -1378,6 +1423,7 @@ mod tests {
             &worker,
             "auto",
             Path::new("/repo/pkg-a"),
+            Path::new("/repo/pkg-a"),
             &[],
             None,
         )
@@ -1388,6 +1434,7 @@ mod tests {
             &root,
             &worker,
             "auto",
+            Path::new("/repo"),
             Path::new("/repo"),
             &[],
             None,
@@ -1428,6 +1475,7 @@ mod tests {
                 &worker,
                 "auto",
                 Path::new("/repo"),
+                Path::new("/repo"),
                 &[],
                 None,
             )
@@ -1445,6 +1493,7 @@ mod tests {
                 &bad_path,
                 &worker,
                 "auto",
+                Path::new("/repo"),
                 Path::new("/repo"),
                 &[],
                 None,
@@ -1938,6 +1987,7 @@ mod tests {
             &worker,
             "auto",
             std::path::Path::new("/tmp"),
+            std::path::Path::new("/tmp"),
             &profiles,
             None,
         )
@@ -1989,6 +2039,7 @@ mod tests {
                     &task,
                     &worker,
                     "deepseek-v4-pro",
+                    std::path::Path::new("/tmp"),
                     std::path::Path::new("/tmp"),
                     &[],
                     Some(&parent),
@@ -2049,6 +2100,7 @@ mod tests {
             &worker,
             "deepseek-v4-flash",
             std::path::Path::new("/tmp"),
+            std::path::Path::new("/tmp"),
             &[],
             None,
         )
@@ -2062,6 +2114,7 @@ mod tests {
             &task,
             &worker,
             "auto",
+            std::path::Path::new("/tmp"),
             std::path::Path::new("/tmp"),
             &[],
             None,
@@ -2837,6 +2890,7 @@ mod tests {
             &worker,
             "auto",
             std::path::Path::new("/tmp"),
+            std::path::Path::new("/tmp"),
             &[profile.clone()],
             None,
         )
@@ -2864,6 +2918,7 @@ mod tests {
             ),
             &worker,
             "auto",
+            std::path::Path::new("/tmp"),
             std::path::Path::new("/tmp"),
             &[profile],
             None,
@@ -2920,6 +2975,7 @@ mod tests {
             &worker,
             "deepseek-v4-pro",
             std::path::Path::new("/tmp"),
+            std::path::Path::new("/tmp"),
             &[profile],
             Some(&parent),
         )
@@ -2972,6 +3028,7 @@ mod tests {
             &worker,
             run_model,
             std::path::Path::new("/tmp"),
+            std::path::Path::new("/tmp"),
             &[profile.clone()],
             None,
         )
@@ -2998,6 +3055,7 @@ mod tests {
             ),
             &worker,
             run_model,
+            std::path::Path::new("/tmp"),
             std::path::Path::new("/tmp"),
             &[profile],
             None,
@@ -3026,6 +3084,7 @@ mod tests {
             &worker,
             run_model,
             std::path::Path::new("/tmp"),
+            std::path::Path::new("/tmp"),
             &[],
             None,
         )
@@ -3039,6 +3098,7 @@ mod tests {
             &fleet_task("inherit", None),
             &worker,
             run_model,
+            std::path::Path::new("/tmp"),
             std::path::Path::new("/tmp"),
             &[],
             None,
@@ -3080,6 +3140,7 @@ mod tests {
             &task,
             &worker,
             "auto",
+            std::path::Path::new("/tmp"),
             std::path::Path::new("/tmp"),
             &[],
             Some(&parent),
@@ -3160,6 +3221,7 @@ mod tests {
             &task,
             &worker,
             "auto",
+            std::path::Path::new("/tmp"),
             std::path::Path::new("/tmp"),
             &[],
             None,
@@ -3281,6 +3343,7 @@ mod tests {
                 &task,
                 &worker,
                 model,
+                std::path::Path::new("/tmp"),
                 std::path::Path::new("/tmp"),
                 &[],
                 None,
