@@ -2,6 +2,7 @@
 //! network inspection.
 
 mod attachment;
+mod automation;
 mod jobs;
 mod mcp;
 mod network;
@@ -17,6 +18,10 @@ impl CommandGroup for UtilityCommands {
             Box::new(FunctionCommand::new(
                 attachment::AttachCmd::info(),
                 attachment::AttachCmd::execute,
+            )),
+            Box::new(FunctionCommand::new(
+                automation::AutomationCmd::info(),
+                automation::AutomationCmd::execute,
             )),
             Box::new(FunctionCommand::new(
                 task::TaskCmd::info(),

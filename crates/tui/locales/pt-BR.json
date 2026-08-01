@@ -1249,5 +1249,6 @@
     "SessionsArchivedCompact": "arquivada",
     "KbReasoningDetail": "Open reasoning detail for the selected or current turn",
     "KbTurnInspector": "Abrir Inspetor de turno",
-    "CmdTurnInspectDescription": "Open the whole-turn inspector"
+    "CmdTurnInspectDescription": "Open the whole-turn inspector",
+    "CmdAutomationDescription": "Gerenciar automações agendadas duráveis"
 }

@@ -499,5 +499,6 @@
     "CmdTokensReport": "Token 用量：\n─────────────────────────────\n作用中內容：       {active}\n上次 API 輸入：    {input}（回合遙測；工具往返可能重複計入相同前綴）\n上次 API 輸出：    {output}\n快取命中/未命中：  {cache}（僅用於遙測/費用）\n累計 token：       {total}（工作階段用量遙測）\n已定價金額：       {cost}\nAPI 訊息數：       {api_messages}\n聊天訊息數：       {chat_messages}\n模型：             {model}",
     "KbReasoningDetail": "Open reasoning detail for the selected or current turn",
     "KbTurnInspector": "Open Turn Inspector",
-    "CmdTurnInspectDescription": "Open the whole-turn inspector"
+    "CmdTurnInspectDescription": "Open the whole-turn inspector",
+    "CmdAutomationDescription": "管理持久化的計劃自動化"
 }

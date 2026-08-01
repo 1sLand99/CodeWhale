@@ -12464,6 +12464,9 @@ async fn apply_command_result(
                 }
                 refresh_active_task_panel(app, task_manager).await;
             }
+            AppAction::Automation(action) => {
+                crate::tui::automation_routing::handle_action(app, action, task_manager).await;
+            }
             AppAction::ShellJob(action) => {
                 handle_shell_job_action(app, action);
                 // Immediately sync the task panel after cancel/poll so the

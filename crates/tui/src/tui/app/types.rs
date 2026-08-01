@@ -988,6 +988,7 @@ pub enum AppAction {
     TaskCancel {
         id: String,
     },
+    Automation(AutomationAction),
     ShellJob(ShellJobAction),
     Mcp(McpUiAction),
     /// Switch to a different config profile without restarting.
@@ -1010,6 +1011,16 @@ pub enum AppAction {
         model: String,
         mode: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutomationAction {
+    List,
+    Show(String),
+    Pause(String),
+    Resume(String),
+    Delete(String),
+    Run(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

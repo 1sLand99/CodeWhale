@@ -1249,5 +1249,6 @@
     "SessionsArchivedCompact": "в архіві",
     "KbReasoningDetail": "Open reasoning detail for the selected or current turn",
     "KbTurnInspector": "Відкрити інспектор кроку",
-    "CmdTurnInspectDescription": "Open the whole-turn inspector"
+    "CmdTurnInspectDescription": "Open the whole-turn inspector",
+    "CmdAutomationDescription": "Керування постійними запланованими автоматизаціями"
 }

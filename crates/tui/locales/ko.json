@@ -1249,5 +1249,6 @@
     "SessionsArchivedCompact": "보관됨",
     "KbReasoningDetail": "Open reasoning detail for the selected or current turn",
     "KbTurnInspector": "턴 인스펙터 열기",
-    "CmdTurnInspectDescription": "Open the whole-turn inspector"
+    "CmdTurnInspectDescription": "Open the whole-turn inspector",
+    "CmdAutomationDescription": "영구 예약 자동화 관리"
 }
