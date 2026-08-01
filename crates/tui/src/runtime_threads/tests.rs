@@ -318,6 +318,7 @@ fn sample_thread(thread_id: &str) -> ThreadRecord {
         model_provider_id: None,
         workspace: PathBuf::from("."),
         mode: AppMode::Agent.as_setting().to_string(),
+        permission_posture: Some("ask".to_string()),
         allow_shell: false,
         trust_mode: false,
         auto_approve: false,
@@ -344,6 +345,7 @@ fn sample_turn(thread_id: &str, turn_id: &str, status: RuntimeTurnStatus) -> Tur
         ended_at: None,
         duration_ms: None,
         usage: None,
+        permission_posture: None,
         effective_provider: None,
         effective_provider_id: None,
         effective_billing_surface: None,
@@ -4268,7 +4270,7 @@ async fn start_turn_passes_effective_auto_approve_to_engine() -> Result<()> {
     let harness = install_mock_engine(&manager, &thread.id).await;
     let mut rx_op = harness.rx_op;
 
-    let _turn = manager
+    let turn = manager
         .start_turn(
             &thread.id,
             StartTurnRequest {
@@ -4283,9 +4285,17 @@ async fn start_turn_passes_effective_auto_approve_to_engine() -> Result<()> {
             },
         )
         .await?;
+    assert_eq!(turn.permission_posture.as_deref(), Some("full_access"));
 
     match rx_op.recv().await {
-        Some(Op::SendMessage { auto_approve, .. }) => assert!(auto_approve),
+        Some(Op::SendMessage {
+            auto_approve,
+            approval_mode,
+            ..
+        }) => {
+            assert!(auto_approve);
+            assert_eq!(approval_mode, crate::tui::approval::ApprovalMode::Bypass);
+        }
         other => panic!("expected SendMessage op, got {other:?}"),
     }
 
@@ -4313,7 +4323,7 @@ async fn start_turn_can_override_thread_auto_approve_to_false() -> Result<()> {
     let harness = install_mock_engine(&manager, &thread.id).await;
     let mut rx_op = harness.rx_op;
 
-    let _turn = manager
+    let turn = manager
         .start_turn(
             &thread.id,
             StartTurnRequest {
@@ -4328,12 +4338,66 @@ async fn start_turn_can_override_thread_auto_approve_to_false() -> Result<()> {
             },
         )
         .await?;
+    assert_eq!(turn.permission_posture.as_deref(), Some("ask"));
 
     match rx_op.recv().await {
-        Some(Op::SendMessage { auto_approve, .. }) => assert!(!auto_approve),
+        Some(Op::SendMessage {
+            auto_approve,
+            approval_mode,
+            ..
+        }) => {
+            assert!(!auto_approve);
+            assert_eq!(approval_mode, crate::tui::approval::ApprovalMode::Suggest);
+        }
         other => panic!("expected SendMessage op, got {other:?}"),
     }
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn start_turn_enforces_and_records_auto_review_without_legacy_bypass() -> Result<()> {
+    let manager = test_manager(test_runtime_dir())?;
+    let thread = manager
+        .create_thread(CreateThreadRequest {
+            permission_posture: Some("ask".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let harness = install_mock_engine(&manager, &thread.id).await;
+    let mut rx_op = harness.rx_op;
+
+    let turn = manager
+        .start_turn(
+            &thread.id,
+            StartTurnRequest {
+                prompt: "review autonomously".to_string(),
+                permission_posture: Some("auto-review".to_string()),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+    assert_eq!(turn.permission_posture.as_deref(), Some("auto_review"));
+    assert_eq!(
+        manager
+            .store
+            .load_turn(&turn.id)?
+            .permission_posture
+            .as_deref(),
+        Some("auto_review")
+    );
+    match rx_op.recv().await {
+        Some(Op::SendMessage {
+            auto_approve,
+            approval_mode,
+            ..
+        }) => {
+            assert!(!auto_approve);
+            assert_eq!(approval_mode, crate::tui::approval::ApprovalMode::Auto);
+        }
+        other => panic!("expected SendMessage op, got {other:?}"),
+    }
     Ok(())
 }
 
@@ -8492,6 +8556,7 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         model_provider_id: None,
         workspace: PathBuf::from("."),
         mode: "agent".to_string(),
+        permission_posture: None,
         allow_shell: false,
         trust_mode: false,
         auto_approve: false,
@@ -8559,6 +8624,7 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         ended_at: None,
         duration_ms: None,
         usage: None,
+        permission_posture: None,
         effective_provider: None,
         effective_provider_id: None,
         effective_billing_surface: None,
@@ -8584,6 +8650,7 @@ fn opening_manager_recovers_stale_queued_and_in_progress_work() -> Result<()> {
         ended_at: None,
         duration_ms: None,
         usage: None,
+        permission_posture: None,
         effective_provider: None,
         effective_provider_id: None,
         effective_billing_surface: None,
@@ -8664,7 +8731,8 @@ fn parse_mode_opt_resolves_explicit_tokens_and_aliases() {
     assert_eq!(parse_mode_opt("plan"), Some(AppMode::Plan));
     assert_eq!(parse_mode_opt("2"), Some(AppMode::Plan));
     assert_eq!(parse_mode_opt("auto"), Some(AppMode::Agent));
-    assert_eq!(parse_mode_opt("3"), None);
+    assert_eq!(parse_mode_opt("operate"), Some(AppMode::Operate));
+    assert_eq!(parse_mode_opt("3"), Some(AppMode::Operate));
     assert_eq!(parse_mode_opt("yolo"), Some(AppMode::Yolo));
     assert_eq!(parse_mode_opt("4"), Some(AppMode::Yolo));
     assert_eq!(parse_mode_opt(" PLAN "), Some(AppMode::Plan));
@@ -8689,7 +8757,7 @@ fn parse_mode_wrapper_defaults_and_resolves_numeric_aliases() {
     assert_eq!(parse_mode("auto"), AppMode::Agent);
     assert_eq!(parse_mode("1"), AppMode::Agent);
     assert_eq!(parse_mode("2"), AppMode::Plan);
-    assert_eq!(parse_mode("3"), AppMode::Agent);
+    assert_eq!(parse_mode("3"), AppMode::Operate);
     assert_eq!(parse_mode("4"), AppMode::Yolo);
 }
 
@@ -8839,6 +8907,7 @@ fn seed_turns_with_user_messages(
             ended_at: Some(created_at),
             duration_ms: Some(0),
             usage: None,
+            permission_posture: None,
             effective_provider: None,
             effective_provider_id: None,
             effective_billing_surface: None,
