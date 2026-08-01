@@ -16688,7 +16688,7 @@ async fn apply_codewhale_owned_xai_login(
         Err(err) => {
             app.add_message(HistoryCell::System {
                 content: format!(
-                    "Failed to finalize {} device login: {err}\nProvider unchanged.",
+                    "Failed to finalize {} device login: {err:#}\nProvider unchanged.",
                     ApiProvider::Xai.as_str()
                 ),
             });

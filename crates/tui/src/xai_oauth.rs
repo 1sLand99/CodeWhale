@@ -593,13 +593,18 @@ fn activate_device_login_locked(
             None => None,
         };
         let mut file = match previous_owned_name.as_deref() {
-            Some(name) => load_owned_auth_file_from_store(store, name)?.ok_or_else(|| {
-                let path = store.directory().join(name);
-                anyhow::anyhow!(
-                    "the active Codewhale-owned xAI OAuth generation is missing at {}",
-                    codewhale_config::quote_os_path(&path)
-                )
-            })?,
+            // A valid pointer whose file is gone (interrupted revocation,
+            // external cleanup) must not brick login: only a successful
+            // activation can ever rewrite the pointer, so treat the missing
+            // generation like a fresh start instead of failing (#5032).
+            Some(name) => load_owned_auth_file_from_store(store, name)?.unwrap_or_else(|| {
+                tracing::warn!(
+                    target: "codewhale::xai_oauth",
+                    generation = name,
+                    "config pointed at a missing owned xAI OAuth generation; starting a fresh credential file"
+                );
+                BTreeMap::new()
+            }),
             None => BTreeMap::new(),
         };
         let scope = format!("{}::{}", pending.issuer, pending.client_id);
@@ -1924,6 +1929,50 @@ consent_version = 1
                 .unwrap()
                 .contains("second-access")
         );
+    }
+
+    #[test]
+    fn activation_recovers_from_a_dangling_generation_pointer() {
+        let _guard = crate::test_support::lock_test_env();
+        let dir = TempDir::new().unwrap();
+        let home = dir
+            .path()
+            .canonicalize()
+            .expect("canonical temp root")
+            .join("owned-home");
+        let config_path = dir.path().join("config.toml");
+        // A valid-looking generation pointer whose credential file does not
+        // exist: the state Hunter's dogfood machine was bricked in (#5032).
+        let stale = "xai-auth-0123456789abcdef0123456789abcdef.json";
+        fs::write(
+            &config_path,
+            format!(
+                "[providers.xai]\nauth_mode = \"oauth\"\noauth_credential_generation = \"{stale}\"\n"
+            ),
+        )
+        .unwrap();
+        let _home = crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", &home);
+        let mut live = Config::default();
+
+        let activation = activate_device_login(
+            pending_login("recovered-access", "recovered-refresh"),
+            Some(&config_path),
+            Some(&mut live),
+        )
+        .expect("a dangling generation pointer must not brick login");
+        assert!(activation.auth_path.exists());
+        assert!(
+            fs::read_to_string(&activation.auth_path)
+                .unwrap()
+                .contains("recovered-access")
+        );
+        let persisted = fs::read_to_string(&config_path).unwrap();
+        assert!(
+            !persisted.contains(stale),
+            "stale pointer must be replaced: {persisted}"
+        );
+        assert!(persisted.contains(activation.auth_path.file_name().unwrap().to_str().unwrap()));
+        assert!(persisted.contains("auth_mode = \"oauth\""));
     }
 
     #[test]
