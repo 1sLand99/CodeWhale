@@ -7,8 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.4] - Unreleased candidate
+
+This is the Codewhale v0.9.4 source candidate. It is not a published release
+until the matching tag, packages, checksums, and release assets exist.
+
 ### Added
 
+- A Codewhale account device-login surface for CLI profiles, with access and
+  refresh handling, logout/revocation, profile/origin isolation, native secure
+  storage by default, and an explicit private-file opt-in for headless hosts.
+  The TUI and Runtime API now recognize that same secure session record without
+  duplicating the login protocol or exposing its credentials.
 - Added a provider-neutral `WorkflowSearchSpec` authoring and freeze boundary
   for experimental search inside Workflow, plus structured 2–16 candidate
   generation in the best-of-N starter. Searches bind the baseline, requested
@@ -17,6 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- CLI and TUI builds now embed the same exact source commit, and Runtime info
+  reports the full 40-character build identity for strict desktop pairing.
+  The additive account receipt contains only durable account/session IDs,
+  explicit stored scopes, normalized lifecycle state, and access expiry;
+  signed-out local Work remains supported.
+- Runtime thread create, update, and start requests accept named Ask,
+  Auto-Review, and Full Access postures. Current and legacy wires normalize to
+  one persisted policy, per-turn receipts record what governed execution, and
+  the engine's approval mode is driven from that policy without broadening the
+  separate trust boundary.
 - Workflow scale documentation now matches the runtime: up to 1,000 tasks per
   run, admitted at most 16 live at a time (additional `task()` calls block on
   the host's per-run concurrency gate, then route through Fleet).
@@ -24,6 +44,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicit score-first ordering. Runtime-owned hidden gates, benchmark scoring,
   and clean replay remain an explicit host seam rather than being inferred from
   worker self-reports.
+
+### Security
+
+- Account access/refresh tokens, email, provider profile, and provider
+  credentials never enter Runtime info. Anonymous bootstrap probes do not read
+  secure storage and receive a signed-out receipt without account/session IDs
+  or scopes.
 
 ## [0.9.3] - 2026-07-31
 
@@ -4690,7 +4717,8 @@ overflow report and `/theme` picker edge-wrapping patch in #1814.
 
 Older releases (v0.8.39 and earlier) are archived in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).
 
-[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.9.4...HEAD
+[0.9.4]: https://github.com/Hmbown/CodeWhale/compare/v0.9.3...HEAD
 [0.9.3]: https://github.com/Hmbown/CodeWhale/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/Hmbown/CodeWhale/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/Hmbown/CodeWhale/compare/v0.9.0...v0.9.1

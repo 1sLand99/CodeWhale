@@ -7,17 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.4] - Unreleased candidate
+
+This is the Codewhale v0.9.4 source candidate. It is not a published release
+until the matching tag, packages, checksums, and release assets exist.
+
 ### Added
 
-- Added a Workflow experimental-search authoring foundation and structured
-  search option to the bundled best-of-N recipe. This remains Workflow/Fleet,
-  never a new mode or scheduler, and never auto-applies a winner.
-- `codewhale account login`, `status`, `logout`, and `keys` connect a CLI
-  profile to the managed Codewhale account through the browser device flow.
-  Sessions use the OS credential manager, remote BYOK values are never printed,
-  and `codewhale cloud ...` remains a compatibility alias. Provider-facing
-  `codewhale auth` and the legacy local `codewhale login` keep their existing
-  behavior.
+- A Codewhale account device-login surface for CLI profiles, with access and
+  refresh handling, logout/revocation, profile/origin isolation, native secure
+  storage by default, and an explicit private-file opt-in for headless hosts.
+  The TUI and Runtime API now recognize that same secure session record without
+  duplicating the login protocol or exposing its credentials.
+- Added a provider-neutral `WorkflowSearchSpec` authoring and freeze boundary
+  for experimental search inside Workflow, plus structured 2–16 candidate
+  generation in the best-of-N starter. Searches bind the baseline, requested
+  and resolved model ids, public evidence, evaluator identity, gates, scoring,
+  budget, and review-only integration policy before admission.
+
+### Changed
+
+- CLI and TUI builds now embed the same exact source commit, and Runtime info
+  reports the full 40-character build identity for strict desktop pairing.
+  The additive account receipt contains only durable account/session IDs,
+  explicit stored scopes, normalized lifecycle state, and access expiry;
+  signed-out local Work remains supported.
+- Runtime thread create, update, and start requests accept named Ask,
+  Auto-Review, and Full Access postures. Current and legacy wires normalize to
+  one persisted policy, per-turn receipts record what governed execution, and
+  the engine's approval mode is driven from that policy without broadening the
+  separate trust boundary.
+- Workflow scale documentation now matches the runtime: up to 1,000 tasks per
+  run, admitted at most 16 live at a time (additional `task()` calls block on
+  the host's per-run concurrency gate, then route through Fleet).
+  `BranchTournament` keeps its historical cost-first default and supports
+  explicit score-first ordering. Runtime-owned hidden gates, benchmark scoring,
+  and clean replay remain an explicit host seam rather than being inferred from
+  worker self-reports.
+
+### Security
+
+- Account access/refresh tokens, email, provider profile, and provider
+  credentials never enter Runtime info. Anonymous bootstrap probes do not read
+  secure storage and receive a signed-out receipt without account/session IDs
+  or scopes.
 
 ## [0.9.3] - 2026-07-31
 
@@ -2981,82 +3014,6 @@ folds in several community contributions.
 - Paulo Aboim Pinto (@aboimpinto) for the staged command-boundary design and
   Layer 3 registry/parser extraction in PR #2888, plus the #2851/#2791/#2870
   architecture stream that guided the grouped command areas in #3055.
-
-## [0.8.58] - 2026-06-11
-
-### Added
-
-- **Native Anthropic provider.** A dedicated Messages API adapter
-  (`/v1/messages` with `x-api-key` auth) replaces OpenAI-dialect shims for
-  Claude models: adaptive thinking with `output_config.effort` shaping,
-  prompt-cache breakpoints (capped at 4, earliest dropped), signed-thinking
-  replay via `signature_delta`, normalized cache-hit/miss usage telemetry,
-  and SSE error envelopes. `claude-opus-4-8`, `claude-sonnet-4-6`, and
-  `claude-haiku-4-5` join the model registry; configure with
-  `ANTHROPIC_API_KEY` (#3014).
-- **Hooks v2.** `tool_call_before` hooks can now return a JSON decision —
-  `{"decision": "allow"|"deny"|"ask", "reason", "updatedInput",
-  "additionalContext"}` — with deny > ask > allow precedence across multiple
-  hooks, last-writer-wins input rewriting, and concatenated context. Exit
-  code 2 remains a legacy hard deny. Hooks support glob matchers and
-  project-local `.codewhale/hooks.toml` (#3026).
-- **Clickable sidebar.** Background-job rows show/cancel on click, the
-  Ctrl+K hint row runs `/jobs cancel-all`, and agent rows open `/subagents`;
-  row actions are built in the same pass as the rendered lines so a click
-  can never target the wrong job (#3028).
-- OSC 8 out-of-band hyperlink infrastructure with per-region open/close
-  sequences that survive partial redraws (#3029).
-- `codewhale exec` gains `--allowed-tools`, `--disallowed-tools` (deny wins),
-  `--max-turns`, and `--append-system-prompt` (#3027).
-- Constitution prompt source: YAML source-of-truth plus Python renderer for
-  the system prompt, with the active prompt now served from
-  `constitution.md` (#3015, renderer reconciliation still tracked).
-- Agent-task issue template, labels, and runner protocol (#3021); remote
-  smoke-test droplet loop hardening — gh CLI, swapfile, agent sessions
-  (#3022).
-
-### Changed
-
-- **Sub-agent routing is provider-aware.** DeepSeek ids are no longer
-  hardcoded into model validation; routing works from per-provider
-  big/cheap candidates, the network router is skipped when a provider has
-  no cheap tier, and spawn-time model requests are validated against the
-  active provider (#3018).
-- Model-specific facts in the system prompt (context window, sub-agent
-  pricing, thinking notes, architecture characteristics) are now templated
-  per-model instead of hardcoded DeepSeek V4 claims, in both `base.md` and
-  `constitution.md` (#3025).
-- Provider capability lookups for Moonshot/OpenAI/Atlascloud resolve from
-  per-model registry rows (bare and vendor-prefixed ids) instead of
-  hardcoded 64K-era floors (#3023).
-- Reasoning-effort now reaches Atlascloud (DeepSeek dialect), Moonshot
-  (`thinking` enable/disable), and Ollama (`think` param) (#3024); Moonshot/
-  Kimi models joined the reasoning-content provider and model gates (#3016).
-- Transcript polish: compact tool-call cells without boilerplate (#3031),
-  internal turn/agent ids hidden behind stable labels (#3030), and Ctrl+B
-  now backgrounds the running foreground shell directly instead of opening
-  a menu (#3032).
-- The Tasks sidebar separates "Model reasoning" from "Background commands",
-  and `auth list` reports the same active-credential source as
-  `auth status` for openai-codex.
-
-### Fixed
-
-- **TUI freeze under sub-agent load.** Rapid `AgentProgress` events
-  saturated the render loop and starved terminal input; progress-driven
-  repaints are now throttled to one per 100ms (#3033).
-- **Hooks on Windows.** Hook commands were passed to `cmd /C` through
-  CRT-style argument quoting, which injected literal `\"` sequences that
-  cmd.exe never unescapes — JSON decisions could not parse. Commands now
-  reach cmd.exe verbatim via `raw_arg`.
-- Codex Responses: assistant tool results are converted to
-  `function_call_output` items (multi-turn tool calling previously broke),
-  tool schemas are sanitized for the Responses API, and `maximum` effort
-  maps to `xhigh` (#3019, #3017 — both partially; retry/backoff and
-  per-tool strict mode remain open).
-- Better tool-denial and provider error messages harvested from PR #2933
-  (#3020).
-
 
 ---
 
