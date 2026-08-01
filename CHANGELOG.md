@@ -73,6 +73,22 @@ terminal width, and Windows installation.
 
 ### Fixed
 
+- xAI device login now recovers from a config that points at a missing
+  Codewhale-owned credential generation instead of failing every attempt
+  with a generic activation error, and finalize failures report the full
+  error chain (#5032).
+- API keys saved to the secret store no longer read as unconfigured for
+  providers that are not currently active; a configured Kimi/Moonshot key
+  survives provider switches and restarts without re-entry (#5033).
+- Switching to the Codex provider with no saved model now lands on the live
+  roster's flagship model instead of a stale static default (#5034).
+- Worktree-isolated Fleet builders no longer contend on the per-workspace
+  delegated-coordination lock, and a failed lock acquisition is retried on
+  use instead of being memoized for the life of the process (#5036).
+- Fleet dispatch now rebinds the child client when the resolved profile
+  model requires a different wire protocol (DeepSeek flash on Responses),
+  instead of failing deterministically on the worker's first request
+  (#5042).
 - DeepSeek Responses now sends `reasoning.effort: "none"` for the Off tier,
   shows a truthful notice instead of silently discarding server-side
   `web_search_call` items, and parses cache-hit, cache-miss, cache-write, and
