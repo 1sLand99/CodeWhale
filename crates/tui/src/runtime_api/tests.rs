@@ -4608,7 +4608,7 @@ fn cors_layer_skips_invalid_origins() {
 }
 
 /// #562 / whalescale#256 — `PATCH /v1/threads/{id}` accepts the new
-/// fields (allow_shell, trust_mode, auto_approve, model, mode, title,
+/// fields (allow_shell, trust_mode, permission posture, model, mode, title,
 /// system_prompt). Each is independently optional; an empty string clears
 /// `title` / `system_prompt` back to None.
 #[tokio::test]
@@ -4656,7 +4656,8 @@ async fn patch_thread_accepts_extended_field_set() -> Result<()> {
     assert_eq!(patched["trust_mode"], true);
     assert_eq!(patched["auto_approve"], true);
     assert_eq!(patched["model"], "deepseek-v4-pro");
-    assert_eq!(patched["mode"], "yolo");
+    assert_eq!(patched["mode"], "agent");
+    assert_eq!(patched["permission_posture"], "full_access");
     assert_eq!(patched["title"], "Whalescale UI test thread");
     assert_eq!(patched["system_prompt"], "You are a useful assistant.");
 
