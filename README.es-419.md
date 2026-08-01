@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:e2678f36a915 -->
+<!-- source: README.md sha256:4d02e29bfb3a -->
 # Codewhale
 
 Un agente de programación de código abierto para tu terminal — trae tu propio modelo.
@@ -42,10 +42,22 @@ y tus sesiones se conservan — mira [docs/REBRAND.md](docs/REBRAND.md).
 
 ```bash
 codewhale auth set --provider deepseek   # or export ANTHROPIC_API_KEY, etc.
+codewhale account login                  # optional Codewhale account sign-in
 codewhale                                # open the TUI
 codewhale exec "fix the failing test"    # headless
 codewhale web                            # local browser client on 127.0.0.1
 ```
+
+La autenticación del proveedor y la autenticación de la cuenta de Codewhale son
+independientes. `codewhale auth` configura el modelo que usa el runtime local.
+`codewhale account login` abre el navegador del sistema, completa el flujo de
+dispositivo en `app.codewhale.net` y guarda la sesión resultante en el
+administrador de credenciales del sistema operativo. Usa
+`codewhale account status`, `codewhale account logout` y
+`codewhale account keys` para inspeccionar el perfil con sesión iniciada o
+administrar credenciales BYOK asociadas a la cuenta; el prefijo de
+compatibilidad `codewhale cloud` sigue siendo aceptado.
+Los tokens y los valores de las keys de proveedor nunca se imprimen.
 
 En la TUI: `/model` cambia proveedor y modelo juntos, `/fleet` ejecuta un
 equipo de workers y `/restore` deshace un turno. Cuando el compositor está
@@ -74,6 +86,9 @@ la ruta normal de aprobación.
 - [docs/PROVIDERS.md](docs/PROVIDERS.md) — cada ruta de proveedor: alojada,
   gateway y local
 - [docs/FLEET.md](docs/FLEET.md) — fleets, el libro mayor y resume
+- [docs/WORKFLOW_EXPERIMENTAL_SEARCH.md](docs/WORKFLOW_EXPERIMENTAL_SEARCH.md) —
+  búsqueda experimental congelada y neutral respecto al proveedor dentro de
+  Workflow
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`, hooks y la
   constitution
 - [docs/AUTHORIZATION_ORDER.md](docs/AUTHORIZATION_ORDER.md) — cómo se combinan

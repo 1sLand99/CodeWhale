@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:e2678f36a915 -->
+<!-- source: README.md sha256:4d02e29bfb3a -->
 # Codewhale
 
 ターミナルで動くオープンソースのコーディングエージェント — モデルはあなたが持ち込む。
@@ -29,10 +29,13 @@ Cargo、Docker、Nix、Scoop、ビルド済みアーカイブ、Android/Termux�
 
 ```bash
 codewhale auth set --provider deepseek   # or export ANTHROPIC_API_KEY, etc.
+codewhale account login                  # optional Codewhale account sign-in
 codewhale                                # open the TUI
 codewhale exec "fix the failing test"    # headless
 codewhale web                            # local browser client on 127.0.0.1
 ```
+
+プロバイダ認証と Codewhale アカウント認証は別のものです。`codewhale auth` はローカルランタイムが使うモデルを設定します。`codewhale account login` はシステムブラウザを開き、`app.codewhale.net` でデバイスフローを完了して、得られたセッションを OS の資格情報マネージャに保存します。サインイン中のプロファイルの確認や、アカウントスコープの BYOK 資格情報の管理には `codewhale account status`、`codewhale account logout`、`codewhale account keys` を使ってください。互換プレフィックスとして `codewhale cloud` も引き続き受け付けられます。トークンやプロバイダキーの値が表示されることはありません。
 
 TUI では、`/model` がプロバイダとモデルをまとめて切り替え、`/fleet` がワーカーのチームを走らせ、`/restore` がターンを取り消します。入力欄がアイドル状態のとき、`Tab` は Plan / Act / Operate を順に切り替え、`Shift+Tab` は Ask / Auto-Review / Full Access の権限スタンスを順に切り替えます。`!` は Shell コマンドを通常の承認経路で実行します。
 
@@ -47,6 +50,7 @@ TUI では、`/model` がプロバイダとモデルをまとめて切り替え�
 - [docs/PROVIDERS.md](docs/PROVIDERS.md) — ホスト型・ゲートウェイ・ローカル
   まで、すべてのプロバイダルート
 - [docs/FLEET.md](docs/FLEET.md) — Fleet、台帳、再開
+- [docs/WORKFLOW_EXPERIMENTAL_SEARCH.md](docs/WORKFLOW_EXPERIMENTAL_SEARCH.md) — Workflow 内の凍結済み・プロバイダ中立の実験的検索
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`、フック、
   constitution
 - [docs/AUTHORIZATION_ORDER.md](docs/AUTHORIZATION_ORDER.md) — モード、フック、

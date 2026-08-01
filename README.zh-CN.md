@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:e2678f36a915 -->
+<!-- source: README.md sha256:4d02e29bfb3a -->
 # Codewhale
 
 一个面向终端的开源编程智能体——模型由你自带。
@@ -29,10 +29,13 @@ Cargo、Docker、Nix、Scoop、预编译归档、Android/Termux,以及面向无�
 
 ```bash
 codewhale auth set --provider deepseek   # or export ANTHROPIC_API_KEY, etc.
+codewhale account login                  # optional Codewhale account sign-in
 codewhale                                # open the TUI
 codewhale exec "fix the failing test"    # headless
 codewhale web                            # local browser client on 127.0.0.1
 ```
+
+Provider 身份验证与 Codewhale 账户身份验证是彼此独立的。`codewhale auth` 用于配置本地运行时所使用的模型。`codewhale account login` 会打开系统浏览器,在 `app.codewhale.net` 完成设备授权流程,并将得到的会话存入操作系统的凭据管理器。使用 `codewhale account status`、`codewhale account logout` 和 `codewhale account keys` 可以查看已登录的账户信息或管理账户级的 BYOK 凭据;兼容前缀 `codewhale cloud` 仍然可用。令牌和 provider key 的值永远不会被打印出来。
 
 在 TUI 中:`/model` 同时切换 provider 和模型,`/fleet` 运行一组 worker,`/restore` 撤销某一轮。输入区空闲时,`Tab` 在 Plan / Act / Operate 之间循环切换,`Shift+Tab` 在 Ask / Auto-Review / Full Access 权限姿态之间循环切换。`!` 让 shell 命令经由正常的审批路径运行。
 
@@ -46,6 +49,7 @@ codewhale web                            # local browser client on 127.0.0.1
 
 - [docs/PROVIDERS.md](docs/PROVIDERS.md) — 每一条 provider 路由:托管、网关与本地
 - [docs/FLEET.md](docs/FLEET.md) — Fleet、账本与恢复
+- [docs/WORKFLOW_EXPERIMENTAL_SEARCH.md](docs/WORKFLOW_EXPERIMENTAL_SEARCH.md) — Workflow 内已冻结、provider 中立的实验性搜索
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`、hooks 与 constitution
 - [docs/AUTHORIZATION_ORDER.md](docs/AUTHORIZATION_ORDER.md) — 模式、hook、权限规则、安全下限、仓库规则、审批和沙箱如何组合
 - [docs/HOOKS.md](docs/HOOKS.md) — 十一个 TUI 生命周期 hook 事件、其载荷，以及其中可引导回合的三个事件（`codewhale exec` 和 CLI 子命令不会触发 hooks）

@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:e2678f36a915 -->
+<!-- source: README.md sha256:4d02e29bfb3a -->
 # Codewhale
 
 Агент для програмування з відкритим кодом у вашому терміналі — модель приносите ви.
@@ -44,10 +44,21 @@ Cargo, Docker, Nix, Scoop, готові архіви, Android/Termux, а так�
 
 ```bash
 codewhale auth set --provider deepseek   # or export ANTHROPIC_API_KEY, etc.
+codewhale account login                  # optional Codewhale account sign-in
 codewhale                                # open the TUI
 codewhale exec "fix the failing test"    # headless
 codewhale web                            # local browser client on 127.0.0.1
 ```
+
+Автентифікація провайдера й автентифікація облікового запису Codewhale — це
+окремі речі. `codewhale auth` налаштовує модель, яку використовує локальне
+середовище виконання. `codewhale account login` відкриває системний браузер,
+завершує device flow на `app.codewhale.net` і зберігає отриману сесію в
+менеджері облікових даних ОС. Використовуйте `codewhale account status`,
+`codewhale account logout` і `codewhale account keys`, щоб переглянути профіль,
+під яким ви увійшли, або керувати обліковими даними BYOK у межах облікового
+запису; префікс сумісності `codewhale cloud` також приймається. Токени та
+значення ключів провайдерів ніколи не виводяться.
 
 У TUI: `/model` перемикає провайдера й модель разом, `/fleet` запускає команду
 працівників, а `/restore` скасовує крок. Коли поле введення неактивне, `Tab`
@@ -75,6 +86,7 @@ Ask / Auto-Review / Full Access. `!` виконує команду оболон�
 - [docs/PROVIDERS.md](docs/PROVIDERS.md) — кожен маршрут провайдера: хмарний,
   шлюзовий і локальний
 - [docs/FLEET.md](docs/FLEET.md) — флоти, журнал і відновлення
+- [docs/WORKFLOW_EXPERIMENTAL_SEARCH.md](docs/WORKFLOW_EXPERIMENTAL_SEARCH.md) — заморожений, нейтральний до провайдерів експериментальний пошук у Workflow
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`, хуки й
   конституція
 - [docs/AUTHORIZATION_ORDER.md](docs/AUTHORIZATION_ORDER.md) — як поєднуються
