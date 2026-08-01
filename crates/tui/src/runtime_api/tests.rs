@@ -1836,6 +1836,358 @@ async fn fleet_status_runtime_api_exposes_state_and_actions() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn managed_fleet_create_start_and_replay_are_explicit_and_durable() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("codewhale-managed-fleet-{}", Uuid::new_v4()));
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace)?;
+    let marker = root.join("managed-worker-ran");
+    let fake_codewhale = write_fake_fleet_binary(&root, &marker)?;
+    let sub_agent_manager = runtime_api_sub_agent_manager(&workspace, 2);
+    let sessions_dir = root.join("sessions");
+    let Some((addr, _runtime_threads, handle)) =
+        spawn_test_server_with_root_token_mobile_workspace_and_subagents(
+            root.clone(),
+            sessions_dir,
+            None,
+            false,
+            workspace,
+            Some(sub_agent_manager),
+            Some(fake_codewhale.display().to_string()),
+        )
+        .await?
+    else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+    let request = json!({
+        "name": "managed release check",
+        "target": "this_computer",
+        "roles": [
+            {"name": "reviewer"},
+            {"name": "verifier"}
+        ],
+        "workflow": {
+            "id": "release-check",
+            "kind": "parallel",
+            "tasks": [
+                {
+                    "id": "review",
+                    "name": "Review",
+                    "objective": "Review the release locally",
+                    "instructions": "Inspect the prepared release evidence.",
+                    "worker": {"role": "reviewer", "tool_profile": "read-only"}
+                },
+                {
+                    "id": "verify",
+                    "name": "Verify",
+                    "objective": "Verify the release locally",
+                    "instructions": "Verify the prepared release evidence.",
+                    "worker": {"role": "verifier", "tool_profile": "read-only"}
+                }
+            ]
+        },
+        "max_workers": 2
+    });
+
+    let created_response = client
+        .post(format!("http://{addr}/v1/fleet/runs"))
+        .json(&request)
+        .send()
+        .await?;
+    assert_eq!(created_response.status(), StatusCode::CREATED);
+    let created: serde_json::Value = created_response.json().await?;
+    assert_eq!(created["execution"], "awaiting_start");
+    assert_eq!(created["run"]["lifecycle_status"], "queued");
+    assert_eq!(created["run"]["target"], "this_computer");
+    assert_eq!(created["run"]["workflow"]["id"], "release-check");
+    assert_eq!(created["run"]["roles"], json!(["reviewer", "verifier"]));
+    assert_eq!(created["run"]["status"]["queued"], 2);
+    let first_worker_ids = created["run"]["worker_specs"]
+        .as_array()
+        .context("created Fleet response omitted generated workers")?
+        .iter()
+        .map(|worker| {
+            worker["id"]
+                .as_str()
+                .context("generated Fleet worker omitted id")
+                .map(str::to_string)
+        })
+        .collect::<Result<BTreeSet<_>>>()?;
+    assert_eq!(first_worker_ids.len(), 2);
+    assert!(
+        !marker.exists(),
+        "creating a managed Fleet must not cross the explicit launch gate"
+    );
+    let run_id = created["run"]["id"]
+        .as_str()
+        .context("created Fleet response omitted run id")?
+        .to_string();
+
+    let prepared_replay: serde_json::Value = client
+        .get(format!(
+            "http://{addr}/v1/fleet/runs/{run_id}/events/replay?limit=100"
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(prepared_replay["events"].as_array().unwrap().len(), 3);
+    assert_eq!(prepared_replay["events"][0]["event"], "fleet.run.created");
+    assert!(
+        prepared_replay["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .skip(1)
+            .all(|event| event["event"] == "fleet.task.enqueued")
+    );
+
+    let started_response = client
+        .post(format!("http://{addr}/v1/fleet/runs/{run_id}/start"))
+        .send()
+        .await?;
+    assert_eq!(started_response.status(), StatusCode::ACCEPTED);
+    let started: serde_json::Value = started_response.json().await?;
+    assert_eq!(started["execution"], "scheduled");
+    assert_eq!(started["leased"], 0);
+
+    let terminal = tokio::time::timeout(ci_scaled(Duration::from_secs(15)), async {
+        loop {
+            let run: serde_json::Value = client
+                .get(format!("http://{addr}/v1/fleet/runs/{run_id}"))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if run["status"]["queued"] == 0 && run["status"]["running"] == 0 {
+                break run;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .context("managed Fleet did not reach a terminal projection")?;
+    assert_eq!(terminal["lifecycle_status"], "completed");
+    assert_eq!(terminal["status"]["completed"], 2);
+    assert!(
+        marker.is_file(),
+        "explicit start did not launch local workers"
+    );
+
+    let replay: serde_json::Value = client
+        .get(format!(
+            "http://{addr}/v1/fleet/runs/{run_id}/events/replay?limit=100"
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let events = replay["events"]
+        .as_array()
+        .context("missing replay events")?;
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event"] == "fleet.run.status_changed")
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["event"] == "fleet.worker.completed")
+            .count(),
+        2
+    );
+    let cursor = replay["next_cursor"]
+        .as_str()
+        .context("terminal replay omitted reconnect cursor")?;
+    let caught_up: serde_json::Value = client
+        .get(format!(
+            "http://{addr}/v1/fleet/runs/{run_id}/events/replay?after={cursor}&limit=100"
+        ))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert!(caught_up["events"].as_array().unwrap().is_empty());
+
+    let stream = client
+        .get(format!(
+            "http://{addr}/v1/fleet/runs/{run_id}/events?limit=1"
+        ))
+        .send()
+        .await?
+        .error_for_status()?;
+    assert_eq!(
+        stream
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream")
+    );
+    drop(stream);
+
+    let second_created: serde_json::Value = client
+        .post(format!("http://{addr}/v1/fleet/runs"))
+        .json(&request)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let second_worker_ids = second_created["run"]["worker_specs"]
+        .as_array()
+        .context("second Fleet response omitted generated workers")?
+        .iter()
+        .map(|worker| {
+            worker["id"]
+                .as_str()
+                .context("second generated Fleet worker omitted id")
+                .map(str::to_string)
+        })
+        .collect::<Result<BTreeSet<_>>>()?;
+    assert!(
+        first_worker_ids.is_disjoint(&second_worker_ids),
+        "managed Fleets must receive run-scoped worker identities"
+    );
+
+    let unsupported = client
+        .post(format!("http://{addr}/v1/fleet/runs"))
+        .json(&json!({
+            "target": "cloud",
+            "roles": [],
+            "workflow": {"id": "cloud-run", "kind": "parallel", "tasks": []}
+        }))
+        .send()
+        .await?;
+    assert_eq!(unsupported.status(), StatusCode::NOT_IMPLEMENTED);
+
+    handle.abort();
+    Ok(())
+}
+
+#[test]
+fn managed_fleet_rejects_parallel_write_scope_collisions() {
+    let request: CreateFleetRunRequest = serde_json::from_value(json!({
+        "target": "this_computer",
+        "roles": [{"name": "builder"}, {"name": "reviewer"}],
+        "workflow": {
+            "id": "collision-check",
+            "kind": "parallel",
+            "tasks": [
+                {
+                    "id": "build",
+                    "name": "Build",
+                    "instructions": "Build the package.",
+                    "worker": {"role": "builder"},
+                    "workspace": {"root": "packages/runtime", "writable_paths": ["src"]}
+                },
+                {
+                    "id": "review",
+                    "name": "Review",
+                    "instructions": "Review the package.",
+                    "worker": {"role": "reviewer"},
+                    "workspace": {"root": "packages", "writable_paths": ["runtime/src/api"]}
+                }
+            ]
+        }
+    }))
+    .unwrap();
+
+    let error = prepare_managed_fleet_run(request).unwrap_err();
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert!(error.message.contains("write scope collision"));
+
+    let disjoint: CreateFleetRunRequest = serde_json::from_value(json!({
+        "target": "this_computer",
+        "roles": [{"name": "builder"}, {"name": "reviewer"}],
+        "workflow": {
+            "id": "disjoint-roots",
+            "kind": "parallel",
+            "tasks": [
+                {
+                    "id": "build",
+                    "name": "Build",
+                    "instructions": "Build the package.",
+                    "worker": {"role": "builder"},
+                    "workspace": {"root": "packages/one", "writable_paths": ["src"]}
+                },
+                {
+                    "id": "review",
+                    "name": "Review",
+                    "instructions": "Review the package.",
+                    "worker": {"role": "reviewer"},
+                    "workspace": {"root": "packages/two", "writable_paths": ["src"]}
+                }
+            ]
+        }
+    }))
+    .unwrap();
+    prepare_managed_fleet_run(disjoint).unwrap();
+}
+
+#[test]
+fn managed_fleet_rejects_unenforced_security_policy_overrides() {
+    let request: CreateFleetRunRequest = serde_json::from_value(json!({
+        "target": "this_computer",
+        "roles": [{"name": "reviewer"}],
+        "workflow": {
+            "id": "security-check",
+            "kind": "parallel",
+            "tasks": [{
+                "id": "review",
+                "name": "Review",
+                "instructions": "Review without widening authority.",
+                "worker": {"role": "reviewer"}
+            }]
+        },
+        "security_policy": {
+            "default_trust_level": "operator",
+            "capability_grants": [{"capability": "release"}]
+        }
+    }))
+    .unwrap();
+
+    let error = prepare_managed_fleet_run(request).unwrap_err();
+    assert_eq!(error.status, StatusCode::NOT_IMPLEMENTED);
+    assert!(error.message.contains("not executable yet"));
+}
+
+#[test]
+fn managed_fleet_rejects_caller_assigned_worker_identities() {
+    let request: CreateFleetRunRequest = serde_json::from_value(json!({
+        "target": "this_computer",
+        "roles": [{"name": "reviewer"}],
+        "workflow": {
+            "id": "worker-identity-check",
+            "kind": "parallel",
+            "tasks": [{
+                "id": "review",
+                "name": "Review",
+                "instructions": "Review without a cross-run worker identity.",
+                "worker": {"role": "reviewer"}
+            }]
+        },
+        "worker_specs": [{
+            "id": "shared-worker",
+            "name": "Shared worker",
+            "host": {"kind": "local"}
+        }]
+    }))
+    .unwrap();
+
+    let error = prepare_managed_fleet_run(request).unwrap_err();
+    assert_eq!(error.status, StatusCode::NOT_IMPLEMENTED);
+    assert!(error.message.contains("generated per run"));
+}
+
 #[test]
 fn fleet_worker_json_includes_runtime_state_projection() {
     let inspection = FleetWorkerInspection {
@@ -4900,6 +5252,11 @@ async fn runtime_info_reports_bind_state() -> Result<()> {
     assert_eq!(info["capabilities"]["account_session"], true);
     assert_eq!(info["capabilities"]["external_tools"], true);
     assert_eq!(info["capabilities"]["worker_runtime"], true);
+    assert_eq!(info["capabilities"]["fleet_run_create"], true);
+    assert_eq!(info["capabilities"]["fleet_run_start"], true);
+    assert_eq!(info["capabilities"]["fleet_event_replay"], true);
+    assert_eq!(info["capabilities"]["fleet_event_stream"], true);
+    assert_eq!(info["capabilities"]["fleet_local_target"], true);
     assert_eq!(info["account"]["schema_version"], 1);
     assert_eq!(info["account"]["state"], "signed_out");
     assert_eq!(info["account"]["api_base"], "https://api.codewhale.net");
