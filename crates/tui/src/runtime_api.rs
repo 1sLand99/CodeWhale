@@ -354,6 +354,10 @@ struct RuntimeInfoResponse {
     service: &'static str,
     runtime_api_version: &'static str,
     codewhale_version: &'static str,
+    /// Full 40-character source commit embedded by the shared build script.
+    /// Desktop compatibility intentionally rejects `unknown` and abbreviated
+    /// values, so source archives without build provenance fail closed.
+    codewhale_commit: &'static str,
     bind_host: String,
     port: u16,
     auth_required: bool,
@@ -1578,10 +1582,12 @@ async fn submit_user_input(
 
 async fn runtime_info(State(state): State<RuntimeApiState>) -> Json<RuntimeInfoResponse> {
     let version = env!("CARGO_PKG_VERSION");
+    let commit = option_env!("CODEWHALE_BUILD_COMMIT").unwrap_or("unknown");
     Json(RuntimeInfoResponse {
         service: "codewhale-runtime-api",
         runtime_api_version: RUNTIME_API_VERSION,
         codewhale_version: version,
+        codewhale_commit: commit,
         bind_host: state.bind_host.clone(),
         port: state.bind_port,
         auth_required: state.auth_required,

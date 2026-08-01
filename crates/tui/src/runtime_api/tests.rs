@@ -4886,6 +4886,14 @@ async fn runtime_info_reports_bind_state() -> Result<()> {
     assert_eq!(info["service"], "codewhale-runtime-api");
     assert_eq!(info["runtime_api_version"], "1.0");
     assert_eq!(info["codewhale_version"], info["version"]);
+    let commit = info["codewhale_commit"]
+        .as_str()
+        .expect("runtime build commit must be a string");
+    assert_eq!(commit.len(), 40, "runtime build commit must be full length");
+    assert!(
+        commit.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "runtime build commit must be hexadecimal"
+    );
     assert_eq!(info["bind_host"], "127.0.0.1");
     assert_eq!(info["auth_required"], false);
     assert!(info["version"].is_string());
