@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added a provider-neutral `WorkflowSearchSpec` authoring and freeze boundary
+  for experimental search inside Workflow, plus structured 2–16 candidate
+  generation in the best-of-N starter. Searches bind the baseline, requested
+  and resolved model ids, public evidence, evaluator identity, gates, scoring,
+  budget, and review-only integration policy before admission.
+
+### Changed
+
+- Workflow scale documentation now matches the runtime: up to 1,000 tasks per
+  run, admitted at most 16 live at a time (additional `task()` calls block on
+  the host's per-run concurrency gate, then route through Fleet).
+  `BranchTournament` keeps its historical cost-first default and supports
+  explicit score-first ordering. Runtime-owned hidden gates, benchmark scoring,
+  and clean replay remain an explicit host seam rather than being inferred from
+  worker self-reports.
+
 ## [0.9.3] - 2026-07-31
 
 This is the Codewhale v0.9.3 source candidate. It is not a published release

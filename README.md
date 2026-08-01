@@ -80,6 +80,7 @@ path.
 - [docs/PROVIDERS.md](docs/PROVIDERS.md) — every provider route: hosted,
   gateway, and local
 - [docs/FLEET.md](docs/FLEET.md) — fleets, the ledger, and resume
+- [docs/WORKFLOW_EXPERIMENTAL_SEARCH.md](docs/WORKFLOW_EXPERIMENTAL_SEARCH.md) — frozen, provider-neutral experimental search within Workflow
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — `config.toml`, hooks, and
   the constitution
 - [docs/AUTHORIZATION_ORDER.md](docs/AUTHORIZATION_ORDER.md) — how modes,

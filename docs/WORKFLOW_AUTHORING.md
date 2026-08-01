@@ -123,13 +123,30 @@ or filesystem authority.
 Fleet launch validation applies a conservative default shape before any
 Workflow IR is lowered to workers:
 
-- up to 100 total worker agents per workflow run;
-- up to 5 recursive Fleet rings;
+- up to 1,000 total worker agents per Workflow run;
+- up to 16 live worker agents at once; larger populations queue (block) on the
+  host's per-run concurrency gate until a live slot frees, then route through
+  Fleet;
+- up to 5 recursive Fleet rings (the default user configuration is 2);
 - loops require `max_iterations`;
 - dynamic `expand` nodes require `max_children` and a template.
 
-Those limits bound the workflow population, not instantaneous launch
-concurrency. A valid 100-agent workflow can still drain through a smaller Fleet
+Those limits distinguish population from instantaneous launch concurrency. A
+valid 1,000-agent Workflow can still drain through a smaller Fleet
 worker pool. Model selection stays per slot: a DeepSeek preset can suggest
 `deepseek-v4-pro` for the orchestrator and `deepseek-v4-flash` for nearby
 workers, but users and agents may override any slot when the task calls for it.
+
+## Experimental search is a Workflow option
+
+Experimental search generalizes the existing best-of-N recipe without adding a
+new product mode, scheduler, or sub-agent API. A provider-neutral
+`WorkflowSearchSpec` freezes the objective, baseline, model request and resolved
+version, public evidence, evaluator hash, hard gates, scoring rule, budgets,
+write scope, rounds, and review-only integration policy before admission.
+
+The current JS starter supports structured generation and read-only review with
+`strategy: "search"`. Runtime-owned command gates, hidden evaluation, benchmark
+scoring, and clean-baseline replay are an explicit host seam still to wire; a
+candidate's self-verdict must never be promoted into evaluator truth. See
+[Workflow Experimental Search](WORKFLOW_EXPERIMENTAL_SEARCH.md).

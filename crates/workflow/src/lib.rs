@@ -5,6 +5,7 @@
 //! top only after their cancellation and evidence semantics are proven.
 
 mod elevation;
+pub mod experimental_search;
 /// Setup-time Fleet composition: a suggestion schema with no runtime authority.
 ///
 /// Deliberately **not** re-exported from the crate root. Nothing consumes it
@@ -1638,18 +1639,35 @@ fn truncate_evidence(value: &str) -> String {
 pub struct BranchTournament {
     #[serde(default)]
     pub min_score: u32,
+    #[serde(default)]
+    pub ordering: TournamentOrdering,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TournamentOrdering {
+    /// Historical behavior: choose the cheapest passing branch, then score.
+    #[default]
+    CostThenScore,
+    /// Quality-first behavior for explicitly configured evaluation workflows.
+    ScoreThenCost,
 }
 
 impl BranchTournament {
     pub fn select(&self, candidates: &[BranchCandidate]) -> Option<BranchCandidate> {
-        candidates
-            .iter()
-            .filter(|candidate| {
+        let passing = || {
+            candidates.iter().filter(|candidate| {
                 candidate.status == WorkflowRunStatus::Succeeded
                     && candidate.score >= self.min_score
             })
-            .min_by_key(|candidate| (candidate.cost, std::cmp::Reverse(candidate.score)))
-            .cloned()
+        };
+        match self.ordering {
+            TournamentOrdering::CostThenScore => passing()
+                .min_by_key(|candidate| (candidate.cost, std::cmp::Reverse(candidate.score))),
+            TournamentOrdering::ScoreThenCost => passing()
+                .min_by_key(|candidate| (std::cmp::Reverse(candidate.score), candidate.cost)),
+        }
+        .cloned()
     }
 }
 
@@ -2790,7 +2808,7 @@ mod tests {
     }
 
     #[test]
-    fn fleet_validation_accepts_one_hundred_agents_and_variable_models() {
+    fn fleet_validation_accepts_one_thousand_agents_and_variable_models() {
         let nodes = (0..DEFAULT_FLEET_WORKFLOW_MAX_AGENTS)
             .map(|index| {
                 let mut leaf = match leaf_node(&format!("agent-{index}")) {
@@ -2817,14 +2835,14 @@ mod tests {
 
         let shape = workflow
             .validate_for_fleet()
-            .expect("one hundred agents should fit the Fleet Workflow limit");
+            .expect("one thousand agents should fit the Fleet Workflow limit");
 
         assert_eq!(shape.total_agents, DEFAULT_FLEET_WORKFLOW_MAX_AGENTS);
         assert_eq!(shape.max_depth, 1);
     }
 
     #[test]
-    fn fleet_validation_rejects_more_than_one_hundred_agents() {
+    fn fleet_validation_rejects_more_than_one_thousand_agents() {
         let nodes = (0..=DEFAULT_FLEET_WORKFLOW_MAX_AGENTS)
             .map(|index| leaf_node(&format!("agent-{index}")))
             .collect();
@@ -4052,7 +4070,10 @@ mod tests {
 
     #[test]
     fn tournament_selects_passing_minimal_branch() {
-        let tournament = BranchTournament { min_score: 60 };
+        let tournament = BranchTournament {
+            min_score: 60,
+            ordering: TournamentOrdering::CostThenScore,
+        };
         let candidates = vec![
             candidate(
                 "expensive-pass",
@@ -4077,6 +4098,24 @@ mod tests {
             .expect("one passing branch should be selected");
 
         assert_eq!(selected.branch_id, "cheap-pass");
+    }
+
+    #[test]
+    fn tournament_can_select_score_before_cost_explicitly() {
+        let tournament = BranchTournament {
+            min_score: 60,
+            ordering: TournamentOrdering::ScoreThenCost,
+        };
+        let candidates = vec![
+            candidate("quality", WorkflowRunStatus::Succeeded, 95, 100, "quality"),
+            candidate("minimal", WorkflowRunStatus::Succeeded, 70, 10, "minimal"),
+        ];
+
+        let selected = tournament
+            .select(&candidates)
+            .expect("one passing branch should be selected");
+
+        assert_eq!(selected.branch_id, "quality");
     }
 
     #[test]

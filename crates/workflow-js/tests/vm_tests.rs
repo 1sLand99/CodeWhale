@@ -58,6 +58,113 @@ async fn args_global_is_the_invocation_input() {
 }
 
 #[tokio::test]
+async fn checked_in_best_of_n_search_recipe_runs_with_structured_receipts() {
+    let driver = Arc::new(FakeDriver::new());
+    for index in 1..=2 {
+        driver.on(
+            // Rules match the driver-visible `TaskRequest.description`, which
+            // is the full instruction text (the VM's `prompt` alias wins over
+            // a short label). Match the unique per-candidate suffix line.
+            &format!("candidate_id=cand_{index:03} of 2."),
+            FakeReply::Complete(
+                json!({
+                    "candidate_id": format!("cand_{index:03}"),
+                    "hypothesis": "bounded fixture",
+                    "modified_paths": ["src/lib.rs"],
+                    "commands_run": ["cargo test --locked"],
+                    "self_verdict": "pass",
+                    "known_risks": [],
+                    "artifact_refs": [format!("patch:cand_{index:03}")]
+                })
+                .to_string(),
+            ),
+        );
+    }
+    driver.on(
+        "read-only tournament judge",
+        FakeReply::Complete(
+            json!({
+                "winner_id": "cand_001",
+                "ranking": ["cand_001", "cand_002"],
+                "verification_required": true,
+                "reasons": ["fixture score"]
+            })
+            .to_string(),
+        ),
+    );
+
+    let value = run(
+        &driver,
+        include_str!("../../../workflows/operate_best_of_n.workflow.js"),
+        json!({
+            "brief": "Implement the fixture",
+            "strategy": "search",
+            "n": 2,
+            "writeRoots": ["src"],
+            "model": "deepseek-v4-flash",
+            "thinking": "max"
+        }),
+    )
+    .await
+    .expect("checked-in search recipe should execute");
+
+    assert_eq!(value["scenario"], "operate-search");
+    assert_eq!(value["review"]["winner_id"], "cand_001");
+    assert_eq!(driver.spawn_count(), 3);
+    let requests = driver.requests();
+    assert_eq!(requests[0].model.as_deref(), Some("deepseek-v4-flash"));
+    assert_eq!(requests[0].thinking.as_deref(), Some("max"));
+    assert_eq!(requests[0].write_roots, ["src"]);
+    assert_eq!(requests[2].write_authority.as_deref(), Some("read_only"));
+    // Regression: the driver-visible description is the full instruction text,
+    // so reply rules must target text that actually reaches the driver. If a
+    // future recipe reintroduces a separate short `description` next to a long
+    // `prompt`, these needles stop matching, the FakeDriver falls back to its
+    // non-JSON "done:..." reply, and the structured receipts fail loudly.
+    assert!(
+        requests[0]
+            .description
+            .starts_with("You are one independent candidate")
+    );
+    assert!(
+        requests[0]
+            .description
+            .contains("CANDIDATE-SPECIFIC INSTRUCTION: candidate_id=cand_001 of 2.")
+    );
+    assert!(
+        requests[2]
+            .description
+            .starts_with("You are the read-only tournament judge")
+    );
+}
+
+#[tokio::test]
+async fn task_prompt_wins_over_description_as_driver_visible_text() {
+    let driver = Arc::new(FakeDriver::new());
+    let value = run(
+        &driver,
+        r#"
+        return await task({
+            description: "short progress label",
+            prompt: "the real instruction",
+        });
+        "#,
+        json!(null),
+    )
+    .await
+    .unwrap();
+
+    // No rules were registered, so the FakeDriver fallback echoes the
+    // driver-visible description. The reply text proves the driver received
+    // the prompt, not the short label.
+    assert_eq!(value, json!("done:the real instruction"));
+    let requests = driver.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].description, "the real instruction");
+    assert_ne!(requests[0].description, "short progress label");
+}
+
+#[tokio::test]
 async fn task_round_trip_carries_all_options_and_normalizes_profile() {
     let driver = Arc::new(FakeDriver::new());
     let value = run(

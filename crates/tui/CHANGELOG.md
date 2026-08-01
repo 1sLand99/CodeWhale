@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added a Workflow experimental-search authoring foundation and structured
+  search option to the bundled best-of-N recipe. This remains Workflow/Fleet,
+  never a new mode or scheduler, and never auto-applies a winner.
 - `codewhale account login`, `status`, `logout`, and `keys` connect a CLI
   profile to the managed Codewhale account through the browser device flow.
   Sessions use the OS credential manager, remote BYOK values are never printed,
