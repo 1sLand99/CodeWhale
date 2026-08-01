@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::path::{Component, Path};
 use thiserror::Error;
 
 use crate::{DEFAULT_FLEET_WORKFLOW_MAX_AGENTS, experimental_search::SearchSpecError::*};
@@ -72,8 +73,8 @@ impl WorkflowSearchSpec {
         if self.worker.write_roots.is_empty() && self.worker.exact_files.is_empty() {
             return Err(UnboundedWriteScope);
         }
-        validate_string_list("worker.write_roots", &self.worker.write_roots, 128, 1_024)?;
-        validate_string_list("worker.exact_files", &self.worker.exact_files, 256, 1_024)?;
+        validate_repo_relative_paths("worker.write_roots", &self.worker.write_roots, 128)?;
+        validate_repo_relative_paths("worker.exact_files", &self.worker.exact_files, 256)?;
         if self.budget.max_cost_microusd == Some(0) {
             return Err(ZeroBudget("max_cost_microusd"));
         }
@@ -158,12 +159,13 @@ impl WorkflowSearchSpec {
 
     /// Deterministic admission batches. Fleet owns actual scheduling and may
     /// run fewer workers when its configured pool or provider quota is lower.
-    #[must_use]
-    pub fn admission_batches(&self) -> Vec<Vec<String>> {
-        self.candidate_ids()
+    pub fn admission_batches(&self) -> Result<Vec<Vec<String>>, SearchSpecError> {
+        self.validate()?;
+        Ok(self
+            .candidate_ids()
             .chunks(usize::from(self.concurrency))
             .map(<[String]>::to_vec)
-            .collect()
+            .collect())
     }
 }
 
@@ -335,6 +337,8 @@ pub enum SearchSpecError {
     UnboundedWriteScope,
     #[error("{field} contains an empty, oversized, or duplicate entry")]
     InvalidStringList { field: &'static str },
+    #[error("{field} entries must be bounded repo-relative paths without parent traversal")]
+    InvalidWriteScope { field: &'static str },
     #[error("{0} must be greater than zero when set")]
     ZeroBudget(&'static str),
     #[error("experimental search must forbid test changes")]
@@ -415,6 +419,36 @@ fn validate_string_list(
     Ok(())
 }
 
+fn validate_repo_relative_paths(
+    field: &'static str,
+    values: &[String],
+    max_items: usize,
+) -> Result<(), SearchSpecError> {
+    validate_string_list(field, values, max_items, 1_024)?;
+    if values.iter().any(|value| {
+        let trimmed = value.trim();
+        let normalized = trimmed.replace('\\', "/");
+        let windows_drive = normalized.as_bytes().get(1) == Some(&b':')
+            && normalized
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphabetic);
+        trimmed != value
+            || trimmed.chars().any(|ch| matches!(ch, '\0' | '\r' | '\n'))
+            || windows_drive
+            || Path::new(&normalized).is_absolute()
+            || Path::new(&normalized).components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+    }) {
+        return Err(InvalidWriteScope { field });
+    }
+    Ok(())
+}
+
 fn validate_commit(value: &str) -> Result<(), SearchSpecError> {
     if !(7..=64).contains(&value.len()) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(InvalidBaselineCommit);
@@ -478,8 +512,9 @@ retain_diversity = true
         let spec = WorkflowSearchSpec::from_toml(SPEC).expect("valid search spec");
 
         assert_eq!(spec.population, 32);
-        assert_eq!(spec.admission_batches().len(), 2);
-        assert_eq!(spec.admission_batches()[0].len(), 16);
+        let batches = spec.admission_batches().expect("validated admission");
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].len(), 16);
         assert_eq!(spec.candidate_ids()[0], "cand_001");
         assert_eq!(spec.candidate_ids()[31], "cand_032");
     }
@@ -545,6 +580,35 @@ retain_diversity = true
                 population: 32,
             })
         );
+    }
+
+    #[test]
+    fn admission_refuses_unvalidated_zero_concurrency_without_panicking() {
+        let mut spec = WorkflowSearchSpec::from_toml(SPEC).expect("valid search spec");
+        spec.concurrency = 0;
+
+        assert_eq!(
+            spec.admission_batches(),
+            Err(SearchSpecError::InvalidConcurrency {
+                concurrency: 0,
+                population: 32,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_write_scopes_that_escape_or_obscure_the_repo_boundary() {
+        let mut spec = WorkflowSearchSpec::from_toml(SPEC).expect("valid search spec");
+        for unsafe_path in ["../outside", "/tmp/outside", r"C:\outside"] {
+            spec.worker.write_roots = vec![unsafe_path.to_string()];
+            assert_eq!(
+                spec.validate(),
+                Err(SearchSpecError::InvalidWriteScope {
+                    field: "worker.write_roots",
+                }),
+                "path should be rejected: {unsafe_path}"
+            );
+        }
     }
 
     #[test]
