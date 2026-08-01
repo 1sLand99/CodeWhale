@@ -270,6 +270,7 @@ fn messages_from_thread_detail_batches_tool_results() {
         model_provider_id: None,
         workspace: PathBuf::from("."),
         mode: "agent".to_string(),
+        permission_posture: Some("ask".to_string()),
         allow_shell: false,
         trust_mode: false,
         auto_approve: false,
@@ -292,6 +293,7 @@ fn messages_from_thread_detail_batches_tool_results() {
         ended_at: Some(now),
         duration_ms: Some(0),
         usage: None,
+        permission_posture: Some("ask".to_string()),
         effective_provider: None,
         effective_provider_id: None,
         effective_billing_surface: None,
@@ -455,6 +457,7 @@ fn legacy_exact_thread_export_normalizes_provider_kind_and_id() {
             model_provider_id: None,
             workspace: PathBuf::from("."),
             mode: "agent".to_string(),
+            permission_posture: None,
             allow_shell: false,
             trust_mode: false,
             auto_approve: false,
@@ -4606,8 +4609,10 @@ fn cors_layer_skips_invalid_origins() {
 
 /// #562 / whalescale#256 — `PATCH /v1/threads/{id}` accepts the new
 /// fields (allow_shell, trust_mode, auto_approve, model, mode, title,
-/// system_prompt). Each is independently optional; an empty string clears
-/// `title` / `system_prompt` back to None.
+/// system_prompt). Legacy mode aliases remain accepted as one-way inputs and
+/// the response returns the canonical product mode. Each field is
+/// independently optional; an empty string clears `title` / `system_prompt`
+/// back to None.
 #[tokio::test]
 async fn patch_thread_accepts_extended_field_set() -> Result<()> {
     let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
@@ -4653,7 +4658,8 @@ async fn patch_thread_accepts_extended_field_set() -> Result<()> {
     assert_eq!(patched["trust_mode"], true);
     assert_eq!(patched["auto_approve"], true);
     assert_eq!(patched["model"], "deepseek-v4-pro");
-    assert_eq!(patched["mode"], "yolo");
+    assert_eq!(patched["mode"], "agent");
+    assert_eq!(patched["permission_posture"], "full_access");
     assert_eq!(patched["title"], "Whalescale UI test thread");
     assert_eq!(patched["system_prompt"], "You are a useful assistant.");
 
@@ -4928,6 +4934,61 @@ async fn create_thread_accepts_dynamic_tools_and_environments() -> Result<()> {
 }
 
 #[tokio::test]
+async fn create_thread_normalizes_and_persists_named_permission_posture() -> Result<()> {
+    let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
+        return Ok(());
+    };
+    let client = crate::tls::reqwest_client();
+
+    let created: serde_json::Value = client
+        .post(format!("http://{addr}/v1/threads"))
+        .json(&json!({
+            "model": "test-model",
+            "mode": "operate",
+            "permission_posture": "auto-review"
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(created["mode"], "operate");
+    assert_eq!(created["permission_posture"], "auto_review");
+    assert_eq!(created["auto_approve"], false);
+    assert_eq!(created["trust_mode"], false);
+
+    let authoritative_ask: serde_json::Value = client
+        .post(format!("http://{addr}/v1/threads"))
+        .json(&json!({
+            "model": "test-model",
+            "mode": "yolo",
+            "permission_posture": "ask",
+            "auto_approve": true
+        }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(authoritative_ask["mode"], "agent");
+    assert_eq!(authoritative_ask["permission_posture"], "ask");
+    assert_eq!(authoritative_ask["auto_approve"], false);
+
+    let invalid = client
+        .post(format!("http://{addr}/v1/threads"))
+        .json(&json!({
+            "model": "test-model",
+            "permission_posture": "owner"
+        }))
+        .send()
+        .await?;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+    handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn start_turn_accepts_dynamic_tools_and_environment_id() -> Result<()> {
     let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
         return Ok(());
@@ -4955,7 +5016,8 @@ async fn start_turn_accepts_dynamic_tools_and_environment_id() -> Result<()> {
                     "input_schema": { "type": "object" }
                 }
             ],
-            "environment_id": "local"
+            "environment_id": "local",
+            "permission_posture": "auto-review"
         }))
         .send()
         .await?
@@ -4963,6 +5025,17 @@ async fn start_turn_accepts_dynamic_tools_and_environment_id() -> Result<()> {
         .json()
         .await?;
     assert_eq!(started["turn"]["thread_id"], thread_id);
+    assert_eq!(started["thread"]["permission_posture"], "ask");
+    assert_eq!(started["turn"]["permission_posture"], "auto_review");
+
+    let stored: serde_json::Value = client
+        .get(format!("http://{addr}/v1/threads/{thread_id}"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(stored["turns"][0]["permission_posture"], "auto_review");
 
     handle.abort();
     Ok(())

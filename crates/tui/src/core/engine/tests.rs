@@ -4568,7 +4568,7 @@ async fn operate_conversation_reaches_provider_when_workers_are_disabled() {
 }
 
 #[test]
-fn auto_review_classifies_publish_and_force_prompts_it() {
+fn auto_review_classifies_publish_and_holds_without_prompting() {
     let (decision, audit) = auto_review_plan_decision(
         &crate::tui::auto_review::AutoReviewPolicy::default(),
         "exec_shell",
@@ -4582,7 +4582,7 @@ fn auto_review_classifies_publish_and_force_prompts_it() {
 
     assert_eq!(
         decision,
-        AutoReviewPlanDecision::ForcePrompt(
+        AutoReviewPlanDecision::Block(
             "Built-in safety gate requires approval: publish-like action requires durable review"
                 .to_string()
         )
@@ -4592,7 +4592,24 @@ fn auto_review_classifies_publish_and_force_prompts_it() {
 }
 
 #[test]
-fn auto_review_policy_does_not_force_prompt_for_shell_git_tag_list_probe() {
+fn auto_review_classifier_allow_executes_without_prompting() {
+    let (decision, audit) = auto_review_plan_decision(
+        &crate::tui::auto_review::AutoReviewPolicy::default(),
+        "read_file",
+        &json!({"path": "Cargo.toml"}),
+        crate::tui::auto_review::RunOrigin::Interactive,
+        crate::tui::approval::ApprovalMode::Auto,
+        Some("inspect the manifest"),
+        true,
+        false,
+    );
+
+    assert_eq!(decision, AutoReviewPlanDecision::Allow);
+    assert_eq!(audit["decision"], "allow");
+}
+
+#[test]
+fn auto_review_holds_unclassified_shell_probe_without_prompting() {
     let (decision, audit) = auto_review_plan_decision(
         &crate::tui::auto_review::AutoReviewPolicy::default(),
         "exec_shell",
@@ -4604,7 +4621,13 @@ fn auto_review_policy_does_not_force_prompt_for_shell_git_tag_list_probe() {
         false,
     );
 
-    assert_eq!(decision, AutoReviewPlanDecision::NoChange);
+    assert_eq!(
+        decision,
+        AutoReviewPlanDecision::Block(
+            "Auto-Review held tool 'exec_shell': destructive action requires explicit review"
+                .to_string()
+        )
+    );
     assert_eq!(audit["decision"], "ask_user");
     assert_eq!(audit["action_kind"], "shell");
 }
@@ -4704,7 +4727,7 @@ fn generic_required_tools_keep_auto_approve_behavior() {
 }
 
 #[test]
-fn auto_review_policy_does_not_change_generic_destructive_auto_approval_yet() {
+fn auto_review_holds_generic_destructive_call_without_prompting() {
     let (decision, audit) = auto_review_plan_decision(
         &crate::tui::auto_review::AutoReviewPolicy::default(),
         "exec_shell",
@@ -4716,7 +4739,13 @@ fn auto_review_policy_does_not_change_generic_destructive_auto_approval_yet() {
         false,
     );
 
-    assert_eq!(decision, AutoReviewPlanDecision::NoChange);
+    assert_eq!(
+        decision,
+        AutoReviewPlanDecision::Block(
+            "Auto-Review held tool 'exec_shell': destructive action requires explicit review"
+                .to_string()
+        )
+    );
     assert_eq!(audit["decision"], "ask_user");
     assert_eq!(audit["risk"], "destructive");
 }
@@ -6432,9 +6461,9 @@ fn print_mode_runtime_contract_metrics() {
     let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
     let codewhale_home = home.join(".codewhale");
     let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
-    // Keep the model-visible shell fact stable across developer and CI hosts.
-    // ShellDispatcher recognizes this token without executing a shell.
-    let _shell = EnvVarGuard::set("SHELL", "bash");
+    // Keep the model-visible shell fact stable across developer and CI hosts
+    // while exercising the exact-path contract used at runtime.
+    let _shell = EnvVarGuard::set("SHELL", "/bin/bash");
     let mut mode_metrics = serde_json::Map::new();
     for (mode_name, mode, mode_instructions) in [
         ("plan", AppMode::Plan, crate::prompts::PLAN_MODE),
@@ -6572,8 +6601,9 @@ fn measure_representative_runtime_context()
     let _userprofile = EnvVarGuard::set("USERPROFILE", &home);
     let codewhale_home = home.join(".codewhale");
     let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
-    // Keep the model-visible shell fact stable across developer and CI hosts.
-    let _shell = EnvVarGuard::set("SHELL", "bash");
+    // Keep the model-visible shell fact stable across developer and CI hosts
+    // while exercising the exact-path contract used at runtime.
+    let _shell = EnvVarGuard::set("SHELL", "/bin/bash");
 
     let mut stages = vec![representative_stage(
         "base",
@@ -10014,6 +10044,76 @@ async fn change_mode_refreshes_session_prompt_and_updates_session() {
         messages.iter().all(|message| message.role != "system"),
         "mode switch must not persist appended system messages: {messages:?}"
     );
+}
+
+#[tokio::test]
+async fn live_runtime_authority_applies_latest_posture_and_sandbox_before_tools() {
+    use crate::sandbox::SandboxPolicy;
+    use crate::tui::approval::ApprovalMode;
+
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, handle) = Engine::new(config, &Config::default());
+    let registry = ToolRegistryBuilder::new()
+        .build(engine.build_tool_context(engine.current_mode, engine.session.auto_approve));
+
+    for (mode, posture, auto_approve, sandbox_mode, expected_sandbox) in [
+        (
+            AppMode::Operate,
+            ApprovalMode::Auto,
+            false,
+            Some("read-only".to_string()),
+            SandboxPolicy::ReadOnly,
+        ),
+        (
+            AppMode::Agent,
+            ApprovalMode::Bypass,
+            true,
+            None,
+            SandboxPolicy::DangerFullAccess,
+        ),
+        (
+            AppMode::Agent,
+            ApprovalMode::Suggest,
+            false,
+            None,
+            SandboxPolicy::WorkspaceWrite {
+                writable_roots: vec![tmp.path().to_path_buf()],
+                network_access: true,
+                exclude_tmpdir: false,
+                exclude_slash_tmp: false,
+            },
+        ),
+    ] {
+        handle
+            .try_send(Op::ChangeMode {
+                mode,
+                allow_shell: true,
+                trust_mode: false,
+                auto_approve,
+                approval_mode: posture,
+                configured_sandbox_mode: sandbox_mode,
+            })
+            .expect("publish live runtime authority");
+
+        let published = handle.runtime_permission_authority();
+        assert_eq!(published.approval_mode, posture);
+        assert_eq!(published.auto_approve, auto_approve);
+        assert!(engine.apply_pending_runtime_authority().await);
+        assert_eq!(engine.current_mode, mode);
+        assert_eq!(engine.session.approval_mode, posture);
+        assert_eq!(engine.session.auto_approve, auto_approve);
+        assert_eq!(
+            engine
+                .live_tool_context(Some(&registry))
+                .expect("live registry context")
+                .elevated_sandbox_policy,
+            Some(expected_sandbox),
+        );
+    }
 }
 
 #[test]
@@ -13944,6 +14044,16 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
         tx_steer: mpsc::channel(1).0,
         shared_paused: Arc::new(StdMutex::new(false)),
         client_preflight_required: true,
+        live_runtime_authority: Arc::new(StdMutex::new(LiveRuntimeAuthorityState::new(
+            LiveRuntimeAuthority::from_fields(
+                AppMode::Agent,
+                false,
+                false,
+                false,
+                crate::tui::approval::ApprovalMode::Suggest,
+                None,
+            ),
+        ))),
     };
 
     // Fill the op channel with one message (capacity = 1).
@@ -13952,9 +14062,82 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
         .try_send(Op::ListSubAgents)
         .expect("first send should succeed");
 
-    // try_send must return Err immediately — never block.
-    let result = handle.try_send(Op::ListSubAgents);
+    // A live posture update must publish immediately even though its wake-up
+    // cannot fit. The already-queued operation will wake the engine, which
+    // applies this pending authority before handling it.
+    let result = handle.try_send(Op::ChangeMode {
+        mode: AppMode::Operate,
+        allow_shell: true,
+        trust_mode: false,
+        auto_approve: false,
+        approval_mode: crate::tui::approval::ApprovalMode::Auto,
+        configured_sandbox_mode: None,
+    });
     assert!(result.is_err(), "try_send should fail when channel is full");
+    let authority = handle.runtime_permission_authority();
+    assert_eq!(
+        authority.approval_mode,
+        crate::tui::approval::ApprovalMode::Auto
+    );
+    assert!(!authority.auto_approve);
+}
+
+#[tokio::test]
+async fn full_mailbox_posture_update_supersedes_queued_change_mode() {
+    use crate::tui::approval::ApprovalMode;
+
+    let tmp = tempdir().expect("tempdir");
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (engine, handle) = Engine::new(config, &Config::default());
+
+    handle
+        .try_send(Op::ChangeMode {
+            mode: AppMode::Plan,
+            allow_shell: false,
+            trust_mode: false,
+            auto_approve: false,
+            approval_mode: ApprovalMode::Suggest,
+            configured_sandbox_mode: None,
+        })
+        .expect("queue older posture");
+    for _ in 1..ENGINE_OP_CHANNEL_CAPACITY {
+        handle
+            .try_send(Op::ListSubAgents)
+            .expect("fill operation mailbox");
+    }
+
+    let result = handle.try_send(Op::ChangeMode {
+        mode: AppMode::Operate,
+        allow_shell: true,
+        trust_mode: false,
+        auto_approve: false,
+        approval_mode: ApprovalMode::Auto,
+        configured_sandbox_mode: Some("read-only".to_string()),
+    });
+    assert!(
+        result.is_err(),
+        "latest posture wake-up must see a full mailbox"
+    );
+
+    let run = tokio::spawn(engine.run());
+    let snapshot = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        handle.get_session_snapshot(),
+    )
+    .await
+    .expect("snapshot after mailbox drain")
+    .expect("session snapshot");
+
+    assert_eq!(snapshot.mode, "operate");
+    let authority = handle.runtime_permission_authority();
+    assert_eq!(authority.approval_mode, ApprovalMode::Auto);
+    assert!(!authority.auto_approve);
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
 }
 
 #[tokio::test]
