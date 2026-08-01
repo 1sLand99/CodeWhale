@@ -39,6 +39,8 @@ fn default_runtime_event_envelope_schema_version() -> u32 {
 /// All fields are required on serialization so clients can rely on the shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeCapabilities {
+    #[serde(default)]
+    pub account_session: bool,
     pub threads: bool,
     pub turns: bool,
     pub turn_steer: bool,
@@ -329,6 +331,7 @@ mod tests {
     #[test]
     fn runtime_capabilities_serializes_expected_shape() {
         let caps = RuntimeCapabilities {
+            account_session: true,
             threads: true,
             turns: true,
             turn_steer: true,
@@ -341,6 +344,7 @@ mod tests {
         let value = serde_json::to_value(&caps).unwrap();
         let obj = value.as_object().unwrap();
         assert_eq!(obj.get("threads").unwrap(), &json!(true));
+        assert_eq!(obj.get("account_session").unwrap(), &json!(true));
         assert_eq!(obj.get("external_tools").unwrap(), &json!(false));
         assert!(obj.contains_key("worker_runtime"));
     }

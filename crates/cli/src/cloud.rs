@@ -5,30 +5,35 @@
 //! surface signs a CLI profile into the managed Codewhale account and stores
 //! provider keys in that account's remote vault.
 
-use std::collections::BTreeMap;
 use std::io::{self, IsTerminal, Read, Write};
 use std::net::IpAddr;
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use codewhale_config::{ConfigStore, ProviderKind};
-use codewhale_secrets::{DefaultKeyringStore, Secrets};
+use codewhale_secrets::Secrets;
+use codewhale_secrets::account::{
+    ACCOUNT_ALLOW_FILE_SESSION_STORE_ENV as CLOUD_ALLOW_FILE_SESSION_STORE_ENV,
+    ACCOUNT_API_BASE_ENV as CLOUD_API_BASE_ENV, AccountAuthBundle as AuthBundle,
+    AccountSessionStore, AccountUser as CloudUser, DEFAULT_ACCOUNT_API_BASE as DEFAULT_API_BASE,
+    StoredAccountAuth as StoredCloudAuth, normalize_account_profile as normalized_profile,
+    secure_account_session_secrets, validate_account_auth_bundle as validate_auth_bundle,
+};
+#[cfg(test)]
+use codewhale_secrets::account::{
+    AccountSession as AuthSession, account_auth_slot as cloud_auth_slot,
+    account_file_session_store_opted_in_value as file_session_store_opted_in_value,
+};
 use reqwest::Url;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use sha2::{Digest, Sha256};
 
-const DEFAULT_API_BASE: &str = "https://api.codewhale.net";
-const CLOUD_API_BASE_ENV: &str = "CODEWHALE_CLOUD_API_BASE";
-const CLOUD_ALLOW_FILE_SESSION_STORE_ENV: &str = "CODEWHALE_CLOUD_ALLOW_FILE_SESSION_STORE";
 const MAX_RESPONSE_BYTES: u64 = 256 * 1024;
 const MIN_API_KEY_BYTES: usize = 8;
 const MAX_API_KEY_BYTES: u64 = 4096;
 const MAX_API_KEY_STDIN_BYTES: u64 = MAX_API_KEY_BYTES + 1024;
 const MAX_KEY_LABEL_CHARS: usize = 80;
-const MAX_TOKEN_BYTES: usize = 64 * 1024;
 const DEFAULT_LOGIN_TIMEOUT_SECONDS: u64 = 600;
 const MAX_LOGIN_TIMEOUT_SECONDS: u64 = 3600;
 
@@ -234,54 +239,6 @@ impl CloudTransport for ReqwestTransport {
     }
 }
 
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AuthBundle {
-    token_type: String,
-    access_token: String,
-    refresh_token: String,
-    #[serde(default)]
-    session: Option<AuthSession>,
-    #[serde(default)]
-    user: Option<CloudUser>,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AuthSession {
-    id: String,
-    #[serde(default)]
-    provider: String,
-    #[serde(default)]
-    expires_at: String,
-    #[serde(default)]
-    refresh_expires_at: String,
-}
-
-#[derive(Clone, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CloudUser {
-    #[serde(default)]
-    id: String,
-    #[serde(default)]
-    display_name: String,
-    #[serde(default)]
-    email: String,
-    #[serde(default)]
-    region: String,
-    #[serde(default)]
-    plan: String,
-    #[serde(default)]
-    model_keys: BTreeMap<String, ModelKeyState>,
-}
-
-#[derive(Clone, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ModelKeyState {
-    #[serde(default)]
-    configured: bool,
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DeviceStart {
@@ -316,28 +273,16 @@ struct ModelKeyRequest<'a> {
     label: &'a str,
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct StoredCloudAuth {
-    schema_version: u8,
-    api_base: String,
-    bundle: AuthBundle,
-}
-
 struct CloudClient<'a, T: CloudTransport> {
     transport: &'a T,
-    secrets: &'a Secrets,
-    auth_slot: String,
-    api_base: &'a str,
+    account_store: AccountSessionStore,
 }
 
 impl<'a, T: CloudTransport> CloudClient<'a, T> {
     fn new(transport: &'a T, secrets: &'a Secrets, profile: &str, api_base: &'a str) -> Self {
         Self {
             transport,
-            secrets,
-            auth_slot: cloud_auth_slot(profile, api_base),
-            api_base,
+            account_store: AccountSessionStore::new(secrets.clone(), Some(profile), api_base),
         }
     }
 
@@ -400,39 +345,20 @@ impl<'a, T: CloudTransport> CloudClient<'a, T> {
     }
 
     fn load_auth(&self) -> Result<Option<StoredCloudAuth>> {
-        let Some(raw) = self
-            .secrets
-            .get(&self.auth_slot)
-            .context("failed to read the local Codewhale account session")?
-        else {
-            return Ok(None);
-        };
-        let stored: StoredCloudAuth = serde_json::from_str(&raw)
-            .context("the local Codewhale account session is unreadable; run `codewhale account logout` and sign in again")?;
-        if stored.schema_version != 1 || stored.api_base != self.api_base {
-            return Ok(None);
-        }
-        validate_auth_bundle(&stored.bundle)?;
-        Ok(Some(stored))
+        self.account_store.load().context(
+            "the local Codewhale account session is unreadable; run `codewhale account logout` and sign in again",
+        )
     }
 
     fn save_auth(&self, bundle: AuthBundle) -> Result<()> {
-        validate_auth_bundle(&bundle)?;
-        let stored = StoredCloudAuth {
-            schema_version: 1,
-            api_base: self.api_base.to_string(),
-            bundle,
-        };
-        let value = serde_json::to_string(&stored)
-            .context("failed to encode the local Codewhale account session")?;
-        self.secrets
-            .set(&self.auth_slot, &value)
+        self.account_store
+            .save(bundle)
             .context("failed to save the Codewhale account session in the local secret store")
     }
 
     fn clear_auth(&self) -> Result<()> {
-        self.secrets
-            .delete(&self.auth_slot)
+        self.account_store
+            .clear()
             .context("failed to remove the local Codewhale account session")
     }
 
@@ -584,28 +510,19 @@ pub(crate) fn run(args: CloudArgs, profile: Option<&str>, config: &ConfigStore) 
 }
 
 fn cloud_session_secrets() -> Result<Secrets> {
-    let keyring = DefaultKeyringStore::new("codewhale-cloud");
-    match keyring.probe() {
-        Ok(()) => Ok(Secrets::new(Arc::new(keyring))),
-        Err(_) if file_session_store_opted_in() => {
-            eprintln!(
-                "warning: OS credential manager unavailable; {CLOUD_ALLOW_FILE_SESSION_STORE_ENV}=1 explicitly enables the local 0600 Codewhale secrets file for cloud session tokens"
-            );
-            Ok(Secrets::file_backed())
+    match secure_account_session_secrets() {
+        Ok(secrets) => {
+            if secrets.backend_name().starts_with("file-based") {
+                eprintln!(
+                    "warning: OS credential manager unavailable; {CLOUD_ALLOW_FILE_SESSION_STORE_ENV}=1 explicitly enables the local 0600 Codewhale secrets file for cloud session tokens"
+                );
+            }
+            Ok(secrets)
         }
         Err(_) => bail!(
             "Codewhale account login requires an OS credential manager for session tokens. Configure Keychain, Credential Manager, or Secret Service and try again. Headless users may explicitly opt into the local 0600 secrets file with {CLOUD_ALLOW_FILE_SESSION_STORE_ENV}=1"
         ),
     }
-}
-
-fn file_session_store_opted_in() -> bool {
-    let value = std::env::var(CLOUD_ALLOW_FILE_SESSION_STORE_ENV).ok();
-    file_session_store_opted_in_value(value.as_deref())
-}
-
-fn file_session_store_opted_in_value(value: Option<&str>) -> bool {
-    value.is_some_and(|value| value.trim() == "1")
 }
 
 pub(crate) fn reject_inline_api_key(api_key: Option<&str>) -> Result<()> {
@@ -768,29 +685,6 @@ fn write_account<W: Write>(
     Ok(())
 }
 
-fn normalized_profile(profile: Option<&str>) -> String {
-    profile
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("default")
-        .to_string()
-}
-
-fn cloud_auth_slot(profile: &str, api_base: &str) -> String {
-    let mut digest = Sha256::new();
-    digest.update(profile.as_bytes());
-    digest.update([0]);
-    digest.update(api_base.as_bytes());
-    let digest = digest.finalize();
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        encoded.push(HEX[(byte >> 4) as usize] as char);
-        encoded.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    format!("codewhale-cloud-auth-v1-{encoded}")
-}
-
 struct ValidatedApiBase {
     url: Url,
     display: String,
@@ -909,26 +803,6 @@ fn validate_device_code(code: &str) -> Result<()> {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
         bail!("The Codewhale service returned an invalid device authorization response");
-    }
-    Ok(())
-}
-
-fn validate_auth_bundle(bundle: &AuthBundle) -> Result<()> {
-    if !bundle.token_type.eq_ignore_ascii_case("bearer")
-        || bundle.access_token.trim().is_empty()
-        || bundle.refresh_token.trim().is_empty()
-        || bundle.access_token.len() > MAX_TOKEN_BYTES
-        || bundle.refresh_token.len() > MAX_TOKEN_BYTES
-        || bundle
-            .access_token
-            .chars()
-            .any(|character| character.is_control() || character.is_whitespace())
-        || bundle
-            .refresh_token
-            .chars()
-            .any(|character| character.is_control() || character.is_whitespace())
-    {
-        bail!("The Codewhale service returned invalid session credentials");
     }
     Ok(())
 }
@@ -1183,6 +1057,7 @@ mod tests {
                 provider: "github".to_string(),
                 expires_at: String::new(),
                 refresh_expires_at: String::new(),
+                ..AuthSession::default()
             }),
             user: Some(CloudUser {
                 id: account_id.to_string(),

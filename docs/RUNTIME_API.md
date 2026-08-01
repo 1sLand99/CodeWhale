@@ -63,6 +63,41 @@ The legacy in-process `codewhale app-server` also requires an explicit
 `--auth-token` or `CODEWHALE_APP_SERVER_TOKEN` before binding a non-loopback
 host; its generated one-time `cwapp_*` token is loopback-only.
 
+### Runtime and account identity
+
+`GET /v1/runtime/info` reports `codewhale_version` plus the full 40-character
+`codewhale_commit` embedded by the shared CLI/TUI build. A source archive that
+cannot provide an exact commit reports `unknown`, allowing compatibility
+clients to fail closed rather than accepting an ambiguous binary pair.
+
+The same response advertises `capabilities.account_session: true` and a
+token-free account receipt:
+
+```json
+{
+  "account": {
+    "schema_version": 1,
+    "state": "authenticated",
+    "api_base": "https://api.codewhale.net",
+    "account_id": "acct_...",
+    "session_id": "session_...",
+    "scopes": [],
+    "expires_at": "2026-08-01T20:00:00Z"
+  }
+}
+```
+
+The Runtime reads this receipt from the exact profile- and API-origin-scoped
+secure record written by `codewhale account login`; it does not run a second
+login flow. States are `signed_out`, `authenticated`, `offline_cached`,
+`expired`, or `revoked`. Scopes are copied only from explicit stored session
+grants and are never inferred from account identity. Access/refresh tokens,
+email, provider profile, and provider credentials are never returned.
+`account_id` and `session_id` are included only for a request authorized with
+the Runtime token (or an explicitly insecure loopback server); the public
+bootstrap response remains usable but reports `signed_out`. Signed-out local
+Work remains supported and never allocates cloud compute implicitly.
+
 The `--stdio` control transport is newline-delimited JSON-RPC 2.0. Probe it
 without spending model tokens:
 
