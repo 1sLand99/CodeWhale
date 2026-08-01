@@ -6,6 +6,7 @@ description: >-
   is ending, context is running low, the user asks for a handoff / "pass the
   baton" / "hand off", or a long-running operation needs a durable state
   checkpoint.
+invocation: model+user
 ---
 
 # Handoff
@@ -16,8 +17,6 @@ description: >-
 > baton" / "hand off", or a long-running operation needs a durable state
 > checkpoint. The goal: the durable artifact survives, the context does not
 > need to.
-
-Invocation: `model+user`
 
 ## When to use
 
