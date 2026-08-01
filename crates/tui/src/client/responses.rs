@@ -1224,10 +1224,9 @@ mod tests {
                     content_block: ContentBlockStart::Text { text },
                     ..
                 }) = event
+                    && text.contains("not replayed")
                 {
-                    if text.contains("not replayed") {
-                        saw_notice = true;
-                    }
+                    saw_notice = true;
                 }
             }
         })

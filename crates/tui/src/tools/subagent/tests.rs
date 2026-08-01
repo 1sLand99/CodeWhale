@@ -4557,12 +4557,11 @@ fn role_posture_blocks_writes_and_shell_for_read_only_roles() {
             "{role:?} has full shell"
         );
     }
-    for role in [FleetRole::Planner] {
-        assert!(
-            !role_posture_permits(&role, ApprovalRequirement::Required),
-            "{role:?} must not run shell tools"
-        );
-    }
+    let role = FleetRole::Planner;
+    assert!(
+        !role_posture_permits(&role, ApprovalRequirement::Required),
+        "{role:?} must not run shell tools"
+    );
 
     // Custom passes the role-only check; its explicit allowlist, bounded write
     // authority, and parent-intersected runtime profile are enforced together.
