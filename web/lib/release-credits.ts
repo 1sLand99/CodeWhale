@@ -20,12 +20,13 @@
 
 /** Contributors whose PRs were merged or harvested into this release. */
 export const RELEASE_CONTRIBUTORS: string[] = [
-  "@greyfreedom",
-  "@nightt5879",
+  "@SparkofSpike",
+  "@XhesicaFrost",
+  "@aboimpinto",
 ];
 
 /** Contributors who helped with reports, reproductions, and verification. */
 export const RELEASE_HELPERS: string[] = [
-  "@Watcher24",
-  "@fleitz",
+  "@DracheTek",
+  "@MuRongMoQing",
 ];

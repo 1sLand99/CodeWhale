@@ -488,12 +488,13 @@ done
     for (const [term, definition] of Object.entries(matrix.product.terminology)) {
       expect(fleet).toContain(`**${term}** = ${definition}`);
     }
-    expect(matrix.repository.requiredCandidateCredits).toEqual(["@fleitz"]);
+    expect(matrix.repository.requiredCandidateCredits).not.toHaveLength(0);
     expect(matrix.repository.mirrors.some((mirror) => mirror.includes("gitee"))).toBe(false);
-    expect(changelog).toContain("PR #4673 by @fleitz");
-    expect(changelog).toContain("#4674");
-    expect(contributors).toContain("github.com/fleitz");
-    expect(releaseCredits).toContain('"@fleitz"');
+    for (const handle of matrix.repository.requiredCandidateCredits) {
+      expect(changelog).toContain(handle);
+      expect(contributors).toContain(`github.com/${handle.slice(1)}`);
+      expect(releaseCredits).toContain(`"${handle}"`);
+    }
     expect(footer).toContain('{ label: "MIT license", href: "https://github.com/Hmbown/CodeWhale/blob/main/LICENSE" }');
     expect(footer).toContain('{ label: "MIT 许可证", href: "https://github.com/Hmbown/CodeWhale/blob/main/LICENSE" }');
     expect(footer).toContain('href="https://github.com/Hmbown/CodeWhale/releases"');

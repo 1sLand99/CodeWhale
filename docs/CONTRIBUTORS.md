@@ -28,6 +28,28 @@ notes, and relevant issue/PR comments.
 ## Contributors by time
 
 <details open>
+<summary><strong>v0.9.4 — calmer output, recovery, and release hardening</strong></summary>
+
+**Merged or adapted contributions**
+
+- **[Sh1Zuku / SparkofSpike](https://github.com/SparkofSpike)** — LaTeX
+  rendering in PR #4981, circled-digit and keycap width handling in PR #5001,
+  and actionable File-edit recovery in PR #5008
+- **[XhesicaFrost](https://github.com/XhesicaFrost)** — long Windows user-PATH
+  preservation in PR #5006
+- **[Paulo Aboim Pinto / aboimpinto](https://github.com/aboimpinto)** — the
+  user-command dispatch acceptance contract in PR #4992
+
+**Reports, reproductions, and verification**
+
+- **[DracheTek](https://github.com/DracheTek)** — the multilingual, CRLF-heavy
+  File-edit failure report in issue #5003
+- **[An Ziwu / MuRongMoQing](https://github.com/MuRongMoQing)** — the Windows
+  PATH-overwrite defect report in issue #4685
+
+</details>
+
+<details>
 <summary><strong>v0.9.3 — DeepSeek Responses, canonical tools, and runtime hardening</strong></summary>
 
 - **[greyfreedom](https://github.com/greyfreedom)** (Turisla) — the documented
