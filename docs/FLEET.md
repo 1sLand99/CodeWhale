@@ -322,13 +322,16 @@ perform real work as `codewhale exec` processes.
 
 Default Workflow-to-Fleet validation is intentionally bounded:
 
-- 100 total worker agents per workflow run;
-- 5 recursive Fleet rings;
+- 1,000 total worker agents per Workflow run;
+- 16 live worker agents at once; larger populations queue (block) on the host's
+  per-run concurrency gate until a live slot frees, then route through Fleet;
+- 5 recursive Fleet rings as the hard ceiling (default user configuration: 2);
 - bounded loops only (`max_iterations` required);
 - bounded dynamic expansion only (`max_children` plus a template required).
 
 These are population limits, not a demand to launch everything at once. A
-100-agent workflow should still drain through the configured Fleet worker pool.
+1,000-agent Workflow should still drain through the configured Fleet worker
+pool.
 Recommended model layouts, such as a DeepSeek Pro orchestrator with Flash
 workers in the first ring and cheaper workers farther out, are presets only.
 Every slot can inherit the active model or carry an explicit model override.

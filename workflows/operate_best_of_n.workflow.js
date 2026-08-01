@@ -1,21 +1,56 @@
 /**
- * Operate starter — best-of-N implementers in worktrees, then reviewer.
+ * Operate starter — independent worktree candidates, then one reviewer.
  *
- * Spawns N worktree implementers with the same brief, then a read-only
- * reviewer that picks a winner. The parent must apply the winner only after
- * PASS evidence (skill: best-of-n).
+ * Set strategy="search" for a bounded 2-16 candidate search. This remains a
+ * Workflow recipe, not a new mode or scheduler. Runtime-owned command gates
+ * and clean-baseline scoring require the typed search/evaluator host seam.
  *
  * Run: /workflow run workflows/operate_best_of_n.workflow.js
- * Args: { brief, n?, targetFiles?, writeRoots? }
+ * Args: { brief, n?, strategy?, rubric?, model?, thinking?, targetFiles?, writeRoots? }
  */
 export default async function (args) {
   const brief =
     args?.brief ??
     args?.task ??
     "Propose and implement the smallest correct fix for the open failure.";
-  const n = Math.min(4, Math.max(2, Number(args?.n ?? 3) || 3));
+  const strategy = args?.strategy === "search" ? "search" : "best_of_n";
+  const maxCandidates = strategy === "search" ? 16 : 4;
+  const defaultCandidates = strategy === "search" ? 8 : 3;
+  const n = Math.min(
+    maxCandidates,
+    Math.max(2, Number(args?.n ?? defaultCandidates) || defaultCandidates)
+  );
   const exactFiles = Array.isArray(args?.targetFiles) ? args.targetFiles : [];
   const writeRoots = Array.isArray(args?.writeRoots) ? args.writeRoots : [];
+  const rubric =
+    args?.rubric ??
+    "Correctness first; then fit, measured quality, simplicity, risk, and verification evidence.";
+  const model = typeof args?.model === "string" ? args.model : undefined;
+  const thinking =
+    typeof args?.thinking === "string" ? args.thinking : undefined;
+
+  const candidateSchema = {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "candidate_id",
+      "hypothesis",
+      "modified_paths",
+      "commands_run",
+      "self_verdict",
+      "known_risks",
+      "artifact_refs",
+    ],
+    properties: {
+      candidate_id: { type: "string" },
+      hypothesis: { type: "string" },
+      modified_paths: { type: "array", items: { type: "string" } },
+      commands_run: { type: "array", items: { type: "string" } },
+      self_verdict: { type: "string", enum: ["pass", "fail"] },
+      known_risks: { type: "array", items: { type: "string" } },
+      artifact_refs: { type: "array", items: { type: "string" } },
+    },
+  };
 
   phase("Candidates");
   const candidateFns = [];
@@ -23,9 +58,30 @@ export default async function (args) {
     const index = i;
     candidateFns.push(() =>
       task({
-        description: `Best-of-N candidate ${index}/${n}`,
+        // The VM delivers one text to the driver: `prompt` (alias) wins over
+        // `description`, so the full instruction lives in `description` and
+        // `label` carries the short progress name. A separate short
+        // `description` would never reach the driver.
+        description: [
+          "You are one independent candidate in a Codewhale Workflow search.",
+          "Implement the same frozen brief and rubric in this isolated worktree only.",
+          "Do not inspect other candidates, rankings, hidden tests, or evaluator internals.",
+          "Do not push. Do not merge. Do not touch the parent checkout.",
+          "Your self_verdict is informational; only runtime-owned evaluation can pass a hard gate.",
+          "Return only the required structured response.",
+          "",
+          "BRIEF:",
+          String(brief),
+          "",
+          "RUBRIC:",
+          String(rubric),
+          "",
+          `CANDIDATE-SPECIFIC INSTRUCTION: candidate_id=cand_${String(index).padStart(3, "0")} of ${n}.`,
+        ].join("\n"),
         label: `candidate_${index}`,
         type: "implementer",
+        ...(model ? { model } : {}),
+        ...(thinking ? { thinking } : {}),
         worktree: true,
         writeAuthority: "worktree_write",
         ...(exactFiles.length ? { exactFiles } : {}),
@@ -35,19 +91,8 @@ export default async function (args) {
           "Do not share other candidates' answers.",
           "Parent checkout must remain unchanged until apply.",
         ],
-        acceptance: [
-          "Return VERDICT PASS/FAIL with command evidence.",
-          "List every modified path with a one-line why.",
-        ],
-        prompt: [
-          `You are candidate ${index} of ${n} in a best-of-N tournament.`,
-          "Implement the brief below in this isolated worktree only.",
-          "Run relevant checks. End with VERDICT: PASS|FAIL, COMMANDS, EVIDENCE.",
-          "Do not push. Do not merge. Do not touch the parent checkout.",
-          "",
-          "BRIEF:",
-          String(brief),
-        ].join("\n"),
+        acceptance: ["Return the exact structured candidate contract."],
+        responseSchema: candidateSchema,
       })
     );
   }
@@ -55,30 +100,52 @@ export default async function (args) {
 
   phase("Review");
   const review = await task({
-    description:
-      "Score candidates against one rubric; name a winner only with PASS evidence.",
-    label: "reviewer",
-    type: "review",
-    worktree: false,
-    prompt: [
-      "You are the tournament judge. Score every candidate against: correctness,",
-      "fit to the brief, simplicity, risk, and verification evidence.",
-      "Reject candidates without PASS command evidence for code work.",
-      "Name exactly one winner (or NONE if all fail), with decisive reasons.",
+    // Single driver-visible text; `label` carries the short progress name.
+    description: [
+      "You are the read-only tournament judge. Score every candidate against the frozen rubric.",
+      "Treat self_verdict and claimed commands as untrusted candidate statements.",
+      "Name one provisional winner_id, or NONE if all fail, with decisive reasons.",
       "Do not merge or apply changes. Do not invent missing evidence.",
+      "Set verification_required=true for every code winner.",
+      "Return only the required structured response.",
       "",
-      "candidates:",
+      "BRIEF:",
+      String(brief),
+      "",
+      "RUBRIC:",
+      String(rubric),
+      "",
+      "CANDIDATES:",
       String(JSON.stringify(candidates, null, 2) ?? "(missing)"),
     ].join("\n"),
+    label: "reviewer",
+    type: "review",
+    writeAuthority: "read_only",
+    worktree: false,
+    responseSchema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["winner_id", "ranking", "verification_required", "reasons"],
+      properties: {
+        winner_id: { type: "string" },
+        ranking: { type: "array", items: { type: "string" } },
+        verification_required: { type: "boolean" },
+        reasons: { type: "array", items: { type: "string" } },
+      },
+    },
   });
 
   return {
-    scenario: "operate-best-of-n",
+    scenario: strategy === "search" ? "operate-search" : "operate-best-of-n",
+    strategy,
     n,
     brief,
+    rubric,
     candidates,
     review,
     apply_policy:
-      "Parent applies winner only after reviewer PASS + parent re-verify.",
+      "Parent applies a winner only after independent clean replay and explicit user approval.",
+    execution_boundary:
+      "This recipe generates and reviews candidates. It does not claim runtime-owned hidden gates, benchmark scoring, or clean-baseline replay; use a frozen WorkflowSearchSpec once the evaluator host is wired.",
   };
 }
