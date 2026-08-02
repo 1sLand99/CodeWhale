@@ -12594,6 +12594,7 @@ fn apply_workspace_runtime_state(app: &mut App, config: &Config, workspace: Path
     );
     app.skills_dir = crate::tui::app::resolve_skills_dir(&workspace, &config.skills_dir(), config);
     app.skills_scan_codewhale_only = config.skills_config().scan_codewhale_only();
+    app.project_context_pack_enabled = config.project_context_pack_enabled();
     app.refresh_skill_cache();
     app.workspace_context = None;
     if let Ok(mut cell) = app.workspace_context_cell.lock() {

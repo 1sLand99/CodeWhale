@@ -200,6 +200,47 @@ fn render_available_skills_context_omits_overflowing_skills() {
 }
 
 #[test]
+fn render_skills_block_holds_budget_with_five_digit_omission_counts() {
+    let tmpdir = TempDir::new().unwrap();
+    let mut registry = super::SkillRegistry::default();
+    for i in 0..11_000 {
+        registry.skills.push(super::Skill {
+            name: format!("skill-{i:05}"),
+            description: "x".to_string(),
+            localized_descriptions: std::collections::HashMap::new(),
+            invocation: super::SkillInvocation::ModelAndUser,
+            aliases: Vec::new(),
+            body: "body".to_string(),
+            path: tmpdir.path().join(format!("skill-{i:05}/SKILL.md")),
+            source: super::SkillSource::Native,
+        });
+        registry.warnings.push(format!("warning {i:05}"));
+    }
+
+    let rendered =
+        super::render_skills_block(&registry, "en", tmpdir.path()).expect("skill context");
+    let omitted_skills = rendered
+        .lines()
+        .find(|line| line.contains("additional skills omitted"))
+        .and_then(|line| line.split_whitespace().nth(2))
+        .and_then(|count| count.parse::<usize>().ok())
+        .expect("skill omission count");
+    let omitted_warnings = rendered
+        .lines()
+        .find(|line| line.contains("additional warnings omitted"))
+        .and_then(|line| line.split_whitespace().nth(2))
+        .and_then(|count| count.parse::<usize>().ok())
+        .expect("warning omission count");
+
+    assert!(omitted_skills > 9_999, "fixture must exercise five digits");
+    assert!(
+        omitted_warnings > 9_999,
+        "fixture must exercise five digits"
+    );
+    assert!(rendered.chars().count() <= super::MAX_AVAILABLE_SKILLS_CHARS);
+}
+
+#[test]
 fn render_skills_block_preserves_registry_precedence_under_prompt_budget() {
     let tmpdir = TempDir::new().unwrap();
     let mut registry = super::SkillRegistry::default();

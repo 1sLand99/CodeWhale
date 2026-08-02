@@ -250,14 +250,11 @@ impl ReportBuilder {
 }
 
 pub fn build_context_report(app: &App) -> PromptSourceMap {
-    let project_pack_active = app.system_prompt.as_ref().is_some_and(|prompt| {
-        crate::prompts::system_prompt_flat_text(prompt).contains("<project_context_pack>")
-    });
     let mut builder = base_source_entries(
         &app.model,
         &app.workspace,
         Some(&app.skills_dir),
-        project_pack_active,
+        app.project_context_pack_enabled,
         app.skills_scan_codewhale_only,
         app.ui_locale.tag(),
         app.mode,
@@ -614,7 +611,7 @@ fn base_source_entries(
         SourceKind::EnvironmentBlock,
         "Runtime environment",
         Some(workspace.display().to_string()),
-        ActivationReason::PerRequest,
+        ActivationReason::AlwaysOn,
         &crate::prompts::render_environment_block(workspace, locale_tag),
         CountingConfidence::High,
         Some(4),
@@ -1162,6 +1159,50 @@ mod tests {
             configured_pack.estimated_tokens > 0,
             "configured project pack must be counted"
         );
+
+        let environment = configured_report
+            .entries
+            .iter()
+            .find(|entry| entry.source_kind == SourceKind::EnvironmentBlock)
+            .expect("runtime environment entry");
+        assert_eq!(environment.activation_reason, ActivationReason::AlwaysOn);
+    }
+
+    #[test]
+    fn app_context_report_counts_configured_project_pack_before_first_turn() {
+        let tmp = tempdir().expect("tempdir");
+        fs::create_dir(tmp.path().join(".git")).expect("mkdir .git");
+        fs::create_dir(tmp.path().join("src")).expect("mkdir src");
+        fs::write(tmp.path().join("src/lib.rs"), "pub fn fixture() {}\n").expect("write fixture");
+        let mut config = Config::default();
+        config.context.project_pack = Some(true);
+        let app = App::new(
+            crate::tui::app::TuiOptions {
+                use_alt_screen: false,
+                use_bracketed_paste: false,
+                notes_path: tmp.path().join("notes.txt"),
+                mcp_config_path: tmp.path().join("mcp.json"),
+                start_in_agent_mode: true,
+                ..crate::test_support::test_tui_options(tmp.path())
+            },
+            &config,
+        );
+
+        assert!(
+            app.system_prompt.is_none(),
+            "fixture must be pre-first-turn"
+        );
+        let report = build_context_report(&app);
+        let project_pack = report
+            .entries
+            .iter()
+            .find(|entry| entry.source_kind == SourceKind::ProjectContextPack)
+            .expect("project pack entry");
+        assert_eq!(
+            project_pack.activation_reason,
+            ActivationReason::ConfigEnabled
+        );
+        assert!(project_pack.estimated_tokens > 0);
     }
 
     #[test]
