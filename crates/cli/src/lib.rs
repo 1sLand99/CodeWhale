@@ -6245,7 +6245,10 @@ model = "qwen-2.5-7b"
         let message = format!("{error:#}");
         assert!(message.contains("Secret storage write failed"), "{message}");
         assert!(message.contains("Refusing"), "{message}");
-        assert!(message.contains(&path.display().to_string()), "{message}");
+        assert!(
+            message.contains(&store.path().display().to_string()),
+            "{message}"
+        );
         assert!(store.config.providers.openrouter.api_key.is_none());
         assert!(!path.exists(), "plaintext config must stay untouched");
     }
