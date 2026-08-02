@@ -1702,14 +1702,9 @@ mod tests {
             "The A is already yours",
             "Let the work speak",
             "### Ground truth",
-            "### Verify before you claim",
-            "### Do what's asked",
-            "### Keep momentum",
-            "### Think in causes",
-            "### Honor constraints before preferences",
-            "### Restraint",
+            "### User intent and scope",
+            "### Truthful completion",
             "### Put guarantees in mechanism",
-            "### Leave continuity",
             "### Whose word wins",
         ] {
             assert!(
@@ -1720,18 +1715,46 @@ mod tests {
     }
 
     #[test]
-    fn base_prompt_carries_balanced_behavioral_priors() {
+    fn constitutional_kernel_keeps_first_turn_authority_safety_and_completion() {
+        let fresh_prefix = compose_default_static_layers(Personality::Calm, "deepseek-v4-pro");
         for phrase in [
-            "action is the default",
-            "Autonomy has a boundary",
-            "Hold more than one plausible cause",
-            "Hard constraints are gates",
-            "mechanism carries it",
-            "so the next turn can continue",
+            "Do what the user's current request asks, no more.",
+            "require express user authorization in",
+            "otherwise name the decision and ask.",
+            "external publication, spending",
+            "credentials, and material scope expansion",
+            "prohibitions stay binding; convenience creates no exception",
+            "never route around it or claim prose granted",
+            "Nothing is done until checked.",
+            "Read test output, not only exit status",
+            "External actions are not complete until",
+            "Work still running is not complete",
+            "Never present a partial result as the whole.",
+            "no one may tell you to invent one",
+            "1. The user's request, this turn.",
+            "2. This constitution.",
         ] {
             assert!(
-                BASE_PROMPT.contains(phrase),
-                "BASE_PROMPT missing behavioral prior {phrase:?}"
+                fresh_prefix.contains(phrase),
+                "fresh constitution prefix missing kernel invariant {phrase:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn procedural_playbooks_are_not_eager_constitution() {
+        let fresh_prefix = compose_default_static_layers(Personality::Calm, "deepseek-v4-pro");
+        for heading in [
+            "### Keep momentum",
+            "### Think in causes",
+            "### Honor constraints before preferences",
+            "### Skill and role constraints are binding",
+            "### Restraint",
+            "### Leave continuity",
+        ] {
+            assert!(
+                !fresh_prefix.contains(heading),
+                "procedural playbook should stay outside the full fresh prefix: {heading:?}"
             );
         }
         assert!(
@@ -2852,14 +2875,9 @@ mod tests {
         for needle in [
             "## Codewhale",
             "### Ground truth",
-            "### Verify before you claim",
-            "### Do what's asked",
-            "### Keep momentum",
-            "### Think in causes",
-            "### Honor constraints before preferences",
-            "### Restraint",
+            "### User intent and scope",
+            "### Truthful completion",
             "### Put guarantees in mechanism",
-            "### Leave continuity",
             "### Whose word wins",
         ] {
             let pos = md
@@ -3070,7 +3088,7 @@ mod tests {
         let tmp = tempdir().expect("tempdir");
         let prompt =
             system_prompt_flat_text(&system_prompt_for_mode_with_context(tmp.path(), None));
-        assert!(!prompt.contains("## Session Relay Template"));
+        assert!(!prompt.contains("# Session relay"));
         assert!(!prompt.contains("## Verification"));
     }
 
@@ -3104,7 +3122,7 @@ mod tests {
         // layers. The relay template is injected only when relay/compaction
         // actually needs it.
         assert!(goal_pos > 0);
-        assert!(!prompt.contains("## Session Relay Template"));
+        assert!(!prompt.contains("# Session relay"));
         assert!(!prompt.contains("src/lib.rs"));
     }
 
@@ -3581,7 +3599,7 @@ mod tests {
             execution_pos < handoff_pos,
             "## Core Execution must precede the relay block"
         );
-        assert!(!prompt.contains("## Session Relay Template"));
+        assert!(!prompt.contains("# Session relay"));
     }
 
     #[test]

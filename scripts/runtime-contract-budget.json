@@ -5,43 +5,43 @@
     "fixture_id": "representative-v1",
     "stages": {
       "base": {
-        "bytes": 10045,
-        "identity_sha256": "939efaa600c3b8ed409d1939e5d248a870fda3e17364a0aec43b414812ee8bb3"
+        "bytes": 6357,
+        "identity_sha256": "cb8e03ad29d06bdad365a8d7619965f41e0f1caee604737284598abaccbc5bb2"
       },
       "goal": {
-        "bytes": 12893,
+        "bytes": 9205,
         "delta_bytes": 80,
-        "identity_sha256": "f4b583ce3a5059f0877c833912e12c4652ac729d0f9125984211a308199c970a"
+        "identity_sha256": "9b181fb48bafee09daa50e07ecdf0962604e0f27b96a133ab734df068d1530d3"
       },
       "handoff": {
-        "bytes": 13281,
+        "bytes": 9593,
         "delta_bytes": 388,
-        "identity_sha256": "7c91e728ffb4ff4da063df7bc2b220fa8549c3cfa24f523c30fd86acdabf5af2"
+        "identity_sha256": "b10a398db1927bd8d3a8a5ac61ee7729ca6ac84d44fce3bebb73b4258617287d"
       },
       "instructions": {
-        "bytes": 10497,
+        "bytes": 6809,
         "delta_bytes": 131,
-        "identity_sha256": "23c600cbdd3af911c71324a807d55a74bd98f8152d7ad4f47f812af4093b8a67"
+        "identity_sha256": "3ae35f96d3f2a9f03005117df6c9fd60ad592f27686e9522991e74f6db4dcad3"
       },
       "memory": {
-        "bytes": 12813,
+        "bytes": 9125,
         "delta_bytes": 1649,
-        "identity_sha256": "3fc763d3548bba101ee4c9c241685faefd9da9dd30c21885172a3b12c8b784f2"
+        "identity_sha256": "363a8ac2ed61125e3076bd164543c6eae039d34910334556d6f7b6737ac1e2d5"
       },
       "project": {
-        "bytes": 10366,
+        "bytes": 6678,
         "delta_bytes": 321,
-        "identity_sha256": "88d73026a25657dc8acd797b040472505c550036f9dd2a77d5fa3d536de56e3b"
+        "identity_sha256": "1e60faf8e4601df7f891e850296c8ae405d0ee6fdaa1b41a9d49b1ba9cec7fa8"
       },
       "skill": {
-        "bytes": 11164,
+        "bytes": 7476,
         "delta_bytes": 667,
-        "identity_sha256": "c8be3873353b87f73f2f6a33fdd4bcfbc8cb75a2aab498f65865facd5033489e"
+        "identity_sha256": "ae6d0e1d6a519c6db96bdb9738c3616c78e9dbdf0e25b689511cce7caa2f678d"
       }
     },
     "system_prompt_blocks": 6,
-    "total_bytes": 13281,
-    "total_tokens_est": 3321
+    "total_bytes": 9593,
+    "total_tokens_est": 2399
   },
   "schema_version": 1,
   "skill_discovery": {
@@ -62,22 +62,22 @@
         "mode_instructions_bytes": 802,
         "mode_instructions_tokens_est": 201,
         "system_prompt_blocks": 4,
-        "system_prompt_bytes": 10045,
-        "system_prompt_tokens_est": 2512
+        "system_prompt_bytes": 6357,
+        "system_prompt_tokens_est": 1590
       },
       "operate": {
         "mode_instructions_bytes": 1671,
         "mode_instructions_tokens_est": 418,
         "system_prompt_blocks": 4,
-        "system_prompt_bytes": 10914,
-        "system_prompt_tokens_est": 2729
+        "system_prompt_bytes": 7226,
+        "system_prompt_tokens_est": 1807
       },
       "plan": {
         "mode_instructions_bytes": 517,
         "mode_instructions_tokens_est": 130,
         "system_prompt_blocks": 4,
-        "system_prompt_bytes": 9760,
-        "system_prompt_tokens_est": 2440
+        "system_prompt_bytes": 6072,
+        "system_prompt_tokens_est": 1518
       }
     }
   },

@@ -141,6 +141,22 @@ fn render_available_skills_context_returns_none_when_empty() {
 }
 
 #[test]
+fn render_skills_block_surfaces_warnings_when_no_skill_loaded() {
+    let tmpdir = TempDir::new().unwrap();
+    let mut registry = super::SkillRegistry::default();
+    registry
+        .warnings
+        .push("broken skill could not be parsed".to_string());
+
+    let rendered =
+        super::render_skills_block(&registry, "en", tmpdir.path()).expect("warning-only block");
+
+    assert!(rendered.contains("### Skill load warnings"));
+    assert!(rendered.contains("broken skill could not be parsed"));
+    assert!(rendered.chars().count() <= super::MAX_AVAILABLE_SKILLS_CHARS);
+}
+
+#[test]
 fn render_available_skills_context_truncates_long_descriptions() {
     let tmpdir = TempDir::new().unwrap();
     let long_desc = "x".repeat(2_000);

@@ -1337,7 +1337,7 @@ fn privacy_safe_skill_path(path: &Path, workspace: &Path) -> String {
 }
 
 fn render_skills_block(registry: &SkillRegistry, locale: &str, workspace: &Path) -> Option<String> {
-    if registry.is_empty() {
+    if registry.is_empty() && registry.warnings().is_empty() {
         return None;
     }
 
