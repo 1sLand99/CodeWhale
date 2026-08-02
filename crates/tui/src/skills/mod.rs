@@ -1250,7 +1250,8 @@ pub fn render_available_skills_context_for_workspace_with_mode_and_plugins(
     locale: &str,
     plugins: Option<&crate::plugins::PluginRegistry>,
 ) -> Option<String> {
-    let registry = discover_in_workspace_with_mode_and_plugins(workspace, mode, plugins);
+    let registry =
+        discover_in_workspace_with_mode_and_plugins(workspace, mode, plugins).into_enabled();
     render_skills_block(&registry, locale, workspace)
 }
 

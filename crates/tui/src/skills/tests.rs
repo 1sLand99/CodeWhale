@@ -92,6 +92,47 @@ fn render_available_skills_context_lists_paths_and_usage() {
 }
 
 #[test]
+fn workspace_prompt_omits_disabled_skills_without_configured_directory() {
+    let _env_lock = crate::test_support::lock_test_env();
+    let tmpdir = TempDir::new().unwrap();
+    let home = tmpdir.path().join("home");
+    let workspace = tmpdir.path().join("workspace");
+    let skills_root = workspace.join(".agents").join("skills");
+    std::fs::create_dir_all(&home).unwrap();
+    write_skill(
+        &skills_root,
+        "enabled-skill",
+        "Enabled skill",
+        "Instructions",
+    );
+    write_skill(
+        &skills_root,
+        "disabled-skill",
+        "Disabled skill",
+        "Instructions",
+    );
+    let _home = crate::test_support::EnvVarGuard::set("HOME", &home);
+    let _userprofile = crate::test_support::EnvVarGuard::set("USERPROFILE", &home);
+    let _codewhale_home =
+        crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.join(".codewhale"));
+
+    let mut state = crate::skill_state::SkillStateStore::load_default().unwrap();
+    state.set_enabled("disabled-skill", false).unwrap();
+    super::clear_skill_discovery_cache();
+
+    let rendered = super::render_available_skills_context_for_workspace_with_mode_and_plugins(
+        &workspace,
+        super::SkillDiscoveryMode::Compatible,
+        "en",
+        None,
+    )
+    .expect("enabled skill context");
+
+    assert!(rendered.contains("enabled-skill"));
+    assert!(!rendered.contains("disabled-skill"));
+}
+
+#[test]
 fn render_available_skills_context_uses_real_dir_name_not_frontmatter_name() {
     // Regression: when a community-installed or manually-placed skill
     // lives in a directory whose name differs from its frontmatter
