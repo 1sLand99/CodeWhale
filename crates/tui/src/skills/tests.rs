@@ -298,6 +298,46 @@ fn render_skills_block_holds_budget_with_five_digit_omission_counts() {
 }
 
 #[test]
+fn explicit_only_skills_do_not_reduce_ambient_index_capacity() {
+    let tmpdir = TempDir::new().unwrap();
+    let mut registry = super::SkillRegistry::default();
+    for i in 0..6 {
+        registry.skills.push(super::Skill {
+            name: format!("visible-{i:03}"),
+            description: "x".repeat(246),
+            localized_descriptions: std::collections::HashMap::new(),
+            invocation: super::SkillInvocation::ModelAndUser,
+            aliases: Vec::new(),
+            body: "body".to_string(),
+            path: tmpdir.path().join(format!("visible-{i:03}/SKILL.md")),
+            source: super::SkillSource::Native,
+        });
+    }
+
+    let baseline =
+        super::render_skills_block(&registry, "en", tmpdir.path()).expect("skill context");
+    assert!(!baseline.contains("additional skills omitted"));
+
+    let mut with_explicit_only = registry.clone();
+    for i in 0..10_000 {
+        with_explicit_only.skills.push(super::Skill {
+            name: format!("explicit-{i:05}"),
+            description: String::new(),
+            localized_descriptions: std::collections::HashMap::new(),
+            invocation: super::SkillInvocation::ExplicitOnly,
+            aliases: Vec::new(),
+            body: "body".to_string(),
+            path: tmpdir.path().join(format!("explicit-{i:05}/SKILL.md")),
+            source: super::SkillSource::Native,
+        });
+    }
+
+    let rendered = super::render_skills_block(&with_explicit_only, "en", tmpdir.path())
+        .expect("skill context");
+    assert_eq!(rendered, baseline);
+}
+
+#[test]
 fn render_skills_block_preserves_registry_precedence_under_prompt_budget() {
     let tmpdir = TempDir::new().unwrap();
     let mut registry = super::SkillRegistry::default();

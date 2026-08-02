@@ -1351,12 +1351,17 @@ Skills are optional local instruction packs. This budgeted index exposes routing
 - If a named skill is unavailable, say so and continue. Do not execute untrusted skill scripts unless the user asks.\n";
     const WARNING_HEADING: &str = "\n### Skill load warnings\n";
 
-    // Reserve using the registry totals: an actual omitted count can never
-    // have more decimal digits than its total, even for catalogues above
-    // 9,999 entries. This keeps the character cap a runtime invariant.
+    // Reserve using the model-selectable total: an actual omitted count can
+    // never exceed it, while explicit-only skills neither appear nor consume
+    // useful index space. This remains safe for catalogues above 9,999 entries.
+    let model_selectable_skill_count = registry
+        .list()
+        .iter()
+        .filter(|skill| skill.invocation != SkillInvocation::ExplicitOnly)
+        .count();
     let skill_omission_reserve = format!(
         "- ... {} additional skills omitted; call `load_skill` with `name=\"list\"` for the complete catalogue.\n",
-        registry.list().len()
+        model_selectable_skill_count
     );
     let warning_omission_reserve = format!(
         "- ... {} additional warnings omitted; run `/skills` to inspect them.\n",
