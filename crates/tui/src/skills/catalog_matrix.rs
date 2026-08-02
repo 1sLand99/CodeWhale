@@ -186,7 +186,7 @@ fn every_bundled_skill_is_explicitly_loadable_including_explicit_only() {
 }
 
 #[test]
-fn model_catalogue_contains_exactly_the_eligible_bundled_skills() {
+fn ambient_catalogue_is_a_progressive_subset_of_eligible_bundled_skills() {
     let (tmp, registry) = installed_registry();
     let block = rendered_catalogue(&registry, "en", tmp.path());
     let rendered: BTreeSet<String> = catalogue_entry_names(&block).into_iter().collect();
@@ -198,10 +198,20 @@ fn model_catalogue_contains_exactly_the_eligible_bundled_skills() {
         .map(|entry| entry.name)
         .collect();
 
-    assert_eq!(
-        rendered, expected,
-        "the ambient catalogue must contain exactly the model+user bundled skills"
+    assert!(
+        !rendered.is_empty(),
+        "the ambient routing page must not be empty"
     );
+    assert!(
+        rendered.is_subset(&expected),
+        "the ambient page may contain only model+user bundled skills"
+    );
+    if rendered.len() < expected.len() {
+        assert!(
+            block.contains("`load_skill` with `name=\"list\""),
+            "a truncated ambient page must point to complete discovery"
+        );
+    }
 }
 
 // ── negative: non-activation and explicit-only exclusion ────────────────────
@@ -326,7 +336,7 @@ fn no_two_bundled_skills_claim_the_same_alias() {
 // ── prompt-budget invariants ────────────────────────────────────────────────
 
 #[test]
-fn catalogue_has_one_entry_per_canonical_name_and_fits_the_prompt_budget() {
+fn catalogue_has_unique_entries_and_the_complete_block_fits_the_prompt_budget() {
     let (tmp, registry) = installed_registry();
     let block = rendered_catalogue(&registry, "en", tmp.path());
     let rendered = catalogue_entry_names(&block);
@@ -339,15 +349,16 @@ fn catalogue_has_one_entry_per_canonical_name_and_fits_the_prompt_budget() {
     );
 
     assert!(
-        !block.contains("additional skills omitted from this prompt budget"),
-        "the shipped pack alone must fit inside MAX_AVAILABLE_SKILLS_CHARS \
-         so user skills are not silently dropped"
-    );
-    assert!(
         block.chars().count() <= MAX_AVAILABLE_SKILLS_CHARS,
-        "rendered catalogue is {} chars, over the {MAX_AVAILABLE_SKILLS_CHARS} budget",
+        "complete ambient block is {} chars, over the {MAX_AVAILABLE_SKILLS_CHARS} budget",
         block.chars().count()
     );
+    if block.contains("additional skills omitted") {
+        assert!(
+            block.contains("`load_skill` with `name=\"list\""),
+            "budget overflow must advertise complete on-demand discovery"
+        );
+    }
 
     // No entry may smuggle newlines or an oversized description into the
     // prompt prefix — that is how a catalogue line would poison context.

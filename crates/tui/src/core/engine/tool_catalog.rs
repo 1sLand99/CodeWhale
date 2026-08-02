@@ -48,6 +48,9 @@ pub(super) const DEFAULT_ACTIVE_NATIVE_TOOLS: &[&str] = &[
     "Git",
     "Run",
     "agent",
+    // Skills use a bounded ambient index. Keep the tiny discovery/load schema
+    // active so omitted skills remain one-call discoverable on the first turn.
+    "load_skill",
     "remember",
     // Piagent phase B: the model-facing durable-task tool is `tasks`; the
     // legacy `task_create`/`task_list`/`task_read` names it replaces are

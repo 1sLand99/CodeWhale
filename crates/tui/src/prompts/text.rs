@@ -358,40 +358,29 @@ The write-block is a runtime setting the user may change at any time — not a p
 "#;
 
 // ── Runtime templates ──────────────────────────────────────────────
-/// Compaction relay template — written into the system prompt so the
-/// model knows the format to use when writing `.codewhale/handoff.md`.
-pub const COMPACT_TEMPLATE: &str = r#"## Compaction Relay
+/// Session-relay template — injected only into the `/relay` request. Automatic
+/// compaction owns its separate successor-brief prompt in `compaction.rs`.
+pub const COMPACT_TEMPLATE: &str = r#"## Session Relay Template
 
-The conversation above this point has been compacted. Below is a structured summary of what was discussed and decided. Read this first — it replaces re-reading the compressed transcript.
+# Session relay
 
-### Goal
-[The user's high-level objective for this session]
+## Goal
+[the user's objective and explicit constraints]
 
-### Constraints
-[What's off-limits, what bounds the work, what the user explicitly does NOT want changed]
+## Current work
+[the active To-do item, progress, and what is mid-flight]
 
-### Progress
+## Files and state
+[changed files, important paths, sub-agents, commands run]
 
-#### Done
-[What's complete and verified — landed commits, passing tests, shipped patches]
+## Decisions
+[key choices and why they were made]
 
-#### In Progress
-[What's mid-flight — partial implementations, open PRs, work-in-tree]
+## Verification
+[what passed, what failed, and what was not run]
 
-#### Blocked
-[What's stuck, why, and what would unblock it]
-
-### Key Decisions
-[Architectural choices, design decisions, trade-offs made — the WHY behind the work]
-
-### Next step
-[The single next action to take when resuming — one line, concrete]
-
-**Staleability:** This handoff is useful context, not law. Live tool output,
-file contents, the current repository state, and the user's current request
-outrank it. A handoff that declares a blocker does not bind a user who says to
-proceed. A handoff that claims completion does not override evidence that the
-work is unfinished. Use this summary as orientation.
+## Next action
+[one concrete action for the next thread]
 "#;
 /// Goal continuation audit template — injected by the engine when a runtime
 /// goal is active and the assistant tries to end a turn without closing it.

@@ -54,6 +54,10 @@ fn build_relay_instruction(app: &App, focus: Option<&str>) -> String {
         "Keep the existing file path for compatibility, but title the artifact `# Session relay`."
     );
     let _ = writeln!(out);
+    let _ = writeln!(out, "Use this relay structure:");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "{}", crate::prompts::COMPACT_TEMPLATE.trim());
+    let _ = writeln!(out);
     let _ = writeln!(out, "Current session snapshot:");
     let _ = writeln!(out, "- Workspace: {}", app.workspace.display());
     let _ = writeln!(out, "- Mode: {}", app.mode.label());
@@ -132,29 +136,6 @@ fn build_relay_instruction(app: &App, focus: Option<&str>) -> String {
     let _ = writeln!(
         out,
         "\nBefore writing, inspect the current transcript context and any live tool evidence you need. Do not invent test results, file changes, blockers, or decisions."
-    );
-    let _ = writeln!(
-        out,
-        "\nUse this compact structure:\n\
-         # Session relay\n\
-         \n\
-         ## Goal\n\
-         [the user's objective and any explicit constraints]\n\
-         \n\
-         ## Current work\n\
-         [the active To-do item, progress, and what is mid-flight]\n\
-         \n\
-         ## Files and state\n\
-         [changed files, important paths, sub-agents/RLM sessions, commands run]\n\
-         \n\
-         ## Decisions\n\
-         [why key choices were made]\n\
-         \n\
-         ## Verification\n\
-         [what passed, what failed, what was not run]\n\
-         \n\
-         ## Next action\n\
-         [one concrete action for the next thread]"
     );
     let _ = writeln!(
         out,

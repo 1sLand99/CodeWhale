@@ -81,14 +81,14 @@ fn render_available_skills_context_lists_paths_and_usage() {
 
     assert!(rendered.contains("## Skills"));
     assert!(rendered.contains("- test-skill: A test skill"));
-    assert!(rendered.contains("Use `load_skill` to open any skill body by name"));
-    assert!(rendered.contains("Direct file reads retain the normal workspace/trust boundary"));
+    assert!(rendered.contains("load the exact skill before applying it"));
+    assert!(rendered.contains("do not expand tool, approval, or trust authority"));
     assert!(
         rendered.contains(&expected_path),
         "expected path {expected_path:?} not in rendered output"
     );
     assert!(!rendered.contains(tmpdir.path().to_str().unwrap_or("/nonexistent")));
-    assert!(rendered.contains("### How to use skills"));
+    assert!(rendered.contains("### Usage"));
 }
 
 #[test]
@@ -190,12 +190,12 @@ fn render_available_skills_context_omits_overflowing_skills() {
         .expect("skill context");
 
     assert!(
-        rendered.contains("additional skills omitted from this prompt budget"),
+        rendered.contains("additional skills omitted"),
         "expected overflow notice"
     );
     assert!(
-        rendered.chars().count() < super::MAX_AVAILABLE_SKILLS_CHARS + 4_000,
-        "rendered length should stay near the budget"
+        rendered.chars().count() <= super::MAX_AVAILABLE_SKILLS_CHARS,
+        "rendered length must stay within the complete block budget"
     );
 }
 
@@ -245,7 +245,7 @@ fn render_skills_block_preserves_registry_precedence_under_prompt_budget() {
         "higher-precedence workspace skills must not be reordered behind globals:\n{rendered}"
     );
     assert!(
-        rendered.contains("additional skills omitted from this prompt budget"),
+        rendered.contains("additional skills omitted"),
         "fixture should exceed prompt budget"
     );
 }
