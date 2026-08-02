@@ -4426,7 +4426,9 @@ pub use codewhale_paths::{CODEWHALE_APP_DIR, LEGACY_APP_DIR};
 /// `$CODEWHALE_HOME` takes precedence when set. Otherwise defaults to
 /// `$HOME/.codewhale`. This is the write target for new product state.
 pub fn codewhale_home() -> Result<PathBuf> {
-    codewhale_paths::codewhale_home().context("failed to resolve home directory")
+    codewhale_paths::codewhale_home()
+        .map_err(anyhow::Error::new)?
+        .context("failed to resolve home directory")
 }
 
 /// Whether `$CODEWHALE_HOME` is set to a non-empty value.
@@ -4701,28 +4703,10 @@ pub fn resolve_config_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = explicit {
         return normalize_config_file_path(path);
     }
-    if let Ok(path) = std::env::var("CODEWHALE_CONFIG_PATH") {
-        if let Some(path) = config_path_from_env_value(&path)? {
-            return Ok(path);
-        }
-        return default_config_path();
-    }
-    if let Ok(path) = std::env::var("DEEPSEEK_CONFIG_PATH") {
-        if let Some(path) = config_path_from_env_value(&path)? {
-            return Ok(path);
-        }
-        return default_config_path();
+    if let Some(path) = codewhale_paths::config_path_override().map_err(anyhow::Error::new)? {
+        return normalize_config_file_path(path);
     }
     default_config_path()
-}
-
-fn config_path_from_env_value(path: &str) -> Result<Option<PathBuf>> {
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        Ok(None)
-    } else {
-        normalize_config_file_path(PathBuf::from(trimmed)).map(Some)
-    }
 }
 
 #[must_use]

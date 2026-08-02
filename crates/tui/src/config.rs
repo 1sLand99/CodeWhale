@@ -3806,7 +3806,7 @@ impl Config {
         profile: Option<&str>,
         environment_policy: ConfigEnvironmentPolicy,
     ) -> Result<Self> {
-        let path = resolve_load_config_path(path);
+        let path = try_resolve_load_config_path(path)?;
         let mut config = if let Some(path) = path.as_ref() {
             if path.exists() {
                 let contents = fs::read_to_string(path)
@@ -6353,7 +6353,8 @@ mod paths;
 use paths::{
     canonicalize_or_keep, codewhale_home_dir, default_config_path, default_managed_config_path,
     default_mcp_config_path, default_memory_path, default_notes_path, default_requirements_path,
-    default_skills_dir, env_config_path, expand_pathbuf, home_config_path, workspace_config_key,
+    default_skills_dir, env_config_path, expand_pathbuf, try_default_config_path,
+    workspace_config_key,
 };
 pub(crate) use paths::{effective_home_dir, expand_path};
 
@@ -6390,8 +6391,8 @@ pub(crate) fn is_workspace_trusted(workspace: &Path) -> bool {
 }
 
 pub(crate) fn save_workspace_trust(workspace: &Path) -> Result<PathBuf> {
-    let config_path = default_config_path()
-        .context("Failed to resolve config path: home directory not found.")?;
+    let config_path =
+        try_default_config_path().context("Failed to resolve config path for workspace trust.")?;
     ensure_parent_dir(&config_path)?;
 
     let project_key = workspace_config_key(workspace);
@@ -6432,8 +6433,12 @@ fn is_trusted_level(level: &str) -> bool {
 }
 
 pub(crate) fn resolve_load_config_path(path: Option<PathBuf>) -> Option<PathBuf> {
+    try_resolve_load_config_path(path).ok().flatten()
+}
+
+fn try_resolve_load_config_path(path: Option<PathBuf>) -> Result<Option<PathBuf>> {
     if let Some(path) = path {
-        return Some(expand_pathbuf(path));
+        return Ok(Some(expand_pathbuf(path)));
     }
 
     #[cfg(test)]
@@ -6441,36 +6446,18 @@ pub(crate) fn resolve_load_config_path(path: Option<PathBuf>) -> Option<PathBuf>
         let honor_guarded_environment = crate::test_support::current_thread_holds_test_env_lock();
         crate::test_support::with_test_env_lock(|| {
             if honor_guarded_environment {
-                resolve_default_load_config_path()
+                try_default_config_path().map(Some)
             } else {
-                Some(
+                Ok(Some(
                     crate::test_support::isolated_test_state_root()
                         .join(codewhale_config::CONFIG_FILE_NAME),
-                )
+                ))
             }
         })
     }
 
     #[cfg(not(test))]
-    resolve_default_load_config_path()
-}
-
-fn resolve_default_load_config_path() -> Option<PathBuf> {
-    if let Some(path) = env_config_path() {
-        if path.exists() {
-            return Some(path);
-        }
-
-        if let Some(home_path) = home_config_path()
-            && home_path.exists()
-        {
-            return Some(home_path);
-        }
-
-        return Some(path);
-    }
-
-    home_config_path()
+    try_default_config_path().map(Some)
 }
 
 /// Create an inspectable config file on first interactive launch.
@@ -9080,8 +9067,7 @@ fn save_root_api_key_for_secret_slot(
         anyhow::bail!("Refusing to save an empty API key.");
     }
 
-    let path = default_config_path()
-        .context("Failed to resolve config path: home directory not found.")?;
+    let path = try_default_config_path().context("Failed to resolve config path for API key.")?;
 
     if let Some(secrets) = credential_secret_store_for_save() {
         let prior_secret = secrets.get(secret_slot);
@@ -9191,8 +9177,8 @@ fn save_root_api_key_metadata_without_plaintext(
 
 /// Write the `api_key` slot directly to `config.toml`.
 fn save_api_key_to_config_file(api_key: &str) -> Result<PathBuf> {
-    let config_path = default_config_path()
-        .context("Failed to resolve config path: home directory not found.")?;
+    let config_path =
+        try_default_config_path().context("Failed to resolve config path for API key.")?;
 
     ensure_parent_dir(&config_path)?;
 
@@ -9646,8 +9632,8 @@ fn save_api_key_for_identity_unlocked(
     let api_key = api_key.trim();
     anyhow::ensure!(!api_key.is_empty(), "Refusing to save an empty API key.");
 
-    let config_path = default_config_path()
-        .context("Failed to resolve config path: home directory not found.")?;
+    let config_path =
+        try_default_config_path().context("Failed to resolve config path for provider API key.")?;
     ensure_parent_dir(&config_path)?;
 
     let key_inside = if provider == ApiProvider::Custom {
@@ -9818,8 +9804,8 @@ pub(crate) fn save_provider_model_for_identity(
     let model = model.trim();
     anyhow::ensure!(!model.is_empty(), "model cannot be empty");
 
-    let config_path = default_config_path()
-        .context("Failed to resolve config path: home directory not found.")?;
+    let config_path =
+        try_default_config_path().context("Failed to resolve config path for provider model.")?;
     ensure_parent_dir(&config_path)?;
 
     let is_legacy_literal_custom = provider == ApiProvider::Custom
@@ -9866,8 +9852,8 @@ pub(crate) fn save_provider_base_url_for_identity(
 ) -> Result<PathBuf> {
     let base_url = base_url.trim();
     anyhow::ensure!(!base_url.is_empty(), "base URL cannot be empty");
-    let config_path = default_config_path()
-        .context("Failed to resolve config path: home directory not found.")?;
+    let config_path = try_default_config_path()
+        .context("Failed to resolve config path for provider base URL.")?;
     ensure_parent_dir(&config_path)?;
     let key_inside = if identity.provider == ApiProvider::Custom {
         let key = identity.key.trim();
@@ -9895,8 +9881,8 @@ pub(crate) fn save_provider_context_window_for_identity(
     context_window: u32,
 ) -> Result<PathBuf> {
     anyhow::ensure!(context_window > 0, "context window must be greater than 0");
-    let config_path = default_config_path()
-        .context("Failed to resolve config path: home directory not found.")?;
+    let config_path = try_default_config_path()
+        .context("Failed to resolve config path for provider context window.")?;
     ensure_parent_dir(&config_path)?;
     let key_inside = if identity.provider == ApiProvider::Custom {
         let key = identity.key.trim();
@@ -9952,8 +9938,8 @@ pub(crate) fn persist_external_credential_consent_for_at(
     )?;
     let config_path = match config_path {
         Some(path) => path.to_path_buf(),
-        None => default_config_path()
-            .context("Failed to resolve config path: home directory not found.")?,
+        None => try_default_config_path()
+            .context("Failed to resolve config path for external credential consent.")?,
     };
     ensure_parent_dir(&config_path)?;
     let key_inside = provider_config_key(provider).context("external credential provider key")?;
@@ -10022,8 +10008,8 @@ pub(crate) fn revoke_external_credential_consent_for_at(
     );
     let config_path = match config_path {
         Some(path) => path.to_path_buf(),
-        None => default_config_path()
-            .context("Failed to resolve config path: home directory not found.")?,
+        None => try_default_config_path()
+            .context("Failed to resolve config path for external credential consent.")?,
     };
     ensure_parent_dir(&config_path)?;
     let key_inside = provider_config_key(provider).context("external credential provider key")?;
@@ -10197,8 +10183,8 @@ fn clear_api_key_unlocked() -> Result<()> {
     // Strip api_key entries from config.toml, including provider-scoped
     // nested entries. Clearing a config file must not trigger platform
     // credential prompts.
-    let config_path = default_config_path()
-        .context("Failed to resolve config path: home directory not found.")?;
+    let config_path = try_default_config_path()
+        .context("Failed to resolve config path while clearing API keys.")?;
 
     if !config_path.exists() {
         return Ok(());
@@ -10244,8 +10230,8 @@ pub fn clear_active_provider_api_key(provider: &str) -> Result<()> {
 }
 
 fn clear_active_provider_api_key_unlocked(provider: &str) -> Result<()> {
-    let config_path = default_config_path()
-        .context("Failed to resolve config path: home directory not found.")?;
+    let config_path = try_default_config_path()
+        .context("Failed to resolve config path while clearing API keys.")?;
 
     if !config_path.exists() {
         return Ok(());

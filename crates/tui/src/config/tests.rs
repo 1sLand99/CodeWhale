@@ -4871,7 +4871,7 @@ fn test_load_uses_tilde_expanded_deepseek_config_path() -> Result<()> {
 }
 
 #[test]
-fn test_load_falls_back_to_home_config_when_env_path_missing() -> Result<()> {
+fn missing_env_config_path_does_not_fall_back_to_a_different_home_file() -> Result<()> {
     let _lock = lock_test_env();
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4898,7 +4898,52 @@ fn test_load_falls_back_to_home_config_when_env_path_missing() -> Result<()> {
     }
 
     let config = Config::load(None, None)?;
-    assert_eq!(config.api_key.as_deref(), Some("home-key"));
+    assert_eq!(
+        config.api_key, None,
+        "reads must honor the same missing env target that writes will create"
+    );
+    Ok(())
+}
+
+#[test]
+fn save_then_load_uses_the_same_missing_absolute_env_config_path() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let config_path = temp_root.path().join("nested/config.toml");
+    let _config_path = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", &config_path);
+    let _legacy_config_path = EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
+    let identity = ProviderIdentity {
+        provider: ApiProvider::Openrouter,
+        key: ApiProvider::Openrouter.as_str().to_string(),
+        exact_id: Some(ApiProvider::Openrouter.as_str().to_string()),
+    };
+
+    let written =
+        save_provider_model_for_identity(&identity, &Config::default(), "round-trip-model")?;
+    assert_eq!(written, config_path);
+    let loaded = Config::load(None, None)?;
+    assert_eq!(
+        loaded
+            .provider_config_for(ApiProvider::Openrouter)
+            .and_then(|provider| provider.model.as_deref()),
+        Some("round-trip-model")
+    );
+    Ok(())
+}
+
+#[test]
+fn relative_config_env_is_a_load_error() -> Result<()> {
+    let _lock = lock_test_env();
+    let temp_root = tempfile::tempdir()?;
+    let _guard = EnvGuard::new(temp_root.path());
+    let _config_path = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", ".codewhale/config.toml");
+    let _legacy_config_path = EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
+
+    let error = Config::load(None, None).expect_err("relative config path must fail closed");
+    let message = format!("{error:#}");
+    assert!(message.contains("CODEWHALE_CONFIG_PATH"), "{message}");
+    assert!(message.contains("absolute"), "{message}");
     Ok(())
 }
 
