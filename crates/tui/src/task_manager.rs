@@ -1019,11 +1019,11 @@ impl TaskManager {
         let mut items = state
             .tasks
             .values()
+            .filter(|record| {
+                workspace.is_none_or(|workspace| record.workspace.as_path() == workspace)
+            })
             .map(TaskSummary::from)
             .collect::<Vec<_>>();
-        if let Some(workspace) = workspace {
-            items.retain(|item| item.workspace.as_path() == workspace);
-        }
         items.sort_by_key(|i| std::cmp::Reverse(i.created_at));
         if let Some(limit) = limit {
             items.truncate(limit);
