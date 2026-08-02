@@ -2457,12 +2457,13 @@ mod tests {
     #[test]
     fn codewhale_home_override_returns_the_env_value_verbatim() {
         let _lock = CODEWHALE_HOME_TEST_LOCK.lock().unwrap();
-        let _g = CodeWhaleHomeGuard::set("/tmp/cw-isolated-state");
+        let override_path = std::env::temp_dir().join("cw-isolated-state");
+        let _g = CodeWhaleHomeGuard::set(override_path.to_str().unwrap());
         // The env var IS the home dir — no ".codewhale" appended. This matches
         // codewhale_home() in config ($CODEWHALE_HOME=/x means home is /x).
         assert_eq!(
             codewhale_home_override().unwrap().as_deref(),
-            Some(std::path::Path::new("/tmp/cw-isolated-state"))
+            Some(override_path.as_path())
         );
     }
 
