@@ -9019,9 +9019,10 @@ pub enum SavedCredential {
         /// Absolute path to the credential-free config metadata file.
         path: PathBuf,
     },
-    /// Stored in the Codewhale config file only. Fallback when the selected
-    /// secret backend cannot be written, or under `cfg(test)` so unit tests do
-    /// not pollute the host credential store.
+    /// Stored in the Codewhale config file only under `cfg(test)` so unit tests
+    /// without an explicitly isolated secret backend do not pollute the host
+    /// credential store. Production save flows never automatically downgrade
+    /// a failed secret-store write to plaintext.
     ConfigFile(PathBuf),
 }
 
@@ -9047,8 +9048,8 @@ impl SavedCredential {
 /// The selected durable secret backend is attempted first. On success the
 /// config keeps only non-secret auth metadata and any older plaintext copy is
 /// removed. When the secret-store write fails (OS permission denied, corrupt
-/// or read-only file backend, etc.), `config.toml` remains the headless-safe
-/// fallback and the function reports [`SavedCredential::ConfigFile`].
+/// or read-only file backend, etc.), the save fails loudly rather than writing
+/// the key to plaintext `config.toml`.
 ///
 /// Under `cfg(test)` the secret-store path is enabled only when the test sets
 /// both an isolated `CODEWHALE_HOME` and an explicit backend, preventing unit
@@ -9109,16 +9110,13 @@ fn save_root_api_key_for_secret_slot(
                     return Ok(SavedCredential::KeyringAndConfigFile { backend, path });
                 }
                 Err(err) => {
-                    tracing::warn!(
-                        "secret-store write failed; key saved to config.toml only: {err}"
-                    );
-                    // Fall through to the ConfigFile-only outcome below.
+                    return Err(plaintext_credential_fallback_refused("write", &path, &err));
                 }
             },
             Err(error) => {
-                tracing::warn!(
-                    "secret-store snapshot failed; key saved to config.toml only: {error}"
-                );
+                return Err(plaintext_credential_fallback_refused(
+                    "snapshot", &path, &error,
+                ));
             }
         }
     }
@@ -9126,6 +9124,17 @@ fn save_root_api_key_for_secret_slot(
     let path = save_api_key_to_config_file(trimmed)?;
     codewhale_config::scrub_plaintext_api_keys_from_config_backup(&path)?;
     Ok(SavedCredential::ConfigFile(path))
+}
+
+fn plaintext_credential_fallback_refused(
+    operation: &str,
+    config_path: &Path,
+    failure: &dyn std::fmt::Display,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "Secret storage {operation} failed: {failure}. Refusing to write the API key in plaintext to {}. Fix the configured secret backend and retry; Codewhale did not change that file.",
+        codewhale_config::quote_os_path(config_path)
+    )
 }
 
 #[cfg(not(test))]
@@ -9732,17 +9741,19 @@ fn save_api_key_for_identity_unlocked(
                     return Ok(config_path);
                 }
                 Err(err) => {
-                    tracing::warn!(
-                        provider = %identity.key,
-                        "secret-store write failed; key saved to config.toml only: {err}"
-                    );
+                    return Err(plaintext_credential_fallback_refused(
+                        "write",
+                        &config_path,
+                        &err,
+                    ));
                 }
             },
             Err(error) => {
-                tracing::warn!(
-                    provider = %identity.key,
-                    "secret-store snapshot failed; key saved to config.toml only: {error}"
-                );
+                return Err(plaintext_credential_fallback_refused(
+                    "snapshot",
+                    &config_path,
+                    &error,
+                ));
             }
         }
     }
