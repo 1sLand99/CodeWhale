@@ -57,7 +57,6 @@ impl std::error::Error for PathOverrideError {}
 /// values are preserved on platforms that support them instead of silently
 /// dropping an otherwise valid filesystem path. A leading `~` is expanded;
 /// every other relative value is rejected.
-#[must_use]
 pub fn codewhale_home_override() -> Result<Option<PathBuf>, PathOverrideError> {
     absolute_path_env("CODEWHALE_HOME")
 }
