@@ -2920,6 +2920,7 @@ fn save_key_refuses_plaintext_config_when_isolated_file_store_is_unwritable() ->
     let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", codewhale_home.as_os_str());
     let _config_path = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", config_path.as_os_str());
     let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let resolved_config_path = codewhale_config::resolve_config_path(None)?;
 
     let error = save_api_key("fallback-test-credential")
         .expect_err("secret-store failure must not downgrade to plaintext");
@@ -2927,11 +2928,11 @@ fn save_key_refuses_plaintext_config_when_isolated_file_store_is_unwritable() ->
     assert!(message.contains("Secret storage"), "{message}");
     assert!(message.contains("Refusing"), "{message}");
     assert!(
-        message.contains(&config_path.display().to_string()),
+        message.contains(&codewhale_config::quote_os_path(&resolved_config_path)),
         "{message}"
     );
     assert!(
-        !config_path.exists(),
+        !resolved_config_path.exists(),
         "plaintext config must stay untouched"
     );
     Ok(())
@@ -2952,6 +2953,7 @@ fn provider_key_refuses_plaintext_config_when_secret_store_snapshot_fails() -> R
     let _codewhale_home = EnvVarGuard::set("CODEWHALE_HOME", &codewhale_home);
     let _config_path = EnvVarGuard::set("CODEWHALE_CONFIG_PATH", &config_path);
     let _backend = EnvVarGuard::set("CODEWHALE_SECRET_BACKEND", "file");
+    let resolved_config_path = codewhale_config::resolve_config_path(None)?;
     let identity = ProviderIdentity {
         provider: ApiProvider::Openrouter,
         key: ApiProvider::Openrouter.as_str().to_string(),
@@ -2963,11 +2965,11 @@ fn provider_key_refuses_plaintext_config_when_secret_store_snapshot_fails() -> R
     let message = format!("{error:#}");
     assert!(message.contains("snapshot"), "{message}");
     assert!(
-        message.contains(&config_path.display().to_string()),
+        message.contains(&codewhale_config::quote_os_path(&resolved_config_path)),
         "{message}"
     );
     assert!(
-        !config_path.exists(),
+        !resolved_config_path.exists(),
         "plaintext config must stay untouched"
     );
     Ok(())
