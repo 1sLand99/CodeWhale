@@ -6246,7 +6246,7 @@ model = "qwen-2.5-7b"
         assert!(message.contains("Secret storage write failed"), "{message}");
         assert!(message.contains("Refusing"), "{message}");
         assert!(
-            message.contains(&store.path().display().to_string()),
+            message.contains(&codewhale_config::quote_os_path(store.path())),
             "{message}"
         );
         assert!(store.config.providers.openrouter.api_key.is_none());
