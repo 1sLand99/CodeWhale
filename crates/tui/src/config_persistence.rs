@@ -427,7 +427,7 @@ pub(crate) fn config_toml_path(config_path: Option<&Path>) -> anyhow::Result<Pat
     if let Some(path) = config_path {
         return Ok(expand_path(path.to_string_lossy().as_ref()));
     }
-    crate::config::resolve_load_config_path(None)
+    crate::config::resolve_load_config_path(None)?
         .context("failed to resolve the active config.toml path")
 }
 

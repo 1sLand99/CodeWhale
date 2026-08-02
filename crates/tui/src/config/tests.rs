@@ -539,7 +539,7 @@ fn load_honors_codewhale_home_for_primary_config_path() -> Result<()> {
     let _deepseek_config = EnvVarGuard::remove("DEEPSEEK_CONFIG_PATH");
 
     let expected = codewhale_home.join("config.toml");
-    assert_eq!(default_config_path().as_deref(), Some(expected.as_path()));
+    assert_eq!(default_config_path()?, expected);
     let config = Config::load(None, None)?;
 
     assert_eq!(config.provider.as_deref(), Some("zai"));
@@ -4861,7 +4861,7 @@ fn codewhale_config_path_env_wins_over_legacy_env() -> Result<()> {
         env::set_var("DEEPSEEK_CONFIG_PATH", &legacy);
     }
 
-    assert_eq!(env_config_path().unwrap(), preferred);
+    assert_eq!(env_config_path().unwrap().unwrap(), preferred);
 
     unsafe {
         EnvGuard::restore_var("CODEWHALE_CONFIG_PATH", prev_codewhale);
@@ -5018,6 +5018,23 @@ fn relative_config_env_is_a_load_error() -> Result<()> {
     let message = format!("{error:#}");
     assert!(message.contains("CODEWHALE_CONFIG_PATH"), "{message}");
     assert!(message.contains("absolute"), "{message}");
+
+    for error in [
+        default_config_path().expect_err("default path must preserve the override error"),
+        resolve_load_config_path(None)
+            .expect_err("load-path helper must preserve the override error"),
+        ensure_config_file_exists(None)
+            .expect_err("first-run config creation must preserve the override error"),
+    ] {
+        let message = format!("{error:#}");
+        assert!(message.contains("CODEWHALE_CONFIG_PATH"), "{message}");
+        assert!(message.contains("absolute"), "{message}");
+        assert!(!message.contains("home directory not found"), "{message}");
+    }
+    let error = env_config_path().expect_err("env helper must preserve the override error");
+    let message = error.to_string();
+    assert!(message.contains("CODEWHALE_CONFIG_PATH"), "{message}");
+    assert!(workspace_trust_config_candidate_paths().is_empty());
     Ok(())
 }
 

@@ -3461,8 +3461,10 @@ impl Config {
         }
 
         if let Some(profile) = profile {
-            let Some(path) = resolve_load_config_path(config_path.map(Path::to_path_buf)) else {
-                return Some("an unresolved active config profile");
+            let path = match resolve_load_config_path(config_path.map(Path::to_path_buf)) {
+                Ok(Some(path)) => path,
+                Ok(None) => return Some("an unresolved active config profile"),
+                Err(_) => return Some("an invalid active config path override"),
             };
             let Some(parsed) = std::fs::read_to_string(path)
                 .ok()
@@ -3548,12 +3550,15 @@ impl Config {
             return ApprovalPolicyControl::Environment;
         }
 
-        let Some(path) = resolve_load_config_path(config_path.map(Path::to_path_buf)) else {
-            return if self.approval_policy.is_some() {
-                ApprovalPolicyControl::Ambiguous
-            } else {
-                ApprovalPolicyControl::Unset
-            };
+        let path = match resolve_load_config_path(config_path.map(Path::to_path_buf)) {
+            Ok(Some(path)) => path,
+            Ok(None) | Err(_) => {
+                return if self.approval_policy.is_some() {
+                    ApprovalPolicyControl::Ambiguous
+                } else {
+                    ApprovalPolicyControl::Unset
+                };
+            }
         };
         let parsed = std::fs::read_to_string(path)
             .ok()
@@ -3625,12 +3630,15 @@ impl Config {
             return ShellAccessControl::Environment;
         }
 
-        let Some(path) = resolve_load_config_path(config_path.map(Path::to_path_buf)) else {
-            return if self.allow_shell.is_some() {
-                ShellAccessControl::Ambiguous
-            } else {
-                ShellAccessControl::Unset
-            };
+        let path = match resolve_load_config_path(config_path.map(Path::to_path_buf)) {
+            Ok(Some(path)) => path,
+            Ok(None) | Err(_) => {
+                return if self.allow_shell.is_some() {
+                    ShellAccessControl::Ambiguous
+                } else {
+                    ShellAccessControl::Unset
+                };
+            }
         };
         let parsed = std::fs::read_to_string(path)
             .ok()
@@ -3806,7 +3814,7 @@ impl Config {
         profile: Option<&str>,
         environment_policy: ConfigEnvironmentPolicy,
     ) -> Result<Self> {
-        let path = try_resolve_load_config_path(path)?;
+        let path = resolve_load_config_path(path)?;
         let mut config = if let Some(path) = path.as_ref() {
             if path.exists() {
                 let contents = fs::read_to_string(path)
@@ -6359,12 +6367,28 @@ use paths::{
 pub(crate) use paths::{effective_home_dir, expand_path};
 
 pub(crate) fn workspace_trust_config_candidate_paths() -> Vec<PathBuf> {
-    if let Some(path) = env_config_path() {
-        return vec![path];
+    match env_config_path() {
+        Ok(Some(path)) => return vec![path],
+        Ok(None) => {}
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "invalid config path override; refusing workspace-trust fallback"
+            );
+            return Vec::new();
+        }
     }
 
-    if let Some(codewhale_home) = codewhale_home_dir() {
-        return vec![codewhale_home.join("config.toml")];
+    match codewhale_home_dir() {
+        Ok(Some(codewhale_home)) => return vec![codewhale_home.join("config.toml")],
+        Ok(None) => {}
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "invalid Codewhale home override; refusing workspace-trust fallback"
+            );
+            return Vec::new();
+        }
     }
 
     let Some(home) = effective_home_dir() else {
@@ -6378,8 +6402,15 @@ pub(crate) fn workspace_trust_config_candidate_paths() -> Vec<PathBuf> {
 
 #[must_use]
 pub(crate) fn is_workspace_trusted(workspace: &Path) -> bool {
-    let Some(config_path) = default_config_path() else {
-        return false;
+    let config_path = match default_config_path() {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "failed to resolve workspace-trust config; treating workspace as untrusted"
+            );
+            return false;
+        }
     };
     let Ok(raw) = fs::read_to_string(config_path) else {
         return false;
@@ -6432,11 +6463,7 @@ fn is_trusted_level(level: &str) -> bool {
     level.trim().eq_ignore_ascii_case("trusted")
 }
 
-pub(crate) fn resolve_load_config_path(path: Option<PathBuf>) -> Option<PathBuf> {
-    try_resolve_load_config_path(path).ok().flatten()
-}
-
-fn try_resolve_load_config_path(path: Option<PathBuf>) -> Result<Option<PathBuf>> {
+pub(crate) fn resolve_load_config_path(path: Option<PathBuf>) -> Result<Option<PathBuf>> {
     if let Some(path) = path {
         return Ok(Some(expand_pathbuf(path)));
     }
@@ -6465,10 +6492,10 @@ fn try_resolve_load_config_path(path: Option<PathBuf>) -> Result<Option<PathBuf>
 /// The file intentionally omits `api_key`; onboarding or `codewhale auth set`
 /// writes that field after the user supplies a key.
 pub fn ensure_config_file_exists(path: Option<PathBuf>) -> Result<Option<PathBuf>> {
-    let config_path = path
-        .map(expand_pathbuf)
-        .or_else(default_config_path)
-        .context("Failed to resolve config path: home directory not found.")?;
+    let config_path = match path {
+        Some(path) => expand_pathbuf(path),
+        None => default_config_path().context("Failed to resolve config path.")?,
+    };
     if config_path.exists() {
         return Ok(None);
     }
