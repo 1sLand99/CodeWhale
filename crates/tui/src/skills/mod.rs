@@ -1234,10 +1234,8 @@ pub(crate) fn discover_for_workspace_and_dir_with_home_and_mode_and_plugins(
     discover_from_directories_with_plugins(dirs, plugins)
 }
 
-/// Render the system-prompt skills block from every workspace
-/// candidate directory plus the global default (#432). Wraps
-/// [`discover_in_workspace`] for callers (e.g. `prompts.rs`) that
-/// only have the workspace path to hand.
+/// Test-only convenience wrapper for rendering the system-prompt skills block
+/// from every workspace candidate directory plus the global default (#432).
 #[cfg(test)]
 #[must_use]
 pub fn render_available_skills_context_for_workspace(workspace: &Path) -> Option<String> {

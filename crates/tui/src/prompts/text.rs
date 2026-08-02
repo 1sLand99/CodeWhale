@@ -360,9 +360,7 @@ The write-block is a runtime setting the user may change at any time — not a p
 // ── Runtime templates ──────────────────────────────────────────────
 /// Session-relay template — injected only into the `/relay` request. Automatic
 /// compaction owns its separate successor-brief prompt in `compaction.rs`.
-pub const COMPACT_TEMPLATE: &str = r#"## Session Relay Template
-
-# Session relay
+pub const COMPACT_TEMPLATE: &str = r#"# Session relay
 
 ## Goal
 [the user's objective and explicit constraints]

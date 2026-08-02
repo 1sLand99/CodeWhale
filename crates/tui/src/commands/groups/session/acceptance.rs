@@ -577,7 +577,6 @@ fn codewhale_sends_session_relay_instruction_focused_on(
 
     assert!(message.contains("Write or update `.deepseek/handoff.md`."));
     assert!(message.contains("# Session relay"));
-    assert!(message.contains("## Session Relay Template"));
     assert!(message.contains("## Verification"));
     assert!(
         message.contains(&format!("- Requested relay focus: {focus}")),
