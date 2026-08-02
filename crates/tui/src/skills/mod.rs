@@ -926,11 +926,13 @@ pub(crate) use roots::existing_skill_dirs;
 /// Warnings from each scanned directory accumulate so the model
 /// (and the user via `/skill list`) can see why a skill didn't
 /// load.
+#[cfg(test)]
 #[must_use]
 pub fn discover_in_workspace(workspace: &Path) -> SkillRegistry {
     discover_in_workspace_with_mode(workspace, SkillDiscoveryMode::Compatible)
 }
 
+#[cfg(test)]
 #[must_use]
 pub fn discover_in_workspace_with_mode(
     workspace: &Path,
@@ -1236,6 +1238,7 @@ pub(crate) fn discover_for_workspace_and_dir_with_home_and_mode_and_plugins(
 /// candidate directory plus the global default (#432). Wraps
 /// [`discover_in_workspace`] for callers (e.g. `prompts.rs`) that
 /// only have the workspace path to hand.
+#[cfg(test)]
 #[must_use]
 pub fn render_available_skills_context_for_workspace(workspace: &Path) -> Option<String> {
     let registry = discover_in_workspace(workspace);
@@ -1253,46 +1256,17 @@ pub fn render_available_skills_context_for_workspace_with_mode_and_plugins(
     render_skills_block(&registry, locale, workspace)
 }
 
-/// Codex's progressive-disclosure contract: the model sees skill names,
-/// descriptions, and paths up front, then opens the specific `SKILL.md` only
-/// when a skill is relevant.
+/// Progressive-disclosure contract: the model sees a bounded page of skill
+/// names, descriptions, and paths, then uses `load_skill` for the complete
+/// catalogue or a specific `SKILL.md` body.
 ///
-/// Single-directory variant — use
-/// [`render_available_skills_context_for_workspace`] when scanning
-/// a workspace for cross-tool skill folders (#432).
+/// Test-only single-directory variant. Production callers scan the complete
+/// workspace/global registry through the mode-and-plugin variants above.
 #[cfg(test)]
 #[must_use]
 fn render_available_skills_context(skills_dir: &Path) -> Option<String> {
     let registry = SkillRegistry::discover(skills_dir);
     render_skills_block(&registry, "en", skills_dir)
-}
-
-/// Union variant: merge skills discovered in the `workspace` (cross-tool skill
-/// folders) and an explicitly-configured `skills_dir`.
-#[must_use]
-pub fn render_available_skills_context_for_workspace_and_dir(
-    workspace: &Path,
-    skills_dir: &Path,
-) -> Option<String> {
-    render_available_skills_context_for_workspace_and_dir_with_mode(
-        workspace,
-        skills_dir,
-        SkillDiscoveryMode::Compatible,
-        "en",
-    )
-}
-
-#[must_use]
-pub fn render_available_skills_context_for_workspace_and_dir_with_mode(
-    workspace: &Path,
-    skills_dir: &Path,
-    mode: SkillDiscoveryMode,
-    locale: &str,
-) -> Option<String> {
-    let registry =
-        discover_for_workspace_and_dir_with_mode_and_plugins(workspace, skills_dir, mode, None)
-            .into_enabled();
-    render_skills_block(&registry, locale, workspace)
 }
 
 #[must_use]
