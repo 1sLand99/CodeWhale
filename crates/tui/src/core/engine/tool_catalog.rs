@@ -212,6 +212,29 @@ pub(super) fn build_model_tool_catalog_with_surface(
     native_tools
 }
 
+const REGISTRY_FIRST_SHELL_GUIDANCE: &str = "Before using this tool for a task whose core operation is a specialized capability (for example media or document conversion, data transformation, browser automation, database or service access, or a developer utility), call registry_sync first. If its complete catalog contains any plausible match, call start_registry_mcp_server and inspect the connected tools before using a shell alternative. Use the shell directly for ordinary repo-native work and simple file operations, or after every Registry entry is clearly irrelevant or the matching server fails to start.";
+
+/// Put the Registry-first decision at the point where the model considers its
+/// strongest fallback. The discovery skill body is lazy-loaded, so relying on
+/// it alone creates a loop: the model must already prefer discovery before it
+/// can read the instruction that tells it to prefer discovery.
+///
+/// This is applied only while MCP is enabled. It changes no dispatch order and
+/// performs no task matching in the host; the model still compares the user's
+/// context against the Registry catalog itself.
+pub(super) fn apply_registry_first_shell_guidance(catalog: &mut [Tool]) {
+    let Some(shell) = catalog.iter_mut().find(|tool| tool.name == "exec_shell") else {
+        return;
+    };
+    if shell.description.contains(REGISTRY_FIRST_SHELL_GUIDANCE) {
+        return;
+    }
+    if !shell.description.ends_with(char::is_whitespace) {
+        shell.description.push(' ');
+    }
+    shell.description.push_str(REGISTRY_FIRST_SHELL_GUIDANCE);
+}
+
 fn apply_tool_surface_budget(
     catalog: &mut [Tool],
     surface_budget: ToolSurfaceBudget,

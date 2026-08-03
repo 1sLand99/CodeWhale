@@ -3683,6 +3683,16 @@ impl McpPool {
         Ok(())
     }
 
+    /// Remove an in-memory runtime server after a failed start attempt.
+    /// This makes dynamic registration transactional: callers may retry the
+    /// same deterministic name after correcting an argument or install issue.
+    pub fn remove_runtime_server_config(&mut self, name: &str) {
+        self.drop_connection(name, "runtime server start rolled back");
+        if self.dynamic_servers.write().remove(name).is_some() {
+            self.catalog_generation.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
     /// Get list of connected server names
     #[allow(dead_code)] // Public API; the HTTP list endpoint no longer spawns a pool to call it (#3532)
     pub fn connected_servers(&self) -> Vec<&str> {

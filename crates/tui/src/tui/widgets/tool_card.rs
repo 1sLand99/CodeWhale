@@ -87,8 +87,11 @@ pub fn tool_family_for_name(name: &str) -> ToolFamily {
         | "exec_shell_interact"
         | "exec_shell_cancel"
         | "task_shell_start"
-        | "task_shell_wait" => ToolFamily::Run,
-        "grep_files" | "file_search" | "web_search" | "fetch_url" => ToolFamily::Find,
+        | "task_shell_wait"
+        | "start_registry_mcp_server" => ToolFamily::Run,
+        "grep_files" | "file_search" | "web_search" | "fetch_url" | "registry_sync" => {
+            ToolFamily::Find
+        }
         "agent" => ToolFamily::Delegate,
         "rlm_open" | "rlm_eval" | "rlm_configure" | "rlm_close" | "rlm" => ToolFamily::Rlm,
         "run_tests"

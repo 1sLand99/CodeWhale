@@ -987,6 +987,30 @@ impl ToolRegistryBuilder {
         self
     }
 
+    /// Register the `registry_sync` tool for fetching and caching
+    /// MCP Registry server metadata.
+    #[must_use]
+    pub fn with_registry_mcp_sync_tool(mut self) -> Self {
+        self.tools
+            .push(Arc::new(super::mcp_registry::McpSyncRegistry));
+        self
+    }
+
+    /// Register the structured Registry launcher. Unlike `start_mcp_server`,
+    /// this accepts no free-form command and can only launch cached,
+    /// zero-environment stdio candidates.
+    #[must_use]
+    pub fn with_registry_mcp_start_tool(
+        mut self,
+        mcp_pool: std::sync::Arc<tokio::sync::Mutex<crate::mcp::McpPool>>,
+    ) -> Self {
+        self.tools
+            .push(Arc::new(super::mcp_registry::StartRegistryMcpServer::new(
+                mcp_pool,
+            )));
+        self
+    }
+
     /// Include all agent tools under a typed shell policy.
     #[must_use]
     pub fn with_agent_tools_policy(self, shell_policy: crate::worker_profile::ShellPolicy) -> Self {

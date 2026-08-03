@@ -400,6 +400,13 @@ pub fn apply_spillover_with_artifact(
     tool_name: &str,
     session_id: &str,
 ) -> Option<PathBuf> {
+    // Registry discovery intentionally sends the complete eligible catalog to
+    // the model for semantic selection. Spilling it here would replace most of
+    // that candidate set with an artifact pointer before context shaping gets
+    // a chance to preserve it.
+    if tool_name == "registry_sync" {
+        return None;
+    }
     apply_spillover_inner(
         result,
         tool_id,
@@ -1340,6 +1347,24 @@ mod tests {
                 "metadata failure must leave no payload behind a guessable handle"
             );
         });
+    }
+
+    #[test]
+    fn registry_catalog_is_never_spilled_out_of_model_context() {
+        let original = "registry-entry\n".repeat(10_000);
+        assert!(original.len() > SPILLOVER_THRESHOLD_BYTES);
+        let mut result = ToolResult::success(original.clone());
+
+        let path = apply_spillover_with_artifact(
+            &mut result,
+            "call-registry",
+            "registry_sync",
+            "session-registry",
+        );
+
+        assert!(path.is_none());
+        assert_eq!(result.content, original);
+        assert!(result.metadata.is_none());
     }
 
     #[test]

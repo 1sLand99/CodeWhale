@@ -5139,3 +5139,15 @@ fn mcp_model_tool_names_and_server_attribution_share_one_definition() {
         Some("solo")
     );
 }
+
+#[test]
+fn removed_runtime_server_config_can_be_retried_with_same_name() {
+    let mut pool = McpPool::new(McpConfig::default());
+    let config: McpServerConfig = serde_json::from_str(r#"{"command": "node a.js"}"#).unwrap();
+
+    pool.add_runtime_server_config("retryable".to_string(), config.clone())
+        .unwrap();
+    pool.remove_runtime_server_config("retryable");
+    pool.add_runtime_server_config("retryable".to_string(), config)
+        .expect("rollback must release the deterministic runtime name");
+}

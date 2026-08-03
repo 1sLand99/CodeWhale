@@ -72,13 +72,18 @@ impl Engine {
                 todo_list,
                 plan_state,
             );
+            if self.config.features.enabled(Feature::Mcp) {
+                builder = builder.with_registry_mcp_sync_tool();
+            }
             // `start_mcp_server` belongs to every executable mode. Keep its
             // handler aligned with the model catalog, which always loads the
             // tool while MCP is enabled. The former early return registered
             // it only in Plan mode, so Agent/Full Access advertised a tool
             // that could never cross the execution boundary.
             if let Some(ref pool) = self.mcp_pool {
-                builder = builder.with_runtime_mcp_tool(Arc::clone(pool));
+                builder = builder
+                    .with_runtime_mcp_tool(Arc::clone(pool))
+                    .with_registry_mcp_start_tool(Arc::clone(pool));
             }
             return builder;
         }
@@ -134,11 +139,21 @@ impl Engine {
         // so there's no failure mode worth gating on.
         builder = builder.with_notify_tool();
 
+        // Register the `registry_sync` tool for fetching and caching
+        // MCP Registry server metadata. Rides on `Feature::Mcp` — the same
+        // flag that gates the rest of the MCP system (defaults to enabled;
+        // opt out via `[features]` in config.toml).
+        if self.config.features.enabled(Feature::Mcp) {
+            builder = builder.with_registry_mcp_sync_tool();
+        }
+
         // Register the start_mcp_server tool so LLM can dynamically start
         // MCP servers from conversation context. Only when the pool has been
         // initialized (lazy via ensure_mcp_pool).
         if let Some(ref pool) = self.mcp_pool {
-            builder = builder.with_runtime_mcp_tool(Arc::clone(pool));
+            builder = builder
+                .with_runtime_mcp_tool(Arc::clone(pool))
+                .with_registry_mcp_start_tool(Arc::clone(pool));
         }
 
         builder

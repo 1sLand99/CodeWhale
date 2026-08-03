@@ -432,6 +432,16 @@ pub(crate) fn compact_tool_result_for_route(
         return String::new();
     }
 
+    // `registry_sync` is deliberately a complete model-side candidate set.
+    // Applying the generic 12K hard limit retains only the JSON head/tail and
+    // silently removes candidates from the middle, turning semantic matching
+    // back into an accidental position-based filter. The eligible local stdio
+    // catalog is bounded upstream by Registry pagination and environment/package
+    // filtering, so preserve it intact for the selection step.
+    if tool_name == "registry_sync" {
+        return raw.to_string();
+    }
+
     if let Some(summary) = compact_subagent_tool_result_for_context(tool_name, raw) {
         return summary;
     }

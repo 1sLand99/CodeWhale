@@ -74,7 +74,7 @@ pub fn get_tool_category(name: &str) -> ToolCategory {
         ToolCategory::FileWrite
     } else if matches!(
         name,
-        "web_run" | "web_search" | "fetch_url" | "wait_for_dev_server"
+        "web_run" | "web_search" | "fetch_url" | "wait_for_dev_server" | "registry_sync"
     ) {
         ToolCategory::Network
     } else if matches!(
@@ -121,7 +121,7 @@ pub fn get_tool_category(name: &str) -> ToolCategory {
         || name.starts_with("get_")
     {
         ToolCategory::Safe
-    } else if name == "start_mcp_server" {
+    } else if matches!(name, "start_mcp_server" | "start_registry_mcp_server") {
         // Starting an MCP server spawns child processes or opens network
         // connections — classify as McpAction to trigger appropriate
         // approval prompts.
@@ -172,7 +172,7 @@ pub fn classify_risk(tool_name: &str, category: ToolCategory, params: &Value) ->
         // Query-only network is benign; opening a URL pulls arbitrary
         // remote content, so it stays destructive.
         ToolCategory::Network => match tool_name {
-            "web_search" | "wait_for_dev_server" => RiskLevel::Benign,
+            "web_search" | "wait_for_dev_server" | "registry_sync" => RiskLevel::Benign,
             // web_run is benign for search/query, but its `open`/`click`
             // actions fetch model-supplied URLs (arbitrary remote content) -
             // destructive, consistent with fetch_url.

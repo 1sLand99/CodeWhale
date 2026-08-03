@@ -255,8 +255,14 @@ impl ToolSpec for StartRuntimeMcpServer {
             .ok_or_else(|| ToolError::invalid_input("Missing required field: server"))?;
 
         let custom_name = input.get("name").and_then(|v| v.as_str());
-        let parsed =
+        let mut parsed =
             parse_mcp_command(server).map_err(|e| ToolError::invalid_input(e.to_string()))?;
+        // Host-supplied override (used by the Registry launcher, whose
+        // packages cold-start via npx/uvx downloads). Not exposed on the
+        // model-facing schema, so the model cannot widen its own timeouts.
+        if let Some(timeout) = input.get("connect_timeout").and_then(Value::as_u64) {
+            parsed.config.connect_timeout = Some(timeout);
+        }
 
         // Reject shell-wrapped commands that could execute arbitrary code
         if let Some(ref cmd) = parsed.config.command {
@@ -337,12 +343,14 @@ impl ToolSpec for StartRuntimeMcpServer {
         let mut pool = self.pool.lock().await;
         pool.add_runtime_server_config(server_name.clone(), parsed.config)
             .map_err(ToolError::invalid_input)?;
-        let conn = pool.get_or_connect(&server_name).await.map_err(|e| {
-            ToolError::execution_failed(format!(
-                "Failed to connect to MCP server '{}': {e}",
-                server_name
-            ))
-        })?;
+        let conn = match pool.get_or_connect(&server_name).await {
+            Ok(conn) => conn,
+            Err(error) => {
+                let message = connect_failure_message(&server_name, &error);
+                pool.remove_runtime_server_config(&server_name);
+                return Err(ToolError::execution_failed(message));
+            }
+        };
 
         let mcp_tools: Vec<McpTool> = conn.tools().to_vec();
 
@@ -374,8 +382,42 @@ impl ToolSpec for StartRuntimeMcpServer {
         }))
         .unwrap_or_else(|_| "{}".to_string());
 
-        Ok(ToolResult::success(result))
+        let mut output = ToolResult::success(result);
+        output.metadata = Some(json!({ "mcp_catalog_changed": true }));
+        Ok(output)
     }
+}
+
+/// Build the connect-failure message returned to the model. A spawned
+/// package that prints its CLI help and exits (the classic
+/// missing-subcommand case, e.g. `npx -y agentic-mermaid@0.1.2` without
+/// `mcp`) surfaces as `Stdio transport closed` before the handshake
+/// completes — a bare transport error gives the model no signal about
+/// *why*, and it tends to abandon the MCP route after one failed server.
+/// Classify that early-exit shape, note when the captured output looks
+/// like usage help, and point recovery at the registry: verify the exact
+/// structured arguments returned by `registry_sync`, then fall through to
+/// the next candidate from the search results instead of giving up.
+fn connect_failure_message(server_name: &str, err: &anyhow::Error) -> String {
+    let text = format!("{err:#}");
+    let base = format!("Failed to connect to MCP server '{server_name}': {text}");
+    let early_exit =
+        text.contains("Stdio transport closed") || text.contains("Stdio transport read error");
+    if !early_exit {
+        return base;
+    }
+    let looks_like_help = text.contains("usage")
+        || text.contains("Usage")
+        || text.contains("--help")
+        || text.contains("Commands:");
+    let help_note = if looks_like_help {
+        " Its output above looks like CLI usage help."
+    } else {
+        ""
+    };
+    format!(
+        "{base}\n\nThe server process exited before completing the MCP handshake.{help_note} The launch arguments are usually incomplete in this case (missing subcommand or required argument). For Registry-discovered servers, verify the structured required_args returned by registry_sync and retry; if this server still will not start, try the next candidate from the Registry catalog."
+    )
 }
 
 #[cfg(test)]
@@ -440,6 +482,38 @@ mod tests {
         assert_eq!(
             extract_name_from_url("https://example.com/").unwrap(),
             "example-com"
+        );
+    }
+
+    #[test]
+    fn connect_failure_message_flags_early_exit_with_help_output() {
+        let err = anyhow::anyhow!(
+            "Stdio transport closed\nMCP server stderr (last 2 lines):\nUsage: agentic-mermaid [OPTIONS] <COMMAND>"
+        );
+        let msg = connect_failure_message("agentic-mermaid", &err);
+        assert!(msg.contains("Failed to connect to MCP server 'agentic-mermaid'"));
+        assert!(msg.contains("exited before completing the MCP handshake"));
+        assert!(msg.contains("looks like CLI usage help"));
+        assert!(msg.contains("required_args"));
+        assert!(msg.contains("next candidate"));
+    }
+
+    #[test]
+    fn connect_failure_message_flags_early_exit_without_help_output() {
+        let err = anyhow::anyhow!("Stdio transport closed");
+        let msg = connect_failure_message("x", &err);
+        assert!(msg.contains("exited before completing the MCP handshake"));
+        assert!(!msg.contains("usage help"));
+        assert!(msg.contains("required_args"));
+    }
+
+    #[test]
+    fn connect_failure_message_passes_other_errors_through() {
+        let err = anyhow::anyhow!("connection refused");
+        let msg = connect_failure_message("x", &err);
+        assert_eq!(
+            msg,
+            "Failed to connect to MCP server 'x': connection refused"
         );
     }
 

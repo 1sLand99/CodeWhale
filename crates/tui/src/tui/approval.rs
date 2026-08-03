@@ -2048,6 +2048,10 @@ mod tests {
             get_tool_category("mcp_linear_save_issue"),
             ToolCategory::McpAction
         );
+        assert_eq!(
+            get_tool_category("start_registry_mcp_server"),
+            ToolCategory::McpAction
+        );
         assert_eq!(get_tool_category("list_mcp_tools"), ToolCategory::McpRead);
     }
 
@@ -2082,6 +2086,11 @@ mod tests {
             classify_risk("web_search", cat, &json!({"q": "rust"})),
             RiskLevel::Benign
         );
+        // Registry discovery mirrors web_search: query-only network → Benign.
+        assert_eq!(
+            classify_risk("registry_sync", cat, &json!({})),
+            RiskLevel::Benign
+        );
         // fetch_url pulls arbitrary remote content, so it stays destructive.
         assert_eq!(
             classify_risk("fetch_url", cat, &json!({"url": "https://example.com"})),
@@ -2102,6 +2111,7 @@ mod tests {
             ("apply_patch", ToolCategory::FileWrite),
             ("exec_shell", ToolCategory::Shell),
             ("mcp_linear_save_issue", ToolCategory::McpAction),
+            ("start_registry_mcp_server", ToolCategory::McpAction),
             ("totally_new_tool", ToolCategory::Unknown),
         ] {
             assert_eq!(
