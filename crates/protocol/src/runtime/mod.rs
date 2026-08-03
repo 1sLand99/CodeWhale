@@ -74,6 +74,10 @@ pub struct RuntimeCapabilities {
     /// /v1/apps/mcp/servers` family of endpoints.
     #[serde(default)]
     pub mcp_server_management: bool,
+    /// Skill lifecycle operations (install, update, uninstall, trust, audit)
+    /// are available via the HTTP API.
+    #[serde(default)]
+    pub skill_lifecycle: bool,
 }
 
 /// Experimental opt-in flags advertised by `GET /v1/runtime/info`.
@@ -372,6 +376,7 @@ mod tests {
             fleet_local_target: true,
             thread_goals: true,
             memory: true,
+            skill_lifecycle: false,
         };
         let value = serde_json::to_value(&caps).unwrap();
         let obj = value.as_object().unwrap();
