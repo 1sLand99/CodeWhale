@@ -2523,7 +2523,9 @@ mod tests {
                 task_id: "task-a".to_string(),
                 timestamp: "2026-06-12T17:02:00Z".to_string(),
                 payload: FleetWorkerEventPayload::Failed {
-                    reason: "provider failed: api_key = super-secret; bearer sk-abcdef1234567890; authorization: Bearer abcdefghijklmno"
+                    // Low-entropy fixtures on purpose: realistic tokens trip
+                    // push-time secret scanners (GitGuardian flagged the originals).
+                    reason: "provider failed: api_key = super-secret; bearer sk-aaaaaaaaaaaaaaaa; authorization: Bearer aaaaaaaaaaaaaa"
                         .to_string(),
                     recoverable: true,
                 },
@@ -2551,8 +2553,8 @@ mod tests {
         );
         let encoded = serde_json::to_string(&page).unwrap();
         assert!(!encoded.contains("super-secret"));
-        assert!(!encoded.contains("sk-abcdef1234567890"));
-        assert!(!encoded.contains("abcdefghijklmno"));
+        assert!(!encoded.contains("sk-aaaaaaaaaaaaaaaa"));
+        assert!(!encoded.contains("aaaaaaaaaaaaaa\""));
         assert!(!encoded.contains("private/full-report.md"));
         assert!(!encoded.contains("private-checksum"));
 
