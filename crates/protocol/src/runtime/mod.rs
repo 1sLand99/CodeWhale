@@ -69,6 +69,11 @@ pub struct RuntimeCapabilities {
     /// standard route layer) for lifecycle controls.
     #[serde(default)]
     pub memory: bool,
+    /// Whether the runtime supports create/update/enable/disable/reconnect/delete
+    /// operations on MCP server configuration via the `POST|GET|PATCH|DELETE
+    /// /v1/apps/mcp/servers` family of endpoints.
+    #[serde(default)]
+    pub mcp_server_management: bool,
 }
 
 /// Experimental opt-in flags advertised by `GET /v1/runtime/info`.
