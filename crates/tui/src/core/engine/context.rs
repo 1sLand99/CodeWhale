@@ -9,7 +9,7 @@ use crate::config::ApiProvider;
 use crate::context_budget::ContextBudget;
 use crate::error_taxonomy::ErrorCategory;
 use crate::models::{Message, SystemPrompt};
-pub(super) use crate::route_budget::effective_max_output_tokens_for_route;
+pub(crate) use crate::route_budget::effective_max_output_tokens_for_route;
 #[cfg(test)]
 pub(super) use crate::route_budget::{TURN_MAX_OUTPUT_TOKENS, effective_max_output_tokens};
 use crate::tools::spec::ToolResult;

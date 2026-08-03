@@ -9151,7 +9151,7 @@ async fn run_interactive_with_notice(
 }
 
 #[derive(Debug)]
-struct CliAutoRoute {
+pub(crate) struct CliAutoRoute {
     provider: crate::config::ApiProvider,
     model: String,
     reasoning_effort: Option<crate::tui::app::ReasoningEffort>,
@@ -9203,7 +9203,7 @@ fn normalize_cli_reasoning_effort(value: &str) -> Result<Option<String>> {
         .map_err(anyhow::Error::msg)
 }
 
-fn config_for_cli_route(config: &Config, route: &CliAutoRoute) -> Config {
+pub(crate) fn config_for_cli_route(config: &Config, route: &CliAutoRoute) -> Config {
     let mut execution_config = config.clone();
     execution_config.provider = Some(config.provider_identity_for(route.provider));
     execution_config.set_provider_model_override(route.provider, Some(route.model.clone()));
@@ -9216,7 +9216,17 @@ fn config_for_cli_route(config: &Config, route: &CliAutoRoute) -> Config {
     execution_config
 }
 
-async fn resolve_cli_auto_route(
+pub(crate) fn resolve_cli_route_limits(
+    config: &Config,
+    provider: crate::config::ApiProvider,
+    model: &str,
+) -> Option<codewhale_config::route::RouteLimits> {
+    crate::route_runtime::resolve_runtime_route(config, provider, Some(model))
+        .ok()
+        .and_then(|route| crate::route_budget::known_route_limits(route.candidate.limits()))
+}
+
+pub(crate) async fn resolve_cli_auto_route(
     config: &Config,
     model: &str,
     prompt: &str,
