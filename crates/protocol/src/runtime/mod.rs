@@ -63,6 +63,12 @@ pub struct RuntimeCapabilities {
     /// lifecycle actions are available.
     #[serde(default)]
     pub thread_goals: bool,
+    /// `GET /v1/memory` and `GET /v1/memory/{id}` are available for
+    /// bounded inspection of the native memory store.  `POST /v1/memory`
+    /// and `DELETE /v1/memory` are also available (auth-gated via the
+    /// standard route layer) for lifecycle controls.
+    #[serde(default)]
+    pub memory: bool,
 }
 
 /// Experimental opt-in flags advertised by `GET /v1/runtime/info`.
@@ -360,6 +366,7 @@ mod tests {
             fleet_event_stream: true,
             fleet_local_target: true,
             thread_goals: true,
+            memory: true,
         };
         let value = serde_json::to_value(&caps).unwrap();
         let obj = value.as_object().unwrap();
@@ -370,6 +377,7 @@ mod tests {
         assert_eq!(obj.get("fleet_run_create").unwrap(), &json!(true));
         assert_eq!(obj.get("fleet_event_stream").unwrap(), &json!(true));
         assert_eq!(obj.get("thread_goals").unwrap(), &json!(true));
+        assert_eq!(obj.get("memory").unwrap(), &json!(true));
     }
 
     #[test]
