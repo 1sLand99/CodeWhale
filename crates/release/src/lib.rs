@@ -3,6 +3,12 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+pub mod check;
+pub mod install;
+
+pub use check::{SuppressionReason, UpdateCheckCache, suppression_reason};
+pub use install::{InstallMethod, current_install_method};
+
 /// Filename of the SHA-256 checksum manifest included in every release.
 ///
 /// Mirror directories must contain this file alongside platform binaries so

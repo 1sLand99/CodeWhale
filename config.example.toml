@@ -99,9 +99,15 @@ reasoning_effort = "max"
 # ─────────────────────────────────────────────────────────────────────────────────
 # The TUI checks for newer Codewhale releases in the background at startup.
 # Set check_for_updates = false in managed or air-gapped environments.
+# The result is cached in ~/.codewhale/update-check.json, so the network is
+# touched at most once per check_interval_hours while the notice still shows
+# on every launch. Set 0 to check on every launch.
+# Checks are skipped entirely in CI, and when CODEWHALE_NO_UPDATE_CHECK or
+# NO_UPDATE_NOTIFIER is set.
 # update_uri may point at a GitHub-compatible latest-release JSON endpoint.
 [update]
 check_for_updates = true
+check_interval_hours = 24
 # update_uri = "https://internal.mirror.example/codewhale/releases/latest"
 
 # ─────────────────────────────────────────────────────────────────────────────────

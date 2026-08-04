@@ -597,7 +597,8 @@ distinct set of commands (`auth`, `config`, `model`, `thread`, `sandbox`,
 
 By default, the TUI starts a background check for the latest stable Codewhale
 release and shows a short toast only when a newer release is available and the
-official release assets are complete.
+official release assets are complete. The check never blocks startup, never
+blocks a turn, and fails silently when offline.
 
 Disable the startup check entirely for air-gapped, corporate-proxy, or managed
 desktop environments:
@@ -606,6 +607,55 @@ desktop environments:
 [update]
 check_for_updates = false
 ```
+
+#### Throttling
+
+The answer is cached in `~/.codewhale/update-check.json` and reused for
+`check_interval_hours` (default `24`). Only the *network request* is throttled —
+the notice still appears on every launch while an update is outstanding. Set `0`
+to check on every launch.
+
+```toml
+[update]
+check_interval_hours = 24
+```
+
+A failed check is not cached, so an outage does not suppress the notice until
+the interval elapses.
+
+#### Automatic suppression
+
+Checks are skipped, without contacting the network, when any of these is set to
+a non-falsey value:
+
+| Variable | Why |
+| --- | --- |
+| `CODEWHALE_NO_UPDATE_CHECK` | Explicit opt-out. |
+| `NO_UPDATE_NOTIFIER` | The cross-CLI convention, honored for compatibility. |
+| `CI`, `CONTINUOUS_INTEGRATION`, `GITHUB_ACTIONS`, `GITLAB_CI`, `BUILDKITE`, `CIRCLECI`, `JENKINS_URL`, `TEAMCITY_VERSION`, `TF_BUILD` | Automated build; nobody is at the terminal. |
+
+Values of `""`, `0`, `false`, `no`, and `off` do not count as set, so a
+`CI=false` export does not disable checks for ordinary users.
+
+#### Which update command is offered
+
+Codewhale never installs anything on its own — it only tells you an update
+exists. The command it names depends on how the running binary was installed,
+detected from its path:
+
+| Install | Command offered |
+| --- | --- |
+| GitHub release binary (including Termux) | `codewhale update` |
+| npm (`node_modules` on the path) | `npm install -g codewhale@latest` |
+| Homebrew (`Cellar` / `linuxbrew` prefix) | `brew upgrade deepseek-tui` |
+| `cargo install` (`~/.cargo/bin`) | `cargo install codewhale-cli --locked --force` |
+
+For package-managed installs the notice also warns against `codewhale update`:
+replacing a binary Homebrew or npm owns leaves the manager describing a version
+that is no longer on disk, and the next upgrade silently reverts you.
+
+Override the detection with `CODEWHALE_INSTALL_METHOD=npm|homebrew|cargo|binary`
+if you relocated the binary somewhere the path heuristics cannot read.
 
 To redirect the startup check, set `update_uri` to an internal endpoint that
 returns GitHub-compatible latest-release JSON. Minimal mirror metadata with a

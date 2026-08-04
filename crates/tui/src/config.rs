@@ -2417,12 +2417,21 @@ fn default_update_check_for_updates() -> bool {
     true
 }
 
+fn default_update_check_interval_hours() -> u64 {
+    codewhale_release::check::DEFAULT_CHECK_INTERVAL_HOURS
+}
+
 /// Startup update-check configuration (`[update]` table in config.toml).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct UpdateConfig {
     /// When false, skip the TUI startup background update check entirely.
     #[serde(default = "default_update_check_for_updates")]
     pub check_for_updates: bool,
+    /// Hours between network checks. The answer is cached on disk in between,
+    /// so the notice still appears on every launch — only the request is
+    /// throttled. `0` disables caching and checks on every launch.
+    #[serde(default = "default_update_check_interval_hours")]
+    pub check_interval_hours: u64,
     /// Optional GitHub-compatible latest-release JSON endpoint.
     #[serde(default)]
     pub update_uri: Option<String>,
@@ -2432,6 +2441,7 @@ impl Default for UpdateConfig {
     fn default() -> Self {
         Self {
             check_for_updates: true,
+            check_interval_hours: default_update_check_interval_hours(),
             update_uri: None,
         }
     }

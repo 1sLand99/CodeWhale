@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use crate::error_taxonomy::{ErrorCategory, ErrorEnvelope, ErrorSeverity};
 use crate::resource_telemetry::{TokenThroughput, estimate_output_tokens_from_text};
 use anyhow::{Context, Result};
+use codewhale_release::InstallMethod;
 // On Windows the push/pop helpers write the escapes directly; crossterm's
 // PushKeyboardEnhancementFlags / PopKeyboardEnhancementFlags commands are
 // never referenced, so the imports are gated to avoid -D warnings failures.
@@ -3113,14 +3114,18 @@ async fn run_event_loop(
             // in-transcript notice so the prompt survives the toast TTL and
             // stays actionable during a busy session (#3961). The persistent
             // header chip keeps a quiet affordance after both (#14).
+            // Which command to advertise depends on who owns this binary on
+            // disk, so resolve that here rather than hardcoding our own
+            // updater into the wording.
+            let install = codewhale_release::current_install_method();
             app.update_available = Some(notice.chip_label());
             app.push_status_toast(
-                notice.toast_line(),
+                notice.toast_line(install),
                 StatusToastLevel::Info,
                 Some(VERSION_HINT_TOAST_TTL_MS),
             );
             app.add_message(HistoryCell::System {
-                content: notice.notice_block(),
+                content: notice.notice_block(install),
             });
         }
 
@@ -17984,13 +17989,45 @@ enum StartupVersionCheckSource {
 }
 
 fn startup_version_check_source(config: &UpdateConfig) -> StartupVersionCheckSource {
+    resolve_version_check_source(config, codewhale_release::suppression_reason())
+}
+
+/// Pure form of [`startup_version_check_source`]: the environment is read once
+/// by the caller and passed in, so the decision itself is testable without
+/// mutating process-global state (and so this crate's own CI run does not
+/// change the answer).
+fn resolve_version_check_source(
+    config: &UpdateConfig,
+    suppression: Option<codewhale_release::SuppressionReason>,
+) -> StartupVersionCheckSource {
     if !config.check_for_updates {
+        return StartupVersionCheckSource::Disabled;
+    }
+    // CI runners and explicit opt-outs never reach the network: there is
+    // nobody at the terminal to read the notice, and an unexplained outbound
+    // request from a build agent is a support ticket waiting to happen.
+    if let Some(reason) = suppression {
+        tracing::debug!(
+            variable = reason.variable(),
+            "skipping startup update check"
+        );
         return StartupVersionCheckSource::Disabled;
     }
     if let Some(update_uri) = config.update_uri() {
         return StartupVersionCheckSource::ConfiguredUrl(update_uri.to_string());
     }
     StartupVersionCheckSource::ReleaseResolver
+}
+
+/// Where the throttling cache for the startup check lives.
+///
+/// `None` when the CodeWhale home cannot be resolved — the check still runs,
+/// it just cannot be throttled, which is the right tradeoff for a homeless
+/// install (rare, and better than never checking).
+fn update_check_cache_path() -> Option<PathBuf> {
+    codewhale_config::codewhale_home()
+        .ok()
+        .map(|home| codewhale_release::check::cache_path_in(&home))
 }
 
 fn spawn_startup_version_check(
@@ -18002,26 +18039,68 @@ fn spawn_startup_version_check(
     }
 
     let current = env!("CARGO_PKG_VERSION").to_string();
+    let cache_path = update_check_cache_path();
+    let interval_hours = config.check_interval_hours;
     Some(tokio::spawn(async move {
-        version_hint_from_startup_source(source, &current).await
+        cached_version_hint(source, &current, cache_path.as_deref(), interval_hours).await
     }))
 }
 
-async fn version_hint_from_startup_source(
+/// Resolve the update notice, reaching for the network at most once per
+/// configured interval.
+///
+/// The cache holds the *tag we last saw*, not a "checked recently" flag, so a
+/// user who relaunches all afternoon still sees the notice every time while
+/// GitHub is asked once. A cached `None` means "we asked, there was nothing" —
+/// also a valid answer worth not re-asking for.
+async fn cached_version_hint(
     source: StartupVersionCheckSource,
     current: &str,
+    cache_path: Option<&Path>,
+    interval_hours: u64,
 ) -> Option<UpdateNotice> {
+    let now = codewhale_release::check::now_unix();
+    if let Some(path) = cache_path
+        && let Some(entry) = codewhale_release::UpdateCheckCache::load(path)
+        && entry.is_fresh(now, interval_hours)
+    {
+        return entry
+            .latest_tag
+            .as_deref()
+            .and_then(|tag| version_hint_from_latest_tag(tag, current));
+    }
+
+    let latest_tag = latest_tag_from_startup_source(source).await;
+
+    // Only record a completed check. A network failure leaves the cache
+    // untouched so the next launch retries instead of caching an outage for a
+    // whole day.
+    if let Some(path) = cache_path
+        && latest_tag.is_some()
+        && let Err(err) = codewhale_release::UpdateCheckCache::now(latest_tag.clone()).store(path)
+    {
+        tracing::debug!(error = %err, "failed to persist update-check cache");
+    }
+
+    latest_tag
+        .as_deref()
+        .and_then(|tag| version_hint_from_latest_tag(tag, current))
+}
+
+/// The latest publishable release tag for this source, or `None` when the
+/// lookup failed or the release is not one we would offer.
+async fn latest_tag_from_startup_source(source: StartupVersionCheckSource) -> Option<String> {
     match source {
         StartupVersionCheckSource::Disabled => None,
         StartupVersionCheckSource::ConfiguredUrl(url) => {
-            match version_hint_from_configured_update_uri(&url, current).await {
-                Ok(hint) => hint,
-                Err(_) => version_hint_from_release_mirror_env(current).await,
+            match latest_tag_from_configured_update_uri(&url).await {
+                Ok(tag) => tag,
+                Err(_) => latest_tag_from_release_mirror_env().await,
             }
         }
         StartupVersionCheckSource::ReleaseResolver => {
             if release_mirror_env_configured() {
-                return version_hint_from_release_mirror_env(current).await;
+                return latest_tag_from_release_mirror_env().await;
             }
 
             let body = codewhale_release::fetch_release_json_async(
@@ -18031,20 +18110,18 @@ async fn version_hint_from_startup_source(
             .await
             .ok()?;
             let json: serde_json::Value = serde_json::from_str(&body).ok()?;
-            version_hint_from_release_json(&json, current)
+            publishable_release_tag(&json).map(str::to_string)
         }
     }
 }
 
-async fn version_hint_from_release_mirror_env(current: &str) -> Option<UpdateNotice> {
+async fn latest_tag_from_release_mirror_env() -> Option<String> {
     if !release_mirror_env_configured() {
         return None;
     }
-    let tag =
-        codewhale_release::latest_release_tag_async(codewhale_release::ReleaseChannel::Stable)
-            .await
-            .ok()?;
-    version_hint_from_latest_tag(&tag, current)
+    codewhale_release::latest_release_tag_async(codewhale_release::ReleaseChannel::Stable)
+        .await
+        .ok()
 }
 
 fn release_mirror_env_configured() -> bool {
@@ -18053,39 +18130,51 @@ fn release_mirror_env_configured() -> bool {
     codewhale_release::release_base_url_from_env(&version).is_some()
 }
 
-async fn version_hint_from_configured_update_uri(
-    update_uri: &str,
-    current: &str,
-) -> Result<Option<UpdateNotice>> {
+async fn latest_tag_from_configured_update_uri(update_uri: &str) -> Result<Option<String>> {
     let body = codewhale_release::fetch_release_json_async(update_uri, "configured latest release")
         .await?;
     let json: serde_json::Value = serde_json::from_str(&body).with_context(|| {
         format!("failed to parse release JSON from configured URI {update_uri}")
     })?;
-    Ok(version_hint_from_custom_release_json(&json, current))
+    Ok(custom_release_tag(&json).map(str::to_string))
 }
 
-fn version_hint_from_release_json(json: &serde_json::Value, current: &str) -> Option<UpdateNotice> {
+/// Tag of a GitHub release we would actually offer: published, and with every
+/// asset the updater needs already uploaded.
+fn publishable_release_tag(json: &serde_json::Value) -> Option<&str> {
     if !release_has_required_assets(json) {
         return None;
     }
-
-    let tag = json["tag_name"].as_str()?;
-    version_hint_from_latest_tag(tag, current)
+    json["tag_name"].as_str()
 }
 
-fn version_hint_from_custom_release_json(
-    json: &serde_json::Value,
-    current: &str,
-) -> Option<UpdateNotice> {
+/// Tag from a user-configured release endpoint. Asset completeness is only
+/// enforced when the payload advertises assets at all, since a custom mirror
+/// may legitimately publish metadata in a different shape.
+fn custom_release_tag(json: &serde_json::Value) -> Option<&str> {
     if !release_is_publishable(json) {
         return None;
     }
     if json.get("assets").is_some() && !release_has_required_assets(json) {
         return None;
     }
-    let tag = json["tag_name"].as_str()?;
-    version_hint_from_latest_tag(tag, current)
+    json["tag_name"].as_str()
+}
+
+/// Test-only shorthand pairing tag extraction with the newness comparison.
+/// Production code splits the two so the tag can be cached independently of
+/// the version we happen to be running.
+#[cfg(test)]
+fn version_hint_from_release_json(json: &serde_json::Value, current: &str) -> Option<UpdateNotice> {
+    version_hint_from_latest_tag(publishable_release_tag(json)?, current)
+}
+
+#[cfg(test)]
+fn version_hint_from_custom_release_json(
+    json: &serde_json::Value,
+    current: &str,
+) -> Option<UpdateNotice> {
+    version_hint_from_latest_tag(custom_release_tag(json)?, current)
 }
 
 /// A newer-stable-release notice, carrying enough context to render both the
@@ -18097,17 +18186,19 @@ struct UpdateNotice {
 }
 
 impl UpdateNotice {
-    /// Short line for the transient status toast (unchanged wording).
-    fn toast_line(&self) -> String {
+    /// Short line for the transient status toast, naming the command that
+    /// actually updates *this* install.
+    fn toast_line(&self, install: InstallMethod) -> String {
         format!(
-            "v{latest} available - run `codewhale update` and restart",
-            latest = self.latest
+            "v{latest} available - run `{command}` and restart",
+            latest = self.latest,
+            command = install.update_command()
         )
     }
 
     /// Compact header chip label shown once the check has landed. Quiet by
     /// design: no action verb, no repetition — the toast and transcript
-    /// notice carry the `codewhale update` instructions (#14).
+    /// notice carry the update instructions (#14).
     fn chip_label(&self) -> String {
         format!("↑ v{latest}", latest = self.latest)
     }
@@ -18115,11 +18206,27 @@ impl UpdateNotice {
     /// Durable, actionable notice pushed into the transcript so it survives the
     /// toast TTL. Includes current/latest versions, release notes, the exact
     /// update command, and restart guidance.
-    fn notice_block(&self) -> String {
+    ///
+    /// Package-managed installs get their manager's command instead of
+    /// `codewhale update`, plus an explicit warning: self-updating a binary
+    /// Homebrew or npm owns leaves the manager's metadata lying about what is
+    /// on disk, and the next upgrade silently reverts the user.
+    fn notice_block(&self, install: InstallMethod) -> String {
+        let action = if install.supports_self_update() {
+            "Run `codewhale update` (preview with `codewhale update --check`), then restart CodeWhale."
+                .to_string()
+        } else {
+            format!(
+                "Installed via {label}. Run `{command}`, then restart CodeWhale.\n\
+                 Do not use `codewhale update` here — it would replace a binary {label} manages.",
+                label = install.label(),
+                command = install.update_command()
+            )
+        };
         format!(
             "Update available: v{current} -> v{latest}\n\
              Release notes: https://github.com/Hmbown/CodeWhale/releases/tag/v{latest}\n\
-             Run `codewhale update` (preview with `codewhale update --check`), then restart CodeWhale.",
+             {action}",
             current = self.current,
             latest = self.latest
         )

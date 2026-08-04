@@ -9876,7 +9876,10 @@ fn complete_release_json(tag: &str) -> serde_json::Value {
 fn version_hint_requires_complete_release_assets() {
     let complete = complete_release_json("v0.8.47");
     let hint = version_hint_from_release_json(&complete, "0.8.46").expect("newer complete release");
-    assert!(hint.toast_line().contains("v0.8.47 available"));
+    assert!(
+        hint.toast_line(codewhale_release::InstallMethod::Binary)
+            .contains("v0.8.47 available")
+    );
 
     let mut missing_manifest = complete_release_json("v0.8.47");
     missing_manifest["assets"] = serde_json::Value::Array(
@@ -9931,26 +9934,150 @@ fn version_hint_ignores_draft_prerelease_and_current_versions() {
 #[test]
 fn startup_version_check_source_respects_update_config() {
     assert_eq!(
-        startup_version_check_source(&UpdateConfig {
-            check_for_updates: false,
-            update_uri: Some("https://mirror.example/releases/latest".to_string()),
-        }),
+        resolve_version_check_source(
+            &UpdateConfig {
+                check_for_updates: false,
+                update_uri: Some("https://mirror.example/releases/latest".to_string()),
+                ..UpdateConfig::default()
+            },
+            None
+        ),
         StartupVersionCheckSource::Disabled
     );
 
     assert_eq!(
-        startup_version_check_source(&UpdateConfig {
-            check_for_updates: true,
-            update_uri: Some("  https://mirror.example/releases/latest  ".to_string()),
-        }),
+        resolve_version_check_source(
+            &UpdateConfig {
+                check_for_updates: true,
+                update_uri: Some("  https://mirror.example/releases/latest  ".to_string()),
+                ..UpdateConfig::default()
+            },
+            None
+        ),
         StartupVersionCheckSource::ConfiguredUrl(
             "https://mirror.example/releases/latest".to_string()
         )
     );
 
     assert_eq!(
-        startup_version_check_source(&UpdateConfig::default()),
+        resolve_version_check_source(&UpdateConfig::default(), None),
         StartupVersionCheckSource::ReleaseResolver
+    );
+}
+
+#[test]
+fn startup_version_check_is_disabled_in_ci_and_on_opt_out() {
+    // A build agent has nobody to tell, so the check never reaches the
+    // network there — even with the feature enabled and a mirror configured.
+    for reason in [
+        codewhale_release::SuppressionReason::ContinuousIntegration("CI"),
+        codewhale_release::SuppressionReason::OptOut("CODEWHALE_NO_UPDATE_CHECK"),
+    ] {
+        assert_eq!(
+            resolve_version_check_source(
+                &UpdateConfig {
+                    check_for_updates: true,
+                    update_uri: Some("https://mirror.example/releases/latest".to_string()),
+                    ..UpdateConfig::default()
+                },
+                Some(reason)
+            ),
+            StartupVersionCheckSource::Disabled,
+            "{} should suppress the check",
+            reason.variable()
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_fresh_cache_answers_the_update_check_without_the_network() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cache = codewhale_release::check::cache_path_in(dir.path());
+    codewhale_release::UpdateCheckCache::now(Some("v9.9.9".to_string()))
+        .store(&cache)
+        .expect("seed cache");
+
+    // `ConfiguredUrl` points at an unroutable host: if the cache were not
+    // consulted first this would fail rather than produce a notice.
+    let notice = cached_version_hint(
+        StartupVersionCheckSource::ConfiguredUrl("http://127.0.0.1:1/nope".to_string()),
+        "0.9.4",
+        Some(&cache),
+        24,
+    )
+    .await
+    .expect("fresh cache should still yield the notice");
+    assert_eq!(notice.chip_label(), "↑ v9.9.9");
+}
+
+#[tokio::test]
+async fn a_cached_up_to_date_answer_produces_no_notice() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cache = codewhale_release::check::cache_path_in(dir.path());
+    codewhale_release::UpdateCheckCache::now(Some("v0.9.4".to_string()))
+        .store(&cache)
+        .expect("seed cache");
+
+    assert!(
+        cached_version_hint(
+            StartupVersionCheckSource::ConfiguredUrl("http://127.0.0.1:1/nope".to_string()),
+            "0.9.4",
+            Some(&cache),
+            24,
+        )
+        .await
+        .is_none()
+    );
+}
+
+#[tokio::test]
+async fn a_failed_check_leaves_the_cache_untouched_so_the_next_launch_retries() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cache = codewhale_release::check::cache_path_in(dir.path());
+
+    let notice = cached_version_hint(
+        StartupVersionCheckSource::ConfiguredUrl("http://127.0.0.1:1/nope".to_string()),
+        "0.9.4",
+        Some(&cache),
+        24,
+    )
+    .await;
+    assert!(notice.is_none(), "an unreachable endpoint yields no notice");
+    assert!(
+        !cache.exists(),
+        "a network failure must not be cached as 'no update' for a whole day"
+    );
+}
+
+#[test]
+fn update_notice_names_the_command_for_the_actual_install_method() {
+    let complete = complete_release_json("v0.8.47");
+    let notice =
+        version_hint_from_release_json(&complete, "0.8.46").expect("newer release yields a notice");
+
+    // A package-managed install must not be told to self-replace: the manager
+    // would silently revert it on the next upgrade.
+    let npm_block = notice.notice_block(codewhale_release::InstallMethod::Npm);
+    assert!(
+        npm_block.contains("npm install -g codewhale@latest"),
+        "names the npm command: {npm_block:?}"
+    );
+    assert!(
+        npm_block.contains("Do not use `codewhale update`"),
+        "warns against self-update: {npm_block:?}"
+    );
+    assert!(
+        notice
+            .toast_line(codewhale_release::InstallMethod::Homebrew)
+            .contains("brew upgrade deepseek-tui"),
+        "toast names the Homebrew command"
+    );
+
+    // A plain release binary keeps the self-updater.
+    assert!(
+        notice
+            .toast_line(codewhale_release::InstallMethod::Binary)
+            .contains("codewhale update")
     );
 }
 
@@ -9964,7 +10091,10 @@ fn custom_update_uri_accepts_tag_only_release_json() {
 
     let hint = version_hint_from_custom_release_json(&json, "0.8.46")
         .expect("tag-only custom metadata should be enough for mirrors");
-    assert!(hint.toast_line().contains("v0.8.47 available"));
+    assert!(
+        hint.toast_line(codewhale_release::InstallMethod::Binary)
+            .contains("v0.8.47 available")
+    );
 }
 
 #[test]
@@ -9975,7 +10105,7 @@ fn update_notice_block_is_persistent_and_actionable() {
 
     // Durable notice carries current + latest versions, release-notes link,
     // the exact update command, and restart guidance (#3961 acceptance).
-    let block = notice.notice_block();
+    let block = notice.notice_block(codewhale_release::InstallMethod::Binary);
     assert!(
         block.contains("v0.8.46"),
         "shows current version: {block:?}"

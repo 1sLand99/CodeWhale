@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use codewhale_release::{
-    CHECKSUM_MANIFEST_ASSET, ReleaseChannel, ReleaseQuery, UPDATE_USER_AGENT,
+    CHECKSUM_MANIFEST_ASSET, InstallMethod, ReleaseChannel, ReleaseQuery, UPDATE_USER_AGENT,
     compare_release_versions, is_beta_tag, mirror_asset_url, resolve_release_query,
     update_is_needed, update_network_fallback_hint,
 };
@@ -54,6 +54,10 @@ pub fn run_update(beta: bool, check_only: bool, proxy_arg: Option<String>) -> Re
     if legacy_binary {
         println!();
         println!("{}", legacy_binary_message(&current_exe));
+    }
+    if let Some(warning) = managed_install_warning(InstallMethod::detect(&current_exe)) {
+        println!();
+        println!("{warning}");
     }
 
     if check_only {
@@ -183,6 +187,27 @@ pub fn run_update(beta: bool, check_only: bool, proxy_arg: Option<String>) -> Re
     );
 
     Ok(())
+}
+
+/// Warn when self-update would overwrite a binary a package manager owns.
+///
+/// We warn rather than refuse: the download still produces a working newer
+/// binary, and refusing would break workflows that have been doing this for
+/// releases. But the manager's metadata will then describe a version that is
+/// no longer on disk, and its next upgrade silently reverts the user — so say
+/// so, and name the command that would have done this properly.
+fn managed_install_warning(method: InstallMethod) -> Option<String> {
+    if method.supports_self_update() {
+        return None;
+    }
+    Some(format!(
+        "Warning: this binary looks like a {label} install.\n  \
+         `{command}` is the command that updates it cleanly.\n  \
+         Self-updating in place still works, but leaves {label} describing a version\n  \
+         that is no longer on disk, and its next upgrade will revert this update.",
+        label = method.label(),
+        command = method.update_command()
+    ))
 }
 
 /// Resolve the executable that the updater is allowed to replace.
@@ -1989,6 +2014,22 @@ mod tests {
         assert!(!is_legacy_binary(Path::new("codewhale")));
         assert!(!is_legacy_binary(Path::new("codewhale-tui")));
         assert!(!is_legacy_binary(Path::new("codew")));
+    }
+
+    #[test]
+    fn managed_installs_are_warned_before_self_update_overwrites_them() {
+        let npm = managed_install_warning(InstallMethod::Npm).expect("npm is package-managed");
+        assert!(npm.contains("npm install -g codewhale@latest"));
+        assert!(npm.contains("revert this update"));
+
+        let brew =
+            managed_install_warning(InstallMethod::Homebrew).expect("brew is package-managed");
+        assert!(brew.contains("brew upgrade deepseek-tui"));
+
+        assert!(managed_install_warning(InstallMethod::Cargo).is_some());
+
+        // A plain release binary is exactly what this updater is for.
+        assert!(managed_install_warning(InstallMethod::Binary).is_none());
     }
 
     #[test]
