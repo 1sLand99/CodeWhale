@@ -4921,11 +4921,20 @@ async fn runtime_info_reports_bind_state() -> Result<()> {
     let commit = info["codewhale_commit"]
         .as_str()
         .expect("runtime build commit must be a string");
-    assert_eq!(commit.len(), 40, "runtime build commit must be full length");
-    assert!(
-        commit.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        "runtime build commit must be hexadecimal"
-    );
+    // Since #5245 the commit is env-stamped only: a stamped build (CI /
+    // release / a `DEEPSEEK_BUILD_SHA=…` dogfood build) reports a full 40-hex
+    // sha; an unstamped local build honestly reports "unknown" rather than
+    // reading the checkout. Both are valid provenance — a fabricated sha
+    // would be the bug.
+    if commit == "unknown" {
+        // Unstamped local build — the honest absence.
+    } else {
+        assert_eq!(commit.len(), 40, "a stamped build commit is a full sha");
+        assert!(
+            commit.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "runtime build commit must be hexadecimal"
+        );
+    }
     assert_eq!(info["bind_host"], "127.0.0.1");
     assert_eq!(info["auth_required"], false);
     assert!(info["version"].is_string());

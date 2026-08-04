@@ -295,6 +295,22 @@ const IDLE_SHIMMER_SWEEP_FRACTION: f32 = 0.32;
 const IDLE_SHIMMER_BAND_HALF_WIDTH: f32 = 0.38;
 const IDLE_SHIMMER_STRENGTH: f32 = 0.33;
 
+/// The build-version string the header renders. Since #5245 an unstamped
+/// local build reports `0.9.4 (dev)` while CI/release carries a sha, so the
+/// header's width choreography (which lengths of version stamp fit at which
+/// terminal width) is environment-dependent. Tests that assert on those
+/// width breakpoints override this to a fixed value so they measure the
+/// layout, not the ambient build's sha length.
+fn shell_build_version() -> Cow<'static, str> {
+    #[cfg(test)]
+    {
+        if let Some(version) = tests::build_version_override() {
+            return Cow::Owned(version);
+        }
+    }
+    Cow::Borrowed(env!("DEEPSEEK_BUILD_VERSION"))
+}
+
 impl ShellPhase {
     #[must_use]
     pub fn from_app(app: &App) -> Self {
@@ -647,7 +663,7 @@ pub fn render_launch_screen(area: Rect, buf: &mut Buffer, app: &App) {
         .style(Style::default().bg(app.ui_theme.surface_bg))
         .render(area, buf);
     let width = usize::from(area.width);
-    let version = format!("v{}", env!("DEEPSEEK_BUILD_VERSION"));
+    let version = format!("v{}", shell_build_version());
     let workspace_budget = width.saturating_sub(version.width() + 6);
     let workspace = truncate_to_width(
         &crate::utils::display_path(&app.workspace),
@@ -1037,7 +1053,7 @@ pub fn render_header(area: Rect, buf: &mut Buffer, app: &App) {
     let token_breakdown_requested = token_breakdown.is_some();
     let version = (tier == ShellTier::Wide).then(|| {
         Span::styled(
-            format!("v{}", env!("DEEPSEEK_BUILD_VERSION")),
+            format!("v{}", shell_build_version()),
             Style::default().fg(app.ui_theme.text_hint),
         )
     });
@@ -1548,9 +1564,38 @@ mod tests {
         tui::app::{LaunchState, TuiOptions},
     };
     use std::{
+        cell::RefCell,
         path::PathBuf,
         time::{Duration, Instant},
     };
+
+    thread_local! {
+        static BUILD_VERSION_OVERRIDE: RefCell<Option<String>> = const { RefCell::new(None) };
+    }
+
+    /// Read the header's version-string override (see [`shell_build_version`]).
+    pub(super) fn build_version_override() -> Option<String> {
+        BUILD_VERSION_OVERRIDE.with(|cell| cell.borrow().clone())
+    }
+
+    /// Pin the header's version stamp for the current test thread so width
+    /// choreography is measured against a fixed length, not the ambient
+    /// build's sha (which is `(dev)` locally and a sha on CI since #5245).
+    /// The default fixture mirrors a sha-stamped build's width.
+    struct BuildVersionGuard;
+
+    impl BuildVersionGuard {
+        fn set(version: &str) -> Self {
+            BUILD_VERSION_OVERRIDE.with(|cell| *cell.borrow_mut() = Some(version.to_string()));
+            Self
+        }
+    }
+
+    impl Drop for BuildVersionGuard {
+        fn drop(&mut self) {
+            BUILD_VERSION_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
+        }
+    }
 
     fn test_app() -> App {
         App::new(
@@ -1604,6 +1649,10 @@ mod tests {
 
     #[test]
     fn configured_session_tokens_follow_underwater_header_width_priority() {
+        // Pin the version stamp: the Wide-tier breakpoints below are
+        // calibrated to a sha-length stamp, which #5245 no longer guarantees
+        // on a local build.
+        let _version = BuildVersionGuard::set("0.9.4 (000000000000)");
         let mut app = test_app();
         app.header_items = vec![HeaderItem::Tokens];
         app.session.total_input_tokens = 18_000;
@@ -1709,7 +1758,7 @@ mod tests {
             "context meter missing: {wide_header:?}"
         );
         assert!(
-            wide_header.contains(&format!("v{}", env!("DEEPSEEK_BUILD_VERSION"))),
+            wide_header.contains(&format!("v{}", shell_build_version())),
             "version missing: {wide_header:?}"
         );
     }
