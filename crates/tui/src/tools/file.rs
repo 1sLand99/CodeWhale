@@ -349,6 +349,36 @@ fn read_window_streaming(
     Ok((window, total_lines))
 }
 
+/// Marker placed between the retained head and tail when a read window is
+/// truncated by the byte budget. Mirrors qwen-code's truncation style so the
+/// model sees both ends of the range.
+const BYTE_TRUNCATION_SEPARATOR: &str = "\n\n---\n... [CONTENT TRUNCATED] ...\n---\n\n";
+
+/// Split `content` into a head of at most `head_budget` bytes and a tail that
+/// fills the remainder of `total_budget` (separator accounted for). Never
+/// overlaps and never splits mid-codepoint. Style matches qwen-code:
+/// `head_budget = total_budget / 5`.
+fn head_tail_for_budget(content: &str, total_budget: usize) -> (String, String) {
+    let head_budget = (total_budget / 5).max(1);
+    let head_end = (0..=head_budget.min(content.len()))
+        .rev()
+        .find(|&i| content.is_char_boundary(i))
+        .unwrap_or(0);
+    let sep_len = BYTE_TRUNCATION_SEPARATOR.len();
+    let tail_budget = total_budget
+        .saturating_sub(head_end)
+        .saturating_sub(sep_len)
+        .max(1);
+    let tail_floor = content.len().saturating_sub(tail_budget).max(head_end);
+    let tail_start = (tail_floor..=content.len())
+        .find(|&i| content.is_char_boundary(i))
+        .unwrap_or(content.len());
+    (
+        content[..head_end].to_string(),
+        content[tail_start..].to_string(),
+    )
+}
+
 /// Render a collected line window into the `<file …>` wrapper used for
 /// ranged/large reads. `window` must hold the lines for
 /// `start_line..start_line + max_lines` (clamped to EOF).
@@ -370,16 +400,16 @@ fn render_line_window(
         numbered.push_str(&format!("{line_no:>6}│ {line}\n"));
     }
 
-    // UTF-8-safe byte truncation of the rendered range.
+    // UTF-8-safe byte truncation of the rendered range. Qwen-style: keep a
+    // short head (budget/5) plus the matching tail so the model sees both
+    // ends of a long range. The full file already lives at `path_str` — the
+    // recovery note names that absolute/workspace path for a re-read.
     let truncated_by_bytes = numbered.len() > MAX_VISIBLE_BYTES;
     let shown_content = if truncated_by_bytes {
-        let mut end = MAX_VISIBLE_BYTES;
-        while end > 0 && !numbered.is_char_boundary(end) {
-            end -= 1;
-        }
-        &numbered[..end]
+        let (head, tail) = head_tail_for_budget(&numbered, MAX_VISIBLE_BYTES);
+        format!("{head}{BYTE_TRUNCATION_SEPARATOR}{tail}")
     } else {
-        &numbered
+        numbered
     };
 
     let truncated_by_lines = zero_based_end < total_lines;
@@ -400,9 +430,9 @@ fn render_line_window(
         ));
     }
     if truncated_by_bytes {
-        output.push_str(
-            "\n[TRUNCATED] The selected range exceeded 16KB. Continue with a smaller max_lines value.\n",
-        );
+        output.push_str(&format!(
+            "\n[TRUNCATED] The selected range exceeded 16KB; showing head + tail. Full file remains at path=\"{path_str}\". Re-read with a smaller max_lines or a tighter start_line range.\n"
+        ));
     }
     output.push_str("</file>");
 

@@ -274,6 +274,66 @@ async fn read_file_rejects_zero_start_line_and_zero_max_lines() {
 }
 
 #[tokio::test]
+async fn read_file_byte_truncation_keeps_head_and_tail() {
+    // Long lines force the 16 KiB bound before the line cap. The model must
+    // see both ends of the window (qwen-style head = budget/5 + tail) and the
+    // recovery note must name the original path for a re-read.
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let file = tmp.path().join("wide.txt");
+    let body: String = (1..=40)
+        .map(|n| format!("LINE{n}_START {} LINE{n}_END\n", "x".repeat(600)))
+        .collect();
+    assert!(body.len() > 16 * 1024, "fixture must exceed 16KB");
+    fs::write(&file, &body).expect("write");
+
+    let tool = ReadFileTool;
+    let result = tool
+        .execute(
+            json!({ "path": "wide.txt", "start_line": 1, "max_lines": 40 }),
+            &ctx,
+        )
+        .await
+        .expect("execute");
+
+    assert!(result.success);
+    assert!(result.content.contains("truncated=\"true\""));
+    assert!(
+        result.content.contains("LINE1_START"),
+        "head of the window must survive: {}",
+        &result.content[..result.content.len().min(400)]
+    );
+    assert!(
+        result.content.contains("LINE40_END") || result.content.contains("LINE40_START"),
+        "tail of the window must survive: {}",
+        &result.content[result.content.len().saturating_sub(400)..]
+    );
+    assert!(
+        result.content.contains("[CONTENT TRUNCATED]"),
+        "head/tail separator missing: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("path=\"wide.txt\""),
+        "recovery path must name the file: {}",
+        result.content
+    );
+    assert!(
+        result
+            .content
+            .contains("Full file remains at path=\"wide.txt\""),
+        "byte-truncation recovery note missing: {}",
+        result.content
+    );
+    // Middle of the window should be the part omitted under a head+tail budget.
+    assert!(
+        !result.content.contains("LINE20_START") || result.content.contains("[CONTENT TRUNCATED]"),
+        "expected truncation of the middle: {}",
+        result.content
+    );
+}
+
+#[tokio::test]
 async fn read_file_clamps_max_lines_to_hard_cap() {
     let tmp = tempdir().expect("tempdir");
     let ctx = ToolContext::new(tmp.path().to_path_buf());

@@ -2,9 +2,10 @@
 
 /// Maximum output size before truncation (30KB like Claude Code).
 const MAX_OUTPUT_SIZE: usize = 30_000;
-/// Head bytes preserved for large shell/test output. The matching tail budget
-/// keeps final errors and test summaries visible without a second command.
-const TRUNCATED_HEAD_BYTES: usize = 22_000;
+/// Head bytes preserved for large shell/test output. Qwen-style: head is
+/// `threshold / 5` so the bulk of the budget stays on the tail (compiler
+/// summaries, test failures) without a second command.
+const TRUNCATED_HEAD_BYTES: usize = MAX_OUTPUT_SIZE / 5;
 const TRUNCATED_TAIL_BYTES: usize = MAX_OUTPUT_SIZE - TRUNCATED_HEAD_BYTES;
 /// Limits for summary strings in tool metadata.
 const SUMMARY_MAX_LINES: usize = 3;
