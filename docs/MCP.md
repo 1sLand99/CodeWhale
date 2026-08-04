@@ -115,10 +115,20 @@ Supported in-TUI actions:
 /mcp reload
 ```
 
-`/mcp validate` and `/mcp reload` reconnect for UI discovery and refresh the
-manager snapshot. Config edits made from the TUI are written immediately, but
-the model-visible MCP tool pool is not hot-reloaded; the manager marks this as
-restart-required until the TUI is restarted.
+`/mcp validate` (alias `/mcp doctor`) reconnects for UI discovery only: it
+refreshes the manager snapshot you see in the pager, not the catalog the model
+gets.
+
+`/mcp reload` (aliases `/mcp reconnect`, `/mcp restart`) is the hot-reload path.
+It re-reads the MCP config sources and reconnects through the engine-owned pool,
+so the rebuilt catalog is the exact one the next model turn uses — no TUI
+restart. Config edits made from the TUI are written immediately and the manager
+marks the snapshot reload-required until you run it; a failed reload leaves the
+previous live pool intact and says so.
+
+Headless surfaces are the exception: the `ConfigReload` app-server request does
+**not** refresh MCP connections, so a headless runtime still needs a restart
+after MCP config changes.
 
 ## Remote HTTP Auth
 
@@ -202,8 +212,7 @@ The recommended setup path is Hugging Face's settings-generated configuration:
 2. Choose the MCP client closest to your Codewhale config shape and copy the
    generated server snippet.
 3. Paste the Hugging Face server entry into your resolved MCP config file.
-4. Restart Codewhale, or run `/mcp reload` for the manager snapshot and restart
-   if the model-visible tool pool still needs to rebuild.
+4. Run `/mcp reload` to rebuild the live model-visible tool pool.
 
 Codewhale reads both `servers` and `mcpServers`, so settings-generated snippets
 can be adapted without changing the rest of the MCP file. A placeholder-only
@@ -253,10 +262,11 @@ Overrides:
 `codewhale-tui mcp init` (and `codewhale-tui setup --mcp`) writes to this resolved path.
 
 The interactive `/config` editor also exposes `mcp_config_path`. Changing it in
-the TUI updates the path used by `/mcp`, and requires a restart before the
-model-visible MCP tool pool is rebuilt.
+the TUI updates the path used by `/mcp` and marks the pool reload-required;
+`/mcp reload` then switches the live pool to the new config source.
 
-After editing the file or changing `mcp_config_path`, restart the TUI.
+After editing the MCP file or changing `mcp_config_path`, run `/mcp reload`. No
+TUI restart is needed.
 
 ## Tool Naming
 
@@ -414,5 +424,7 @@ Avoid committing literal `Authorization` headers. Prefer `env_headers`,
 
 - Run `codewhale-tui doctor` to confirm the MCP config path it resolved and whether it exists.
 - In the TUI, run `/mcp validate` to refresh the visible server/tool snapshot.
+- If tools are missing from the model's catalog after a config or credential
+  change, run `/mcp reload` — `/mcp validate` only refreshes the UI snapshot.
 - If the MCP config is missing, run `codewhale-tui mcp init --force` to regenerate it.
 - If tools don’t appear, verify the server command works from your shell and that the server supports MCP `tools/list`.
