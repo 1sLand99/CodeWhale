@@ -793,6 +793,13 @@ pub fn format_context_report(report: &PromptSourceMap) -> String {
             let _ = writeln!(out, "Window: unknown");
         }
     }
+    // #5134: the source label says where the window came from but not how to
+    // change it. Name the key here so the report answers the question it
+    // provokes.
+    let _ = writeln!(
+        out,
+        "Change the window: set `context_window` on the active `[providers.<name>]` table in config.toml (docs/CONFIGURATION.md, \"Context length\")."
+    );
     let _ = writeln!(
         out,
         "Source-entry total: {} tokens",

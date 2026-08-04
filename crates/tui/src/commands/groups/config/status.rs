@@ -57,6 +57,7 @@ fn format_status(app: &App) -> String {
         "Context window:",
         &format!("{context_percent:.1}% used ({context_used} / {context_max} tokens)"),
     );
+    push_row(&mut out, "Window source:", &context_window_source(app));
     push_row(
         &mut out,
         "Last API input:",
@@ -204,6 +205,32 @@ fn context_usage(app: &App) -> (usize, u32, f64) {
     (used, max, percent)
 }
 
+/// Name where the effective context window came from and the exact key that
+/// changes it.
+///
+/// #5134: `/status` printed the window as a bare number, so a user watching
+/// auto-compaction fire at 128K on a 1M-capable model had no way to learn that
+/// `context_window` exists, let alone which table it belongs on. The
+/// provenance label alone is not enough — the actionable half is the key path.
+fn context_window_source(app: &App) -> String {
+    let source = app.active_context_window_source;
+    let label = source.label();
+    let Some(table) = app
+        .api_provider
+        .metadata()
+        .map(|metadata| metadata.provider_config_key())
+    else {
+        return format!(
+            "{label} (override: `context_window` on the active provider table in config.toml)"
+        );
+    };
+    if source == crate::route_runtime::ContextWindowSource::Configured {
+        format!("{label} — `[providers.{table}] context_window` in config.toml")
+    } else {
+        format!("{label} (override: `[providers.{table}] context_window` in config.toml)")
+    }
+}
+
 fn token_count(value: Option<u32>) -> String {
     value.map_or_else(|| "not reported".to_string(), |tokens| tokens.to_string())
 }
@@ -280,6 +307,38 @@ mod tests {
         assert!(msg.contains("Cache hit/miss:"));
         assert!(msg.contains("70 hit / 30 miss"));
         assert!(msg.contains("Use /statusline to configure footer items."));
+    }
+
+    /// #5134: the number alone sends users to the issue tracker. `/status` has
+    /// to name the provenance and the key that changes it, and it must name the
+    /// table the user is actually on — not a generic placeholder.
+    #[test]
+    fn status_report_names_context_window_source_and_override_key() {
+        let tmpdir = TempDir::new().expect("temp dir");
+        let mut app = create_test_app(tmpdir.path().to_path_buf());
+        app.api_provider = ApiProvider::Moonshot;
+
+        let msg = status(&mut app).message.expect("status message");
+
+        let row = msg
+            .lines()
+            .find(|line| line.trim_start().starts_with("Window source:"))
+            .expect("window source row");
+        assert!(
+            row.contains("[providers.moonshot] context_window"),
+            "override key must be spelled for the active provider: {row}"
+        );
+
+        // A user override reads as a statement of fact, not as advice to set
+        // something that is already set.
+        app.active_context_window_source = crate::route_runtime::ContextWindowSource::Configured;
+        let msg = status(&mut app).message.expect("status message");
+        let row = msg
+            .lines()
+            .find(|line| line.trim_start().starts_with("Window source:"))
+            .expect("window source row");
+        assert!(row.contains("configured"), "{row}");
+        assert!(!row.contains("override:"), "{row}");
     }
 
     #[test]

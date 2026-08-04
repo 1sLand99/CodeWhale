@@ -495,7 +495,9 @@ The same rule applies to all provider-prefixed model strings: a prefix such as
 `deepseek-ai/...` or `deepseek/...` is a provider-owned wire ID under the
 selected provider, not an automatic switch to the DeepSeek provider.
 Set `context_window` to the gateway/model's real total context window when it
-differs from Codewhale's static model metadata.
+differs from Codewhale's static model metadata. See
+[Context length (context window)](#context-length-context-window) for the full
+resolution order and for how to check which value is in effect.
 
 If the gateway accepts `POST /chat/completions` but rejects
 `/v1/chat/completions`, set a provider-local `path_suffix`:
@@ -673,6 +675,92 @@ variables such as `CODEWHALE_RELEASE_BASE_URL` before falling back to the
 official GitHub API endpoint. If a configured `update_uri` cannot be fetched or
 parsed and a release mirror env var is set, the TUI falls back to that mirror
 instead of failing startup.
+
+## Context length (context window)
+
+Also called context size, context limit, max context, or window. This is the
+total token window Codewhale budgets against, and it drives the header/footer
+context percent, the auto-compaction trigger, context-pressure checks, and the
+request output cap. If Codewhale compacts at 128K on a model you know serves a
+1M window, this is the setting to change (#5134).
+
+**See what is in effect, and where the value came from.** Every one of these
+prints the resolved window *and* its source:
+
+- `/status` — a `Context window:` row with the percent and token counts, and a
+  `Window source:` row naming the provenance and the exact key that overrides
+  it.
+- `/config` → Provider — `Context window` (your override, or `(not set)`) and
+  `Effective context window` (`1048576 tokens · configured`). Typing
+  `context length` in the `/config` filter jumps straight to them.
+- `/context report` — `Window: 1048576 tokens (12.4% used, ...; source: configured)`.
+- `/context json` — machine-readable `context_window_tokens` and
+  `context_window_source`.
+
+**Change it** with the provider-table key `context_window`:
+
+```toml
+[providers.moonshot]
+context_window = 1048576
+```
+
+or from the CLI:
+
+```bash
+codewhale config set providers.moonshot.context_window 1048576
+codewhale config unset providers.moonshot.context_window   # back to automatic
+```
+
+Use the table for the provider you are actually on (`providers.openai`,
+`providers.deepseek`, `providers.moonshot`, …); `/status` names it for you. The
+value is a positive token count for the route's *total* window.
+
+### How the effective window is resolved
+
+First match wins, and the source label each surface prints is exactly this
+rung:
+
+1. `configured` — `[providers.<name>] context_window` in `config.toml`. A hard
+   override: nothing below it can raise or lower the result. Read-time aliases:
+   `contextWindow`, `context_window_tokens`, `contextWindowTokens`,
+   `context_length`, `contextLength`.
+2. `provider-reported` — route-scoped 1M metadata a provider actually reported
+   for the Kimi Code `k3` route, when it was observed within the last 24 hours.
+3. `static Kimi Code safe floor` — 262,144 tokens for Kimi Code memberships,
+   because 1M access is plan-gated (Allegretto and above).
+4. `catalog` — the bundled route catalog (hand-curated offerings first, then
+   the bundled Models.dev rows). For `openai-codex`, a fresh (under 24 hours)
+   `$CODEX_HOME` model roster corrects this rung.
+5. `fallback` — the static per-provider capability table: 200,000 for
+   Anthropic-wire routes, 128,000 for `openai-codex`, 8,192 for Ollama,
+   otherwise Codewhale's static per-model metadata, and finally 128,000 when
+   the model is unknown.
+
+There is no environment variable for the context window, and no per-model
+override key. The per-provider `context_window` is the only user knob, which is
+also why it is the right one to set when a gateway or self-hosted runtime
+serves a window Codewhale's catalog does not model. Codewhale will not invent a
+window it cannot justify — it falls back to a conservative value and labels it
+`fallback`.
+
+### Adjacent knobs
+
+- `auto_compact_threshold_percent` (settings.toml; also accepted as
+  `auto_compact_threshold`; `10`–`100`, default `80`): the share of the usable
+  input budget — the window minus reserved output headroom — at which
+  auto-compaction fires. Editable from `/config`. Raising the window without
+  touching this raises the absolute compaction point along with it.
+- `auto_compact` (settings.toml, on/off): turns automatic compaction off
+  entirely; `/compact` and Ctrl+L stay available.
+- `CODEWHALE_MAX_OUTPUT_TOKENS` (environment variable; legacy alias
+  `DEEPSEEK_MAX_OUTPUT_TOKENS`): overrides the requested output cap, which is
+  otherwise derived from the window. There is no `max_output_tokens` key in
+  `config.toml`.
+
+See [Settings File](#settings-file-persistent-ui-preferences) for the
+compaction settings and [Token Quantities and
+Drivers](#token-quantities-and-drivers) for what each displayed token number
+actually measures.
 
 ## Profiles
 
@@ -1530,7 +1618,7 @@ If you are upgrading from older releases:
 - `auth_mode` (string, optional provider-table key): selects a provider-specific authentication contract. Kimi Code membership uses `auth_mode = "api_key"` (or omit the field), a key created in the [Kimi Code console](https://www.kimi.com/code/console), `base_url = "https://api.kimi.com/coding/v1"`, and bare `model = "k3"` for K3. Codewhale gives that route a safe 262,144-token baseline; set `context_window = 1048576` only when the Kimi Code plan includes 1M access (Allegretto and above). `k3[1m]` is a Claude Code-only convention, not an API model ID, and Codewhale rejects it instead of silently changing the wire model or assuming an entitlement. `model = "kimi-for-coding"` remains the valid K2.7 compatibility route available to all Kimi Code members. Legacy `auth_mode = "kimi_oauth"` fails closed with API-key guidance and never probes, reads, refreshes, or rewrites `kimi_cli`/`kimi_code_cli` credential files. First-class OAuth requires Codewhale's own vendor-registered client identity and remains tracked in #4417.
 - `base_url` (string, optional): defaults to `https://api.deepseek.com/beta` for DeepSeek's OpenAI-compatible Chat Completions API, including legacy `provider = "deepseek-cn"` configs. Other defaults are `https://api.deepseek.com/anthropic` for `deepseek-anthropic`, `https://integrate.api.nvidia.com/v1` for `nvidia-nim`, `https://api.openai.com/v1` for `openai`, `https://api.atlascloud.ai/v1` for `atlascloud`, `https://maas-openapi.wanjiedata.com/api/v1` for `wanjie-ark`, `https://ark.cn-beijing.volces.com/api/coding/v3` for `volcengine`, `https://openrouter.ai/api/v1` for `openrouter`, `https://token-plan-sgp.xiaomimimo.com/v1` for `xiaomi-mimo` when the API key starts with `tp-...` and `https://api.xiaomimimo.com/v1` otherwise, `https://api.novita.ai/openai/v1` for `novita`, `https://api.fireworks.ai/inference/v1` for `fireworks`, `https://api.siliconflow.com/v1` for `siliconflow`, `https://api.siliconflow.cn/v1` for `siliconflow-CN`, `https://api.arcee.ai/api/v1` for `arcee`, `https://api.moonshot.ai/v1` for `moonshot`, `https://api.minimax.io/v1` for `minimax`, `https://api.openmodel.ai` for `openmodel`, `https://api.z.ai/api/coding/paas/v4` for `zai`, `https://api.stepfun.ai/v1` for `stepfun`, `https://api.deepinfra.com/v1/openai` for `deepinfra`, `https://api.sakana.ai/v1` for `sakana`, `https://router.huggingface.co/v1` for `huggingface`, `https://api.together.xyz/v1` for `together`, `https://api.baiduqianfan.ai/v1` for `qianfan`, `https://chatgpt.com/backend-api` for `openai-codex`, `https://api.anthropic.com` for `anthropic`, `http://localhost:30000/v1` for `sglang`, `http://localhost:8000/v1` for `vllm`, and `http://localhost:11434/v1` for `ollama`. Set `base_url = "https://token-plan-cn.xiaomimimo.com/v1"` for China-region Xiaomi MiMo Token Plan accounts or `base_url = "https://token-plan-ams.xiaomimimo.com/v1"` for Europe/Amsterdam accounts. Set `https://api.deepseek.com` or `https://api.deepseek.com/v1` explicitly to opt out of DeepSeek beta features.
 - `telecomjs` base URL and catalog: `[providers.telecomjs]` defaults to `https://aigw.telecomjs.com/v1`; `TELECOMJS_BASE_URL` overrides it. With `TELECOMJS_API_KEY`, `/models` refreshes a key-scoped catalog without mixing rows into another provider.
-- `context_window` (integer, optional provider-table key): override the total context window for the active `[providers.<name>]` route when an OpenAI-compatible gateway, hosted model alias, or self-hosted runtime has a different limit than Codewhale's static model table. For example, `[providers.openai] context_window = 1000000` lets an OpenAI-compatible DashScope/Qwen route budget against a 1M-token window instead of the conservative fallback. For Kimi Code K3, keep `model = "k3"` and set `[providers.moonshot] context_window = 1048576` only when the membership plan includes 1M access; otherwise omit it to retain the 262,144-token safe baseline. The value must be greater than 0 and affects prompt context notes, compaction thresholds, context-pressure checks, and request output caps.
+- `context_window` (integer, optional provider-table key): override the total context window for the active `[providers.<name>]` route when an OpenAI-compatible gateway, hosted model alias, or self-hosted runtime has a different limit than Codewhale's static model table. For example, `[providers.openai] context_window = 1000000` lets an OpenAI-compatible DashScope/Qwen route budget against a 1M-token window instead of the conservative fallback. For Kimi Code K3, keep `model = "k3"` and set `[providers.moonshot] context_window = 1048576` only when the membership plan includes 1M access; otherwise omit it to retain the 262,144-token safe baseline. The value must be greater than 0 and affects prompt context notes, compaction thresholds, context-pressure checks, and request output caps. Full resolution order, and how to see which rung produced the current window: [Context length (context window)](#context-length-context-window).
 - `path_suffix` (string, optional provider-table key): override the chat-completions path for OpenAI-compatible gateways that do not serve `/v1/chat/completions`. For example, `[providers.openai] path_suffix = "/chat/completions"` sends chat requests to the unversioned base URL plus `/chat/completions`; `models` and `beta/*` requests keep their normal routing.
 - `reasoning_stream_style` (string, optional provider-table key): override how streaming reasoning is separated from answer text for the active provider route. Use `separate_field` for `reasoning_content` / `reasoning` deltas, `inline_tags` for gateways that stream `<think>...</think>` inside `delta.content`, or `none` to render incoming content exactly as answer text.
 - `[providers.<name>.auth]` (table, optional): provider-scoped auth source metadata. `source = "command"` stores a command argv plus optional `timeout_ms`; `source = "secret"` stores a `secret_id`. This slice lets provider readiness, `/provider`, and doctor JSON report the auth source class without exposing command argv output or secret values; executing commands and resolving external secret material is handled by the follow-up resolver work.

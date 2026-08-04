@@ -2948,11 +2948,14 @@ fn config_hint_for_key(key: &str) -> &'static str {
         "provider_url" => {
             "current provider endpoint; Xiaomi: token-plan | pay-as-you-go | custom URL"
         }
+        // #5134: the filter matches hint text, so the words a confused user
+        // actually types — "context length", "context size", "max context",
+        // "1m" — have to appear here or these rows stay unfindable.
         "context_window" => {
-            "provider override in config.toml; e.g. 262144 to cap a 1M model to 256K"
+            "max context length / context size limit in tokens · set `[providers.<name>] context_window` in config.toml, e.g. 1048576 for a 1M route; (not set) resolves it automatically"
         }
         "effective_context_window" => {
-            "resolved token window and source used by compaction, pressure, and preflight budgets"
+            "resolved max context length / window size limit in tokens and where the value came from; drives compaction, pressure, and preflight budgets"
         }
         "cost_currency" => "usd | cny",
         "calm_mode" => "quietens transcript chrome and tool detail; independent of live motion",
@@ -2969,7 +2972,9 @@ fn config_hint_for_key(key: &str) -> &'static str {
         "synchronized_output" => "auto | on | off; terminal redraw pacing, not model speed",
         "default_mode" => "act (agent) | plan | operate",
         "max_history" => "integer (0 allowed)",
-        "auto_compact_threshold_percent" => "10..=100",
+        "auto_compact_threshold_percent" => {
+            "10..=100 · compaction threshold: percent of the usable context length at which auto-compaction fires"
+        }
         "default_model" => {
             "DeepSeek-only legacy fallback; other providers use their provider-scoped model above"
         }
@@ -5991,6 +5996,38 @@ context_window = 262144
         view.clear_filter();
         type_filter(&mut view, "fan-out/fan-in");
         assert_eq!(visible_row_keys(&view), vec!["workflow"]);
+    }
+
+    /// #5134 filed an issue to ask how to raise the context window, because
+    /// the rows that answer it are keyed `context_window` and only findable by
+    /// someone who already knows that name. The filter has to answer the words
+    /// a user actually types.
+    #[test]
+    fn config_view_filter_finds_context_window_by_user_vocabulary() {
+        let mut view = create_config_view(Locale::En);
+
+        for phrase in ["context length", "context size", "max context length"] {
+            view.clear_filter();
+            type_filter(&mut view, phrase);
+            let keys = visible_row_keys(&view);
+            assert!(
+                keys.contains(&"context_window"),
+                "`{phrase}` must surface the context_window row: {keys:?}"
+            );
+            assert!(
+                keys.contains(&"effective_context_window"),
+                "`{phrase}` must surface the resolved window row: {keys:?}"
+            );
+        }
+
+        // The adjacent knob the same user reaches for next.
+        view.clear_filter();
+        type_filter(&mut view, "compaction threshold");
+        let keys = visible_row_keys(&view);
+        assert!(
+            keys.contains(&"auto_compact_threshold_percent"),
+            "`compaction threshold` must surface the auto-compaction trigger: {keys:?}"
+        );
     }
 
     #[test]
