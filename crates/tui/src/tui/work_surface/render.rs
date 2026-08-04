@@ -15,7 +15,7 @@ use crate::tui::app::{App, SidebarHoverRow, SidebarHoverSection};
 use crate::tui::ui_text::truncate_line_to_width;
 
 use super::model::{
-    RailPanel, WorkHitbox, WorkRow, WorkSurfacePlacement, WorkTone, project_visible,
+    AgentRowFacts, RailPanel, WorkHitbox, WorkRow, WorkSurfacePlacement, WorkTone, project_visible,
 };
 
 const SIDE_RAIL_MIN_HOST_WIDTH: u16 = 72;
@@ -337,6 +337,15 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     let list_height = body_area.height.saturating_sub(header_height);
     let body_height = usize::from(list_height);
     let overflow = rows.len() > body_height;
+    // A capped list owes the reader the size of what it is hiding, so the
+    // last painted row becomes `↓ N more`. The scrollbar shows position; only
+    // this shows how much work is off-screen.
+    let more_row = overflow && body_height >= 2;
+    let list_rows = if more_row {
+        body_height.saturating_sub(1)
+    } else {
+        body_height
+    };
     let inset = u16::from(body_area.width >= 60);
     let rail_width = u16::from(overflow);
     let content_area = Rect {
@@ -349,13 +358,13 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         height: list_height,
     };
 
-    app.work_surface.visible_rows = body_height;
+    app.work_surface.visible_rows = list_rows;
     app.work_surface.total_rows = rows.len();
     // A redraw may clamp an obsolete offset, but it must not reveal the
     // remembered keyboard selection: doing so undoes mouse-wheel scrolling
     // whenever that selection is above the viewport (#4594).
     app.work_surface.clamp_viewport(&rows);
-    let max_offset = rows.len().saturating_sub(body_height.max(1));
+    let max_offset = rows.len().saturating_sub(list_rows.max(1));
     app.work_surface.scroll_offset = app.work_surface.scroll_offset.min(max_offset);
 
     Block::default()
@@ -418,12 +427,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     let start = app.work_surface.scroll_offset;
-    let visible = rows
-        .iter()
-        .skip(start)
-        .take(body_height)
-        .collect::<Vec<_>>();
-    let mut lines = Vec::with_capacity(visible.len());
+    let visible = rows.iter().skip(start).take(list_rows).collect::<Vec<_>>();
+    let role_column = agent_role_column(&visible);
+    let mut lines = Vec::with_capacity(visible.len().saturating_add(1));
     let mut hover_rows = Vec::new();
     let mut hitboxes = Vec::new();
     for (visible_index, row) in visible.iter().enumerate() {
@@ -451,6 +457,65 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         } else {
             format!("{compact_owner}{mark} ")
         };
+
+        // Sub-agent rows own their own column layout: glyph, agent type,
+        // objective, right-aligned elapsed and tokens. They stay ordinary
+        // rows in every other respect — same hitbox, same selection, same
+        // primary action.
+        if let Some(facts) = row.agent.as_ref() {
+            let laid_out = layout_agent_row(
+                usize::from(content_area.width),
+                UnicodeWidthStr::width(prefix.as_str()),
+                &row.label,
+                role_column,
+                facts,
+            );
+            let (normal, muted) = agent_row_styles(app, selected, hovered, opened);
+            let display = format!(
+                "{prefix}{}{}{}{}{}",
+                laid_out.role,
+                if laid_out.role.is_empty() {
+                    String::new()
+                } else {
+                    " ".repeat(AGENT_ROLE_GUTTER)
+                },
+                laid_out.objective,
+                " ".repeat(laid_out.gap),
+                laid_out.receipt,
+            );
+            let mut spans = vec![Span::styled(prefix.clone(), normal)];
+            if !laid_out.role.is_empty() {
+                spans.push(Span::styled(
+                    format!("{}{}", laid_out.role, " ".repeat(AGENT_ROLE_GUTTER)),
+                    muted,
+                ));
+            }
+            spans.push(Span::styled(laid_out.objective.clone(), normal));
+            spans.push(Span::styled(
+                format!("{}{}", " ".repeat(laid_out.gap), laid_out.receipt),
+                muted,
+            ));
+            lines.push(Line::from(spans));
+
+            hitboxes.push(WorkHitbox {
+                id: row.id.clone(),
+                row_y,
+            });
+            hover_rows.push(SidebarHoverRow {
+                row_y,
+                display_text: display,
+                full_text: format!("{} · {}", row.label, row.detail),
+                detail: Some(row.detail.clone()),
+                is_truncated: laid_out.objective != facts.objective
+                    || laid_out.receipt != agent_receipt(facts, AgentRowTier::Full),
+                click_action: row.primary_action.clone(),
+                stop_action: None,
+                stop_zone_start_col: None,
+                stop_zone_end_col: None,
+            });
+            continue;
+        }
+
         let detail_candidate = if row.tone != WorkTone::Heading && content_area.width >= 44 {
             format!("  {}", row.detail)
         } else {
@@ -493,6 +558,30 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         }
     }
 
+    if more_row {
+        // Right-aligned under the receipt column, muted like every other
+        // secondary figure. Scrolled to the bottom there is nothing below, so
+        // the reserved row stays blank rather than claiming a count of zero.
+        let remaining = rows
+            .len()
+            .saturating_sub(start.saturating_add(visible.len()));
+        let text = if remaining == 0 {
+            String::new()
+        } else {
+            truncate_line_to_width(
+                &format!("↓ {remaining} more"),
+                usize::from(content_area.width),
+            )
+        };
+        let pad = usize::from(content_area.width).saturating_sub(UnicodeWidthStr::width(&*text));
+        lines.push(Line::from(Span::styled(
+            format!("{}{text}", " ".repeat(pad)),
+            Style::default()
+                .fg(app.ui_theme.text_muted)
+                .bg(app.ui_theme.surface_bg),
+        )));
+    }
+
     Paragraph::new(lines).render(content_area, frame.buffer_mut());
     render_divider(frame, area, placement, app);
     if overflow {
@@ -505,7 +594,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
                 height: content_area.height,
             },
             app.work_surface.scroll_offset,
-            body_height,
+            list_rows,
             rows.len(),
             app,
         );
@@ -699,6 +788,172 @@ fn top_todo_progress(app: &App, rows: &[WorkRow]) -> Option<String> {
             .replace("{total}", &total.to_string())
             .replace("{remaining}", &remaining.to_string()),
     )
+}
+
+/// Gap between the agent-type column and the objective.
+const AGENT_ROLE_GUTTER: usize = 2;
+/// Minimum gap between the objective and the right-aligned receipt.
+const AGENT_RECEIPT_GUTTER: usize = 2;
+/// Columns the objective must keep before an optional column may stay. Below
+/// this the objective is a shrug — "Streaming d…" answers nothing — so the
+/// optional column loses instead.
+const AGENT_OBJECTIVE_MIN: usize = 24;
+
+/// How much of a sub-agent row survives at the current width.
+///
+/// Degradation order, widest to narrowest: the token figure goes first, then
+/// the elapsed time, then the agent-type column. The objective is the last
+/// thing to go — a fleet row that cannot say what the agent is doing has
+/// stopped being worth a row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentRowTier {
+    /// Type, objective, elapsed, tokens.
+    Full,
+    /// Type, objective, elapsed.
+    NoTokens,
+    /// Type, objective.
+    NoReceipt,
+    /// Objective only.
+    ObjectiveOnly,
+}
+
+const AGENT_ROW_TIERS: [AgentRowTier; 4] = [
+    AgentRowTier::Full,
+    AgentRowTier::NoTokens,
+    AgentRowTier::NoReceipt,
+    AgentRowTier::ObjectiveOnly,
+];
+
+/// A sub-agent row resolved to painted columns.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AgentRowText {
+    /// Agent-type column, padded to the shared width. Empty once dropped.
+    role: String,
+    objective: String,
+    /// `12m 33s · ↓ 111.9k tokens`. Empty once dropped.
+    receipt: String,
+    /// Spaces separating the objective from the receipt.
+    gap: usize,
+}
+
+/// The right-aligned receipt at a given tier. A figure the runtime never
+/// reported is absent, never zero: an agent with no usage envelope shows no
+/// token count at all.
+fn agent_receipt(facts: &AgentRowFacts, tier: AgentRowTier) -> String {
+    let elapsed = facts
+        .elapsed_secs
+        .filter(|_| matches!(tier, AgentRowTier::Full | AgentRowTier::NoTokens))
+        .map(crate::elapsed::format_elapsed_secs);
+    let tokens = facts
+        .tokens
+        .filter(|_| tier == AgentRowTier::Full)
+        .map(|tokens| {
+            format!(
+                "↓ {} tokens",
+                crate::tui::footer_ui::format_token_count_compact(tokens)
+            )
+        });
+    match (elapsed, tokens) {
+        (Some(elapsed), Some(tokens)) => format!("{elapsed} · {tokens}"),
+        (Some(only), None) | (None, Some(only)) => only,
+        (None, None) => String::new(),
+    }
+}
+
+/// Shared width of the agent-type column across the rows painted this frame,
+/// so the objectives line up the way a fleet listing should read.
+///
+/// Deliberately uncapped: an agent type is either shown whole or dropped by
+/// the tier machinery. A truncated `general-purpo…` is a worse answer than no
+/// type column at all, and it would misname roles that share a prefix.
+fn agent_role_column(rows: &[&WorkRow]) -> usize {
+    rows.iter()
+        .filter(|row| row.agent.is_some())
+        .map(|row| UnicodeWidthStr::width(row.label.as_str()))
+        .max()
+        .unwrap_or(0)
+}
+
+/// Fit one sub-agent row into `width`, dropping optional columns in
+/// [`AGENT_ROW_TIERS`] order until the objective has room to say something.
+/// Every column truncates; nothing ever wraps.
+fn layout_agent_row(
+    width: usize,
+    prefix_width: usize,
+    label: &str,
+    role_column: usize,
+    facts: &AgentRowFacts,
+) -> AgentRowText {
+    for tier in AGENT_ROW_TIERS {
+        let receipt = agent_receipt(facts, tier);
+        let role = if tier == AgentRowTier::ObjectiveOnly || role_column == 0 {
+            String::new()
+        } else {
+            let pad = role_column.saturating_sub(UnicodeWidthStr::width(label));
+            format!("{label}{}", " ".repeat(pad))
+        };
+        let role_cost = if role.is_empty() {
+            0
+        } else {
+            UnicodeWidthStr::width(role.as_str()).saturating_add(AGENT_ROLE_GUTTER)
+        };
+        let receipt_cost = if receipt.is_empty() {
+            0
+        } else {
+            UnicodeWidthStr::width(receipt.as_str()).saturating_add(AGENT_RECEIPT_GUTTER)
+        };
+        let budget = width
+            .saturating_sub(prefix_width)
+            .saturating_sub(role_cost)
+            .saturating_sub(receipt_cost);
+        if budget < AGENT_OBJECTIVE_MIN && tier != AgentRowTier::ObjectiveOnly {
+            continue;
+        }
+        let objective = truncate_line_to_width(&facts.objective, budget);
+        let gap = width
+            .saturating_sub(prefix_width)
+            .saturating_sub(role_cost)
+            .saturating_sub(UnicodeWidthStr::width(objective.as_str()))
+            .saturating_sub(UnicodeWidthStr::width(receipt.as_str()));
+        return AgentRowText {
+            role,
+            objective,
+            receipt,
+            gap,
+        };
+    }
+    AgentRowText::default()
+}
+
+/// Normal-text and muted styles for one sub-agent row.
+///
+/// Three colour roles and no more: the objective is normal text, every
+/// secondary figure (type, `(+N)`, elapsed, tokens) is muted, and
+/// `accent_primary` means "this is the row you have selected" and nothing
+/// else. Status is carried by the glyph, never by colour.
+fn agent_row_styles(app: &App, selected: bool, hovered: bool, opened: bool) -> (Style, Style) {
+    let bg = if selected {
+        app.ui_theme.selection_bg
+    } else if hovered {
+        app.ui_theme.elevated_bg
+    } else {
+        app.ui_theme.surface_bg
+    };
+    let mut normal = Style::default().fg(app.ui_theme.text_body).bg(bg);
+    let mut muted = Style::default().fg(app.ui_theme.text_muted).bg(bg);
+    if selected || opened {
+        normal = normal.fg(app.ui_theme.accent_primary);
+        muted = muted.fg(app.ui_theme.accent_primary);
+    }
+    if selected {
+        normal = normal.add_modifier(Modifier::BOLD);
+        muted = muted.add_modifier(Modifier::BOLD);
+    }
+    if opened {
+        normal = normal.add_modifier(Modifier::UNDERLINED);
+        muted = muted.add_modifier(Modifier::UNDERLINED);
+    }
+    (normal, muted)
 }
 
 fn row_style(app: &App, row: &WorkRow, selected: bool, hovered: bool, opened: bool) -> Style {

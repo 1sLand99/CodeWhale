@@ -441,6 +441,11 @@ pub struct AgentProgressMeta {
     /// These stay absent until the provider actually reports usage.
     pub resolved_provider: Option<String>,
     pub resolved_model: Option<String>,
+    /// Tokens this child has *received* from its provider, accumulated across
+    /// its own usage envelopes. `None` until the provider actually reports
+    /// usage: a sub-agent whose spend is unknown renders no token figure at
+    /// all rather than a fabricated `0`.
+    pub received_tokens: Option<u64>,
 }
 
 /// Per-turn LSP repair-loop summary for the Turn Inspector (#4107).

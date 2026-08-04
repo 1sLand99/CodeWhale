@@ -610,7 +610,16 @@ fn bounded_mailbox_message(message: &MailboxMessage) -> MailboxMessage {
 fn record_agent_current_activity(app: &mut App, message: &MailboxMessage) {
     let agent_id = message.agent_id().to_string();
     let meta = app.agent_progress_meta.entry(agent_id).or_default();
-    if let MailboxMessage::TokenUsage { route, .. } = message {
+    if let MailboxMessage::TokenUsage { route, usage, .. } = message {
+        // The child's own received-token tally. `output_tokens` is what came
+        // back down from the provider, which is what the work-surface `↓`
+        // figure claims to be. Absent until a real envelope lands, so an
+        // agent with no reported usage shows no number instead of a zero.
+        meta.received_tokens = Some(
+            meta.received_tokens
+                .unwrap_or(0)
+                .saturating_add(u64::from(usage.output_tokens)),
+        );
         meta.resolved_provider = Some(route.provider.as_str().to_string());
         meta.resolved_model = Some(bound_agent_activity_text(
             &crate::cost_status::sanitize_persisted_route_label(&route.model),

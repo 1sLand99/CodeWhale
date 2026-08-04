@@ -972,8 +972,14 @@ mod tests {
             .iter()
             .find(|row| row.id.0 == "worker:agent_worker")
             .expect("agent work row");
-        // #36: number + fleet role + short name — never the raw agent id.
-        assert_eq!(row.label, "1 worker · Blue Whale");
+        // The identity column is the agent's type. It is never the raw agent
+        // id (#36), and it carries no `(+N)` while the agent is childless.
+        assert_eq!(row.label, "worker");
+        let facts = row.agent.as_ref().expect("agent row facts");
+        assert_eq!(facts.objective, "Wire settled file activity");
+        assert_eq!(facts.elapsed_secs, Some(0));
+        // No usage envelope has been seen, so there is no token figure at all.
+        assert_eq!(facts.tokens, None);
         assert!(row.detail.contains("Wire settled file activity"));
         assert!(row.detail.contains("using File.apply_patch"));
         assert!(row.detail.contains("step 2"));
@@ -1024,8 +1030,8 @@ mod tests {
     }
 
     #[test]
-    fn agent_rows_number_by_fleet_role_and_never_leak_raw_ids() {
-        // #36: the strip shows sequential number + fleet role; the raw agent
+    fn agent_rows_identify_by_fleet_role_and_never_leak_raw_ids() {
+        // #36: the strip identifies an agent by its fleet role; the raw agent
         // id hash is noise and must never render as the "name". Flat fan-outs
         // carry no nesting chrome.
         let mut app = app();
@@ -1054,8 +1060,8 @@ mod tests {
             .iter()
             .find(|row| row.id.0 == "worker:agent_99aa77bb")
             .expect("second agent row");
-        assert_eq!(first.label, "1 builder");
-        assert_eq!(second.label, "2 scout");
+        assert_eq!(first.label, "builder");
+        assert_eq!(second.label, "scout");
         assert!(first.detail.starts_with("running"), "{}", first.detail);
         for row in rows.iter().filter(|row| row.id.0.starts_with("worker:")) {
             assert!(!row.label.contains("agent_e0b2dcf1"), "{}", row.label);
@@ -1071,7 +1077,8 @@ mod tests {
     #[test]
     fn agent_rows_order_and_indent_nested_spawns_under_their_parent() {
         // #36: nesting is visible only when actually present — the child
-        // renders directly under its parent with a `↳` indent.
+        // renders directly under its parent with a `↳` indent, and the parent
+        // advertises the child it spawned as `(+1)`.
         let mut app = app();
         app.current_session_id = Some(SESSION.to_string());
         app.subagent_cache.push(cached_worker(
@@ -1097,11 +1104,11 @@ mod tests {
             .collect::<Vec<_>>();
         let parent_pos = worker_labels
             .iter()
-            .position(|label| *label == "1 builder")
-            .expect("parent row label");
+            .position(|label| *label == "builder (+1)")
+            .expect("parent row label with child count");
         let child_pos = worker_labels
             .iter()
-            .position(|label| *label == "↳ 2 scout")
+            .position(|label| *label == "↳ scout")
             .expect("indented child row label");
         assert!(
             child_pos == parent_pos + 1,
@@ -1152,6 +1159,272 @@ mod tests {
         assert!(!row.detail.contains("using "), "{}", row.detail);
         assert!(!row.detail.contains("step 7"), "{}", row.detail);
         assert!(!row.detail.contains("files changed"), "{}", row.detail);
+    }
+
+    // ---- Fleet row layout -------------------------------------------------
+
+    /// Painted lines, one per terminal row, trailing padding removed.
+    fn render_rows(app: &mut App, width: u16, height: u16) -> Vec<String> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| super::render(frame, frame.area(), app))
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn fleet_row(rows: &[String]) -> String {
+        rows.iter()
+            .find(|line| line.contains("Streaming"))
+            .cloned()
+            .unwrap_or_else(|| panic!("no fleet row in {rows:?}"))
+    }
+
+    fn fleet_worker(
+        id: &str,
+        role: &str,
+        objective: &str,
+        duration_ms: u64,
+        status: SubAgentStatus,
+    ) -> SubAgentResult {
+        let mut agent = cached_worker(id, role, None, None, status);
+        agent.assignment.objective = objective.to_string();
+        agent.duration_ms = duration_ms;
+        agent
+    }
+
+    /// Seed a live fleet of one, with a reported token spend.
+    fn fleet_app(tokens: Option<u64>) -> App {
+        let mut app = app();
+        app.current_session_id = Some(SESSION.to_string());
+        app.subagent_cache.push(fleet_worker(
+            "agent_stream",
+            "general-purpose",
+            "Streaming dead-code removal",
+            753_000,
+            SubAgentStatus::Running,
+        ));
+        app.agent_progress_meta.insert(
+            "agent_stream".to_string(),
+            crate::tui::app::AgentProgressMeta {
+                received_tokens: tokens,
+                ..crate::tui::app::AgentProgressMeta::default()
+            },
+        );
+        app
+    }
+
+    #[test]
+    fn fleet_row_lays_out_type_objective_and_a_right_aligned_receipt() {
+        let mut app = fleet_app(Some(111_900));
+        let rows = render_rows(&mut app, 100, 4);
+
+        assert_eq!(
+            fleet_row(&rows),
+            " ▸ general-purpose  Streaming dead-code removal                           \
+12m 33s · ↓ 111.9k tokens"
+        );
+        // The group header the strip already had stays put.
+        assert!(
+            rows.iter().any(|line| line.contains("Subagents 1")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn fleet_row_drops_tokens_then_elapsed_then_type_as_the_surface_narrows() {
+        // Settled degradation order. The objective is the last thing to go and
+        // every column truncates rather than wrapping.
+        let mut app = fleet_app(Some(111_900));
+        let medium = fleet_row(&render_rows(&mut app, 62, 4));
+        assert!(medium.contains("12m 33s"), "{medium}");
+        assert!(!medium.contains("tokens"), "{medium}");
+        assert!(medium.contains("general-purpose"), "{medium}");
+
+        let narrow = fleet_row(&render_rows(&mut app, 44, 4));
+        assert!(!narrow.contains("tokens"), "{narrow}");
+        assert!(!narrow.contains("12m 33s"), "{narrow}");
+        assert!(narrow.contains("general-purpose"), "{narrow}");
+
+        let tight = fleet_row(&render_rows(&mut app, 28, 4));
+        assert!(!tight.contains("general-purpose"), "{tight}");
+        assert!(tight.contains("Streaming"), "{tight}");
+
+        for line in [&medium, &narrow, &tight] {
+            assert!(line.chars().all(|ch| ch != '\n'), "{line}");
+        }
+    }
+
+    #[test]
+    fn fleet_row_elapsed_freezes_once_the_agent_is_finished() {
+        // The manager recomputes `duration_ms` as `started_at.elapsed()` on
+        // every snapshot, so a finished agent's raw duration keeps growing.
+        // The row must latch the first terminal reading instead.
+        let mut app = fleet_app(None);
+        app.subagent_cache[0].status = SubAgentStatus::Completed;
+        app.subagent_cache[0].duration_ms = 753_000;
+
+        let first = super::model::project(&mut app);
+        let finished = first
+            .iter()
+            .find(|row| row.id.0 == "worker:agent_stream")
+            .and_then(|row| row.agent.as_ref())
+            .expect("finished agent facts");
+        assert_eq!(finished.elapsed_secs, Some(753));
+
+        // A later snapshot reports a larger duration for the same dead agent.
+        app.subagent_cache[0].duration_ms = 999_000;
+        let second = super::model::project(&mut app);
+        let still = second
+            .iter()
+            .find(|row| row.id.0 == "worker:agent_stream")
+            .and_then(|row| row.agent.as_ref())
+            .expect("finished agent facts");
+        assert_eq!(
+            still.elapsed_secs,
+            Some(753),
+            "finished elapsed must freeze"
+        );
+    }
+
+    #[test]
+    fn fleet_row_elapsed_still_advances_while_the_agent_runs() {
+        let mut app = fleet_app(None);
+        app.subagent_cache[0].duration_ms = 10_000;
+        let early = super::model::project(&mut app);
+        assert_eq!(
+            early
+                .iter()
+                .find(|row| row.id.0 == "worker:agent_stream")
+                .and_then(|row| row.agent.as_ref())
+                .expect("running agent facts")
+                .elapsed_secs,
+            Some(10)
+        );
+
+        app.subagent_cache[0].duration_ms = 40_000;
+        let later = super::model::project(&mut app);
+        assert_eq!(
+            later
+                .iter()
+                .find(|row| row.id.0 == "worker:agent_stream")
+                .and_then(|row| row.agent.as_ref())
+                .expect("running agent facts")
+                .elapsed_secs,
+            Some(40)
+        );
+    }
+
+    #[test]
+    fn fleet_row_with_no_reported_usage_shows_no_token_figure_at_all() {
+        // An unknown number is rendered as nothing. Never `0`, which would
+        // claim the agent spent nothing.
+        let mut app = fleet_app(None);
+        let row = fleet_row(&render_rows(&mut app, 100, 4));
+        assert!(!row.contains("tokens"), "{row}");
+        assert!(!row.contains('↓'), "{row}");
+        assert!(row.contains("12m 33s"), "{row}");
+
+        let mut spent = fleet_app(Some(0));
+        let zero = fleet_row(&render_rows(&mut spent, 100, 4));
+        // A *reported* zero is a fact and does render.
+        assert!(zero.contains("↓ 0 tokens"), "{zero}");
+    }
+
+    #[test]
+    fn fleet_row_child_badge_counts_children_that_are_on_the_surface() {
+        let mut app = app();
+        app.current_session_id = Some(SESSION.to_string());
+        app.subagent_cache.push(cached_worker(
+            "agent_lead",
+            "general-purpose",
+            None,
+            None,
+            SubAgentStatus::Running,
+        ));
+        for child in ["agent_c1", "agent_c2", "agent_c3"] {
+            app.subagent_cache.push(cached_worker(
+                child,
+                "scout",
+                None,
+                Some("agent_lead"),
+                SubAgentStatus::Running,
+            ));
+        }
+        // A child whose parent is not on the surface must not be counted for
+        // anyone, and must not inflate the lead's badge.
+        app.subagent_cache.push(cached_worker(
+            "agent_orphan",
+            "scout",
+            None,
+            Some("agent_missing"),
+            SubAgentStatus::Running,
+        ));
+
+        let rows = super::model::project(&mut app);
+        let label = |id: &str| {
+            rows.iter()
+                .find(|row| row.id.0 == format!("worker:{id}"))
+                .map(|row| row.label.clone())
+                .unwrap_or_else(|| panic!("row for {id}"))
+        };
+        assert_eq!(label("agent_lead"), "general-purpose (+3)");
+        assert_eq!(label("agent_c1"), "↳ scout");
+        assert_eq!(label("agent_orphan"), "scout");
+    }
+
+    #[test]
+    fn a_capped_fleet_list_announces_how_many_rows_it_is_hiding() {
+        let mut app = app();
+        app.current_session_id = Some(SESSION.to_string());
+        for index in 0..8 {
+            app.subagent_cache.push(cached_worker(
+                &format!("agent_{index}"),
+                "general-purpose",
+                None,
+                None,
+                SubAgentStatus::Running,
+            ));
+        }
+
+        // Four content rows for nine projected rows (header + eight workers).
+        let rows = render_rows(&mut app, 100, 5);
+        let more = rows
+            .iter()
+            .find(|line| line.contains("more"))
+            .unwrap_or_else(|| panic!("no overflow line in {rows:?}"));
+        // Nine projected rows (header + eight workers); three fit, six do not.
+        assert!(more.contains("↓ 6 more"), "{more}");
+        // Right-aligned against the content column, not the left margin.
+        assert!(more.starts_with("        "), "{more}");
+    }
+
+    #[test]
+    fn fleet_rows_render_in_top_left_and_right_placements() {
+        for placement in [
+            super::WorkSurfacePlacement::Top,
+            super::WorkSurfacePlacement::Left,
+            super::WorkSurfacePlacement::Right,
+        ] {
+            let mut app = fleet_app(Some(111_900));
+            app.work_surface.placement = placement;
+            app.work_surface.effective_placement = placement;
+            let rows = render_rows(&mut app, 40, 8);
+            let row = fleet_row(&rows);
+            assert!(
+                row.contains("Streaming"),
+                "{placement:?} lost the objective: {rows:?}"
+            );
+        }
     }
 
     #[test]

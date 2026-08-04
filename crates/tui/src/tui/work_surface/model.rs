@@ -7,8 +7,8 @@ use ratatui::layout::Rect;
 
 use crate::settings::InlineDiffMode;
 use crate::tools::canonical_action::canonical_action_alias;
-use crate::tools::subagent::{AgentWorkerStatus, SubAgentStatus};
-use crate::tui::app::{AgentCurrentActivityStatus, App, SidebarRowAction};
+use crate::tools::subagent::{AgentWorkerStatus, SubAgentResult, SubAgentStatus};
+use crate::tui::app::{AgentCurrentActivityStatus, AgentProgressMeta, App, SidebarRowAction};
 use crate::tui::history::{
     FileActivityKind, FileActivitySummary, FileMutationReceipt, HistoryCell, ToolCell,
 };
@@ -121,6 +121,27 @@ pub(super) struct WorkRow {
     pub tone: WorkTone,
     pub selectable: bool,
     pub primary_action: Option<SidebarRowAction>,
+    /// Present only on sub-agent rows. Carries the fields the fleet row paints
+    /// beyond `label`, so the renderer can drop them one at a time as the
+    /// surface narrows instead of truncating one pre-joined string.
+    pub agent: Option<AgentRowFacts>,
+}
+
+/// The parts of a sub-agent row that are laid out as their own columns.
+///
+/// `label` already carries the identity column (nesting indent, agent type,
+/// `(+N)` child count). This carries the rest: what the agent is doing, and
+/// the right-aligned receipt.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct AgentRowFacts {
+    /// What the agent was sent to do.
+    pub objective: String,
+    /// Wall-clock seconds, frozen once the agent is observed terminal so a
+    /// finished agent stops ticking. `None` when no duration is known.
+    pub elapsed_secs: Option<u64>,
+    /// Tokens received from the provider. `None` means *genuinely unknown* —
+    /// the row then renders no token figure rather than claiming zero.
+    pub tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -221,6 +242,12 @@ pub struct WorkSurfaceState {
     /// Bumped on accepted user turns / newly started operations.
     user_turn_epoch: u64,
     last_handled_user_turn_epoch: u64,
+    /// Elapsed wall-clock, in ms, captured the first frame each sub-agent was
+    /// observed in a terminal state. The manager's `duration_ms` is
+    /// `started_at.elapsed()` recomputed per snapshot, so it keeps growing
+    /// after an agent finishes; latching the first terminal reading is what
+    /// makes a completed row stop ticking.
+    pub(super) frozen_agent_elapsed_ms: std::collections::HashMap<String, u64>,
     /// Session-instance ownership of the restored session record (#4416).
     pub(crate) session_instance: Option<SessionInstanceScope>,
     /// Test override for the sessions directory the ownership probe reads;
@@ -287,6 +314,7 @@ impl WorkSurfaceState {
             activity_suppressed: false,
             user_turn_epoch: 0,
             last_handled_user_turn_epoch: 0,
+            frozen_agent_elapsed_ms: std::collections::HashMap::new(),
             session_instance: None,
             session_owner_probe_dir: None,
         }
@@ -419,6 +447,7 @@ impl WorkSurfaceState {
 
 pub(super) fn project(app: &mut App) -> Vec<WorkRow> {
     let active_session = app.current_session_id.is_some();
+    freeze_terminal_agent_elapsed(app);
     let agents = agent_rows(app);
     let coordination = coordination_row(app);
     let activity = settled_file_activity(app);
@@ -961,6 +990,7 @@ fn coordination_row(app: &App) -> Option<RankedWorkRow> {
                 body: crate::tui::coordination_detail::format(app.ui_locale, projection),
                 stop_action: None,
             }),
+            agent: None,
         },
     })
 }
@@ -998,7 +1028,6 @@ struct AgentRowSeed {
     agent_id: String,
     parent_run_id: Option<String>,
     role: String,
-    name: Option<String>,
     ranked: RankedWorkRow,
 }
 
@@ -1012,16 +1041,18 @@ fn agent_nesting_indent(depth: usize) -> String {
     }
 }
 
-/// Compose the condensed strip label: sequential number + fleet role, plus a
-/// short name only when a real one exists (nickname or stable label). Raw
-/// agent-id hashes are never a name — when no name is known the label simply
-/// omits it rather than fabricating one (#36).
-fn agent_strip_label(indent: &str, number: usize, role: &str, name: Option<&str>) -> String {
-    let base = match name {
-        Some(name) => format!("{number} {role} · {name}"),
-        None => format!("{number} {role}"),
-    };
-    format!("{indent}{base}")
+/// Compose the sub-agent identity column: nesting indent, the agent's
+/// type/role, and `(+N)` when that agent has spawned children of its own.
+///
+/// The raw agent-id hash is never a name and is never rendered (#36); the
+/// nickname lives in Agent Details, not in this column, so the type stays
+/// scannable down the left edge the way a fleet listing should read.
+fn agent_strip_label(indent: &str, role: &str, children: usize) -> String {
+    if children == 0 {
+        format!("{indent}{role}")
+    } else {
+        format!("{indent}{role} (+{children})")
+    }
 }
 
 /// Order worker rows so nested spawns sit directly under their parent, then
@@ -1072,6 +1103,18 @@ fn order_agent_seeds(seeds: Vec<AgentRowSeed>) -> Vec<RankedWorkRow> {
         push_tree(idx, 0, &seeds, &children, &mut seen, &mut order);
     }
 
+    // `(+N)` counts children that are actually on this surface: the same map
+    // the tree walk used, so the badge can never promise a child the list does
+    // not show. Snapshot it before `seeds` is consumed — `children` borrows it.
+    let child_counts: Vec<usize> = seeds
+        .iter()
+        .map(|seed| {
+            children
+                .get(seed.agent_id.as_str())
+                .map_or(0, |indices| indices.len())
+        })
+        .collect();
+
     let mut slots: Vec<Option<AgentRowSeed>> = seeds.into_iter().map(Some).collect();
     order
         .into_iter()
@@ -1080,12 +1123,7 @@ fn order_agent_seeds(seeds: Vec<AgentRowSeed>) -> Vec<RankedWorkRow> {
             let seed = slots[idx].take().expect("each row emitted exactly once");
             let mut ranked = seed.ranked;
             let indent = agent_nesting_indent(depth.min(3));
-            ranked.row.label = agent_strip_label(
-                &indent,
-                position.saturating_add(1),
-                &seed.role,
-                seed.name.as_deref(),
-            );
+            ranked.row.label = agent_strip_label(&indent, &seed.role, child_counts[idx]);
             // `ordered_rows` re-sorts within status buckets by `order`; stamp
             // the tree position so a child sorts directly under its parent
             // whenever they share a bucket.
@@ -1125,46 +1163,9 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                 .filter(|role| !role.trim().is_empty())
                 .unwrap_or_else(|| agent.agent_type.as_str())
                 .to_string();
-            // A name is a nickname or stable label — never `agent.name`,
-            // which is the raw session id hash (#36).
-            let name = agent
-                .nickname
-                .clone()
-                .filter(|name| !name.trim().is_empty() && name != &agent.agent_id)
-                .or_else(|| app.agent_label_map.get(&agent.agent_id).cloned());
-            let terminal = current_activity
-                .map(|activity| {
-                    matches!(
-                        activity.status,
-                        AgentCurrentActivityStatus::Done
-                            | AgentCurrentActivityStatus::Canceled
-                            | AgentCurrentActivityStatus::Failed
-                            | AgentCurrentActivityStatus::Interrupted
-                    )
-                })
-                .or_else(|| {
-                    agent.worker_status.map(|worker_status| {
-                        matches!(
-                            worker_status,
-                            AgentWorkerStatus::Completed
-                                | AgentWorkerStatus::Cancelled
-                                | AgentWorkerStatus::Failed
-                                | AgentWorkerStatus::Interrupted
-                        )
-                    })
-                })
-                .unwrap_or(matches!(
-                    agent.status,
-                    SubAgentStatus::Completed
-                        | SubAgentStatus::Cancelled
-                        | SubAgentStatus::Failed(_)
-                        | SubAgentStatus::Interrupted(_)
-                        | SubAgentStatus::BudgetExhausted
-                ));
-            let mut facts = vec![
-                status.to_string(),
-                summarize_assignment(&agent.assignment.objective),
-            ];
+            let terminal = agent_is_terminal(agent, meta);
+            let objective = summarize_assignment(&agent.assignment.objective);
+            let mut facts = vec![status.to_string(), objective.clone()];
             // Quiet completion (#36): a finished agent keeps its one-line
             // status and objective; in-flight metadata (current tool, step
             // counters, file tallies) is working state, not a receipt, and
@@ -1194,7 +1195,6 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                 agent_id: agent.agent_id.clone(),
                 parent_run_id: agent.parent_run_id.clone(),
                 role,
-                name,
                 ranked: RankedWorkRow {
                     bucket,
                     order,
@@ -1203,13 +1203,20 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                         id: WorkRowId(format!("worker:{}", agent.agent_id)),
                         mark: agent_mark(bucket),
                         // Stamped by `order_agent_seeds` once the display
-                        // order (and therefore the number) is known.
+                        // depth (and therefore the indent) is known.
                         label: String::new(),
                         detail: facts.join(" · "),
                         tone: bucket_tone(bucket),
                         selectable: true,
                         primary_action: Some(SidebarRowAction::OpenAgentDetail {
                             agent_id: agent.agent_id.clone(),
+                        }),
+                        agent: Some(AgentRowFacts {
+                            objective,
+                            elapsed_secs: Some(
+                                agent_elapsed_ms(app, &agent.agent_id, agent.duration_ms) / 1_000,
+                            ),
+                            tokens: meta.and_then(|meta| meta.received_tokens),
                         }),
                     },
                 },
@@ -1236,7 +1243,6 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                 let bucket = current_activity
                     .map(|activity| current_activity_status_bucket(activity.status))
                     .unwrap_or(WorkBucket::Active);
-                let name = app.agent_label_map.get(id).cloned();
                 let mut facts = vec![status.to_string()];
                 if let Some(detail) =
                     current_activity.and_then(|activity| activity.detail.as_deref())
@@ -1263,7 +1269,6 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                     // Role is unknown until the manager snapshot arrives;
                     // "agent" is the honest fallback, not a fabrication.
                     role: "agent".to_string(),
-                    name,
                     ranked: RankedWorkRow {
                         bucket,
                         order: 5_000usize.saturating_add(order),
@@ -1278,6 +1283,17 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                             primary_action: Some(SidebarRowAction::OpenAgentDetail {
                                 agent_id: id.clone(),
                             }),
+                            agent: Some(AgentRowFacts {
+                                // No manager snapshot yet, so there is no
+                                // assignment to quote: the live activity line
+                                // is the honest answer to "what is it doing".
+                                objective: facts.join(" · "),
+                                // Neither a duration nor a usage envelope has
+                                // been seen for this id. Both render as
+                                // nothing rather than as `0s` / `0 tokens`.
+                                elapsed_secs: None,
+                                tokens: meta.and_then(|meta| meta.received_tokens),
+                            }),
                         },
                     },
                 }
@@ -1288,6 +1304,78 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
 
 fn summarize_assignment(value: &str) -> String {
     crate::tui::history::summarize_tool_output(value)
+}
+
+/// Has this agent stopped working? Typed live activity wins over the worker
+/// status, which in turn wins over the coarse manager status — the same
+/// precedence the row's status label and bucket already use.
+fn agent_is_terminal(agent: &SubAgentResult, meta: Option<&AgentProgressMeta>) -> bool {
+    meta.and_then(|meta| meta.current_activity.as_ref())
+        .map(|activity| {
+            matches!(
+                activity.status,
+                AgentCurrentActivityStatus::Done
+                    | AgentCurrentActivityStatus::Canceled
+                    | AgentCurrentActivityStatus::Failed
+                    | AgentCurrentActivityStatus::Interrupted
+            )
+        })
+        .or_else(|| {
+            agent.worker_status.map(|worker_status| {
+                matches!(
+                    worker_status,
+                    AgentWorkerStatus::Completed
+                        | AgentWorkerStatus::Cancelled
+                        | AgentWorkerStatus::Failed
+                        | AgentWorkerStatus::Interrupted
+                )
+            })
+        })
+        .unwrap_or(matches!(
+            agent.status,
+            SubAgentStatus::Completed
+                | SubAgentStatus::Cancelled
+                | SubAgentStatus::Failed(_)
+                | SubAgentStatus::Interrupted(_)
+                | SubAgentStatus::BudgetExhausted
+        ))
+}
+
+/// Latch each finished agent's elapsed time the first frame it is observed
+/// terminal, and forget agents that have left the cache.
+///
+/// The manager recomputes `SubAgentResult::duration_ms` as
+/// `started_at.elapsed()` on every snapshot, so a completed agent's duration
+/// keeps growing for as long as it stays listed. Without this pass a finished
+/// row would tick forever, which is exactly the thing a receipt must not do.
+fn freeze_terminal_agent_elapsed(app: &mut App) {
+    let live: HashSet<&str> = app
+        .subagent_cache
+        .iter()
+        .map(|agent| agent.agent_id.as_str())
+        .collect();
+    app.work_surface
+        .frozen_agent_elapsed_ms
+        .retain(|id, _| live.contains(id.as_str()));
+
+    for agent in &app.subagent_cache {
+        if !agent_is_terminal(agent, app.agent_progress_meta.get(&agent.agent_id)) {
+            continue;
+        }
+        app.work_surface
+            .frozen_agent_elapsed_ms
+            .entry(agent.agent_id.clone())
+            .or_insert(agent.duration_ms);
+    }
+}
+
+/// Frozen elapsed for a finished agent, live elapsed for a running one.
+fn agent_elapsed_ms(app: &App, agent_id: &str, duration_ms: u64) -> u64 {
+    app.work_surface
+        .frozen_agent_elapsed_ms
+        .get(agent_id)
+        .copied()
+        .unwrap_or(duration_ms)
 }
 
 fn current_activity_status_bucket(status: AgentCurrentActivityStatus) -> WorkBucket {
@@ -1515,6 +1603,7 @@ fn aggregate_activity_row(activity: &SettledFileActivity) -> Option<RankedWorkRo
                 body: body_parts.join("\n\n"),
                 stop_action: None,
             }),
+            agent: None,
         },
     })
 }
@@ -1646,6 +1735,7 @@ fn section_heading(id: &str, label: &str, detail: &str) -> WorkRow {
         tone: WorkTone::Heading,
         selectable: false,
         primary_action: None,
+        agent: None,
     }
 }
 
@@ -1703,6 +1793,7 @@ fn graph_node_row(snapshot: &WorkGraphSnapshot, node: &WorkNode) -> WorkRow {
             body: inspector_text(snapshot, node),
             stop_action: stop_action.map(Box::new),
         }),
+        agent: None,
     }
 }
 
