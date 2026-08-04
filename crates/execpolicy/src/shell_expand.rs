@@ -443,18 +443,23 @@ fn find_wrapper_head(tokens: &[String]) -> Option<usize> {
 
 /// The command-line argument of a shell's `-c` flag, if present.
 ///
-/// `tokens[0]` is the shell. Combined short flags count (`bash -lc '…'`), and
-/// the scan stops at the first non-flag operand, which in a `-c`-less
-/// invocation is the script path rather than a command line.
+/// `tokens[0]` is the shell. Combined short flags count (`bash -lc '…'`).
+/// The scan deliberately does NOT stop at the first non-flag operand: an
+/// earlier version did, and `bash -o vi -c 'payload'` walked straight past
+/// the deny expander because `vi` (the argument of `-o`) ended the scan
+/// before `-c` was seen (2026-08-04 review). Continuing the scan can
+/// over-read a `-c` that is really an argument to a script
+/// (`bash script.sh -c x`), but this expander's contract is explicit that
+/// over-emitting targets is safe and under-emitting is a bypass.
 fn shell_c_argument(tokens: &[String]) -> Option<&str> {
     let mut index = 1usize;
     while index < tokens.len() {
-        // The first non-flag operand of a `-c`-less shell invocation is a
-        // script path, not a command line — stop rather than misread it.
-        let flags = tokens[index].strip_prefix('-')?;
-        let takes_command_line = match flags.strip_prefix('-') {
+        let token = tokens[index].as_str();
+        let takes_command_line = match token.strip_prefix("--") {
             Some(long) => long.eq_ignore_ascii_case("command"),
-            None => flags.contains('c'),
+            None => token
+                .strip_prefix('-')
+                .is_some_and(|flags| flags.contains('c')),
         };
         if takes_command_line {
             return tokens.get(index + 1).map(String::as_str);
@@ -547,6 +552,10 @@ mod tests {
             "bash -c 'rm -rf /'",
             "sh -lc \"rm -rf /\"",
             "sudo -u root bash -c 'rm -rf /'",
+            // 2026-08-04: `-o vi` used to end the flag scan before `-c` was
+            // seen, so the payload skipped deny expansion entirely.
+            "bash -o vi -c 'rm -rf /'",
+            "zsh --norcs -c 'rm -rf /'",
         ] {
             assert!(
                 contains(command, "rm -rf /"),
