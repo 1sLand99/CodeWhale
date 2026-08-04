@@ -881,7 +881,7 @@ fn agent_identity_cap(width: usize) -> usize {
 /// Identities are never truncated, only dropped. `Fluke the Deep…` and
 /// `general-purpo…` both misidentify an agent, and roles that share a prefix
 /// would become indistinguishable.
-fn agent_identity<'row>(row: &'row WorkRow, cap: usize) -> &'row str {
+fn agent_identity(row: &WorkRow, cap: usize) -> &str {
     let Some(facts) = row.agent.as_ref() else {
         return "";
     };
