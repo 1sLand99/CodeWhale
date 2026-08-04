@@ -9932,7 +9932,14 @@ fn build_tool_context_preserves_read_snapshots_across_turns() {
     let err = later_turn
         .require_fresh_file_read(&path, "observed.txt")
         .expect_err("a retained snapshot must still reject stale edits");
-    assert!(err.to_string().contains("changed since the last read_file"));
+    // Names the tool the model can actually call. `read_file` is a retired name
+    // and pointing a stale-read refusal at it sent the model to a tool that does
+    // not exist — the guard-then-bad-advice chain this release set out to close.
+    assert!(
+        err.to_string()
+            .contains("changed since the last File action=\"read\" call"),
+        "stale-read refusal must name a live tool, got: {err}"
+    );
 }
 
 #[test]
