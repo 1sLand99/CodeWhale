@@ -276,23 +276,12 @@ impl ToolSpec for StartRuntimeMcpServer {
         }
 
         // Reject shell metacharacters in arguments to prevent injection.
-        // Redirects (>, >>), pipes (|), command chaining (;, &&, ||),
-        // subshells (``), and variable expansion ($) are all dangerous.
-        for arg in &parsed.config.args {
-            if arg.contains('>')
-                || arg.contains('|')
-                || arg.contains(';')
-                || arg.contains('&')
-                || arg.contains('`')
-                || arg.contains('$')
-            {
-                return Err(ToolError::invalid_input(format!(
-                    "Argument contains shell metacharacters: '{arg}'. \
-                     MCP server arguments must not contain redirects, pipes, \
-                     command chaining, or variable expansion."
-                )));
-            }
-        }
+        // Extracted to `reject_shell_metacharacters` so it is reachable from
+        // tests: the `reject_metachar_*` tests used to assert only that their
+        // own input string contained the metacharacter and never that this
+        // guard refused it, so deleting the guard left them green
+        // (2026-08-04 audit).
+        reject_shell_metacharacters(&parsed.config.args)?;
 
         // Allowlist of known MCP server runtimes and package managers.
         // Commands not in this list are rejected to prevent arbitrary execution.
@@ -376,6 +365,27 @@ impl ToolSpec for StartRuntimeMcpServer {
 
         Ok(ToolResult::success(result))
     }
+}
+
+/// Refuse MCP server arguments carrying shell metacharacters.
+///
+/// Redirects (`>`), pipes (`|`), chaining (`;`, `&`), subshells (`` ` ``), and
+/// variable expansion (`$`) are all dangerous in an argv that may reach a
+/// shell. Kept as a free function rather than inline in `execute` so it is
+/// directly testable: the `reject_metachar_*` tests previously asserted only
+/// that their own input contained the metacharacter, so deleting the guard
+/// left every one of them green (2026-08-04 audit).
+fn reject_shell_metacharacters(args: &[String]) -> Result<(), ToolError> {
+    for arg in args {
+        if arg.contains(['>', '|', ';', '&', '`', '$']) {
+            return Err(ToolError::invalid_input(format!(
+                "Argument contains shell metacharacters: '{arg}'. \
+                 MCP server arguments must not contain redirects, pipes, \
+                 command chaining, or variable expansion."
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -636,41 +646,38 @@ mod tests {
         // but execute would reject — tested via parse_mcp_command structure
     }
 
+    /// These used to assert only that their own input string contained the
+    /// metacharacter — never that the guard refused it — so deleting the
+    /// defense left all four green (2026-08-04 audit). They now call the
+    /// guard.
     #[test]
-    fn reject_metachar_redirect_in_args() {
-        let parsed = parse_mcp_command("npx server --out>file").unwrap();
-        assert!(parsed.config.args.iter().any(|a| a.contains('>')));
+    fn shell_metacharacters_in_args_are_refused() {
+        for bad in [
+            "--out>file",
+            "arg|cat",
+            "a;rm -rf /",
+            "a&&b",
+            "`whoami`",
+            "$HOME",
+        ] {
+            let args = vec!["server".to_string(), bad.to_string()];
+            let err = super::reject_shell_metacharacters(&args)
+                .expect_err("metacharacter must be refused: {bad}");
+            assert!(
+                err.to_string().contains("shell metacharacters"),
+                "refusal must name the reason for {bad}: {err}"
+            );
+        }
     }
 
     #[test]
-    fn reject_metachar_pipe_in_args() {
-        let parsed = parse_mcp_command("npx server arg1 | cat").unwrap();
-        assert!(parsed.config.args.iter().any(|a| a.contains('|')));
-    }
-
-    #[test]
-    fn reject_metachar_dollar_in_args() {
-        let parsed = parse_mcp_command(r#"npx server --key=$SECRET"#).unwrap();
-        assert!(parsed.config.args.iter().any(|a| a.contains('$')));
-    }
-
-    #[test]
-    fn reject_metachar_backtick_in_args() {
-        let parsed = parse_mcp_command("npx server --dir=`whoami`").unwrap();
-        assert!(parsed.config.args.iter().any(|a| a.contains('`')));
-    }
-
-    #[test]
-    fn allow_clean_mcp_command() {
-        let parsed = parse_mcp_command("npx @modelcontextprotocol/server-filesystem /tmp").unwrap();
-        assert_eq!(parsed.config.command, Some("npx".to_string()));
-        assert!(
-            parsed
-                .config
-                .args
-                .iter()
-                .all(|a| !a.contains('>') && !a.contains('|') && !a.contains('$'))
-        );
+    fn ordinary_args_pass_the_metacharacter_guard() {
+        let args = vec![
+            "@modelcontextprotocol/server-filesystem".to_string(),
+            "/tmp/workspace".to_string(),
+            "--read-only".to_string(),
+        ];
+        assert!(super::reject_shell_metacharacters(&args).is_ok());
     }
 
     #[test]
