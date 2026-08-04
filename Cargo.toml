@@ -71,6 +71,15 @@ mimalloc = { version = "0.1", default-features = false }
 # fast to produce. Shipping artifacts use `--profile dist` below — fat LTO on
 # a 680k-line crate belongs in release CI, not in every contributor's loop
 # (#5246; community-reported 8–16 minute local release builds, #4991).
+# Dev/test carry line tables instead of full debug info. Backtraces still name
+# the file and line of every frame — the thing anyone actually reads — but the
+# per-variable DWARF that no one inspects without a debugger attached is gone.
+# The debug binary was 227 MB and target/debug had grown past 260 GB; those
+# links are IO-bound, so the debuginfo is paid on every incremental build.
+# Anyone stepping through under lldb can override this locally.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 lto = "thin"
 strip = true
