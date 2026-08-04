@@ -85,9 +85,9 @@
     "modes": {
       "act": {
         "active": {
-          "bytes": 21482,
+          "bytes": 23033,
           "identity_sha256": "669ce9c314867be9009e48999bf398f0e7dc8933c0234f28eeba7ea7d57a087e",
-          "tokens_est": 5371,
+          "tokens_est": 5759,
           "tool_names": [
             "Bash",
             "File",
@@ -101,9 +101,9 @@
           "tools": 8
         },
         "full": {
-          "bytes": 66794,
+          "bytes": 68792,
           "identity_sha256": "34086a7e145dae6e115b5b95f35968862cedabb21257cae29c992f65732c165f",
-          "tokens_est": 16699,
+          "tokens_est": 17198,
           "tool_names": [
             "Bash",
             "File",
@@ -159,9 +159,9 @@
       },
       "operate": {
         "active": {
-          "bytes": 21482,
+          "bytes": 23033,
           "identity_sha256": "669ce9c314867be9009e48999bf398f0e7dc8933c0234f28eeba7ea7d57a087e",
-          "tokens_est": 5371,
+          "tokens_est": 5759,
           "tool_names": [
             "Bash",
             "File",
@@ -175,9 +175,9 @@
           "tools": 8
         },
         "full": {
-          "bytes": 66794,
+          "bytes": 68792,
           "identity_sha256": "34086a7e145dae6e115b5b95f35968862cedabb21257cae29c992f65732c165f",
-          "tokens_est": 16699,
+          "tokens_est": 17198,
           "tool_names": [
             "Bash",
             "File",
@@ -233,9 +233,9 @@
       },
       "plan": {
         "active": {
-          "bytes": 16203,
+          "bytes": 17388,
           "identity_sha256": "e1c0ec4c8caf7799e406a2352cb7caba53468abb50e50a88a8e04f52f7942200",
-          "tokens_est": 4051,
+          "tokens_est": 4347,
           "tool_names": [
             "File",
             "Git",
@@ -247,9 +247,9 @@
           "tools": 6
         },
         "full": {
-          "bytes": 40937,
+          "bytes": 42539,
           "identity_sha256": "e44f5cc1c77e86a0fd5f3664441afeb3d913dc19b8a8f3b9a0385ee98f78b42e",
-          "tokens_est": 10235,
+          "tokens_est": 10635,
           "tool_names": [
             "File",
             "Git",
