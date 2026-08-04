@@ -247,12 +247,21 @@ fn patch_node(
     let node = next
         .node_mut(id)
         .ok_or_else(|| structural(format!("node {id} not found")))?;
-    if node.state.is_terminal() && patch.state.is_some() {
+    // Only an actual transition OUT of a terminal state is forbidden.
+    // Re-asserting the state a node already holds is a no-op, and rejecting it
+    // broke the only tool that writes here: `work_update` replaces the whole
+    // todo list on every call, so once an item is cancelled every later call
+    // re-sends it as cancelled and the entire update was refused. The model was
+    // then told to "use Supersede", which `work_update` does not expose — a
+    // dead end whose only escape was silently dropping the item from the list.
+    if node.state.is_terminal() && patch.state.is_some_and(|s| s != node.state) {
         return Err(ValidationReport::single(
             ValidationCode::V9,
             format!(
-                "node {id} is terminal ({:?}); use Supersede to replace it",
-                node.state
+                "node {id} is terminal ({:?}) and cannot move to {:?}. \
+                 Re-sending its current state is fine; changing it needs Supersede.",
+                node.state,
+                patch.state.expect("checked above")
             ),
         ));
     }

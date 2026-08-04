@@ -451,6 +451,26 @@ fn v9_terminal_states_only_move_via_supersede() {
     );
     expect_code(result, ValidationCode::V9);
 
+    // ...but re-asserting the state it already holds is a no-op, not an error.
+    // `work_update` replaces the whole list on every call, so a cancelled item
+    // is re-sent as cancelled every time; rejecting that made the tool unusable
+    // once anything was cancelled.
+    let terminal_state = graph.snapshot().node(&nid("op")).expect("op node").state;
+    let replay = graph.apply(
+        WorkGraphChange::UpdateNode {
+            id: nid("op"),
+            patch: WorkNodePatch {
+                state: Some(terminal_state),
+                ..WorkNodePatch::default()
+            },
+        },
+        ctx(8),
+    );
+    assert!(
+        replay.is_ok(),
+        "re-sending a terminal node's own state must be accepted: {replay:?}"
+    );
+
     // Explicit Supersede is the sanctioned path.
     must(
         &mut graph,
