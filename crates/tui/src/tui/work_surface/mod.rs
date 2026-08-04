@@ -778,10 +778,7 @@ mod tests {
         app.hunt.quarry = Some("only a goal".to_string());
         let budget = working_budget(&app, 40);
         let h = super::height(&mut app, 100, 40, budget);
-        assert!(
-            h >= 2,
-            "goal alone must reserve title + divider, got {h}"
-        );
+        assert!(h >= 2, "goal alone must reserve title + divider, got {h}");
         let text = render_text(&mut app, 80, h);
         assert!(
             text.contains("Goal: only a goal"),
@@ -1406,9 +1403,7 @@ mod tests {
                         );
                         if panel != super::RailPanel::Context {
                             assert!(
-                                !text
-                                    .split_whitespace()
-                                    .any(|tok| tok == panel.title()),
+                                !text.split_whitespace().any(|tok| tok == panel.title()),
                                 "{panel:?} on Top must not print the panel name as chrome; got: {text}"
                             );
                         }

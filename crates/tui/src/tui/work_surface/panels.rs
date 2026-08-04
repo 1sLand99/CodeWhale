@@ -165,6 +165,8 @@ fn pinned_panel_lines(
         max_rows,
         app.ui_theme.mode,
         &app.ui_theme,
-        WorkPanelOpts { omit_goal_objective },
+        WorkPanelOpts {
+            omit_goal_objective,
+        },
     )
 }

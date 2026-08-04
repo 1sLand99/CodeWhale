@@ -320,9 +320,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     // Pin goal title, then progress receipt, above the scrollable rows.
     // At the minimum two-row surface keep one usable content row + divider.
     let goal_height = u16::from(goal_title.is_some() && body_area.height >= 1);
-    let progress_height = u16::from(
-        todo_progress.is_some() && body_area.height.saturating_sub(goal_height) >= 2,
-    );
+    let progress_height =
+        u16::from(todo_progress.is_some() && body_area.height.saturating_sub(goal_height) >= 2);
     let header_height = goal_height.saturating_add(progress_height);
     let list_height = body_area.height.saturating_sub(header_height);
     let body_height = usize::from(list_height);
@@ -514,8 +513,7 @@ fn render_panel(frame: &mut Frame, area: Rect, body_area: Rect, app: &mut App) {
     );
 
     let title_rows = if let Some((goal_text, goal_style)) = goal.as_ref() {
-        let goal_text =
-            truncate_line_to_width(goal_text, usize::from(body_area.width).max(1));
+        let goal_text = truncate_line_to_width(goal_text, usize::from(body_area.width).max(1));
         Paragraph::new(Line::from(Span::styled(
             goal_text,
             goal_style.bg(app.ui_theme.surface_bg),
