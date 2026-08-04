@@ -6464,7 +6464,10 @@ impl Config {
     /// `[MIN_SUBAGENT_HEARTBEAT_TIMEOUT_SECS, MAX_SUBAGENT_HEARTBEAT_TIMEOUT_SECS]`.
     /// `None` or `0` resolve to the default 300 seconds. The final value is
     /// also kept at least 30 seconds above `subagent_api_timeout_secs()` so a
-    /// configured long model request is not pre-empted by heartbeat cleanup.
+    /// configured long model request is not pre-empted by heartbeat cleanup,
+    /// and at least 30 seconds above the sub-agent tool timeout so a single
+    /// long tool execution is not cancelled as "no progress" (2026-08-04
+    /// sub-agent hunt, finding 4).
     #[must_use]
     pub fn subagent_heartbeat_timeout_secs(&self) -> u64 {
         resolve_subagent_heartbeat_timeout_secs(
@@ -6472,6 +6475,7 @@ impl Config {
                 .as_ref()
                 .and_then(|cfg| cfg.heartbeat_timeout_secs),
             self.subagent_api_timeout_secs(),
+            DEFAULT_SUBAGENT_TOOL_TIMEOUT_SECS,
         )
     }
 
@@ -6488,6 +6492,7 @@ impl Config {
                         .and_then(|cfg| cfg.heartbeat_timeout_secs)
                 }),
             api_timeout,
+            DEFAULT_SUBAGENT_TOOL_TIMEOUT_SECS,
         )
     }
 

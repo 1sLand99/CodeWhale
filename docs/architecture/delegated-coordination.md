@@ -77,3 +77,40 @@ contention, projections, and reconciliation sequence.
 projection, and reconciliation receipts plus deterministic hottest-path counts.
 Metrics without an authoritative source, such as package growth or route cost,
 remain explicitly null instead of being inferred.
+
+## The workspace lock, and what losing it does and does not mean
+
+The ledger lives in one file, `.codewhale/state/subagents.v1.json`, written as a
+whole-document atomic replace. Two processes rewriting that file would be
+last-rename-wins, and the loser's `write_claims` would vanish — which silently
+re-opens concurrent overlapping mutation of the same paths after a restart. So
+one per-workspace advisory flock (`subagents.v1.lock`) decides who may *write*
+the file. That is the whole of its job.
+
+Opening a second Codewhale session in the same workspace is ordinary usage, so
+losing that flock is an ordinary state, not a failure:
+
+- **It does not affect liveness.** A session that cannot write the ledger runs
+  its own agents normally. Whether an agent is alive is decided by heartbeat
+  evidence, never by lock ownership. (Before v0.9.4 the cleanup pass
+  terminalized every running agent with no live task handle purely because this
+  process lacked the flock; that coupling is gone.)
+- **It does not affect reads.** The boot-time load is unconditional. A second
+  session sees the workspace's decisions and write claims even though it cannot
+  append to them. Gating the load on the write flock previously left the second
+  session holding an empty default ledger, which it would write straight over
+  the real one the moment the first session exited and the flock became
+  acquirable.
+- **It does mean no durable ledger appends.** Decision, claim, contention, and
+  reconciliation mutations still require the flock, and so does any
+  shared-workspace write-capable launch, because such a launch must be durably
+  replayable before it executes. A second session can therefore delegate
+  read-only and isolated-worktree work, but not shared-workspace writers.
+
+Known gap: a lock-less session holds the ledger as of its own boot. If the lock
+owner appends more records and then exits, the second session can acquire the
+flock and persist its boot-time snapshot, losing the records appended in
+between. Closing that — and letting a second session launch shared-workspace
+writers — needs per-session ledger segments unioned on read, so that no two
+processes ever write the same file and the claim-overlap check runs against the
+union. That work is not done.

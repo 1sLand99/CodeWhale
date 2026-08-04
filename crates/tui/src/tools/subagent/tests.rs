@@ -1102,8 +1102,12 @@ fn coordination_detail_projection_reports_process_lock_ownership() {
     );
 }
 
+/// A second Codewhale session in the same workspace is ordinary usage. Losing
+/// the coordination flock means "I cannot append to the shared ledger" — it
+/// must never mean "my agents are dead". Bookkeeping failure and liveness are
+/// separate concerns (owner report, 2026-08-04).
 #[test]
-fn cleanup_terminalizes_running_orphans_without_task_handle_when_lock_missing() {
+fn a_second_session_without_the_lock_keeps_its_running_agents_live() {
     let tmp = tempdir().expect("tempdir");
     let workspace = tmp.path().canonicalize().expect("canonical workspace");
 
@@ -1119,7 +1123,7 @@ fn cleanup_terminalizes_running_orphans_without_task_handle_when_lock_missing() 
 
     let (input_tx, _input_rx) = mpsc::unbounded_channel();
     let mut agent = SubAgent::new(
-        "orphan-no-handle".to_string(),
+        "live-in-second-session".to_string(),
         FleetRole::Scout,
         "explore".to_string(),
         make_assignment(),
@@ -1130,24 +1134,168 @@ fn cleanup_terminalizes_running_orphans_without_task_handle_when_lock_missing() 
         PathBuf::from("."),
         contender.session_boot_id().to_string(),
     );
-    // Explicit orphan: Running, no task_handle (SubAgent::new already sets None).
-    assert!(agent.task_handle.is_none());
-    agent.last_activity_at = Instant::now() - Duration::from_secs(10);
+    // Fresh, well inside the heartbeat window: nothing about this agent is
+    // stale. The only thing "wrong" with it is that this process cannot write
+    // the shared ledger.
+    agent.last_activity_at = Instant::now();
     let agent_id = agent.id.clone();
     contender.agents.insert(agent_id.clone(), agent);
 
     let cancelled = contender.cleanup(Duration::from_secs(3600));
-    assert!(
-        cancelled >= 1,
-        "orphan without task handle must terminalize under lock loss"
+    assert_eq!(
+        cancelled, 0,
+        "lock loss alone must not terminalize anything"
     );
     let snap = contender
         .get_result(&agent_id)
-        .expect("agent still listed after local terminalization");
-    assert!(
-        matches!(snap.status, SubAgentStatus::Interrupted(_)),
-        "orphan becomes Interrupted locally, not left Running: {:?}",
+        .expect("agent still listed in the second session");
+    assert_eq!(
+        snap.status,
+        SubAgentStatus::Running,
+        "a live agent stays Running when this session cannot write the ledger: {:?}",
         snap.status
+    );
+}
+
+/// Reading the workspace ledger is a read. Gating the boot-time load on the
+/// *write* flock left a second session blind to every decision and write claim
+/// in the workspace — and, worse, primed to overwrite the real ledger with its
+/// own empty one as soon as the first session exited and the flock became
+/// available.
+#[test]
+fn a_second_session_without_the_lock_still_loads_the_workspace_ledger() {
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().canonicalize().expect("canonical workspace");
+    let state_path = default_state_path(&workspace).expect("state path");
+
+    let mut first = SubAgentManager::new(workspace.clone(), 4)
+        .with_state_path(state_path.clone())
+        .require_coordination_process_lock();
+    first
+        .ensure_coordination_process_lock()
+        .expect("first session owns the lock");
+    first
+        .record_coordination_decision(DecisionRecord {
+            decision_id: "shared-decision".to_string(),
+            subject: "durability".to_string(),
+            status: DecisionStatus::Accepted,
+            owner: "root".to_string(),
+            scope: vec!["src".to_string()],
+            constraints: vec!["persist before acknowledgement".to_string()],
+            evidence_handles: Vec::new(),
+            version: 1,
+            sequence: 0,
+        })
+        .expect("first session records a decision");
+    first
+        .persist_state_synchronously()
+        .expect("first session persists the ledger");
+
+    // Second session in the same workspace, while the first still holds the
+    // flock. It must still see the workspace ledger.
+    let second = new_shared_subagent_manager(workspace.clone(), 4);
+    {
+        let guard = second.blocking_read();
+        assert!(
+            !guard.holds_coordination_process_lock(),
+            "test premise: the second session does not own the flock"
+        );
+        let ledger = guard.coordination_snapshot();
+        assert_eq!(
+            ledger.decisions.len(),
+            1,
+            "second session must load the workspace ledger it cannot write"
+        );
+        assert_eq!(ledger.decisions[0].decision_id, "shared-decision");
+    }
+
+    // First session exits; the flock becomes available. The second session's
+    // next persist must not blank the ledger it inherited.
+    drop(first);
+    {
+        let guard = second.blocking_write();
+        guard
+            .ensure_coordination_process_lock()
+            .expect("lock acquisition retries after the first session exits");
+        guard
+            .persist_state_synchronously()
+            .expect("second session persists once it owns the lock");
+    }
+    let mut replayed = SubAgentManager::new(workspace, 4).with_state_path(state_path);
+    replayed.load_state().expect("reload the workspace ledger");
+    assert_eq!(
+        replayed.coordination.decisions.len(),
+        1,
+        "the second session must not overwrite the workspace ledger with an empty one"
+    );
+}
+
+/// The complement of the test above: an orphan still terminalizes, but only on
+/// heartbeat evidence. Lock ownership is not part of the decision either way.
+#[test]
+fn cleanup_terminalizes_orphans_on_heartbeat_evidence_not_on_lock_ownership() {
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().canonicalize().expect("canonical workspace");
+
+    let holder = SubAgentManager::new(workspace.clone(), 4).require_coordination_process_lock();
+    holder
+        .ensure_coordination_process_lock()
+        .expect("holder owns the lock");
+
+    let mut contender = SubAgentManager::new(workspace, 4)
+        .with_running_heartbeat_timeout(Duration::from_secs(30))
+        .require_coordination_process_lock();
+    contender
+        .ensure_coordination_process_lock()
+        .expect_err("contender must not own the lock");
+
+    let insert_orphan = |manager: &mut SubAgentManager, name: &str, idle: Duration| {
+        let (input_tx, _input_rx) = mpsc::unbounded_channel();
+        let mut agent = SubAgent::new(
+            name.to_string(),
+            FleetRole::Scout,
+            "explore".to_string(),
+            make_assignment(),
+            "deepseek-v4-flash".to_string(),
+            None,
+            None,
+            input_tx,
+            PathBuf::from("."),
+            manager.session_boot_id().to_string(),
+        );
+        // Explicit orphan: Running, no task_handle (SubAgent::new sets None).
+        assert!(agent.task_handle.is_none());
+        agent.last_activity_at = Instant::now() - idle;
+        let agent_id = agent.id.clone();
+        manager.agents.insert(agent_id.clone(), agent);
+        agent_id
+    };
+
+    let fresh = insert_orphan(&mut contender, "fresh-orphan", Duration::from_secs(1));
+    let stale = insert_orphan(&mut contender, "stale-orphan", Duration::from_secs(300));
+
+    let cancelled = contender.cleanup(Duration::from_secs(3600));
+    assert_eq!(
+        cancelled, 1,
+        "only the agent with stale heartbeat evidence terminalizes"
+    );
+    assert_eq!(
+        contender
+            .get_result(&fresh)
+            .expect("fresh orphan still listed")
+            .status,
+        SubAgentStatus::Running,
+        "a fresh orphan is not terminalized just because the flock is elsewhere"
+    );
+    assert!(
+        matches!(
+            contender
+                .get_result(&stale)
+                .expect("stale orphan still listed")
+                .status,
+            SubAgentStatus::Interrupted(_)
+        ),
+        "a heartbeat-stale orphan still becomes Interrupted"
     );
 }
 

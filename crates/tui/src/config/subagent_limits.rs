@@ -34,6 +34,12 @@ pub const MIN_SUBAGENT_API_TIMEOUT_SECS: u64 = 1;
 /// keeps a misconfigured per-step timeout from masking real model/network
 /// hangs forever.
 pub const MAX_SUBAGENT_API_TIMEOUT_SECS: u64 = 3600;
+/// Default wall-clock budget for a single sub-agent tool execution, in
+/// seconds. This is the single source of truth for the default:
+/// `tools::subagent::DEFAULT_TOOL_TIMEOUT` derives from it, so the heartbeat
+/// floor below and the timeout actually applied to a running tool can never
+/// drift apart.
+pub const DEFAULT_SUBAGENT_TOOL_TIMEOUT_SECS: u64 = 300;
 /// Default wall-clock interval without manager-visible sub-agent progress
 /// before a running child can be auto-cancelled to release its slot (#2614).
 pub const DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS: u64 = 300;
@@ -62,6 +68,7 @@ pub(crate) fn resolve_subagent_api_timeout_secs(raw: Option<u64>) -> u64 {
 pub(crate) fn resolve_subagent_heartbeat_timeout_secs(
     raw: Option<u64>,
     api_timeout_secs: u64,
+    tool_timeout_secs: u64,
 ) -> u64 {
     let raw = raw.unwrap_or(DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS);
     let configured = if raw == 0 {
@@ -76,5 +83,16 @@ pub(crate) fn resolve_subagent_heartbeat_timeout_secs(
         MIN_SUBAGENT_HEARTBEAT_TIMEOUT_SECS,
         MAX_SUBAGENT_HEARTBEAT_TIMEOUT_SECS,
     );
-    configured.max(min_for_api)
+    // A single tool execution may legitimately run up to `tool_timeout_secs`
+    // without the child touching its progress heartbeat (activity is recorded
+    // at step boundaries, not mid-tool), so the floor must also sit above the
+    // tool timeout. Deriving it from `api_timeout_secs` alone let a low
+    // `[subagents] api_timeout_secs` pull the floor under a long tool, and
+    // cleanup then killed a legitimately-working child (2026-08-04 sub-agent
+    // hunt, finding 4).
+    let min_for_tool = tool_timeout_secs.saturating_add(30).clamp(
+        MIN_SUBAGENT_HEARTBEAT_TIMEOUT_SECS,
+        MAX_SUBAGENT_HEARTBEAT_TIMEOUT_SECS,
+    );
+    configured.max(min_for_api).max(min_for_tool)
 }

@@ -244,8 +244,12 @@ const MAX_CHILD_WALL_TIME: Duration = Duration::from_secs(24 * 60 * 60);
 /// tool (a large build, a slow shell command, a deep search) is not killed
 /// mid-flight. Kept non-zero so `timeout(Duration::ZERO, ...)` can never fire
 /// immediately. The per-step API timeout, streaming watchdogs, and heartbeat
-/// floors remain the independent stall detectors.
-const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
+/// floors remain the independent stall detectors. Derived from the shared
+/// `DEFAULT_SUBAGENT_TOOL_TIMEOUT_SECS` so the heartbeat floor (which must sit
+/// above this timeout, see `resolve_subagent_heartbeat_timeout_secs`) can never
+/// drift from the value actually applied to a running tool.
+const DEFAULT_TOOL_TIMEOUT: Duration =
+    Duration::from_secs(crate::config::DEFAULT_SUBAGENT_TOOL_TIMEOUT_SECS);
 const MIN_SUBAGENT_SPAWN_TOKEN_RESERVE: u64 = 1;
 const MIN_EVENT_CHANNEL_HEADROOM_FOR_ROUTINE_PROGRESS: usize = 32;
 
@@ -2756,6 +2760,13 @@ struct CoordinationProcessLock {
 pub const COORDINATION_SAME_PROCESS_HANDOVER: &str =
     "handing delegated coordination between engines in this process";
 
+/// Marker inside a lock-acquisition error meaning the flock wait expired
+/// rather than that another session holds it. The status strip distinguishes
+/// the two, because "a second session is open here" and "the claim timed out"
+/// call for different responses.
+pub const COORDINATION_LOCK_TIMEOUT_MARKER: &str =
+    "timed out acquiring delegated coordination lock";
+
 impl CoordinationProcessLock {
     fn acquire(workspace: &Path) -> Result<Self> {
         let lock_path = normalize_subagent_workspace(workspace)
@@ -2838,7 +2849,7 @@ impl CoordinationProcessLock {
                 drop(release_tx);
                 let _ = thread.join();
                 Err(anyhow!(
-                    "timed out acquiring delegated coordination lock for {}: {error}",
+                    "{COORDINATION_LOCK_TIMEOUT_MARKER} for {}: {error}",
                     workspace.display()
                 ))
             }
@@ -5666,37 +5677,14 @@ impl SubAgentManager {
                 auto_cancelled += 1;
             }
         }
-        // When this process does not own the coordination flock, any Running
-        // agent without a live task handle cannot make durable progress from
-        // here. Terminalize immediately so the UI never shows a ticking
-        // counter on a dead job while we wait for heartbeat timeout (#2.6).
-        if !self.holds_coordination_process_lock() {
-            let orphan_ids = self
-                .agents
-                .values()
-                .filter(|agent| {
-                    agent.status == SubAgentStatus::Running
-                        && !agent.completion_claimed
-                        && agent.task_handle.is_none()
-                })
-                .map(|agent| agent.id.clone())
-                .collect::<Vec<_>>();
-            for agent_id in orphan_ids {
-                let Some(mut terminal) = self.agents.get(&agent_id).map(SubAgent::snapshot) else {
-                    continue;
-                };
-                terminal.status = SubAgentStatus::Interrupted(
-                    "Delegated coordination unavailable in this process".to_string(),
-                );
-                terminal.result = Some(
-                    "Marked terminal locally because this session does not hold the workspace coordination lock and the agent has no live executor.".to_string(),
-                );
-                terminal.needs_input = None;
-                if self.finish_terminal_result(&agent_id, terminal, false, true) {
-                    auto_cancelled += 1;
-                }
-            }
-        }
+        // Deliberately NOT here: a pass that terminalized every Running agent
+        // without a live task handle whenever this process lacked the
+        // coordination flock (#2.6). Two Codewhale sessions in one workspace is
+        // ordinary usage, and failure to append to a shared bookkeeping ledger
+        // is not evidence that live work has stopped. Liveness is decided by
+        // the heartbeat above — which is actual evidence — never by who owns
+        // the flock (owner report, 2026-08-04). See `docs/architecture/
+        // delegated-coordination.md` for what lock loss legitimately costs.
 
         self.agents.retain(|_, agent| {
             if agent.status == SubAgentStatus::Running {
@@ -6582,8 +6570,17 @@ pub fn new_shared_subagent_manager_with_timeout(
     }
     manager = manager.require_coordination_process_lock();
     if let Err(error) = manager.ensure_coordination_process_lock() {
-        tracing::warn!(target: "subagent", %error, "delegated coordination unavailable in this process");
-    } else if let Err(err) = manager.load_state() {
+        tracing::warn!(target: "subagent", %error, "this session cannot append to the shared coordination ledger");
+    }
+    // Loading is a read. It was previously gated behind the *write* flock,
+    // which left a second session in the same workspace blind to every
+    // decision and write claim already recorded — and holding a default,
+    // empty ledger that would be written straight over the real one the
+    // moment the first session exited and the flock became acquirable
+    // (owner report, 2026-08-04). Read unconditionally; the write gate on
+    // `persist_state`/`persist_state_synchronously` is what keeps the file
+    // single-writer.
+    if let Err(err) = manager.load_state() {
         // Routed through tracing instead of stderr — see comment in
         // `persist_state_best_effort` above.
         tracing::warn!(target: "subagent", ?err, "failed to load sub-agent state");

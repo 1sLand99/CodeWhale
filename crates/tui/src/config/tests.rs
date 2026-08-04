@@ -2124,9 +2124,14 @@ heartbeat_timeout_secs = 240
         config.subagent_api_timeout_secs_for_provider(ApiProvider::Zai),
         180
     );
+    // The explicit 240s provider override sits below the 300s tool timeout,
+    // and a heartbeat under the tool timeout kills children mid-legitimate-
+    // tool (activity is only recorded at step boundaries). The tool-timeout
+    // floor lifts the resolved value above the override
+    // (2026-08-04 sub-agent hunt, finding 4).
     assert_eq!(
         config.subagent_heartbeat_timeout_secs_for_provider(ApiProvider::Zai),
-        240
+        DEFAULT_SUBAGENT_TOOL_TIMEOUT_SECS + 30
     );
 }
 
@@ -2412,9 +2417,12 @@ fn subagent_api_timeout_defaults_and_clamps() {
 #[test]
 fn subagent_heartbeat_timeout_defaults_clamps_and_respects_api_timeout() {
     // With the 600s default API timeout, the heartbeat floor (api + 30s)
-    // lifts the resolved default above the raw 300s constant.
-    let resolved_default =
-        DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS.max(DEFAULT_SUBAGENT_API_TIMEOUT_SECS + 30);
+    // lifts the resolved default above the raw 300s constant. The tool
+    // timeout floor (tool + 30s) also participates but sits below the API
+    // floor at default settings.
+    let resolved_default = DEFAULT_SUBAGENT_HEARTBEAT_TIMEOUT_SECS
+        .max(DEFAULT_SUBAGENT_API_TIMEOUT_SECS + 30)
+        .max(DEFAULT_SUBAGENT_TOOL_TIMEOUT_SECS + 30);
     assert_eq!(
         Config::default().subagent_heartbeat_timeout_secs(),
         resolved_default
@@ -2429,6 +2437,12 @@ fn subagent_heartbeat_timeout_defaults_clamps_and_respects_api_timeout() {
     };
     assert_eq!(zero.subagent_heartbeat_timeout_secs(), resolved_default);
 
+    // With a tiny API timeout the tool-timeout floor dominates: a single
+    // tool execution can run the full tool timeout without touching the
+    // heartbeat, so cleanup must not fire before tool_timeout + 30s even
+    // though the API floor alone would be 31s (2026-08-04 sub-agent hunt,
+    // finding 4 — this case resolved to 31 before the fix, which let
+    // cleanup kill a child mid-legitimate-tool).
     let low = Config {
         subagents: Some(SubagentsConfig {
             api_timeout_secs: Some(1),
@@ -2439,7 +2453,7 @@ fn subagent_heartbeat_timeout_defaults_clamps_and_respects_api_timeout() {
     };
     assert_eq!(
         low.subagent_heartbeat_timeout_secs(),
-        MIN_SUBAGENT_API_TIMEOUT_SECS + 30
+        DEFAULT_SUBAGENT_TOOL_TIMEOUT_SECS + 30
     );
 
     let follows_long_api_timeout = Config {
@@ -2466,6 +2480,51 @@ fn subagent_heartbeat_timeout_defaults_clamps_and_respects_api_timeout() {
         high.subagent_heartbeat_timeout_secs(),
         MAX_SUBAGENT_HEARTBEAT_TIMEOUT_SECS
     );
+}
+
+#[test]
+fn subagent_heartbeat_floor_never_drops_below_tool_timeout_plus_margin() {
+    // The safety property behind finding 4: for EVERY accepted combination of
+    // `[subagents] api_timeout_secs` and `heartbeat_timeout_secs`, the
+    // resolved heartbeat timeout stays above the tool timeout, because a tool
+    // running up to `tool_timeout` produces no heartbeat activity. Corners
+    // cover the smallest legal API timeout and heartbeat against both the
+    // global and provider-specific resolvers.
+    let corners: [Option<u64>; 4] = [
+        Some(MIN_SUBAGENT_API_TIMEOUT_SECS),
+        Some(1),
+        None,
+        Some(MAX_SUBAGENT_API_TIMEOUT_SECS),
+    ];
+    let heartbeats: [Option<u64>; 4] = [
+        Some(MIN_SUBAGENT_HEARTBEAT_TIMEOUT_SECS),
+        Some(1),
+        None,
+        Some(0),
+    ];
+    for api in corners {
+        for heartbeat in heartbeats {
+            let cfg = Config {
+                subagents: Some(SubagentsConfig {
+                    api_timeout_secs: api,
+                    heartbeat_timeout_secs: heartbeat,
+                    ..SubagentsConfig::default()
+                }),
+                ..Config::default()
+            };
+            let floor = DEFAULT_SUBAGENT_TOOL_TIMEOUT_SECS + 30;
+            assert!(
+                cfg.subagent_heartbeat_timeout_secs() >= floor,
+                "global resolver: api={api:?} heartbeat={heartbeat:?} resolved {} < {floor}",
+                cfg.subagent_heartbeat_timeout_secs()
+            );
+            assert!(
+                cfg.subagent_heartbeat_timeout_secs_for_provider(ApiProvider::Deepseek) >= floor,
+                "provider resolver: api={api:?} heartbeat={heartbeat:?} resolved {} < {floor}",
+                cfg.subagent_heartbeat_timeout_secs_for_provider(ApiProvider::Deepseek)
+            );
+        }
+    }
 }
 
 #[test]
