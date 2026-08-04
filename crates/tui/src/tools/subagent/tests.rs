@@ -2392,35 +2392,39 @@ fn prompt_only_general_children_default_read_only_instead_of_claiming_the_repo()
     assert_eq!(request.write_authority, Some(SpawnWriteAuthority::ReadOnly));
     assert!(request.write_roots.is_empty());
 
-    let error = parse_spawn_request(&json!({
+    // Explicit write-capable starts without a scope default to the parent
+    // workspace root rather than refusing.
+    let workspace_write = parse_spawn_request(&json!({
         "prompt": "edit without a claim",
         "write_authority": "workspace_write",
     }))
-    .expect_err("explicit write authority requires an explicit bounded claim")
-    .to_string();
-    assert!(error.contains("must declare"), "{error}");
+    .expect("explicit write authority defaults write scope to parent workspace");
+    assert_eq!(
+        workspace_write.write_authority,
+        Some(SpawnWriteAuthority::WorkspaceWrite)
+    );
+    assert_eq!(workspace_write.write_roots, vec![".".to_string()]);
 
     for explicit in [
         json!({"prompt": "implement", "type": "implementer"}),
         json!({"prompt": "general but explicit", "type": "general"}),
     ] {
-        let error = parse_spawn_request(&explicit)
-            .expect_err("explicit write-capable identity must not silently become read-only")
-            .to_string();
-        assert!(error.contains("must declare"), "{error}");
+        let request = parse_spawn_request(&explicit)
+            .expect("explicit write-capable identity defaults write scope to parent workspace");
+        assert!(spawn_request_is_write_capable(&request));
+        assert_eq!(request.write_roots, vec![".".to_string()]);
     }
 
     // Fleet roles are classified only after the live roster resolves them.
-    // A manager profile still fails closed before spawn when it has no scope.
+    // A manager profile defaults to the parent workspace when it has no scope.
     let roster = FleetRoster::built_ins_only();
     let mut fleet_role =
         parse_spawn_request(&json!({"prompt": "fleet role", "role": "release_lead"}))
             .expect("unresolved fleet role should parse");
     apply_spawn_profile(&mut fleet_role, &roster).expect("release lead should resolve");
-    let error = validate_spawn_write_contract(&mut fleet_role, false)
-        .expect_err("resolved write-capable fleet role must declare a scope")
-        .to_string();
-    assert!(error.contains("must declare"), "{error}");
+    validate_spawn_write_contract(&mut fleet_role, false)
+        .expect("resolved write-capable fleet role defaults write scope to parent workspace");
+    assert_eq!(fleet_role.write_roots, vec![".".to_string()]);
 }
 
 #[test]
@@ -4285,7 +4289,7 @@ fn agent_tool_prompt_schema_keeps_ordinary_starts_message_first() {
     let prompt = schema_property_description(&agent_schema, "prompt");
     assert!(prompt.contains("focused task"));
     assert!(prompt.contains("read-only role needs no write scope"));
-    assert!(prompt.contains("write-capable role must also declare a bounded write scope"));
+    assert!(prompt.contains("write-capable role defaults to the parent workspace"));
     for ceremony in [
         "Subagent Brief",
         "QUESTION",

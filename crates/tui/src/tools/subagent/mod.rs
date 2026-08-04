@@ -1715,8 +1715,9 @@ struct SpawnRequest {
     /// Declared expected artifact. Surfaced to the child in its prompt so the
     /// contract the spawner declared is visible to the agent doing the work.
     expected_artifact: Option<String>,
-    /// Expected mutation boundary. Write-capable launches must declare at
-    /// least one bounded root, exact file, or named contract.
+    /// Expected mutation boundary. Write-capable launches without an explicit
+    /// root, exact file, or named contract default to the parent workspace
+    /// root (`"."`). Escalation outside the parent workspace is refused.
     write_roots: Vec<String>,
     exact_files: Vec<String>,
     coordination_contracts: Vec<String>,
@@ -6666,7 +6667,7 @@ impl ToolSpec for AgentTool {
             "Add a Fleet profile, role, or explicit limits only when they improve the task. ",
             "Coordinate through this same tool: action=message queues a note without waking the child; action=followup delivers queued notes and wakes a running child for its next user-provenance turn; action=interrupt stops the current child turn while preserving its checkpoint; action=wait only observes. ",
             "The narrow agents/list, agents/message, agents/followup, agents/interrupt, and agents/wait tools expose the same semantics directly; there is no second transport. ",
-            "In Operate, background workers are the default for independent or long work; a write-capable root start also declares bounded write_roots, exact_files, or coordination_contracts; arbitrary shell remains gated. ",
+            "In Operate, background workers are the default for independent or long work; a write-capable root start defaults write scope to the parent workspace unless narrowed with write_roots, exact_files, or coordination_contracts; arbitrary shell remains gated. ",
             "Legacy action=status|peek|cancel remain for compatibility."
         )
     }
@@ -6708,7 +6709,7 @@ impl ToolSpec for AgentTool {
                 },
                 "prompt": {
                     "type": "string",
-                    "description": "The focused task to give the background worker. A read-only role needs no write scope; a write-capable role must also declare a bounded write scope."
+                    "description": "The focused task to give the background worker. A read-only role needs no write scope; a write-capable role defaults to the parent workspace unless narrowed with write_roots, exact_files, or coordination_contracts."
                 },
                 "dependencies": {
                     "type": "array",
@@ -6802,7 +6803,7 @@ impl ToolSpec for AgentTool {
                 "write_roots": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Expected repo-relative directory trees this child may mutate. Shared write-capable children claim these before launch; scope expansion must use agents/coordinate before mutation."
+                    "description": "Expected repo-relative directory trees this child may mutate. Defaults to the parent workspace ('.') when omitted on a write-capable start. Shared write-capable children claim these before launch; scope expansion must use agents/coordinate before mutation. Paths outside the parent workspace are refused."
                 },
                 "exact_files": {
                     "type": "array",
@@ -10706,15 +10707,17 @@ fn validate_spawn_write_contract(
         && request.coordination_contracts.is_empty()
     {
         if request.write_authority.is_some() || !allow_prompt_only_general {
-            return Err(ToolError::invalid_input(
-                "explicit write-capable agent starts must declare write_roots, exact_files, or coordination_contracts; choose a read-only role for non-mutating work"
-                    .to_string(),
-            ));
+            // Default write scope to the parent workspace root. Escalation
+            // outside the workspace is still refused by path normalization
+            // when an explicit scope is declared.
+            request.write_roots = vec![".".to_string()];
+        } else {
+            // A prompt-only/general launch remains ergonomic but is not
+            // silently granted the whole repository. It starts read-only
+            // until the caller supplies an explicit write-capable identity
+            // or mutation claim.
+            request.write_authority = Some(SpawnWriteAuthority::ReadOnly);
         }
-        // A prompt-only/general launch remains ergonomic but is not silently
-        // granted the whole repository. It starts read-only until the caller
-        // supplies an explicit bounded mutation claim.
-        request.write_authority = Some(SpawnWriteAuthority::ReadOnly);
     }
     Ok(())
 }
