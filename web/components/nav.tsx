@@ -2,7 +2,7 @@ import Link from "next/link";
 import type { Locale } from "@/lib/i18n/config";
 import { FACTS } from "@/lib/facts.generated";
 import { fill, getChrome } from "@/lib/i18n/dictionaries";
-import { navLinks, REPO_URL } from "@/lib/i18n/links";
+import { navLinks, REPO_URL, DISCORD_URL } from "@/lib/i18n/links";
 import { fetchRepoStats, formatStars } from "@/lib/github";
 import { getEnv } from "@/lib/kv";
 import { LocaleSwitcher } from "./locale-switcher";
@@ -92,6 +92,13 @@ export async function Nav({ locale = "en" }: { locale?: Locale }) {
             aria-label={chrome.starsAria}
           >
             ★ {stars > 0 ? formatStars(stars) : chrome.githubFallback}
+          </Link>
+          <Link
+            href={DISCORD_URL}
+            className="site-discord-link paper-discord-badge"
+            aria-label="Discord"
+          >
+            Discord
           </Link>
           <Link
             href={`/${locale}/install`}

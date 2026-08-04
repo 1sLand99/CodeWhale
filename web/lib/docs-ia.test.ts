@@ -147,6 +147,7 @@ describe("navigation parity and accessibility", () => {
       expect(project.map((l) => l.href), `${locale} footer project routes`).toEqual([
         "https://github.com/Hmbown/CodeWhale",
         "https://github.com/Hmbown/CodeWhale/issues",
+        "https://discord.gg/37gfS3ksug",
         `/${locale}/contribute`,
         "https://github.com/Hmbown/CodeWhale/blob/main/LICENSE",
       ]);

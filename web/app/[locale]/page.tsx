@@ -10,7 +10,7 @@ import { Whale } from "@/components/whale";
 import { getFacts } from "@/lib/facts";
 import { fetchFeed } from "@/lib/github";
 import { fill, getChrome, getHome, splitToken } from "@/lib/i18n/dictionaries";
-import { REPO_ISSUES_URL, REPO_RELEASES_URL, REPO_URL } from "@/lib/i18n/links";
+import { REPO_ISSUES_URL, REPO_RELEASES_URL, REPO_URL, DISCORD_URL } from "@/lib/i18n/links";
 import { getEnv } from "@/lib/kv";
 import type { FeedItem } from "@/lib/types";
 
@@ -345,6 +345,7 @@ export default async function HomePage({ params }: { params: Promise<{ locale: s
             <nav aria-label={d.communityLinksAria}>
               <a href={REPO_URL}>GitHub</a>
               <a href={REPO_ISSUES_URL}>Issues</a>
+              <a href={DISCORD_URL}>Discord</a>
               <Link href={`/${locale}/contribute`}>{d.contribute}</Link>
               {publishedRelease ? (
                 <a href={publishedRelease.url}>{publishedRelease.tag}</a>

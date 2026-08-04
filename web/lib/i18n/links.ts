@@ -14,6 +14,8 @@ export const REPO_URL = "https://github.com/Hmbown/CodeWhale";
 export const REPO_ISSUES_URL = `${REPO_URL}/issues`;
 export const REPO_RELEASES_URL = `${REPO_URL}/releases`;
 export const REPO_LICENSE_URL = `${REPO_URL}/blob/main/LICENSE`;
+/** Community chat. A brand name, so it is not a dictionary string. */
+export const DISCORD_URL = "https://discord.gg/37gfS3ksug";
 
 /** A chrome link. `secondary` is the small bilingual companion label. */
 export interface ChromeLink {
@@ -67,6 +69,7 @@ export function footerProjectLinks(locale: string, chrome: ChromeDict): ChromeLi
   return [
     { href: REPO_URL, label: "GitHub" },
     { href: REPO_ISSUES_URL, label: chrome.footerIssues },
+    { href: DISCORD_URL, label: "Discord" },
     { href: `/${locale}/contribute`, label: chrome.footerContribute },
     { href: REPO_LICENSE_URL, label: chrome.footerLicense },
   ];
