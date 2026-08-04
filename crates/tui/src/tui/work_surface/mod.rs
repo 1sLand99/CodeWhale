@@ -1,4 +1,27 @@
-//! Ocean Work Graph surface ownership.
+//! Ocean Work Graph surface ownership — **this module is the top bar.**
+//!
+//! Naming warning, because it has confused readers repeatedly: this is called
+//! the "rail" or the "work surface", but [`WorkSurfacePlacement`] defaults to
+//! `Top`, so by default it renders as a horizontal strip under the header and
+//! above the transcript. "The rail", "the work surface" and "the top bar" all
+//! name this module. It is not the header ([`crate::tui::underwater`]) and not
+//! the footer.
+//!
+//! Two settings are orthogonal and are routinely mixed up:
+//!
+//! - **placement** — where it renders. `Top` (default) | `Left` | `Right` |
+//!   `Off`. Top height comes from `work_surface_top_height` (2..=16), which
+//!   drag-resizing the divider persists to `settings.toml`.
+//! - **panel** — what it shows. [`RailPanel`]: `Tasks` (default) | `Agents` |
+//!   `Context` | `Pinned`, from the `rail_panel` setting. The legacy
+//!   `sidebar_focus` key migrates into it.
+//!
+//! So the word "Pinned" on screen is a PANEL name, not a state.
+//!
+//! Height is decided once per frame by [`render::height`]; the row budget it is
+//! given comes from `crate::tui::ui::rail_row_budget`, which is its only
+//! production caller. An empty panel returns 0 rows rather than rendering a
+//! title over nothing.
 //!
 //! Placement, scrolling, selection, and pager ownership remain local to this
 //! component. Every visible work row derives from the active-session graph.
