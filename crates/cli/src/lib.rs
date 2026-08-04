@@ -1873,7 +1873,9 @@ fn run() -> Result<()> {
                 &resolved_runtime,
             )
         }
-        Some(Commands::Thread(args)) => run_thread_command(args.command),
+        Some(Commands::Thread(args)) => {
+            run_thread_command(&cli, &mut store, &runtime_overrides, args.command)
+        }
         Some(Commands::Sandbox(args)) => run_sandbox_command(args.command),
         Some(Commands::AppServer(args)) => {
             // The HTTP/mobile runtime API is delegated to the mature `serve` path
@@ -4021,7 +4023,43 @@ fn run_model_command(
     }
 }
 
-fn run_thread_command(command: ThreadCommand) -> Result<()> {
+/// The TUI passthrough a thread subcommand delegates as, if it delegates.
+///
+/// Exhaustive on purpose: a future `ThreadCommand` variant that starts a
+/// session has to state its passthrough here, where the caller below routes it
+/// through the one command builder that applies the telemetry floor.
+fn thread_delegation(command: &ThreadCommand) -> Option<Vec<String>> {
+    match command {
+        ThreadCommand::Resume { thread_id } => Some(vec!["resume".to_string(), thread_id.clone()]),
+        ThreadCommand::Fork { thread_id } => Some(vec!["fork".to_string(), thread_id.clone()]),
+        ThreadCommand::List { .. }
+        | ThreadCommand::Read { .. }
+        | ThreadCommand::Archive { .. }
+        | ThreadCommand::Unarchive { .. }
+        | ThreadCommand::SetName { .. }
+        | ThreadCommand::ClearName { .. } => None,
+    }
+}
+
+fn run_thread_command(
+    cli: &Cli,
+    store: &mut ConfigStore,
+    runtime_overrides: &CliRuntimeOverrides,
+    command: ThreadCommand,
+) -> Result<()> {
+    // `thread resume`/`thread fork` start a full interactive session in the TUI
+    // binary, so they delegate exactly like the top-level `resume` does —
+    // through `build_tui_command`, which forwards `--config` and states the
+    // resolved telemetry value in the child's environment. They used to take a
+    // bare `Command::new(tui).args(args)` that forwarded neither, so a session
+    // launched this way re-resolved from `$CODEWHALE_HOME/config.toml` with no
+    // overrides and armed telemetry even when the user had passed
+    // `--telemetry false` or pointed `--config` at a file that said
+    // `telemetry = false`.
+    if let Some(passthrough) = thread_delegation(&command) {
+        let resolved_runtime = resolve_runtime_for_dispatch(store, runtime_overrides);
+        return delegate_to_tui(cli, &resolved_runtime, passthrough);
+    }
     let state = StateStore::open(None)?;
     match command {
         ThreadCommand::List { all, limit } => {
@@ -4048,13 +4086,8 @@ fn run_thread_command(command: ThreadCommand) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&thread)?);
             Ok(())
         }
-        ThreadCommand::Resume { thread_id } => {
-            let args = vec!["resume".to_string(), thread_id];
-            delegate_simple_tui(args)
-        }
-        ThreadCommand::Fork { thread_id } => {
-            let args = vec!["fork".to_string(), thread_id];
-            delegate_simple_tui(args)
+        ThreadCommand::Resume { .. } | ThreadCommand::Fork { .. } => {
+            unreachable!("thread_delegation routes resume and fork before this match")
         }
         ThreadCommand::Archive { thread_id } => {
             state.mark_archived(&thread_id)?;
@@ -4761,6 +4794,18 @@ fn build_tui_command_with_paths(
     let telemetry = resolved_runtime.telemetry.to_string();
     cmd.env("CODEWHALE_TELEMETRY", &telemetry);
     cmd.env("DEEPSEEK_TELEMETRY", &telemetry);
+    // …and state *why*, because the value alone cannot say. Off is the shipped
+    // default, so the child receives `false` on every ordinary run and cannot
+    // tell that from an operator who declared a kill switch. The child needs
+    // the difference exactly once: the first-run notice must not ask a question
+    // whose answer this environment overrides, and answering it must not
+    // reverse a decision somebody already made. Stated on every run, so an
+    // inherited marker can never leak in either direction.
+    let floor = cli.telemetry == Some(false) || codewhale_config::telemetry_floor_in_force();
+    cmd.env(
+        codewhale_config::TELEMETRY_FLOOR_ENV,
+        if floor { "1" } else { "0" },
+    );
     // The endpoint travels with the switch. The child re-validates it — plain
     // `http://` to anything that is not loopback is refused there, and there is
     // no environment variable that overrides that refusal — so forwarding is a
@@ -4832,14 +4877,12 @@ fn exit_with_tui_status(status: std::process::ExitStatus) -> Result<()> {
     bail!("codewhale-tui terminated without an exit code")
 }
 
-fn delegate_simple_tui(args: Vec<String>) -> Result<()> {
-    let tui = locate_sibling_tui_binary()?;
-    let status = Command::new(&tui)
-        .args(args)
-        .status()
-        .map_err(|err| anyhow!("{}", tui_spawn_error(&tui, &err)))?;
-    exit_with_tui_status(status)
-}
+// There is deliberately no "just run the TUI with these args" helper here. One
+// existed, `thread resume`/`thread fork` used it, and it forwarded neither
+// `--config` nor the resolved telemetry value — so the kill switch the
+// dispatcher had already applied never reached the process that emits. Every
+// delegation goes through `build_tui_command_with_paths`, and
+// `only_one_function_may_locate_and_spawn_the_tui` pins that.
 
 fn tui_spawn_error(tui: &Path, err: &io::Error) -> String {
     format!(
@@ -8459,6 +8502,165 @@ model = "qwen-2.5-7b"
         assert_eq!(
             command_env(&cmd, "DEEPSEEK_TELEMETRY").as_deref(),
             Some("true")
+        );
+    }
+
+    #[test]
+    fn thread_resume_and_fork_delegate_with_the_kill_switch_attached() {
+        // Regression: both took a bare `Command::new(tui).args(args)` that
+        // forwarded no arguments and set no environment, so the child
+        // re-resolved from `$CODEWHALE_HOME/config.toml` with no overrides and
+        // collected a full session — `install_or_upgrade`, `session_start`,
+        // `session_end` — for a user who had passed `--telemetry false` or
+        // pointed `--config` at a file saying `telemetry = false`.
+        let _lock = env_lock();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let custom = dir
+            .path()
+            .join(format!("custom-tui{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&custom, b"").unwrap();
+        let custom_str = custom.to_string_lossy().into_owned();
+        let _bin = ScopedEnvVar::set("DEEPSEEK_TUI_BIN", &custom_str);
+
+        let off_config = dir.path().join("off.toml");
+        std::fs::write(&off_config, b"telemetry = false\n").unwrap();
+        let off_config_str = off_config.to_string_lossy().into_owned();
+
+        for (subcommand, thread_command) in [
+            (
+                "resume",
+                ThreadCommand::Resume {
+                    thread_id: "t-1".to_string(),
+                },
+            ),
+            (
+                "fork",
+                ThreadCommand::Fork {
+                    thread_id: "t-1".to_string(),
+                },
+            ),
+        ] {
+            let passthrough =
+                thread_delegation(&thread_command).expect("resume and fork must delegate");
+            assert_eq!(passthrough, vec![subcommand.to_string(), "t-1".to_string()]);
+
+            let cli = parse_ok(&[
+                "codewhale",
+                "--config",
+                &off_config_str,
+                "--telemetry",
+                "false",
+                "thread",
+                subcommand,
+                "t-1",
+            ]);
+            let mut resolved = telemetry_test_resolved();
+            resolved.telemetry = false;
+
+            let cmd = build_tui_command(&cli, &resolved, passthrough).expect("command");
+            let args: Vec<String> = cmd
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == ["--config", off_config_str.as_str()]),
+                "thread {subcommand} must forward --config: {args:?}"
+            );
+            assert!(
+                args.ends_with(&[subcommand.to_string(), "t-1".to_string()]),
+                "thread {subcommand} must pass the session through: {args:?}"
+            );
+            assert_eq!(
+                command_env(&cmd, "CODEWHALE_TELEMETRY").as_deref(),
+                Some("false"),
+                "thread {subcommand} must carry the resolved kill switch"
+            );
+            assert_eq!(
+                command_env(&cmd, "DEEPSEEK_TELEMETRY").as_deref(),
+                Some("false")
+            );
+        }
+
+        // The non-delegating verbs stay in this process; naming them here is
+        // what makes the match above exhaustive, so a future variant that
+        // starts a session cannot be added without stating its passthrough.
+        assert!(
+            thread_delegation(&ThreadCommand::List {
+                all: false,
+                limit: None
+            })
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn only_one_function_may_locate_and_spawn_the_tui() {
+        // The finding above was not a wrong argument list; it was a *second*
+        // way to start the TUI, one that had never been taught the floor. So
+        // the property worth pinning is that there is one.
+        let source = include_str!("lib.rs");
+        let runtime = source
+            .split_once("\nmod tests {")
+            .map_or(source, |(before, _)| before);
+        let call_sites = runtime
+            .lines()
+            .filter(|line| {
+                line.contains("locate_sibling_tui_binary()")
+                    && !line.trim_start().starts_with("//")
+                    && !line.contains("fn locate_sibling_tui_binary")
+            })
+            .count();
+        assert_eq!(
+            call_sites, 1,
+            "exactly one function may locate and spawn the sibling TUI, so that \
+             one function is the only place the telemetry floor has to be applied"
+        );
+    }
+
+    #[test]
+    fn build_tui_command_states_whether_a_kill_switch_is_in_force() {
+        // The forwarded `CODEWHALE_TELEMETRY=false` is ambiguous by
+        // construction: it is both the shipped default and a declared kill
+        // switch. The child needs the difference for the first-run notice, so
+        // the dispatcher states it on every run rather than leaving the child
+        // to infer it from a value that cannot say.
+        let _lock = env_lock();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let custom = dir
+            .path()
+            .join(format!("custom-tui{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&custom, b"").unwrap();
+        let custom_str = custom.to_string_lossy().into_owned();
+        let _bin = ScopedEnvVar::set("DEEPSEEK_TUI_BIN", &custom_str);
+        let _telemetry_env = ScopedEnvVar::remove("CODEWHALE_TELEMETRY");
+        let _legacy_env = ScopedEnvVar::remove("DEEPSEEK_TELEMETRY");
+        let _floor_env = ScopedEnvVar::remove(codewhale_config::TELEMETRY_FLOOR_ENV);
+
+        // An ordinary first run: off, but nobody declared anything.
+        let cli = parse_ok(&["codewhale"]);
+        let resolved = telemetry_test_resolved();
+        let cmd = build_tui_command(&cli, &resolved, Vec::new()).expect("command");
+        assert_eq!(
+            command_env(&cmd, codewhale_config::TELEMETRY_FLOOR_ENV).as_deref(),
+            Some("0")
+        );
+
+        // The per-run flag is a floor for the run it belongs to.
+        let cli = parse_ok(&["codewhale", "--telemetry", "false"]);
+        let cmd = build_tui_command(&cli, &resolved, Vec::new()).expect("command");
+        assert_eq!(
+            command_env(&cmd, codewhale_config::TELEMETRY_FLOOR_ENV).as_deref(),
+            Some("1")
+        );
+
+        // So is the operator's environment.
+        let _env_off = ScopedEnvVar::set("CODEWHALE_TELEMETRY", "0");
+        let cli = parse_ok(&["codewhale"]);
+        let cmd = build_tui_command(&cli, &resolved, Vec::new()).expect("command");
+        assert_eq!(
+            command_env(&cmd, codewhale_config::TELEMETRY_FLOOR_ENV).as_deref(),
+            Some("1")
         );
     }
 
