@@ -1346,6 +1346,28 @@ pub fn wire_model_for_provider_route(provider: ApiProvider, base_url: &str, mode
     wire_model_for_provider(provider, trimmed)
 }
 
+/// Reconcile a remembered `/model` pick with the model the config file names.
+///
+/// `provider_models` in `settings.toml` remembers the last `/model` (or model
+/// picker) selection and outranks `config.toml` on the next launch. The picker
+/// offers catalog spellings, which are lowercase, so a user whose config names
+/// `DeepSeek-V4-Flash` can end up relaunching into `deepseek-v4-flash` — the
+/// wrong id for a self-hosted OpenAI-compatible gateway whose model names are
+/// case-sensitive, and the wrong id in the header.
+///
+/// When the two strings name the *same* model in a different ASCII case, the
+/// config file owns the spelling. A remembered pick that names a genuinely
+/// different model still wins, so `/model` persistence is unchanged: only the
+/// spelling defers, never the selection.
+#[must_use]
+pub(crate) fn prefer_configured_model_spelling(configured: &str, remembered: String) -> String {
+    let configured = configured.trim();
+    if remembered != configured && remembered.eq_ignore_ascii_case(configured) {
+        return configured.to_string();
+    }
+    remembered
+}
+
 /// Recover the behavioral intent of a retiring alias only when the selected
 /// route is a first-party DeepSeek endpoint. Custom endpoints own both the id
 /// and its semantics, so they deliberately return `None` here.

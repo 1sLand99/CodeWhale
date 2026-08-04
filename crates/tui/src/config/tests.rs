@@ -11872,3 +11872,176 @@ fn configured_inactive_provider_reads_its_secret_store_key() -> Result<()> {
     );
     Ok(())
 }
+
+/// A self-hosted OpenAI-compatible gateway owns its model namespace, including
+/// its casing. A WeChat-community user configured `DeepSeek-V4-Flash` against
+/// their company's internal endpoint and reported the id coming back lowercase
+/// — an id that endpoint does not serve. Every stage from the parsed config to
+/// the resolved wire id must hand the string back byte-for-byte.
+#[test]
+fn custom_endpoint_model_id_survives_verbatim_through_the_route() {
+    const MODEL: &str = "DeepSeek-V4-Flash";
+    let shapes: [(&str, &str); 6] = [
+        (
+            "provider-scoped deepseek table with a custom base_url",
+            r#"
+provider = "deepseek"
+[providers.deepseek]
+base_url = "https://llm.corp.internal/v1"
+api_key = "k"
+model = "DeepSeek-V4-Flash"
+"#,
+        ),
+        (
+            "deepseek table with no explicit provider key",
+            r#"
+[providers.deepseek]
+base_url = "https://llm.corp.internal/v1"
+api_key = "k"
+model = "DeepSeek-V4-Flash"
+"#,
+        ),
+        (
+            "root base_url with the root default_text_model",
+            r#"
+base_url = "https://llm.corp.internal/v1"
+api_key = "k"
+default_text_model = "DeepSeek-V4-Flash"
+"#,
+        ),
+        (
+            "anthropic dialect on a custom deepseek endpoint",
+            r#"
+provider = "deepseek"
+[providers.deepseek]
+base_url = "https://llm.corp.internal/anthropic"
+api_key = "k"
+model = "DeepSeek-V4-Flash"
+wire = "anthropic"
+"#,
+        ),
+        (
+            "openai-compatible provider table",
+            r#"
+provider = "openai"
+[providers.openai]
+base_url = "https://llm.corp.internal/v1"
+api_key = "k"
+model = "DeepSeek-V4-Flash"
+"#,
+        ),
+        (
+            "literal custom provider on a root base_url",
+            r#"
+provider = "custom"
+base_url = "https://llm.corp.internal/v1"
+api_key = "k"
+default_text_model = "DeepSeek-V4-Flash"
+"#,
+        ),
+    ];
+
+    for (label, body) in shapes {
+        let mut config: Config = toml::from_str(body).expect("config parses");
+        normalize_model_config(&mut config);
+        let provider = config.api_provider();
+        let base_url = config.base_url_for_route(provider);
+        assert!(
+            provider_preserves_custom_base_url_model(provider, &base_url),
+            "{label}: {base_url} must classify as a custom endpoint"
+        );
+
+        let stored = config
+            .provider_config_for(provider)
+            .and_then(|entry| entry.model.clone())
+            .or_else(|| config.default_text_model.clone())
+            .unwrap_or_default();
+        assert_eq!(stored, MODEL, "{label}: config load rewrote the stored id");
+
+        let resolved = config.default_model();
+        assert_eq!(resolved, MODEL, "{label}: default_model() rewrote the id");
+
+        assert_eq!(
+            wire_model_for_provider_route(provider, &base_url, &resolved),
+            MODEL,
+            "{label}: the wire id must match the configured id byte-for-byte"
+        );
+
+        let route = crate::route_runtime::resolve_runtime_route(&config, provider, Some(&resolved))
+            .unwrap_or_else(|err| panic!("{label}: route resolution failed: {err}"));
+        assert_eq!(
+            route.model, MODEL,
+            "{label}: the resolved route rewrote the id"
+        );
+    }
+}
+
+/// Preserving the user's spelling must not turn alias resolution
+/// case-sensitive: normalize for comparison, never mutate what is stored or
+/// sent. A first-party/catalog route still canonicalizes to its documented id.
+#[test]
+fn model_alias_matching_stays_case_insensitive() {
+    // Mixed-case aliases still resolve to the provider's documented wire id.
+    assert_eq!(
+        normalize_model_name_for_provider(ApiProvider::NvidiaNim, "DeepSeek-V4-Pro").as_deref(),
+        Some(DEFAULT_NVIDIA_NIM_MODEL)
+    );
+    assert_eq!(
+        normalize_model_name_for_provider(ApiProvider::Openrouter, "DeepSeek-V4-Flash").as_deref(),
+        Some(DEFAULT_OPENROUTER_FLASH_MODEL)
+    );
+    assert_eq!(
+        canonical_model_id_for_provider(ApiProvider::Zai, "GLM-5.1").as_deref(),
+        canonical_model_id_for_provider(ApiProvider::Zai, "glm-5.1").as_deref()
+    );
+
+    // A first-party DeepSeek route still migrates the retired aliases,
+    // whatever case they are typed in.
+    for alias in ["deepseek-chat", "DeepSeek-Chat", "DEEPSEEK-REASONER"] {
+        assert_eq!(
+            wire_model_for_provider_route(ApiProvider::Deepseek, "https://api.deepseek.com", alias),
+            DEEPSEEK_ALIAS_REPLACEMENT,
+            "first-party DeepSeek must canonicalize {alias}"
+        );
+    }
+
+    // The same alias on a custom endpoint keeps the user's exact spelling:
+    // that endpoint owns both the id and its meaning.
+    assert_eq!(
+        wire_model_for_provider_route(
+            ApiProvider::Deepseek,
+            "https://llm.corp.internal/v1",
+            "DeepSeek-Chat"
+        ),
+        "DeepSeek-Chat"
+    );
+}
+
+/// The remembered `/model` pick outranks `config.toml` on the next launch. It
+/// must not silently restyle the configured id: two spellings of one model are
+/// the config file's call, a genuinely different model stays the memory's.
+#[test]
+fn remembered_model_pick_defers_to_the_configured_spelling() {
+    assert_eq!(
+        prefer_configured_model_spelling("DeepSeek-V4-Flash", "deepseek-v4-flash".to_string()),
+        "DeepSeek-V4-Flash",
+        "a case-only disagreement belongs to config.toml"
+    );
+    assert_eq!(
+        prefer_configured_model_spelling("  DeepSeek-V4-Flash  ", "DEEPSEEK-V4-FLASH".to_string()),
+        "DeepSeek-V4-Flash"
+    );
+    assert_eq!(
+        prefer_configured_model_spelling("DeepSeek-V4-Flash", "deepseek-v4-pro".to_string()),
+        "deepseek-v4-pro",
+        "a different model is still a real remembered selection"
+    );
+    assert_eq!(
+        prefer_configured_model_spelling("DeepSeek-V4-Flash", "auto".to_string()),
+        "auto"
+    );
+    assert_eq!(
+        prefer_configured_model_spelling("DeepSeek-V4-Flash", "DeepSeek-V4-Flash".to_string()),
+        "DeepSeek-V4-Flash"
+    );
+}

@@ -277,6 +277,7 @@ impl App {
         let model = if crate::config::explicit_launch_model_override().is_some() {
             model
         } else {
+            let configured = model;
             provider_models
                 .get(&provider_identity)
                 .cloned()
@@ -289,7 +290,14 @@ impl App {
                         None
                     }
                 })
-                .unwrap_or(model)
+                // The remembered pick may be a catalog spelling of the model
+                // the config file already names. Case-sensitive self-hosted
+                // endpoints reject the wrong spelling, so config.toml wins a
+                // case-only disagreement (the selection itself is unchanged).
+                .map(|remembered| {
+                    crate::config::prefer_configured_model_spelling(&configured, remembered)
+                })
+                .unwrap_or(configured)
         };
         let auto_model = model.trim().eq_ignore_ascii_case("auto");
         let mut enabled_provider_models = settings.enabled_models.clone().unwrap_or_default();
