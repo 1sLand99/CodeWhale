@@ -729,7 +729,6 @@ impl App {
             last_mouse_pos: None,
             context_panel: settings.context_panel,
             sessions_rail: settings.sessions_rail,
-            sessions_rail_cache: None,
             tool_collapse_threshold: 3,
             expanded_tool_runs: HashSet::new(),
             tool_collapse_mode: ToolCollapseMode::from_setting(&settings.tool_collapse_mode),

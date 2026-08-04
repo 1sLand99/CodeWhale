@@ -37,10 +37,6 @@ use crate::session_manager::{SessionListFilter, SessionMetadata, workspace_scope
 /// user with hundreds of sessions cannot make a surface unbounded.
 pub const MAX_PROJECTED_SESSIONS: usize = 500;
 
-/// Default rows for the sidebar rail. Small on purpose: the rail is a jump
-/// affordance, and the picker is the full browser.
-pub const DEFAULT_RAIL_ROWS: usize = 8;
-
 /// Ordering for a session listing.
 ///
 /// The same three modes the picker has always cycled with `s`; naming them
@@ -254,22 +250,6 @@ pub fn select_sessions<'a>(
 
     matched.truncate(query.limit.min(MAX_PROJECTED_SESSIONS));
     matched
-}
-
-/// How many sessions the query matches, ignoring [`SessionQuery::limit`].
-///
-/// The rail's "8 of 31" footer needs the true in-scope total, and computing it
-/// by projecting with a huge limit would silently re-clamp at
-/// [`MAX_PROJECTED_SESSIONS`] and under-report. This counts without building
-/// rows at all.
-#[must_use]
-pub fn count_sessions(sessions: &[SessionMetadata], query: &SessionQuery) -> usize {
-    sessions
-        .iter()
-        .filter(|session| query.filter.admits(session.archived))
-        .filter(|session| matches_workspace_scope(session, query.workspace_scope.as_deref()))
-        .filter(|session| session_matches_query(&query.search, session))
-        .count()
 }
 
 /// [`select_sessions`], projected into display rows.

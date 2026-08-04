@@ -139,11 +139,6 @@ pub const ACCEPTANCE_MATRIX: &[AcceptanceCase] = &[
         test: "auto_resume_candidate_walk_is_bounded",
     },
     AcceptanceCase {
-        contract: Contract::Shared,
-        behavior: "The rail footer reports the true in-scope total, not a re-clamped projection",
-        test: "rail_total_is_the_true_in_scope_count_not_a_reclamped_projection",
-    },
-    AcceptanceCase {
         contract: Contract::ControlPlane,
         behavior: "Session archive filters resolve the include_archived/archived_only pair like threads",
         test: "session_and_thread_archive_filters_share_one_resolution",
@@ -844,35 +839,6 @@ mod tests {
     }
 
     #[test]
-    fn rail_total_is_the_true_in_scope_count_not_a_reclamped_projection() {
-        let fx = Fixture::new();
-        let all: Vec<crate::session_manager::SessionMetadata> = (0..25)
-            .map(|i| {
-                let mut session =
-                    saved(&format!("s{i:02}"), &format!("Session {i}"), &fx.workspace);
-                session.metadata.updated_at =
-                    chrono::Utc::now() - chrono::Duration::minutes(i64::from(i));
-                session.metadata
-            })
-            .collect();
-
-        let cache = crate::tui::sessions_rail::build_rail_cache(
-            &all,
-            &fx.workspace,
-            None,
-            5,
-            std::time::Instant::now(),
-        );
-
-        assert_eq!(cache.rows().len(), 5);
-        assert_eq!(
-            cache.total_in_scope(),
-            25,
-            "the footer must report every in-scope session, not the capped row count"
-        );
-    }
-
-    #[test]
     fn session_and_thread_archive_filters_share_one_resolution() {
         use crate::runtime_threads::ThreadListFilter;
 
@@ -927,7 +893,6 @@ mod tests {
         for (name, source) in [
             ("session_projection", include_str!("session_projection.rs")),
             ("session_resume", include_str!("session_resume.rs")),
-            ("sessions_rail", include_str!("tui/sessions_rail.rs")),
         ] {
             for forbidden in [
                 "reqwest",

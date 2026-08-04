@@ -396,9 +396,6 @@ fn set_archived(app: &mut App, session_id: Option<&str>, archived: bool) -> Comm
             {
                 cached.archived = metadata.archived;
             }
-            // The rail caches projected rows; a lifecycle change must not wait
-            // for the TTL to become visible.
-            app.sessions_rail_cache = None;
             CommandResult::message(format!(
                 "{} session {} ({})",
                 if archived { "Archived" } else { "Restored" },

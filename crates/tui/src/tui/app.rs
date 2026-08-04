@@ -1365,13 +1365,6 @@ pub struct App {
     pub context_panel: bool,
     /// Whether the persistent Sessions rail is enabled (#2934). Opt-in.
     pub sessions_rail: bool,
-    /// Cached rail rows. `None` means "re-read on the next render".
-    ///
-    /// The rail must not touch the filesystem on every frame, so rows are
-    /// projected once and reused until the cache is invalidated — by the TTL
-    /// in [`crate::tui::sessions_rail`], by a session lifecycle change
-    /// (save/rename/archive/delete), or by toggling the setting.
-    pub sessions_rail_cache: Option<crate::tui::sessions_rail::SessionsRailCache>,
     /// Minimum number of consecutive safe tool cells needed for auto-collapse.
     ///
     /// Fixed at 3 for v0.9.x (#3256 decision): not a user setting. Rollups need

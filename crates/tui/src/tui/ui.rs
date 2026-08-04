@@ -14813,7 +14813,6 @@ async fn handle_view_events(
             ViewEvent::SessionRenamed { metadata } => {
                 let session_id = metadata.id.clone();
                 let title = metadata.title.clone();
-                app.sessions_rail_cache = None;
                 let mut work_snapshot_warning = None;
                 if apply_picker_session_rename_to_active_app(app, *metadata)
                     && let Ok(manager) = SessionManager::default_location()
@@ -14861,7 +14860,6 @@ async fn handle_view_events(
                 {
                     cached.archived = metadata.archived;
                 }
-                app.sessions_rail_cache = None;
                 app.status_message = Some(format!(
                     "{} session {} ({})",
                     if metadata.archived {
@@ -14874,7 +14872,6 @@ async fn handle_view_events(
                 ));
             }
             ViewEvent::SessionDeleted { session_id, title } => {
-                app.sessions_rail_cache = None;
                 app.status_message = Some(format!(
                     "Deleted session {} ({})",
                     crate::session_manager::truncate_id(&session_id),

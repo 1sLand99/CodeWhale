@@ -2103,10 +2103,6 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
         }
         "sessions_rail" | "sessions_panel" | "session_rail" => {
             app.sessions_rail = settings.sessions_rail;
-            // The rail reads from disk, so a fresh enable must invalidate the
-            // cached rows rather than render an empty panel until the next
-            // session write.
-            app.sessions_rail_cache = None;
             app.needs_redraw = true;
         }
         _ => {}

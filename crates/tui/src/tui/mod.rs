@@ -79,7 +79,6 @@ pub mod provider_picker;
 pub mod scrolling;
 pub mod selection;
 pub mod session_picker;
-pub mod sessions_rail;
 pub mod settings_picker;
 pub mod setup;
 mod shell_job_routing;
