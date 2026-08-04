@@ -49,6 +49,9 @@ const SENTINEL_FILENAME: &str = "tc-workspace-sentinel-file.txt";
 const SENTINEL_PROVIDER_TABLE: &str = "tc_custom_provider_sentinel";
 const SENTINEL_MCP_SERVER: &str = "tc-mcp-server-sentinel";
 const SENTINEL_API_KEY: &str = "tc-api-key-sentinel-not-a-real-key";
+/// Planted by writing to `buffer.jsonl` directly, which is what any other
+/// process running as this user can do.
+const SENTINEL_INJECTED: &str = "tc-injected-sentinel-/Users/victim/secret-repo";
 /// The key lives only in the child's environment, never in a file, so the
 /// "absent from every written file" assertion means something.
 const SENTINEL_API_KEY_ENV: &str = "TC_SENTINEL_API_KEY";
@@ -601,6 +604,90 @@ async fn batch_contains_no_planted_sentinel() {
             "the API key leaked into {}",
             file.display()
         );
+    }
+}
+
+/// The buffer file is an **untrusted input**, and this is the test that says so.
+///
+/// Every bound in `codewhale-telemetry`'s schema is a property of how a payload
+/// is *built*: closed enums, `u32`s, `ProviderKind::as_str()`,
+/// `reduce_panic_site`. None of that survives the round trip, because `flush`
+/// re-reads `buffer.jsonl` and deserializes it — and `$CODEWHALE_HOME` is a
+/// predictable path that anything running as the user can append to. The
+/// realistic writer is not an intruder: it is a `Bash` tool call this very
+/// session made on the model's behalf, or an MCP server, or a hook. Without a
+/// drain-path re-check, telemetry is a confused deputy that POSTs whatever that
+/// writer chooses to the configured endpoint, under the user's install id, past
+/// every egress control the user has on the provider route.
+///
+/// The injection happens **after** the session has armed, on purpose: `init`
+/// truncates the buffer, so a pre-arming plant proves nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hostile_buffer_line_never_reaches_a_batch() {
+    let server = start_recorder().await;
+    // A slow first token holds the session open long enough to append.
+    mount_model(&server, Duration::from_secs(5)).await;
+    let fixture = Fixture::new().with_endpoint(&server.uri());
+    plant_sentinels(&fixture, &server.uri());
+
+    let mut command = exec_command(&fixture, "hello");
+    let mut child = command.spawn().expect("spawn codewhale-tui exec");
+
+    let buffer = fixture.telemetry_root().join("buffer.jsonl");
+    wait_until(Duration::from_secs(30), || buffer.exists());
+    append_lines(
+        &buffer,
+        &[
+            // The path-bearing field, carrying a path it was never meant to.
+            json!({"event": "panic", "site": SENTINEL_INJECTED}).to_string(),
+            // The one event field read back from `state.json`.
+            json!({"event": "install_or_upgrade", "kind": "upgrade",
+                   "previous_version": SENTINEL_INJECTED})
+            .to_string(),
+            // The provider set, whose whole design is that it cannot carry a
+            // customer's `[providers.<name>]` table key.
+            json!({"event": "session_end", "duration_bucket": "lt_1m",
+                   "exit_class": "clean", "cold_start_bucket": null,
+                   "providers": [SENTINEL_INJECTED],
+                   "counters": {"turns": 0, "tool_calls": 0, "fleet_dispatch": 0,
+                                "workflow_run": 0, "subagent_spawn": 0,
+                                "mcp_server_connected": 0, "memory_search": 0,
+                                "approval_modal_shown": 0, "approval_auto_allowed": 0,
+                                "command_palette_open": 0},
+                   "errors": {"auth_preflight_failed": 0, "provider_http_4xx": 0,
+                              "provider_http_5xx": 0, "tool_denied_by_policy": 0,
+                              "tool_timeout": 0, "network_error": 0},
+                   "turn_wall": {"lt_5s": 0, "5_30s": 0, "30_120s": 0, "gte_120s": 0}})
+            .to_string(),
+        ],
+    );
+
+    let _ = child
+        .wait_timeout(EXEC_TIMEOUT)
+        .expect("wait for codewhale-tui exec")
+        .expect("codewhale-tui exec must exit");
+
+    let batches = recorded_batches(&server).await;
+    assert!(
+        !batches.is_empty(),
+        "this test is only meaningful against a batch that was actually sent"
+    );
+    let serialized = serde_json::to_string(&batches).expect("serialize batches");
+    assert!(
+        !serialized.contains(SENTINEL_INJECTED),
+        "a line appended to buffer.jsonl was POSTed verbatim:\n{serialized}"
+    );
+}
+
+/// Append raw lines to a sink, the way any other process on the machine would.
+fn append_lines(path: &Path, lines: &[String]) {
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .expect("open the telemetry buffer");
+    for line in lines {
+        writeln!(file, "{line}").expect("append to the telemetry buffer");
     }
 }
 
