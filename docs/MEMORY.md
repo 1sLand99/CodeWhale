@@ -46,12 +46,16 @@ re-roots to `~/.codewhale/memory/`:
 ```text
 ~/.codewhale/memory/
 ├── global/MEMORY.md        # user-scoped notes (follow you everywhere)
-├── workspaces/<id>/MEMORY.md  # repo-scoped notes (hash of git origin)
-└── index.db                # rebuildable SQLite FTS5 cache
+├── workspace/<id>/MEMORY.md   # repo-scoped notes (hash of git origin)
+└── index.sqlite3           # rebuildable SQLite FTS5 cache
 ```
 
-Markdown is the durable source of truth; `index.db` is a disposable
-full-text cache (`/memory reindex` rebuilds it). A configured
+The scope directory is `workspace` (singular) — `MemoryScope::directory`,
+`crates/tui/src/native_memory.rs:29-33`. The index filename is
+`index.sqlite3` (`native_memory.rs:173`).
+
+Markdown is the durable source of truth; `index.sqlite3` is a disposable
+full-text cache (`/memory native reindex` rebuilds it). A configured
 `memory_path` is an **anchor only**: the filename is discarded and its
 parent gains the `memory/global/MEMORY.md` tree. Do not set
 `memory_path` to the native layout path itself — that double-nests the
@@ -91,12 +95,36 @@ submission so you can paste Markdown headings without surprise.
 
 Inspect and maintain the native store:
 
-| Subcommand        | Effect                                            |
-|-------------------|---------------------------------------------------|
-| `/memory`         | Show the store root, active source, and index     |
-| `/memory add …`   | Append a note (global scope)                      |
-| `/memory reindex` | Rebuild the FTS5 index from the Markdown sources  |
-| `/memory help`    | Show command-specific help                        |
+`/memory` splits in two. The bare subcommands operate on the single file at
+`config.memory_path()`; everything about the native store lives behind
+`/memory native …` (`crates/tui/src/commands/groups/memory/memory.rs:236-268`).
+
+| Subcommand      | Effect                                                    |
+|-----------------|-----------------------------------------------------------|
+| `/memory`       | Print the path and contents of the `memory_path` file      |
+| `/memory show`  | Same as bare `/memory`                                     |
+| `/memory path`  | Print the `memory_path` file location                      |
+| `/memory clear` | Truncate that file                                         |
+| `/memory edit`  | Print the `$EDITOR` invocation for it                      |
+| `/memory help`  | Show command-specific help                                 |
+
+Anything else returns `unknown subcommand`. The native store is reached through
+the `native` prefix (`memory.rs:221`):
+
+| Subcommand                              | Effect                              |
+|-----------------------------------------|-------------------------------------|
+| `/memory native status`                 | Store root, active source, index    |
+| `/memory native path`                   | Native store root                   |
+| `/memory native remember [global\|workspace] <note>` | Append a note          |
+| `/memory native search <query>`         | FTS5 search                         |
+| `/memory native get <id>`               | Read one entry                      |
+| `/memory native reindex`                | Rebuild the FTS5 index              |
+| `/memory native import`                 | Import the legacy single-file store |
+| `/memory native export`                 | Dump entries                        |
+| `/memory native delete [all\|global\|workspace]` | Delete entries             |
+
+There is no `/memory add` and no bare `/memory reindex`; use
+`/memory native remember` and `/memory native reindex`.
 
 ### 3. The `remember` tool (auto-capture, #489)
 
