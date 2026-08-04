@@ -352,13 +352,18 @@ pub const SPILLOVER_RECOVERY_HINT: &str = "omitted range recovery:";
 /// Model-facing recovery instruction for a truncated tool result.
 ///
 /// The previous text — "read it back with the read_file tool or with sed line
-/// ranges" — offered three routes and **all three were dead**: `read_file` is
-/// not model-visible (only `File` is), `File action="read"` on an artifact
-/// under `~/.codewhale/sessions/` is refused as a path escape, and `sed`
-/// through `Bash` reads outside the workspace too. Meanwhile
-/// `retrieve_tool_result` — model-visible, purpose-built, and already named
-/// correctly by the web overflow path in `tools/web/overflow.rs` — went
-/// unmentioned.
+/// ranges" — named `read_file`, which is not model-visible at all (only `File`
+/// is), and otherwise leaned on reaching the artifact by path. Reaching it by
+/// path is *conditional*: `ToolContext::resolve_path` short-circuits under
+/// trust mode, so `File action="read"` on an artifact under
+/// `~/.codewhale/sessions/` succeeds in a trusted/auto session and is refused
+/// as a path escape otherwise — and even when it succeeds it pages the file
+/// rather than seeking the omitted range. Meanwhile `retrieve_tool_result` —
+/// model-visible, purpose-built, unconditional, and already named correctly by
+/// the web overflow path in `tools/web/overflow.rs` — went unmentioned.
+/// `tests/adaptive_evidence_acceptance.rs` proves end to end that a model
+/// handed one of these receipts can take the named ref and get the omitted
+/// bytes back.
 ///
 /// The distinction that matters is retrievability, not tidiness. An adaptive
 /// session artifact carries an `art_<id>` the retrieval tool resolves, so name
@@ -947,10 +952,10 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
     }
 
-    /// The old hint named `read_file` (unregistered), `File action="read"`
-    /// on a path outside the workspace (refused as a path escape), and `sed`
-    /// through `Bash` (also outside the workspace) — three dead routes — while
-    /// never naming `retrieve_tool_result`, which is model-visible and exists
+    /// The old hint named `read_file`, which is not registered for the model
+    /// at all, and otherwise pointed at routes that only reach the artifact
+    /// under trust mode (see [`spillover_recovery_instruction`]), while never
+    /// naming `retrieve_tool_result` — model-visible, unconditional, and built
     /// for exactly this.
     #[test]
     fn truncation_footer_names_a_recovery_route_that_works() {

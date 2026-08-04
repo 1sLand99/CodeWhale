@@ -24,6 +24,7 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 const MODEL: &str = "adaptive-evidence-test";
 const SUCCESS_CALL_ID: &str = "call_bash_success";
 const FAILURE_CALL_ID: &str = "call_bash_failure";
+const RETRIEVE_CALL_ID: &str = "call_retrieve_omitted_range";
 const SUCCESS_SENTINEL: &str = "DEEP_SUCCESS_EVIDENCE_SENTINEL_4619";
 const FAILURE_SENTINEL: &str = "DEEP_FAILURE_EVIDENCE_SENTINEL_4619";
 
@@ -42,16 +43,10 @@ async fn headless_bash_success_and_failure_are_distinct_bounded_exact_evidence()
     );
 
     let requests = server.received_requests().await.expect("recorded requests");
-    let success_receipt = requests
-        .iter()
-        .filter_map(|request| request.body_json::<Value>().ok())
-        .find_map(|body| tool_result_content_for(&body, SUCCESS_CALL_ID).map(str::to_owned))
-        .expect("model-visible Bash success receipt");
-    let failure_receipt = requests
-        .iter()
-        .filter_map(|request| request.body_json::<Value>().ok())
-        .find_map(|body| tool_result_content_for(&body, FAILURE_CALL_ID).map(str::to_owned))
-        .expect("model-visible Bash failure receipt");
+    let success_receipt =
+        receipt_for(&requests, SUCCESS_CALL_ID).expect("model-visible Bash success receipt");
+    let failure_receipt =
+        receipt_for(&requests, FAILURE_CALL_ID).expect("model-visible Bash failure receipt");
     for (receipt, sentinel) in [
         (&success_receipt, SUCCESS_SENTINEL),
         (&failure_receipt, FAILURE_SENTINEL),
@@ -66,9 +61,25 @@ async fn headless_bash_success_and_failure_are_distinct_bounded_exact_evidence()
         );
         assert!(
             receipt.contains("/artifacts/"),
-            "the footer deliberately names the on-disk artifact so the model can read the omitted range back"
+            "the footer names where the omitted bytes live on disk"
         );
-        assert!(!receipt.contains("retrieve_tool_result"));
+        // The receipt must name a route the model can take *from this
+        // receipt*. It previously asserted the opposite — that the footer must
+        // NOT name `retrieve_tool_result` — which came from #5018's
+        // "no storage language" pass, not from any shell-vs-tool-result
+        // distinction: #4619 shipped the footer naming
+        // `retrieve_tool_result ref=art_<call>`, #5018 replaced the whole
+        // recovery line with "view full output in the tool details view" (a
+        // view the model cannot open) and froze that removal as a negative
+        // assertion, and #5212 restored the artifact path but left the stale
+        // negative in place. The follow-up probe below settles it empirically
+        // for *this* receipt: the scripted model reads the ref out of the
+        // receipt text it was handed, calls `retrieve_tool_result` with it,
+        // and gets back the exact line the receipt omitted.
+        assert!(
+            receipt.contains("retrieve_tool_result"),
+            "the footer must name the recovery route the model can actually take"
+        );
         assert!(!receipt.contains("[Exact evidence retained"));
         assert!(!receipt.contains(sentinel));
         assert!(
@@ -78,6 +89,17 @@ async fn headless_bash_success_and_failure_are_distinct_bounded_exact_evidence()
         );
     }
     assert_ne!(success_receipt, failure_receipt);
+
+    // The model followed the `ref=` the failure receipt named and got the byte
+    // range the receipt omitted. The mock parsed that ref out of the receipt
+    // text itself, so this only passes when the footer hands over a ref the
+    // retrieval tool can resolve in the origin session.
+    let retrieve_receipt = receipt_for(&requests, RETRIEVE_CALL_ID)
+        .expect("model-visible retrieve_tool_result receipt");
+    assert!(
+        retrieve_receipt.contains(FAILURE_SENTINEL),
+        "retrieve_tool_result must return the range the receipt omitted, got: {retrieve_receipt}"
+    );
 
     let artifact_dir = find_artifact_dir(home.path()).expect("origin-session artifacts");
     let payloads = std::fs::read_dir(&artifact_dir)
@@ -160,24 +182,41 @@ struct EvidenceScenario {
     requests: Arc<AtomicUsize>,
 }
 
+/// Scripted four-turn scenario. Turn 3 is the empirical half of the design
+/// question this test settles: rather than asserting from the outside which
+/// recovery route a Bash receipt *should* name, the scripted model reads the
+/// route out of the receipt it was actually handed and takes it, so the
+/// assertion in the test body observes whether that route returns the bytes
+/// the receipt omitted.
 impl Respond for EvidenceScenario {
     fn respond(&self, request: &Request) -> ResponseTemplate {
         let sequence = self.requests.fetch_add(1, Ordering::SeqCst);
         let body = request.body_json::<Value>().unwrap_or(Value::Null);
-        let raw = body.to_string();
-        let response = if raw.contains(FAILURE_CALL_ID) {
-            final_sse()
-        } else if raw.contains(SUCCESS_CALL_ID) {
-            bash_tool_sse(FAILURE_CALL_ID, false)
-        } else {
-            bash_tool_sse(SUCCESS_CALL_ID, true)
+        let response = match sequence {
+            0 => bash_tool_sse(SUCCESS_CALL_ID, true),
+            1 => bash_tool_sse(FAILURE_CALL_ID, false),
+            2 => {
+                let receipt = tool_result_content_for(&body, FAILURE_CALL_ID)
+                    .expect("Bash failure receipt on the third request");
+                let reference = quoted_after(receipt, "ref=\"")
+                    .expect("failure receipt must hand over a retrieval ref");
+                retrieve_tool_sse(reference, FAILURE_SENTINEL)
+            }
+            _ => final_sse(),
         };
         assert!(
-            sequence < 3,
-            "unexpected extra model request #{sequence}: {raw}"
+            sequence < 4,
+            "unexpected extra model request #{sequence}: {body}"
         );
         sse_response(response)
     }
+}
+
+/// Read the recovery ref the truncation footer hands the model, e.g. the
+/// `art_call_bash_failure` inside `… call retrieve_tool_result with ref="…"`.
+fn quoted_after<'a>(receipt: &'a str, marker: &str) -> Option<&'a str> {
+    let rest = &receipt[receipt.find(marker)? + marker.len()..];
+    rest.get(..rest.find('"')?)
 }
 
 fn run_exec(workspace: &Path, home: &Path, server: &MockServer) -> std::process::Output {
@@ -232,6 +271,13 @@ fn find_artifact_dir(home: &Path) -> Option<PathBuf> {
         })
 }
 
+fn receipt_for(requests: &[Request], call_id: &str) -> Option<String> {
+    requests
+        .iter()
+        .filter_map(|request| request.body_json::<Value>().ok())
+        .find_map(|body| tool_result_content_for(&body, call_id).map(str::to_owned))
+}
+
 fn tool_result_content_for<'a>(body: &'a Value, call_id: &str) -> Option<&'a str> {
     body.get("messages")?
         .as_array()?
@@ -251,30 +297,56 @@ fn bash_tool_sse(call_id: &str, success: bool) -> String {
         (FAILURE_SENTINEL, "BASH-FAILURE")
     };
     let command = probe_command(sentinel, prefix, success);
-    let arguments = serde_json::to_string(&json!({
-        "action": "run",
-        "command": command,
-        "timeout_ms": 30_000
-    }))
-    .expect("tool arguments");
+    tool_call_sse(
+        call_id,
+        "Bash",
+        &json!({"action": "run", "command": command, "timeout_ms": 30_000}),
+    )
+}
+
+/// Take the recovery route the receipt named, asking for the omitted range by
+/// the sentinel that rides in it.
+fn retrieve_tool_sse(reference: &str, query: &str) -> String {
+    tool_call_sse(
+        RETRIEVE_CALL_ID,
+        "retrieve_tool_result",
+        &json!({"ref": reference, "mode": "query", "query": query}),
+    )
+}
+
+fn tool_call_sse(call_id: &str, name: &str, arguments: &Value) -> String {
+    let arguments = serde_json::to_string(arguments).expect("tool arguments");
     [
-        chunk(json!({"id":"tool","object":"chat.completion.chunk","model":MODEL,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":call_id,"type":"function","function":{"name":"Bash","arguments":arguments}}]},"finish_reason":null}]})),
+        chunk(json!({"id":"tool","object":"chat.completion.chunk","model":MODEL,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":call_id,"type":"function","function":{"name":name,"arguments":arguments}}]},"finish_reason":null}]})),
         chunk(json!({"id":"tool","object":"chat.completion.chunk","model":MODEL,"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}})),
         "data: [DONE]\n\n".to_string(),
     ].join("")
 }
 
+/// Stderr filler line the sentinel rides on, which has to land in a narrow
+/// window. `shell_output` bounds each stream to `TRUNCATED_HEAD_BYTES` =
+/// 30_000/5 = 6_000 bytes of head plus 24_000 of tail, so anything past ~line
+/// 68 of stderr never reaches the artifact at all. Below that, the bounded
+/// stdout section (~30.1 KB: head + notice + tail) plus the `STDERR:`
+/// separator puts stderr filler line *n* at roughly 30_110 + 86n bytes of the
+/// result, so anything before ~line 31 is still inside the preview's 32 KiB
+/// head and the receipt would show it. Line 50 sits near the middle of
+/// [31, 68] with ~1.6 KB of slack on each side.
+///
+/// #5212 wrote 100 here against a "22 KB head bound" that does not exist: the
+/// sentinel landed in the stream's own omitted middle, so the artifact never
+/// carried it and this test's retrievability assertion failed. It went
+/// unnoticed because an earlier assertion in the same loop failed first.
+const SENTINEL_LINE: usize = 50;
+
 /// Shell fixture that emits enough bytes to force exact-evidence routing under
 /// the 32_768-token default threshold. The Bash adapter self-bounds each
 /// stream to ~30 KB, so a single stream would now fit inside the hybrid
 /// 32 KiB + 8 KiB preview budget; the probe therefore fills stdout AND stderr
-/// (~60 KB combined) so the envelope still omits a middle range. The sentinel
-/// rides stderr at filler line 100: deep enough to survive the shell tool's
-/// own 22 KB head bound (so the artifact retains it) yet beyond the preview's
-/// 32 KiB head (so the model receipt omits it). The probe executes through
-/// the platform shell — bash on Unix, `cmd /C` on Windows
-/// (#1691) — so each platform needs native syntax to exercise the same
-/// routing path.
+/// (~60 KB combined) so the envelope still omits a middle range, with the
+/// sentinel at [`SENTINEL_LINE`] of stderr. The probe executes through the
+/// platform shell — bash on Unix, `cmd /C` on Windows (#1691) — so each
+/// platform needs native syntax to exercise the same routing path.
 #[cfg(not(windows))]
 fn probe_command(sentinel: &str, prefix: &str, success: bool) -> String {
     let trailer = if success { "" } else { "; exit 7" };
@@ -282,7 +354,7 @@ fn probe_command(sentinel: &str, prefix: &str, success: bool) -> String {
         "i=0; while [ \"$i\" -lt 2800 ]; do printf '{prefix}-%04d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' \"$i\"; i=$((i + 1)); done"
     );
     let stderr_loop = format!(
-        "j=0; while [ \"$j\" -lt 2800 ]; do if [ \"$j\" -eq 100 ]; then printf '%s\\n' '{sentinel}'; fi; printf '{prefix}-ERR-%04d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' \"$j\"; j=$((j + 1)); done"
+        "j=0; while [ \"$j\" -lt 2800 ]; do if [ \"$j\" -eq {SENTINEL_LINE} ]; then printf '%s\\n' '{sentinel}'; fi; printf '{prefix}-ERR-%04d-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' \"$j\"; j=$((j + 1)); done"
     );
     format!("{stdout_loop}; {{ {stderr_loop}; }} >&2{trailer}")
 }
@@ -304,7 +376,7 @@ fn probe_command(sentinel: &str, prefix: &str, success: bool) -> String {
     );
     let stdout_loop = format!("0..2799 | ForEach-Object {{ Write-Output ({stdout_line} -f $_) }}");
     let stderr_loop = format!(
-        "0..2799 | ForEach-Object {{ if ($_ -eq 100) {{ [Console]::Error.WriteLine('{sentinel}') }}; [Console]::Error.WriteLine(({stderr_line} -f $_)) }}"
+        "0..2799 | ForEach-Object {{ if ($_ -eq {SENTINEL_LINE}) {{ [Console]::Error.WriteLine('{sentinel}') }}; [Console]::Error.WriteLine(({stderr_line} -f $_)) }}"
     );
     let trailer = if success { "" } else { "; exit 7" };
     format!("{stdout_loop}; {stderr_loop}{trailer}")
