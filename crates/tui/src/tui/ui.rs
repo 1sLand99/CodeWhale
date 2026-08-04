@@ -440,10 +440,12 @@ enum TranslationEvent {
 // TurnComplete / focus-gain / resize. The alt-screen buffer's double-buffering
 // plus ratatui's `terminal.clear()` are sufficient to repaint cleanly.
 const TERMINAL_ORIGIN_RESET: &[u8] = b"\x1b[r\x1b[?6l\x1b[H";
-// Xterm alternate-scroll mode keeps wheel events inside the alternate-screen
-// viewport when mouse capture is requested but unavailable or temporarily
-// dropped. Leave it off with `--no-mouse-capture` so the host terminal owns
-// raw mouse selection behavior end-to-end.
+// Xterm alternate-scroll mode (DECSET 1007) converts wheel input into arrow
+// keys. It is only meaningful when mouse reporting is unavailable; while
+// mouse capture is active the terminal must deliver wheel events as mouse
+// events, so 1007 stays off (iTerm2 converts anyway, breaking transcript
+// wheel-scroll — #5223). `--no-mouse-capture` also keeps it off so the host
+// terminal owns raw mouse selection behavior end-to-end (#4026).
 const ENABLE_ALT_SCROLL_MODE: &[u8] = b"\x1b[?1007h";
 const DISABLE_ALT_SCROLL_MODE: &[u8] = b"\x1b[?1007l";
 /// Begin synchronized update (DEC 2026): tell the terminal to defer
@@ -17466,10 +17468,6 @@ fn set_alternate_scroll_mode<W: Write>(writer: &mut W, enabled: bool) {
     }
 }
 
-fn enable_alternate_scroll_mode<W: Write>(writer: &mut W) {
-    set_alternate_scroll_mode(writer, true);
-}
-
 pub(crate) fn disable_alternate_scroll_mode<W: Write>(writer: &mut W) {
     set_alternate_scroll_mode(writer, false);
 }
@@ -17545,13 +17543,13 @@ pub(crate) fn recover_terminal_modes<W: Write>(
 
     pop_keyboard_enhancement_flags(writer);
     push_keyboard_enhancement_flags(writer);
-    if use_mouse_capture {
-        enable_alternate_scroll_mode(writer);
-        if let Err(err) = execute!(writer, EnableMouseCapture) {
-            tracing::debug!(?err, "EnableMouseCapture ignored");
-        }
-    } else {
-        disable_alternate_scroll_mode(writer);
+    // DECSET 1007 converts wheel input into arrow keys. While mouse capture
+    // is active, mouse reporting is the authoritative wheel channel and
+    // terminals disagree about precedence (iTerm2 converts — #5223), so keep
+    // 1007 off; #4026 already leaves it off without mouse capture.
+    disable_alternate_scroll_mode(writer);
+    if use_mouse_capture && let Err(err) = execute!(writer, EnableMouseCapture) {
+        tracing::debug!(?err, "EnableMouseCapture ignored");
     }
     if use_bracketed_paste {
         try_enable_bracketed_paste_mode(writer);
