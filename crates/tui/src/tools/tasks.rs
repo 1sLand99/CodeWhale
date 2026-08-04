@@ -224,7 +224,7 @@ impl ToolSpec for TasksTool {
             );
             properties.insert(
                 "mode".to_string(),
-                json!({ "type": "string", "enum": ["agent", "plan", "yolo"], "description": "(action=create)" }),
+                json!({ "type": "string", "enum": ["agent", "plan", "operate"], "description": "(action=create)" }),
             );
             properties.insert(
                 "allow_shell".to_string(),
@@ -368,7 +368,7 @@ fn legacy_action_schema(action: &str) -> Value {
                 "prompt": { "type": "string", "description": "Work prompt for the durable task." },
                 "model": { "type": "string" },
                 "workspace": { "type": "string", "description": "Workspace path; defaults to current workspace." },
-                "mode": { "type": "string", "enum": ["agent", "plan", "yolo"] },
+                "mode": { "type": "string", "enum": ["agent", "plan", "operate"] },
                 "allow_shell": { "type": "boolean" },
                 "trust_mode": { "type": "boolean" },
                 "auto_approve": { "type": "boolean" }
@@ -1279,6 +1279,20 @@ mod tests {
         let schema = TasksTool::alias("task_create", "create").input_schema();
         assert_eq!(schema["required"][0], "prompt");
         assert!(schema["properties"]["prompt"].is_object());
+    }
+
+    #[test]
+    fn create_mode_enum_advertises_operate_not_yolo() {
+        let create = TasksTool::alias("task_create", "create").input_schema();
+        assert_eq!(
+            create["properties"]["mode"]["enum"],
+            json!(["agent", "plan", "operate"])
+        );
+        let canonical = TasksTool::new("tasks").input_schema();
+        assert_eq!(
+            canonical["properties"]["mode"]["enum"],
+            json!(["agent", "plan", "operate"])
+        );
     }
 
     #[test]

@@ -725,6 +725,11 @@ impl ToolSpec for EditFileTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        // #5209 — reject wrong/unknown parameter names before any soft
+        // defaults or success-shaped receipts can be produced. Models
+        // frequently invent `new_str`/`new_string` instead of `replace`.
+        validate_edit_file_params(&input)?;
+
         let path_str = required_str(&input, "path")?;
         let search = required_str(&input, "search")?;
         let replace = required_str(&input, "replace")?;
@@ -869,6 +874,25 @@ impl ToolSpec for EditFileTool {
         crate::utils::write_atomic_workspace(&file_path, updated.as_bytes()).map_err(|e| {
             ToolError::execution_failed(format!("Failed to write {}: {}", file_path.display(), e))
         })?;
+
+        // #5209 — never emit a success receipt unless the on-disk write
+        // actually applied. A fabricated "Replaced 1 occurrence" + diff is
+        // worse than a hard error: models trust it and re-edit the same
+        // span 3–5× before noticing nothing changed.
+        let on_disk = fs::read_to_string(&file_path).map_err(|e| {
+            ToolError::execution_failed(format!(
+                "Failed to verify write to {}: {}",
+                file_path.display(),
+                e
+            ))
+        })?;
+        if on_disk != updated {
+            return Err(ToolError::execution_failed(format!(
+                "edit_file write verification failed for {}: on-disk contents do not match the applied edit — refusing success receipt",
+                file_path.display()
+            )));
+        }
+
         context.note_file_read(&file_path);
 
         let display = file_path.display().to_string();
@@ -911,6 +935,58 @@ impl ToolSpec for EditFileTool {
     }
 }
 
+/// Reject wrong or unexpected parameter names for File/`edit_file` before any
+/// mutation or success-shaped receipt is produced (#5209).
+///
+/// Models frequently invent `new_str` / `new_string` / `old_string` from other
+/// harnesses. Accepting those silently (or only failing on the missing
+/// required field with a weak message) caused fabricated "Replaced 1
+/// occurrence" loops. Hard-error with the correct names.
+fn validate_edit_file_params(input: &Value) -> Result<(), ToolError> {
+    let Some(obj) = input.as_object() else {
+        return Err(ToolError::invalid_input(
+            "File edit input must be an object with `path`, `search`, and `replace`",
+        ));
+    };
+
+    const ALLOWED: &[&str] = &["path", "search", "replace", "fuzz"];
+    // Wrong alias → correct parameter name.
+    const WRONG_ALIASES: &[(&str, &str)] = &[
+        ("new_str", "replace"),
+        ("new_string", "replace"),
+        ("replacement", "replace"),
+        ("old_str", "search"),
+        ("old_string", "search"),
+    ];
+
+    let mut wrong_hits: Vec<String> = Vec::new();
+    for (wrong, correct) in WRONG_ALIASES {
+        if obj.contains_key(*wrong) {
+            wrong_hits.push(format!("`{wrong}` (use `{correct}` instead)"));
+        }
+    }
+    if !wrong_hits.is_empty() {
+        return Err(ToolError::invalid_input(format!(
+            "invalid File edit parameter name(s): {}. Required parameters are `path`, `search`, and `replace` — not alternates. The edit was not applied.",
+            wrong_hits.join("; ")
+        )));
+    }
+
+    let unexpected: Vec<&str> = obj
+        .keys()
+        .map(String::as_str)
+        .filter(|key| !ALLOWED.contains(key))
+        .collect();
+    if !unexpected.is_empty() {
+        return Err(ToolError::invalid_input(format!(
+            "unexpected File edit parameter(s): {}. Allowed parameters are `path`, `search`, `replace`, and optional `fuzz`. Required: `path`, `search`, `replace`. The edit was not applied.",
+            unexpected.join(", ")
+        )));
+    }
+
+    Ok(())
+}
+
 /// Detect catastrophic argument corruption of brace-structured edits.
 ///
 /// Models (and some host XML/JSON bridges) occasionally deliver a `replace`
@@ -918,27 +994,36 @@ impl ToolSpec for EditFileTool {
 /// while `search` still contains the full structured original. Writing that
 /// would brick Rust match arms / JSON objects. Fail closed with recovery text
 /// instead of applying the mangled payload (dogfood 2026-07-24).
+///
+/// Unbalanced-to-unbalanced edits with the **same** brace/bracket delta are
+/// legitimate (e.g. adding `});` inside a nested fragment). Only a *change*
+/// in balance is treated as truncation/mangling. Empty-bracket collapse and
+/// extreme-shrinkage guards remain.
 fn edit_payload_looks_corrupted(search: &str, replace: &str) -> Option<&'static str> {
     let search_curly_open = search.matches('{').count();
     let search_curly_close = search.matches('}').count();
     let replace_curly_open = replace.matches('{').count();
     let replace_curly_close = replace.matches('}').count();
+    let search_square_open = search.matches('[').count();
+    let search_square_close = search.matches(']').count();
     let replace_square_open = replace.matches('[').count();
     let replace_square_close = replace.matches(']').count();
 
-    if replace_curly_open != replace_curly_close {
+    let search_curly_delta = search_curly_open as i32 - search_curly_close as i32;
+    let replace_curly_delta = replace_curly_open as i32 - replace_curly_close as i32;
+    let search_square_delta = search_square_open as i32 - search_square_close as i32;
+    let replace_square_delta = replace_square_open as i32 - replace_square_close as i32;
+
+    // Same delta on both sides (including both unbalanced the same way) is
+    // normal for fragment edits. Divergent deltas usually mean truncation.
+    if search_curly_delta != replace_curly_delta {
         return Some(
-            "replace has unbalanced `{`/`}` braces — the tool-call arguments were likely truncated or mangled before apply",
+            "search/replace change `{`/`}` brace balance — the tool-call arguments were likely truncated or mangled before apply",
         );
     }
-    if search_curly_open != search_curly_close {
+    if search_square_delta != replace_square_delta {
         return Some(
-            "search has unbalanced `{`/`}` braces — copy the exact file span again with balanced braces",
-        );
-    }
-    if replace_square_open != replace_square_close {
-        return Some(
-            "replace has unbalanced `[`/`]` brackets — the tool-call arguments were likely truncated or mangled before apply",
+            "search/replace change `[`/`]` bracket balance — the tool-call arguments were likely truncated or mangled before apply",
         );
     }
 
@@ -959,6 +1044,8 @@ fn edit_payload_looks_corrupted(search: &str, replace: &str) -> Option<&'static 
     }
 
     // Extreme shrinkage with lost braces (e.g. 200-char match arm -> tiny stub).
+    // Balanced-to-balanced nesting changes that shrink hard still look like
+    // mangling; keep this guard even when deltas match.
     if search.len() >= 80
         && replace.len() * 8 < search.len()
         && search_curly_open >= 1

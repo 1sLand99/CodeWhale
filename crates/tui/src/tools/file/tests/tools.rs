@@ -1511,9 +1511,9 @@ async fn test_edit_file_not_found_shows_search_preview() {
     );
 }
 
-/// #157 — When the model uses `replacement` instead of `replace`,
-/// the error should name the provided fields so the model can
-/// self-correct without a second round-trip.
+/// #157 / #5209 — When the model uses a wrong alias (`replacement`,
+/// `new_str`, …) instead of `replace`, hard-error naming the correct
+/// parameter. Never silent-accept or fabricate a success receipt.
 #[tokio::test]
 async fn test_edit_file_wrong_param_name_shows_provided_fields() {
     let tmp = tempdir().expect("tempdir");
@@ -1533,14 +1533,174 @@ async fn test_edit_file_wrong_param_name_shows_provided_fields() {
 
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
-    // The error must name both the missing field AND the provided ones.
     assert!(
-        err.contains("missing required field 'replace'"),
-        "error must name the missing field: {err}"
+        err.contains("replace"),
+        "error must name the correct parameter: {err}"
     );
     assert!(
-        err.contains("Input provided:") || err.contains("provided:"),
-        "error must list the fields the model did supply: {err}"
+        err.contains("replacement") || err.contains("invalid File edit parameter"),
+        "error must call out the wrong name: {err}"
+    );
+    assert!(
+        !err.contains("Replaced 1 occurrence"),
+        "must not fabricate a success receipt: {err}"
+    );
+    assert_eq!(
+        fs::read_to_string(&test_file).expect("read"),
+        "hello world",
+        "file must be unchanged after rejected edit"
+    );
+}
+
+/// #5209 — `new_str` (common alternate harness name) must hard-error
+/// naming `replace`, never report success.
+#[tokio::test]
+async fn edit_file_rejects_new_str_alias_with_hard_error() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let path = tmp.path().join("doc.md");
+    fs::write(&path, "old text line\n").expect("write");
+    read_before_edit(&ctx, "doc.md").await;
+
+    let err = EditFileTool
+        .execute(
+            json!({
+                "path": "doc.md",
+                "search": "old text line",
+                "new_str": "new text line",
+            }),
+            &ctx,
+        )
+        .await
+        .expect_err("new_str must hard-error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("`new_str`") && msg.contains("`replace`"),
+        "must name wrong alias and correct param: {msg}"
+    );
+    assert!(!msg.contains("Replaced 1 occurrence"), "{msg}");
+    assert_eq!(fs::read_to_string(&path).expect("read"), "old text line\n");
+}
+
+/// #5209 — unified File action=edit takes the same hard-error path.
+#[tokio::test]
+async fn file_tool_action_edit_rejects_new_str_alias() {
+    use crate::tools::file_tool::FileTool;
+
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let path = tmp.path().join("doc.md");
+    fs::write(&path, "old text line\n").expect("write");
+    read_before_edit(&ctx, "doc.md").await;
+
+    let err = FileTool::with_patch("File")
+        .execute(
+            json!({
+                "action": "edit",
+                "path": "doc.md",
+                "search": "old text line",
+                "new_str": "new text line",
+            }),
+            &ctx,
+        )
+        .await
+        .expect_err("File action=edit with new_str must hard-error");
+    let msg = err.to_string();
+    assert!(msg.contains("`replace`"), "must name replace: {msg}");
+    assert!(!msg.contains("Replaced 1 occurrence"), "{msg}");
+    assert_eq!(fs::read_to_string(&path).expect("read"), "old text line\n");
+}
+
+/// #5209 — unknown keys on edit hard-error even when required fields are present.
+#[tokio::test]
+async fn edit_file_rejects_unexpected_parameter_names() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    let path = tmp.path().join("doc.md");
+    fs::write(&path, "hello\n").expect("write");
+    read_before_edit(&ctx, "doc.md").await;
+
+    let err = EditFileTool
+        .execute(
+            json!({
+                "path": "doc.md",
+                "search": "hello",
+                "replace": "hi",
+                "mystery": true,
+            }),
+            &ctx,
+        )
+        .await
+        .expect_err("unexpected params must hard-error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("unexpected") && msg.contains("mystery"),
+        "must name unexpected key: {msg}"
+    );
+    assert_eq!(fs::read_to_string(&path).expect("read"), "hello\n");
+}
+
+#[test]
+fn edit_payload_allows_same_brace_delta_unbalanced_fragment() {
+    // Same-delta unbalanced fragment: both sides open one more brace than
+    // they close (typical mid-block edit).
+    let search = "    handler({\n        a: 1,\n";
+    let replace = "    handler({\n        a: 1,\n        b: 2,\n";
+    assert!(
+        edit_payload_looks_corrupted(search, replace).is_none(),
+        "same brace delta unbalanced fragment must be allowed"
+    );
+
+    // Unbalanced-to-unbalanced with the same closing delta (e.g. near `});`).
+    let search = "    done();\n    });\n";
+    let replace = "    done();\n    cleanup();\n    });\n";
+    assert!(
+        edit_payload_looks_corrupted(search, replace).is_none(),
+        "unbalanced-to-unbalanced with same delta (e.g. around `}});`) must be allowed"
+    );
+}
+
+#[test]
+fn edit_payload_rejects_divergent_brace_delta() {
+    let search = "fn f() {\n    body\n}\n";
+    let replace = "fn f() {\n    body\n"; // lost closing brace
+    let reason =
+        edit_payload_looks_corrupted(search, replace).expect("divergent brace delta must reject");
+    assert!(
+        reason.contains("brace balance") || reason.contains("unbalanced"),
+        "reason should mention brace balance: {reason}"
+    );
+}
+
+#[test]
+fn edit_payload_still_rejects_empty_bracket_collapse() {
+    let search = r#"SendMessageOutcome::Finished {
+                status: TurnOutcomeStatus::Interrupted,
+                ..
+            } => self.pause_goal_after_interruption().await,"#;
+    let replace = "[
+
+            ] => {},";
+    assert!(
+        edit_payload_looks_corrupted(search, replace).is_some(),
+        "empty bracket collapse must still fail closed"
+    );
+}
+
+#[test]
+fn edit_payload_still_rejects_extreme_shrinkage() {
+    // Many nested braces in search, collapsed to a tiny stub that lost opens.
+    let search = "fn long_match_arm() {\n".to_string()
+        + &"    if cond { statement(); }\n".repeat(20)
+        + "}\n";
+    let replace = "fn long_match_arm() {}\n";
+    assert!(
+        search.len() >= 80,
+        "fixture must be long enough for shrinkage guard"
+    );
+    assert!(
+        edit_payload_looks_corrupted(&search, replace).is_some(),
+        "extreme shrinkage with lost braces must still fail closed"
     );
 }
 

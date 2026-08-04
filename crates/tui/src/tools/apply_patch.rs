@@ -840,7 +840,7 @@ where
     let parts: Vec<&str> = header.split_whitespace().collect();
     if parts.len() < 3 {
         return Err(ToolError::invalid_input(format!(
-            "Invalid hunk header: {header}. Expected `@@ -start,count +start,count @@`."
+            "Invalid hunk header: {header}. Expected numeric unified-diff form `@@ -old_start,old_count +new_start,new_count @@` (example: `@@ -12,3 +12,5 @@`)."
         )));
     }
 
@@ -905,14 +905,14 @@ fn parse_range(range: &str) -> Result<(usize, usize), ToolError> {
     let parts: Vec<&str> = range.split(',').collect();
     let start = parts[0].parse::<usize>().map_err(|_| {
         ToolError::invalid_input(format!(
-            "Invalid line number `{}` in hunk header. Use positive integers like `12` or `12,3`.",
+            "Invalid line number `{}` in hunk header. Expected numeric unified-diff form `@@ -old_start,old_count +new_start,new_count @@` (example: `@@ -12,3 +12,5 @@`); use positive integers like `12` or `12,3`.",
             parts[0]
         ))
     })?;
     let count = if parts.len() > 1 {
         parts[1].parse::<usize>().map_err(|_| {
             ToolError::invalid_input(format!(
-                "Invalid line count `{}` in hunk header. Use positive integers like `3`.",
+                "Invalid line count `{}` in hunk header. Expected numeric unified-diff form `@@ -old_start,old_count +new_start,new_count @@` (example: `@@ -12,3 +12,5 @@`); use positive integers like `3`.",
                 parts[1]
             ))
         })?
@@ -991,7 +991,7 @@ fn advance_hunk_shape_counts(line: &str, old_remaining: &mut usize, new_remainin
 fn validate_patch_shape(shape: &PatchShape, path_override: Option<&str>) -> Result<(), ToolError> {
     if !shape.has_hunks {
         return Err(ToolError::invalid_input(
-            "Patch must include at least one hunk header (`@@ -start,count +start,count @@`).",
+            "Patch must include at least one hunk header in numeric unified-diff form (`@@ -old_start,old_count +new_start,new_count @@`, example: `@@ -12,3 +12,5 @@`).",
         ));
     }
 
