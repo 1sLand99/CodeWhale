@@ -257,6 +257,42 @@ async fn read_file_range_beyond_total_returns_no_content_sentinel() {
     assert!(result.content.contains("truncated=\"false\""));
 }
 
+/// 2026-08-04 review: a `start_line:"1200"` string (or any wrong type) used
+/// to fall back SILENTLY to the defaults, returning lines 1-500 — the head
+/// of the file dressed up as the window the model asked for. Wrong types
+/// are errors, matching the shared `optional_u64` contract.
+#[tokio::test]
+async fn read_file_refuses_wrongly_typed_range_params_instead_of_defaulting() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+    fs::write(tmp.path().join("any.txt"), "x\ny\nz\n").expect("write");
+    let tool = ReadFileTool;
+    for bad in [json!("1200"), json!(-5), json!(2.5), json!([1200])] {
+        let err = tool
+            .execute(json!({ "path": "any.txt", "start_line": bad }), &ctx)
+            .await
+            .expect_err("wrongly typed start_line must error, never default");
+        assert!(
+            err.to_string().contains("start_line"),
+            "error names the field: {err}"
+        );
+        let err = tool
+            .execute(json!({ "path": "any.txt", "max_lines": bad }), &ctx)
+            .await
+            .expect_err("wrongly typed max_lines must error, never default");
+        assert!(
+            err.to_string().contains("max_lines"),
+            "error names the field: {err}"
+        );
+    }
+    // Null still reads as absent, consistent with the strictness lane.
+    let ok = tool
+        .execute(json!({ "path": "any.txt", "start_line": null }), &ctx)
+        .await
+        .expect("null is absence, not a type error");
+    assert!(ok.success);
+}
+
 #[tokio::test]
 async fn read_file_rejects_zero_start_line_and_zero_max_lines() {
     let tmp = tempdir().expect("tempdir");
@@ -321,8 +357,13 @@ async fn read_file_byte_truncation_keeps_head_and_tail() {
     assert!(
         result
             .content
-            .contains("Full file remains at path=\"wide.txt\""),
-        "byte-truncation recovery note missing: {}",
+            .contains("Re-read narrower windows to see the middle"),
+        "byte-truncation recovery note must give actionable advice: {}",
+        result.content
+    );
+    assert!(
+        result.content.contains("start_line=1 max_lines=20"),
+        "the note names a concrete narrower window: {}",
         result.content
     );
     // Middle of the window should be the part omitted under a head+tail budget.

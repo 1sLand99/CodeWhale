@@ -2459,7 +2459,7 @@ use crate::features::Feature;
 use crate::tools::cargo_failure_summary::summarize_cargo_failure;
 use crate::tools::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
-    optional_bool, optional_str, optional_u64, required_str,
+    optional_bool, optional_str, optional_u64, required_str, type_mismatch,
 };
 use async_trait::async_trait;
 use serde_json::json;
@@ -3103,12 +3103,19 @@ impl ToolSpec for BashTool {
         let interactive = optional_bool(&input, "interactive", false)?;
         let combined_output = optional_bool(&input, "combined_output", false)?;
         let tty = optional_bool(&input, "tty", false)? || (combined_output && background);
-        let stdin_data = input
-            .get("stdin")
-            .or_else(|| input.get("input"))
-            .or_else(|| input.get("data"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string);
+        // Strict types (2026-08-04 review): a non-string here used to be
+        // silently dropped — the command then ran with NO stdin and reported
+        // success, the exact silent-drop failure the alias hardening closed
+        // for misspelled names. A wrong type is an error, never a no-op.
+        let stdin_data = match first_present_field(&input, &["stdin", "input", "data"]) {
+            None => None,
+            Some((name, value)) => Some(
+                value
+                    .as_str()
+                    .ok_or_else(|| type_mismatch(name, value, "a string"))?
+                    .to_string(),
+            ),
+        };
 
         if interactive && background {
             return Ok(ToolResult::error(
@@ -3180,10 +3187,15 @@ impl ToolSpec for BashTool {
         }
 
         let policy_override = context.elevated_sandbox_policy.clone();
-        let working_dir = match input
-            .get("cwd")
-            .or_else(|| input.get("working_dir"))
-            .and_then(serde_json::Value::as_str)
+        // Strict types: a non-string cwd used to silently run the command in
+        // the workspace default instead of erroring (2026-08-04 review).
+        let working_dir = match first_present_field(&input, &["cwd", "working_dir"])
+            .map(|(name, value)| {
+                value
+                    .as_str()
+                    .ok_or_else(|| type_mismatch(name, value, "a string"))
+            })
+            .transpose()?
         {
             Some(dir) => {
                 // Validate cwd against workspace boundary (same as file tools)
@@ -3779,11 +3791,27 @@ impl BashTool {
 }
 
 fn required_task_id(input: &serde_json::Value) -> Result<&str, ToolError> {
-    input
-        .get("task_id")
-        .or_else(|| input.get("id"))
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| ToolError::missing_field("task_id"))
+    // A present-but-non-string task_id is a type error, not a missing field:
+    // "missing required field" sends the model's retry in the wrong
+    // direction when it already supplied `task_id: 42` (2026-08-04 review).
+    match first_present_field(input, &["task_id", "id"]) {
+        None => Err(ToolError::missing_field("task_id")),
+        Some((name, value)) => value
+            .as_str()
+            .ok_or_else(|| type_mismatch(name, value, "a string")),
+    }
+}
+
+/// First PRESENT value among aliased spellings of one field. `null` counts
+/// as absent, matching the `is_absent` rule the shared typed helpers use.
+fn first_present_field<'a>(
+    input: &'a serde_json::Value,
+    names: &[&'static str],
+) -> Option<(&'static str, &'a serde_json::Value)> {
+    names.iter().find_map(|name| match input.get(*name) {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => Some((*name, value)),
+    })
 }
 
 fn build_shell_delta_tool_result(delta: ShellDeltaResult, context: &ToolContext) -> ToolResult {

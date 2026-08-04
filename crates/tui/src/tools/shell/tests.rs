@@ -2405,6 +2405,55 @@ async fn non_string_bash_action_is_refused_instead_of_running_the_command() {
     }
 }
 
+/// The same hole for the data fields (2026-08-04 review). A non-string
+/// `stdin` was silently dropped — the command ran with NO stdin and reported
+/// success, the silent-drop failure this lane exists to close. A non-string
+/// `cwd` silently ran in the workspace default. And a numeric `task_id` was
+/// reported as "missing", steering the model's retry the wrong way.
+#[tokio::test]
+async fn wrongly_typed_stdin_cwd_and_task_id_are_refused_not_dropped() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path().to_path_buf());
+
+    let marker = workspace.path().join("stdin-marker");
+    let error = BashTool::new("Bash")
+        .execute(
+            json!({
+                "command": format!("touch {}", marker.display()),
+                "stdin": 12345,
+            }),
+            &context,
+        )
+        .await
+        .expect_err("non-string stdin must be refused, never silently dropped");
+    let message = error.to_string();
+    assert!(message.contains("'stdin'"), "names the field: {message}");
+    assert!(
+        message.contains("must be a string"),
+        "names the expected type: {message}"
+    );
+    assert!(!marker.exists(), "the command must not have run");
+
+    let error = BashTool::new("Bash")
+        .execute(
+            json!({ "command": "pwd", "cwd": 123 }),
+            &context,
+        )
+        .await
+        .expect_err("non-string cwd must be refused, never defaulted");
+    assert!(error.to_string().contains("'cwd'"), "{error}");
+
+    let error = BashTool::new("Bash")
+        .execute(json!({ "action": "wait", "task_id": 42 }), &context)
+        .await
+        .expect_err("non-string task_id is a type error");
+    let message = error.to_string();
+    assert!(
+        message.contains("'task_id'") && message.contains("must be a string"),
+        "a supplied-but-mistyped task_id must not read as missing: {message}"
+    );
+}
+
 /// `null` is the wire spelling of absence, and `action` documents a `run`
 /// default — so the strictness above must not swallow the default.
 #[tokio::test]

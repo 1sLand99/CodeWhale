@@ -10,7 +10,7 @@
 use super::diff_format::make_unified_diff;
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
-    lsp_diagnostics_for_paths, optional_str, required_str,
+    lsp_diagnostics_for_paths, optional_str, optional_u64, required_str,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -371,7 +371,7 @@ impl ToolSpec for ReadFileTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read a UTF-8 file from the workspace. Use this instead of `cat`, `head`, `tail`, or `sed -n '..p'` in `Bash` — it's faster, sandbox-aware, and skips the approval prompt. Plain text is returned as-is and records the file snapshot required before `edit` will make a narrow in-place edit. CodeWhale config files and file-backed credential stores cannot be read with this tool; use `codewhale config list` or `codewhale auth status` for safe inspection. PDFs are text-extracted when the optional `pdftotext` executable (Poppler) is installed. Image screenshots are OCR-extracted when local OCR is available. Cannot read other non-PDF binaries.\n\nFor large files, use `start_line` and `max_lines` to read in chunks. By default, returns up to 500 lines or 16KB, whichever comes first. If `truncated=\"true\"` in the response, use `next_start_line` to continue reading. For PDFs, use `pages` instead — `start_line`/`max_lines` only apply to text files."
+        "Read a UTF-8 file from the workspace. Use this instead of `cat`, `head`, `tail`, or `sed -n '..p'` in `Bash` — it's faster, sandbox-aware, and skips the approval prompt. Plain text is returned as-is and records the file snapshot required before `edit` will make a narrow in-place edit. CodeWhale config files and file-backed credential stores cannot be read with this tool; use `codewhale config list` or `codewhale auth status` for safe inspection. PDFs are text-extracted when the optional `pdftotext` executable (Poppler) is installed. Image screenshots are OCR-extracted when local OCR is available. Cannot read other non-PDF binaries.\n\nFor large files, use `start_line` and `max_lines` to read in chunks. By default, returns up to 500 lines or 16KB, whichever comes first. If `truncated=\"true\"` and `next_start_line` is present, continue reading from there; a byte-limited window instead shows head + tail with a `[CONTENT TRUNCATED]` marker and its note says how to narrow the range. For PDFs, use `pages` instead — `start_line`/`max_lines` only apply to text files."
     }
 
     fn input_schema(&self) -> Value {
@@ -485,27 +485,31 @@ impl ToolSpec for ReadFileTool {
             ));
         }
 
-        let start_line = match input.get("start_line").and_then(Value::as_u64) {
-            Some(0) => {
+        // Strict types (2026-08-04 review): a `start_line:"1200"` string or a
+        // negative/float value used to silently fall back to the defaults —
+        // returning the head of the file instead of the window the model
+        // asked for, the exact wrong-answer-shaped-like-a-right-one this
+        // action's alias/unknown-parameter hardening exists to prevent.
+        let start_line = match optional_u64(&input, "start_line", 1)? {
+            0 => {
                 return Err(ToolError::invalid_input(
                     "start_line must be 1-based and greater than 0".to_string(),
                 ));
             }
-            Some(v) => usize::try_from(v).map_err(|_| {
+            v => usize::try_from(v).map_err(|_| {
                 ToolError::invalid_input(
                     "start_line exceeds platform addressable range".to_string(),
                 )
             })?,
-            None => 1,
         };
 
-        let max_lines = match input.get("max_lines").and_then(Value::as_u64) {
-            Some(0) => {
+        let max_lines = match optional_u64(&input, "max_lines", DEFAULT_READ_LINES as u64)? {
+            0 => {
                 return Err(ToolError::invalid_input(
                     "max_lines must be greater than 0".to_string(),
                 ));
             }
-            Some(v) => {
+            v => {
                 let converted = usize::try_from(v).map_err(|_| {
                     ToolError::invalid_input(
                         "max_lines exceeds platform addressable range".to_string(),
@@ -513,7 +517,6 @@ impl ToolSpec for ReadFileTool {
                 })?;
                 std::cmp::min(converted, HARD_MAX_READ_LINES)
             }
-            None => DEFAULT_READ_LINES,
         };
 
         // Bounded read for ranged/large files: skip and take lines through a
@@ -705,9 +708,19 @@ fn render_line_window(
         ));
     }
     if truncated_by_bytes {
-        output.push_str(&format!(
-            "\n[TRUNCATED] The selected range exceeded 16KB; showing head + tail. Full file remains at path=\"{path_str}\". Re-read with a smaller max_lines or a tighter start_line range.\n"
-        ));
+        if shown_first == shown_last {
+            // One line alone exceeds the byte budget: no start_line/max_lines
+            // combination can ever reveal the elided middle, so the note must
+            // not pretend otherwise — name the escape hatch that works.
+            output.push_str(&format!(
+                "\n[TRUNCATED] Line {shown_first} alone exceeds 16KB; showing its head + tail. No `start_line`/`max_lines` window can reveal the middle of one line — use File action=\"search_content\" to find what you need inside it, or Bash (e.g. `cut -c` on that line) to slice by column.\n"
+            ));
+        } else {
+            let narrower = ((shown_last - shown_first + 1) / 2).max(1);
+            output.push_str(&format!(
+                "\n[TRUNCATED] The selected range exceeded 16KB; showing head + tail of lines {shown_first}-{shown_last}. Re-read narrower windows to see the middle, e.g. start_line={shown_first} max_lines={narrower}, then advance start_line.\n"
+            ));
+        }
     }
     output.push_str("</file>");
 
