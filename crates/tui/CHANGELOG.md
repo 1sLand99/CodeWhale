@@ -52,15 +52,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Opt-in product telemetry, off by default, shipped with no endpoint
-  configured.** A first-run notice asks once, on a terminal, with declining
-  pre-selected — Enter declines. Nothing is collected unless both
-  `telemetry = true` and a recorded "Enable" answer are present, so a
-  `telemetry = true` written before this release stays inert: the key has been
-  settable and inert for a long time, and setting it was never consent. With no
-  `telemetry_endpoint` — the shipped default — an enabled session writes each
-  batch to `$CODEWHALE_HOME/telemetry/dryrun.jsonl` and constructs no HTTP
-  client at all, so you can read exactly what would have been sent.
+- **Opt-in product telemetry, off by default.** A first-run notice asks once, on
+  a terminal, with declining pre-selected — Enter declines. Nothing is collected
+  unless both `telemetry = true` and a recorded "Enable" answer are present, so
+  a `telemetry = true` written before this release stays inert: the key has been
+  settable and inert for a long time, and setting it was never consent.
+
+  An enabled session sends its batches to the first-party ingest endpoint,
+  `https://telemetry.codewhale.net/v1/telemetry`, which is the shipped default
+  for `telemetry_endpoint`. That is a Cloudflare Worker whose complete source is
+  in this repository under `telemetry-ingest/`; it writes to Workers Analytics
+  Engine, whose row is exactly `_sample_interval`, `blob1`–`blob20`, `dataset`,
+  `double1`–`double20`, `index1`, and `timestamp` — **there is no IP, country,
+  or geo column**, so storing one is structurally impossible rather than merely
+  disabled. The handler reads two request headers, never touches the request's
+  geo properties, logs nothing, and validates against a closed field set that
+  rejects an entire batch carrying any unpublished key. Cloudflare's retention
+  for that data is a fixed three months. Setting `telemetry_endpoint = ""`
+  instead writes each batch to `$CODEWHALE_HOME/telemetry/dryrun.jsonl` and
+  constructs no HTTP client at all, so you can read exactly what would have been
+  sent.
 
   Turning it off is an answer, not a flag: it deletes the random install id,
   truncates every buffered event, and leaves a permanent tombstone that a

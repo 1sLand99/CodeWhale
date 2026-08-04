@@ -1,11 +1,24 @@
 # Codewhale product telemetry
 
-**Status for 0.9.4: opt-in, off by default, and shipped with no endpoint
-configured.** Nothing is collected until you answer the first-run notice with
-"Enable". Even then, with no `telemetry_endpoint` set — which is the shipped
-default — batches are written to a local file on your own machine and contacted
-nobody. You can read exactly what would have been sent by reading
-`$CODEWHALE_HOME/telemetry/dryrun.jsonl`.
+**Status for 0.9.4: opt-in, and off by default.** Nothing is collected until you
+answer the first-run notice with "Enable" — before that answer no event is
+recorded, no batch is assembled, and `$CODEWHALE_HOME/telemetry/` is not even
+created. Answering "Enable" is the entire consent decision; there is no other
+way to turn this on, and a `telemetry = true` written before 0.9.4 does not
+count as one.
+
+**There is now a real endpoint.** An enabled session sends its batches to the
+first-party ingest service at `https://telemetry.codewhale.net/v1/telemetry`,
+which is the shipped default for `telemetry_endpoint`. What that service is,
+what it stores, and what it structurally cannot store is spelled out in "What
+the endpoint does" below. The default decides only *where* an enabled session's
+batches go — it changes nothing about whether a session collects.
+
+**To send nothing anywhere, keep telemetry off** (see "Turning it off"). To stay
+enabled but contact nobody, set `telemetry_endpoint = ""`: batches are then
+appended to `$CODEWHALE_HOME/telemetry/dryrun.jsonl` on your own machine, byte
+for byte what the server would have received, and no HTTP client is ever
+constructed. That file is how you audit this document against reality.
 
 This document is the schema. It is not a summary of the schema: a test in
 `crates/telemetry` parses the field names out of this file and asserts set
@@ -63,7 +76,7 @@ Everything is under `$CODEWHALE_HOME/telemetry/` (`0700`), every file `0600`:
 |---|---|
 | `buffer.jsonl` | pending events, one JSON object per line |
 | `buffer.jsonl.lock` | a sibling lock file; only compaction takes it |
-| `dryrun.jsonl` | where batches go when no endpoint is configured |
+| `dryrun.jsonl` | where batches go when the endpoint is configured empty |
 | `state.json` | the last app version seen and the last flush attempt |
 | `install_id.json` | the random install id and when it was minted |
 | `disabled` | the tombstone; present means nothing is appended or sent |
@@ -83,18 +96,35 @@ and in any case every 90 days.
 There is no factory-reset command in Codewhale, so this document does not
 claim one.
 
-## When anything is sent
+## When anything is sent, and where
 
-There are exactly two flush points: a startup drain, at most once every six
-hours, that recovers events a crashed or signalled prior session left behind;
-and one attempt during shutdown, bounded at three seconds. There is no
-mid-session flush, no per-turn flush, and no per-tool-call flush. Both
-re-resolve your setting from disk immediately beforehand, so
-`codewhale config set telemetry false` written from another terminal stops the
-flush of a session that is already running.
+Nothing is sent at all unless telemetry resolved on **and** the first-run notice
+was answered with "Enable" on this machine. Given both, there are exactly two
+flush points: a startup drain, at most once every six hours, that recovers
+events a crashed or signalled prior session left behind; and one attempt during
+shutdown, bounded at three seconds. There is no mid-session flush, no per-turn
+flush, and no per-tool-call flush. Both re-resolve your setting from disk
+immediately beforehand, so `codewhale config set telemetry false` written from
+another terminal stops the flush of a session that is already running.
+
+A flush is **one `POST`** to the resolved endpoint — by default
+`https://telemetry.codewhale.net/v1/telemetry`. The request carries a
+`content-type: application/json` header, a
+`user-agent: codewhale-telemetry/<app_version>`, and the batch body. That is
+all: no cookies (the HTTP client is built without a cookie jar to disable), no
+redirects (refused outright), no `Authorization` header, no custom headers, and
+no query string. The response body is discarded unread; only the status class is
+looked at.
+
+`https://` is required. Plain `http://` is accepted only for a loopback host, so
+you can point the client at a recorder of your own and read the wire form
+directly; no environment variable overrides that refusal. An endpoint the client
+refuses turns telemetry off for the run rather than falling back to a different
+destination.
 
 Any failure — DNS, connect, TLS, timeout, non-2xx — drops the batch. There is
-no retry, no backoff, and no re-queue.
+no retry, no backoff, and no re-queue. A permanently offline machine attempts at
+most once per flush point and never grows a queue.
 
 ---
 
@@ -134,7 +164,7 @@ no retry, no backoff, and no re-queue.
 | `tty` | bool | `std::io::IsTerminal`, as at `crates/tui/src/tui/ui.rs:1169` | `stdin().is_terminal() && stdout().is_terminal()`. Varies, because consent is machine-scoped. |
 | `events` | array | the drained buffer | Every element is one of the four events below and nothing else. Capped at 200 events or 64 KiB per batch; a batch that would exceed either cap leaves the remainder buffered for the next flush. |
 
-**`os_major` is not collected.** Reading it costs unsafe FFI on two platforms plus a file parser on a third, in the one crate whose entire value is being small enough to audit — and `os`, `arch`, and `libc` are free and answer the platform question. It may be reconsidered once there is a real endpoint and evidence that the OS-version cut matters.
+**`os_major` is not collected.** Reading it costs unsafe FFI on two platforms plus a file parser on a third, in the one crate whose entire value is being small enough to audit — and `os`, `arch`, and `libc` are free and answer the platform question. It may be reconsidered if the stored data ever shows that the OS-version cut is what triage is missing; a hunch is not that evidence.
 
 ### Which surfaces emit
 
@@ -242,12 +272,30 @@ Appended **synchronously** by the panic hook, because a `session_end` may never 
 
 ### What the endpoint does — a shipping gate, not a footnote
 
-This section must be filled in and true **before** any non-loopback endpoint is configured. It is a shipping gate, not a follow-up. Until it is true, the shipped default of "no endpoint" stands.
+This section was a gate on configuring any non-loopback endpoint. The endpoint is now configured by default, so this is a description of a service that exists rather than a promise about one that might.
 
-- Batches are **IP-stripped at ingest**. No IP is stored, logged, or joined to `install_id`.
-- Retention window for raw batches: to be stated as a number of days.
-- No third-party analytics processor sits between the client and storage.
-- `install_id` rotates client-side every 90 days (`rotated_at` in `install_id.json`), so no single identifier spans a long IP history. This costs longitudinal accuracy and the docs say so: **no count derived from `install_id` is a user count.**
+**What it is.** `https://telemetry.codewhale.net/v1/telemetry` — a Cloudflare Worker named `codewhale-telemetry-ingest`, whose complete source is in this repository at [`telemetry-ingest/`](../telemetry-ingest/). It is the only component; there is no queue, no proxy, and no other service in the path. It is write-only: nothing in the Worker can read back what was stored, and querying happens out of band through Cloudflare's SQL API with the owner's token. The hostname is deliberately self-describing, so anyone inspecting their own network traffic can tell what it is from the name alone.
+
+**What it stores.** Everything in this document and nothing else, in Workers Analytics Engine — one row per event. The validator in `telemetry-ingest/src/schema.ts` is a **closed** field set: an unknown key anywhere in a batch rejects the whole batch with `400`. A future client bug that starts attaching a path, a prompt, or a provider table name gets refused by the server rather than quietly stored. `telemetry-ingest/test/schema-doc.test.ts` parses the field names and enum spellings back out of *this file* and asserts set equality against the validator, and `telemetry-ingest/test/ingest.test.ts` posts the Rust client's own pinned golden batch and asserts it is accepted byte for byte — so this document, the client, and the endpoint cannot drift apart without a red test.
+
+Batches are **IP-stripped at ingest**. No IP is stored, logged, or joined to `install_id` — and that is structural rather than a setting anyone could flip. An Analytics Engine row is exactly `_sample_interval`, `blob1`–`blob20`, `dataset`, `double1`–`double20`, `index1`, and `timestamp`. Every one of those columns is written by the Worker's own `writeDataPoint` call; there is no implicit column, so **there is no IP, country, or geo column** — no slot one could occupy even if the code wanted it there. And the code cannot want it:
+
+- The handler reads exactly **two** request headers — `content-type` and `content-length`. Nothing else, ever.
+- It never touches the request's `cf` property, so country, colo, city, region, ASN, timezone, and coordinates are never in scope.
+- The function that builds every stored row cannot see the request at all; its input type is the validated batch body.
+- Nothing logs. `invocation_logs` is off in `wrangler.jsonc` — Cloudflare describes those as "enriched with information available to Cloudflare in the context of the invocation", which is exactly the class of automatic per-request record this service will not keep — and there is no `console.*` call in the source.
+- Rate limiting is keyed on `install_id` from the validated body, never on a network address. An IP-keyed limiter would mean this Worker handles IPs. It is the weaker limiter and it is the right trade.
+- `telemetry-ingest/test/no-ip.test.ts` reads the shipped source as text and fails the build if any address or geo name appears, if the set of headers read grows past two, if a `console.*` call is added, or if a `Response` is ever constructed with a body.
+
+**Retention: three months.** That is Cloudflare's fixed window for Analytics Engine and it is not configurable, so it is a ceiling rather than a policy — there is no setting that could make it longer.
+
+**No third-party analytics processor** sits between the client and storage. There is no ad SDK, no analytics SDK, and no session replay, in the endpoint or in the runtime binary.
+
+**Every response is a bare status with an empty body** — `204` accepted, `400` schema violation, `404`/`405` wrong path or method, `413` oversized, `415` wrong content type, `429` rate-limited, `500` internal. The endpoint cannot echo back what it received or what it holds, and because the client drops the batch on anything that is not 2xx, a rejection is invisible to you by construction and a server error can never surface as a client-visible failure.
+
+`install_id` rotates client-side every 90 days (`rotated_at` in `install_id.json`), so no single identifier spans a long history. This costs longitudinal accuracy and the docs say so: **no count derived from `install_id` is a user count.** It is a lower bound on distinct machine-installs in a window, and it undercounts a returning user across a rotation.
+
+**Turning it off deletes what was kept locally, not what was already sent.** `codewhale config set telemetry false` erases the install id, the buffer, and the dry-run records on your machine, and stops anything further. Rows already accepted by the endpoint are keyed only by a rotating random id that is now gone; they age out with the three-month window. There is no deletion API, and this document does not claim one.
 
 ### What is never collected — the public red-line list
 

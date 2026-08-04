@@ -185,7 +185,7 @@
     "localRuntime": "runtime, workspace state, and audit log stay on the user's machine",
     "hostedProviderBoundary": "the selected hosted provider receives turn context required for inference",
     "localInference": "a loopback local-model route can keep inference local",
-    "telemetry": "product telemetry is opt-in, off by default, and ships with no endpoint configured; no mandatory hosted relay",
+    "telemetry": "product telemetry is opt-in, off by default, and sends nothing until the first-run notice is answered with Enable; an enabled session posts counts and closed enums to the first-party endpoint https://telemetry.codewhale.net/v1/telemetry, whose storage has no IP, country, or geo column and a fixed three-month retention; telemetry_endpoint = \"\" keeps an enabled session writing only to a local dry-run file; no mandatory hosted relay",
     "account": "no account required for the local runtime",
     "plan": "Plan is read-only",
     "sandbox": "Seatbelt is used on macOS when available; Linux bubblewrap is opt-in and must be installed; Windows currently reports no OS sandbox",

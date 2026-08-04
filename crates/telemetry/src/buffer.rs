@@ -7,7 +7,7 @@
 //! |---|---|
 //! | `buffer.jsonl` | one JSON event per line, awaiting a flush |
 //! | `buffer.jsonl.lock` | a **sibling** lock file; never the data file |
-//! | `dryrun.jsonl` | the sink when no endpoint is configured, same ring policy |
+//! | `dryrun.jsonl` | the sink when the endpoint resolves empty, same ring policy |
 //! | `state.json` | last version seen and last flush attempt |
 //! | `install_id.json` | the random install id |
 //! | `disabled` | the tombstone: present ⇒ nothing is appended, drained, or sent |
@@ -49,7 +49,10 @@ pub fn buffer_path(root: &Path) -> PathBuf {
     root.join("buffer.jsonl")
 }
 
-/// `dryrun.jsonl` — where batches go when no endpoint is configured.
+/// `dryrun.jsonl` — where batches go when the endpoint resolves to `None`.
+///
+/// Reached by configuring `telemetry_endpoint` empty; an unconfigured endpoint
+/// resolves to `codewhale_config::DEFAULT_TELEMETRY_ENDPOINT` instead.
 #[must_use]
 pub fn dryrun_path(root: &Path) -> PathBuf {
     root.join("dryrun.jsonl")

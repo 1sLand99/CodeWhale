@@ -245,8 +245,13 @@ A reproducible headless launch uses only existing generic surfaces:
   is already opt-in and off by default, and a fresh `CODEWHALE_HOME` carries no
   first-run notice decision, so a sealed harness run collects nothing either
   way; setting the variable makes that explicit and survives a home the caller
-  reuses. It is a hard floor — an explicit "off" in the environment beats
-  `--telemetry true` and `telemetry = true` in config. See
+  reuses — which is the case that now matters, because a reused home whose owner
+  answered the first-run notice with Enable sends to a live endpoint
+  (`https://telemetry.codewhale.net/v1/telemetry`, the shipped default) rather
+  than to a local file. It is a hard floor — an explicit "off" in the
+  environment beats `--telemetry true` and `telemetry = true` in config. Set
+  `CODEWHALE_TELEMETRY_ENDPOINT=` (empty) instead if a harness wants an enabled
+  home to keep buffering locally without contacting anything. See
   [`docs/TELEMETRY.md`](TELEMETRY.md);
 - `CODEWHALE_ALLOW_INSECURE_HTTP=1` **only** when the harness supplies a
   trusted `http://` interception endpoint (container/tunnel endpoints are not

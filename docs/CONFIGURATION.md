@@ -847,8 +847,12 @@ the `CODEWHALE_*` value wins.
   to off, because a typo in a kill switch must never resolve to "on". See
   [`TELEMETRY.md`](TELEMETRY.md).
 - `CODEWHALE_TELEMETRY_ENDPOINT` / `DEEPSEEK_TELEMETRY_ENDPOINT` (legacy alias)
-  — `https://`, or plain `http://` only for loopback. Unset in shipped
-  builds, which routes batches to a local dry-run file instead of a network.
+  — `https://`, or plain `http://` only for loopback. Overrides the config file.
+  Unset selects the shipped default,
+  `https://telemetry.codewhale.net/v1/telemetry`; setting it to the **empty
+  string** routes batches to a local dry-run file and contacts nobody. Either
+  way it only decides where an already-enabled session sends — it cannot turn
+  telemetry on.
 - `CODEWHALE_ALLOW_SHELL` (`1`/`true` enables)
 - `CODEWHALE_APPROVAL_POLICY` (`on-request|untrusted|never`)
 - `CODEWHALE_SANDBOX_MODE` (`read-only|workspace-write|danger-full-access|external-sandbox`)
@@ -1507,16 +1511,23 @@ If you are upgrading from older releases:
   dry-run records. A repo-local `.codewhale/config.toml` cannot set it. Full
   schema and red lines:
   [`TELEMETRY.md`](TELEMETRY.md).
-- `telemetry_endpoint` (string, optional): where batches are POSTed. **Unset by
-  default, and 0.9.4 ships with no endpoint configured** — with no endpoint an
-  enabled session writes each batch to `$CODEWHALE_HOME/telemetry/dryrun.jsonl`
-  and constructs no HTTP client at all, so you can read exactly what would have
-  been sent. `https://` is required; plain `http://` is accepted only for
-  loopback hosts, and there is no environment variable that overrides that
-  refusal. A rejected endpoint turns telemetry off for the run rather than
-  falling back to plaintext. Override per process with
-  `CODEWHALE_TELEMETRY_ENDPOINT` (legacy alias `DEEPSEEK_TELEMETRY_ENDPOINT`).
-  A repo-local `.codewhale/config.toml` cannot set it.
+- `telemetry_endpoint` (string, optional): where batches are POSTed. Leaving it
+  unset selects the shipped default,
+  **`https://telemetry.codewhale.net/v1/telemetry`** — the first-party ingest
+  service described in [`TELEMETRY.md`](TELEMETRY.md), whose source is in
+  `telemetry-ingest/`. This key decides only *where* an enabled session sends;
+  it cannot turn telemetry on, and it is read only after `telemetry` above
+  resolved true and the first-run notice was answered with "Enable". Setting it
+  to the **empty string** is how you stay enabled and contact nobody: each batch
+  is then written to `$CODEWHALE_HOME/telemetry/dryrun.jsonl` and no HTTP client
+  is constructed at all, so you can read exactly what would have been sent. Any
+  other value replaces the default outright. `https://` is required; plain
+  `http://` is accepted only for loopback hosts, and there is no environment
+  variable that overrides that refusal. A rejected endpoint turns telemetry off
+  for the run rather than falling back to plaintext or to the default. Override
+  per process with `CODEWHALE_TELEMETRY_ENDPOINT` (legacy alias
+  `DEEPSEEK_TELEMETRY_ENDPOINT`), where an empty value means the same "contact
+  nobody". A repo-local `.codewhale/config.toml` cannot set it.
 - `allow_shell` (bool, optional): in interactive TUI Agent sessions, omitting
   this keeps shell tools available with approval prompts; setting it to `false`
   hides shell tools. Headless, durable-task, and other noninteractive profiles

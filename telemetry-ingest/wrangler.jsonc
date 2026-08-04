@@ -54,7 +54,9 @@
     { "pattern": "telemetry.codewhale.net", "custom_domain": true }
   ]
   //
-  // Nothing is aimed at this endpoint until `telemetry_endpoint` is set, which
-  // is unset in the shipped default and stays that way until the owner deploys
-  // and verifies. See README.md, "Deploy".
+  // `https://telemetry.codewhale.net/v1/telemetry` is the shipped default for
+  // `telemetry_endpoint` (`DEFAULT_TELEMETRY_ENDPOINT` in
+  // `crates/config/src/lib.rs`), so real batches arrive here. Only from
+  // sessions that answered the first-run notice with Enable — the default
+  // decides where a batch goes, never whether one exists. See README.md.
 }

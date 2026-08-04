@@ -9,10 +9,15 @@ It lives here and not in `web/` because the site is a separate deploy with its
 own build (Next.js via OpenNext); this is a single 13 KiB script with no assets,
 and coupling the two would mean a telemetry change rebuilding the marketing site.
 
-**Not deployed.** Nothing is aimed at this endpoint: `telemetry_endpoint` is
-unset in the shipped Codewhale default, and stays unset until the owner deploys
-this, verifies it, and changes that deliberately. Until then the client writes
-batches to `$CODEWHALE_HOME/telemetry/dryrun.jsonl` and contacts nobody.
+**Deployed and live** at `https://telemetry.codewhale.net/v1/telemetry`, which
+is the shipped default for `telemetry_endpoint`. workers.dev is disabled; that
+hostname is the only way in.
+
+That default decides where an *already enabled* session's batches go. It is not
+a consent change: Codewhale telemetry is still opt-in and off by default, and
+nothing is collected until the first-run notice is answered with Enable. A user
+who wants to stay enabled and contact nobody sets `telemetry_endpoint = ""`,
+which writes batches to `$CODEWHALE_HOME/telemetry/dryrun.jsonl` instead.
 
 ---
 
@@ -135,17 +140,15 @@ rule. If a generated provider-id list ever lands in the repo, wire it in here.
 ### Retention
 
 Cloudflare stores Analytics Engine data for **three months**, and that is not
-configurable. `docs/TELEMETRY.md`'s shipping-gate section asks for the retention
-window "to be stated as a number of days" — filling that in is part of the
-owner's deploy step, not this directory's.
+configurable — a ceiling rather than a policy, since no setting could make it
+longer. `docs/TELEMETRY.md` states it.
 
 ---
 
-## Deploy — the owner's action
+## Deploy
 
-Nothing here has been deployed, and no Cloudflare resource has been created.
-Everything below is verified locally only (`wrangler deploy --dry-run`,
-`wrangler dev`, and the test suite).
+Live. The commands below are the ones that produced the current deployment and
+the ones that will produce the next one.
 
 ```sh
 cd telemetry-ingest
@@ -155,22 +158,21 @@ npx wrangler deploy --dry-run --outdir=.wrangler/dry-run   # no account touched
 npx wrangler deploy         # <- the only command that publishes anything
 ```
 
-`wrangler deploy` with no `routes` block publishes to `*.workers.dev` only. To
-put it on a hostname, create the DNS record first, then uncomment the `routes`
-block in `wrangler.jsonc`:
+The `routes` block in `wrangler.jsonc` binds it to `telemetry.codewhale.net` as
+a custom domain, so the endpoint URL is
+`https://telemetry.codewhale.net/v1/telemetry`. The workers.dev subdomain is
+disabled: that hostname is the only way in.
 
-```jsonc
-"routes": [
-  { "pattern": "telemetry.codewhale.net", "custom_domain": true }
-]
-```
+Verified against the live endpoint before the client default was changed: the
+client's golden batch returns `204` with a zero-byte body; an unknown key
+returns `400`; `GET` returns `405`; a wrong content type returns `415`; a `POST`
+to `/` returns `404`. Reading back from Analytics Engine returned exactly two
+rows — `session_start` and `session_end`, carrying `install_id`, `surface=tui`,
+`os=macos` — the documented shape and nothing else.
 
-The endpoint URL is then `https://<host>/v1/telemetry`.
-
-**After deploying, before pointing anything at it**, run the verification below.
-Only then is it reasonable to set `telemetry_endpoint`, and only then does
-`docs/TELEMETRY.md`'s "shipped with no endpoint configured" wording need
-revisiting — that is a separate, deliberate edit.
+**Re-run the verification below after any deploy.** The client default now
+points here, so a regression in this Worker is a regression in a promise
+`docs/TELEMETRY.md` makes to users.
 
 ### Analytics Engine dataset setup
 

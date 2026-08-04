@@ -223,9 +223,17 @@ default_text_model = "openrouter/deepseek/deepseek-v4-pro"`}
       <>
         The Codewhale runtime, workspace state, and audit log stay on your machine.
         Product telemetry is opt-in and off by default — nothing is collected until
-        you answer the first-run notice with Enable, 0.9.4 ships with no endpoint
-        configured, and it never carries prompts, file contents, paths, repo names,
-        or credentials (schema: <code className="inline">docs/TELEMETRY.md</code>;
+        you answer the first-run notice with Enable. An enabled session posts counts
+        and closed enums to the first-party endpoint{" "}
+        <code className="inline">https://telemetry.codewhale.net/v1/telemetry</code>,
+        a Cloudflare Worker whose full source is in the repo under{" "}
+        <code className="inline">telemetry-ingest/</code>. Its storage has no IP,
+        country, or geo column — structurally, not as a setting — nothing is logged,
+        and retention is a fixed three months. Set{" "}
+        <code className="inline">telemetry_endpoint = &quot;&quot;</code> to stay
+        enabled and contact nobody. It never carries prompts, file contents, paths,
+        repo names, or credentials (schema:{" "}
+        <code className="inline">docs/TELEMETRY.md</code>;
         off with <code className="inline">codewhale config set telemetry false</code>
         or <code className="inline">CODEWHALE_TELEMETRY=0</code>). There is no
         mandatory hosted relay. The hosted
@@ -577,8 +585,12 @@ default_text_model = "openrouter/deepseek/deepseek-v4-pro"`}
     a: (
       <>
         Codewhale 运行时、工作区状态与审计日志保留在你的机器上。产品遥测是可选加入且默认关闭的——
-        在你把首次运行提示回答为“启用”之前不会收集任何内容；0.9.4 未配置任何端点，且永远不会携带
-        prompt、文件内容、路径、仓库名或凭据（schema 见 <code className="inline">docs/TELEMETRY.md</code>；
+        在你把首次运行提示回答为“启用”之前不会收集任何内容。启用后的会话会把计数与封闭枚举 POST 到第一方端点{" "}
+        <code className="inline">https://telemetry.codewhale.net/v1/telemetry</code>，
+        那是一个 Cloudflare Worker，完整源码就在仓库的 <code className="inline">telemetry-ingest/</code> 目录里。
+        它的存储中没有 IP、国家或任何地理位置列——这是结构上不存在，而不是某个开关——不写任何日志，保留期固定为三个月。
+        若想保持启用但不联系任何服务器，设置 <code className="inline">telemetry_endpoint = &quot;&quot;</code>。
+        它永远不会携带 prompt、文件内容、路径、仓库名或凭据（schema 见 <code className="inline">docs/TELEMETRY.md</code>；
         可用 <code className="inline">codewhale config set telemetry false</code> 或
         <code className="inline">CODEWHALE_TELEMETRY=0</code> 关闭）。也不要求经过托管中继。你选择的托管 provider 会收到本轮所需的
         prompt、项目上下文、工具定义与工具结果。若要让模型推理也保持本地，请使用回环地址上的本地模型路由。
