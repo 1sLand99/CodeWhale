@@ -7,6 +7,7 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use super::canonical_action::required_action;
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
 };
@@ -26,6 +27,11 @@ impl RunTool {
         }
     }
 
+    const ACTIONS: &'static [&'static str] = &["tests", "verifiers"];
+
+    /// Policy-side resolution: approval and parallel-safety predicates cannot
+    /// fail, so a missing action resolves to the most conservative answer.
+    /// Execution does not share this fallback — see `required_action`.
     fn resolve_action<'a>(&self, input: &'a Value) -> &'a str {
         self.forced_action.unwrap_or_else(|| {
             input
@@ -33,6 +39,13 @@ impl RunTool {
                 .and_then(Value::as_str)
                 .unwrap_or("tests")
         })
+    }
+
+    fn required_action(&self, input: &Value) -> Result<String, ToolError> {
+        if let Some(forced) = self.forced_action {
+            return Ok(forced.to_string());
+        }
+        required_action(input, self.name, Self::ACTIONS)
     }
 
     fn strip_action(&self, input: Value) -> Result<Value, ToolError> {
@@ -136,15 +149,61 @@ impl ToolSpec for RunTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
-        let action = self.resolve_action(&input).to_string();
+        let action = self.required_action(&input)?;
         let input = self.strip_action(input)?;
 
         match action.as_str() {
             "tests" => RunTestsTool.execute(input, context).await,
             "verifiers" => RunVerifiersTool.execute(input, context).await,
             other => Err(ToolError::invalid_input(format!(
-                "Unknown Run action: {other}"
+                "Unknown Run action \"{other}\"; nothing was run. Pass one of: {}.",
+                Self::ACTIONS.join(", ")
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    async fn err(input: Value) -> String {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        RunTool::new("Run")
+            .execute(input, &ctx)
+            .await
+            .expect_err("call must be refused")
+            .to_string()
+    }
+
+    /// Defaulting here ran `cargo test` for a model that meant `verifiers`.
+    #[tokio::test]
+    async fn missing_action_does_not_silently_run_tests() {
+        let message = err(json!({"background": true})).await;
+        assert!(message.contains("requires an `action`"), "{message}");
+        assert!(message.contains("nothing was run"), "{message}");
+        assert!(message.contains("tests, verifiers"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn unknown_action_names_the_actions_that_dispatch() {
+        let message = err(json!({"action": "lint"})).await;
+        assert!(message.contains("lint"), "{message}");
+        assert!(message.contains("tests, verifiers"), "{message}");
+    }
+
+    #[test]
+    fn advertised_actions_match_the_actions_that_dispatch() {
+        let schema = RunTool::new("Run").input_schema();
+        let advertised: Vec<&str> = schema["properties"]["action"]["enum"]
+            .as_array()
+            .expect("action enum")
+            .iter()
+            .map(|value| value.as_str().expect("string"))
+            .collect();
+        assert_eq!(advertised, RunTool::ACTIONS);
     }
 }

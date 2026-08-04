@@ -7,6 +7,7 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use super::canonical_action::required_action;
 use super::dev_server_readiness::WaitForDevServerTool;
 use super::fetch_url::FetchUrlTool;
 use super::spec::{
@@ -27,6 +28,11 @@ impl WebTool {
         }
     }
 
+    const ACTIONS: &'static [&'static str] = &["search", "fetch", "wait"];
+
+    /// Policy-side resolution: approval and parallel-safety predicates cannot
+    /// fail, so a missing action resolves to the most conservative answer.
+    /// Execution does not share this fallback — see `required_action`.
     fn resolve_action<'a>(&self, input: &'a Value) -> &'a str {
         self.forced_action.unwrap_or_else(|| {
             input
@@ -34,6 +40,13 @@ impl WebTool {
                 .and_then(Value::as_str)
                 .unwrap_or("search")
         })
+    }
+
+    fn required_action(&self, input: &Value) -> Result<String, ToolError> {
+        if let Some(forced) = self.forced_action {
+            return Ok(forced.to_string());
+        }
+        required_action(input, self.name, Self::ACTIONS)
     }
 
     fn strip_action(&self, input: Value) -> Result<Value, ToolError> {
@@ -178,7 +191,7 @@ impl ToolSpec for WebTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
-        let action = self.resolve_action(&input).to_string();
+        let action = self.required_action(&input)?;
         let input = self.strip_action(input)?;
 
         match action.as_str() {
@@ -186,8 +199,54 @@ impl ToolSpec for WebTool {
             "fetch" => FetchUrlTool.execute(input, context).await,
             "wait" => WaitForDevServerTool.execute(input, context).await,
             other => Err(ToolError::invalid_input(format!(
-                "Unknown Web action: {other}"
+                "Unknown Web action \"{other}\"; nothing was run. Pass one of: {}.",
+                Self::ACTIONS.join(", ")
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    async fn err(input: Value) -> String {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        WebTool::new("Web")
+            .execute(input, &ctx)
+            .await
+            .expect_err("call must be refused")
+            .to_string()
+    }
+
+    /// `Web{url: ...}` meant `fetch`; defaulting turned it into a search.
+    #[tokio::test]
+    async fn missing_action_does_not_silently_search() {
+        let message = err(json!({"url": "https://example.com"})).await;
+        assert!(message.contains("requires an `action`"), "{message}");
+        assert!(message.contains("nothing was run"), "{message}");
+        assert!(message.contains("search, fetch, wait"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn unknown_action_names_the_actions_that_dispatch() {
+        let message = err(json!({"action": "get", "url": "https://example.com"})).await;
+        assert!(message.contains("get"), "{message}");
+        assert!(message.contains("search, fetch, wait"), "{message}");
+    }
+
+    #[test]
+    fn advertised_actions_match_the_actions_that_dispatch() {
+        let schema = WebTool::new("Web").input_schema();
+        let advertised: Vec<&str> = schema["properties"]["action"]["enum"]
+            .as_array()
+            .expect("action enum")
+            .iter()
+            .map(|value| value.as_str().expect("string"))
+            .collect();
+        assert_eq!(advertised, WebTool::ACTIONS);
     }
 }

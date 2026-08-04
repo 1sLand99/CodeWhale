@@ -7,6 +7,7 @@
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use super::canonical_action::required_action;
 use super::git::{GitDiffTool, GitStatusTool};
 use super::git_history::{GitBlameTool, GitLogTool, GitShowTool};
 use super::spec::{
@@ -26,13 +27,13 @@ impl GitTool {
         }
     }
 
-    fn resolve_action<'a>(&self, input: &'a Value) -> &'a str {
-        self.forced_action.unwrap_or_else(|| {
-            input
-                .get("action")
-                .and_then(Value::as_str)
-                .unwrap_or("status")
-        })
+    const ACTIONS: &'static [&'static str] = &["status", "diff", "log", "show", "blame"];
+
+    fn required_action(&self, input: &Value) -> Result<String, ToolError> {
+        if let Some(forced) = self.forced_action {
+            return Ok(forced.to_string());
+        }
+        required_action(input, self.name, Self::ACTIONS)
     }
 
     fn strip_action(&self, input: Value) -> Result<Value, ToolError> {
@@ -41,7 +42,9 @@ impl GitTool {
             obj.remove("action");
             Ok(input)
         } else {
-            Err(ToolError::invalid_input("Git tool input must be an object"))
+            Err(ToolError::invalid_input(
+                "Git tool input must be a JSON object, e.g. {\"action\": \"status\"}",
+            ))
         }
     }
 }
@@ -147,7 +150,7 @@ impl ToolSpec for GitTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
-        let action = self.resolve_action(&input).to_string();
+        let action = self.required_action(&input)?;
         let input = self.strip_action(input)?;
 
         match action.as_str() {
@@ -157,8 +160,56 @@ impl ToolSpec for GitTool {
             "show" => GitShowTool.execute(input, context).await,
             "blame" => GitBlameTool.execute(input, context).await,
             other => Err(ToolError::invalid_input(format!(
-                "Unknown Git action: {other}"
+                "Unknown Git action \"{other}\"; nothing was run. Pass one of: {}.",
+                Self::ACTIONS.join(", ")
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    async fn err(input: Value) -> String {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        GitTool::new("Git")
+            .execute(input, &ctx)
+            .await
+            .expect_err("call must be refused")
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn missing_action_is_refused_with_the_valid_values() {
+        let message = err(json!({"path": "src"})).await;
+        assert!(message.contains("requires an `action`"), "{message}");
+        assert!(message.contains("nothing was run"), "{message}");
+        assert!(message.contains("blame"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn unknown_action_names_the_actions_that_dispatch() {
+        let message = err(json!({"action": "commit"})).await;
+        assert!(message.contains("commit"), "{message}");
+        assert!(
+            message.contains("status, diff, log, show, blame"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn advertised_actions_match_the_actions_that_dispatch() {
+        let schema = GitTool::new("Git").input_schema();
+        let advertised: Vec<&str> = schema["properties"]["action"]["enum"]
+            .as_array()
+            .expect("action enum")
+            .iter()
+            .map(|value| value.as_str().expect("string"))
+            .collect();
+        assert_eq!(advertised, GitTool::ACTIONS);
     }
 }
