@@ -1927,7 +1927,7 @@ fn render_spillover_annotation(width: u16) -> Line<'static> {
     // "Alt+V opens …" hint style (#3256): one quiet line, no handles or paths.
     let affordance = format!(
         "Output shortened — {}",
-        crate::tui::key_shortcuts::tool_details_shortcut_action_hint("full output")
+        crate::tui::key_shortcuts::tool_details_shortcut_action_hint("output")
     );
     Line::from(Span::styled(
         truncate_text(&affordance, usize::from(width).max(8)),
@@ -1957,7 +1957,7 @@ fn render_command_mode(command: &str, width: u16, mode: RenderMode) -> Vec<Line<
     {
         if count >= cap {
             lines.push(details_affordance_line(
-                &crate::tui::key_shortcuts::tool_details_shortcut_action_hint("full command"),
+                &crate::tui::key_shortcuts::tool_details_shortcut_action_hint("command"),
                 Style::default().fg(palette::TEXT_MUTED),
             ));
             break;

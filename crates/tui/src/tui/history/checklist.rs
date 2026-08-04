@@ -200,7 +200,7 @@ pub(super) fn render_checklist_change_card(
             "{} item{}; {}",
             snapshot.total,
             if snapshot.total == 1 { "" } else { "s" },
-            crate::tui::key_shortcuts::tool_details_shortcut_action_hint("full list")
+            crate::tui::key_shortcuts::tool_details_shortcut_action_hint("list")
         ),
         Style::default().fg(palette::TEXT_MUTED),
     ));
@@ -287,7 +287,7 @@ pub(super) fn render_checklist_card(
             None,
             &format!(
                 "+{omitted} more; {}",
-                crate::tui::key_shortcuts::tool_details_shortcut_action_hint("full list")
+                crate::tui::key_shortcuts::tool_details_shortcut_action_hint("list")
             ),
             Style::default().fg(palette::TEXT_DIM),
         ));

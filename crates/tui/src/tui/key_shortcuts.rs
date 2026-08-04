@@ -64,8 +64,10 @@ pub(super) fn tool_details_shortcut_label() -> Cow<'static, str> {
     crate::tui::shell_key_routing::tool_details_chord()
 }
 
-pub(super) fn tool_details_shortcut_action_hint(noun: &str) -> String {
-    format!("{} opens {noun}", tool_details_shortcut_label())
+/// Compact affordance: platform chord + short verb (`⌥V:output`, `Alt+V:list`).
+/// Matches footer notation (`cap:verb`); not a sentence.
+pub(super) fn tool_details_shortcut_action_hint(verb: &str) -> String {
+    format!("{}:{verb}", tool_details_shortcut_label())
 }
 
 /// Open the full reasoning detail pager for the selected or current turn.
@@ -302,15 +304,15 @@ mod tests {
         assert_eq!(label, crate::tui::shell_key_routing::tool_details_chord());
         assert_ne!(label, "v");
         assert_eq!(
-            tool_details_shortcut_action_hint("full output"),
-            format!("{label} opens full output")
+            tool_details_shortcut_action_hint("output"),
+            format!("{label}:output")
         );
     }
 
     /// #3256: every surface that advertises tool details must name the chord
     /// that `is_tool_details_shortcut` actually handles — the help catalog,
     /// shell binding catalog, and in-transcript hint share one source of
-    /// truth so "v opens details" cannot regress while bare `v` types `v`.
+    /// truth so bare-`v` "details" copy cannot regress while bare `v` types `v`.
     #[test]
     fn tool_details_hint_tracks_keybinding_catalog_and_handler() {
         use crate::localization::MessageId;
@@ -336,7 +338,9 @@ mod tests {
             "details hint must advertise Alt+V / ⌥V, got {label}"
         );
         assert!(!label.eq_ignore_ascii_case("v"));
-        assert!(!tool_details_shortcut_action_hint("details").starts_with("v "));
+        let details_hint = tool_details_shortcut_action_hint("details");
+        assert_eq!(details_hint, format!("{label}:details"));
+        assert!(!details_hint.starts_with('v'));
 
         let plain_v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE);
         let alt_v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT);

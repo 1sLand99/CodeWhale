@@ -424,7 +424,11 @@ fn render_spillover_annotation_truncates_to_width() {
         rendered.contains("Output shortened"),
         "compact live rows should expose the calm expand affordance: {rendered:?}"
     );
-    assert!(rendered.contains("opens full output"), "{rendered:?}");
+    assert!(
+        rendered.contains(":output"),
+        "expected cap:verb affordance, got {rendered:?}"
+    );
+    assert!(!rendered.contains("opens full output"), "{rendered:?}");
     assert!(text_display_width(&rendered) <= usize::from(width));
     assert!(!rendered.contains(long_path));
 }
@@ -458,7 +462,11 @@ fn specialized_bash_and_mcp_cells_share_the_calm_expand_affordance() {
         lines_text(&ToolCell::Mcp(mcp).lines_with_motion(80, true)),
     ] {
         assert!(rendered.contains("Output shortened"), "{rendered}");
-        assert!(rendered.contains("opens full output"), "{rendered}");
+        assert!(
+            rendered.contains(":output"),
+            "expected cap:verb affordance, got {rendered}"
+        );
+        assert!(!rendered.contains("opens full output"), "{rendered}");
         // The chord is a global details affordance, not a per-card stamp (#4718).
         assert!(!rendered.contains("Option+V to inspect"), "{rendered}");
         assert!(!rendered.contains("retrieve_tool_result"), "{rendered}");
@@ -473,7 +481,7 @@ fn adaptive_evidence_affordance_is_calm_path_free_and_width_bounded() {
     let secret_path = Path::new("/Users/private/.codewhale/sessions/session-a/artifacts/hash.txt");
     let expected = format!(
         "Output shortened — {}",
-        crate::tui::key_shortcuts::tool_details_shortcut_action_hint("full output")
+        crate::tui::key_shortcuts::tool_details_shortcut_action_hint("output")
     );
     for width in [18_u16, 40, 80, 120] {
         let rendered = line_to_plain(&render_spillover_annotation(width));
@@ -841,7 +849,7 @@ fn render_checklist_change_card_shows_only_changed_item() {
         .map(|s| s.content.as_ref())
         .collect();
     assert!(summary_line.contains("3 items"), "{summary_line:?}");
-    let expected_hint = crate::tui::key_shortcuts::tool_details_shortcut_action_hint("full list");
+    let expected_hint = crate::tui::key_shortcuts::tool_details_shortcut_action_hint("list");
     assert!(summary_line.contains(&expected_hint), "{summary_line:?}");
 }
 
@@ -1049,7 +1057,8 @@ fn render_thinking_collapsed_shows_details_affordance() {
         .iter()
         .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
         .collect::<String>();
-    assert!(text.contains("Ctrl+O: reasoning detail"));
+    assert!(text.contains("Ctrl+O:detail"), "{text}");
+    assert!(text.contains("Space:expand"), "{text}");
     // Pin the actual header shape ("… reasoning done") — a bare
     // `contains("reasoning")` is already satisfied by the Ctrl+O
     // affordance line above and would never fail on its own.
@@ -1175,7 +1184,7 @@ fn render_thinking_streaming_truncated_shows_continues_affordance() {
         .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
         .collect::<String>();
     assert!(
-        text.contains("More reasoning in Ctrl+O"),
+        text.contains("Ctrl+O:more"),
         "streaming-truncation affordance missing, got: {text}"
     );
     // The most recent line must be the visible tail (head dropped).
@@ -2416,11 +2425,11 @@ fn long_thinking_display_is_shorter_than_transcript() {
         "live thinking must drop the tail when collapsed"
     );
     assert!(
-        live_text.contains("Ctrl+O: reasoning detail"),
+        live_text.contains("Ctrl+O:detail"),
         "live thinking must offer the pager affordance"
     );
     assert!(
-        !transcript_text.contains("Ctrl+O: reasoning detail"),
+        !transcript_text.contains("Ctrl+O:detail"),
         "transcript thinking must not include the live affordance"
     );
 }
@@ -2457,7 +2466,7 @@ fn completed_short_thinking_without_summary_stays_visible_in_live_view() {
         "transcript thinking must keep the full reasoning body"
     );
     assert!(
-        !live_text.contains("Ctrl+O: reasoning detail"),
+        !live_text.contains("Ctrl+O:detail"),
         "complete short reasoning should not need the detail affordance: {live_text}"
     );
 }
@@ -2492,7 +2501,7 @@ fn completed_reasoning_receipt_hides_internal_function_names_until_expanded() {
         "surrounding prose must still read: {collapsed_text}"
     );
     assert!(
-        collapsed_text.contains("Ctrl+O: reasoning detail"),
+        collapsed_text.contains("Ctrl+O:detail"),
         "collapsed receipt must offer the expand affordance: {collapsed_text}"
     );
 
@@ -2544,7 +2553,7 @@ fn thinking_default_expanded_inverts_but_preserves_the_space_toggle() {
         "Space must still collapse a default-expanded reasoning cell"
     );
     assert!(
-        collapsed_text.contains("Ctrl+O: reasoning detail"),
+        collapsed_text.contains("Ctrl+O:detail"),
         "the collapsed state must retain the full-reasoning affordance"
     );
 }

@@ -214,8 +214,7 @@ pub(crate) fn render_thinking_with_highlight(
     // don't leak. Streaming reasoning stays verbatim (the user is watching it
     // think) and the expanded / pager / clipboard transcript keeps the full,
     // un-redacted body. The redaction changes `body_text`, which trips the
-    // affordance below so the user still sees the "Ctrl+O: reasoning detail"
-    // hint.
+    // affordance below so the user still sees the "Ctrl+O:detail" hint.
     let body_text = if collapsed && !streaming {
         redact_internal_identifiers(&body_text)
     } else {
@@ -280,10 +279,11 @@ pub(crate) fn render_thinking_with_highlight(
             truncated || body_text.trim() != content.trim()
         };
     if needs_affordance {
+        // One notation with the footer: `cap:verb`, middle-dot separator.
         let label = if streaming {
-            "More reasoning in Ctrl+O"
+            "Ctrl+O:more"
         } else {
-            "Space: expand here · Ctrl+O: reasoning detail"
+            "Space:expand · Ctrl+O:detail"
         };
         lines.push(Line::from(vec![
             Span::styled(REASONING_RAIL.to_string(), rail_style),

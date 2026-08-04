@@ -392,7 +392,7 @@ fn render_preserved_output_mode(
                 lines.push(details_affordance_line(
                     &format!(
                         "{omitted} lines omitted; {}",
-                        crate::tui::key_shortcuts::tool_details_shortcut_action_hint("full output")
+                        crate::tui::key_shortcuts::tool_details_shortcut_action_hint("output")
                     ),
                     Style::default().fg(palette::TEXT_MUTED),
                 ));

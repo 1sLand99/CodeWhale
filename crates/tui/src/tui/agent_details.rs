@@ -253,7 +253,10 @@ pub(crate) fn project_agent_details(app: &App, agent_id: &str) -> Option<AgentDe
     let transcript_available =
         crate::tui::mouse_ui::agent_transcript_evidence_available(app, agent_id);
     if transcript_available {
-        lines.push("Exact evidence: available · Alt/⌥V opens transcript".to_string());
+        // Platform glyph via display_chord (⌥V on macOS, Alt+V elsewhere) —
+        // never the dual "Alt/⌥V" spelling, and cap:verb not a sentence.
+        let chord = crate::tui::shell_key_routing::tool_details_chord();
+        lines.push(format!("Exact evidence: available · {chord}:transcript"));
     } else {
         lines.push("Exact evidence: unavailable".to_string());
     }
@@ -725,7 +728,9 @@ mod tests {
             .push(agent(agent_id, SubAgentStatus::Running));
         let absent = project_agent_details(&app, agent_id).expect("projection");
         assert!(!absent.transcript_available);
-        assert!(!absent.body.contains("Alt/⌥V"));
+        let details_chord = crate::tui::shell_key_routing::tool_details_chord();
+        let transcript_hint = format!("{details_chord}:transcript");
+        assert!(!absent.body.contains(&transcript_hint));
         let mut absent_view = AgentDetailsView::new(absent, agent_id, 80);
         assert!(matches!(
             absent_view.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT)),
@@ -756,7 +761,16 @@ mod tests {
         }
         let present = project_agent_details(&app, agent_id).expect("projection");
         assert!(present.transcript_available);
-        assert!(present.body.contains("Alt/⌥V opens transcript"));
+        assert!(
+            present.body.contains(&transcript_hint),
+            "expected {transcript_hint:?} in {}",
+            present.body
+        );
+        assert!(
+            !present.body.contains("Alt/⌥V"),
+            "dual Alt/⌥ spelling must not appear: {}",
+            present.body
+        );
         let mut present_view = AgentDetailsView::new(present, agent_id, 80);
         assert!(matches!(
             present_view.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT)),
