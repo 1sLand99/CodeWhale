@@ -795,7 +795,7 @@ impl ToolSpec for UpdateGoalTool {
                 },
                 "verification": {
                     "type": "object",
-                    "description": "Required when status is complete or not_achieved. A verifier-as-judge receipt from a concrete check, such as run_verifiers or an equivalent project-specific gate.",
+                    "description": "Required when status is complete or not_achieved. A verifier-as-judge receipt from a concrete check, such as Run action=\"verifiers\" or an equivalent project-specific gate.",
                     "properties": {
                         "status": {
                             "type": "string",

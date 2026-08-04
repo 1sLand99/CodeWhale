@@ -1139,7 +1139,10 @@ async fn edit_file_requires_prior_read() {
         .expect_err("edit without read should fail");
     let message = err.to_string();
     assert!(message.contains("not been read"), "{message}");
-    assert!(message.contains("read_file"), "{message}");
+    // The recovery has to be spelled as a call the model can make: `read_file`
+    // was retired in v0.9.3 and the registry has no fuzzy resolve step.
+    assert!(message.contains(r#"File with action="read""#), "{message}");
+    assert!(!message.contains("read_file"), "{message}");
 
     let unchanged = fs::read_to_string(&test_file).expect("read");
     assert_eq!(unchanged, "hello world");
@@ -1164,7 +1167,8 @@ async fn edit_file_rejects_stale_prior_read() {
         .expect_err("stale read should fail");
     let message = err.to_string();
     assert!(message.contains("changed since"), "{message}");
-    assert!(message.contains("read_file"), "{message}");
+    assert!(message.contains(r#"File with action="read""#), "{message}");
+    assert!(!message.contains("read_file"), "{message}");
 
     let unchanged = fs::read_to_string(&test_file).expect("read");
     assert_eq!(unchanged, "alpha beta gamma");

@@ -224,7 +224,7 @@ impl ToolSpec for RlmTool {
                 },
                 "url": {
                     "type": "string",
-                    "description": "HTTP/HTTPS URL to fetch through fetch_url and load. (action=open)"
+                    "description": "HTTP/HTTPS URL to fetch (through the same path as Web action=\"fetch\") and load. (action=open)"
                 },
                 "session_object": {
                     "type": "string",
@@ -683,7 +683,7 @@ fn legacy_action_schema(action: &str) -> Value {
                 },
                 "url": {
                     "type": "string",
-                    "description": "HTTP/HTTPS URL to fetch through fetch_url and load."
+                    "description": "HTTP/HTTPS URL to fetch (through the same path as Web action=\"fetch\") and load."
                 },
                 "session_object": {
                     "type": "string",

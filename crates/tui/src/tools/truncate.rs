@@ -345,10 +345,40 @@ const HANDLE_ONLY_TAIL_BYTES: usize = 4 * 1024;
 /// carries the artifact path and a recovery instruction instead.
 pub const SPILLOVER_PREVIEW_HINT: &str = "view full output in the tool details view";
 
-/// One-line recovery instruction in the model-facing truncation footer. Also
-/// used by the TUI to recognise current-format truncated previews.
-pub const SPILLOVER_RECOVERY_HINT: &str =
-    "read it back with the read_file tool or with sed line ranges";
+/// Sentinel phrase the TUI matches on to recognise a current-format truncated
+/// preview. It must stay a literal substring of every footer variant.
+pub const SPILLOVER_RECOVERY_HINT: &str = "omitted range recovery:";
+
+/// Model-facing recovery instruction for a truncated tool result.
+///
+/// The previous text — "read it back with the read_file tool or with sed line
+/// ranges" — offered three routes and **all three were dead**: `read_file` is
+/// not model-visible (only `File` is), `File action="read"` on an artifact
+/// under `~/.codewhale/sessions/` is refused as a path escape, and `sed`
+/// through `Bash` reads outside the workspace too. Meanwhile
+/// `retrieve_tool_result` — model-visible, purpose-built, and already named
+/// correctly by the web overflow path in `tools/web/overflow.rs` — went
+/// unmentioned.
+///
+/// The distinction that matters is retrievability, not tidiness. An adaptive
+/// session artifact carries an `art_<id>` the retrieval tool resolves, so name
+/// it. A legacy global spillover is authorized by an ownership sidecar whose
+/// write is allowed to fail (see [`publish_legacy_spillover_ownership`]), so
+/// promising retrieval there would just be a fourth dead route; say plainly
+/// that there is no tool call for it and name what does work instead.
+fn spillover_recovery_instruction(retrieval_ref: Option<&str>) -> String {
+    match retrieval_ref {
+        Some(reference) => format!(
+            "{SPILLOVER_RECOVERY_HINT} call retrieve_tool_result with ref=\"{reference}\" \
+             (mode=\"tail\" for the end, mode=\"lines\" with lines=\"120-160\" for a range, \
+             mode=\"query\" with query=\"…\" to search it)"
+        ),
+        None => format!(
+            "{SPILLOVER_RECOVERY_HINT} no tool call reaches this copy — re-run the command \
+             with narrower output (a tighter filter, or head/tail) if you need the rest"
+        ),
+    }
+}
 
 /// Model-facing footer for a truncated tool result. Names how much was
 /// omitted (bytes and lines), where the complete output lives on disk, and
@@ -357,10 +387,12 @@ fn spillover_preview_footer(
     omitted_bytes: usize,
     omitted_lines: usize,
     recovery_path: &str,
+    retrieval_ref: Option<&str>,
 ) -> String {
     format!(
-        "… {} of output omitted ({omitted_lines} lines) — full output at {recovery_path}; {SPILLOVER_RECOVERY_HINT}",
-        crate::artifacts::format_byte_size(omitted_bytes.try_into().unwrap_or(u64::MAX))
+        "… {} of output omitted ({omitted_lines} lines) — full output at {recovery_path}; {}",
+        crate::artifacts::format_byte_size(omitted_bytes.try_into().unwrap_or(u64::MAX)),
+        spillover_recovery_instruction(retrieval_ref)
     )
 }
 
@@ -385,7 +417,13 @@ fn head_tail_windows(content: &str, head_bytes: usize, tail_bytes: usize) -> (&s
 /// read back, and a short retained tail. When the head and tail windows cover
 /// the whole output (nothing was actually omitted), the content is returned
 /// unchanged — the preview never claims a truncation that did not happen.
-fn truncated_preview(head: &str, tail: &str, original: &str, recovery_path: &str) -> String {
+fn truncated_preview(
+    head: &str,
+    tail: &str,
+    original: &str,
+    recovery_path: &str,
+    retrieval_ref: Option<&str>,
+) -> String {
     let omitted = original.len().saturating_sub(head.len() + tail.len());
     if omitted == 0 {
         return original.to_string();
@@ -395,7 +433,7 @@ fn truncated_preview(head: &str, tail: &str, original: &str, recovery_path: &str
         .count();
     format!(
         "{head}\n\n{}\n\n…\n{tail}",
-        spillover_preview_footer(omitted, omitted_lines, recovery_path)
+        spillover_preview_footer(omitted, omitted_lines, recovery_path, retrieval_ref)
     )
 }
 
@@ -533,6 +571,7 @@ fn apply_spillover_inner(
                     tail,
                     &original_content,
                     &absolute_path.display().to_string(),
+                    Some(artifact_id.as_str()),
                 );
                 artifact_path = Some((absolute_path, relative_path, record));
             }
@@ -548,7 +587,9 @@ fn apply_spillover_inner(
     }
 
     if artifact_path.is_none() {
-        result.content = truncated_preview(head, tail, &original_content, &path_str);
+        // Legacy fallback: no session artifact was written, so there is no
+        // `art_<id>` ref to hand over — only the on-disk path.
+        result.content = truncated_preview(head, tail, &original_content, &path_str, None);
     }
 
     let metadata = result.metadata.get_or_insert_with(|| serde_json::json!({}));
@@ -795,7 +836,13 @@ fn apply_adaptive_evidence_inner(
         relative_path.clone(),
         &original,
     );
-    result.content = truncated_preview(head, tail, &original, &absolute_path.display().to_string());
+    result.content = truncated_preview(
+        head,
+        tail,
+        &original,
+        &absolute_path.display().to_string(),
+        Some(artifact_id.as_str()),
+    );
     let metadata = result.metadata.get_or_insert_with(|| serde_json::json!({}));
     if let Some(object) = metadata.as_object_mut() {
         object.insert(
@@ -898,6 +945,52 @@ mod tests {
         super::TEST_SPILLOVER_GUARD
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The old hint named `read_file` (unregistered), `File action="read"`
+    /// on a path outside the workspace (refused as a path escape), and `sed`
+    /// through `Bash` (also outside the workspace) — three dead routes — while
+    /// never naming `retrieve_tool_result`, which is model-visible and exists
+    /// for exactly this.
+    #[test]
+    fn truncation_footer_names_a_recovery_route_that_works() {
+        let footer = spillover_preview_footer(
+            4096,
+            120,
+            "/tmp/artifacts/art_call-1.txt",
+            Some("art_call-1"),
+        );
+
+        assert!(footer.contains("retrieve_tool_result"), "{footer}");
+        assert!(footer.contains("ref=\"art_call-1\""), "{footer}");
+        assert!(!footer.contains("read_file"), "{footer}");
+        assert!(!footer.contains("sed"), "{footer}");
+    }
+
+    /// The legacy global copy has no guaranteed authorization sidecar, so the
+    /// footer must not invent a fourth dead route — but it still must not name
+    /// the three it used to.
+    #[test]
+    fn truncation_footer_without_an_artifact_promises_nothing_it_cannot_deliver() {
+        let footer = spillover_preview_footer(4096, 120, "/tmp/tool_outputs/call-1.txt", None);
+
+        assert!(
+            footer.contains("no tool call reaches this copy"),
+            "{footer}"
+        );
+        assert!(!footer.contains("retrieve_tool_result"), "{footer}");
+        assert!(!footer.contains("read_file"), "{footer}");
+        assert!(!footer.contains("sed"), "{footer}");
+    }
+
+    /// The TUI keys its "this preview was truncated" detection off the shared
+    /// constant, so it has to stay a literal substring of every variant.
+    #[test]
+    fn every_footer_variant_carries_the_ui_detection_marker() {
+        for reference in [Some("art_call-1"), None] {
+            let footer = spillover_preview_footer(4096, 120, "/tmp/x.txt", reference);
+            assert!(footer.contains(SPILLOVER_RECOVERY_HINT), "{footer}");
+        }
     }
 
     #[test]
@@ -1152,7 +1245,13 @@ mod tests {
             assert!(result.content.contains("full output at"));
             assert!(result.content.contains(&path.display().to_string()));
             assert!(result.content.contains(SPILLOVER_RECOVERY_HINT));
-            assert!(!result.content.contains("retrieve_tool_result"));
+            assert!(
+                !result.content.contains("retrieve_tool_result"),
+                "legacy spillover ownership can fail to publish; promising \
+                 retrieval here would be another dead route"
+            );
+            assert!(!result.content.contains("read_file"));
+            assert!(!result.content.contains("sed"));
 
             // Full bytes are on disk at the returned path.
             assert!(path.exists(), "spillover file missing: {path:?}");
@@ -1205,7 +1304,7 @@ mod tests {
                 "adaptive evidence stores one exact origin-session copy"
             );
             // The model sees a bounded preview with an honest footer: the
-            // artifact path and a recovery instruction, no retrieval handle.
+            // artifact path plus the retrieval call that actually resolves it.
             assert!(!result.content.contains(SPILLOVER_PREVIEW_HINT));
             assert!(result.content.contains("\n…\n"));
             assert!(result.content.contains("of output omitted"));
@@ -1216,7 +1315,16 @@ mod tests {
                 "footer must name the artifact path so the model can recover the output"
             );
             assert!(!result.content.contains("Exact evidence retained"));
-            assert!(!result.content.contains("retrieve_tool_result"));
+            assert!(
+                result.content.contains("retrieve_tool_result"),
+                "a session artifact is retrievable; the footer must say so: {}",
+                result.content
+            );
+            assert!(
+                result.content.contains("ref=\"art_call-big\""),
+                "the footer must hand over a ref that resolves: {}",
+                result.content
+            );
             assert!(
                 session_artifact
                     .with_file_name("art_call-big.evidence.json")
@@ -1468,7 +1576,7 @@ mod tests {
     #[test]
     fn truncated_preview_returns_content_unchanged_when_nothing_omitted() {
         let original = "line one\nline two\nline three\n";
-        let preview = truncated_preview(original, "", original, "/tmp/artifact.txt");
+        let preview = truncated_preview(original, "", original, "/tmp/artifact.txt", None);
         assert_eq!(preview, original);
         assert!(
             !preview.contains("of output omitted"),

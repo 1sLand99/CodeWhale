@@ -1339,7 +1339,7 @@ fn format_hunk_no_match_error(
             let expected_preview = preview_expected_lines(hunk, HUNK_PREVIEW_LINES).join("\n");
             let file_preview = snippet_around(lines, *adjusted_line, SNIPPET_RADIUS).join("\n");
             format!(
-                "could not find matching context near line {expected_line} (searched around line {adjusted_line} with offset {offset:+} and fuzz up to {max_fuzz}). Expected context preview:\n{expected_preview}\nFile snippet near line {adjusted_line}:\n{file_preview}\nHints: the line numbers may be stale after earlier edits — call read_file to re-check the current contents, ensure the patch matches the file, increase `fuzz`, or regenerate the patch."
+                "could not find matching context near line {expected_line} (searched around line {adjusted_line} with offset {offset:+} and fuzz up to {max_fuzz}). Expected context preview:\n{expected_preview}\nFile snippet near line {adjusted_line}:\n{file_preview}\nHints: the line numbers may be stale after earlier edits — call File with action=\"read\" to re-check the current contents, ensure the patch matches the file, increase `fuzz`, or regenerate the patch."
             )
         }
         ApplyHunkError::ContextAmbiguous {
@@ -1352,7 +1352,7 @@ fn format_hunk_no_match_error(
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
-                "could not find matching context near line {expected_line}: the hunk's context appears at multiple locations (lines {candidates}), and the line numbers may be stale after earlier edits, so it is not safe to relocate automatically. Hints: call read_file to inspect the candidate locations above, then regenerate the patch with more surrounding context lines that uniquely identify the target block."
+                "could not find matching context near line {expected_line}: the hunk's context appears at multiple locations (lines {candidates}), and the line numbers may be stale after earlier edits, so it is not safe to relocate automatically. Hints: call File with action=\"read\" to inspect the candidate locations above, then regenerate the patch with more surrounding context lines that uniquely identify the target block."
             )
         }
     }

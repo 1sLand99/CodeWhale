@@ -1423,8 +1423,16 @@ async fn test_exec_shell_foreground_timeout_guides_background_rerun() {
         .expect("execute");
 
     assert!(!result.success);
-    assert!(result.content.contains("task_shell_start"));
-    assert!(result.content.contains("background: true"));
+    // The rerun instruction has to be spelled in the canonical action form:
+    // `exec_shell` / `task_shell_start` are not both dispatchable, and the
+    // model can only reach the shell through `Bash`.
+    assert!(
+        result
+            .content
+            .contains("Bash action=\"run\" background=true")
+    );
+    assert!(result.content.contains("Bash action=\"wait\""));
+    assert!(!result.content.contains("exec_shell"));
     assert!(result.content.contains("process killed"));
     let meta = result.metadata.expect("metadata");
     assert_eq!(meta.get("status").and_then(Value::as_str), Some("TimedOut"));
@@ -1433,17 +1441,28 @@ async fn test_exec_shell_foreground_timeout_guides_background_rerun() {
         .expect("timeout recovery metadata");
     assert_eq!(
         recovery
-            .get("exec_shell_background")
+            .get("rerun_as")
+            .and_then(|rerun| rerun.get("background"))
             .and_then(Value::as_bool),
         Some(true)
     );
-    assert!(
+    assert_eq!(
         recovery
-            .get("hint")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .contains("exec_shell_wait")
+            .get("rerun_as")
+            .and_then(|rerun| rerun.get("tool"))
+            .and_then(Value::as_str),
+        Some("Bash")
     );
+    let hint = recovery
+        .get("hint")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(hint.contains("Bash action=\"wait\""), "{hint}");
+    assert!(!hint.contains("exec_shell"), "{hint}");
+    // The structured tool list is read by the model too; it must not hand
+    // over names the registry does not resolve.
+    let recommended = recovery.to_string();
+    assert!(!recommended.contains("exec_shell"), "{recommended}");
 }
 
 #[test]
@@ -1528,9 +1547,15 @@ async fn test_exec_shell_foreground_can_move_to_background() {
             .content
             .contains("Foreground shell wait moved to /jobs")
     );
-    // The detach message points the model at the wait tool for early output
-    // (the cancel-tool reference was reworded to `exec_shell_wait`).
-    assert!(result.content.contains("exec_shell_wait"));
+    // The detach message points the model at the wait action for early
+    // output, and hands over the task_id it needs to make that call.
+    assert!(
+        result.content.contains("Bash action=\"wait\""),
+        "{}",
+        result.content
+    );
+    assert!(result.content.contains("task_id="), "{}", result.content);
+    assert!(!result.content.contains("exec_shell"), "{}", result.content);
 
     let meta = result.metadata.expect("metadata");
     assert_eq!(meta.get("status").and_then(Value::as_str), Some("Running"));
@@ -2313,4 +2338,60 @@ async fn kill_returns_promptly_when_escaped_descendant_holds_pipe_open() {
         libc::kill(grandchild, libc::SIGKILL);
     }
     assert!(wait_for_shell_pid_exit(grandchild));
+}
+
+/// `Bash` was the only action wrapper whose catch-all fell through to its most
+/// dangerous branch: an unrecognised action ran the command instead.
+#[tokio::test]
+async fn unknown_bash_action_is_refused_instead_of_running_the_command() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path().to_path_buf());
+    let marker = workspace.path().join("should-not-exist");
+
+    let error = BashTool::new("Bash")
+        .execute(
+            json!({
+                "action": "kill",
+                "command": format!("touch {}", marker.display()),
+            }),
+            &context,
+        )
+        .await
+        .expect_err("unknown action must be refused");
+
+    let message = error.to_string();
+    assert!(message.contains("Unknown Bash action"), "{message}");
+    assert!(message.contains("kill"), "{message}");
+    assert!(
+        message.contains("run, wait, interact, cancel"),
+        "must name the actions that dispatch: {message}"
+    );
+    assert!(!marker.exists(), "the command must not have run");
+}
+
+/// Every hint in this file has to name a tool the model can actually call.
+/// `exec_shell` / `exec_shell_wait` were retired in v0.9.3.
+#[test]
+fn shell_recovery_hints_name_only_dispatchable_tools() {
+    assert!(!FOREGROUND_TIMEOUT_RECOVERY_HINT.contains("exec_shell"));
+    assert!(FOREGROUND_TIMEOUT_RECOVERY_HINT.contains("Bash"));
+    assert!(FOREGROUND_TIMEOUT_RECOVERY_HINT.contains("action=\"wait\""));
+}
+
+/// One documented default hid three real ones: `wait` uses 30s and
+/// `interact` 1s, so a model omitting `timeout_ms` on `wait` got a quarter of
+/// the timeout the schema promised.
+#[test]
+fn timeout_ms_description_covers_every_action_default() {
+    let schema = BashTool::new("Bash").input_schema();
+    let description = schema["properties"]["timeout_ms"]["description"]
+        .as_str()
+        .expect("timeout_ms description");
+
+    for expected in ["120000", "600000", "30000", "1000"] {
+        assert!(
+            description.contains(expected),
+            "missing {expected}: {description}"
+        );
+    }
 }

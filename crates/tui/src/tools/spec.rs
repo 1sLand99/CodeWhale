@@ -802,25 +802,25 @@ impl ToolContext {
 
         let Some(prior) = prior else {
             return Err(ToolError::execution_failed(format!(
-                "Refusing edit_file for {} because it has not been read in this session. \
-                 Recovery: call read_file with path=\"{requested_path}\" to inspect the current contents, \
-                 then retry edit_file with a unique search string.",
+                "Refusing File action=\"edit\" for {} because it has not been read in this session. \
+                 Recovery: call File with action=\"read\" path=\"{requested_path}\" to inspect the current contents, \
+                 then retry File action=\"edit\" with a unique search string.",
                 path.display()
             )));
         };
 
         let current = file_read_snapshot(path).map_err(|e| {
             ToolError::execution_failed(format!(
-                "Refusing edit_file for {} because the file could not be checked for staleness ({e}). \
-                 Recovery: call read_file with path=\"{requested_path}\" again, then retry edit_file.",
+                "Refusing File action=\"edit\" for {} because the file could not be checked for staleness ({e}). \
+                 Recovery: call File with action=\"read\" path=\"{requested_path}\" again, then retry File action=\"edit\".",
                 path.display()
             ))
         })?;
 
         if current != prior {
             return Err(ToolError::execution_failed(format!(
-                "Refusing edit_file for {} because it changed since the last read_file call. \
-                 Recovery: call read_file with path=\"{requested_path}\" again and retry with the current contents.",
+                "Refusing File action=\"edit\" for {} because it changed since the last File action=\"read\" call. \
+                 Recovery: call File with action=\"read\" path=\"{requested_path}\" again and retry with the current contents.",
                 path.display()
             )));
         }

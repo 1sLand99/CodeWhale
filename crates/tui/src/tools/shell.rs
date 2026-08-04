@@ -2464,9 +2464,9 @@ use crate::tools::spec::{
 use async_trait::async_trait;
 use serde_json::json;
 
-const FOREGROUND_TIMEOUT_RECOVERY_HINT: &str = "Foreground exec_shell is for bounded commands. \
-The timed-out process was killed; rerun long work with task_shell_start or exec_shell with \
-background: true, then poll with task_shell_wait or exec_shell_wait.";
+const FOREGROUND_TIMEOUT_RECOVERY_HINT: &str = "Foreground Bash is for bounded commands. \
+The timed-out process was killed; rerun long work as Bash action=\"run\" background=true, \
+then poll with Bash action=\"wait\" task_id=\"<id>\".";
 
 const MACOS_PROVENANCE_HINT: &str = "Docker buildx failed to update its activity file due to a macOS \
 com.apple.provenance restriction. Files created by Docker Desktop's signed process carry a \
@@ -2939,7 +2939,7 @@ impl ToolSpec for BashTool {
                 },
                 "timeout_ms": {
                     "type": "integer",
-                    "description": "Timeout in milliseconds (default: 120000, max: 600000)"
+                    "description": "Timeout in milliseconds. The default depends on the action: action=run 120000 (capped at 600000), action=wait 30000, action=interact 1000."
                 },
                 "background": {
                     "type": "boolean",
@@ -3032,7 +3032,18 @@ impl ToolSpec for BashTool {
             "wait" => return self.execute_wait(&input, context).await,
             "interact" => return self.execute_interact(&input, context).await,
             "cancel" => return self.execute_cancel(&input, context).await,
-            _ => {}
+            "run" => {}
+            // Bash was the only action wrapper whose catch-all fell through to
+            // its most dangerous branch: `{"action":"kill", "command":…}` ran
+            // the command instead of cancelling, and a mis-cased "Cancel" did
+            // the same. Every sibling (`File`, `Git`, `Web`, `Run`) already
+            // refuses an unknown action; the tool that executes arbitrary code
+            // should not be the lenient one.
+            other => {
+                return Err(ToolError::invalid_input(format!(
+                    "Unknown Bash action \"{other}\"; nothing was run. Pass one of: run, wait, interact, cancel."
+                )));
+            }
         }
         let command = required_str(&input, "command")?;
         match context.shell_policy {
@@ -3411,11 +3422,11 @@ impl ToolSpec for BashTool {
                 } else if result.status == ShellStatus::Running {
                     if backgrounded_foreground {
                         format!(
-                            "Foreground shell wait moved to /jobs: {task_id_str}\n\nReturns immediately; completion is delivered to the model as an internal runtime event and shown in task/status state. Keep working; call exec_shell_wait only if you need early output, final output, or wait=true at a true dependency."
+                            "Foreground shell wait moved to /jobs: {task_id_str}\n\nReturns immediately; completion is delivered to the model as an internal runtime event and shown in task/status state. Keep working; call Bash action=\"wait\" task_id=\"{task_id_str}\" only if you need early output, final output, or wait=true at a true dependency."
                         )
                     } else {
                         format!(
-                            "Background task started: {task_id_str}\n\nReturns immediately; completion is delivered to the model as an internal runtime event and shown in task/status state. Keep working; call exec_shell_wait only if you need early output, final output, or wait=true at a true dependency."
+                            "Background task started: {task_id_str}\n\nReturns immediately; completion is delivered to the model as an internal runtime event and shown in task/status state. Keep working; call Bash action=\"wait\" task_id=\"{task_id_str}\" only if you need early output, final output, or wait=true at a true dependency."
                         )
                     }
                 } else if result.status == ShellStatus::Killed && was_cancelled {
@@ -3508,14 +3519,12 @@ impl ToolSpec for BashTool {
                     metadata["foreground_timeout_recovery"] = json!({
                         "process_killed": true,
                         "hint": FOREGROUND_TIMEOUT_RECOVERY_HINT,
-                        "recommended_tools": [
-                            "task_shell_start",
-                            "task_shell_wait",
-                            "exec_shell",
-                            "exec_shell_wait"
-                        ],
-                        "exec_shell_background": true,
-                        "poll_with": ["task_shell_wait", "exec_shell_wait"]
+                        "recommended_tools": ["Bash", "task_shell_start", "task_shell_wait"],
+                        "rerun_as": {"tool": "Bash", "action": "run", "background": true},
+                        "poll_with": [
+                            {"tool": "Bash", "action": "wait"},
+                            {"tool": "task_shell_wait"}
+                        ]
                     });
                 }
                 if let Some(hint) = network_restricted_hint {

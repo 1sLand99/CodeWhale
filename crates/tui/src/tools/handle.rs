@@ -189,7 +189,7 @@ impl ToolSpec for HandleReadTool {
          as RLM sessions or sub-agents. This does not read artifact ids \
          (`art_...`), tool-call ids (`call_...`), SHA refs, or files; use \
          retrieve_tool_result for spilled tool results/artifacts and \
-         read_file for workspace files. Provide \
+         File action=\"read\" for workspace files. Provide \
          exactly one projection: `slice` for char/line slices, `range` for \
          one-based line ranges, `count` for metadata counts, or `jsonpath` \
          for a small JSON-path projection. This retrieves from the handle's \
