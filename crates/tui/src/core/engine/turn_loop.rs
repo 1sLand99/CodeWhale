@@ -774,7 +774,7 @@ impl Engine {
                 }
             }
 
-            let request = MessageRequest {
+            let mut request = MessageRequest {
                 model: self.session.model.clone(),
                 messages: self.request_messages_with_work_tail(work_state_tail.as_ref()),
                 max_tokens: effective_max_output_tokens_for_route(
@@ -800,6 +800,22 @@ impl Engine {
                 temperature: None,
                 top_p: None,
             };
+            // Normalize images against the route this request is actually
+            // going to. Session history keeps the real image so that switching
+            // to a vision-capable model later makes it visible again; only the
+            // outbound copy is rewritten, and it is rewritten to text that says
+            // why rather than being dropped.
+            let stripped_images = crate::image_attach::strip_images_when_unsupported(
+                &mut request.messages,
+                self.active_route_capabilities.image_input,
+                &self.session.model,
+            );
+            if stripped_images > 0 {
+                crate::logging::warn(format!(
+                    "{stripped_images} image block(s) replaced with text: model {} does not accept image input",
+                    self.session.model
+                ));
+            }
             let tool_request_snapshot =
                 crate::tool_inspection::ToolInspectionSnapshot::from_prepared_request_with_surface(
                     &turn.id,

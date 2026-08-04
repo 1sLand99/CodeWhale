@@ -2912,16 +2912,15 @@ impl Engine {
     /// them rather than at either end.
     ///
     /// The composer stores an attachment as a `[Attached image: …]` text line
-    /// and the bytes are read here, once, on the way to the wire. That keeps
-    /// multi-megabyte payloads out of session state and undo history, and it
+    /// and the bytes are read here, once, as the message is built. That keeps
+    /// multi-megabyte payloads out of the composer and undo history, and it
     /// means deleting the line deletes the attachment for free. Anything that
     /// cannot be attached becomes a visible notice instead of vanishing.
-    fn user_content_blocks(&self, text: String, routed_model: &str) -> Vec<ContentBlock> {
-        let expanded = crate::image_attach::expand_attachment_blocks(
-            &text,
-            self.active_route_capabilities.image_input,
-            routed_model,
-        );
+    ///
+    /// Whether the model can *see* the result is decided per request, not
+    /// here — see `image_attach::strip_images_when_unsupported`.
+    fn user_content_blocks(&self, text: String) -> Vec<ContentBlock> {
+        let expanded = crate::image_attach::expand_attachment_blocks(&text);
         let mut content = Vec::with_capacity(2 + expanded.blocks.len());
         content.push(ContentBlock::Text {
             text,
@@ -2960,7 +2959,7 @@ impl Engine {
             &text,
             snapshot,
         );
-        let mut content = self.user_content_blocks(text, routed_model);
+        let mut content = self.user_content_blocks(text);
         content.push(turn_metadata);
         Message {
             role: "user".to_string(),
@@ -3037,7 +3036,7 @@ impl Engine {
             &text,
             self.last_policy_narrowing.as_ref(),
         );
-        let mut content = self.user_content_blocks(text, routed_model);
+        let mut content = self.user_content_blocks(text);
         content.push(turn_metadata);
         Message {
             role: "user".to_string(),

@@ -10,8 +10,20 @@
 //!
 //! This module is that faucet. It reads a file, proves it is an image the
 //! providers actually accept, holds it to a size budget, and emits a
-//! `data:` URL. [`expand_attachment_blocks`] is the send-time seam that turns
-//! the composer's placeholder lines into real blocks.
+//! `data:` URL.
+//!
+//! # Two stages, because the two failure kinds differ
+//!
+//! [`expand_attachment_blocks`] runs when the message is built and decides the
+//! *permanent* questions: does this file exist, is it really an image, is it
+//! small enough. Those answers cannot change, so they are baked into history.
+//!
+//! [`strip_images_when_unsupported`] runs per outbound request and decides the
+//! one *contingent* question: can the model this request is going to actually
+//! see images. Routes change mid-session, so answering that at build time
+//! would mean attaching a screenshot under a text-only model and losing it
+//! permanently, even after switching to a vision model. History keeps the
+//! image; each request is normalized against its own route.
 //!
 //! # Provider neutrality
 //!
@@ -62,8 +74,6 @@ pub enum ImageAttachError {
     UnsupportedFormat { path: String, detected: String },
     /// Magic bytes match nothing we recognize as an image.
     NotAnImage { path: String },
-    /// The active model is known not to accept image input.
-    ModelCannotSeeImages { path: String, model: String },
 }
 
 impl std::fmt::Display for ImageAttachError {
@@ -91,12 +101,6 @@ impl std::fmt::Display for ImageAttachError {
                 f,
                 "Cannot attach {path}: the file is not a PNG, JPEG, GIF or \
                  WebP image (its contents do not match any of those formats).",
-            ),
-            Self::ModelCannotSeeImages { path, model } => write!(
-                f,
-                "Cannot attach {path}: the active model ({model}) does not \
-                 accept image input. Switch to a vision-capable model with \
-                 /model, or use the OCR path via the File tool.",
             ),
         }
     }
@@ -284,25 +288,26 @@ pub struct ExpandedAttachments {
 
 /// Build the image blocks for a user turn from its `[Attached image: …]` lines.
 ///
-/// This is the send-time half of the composer's placeholder design: the buffer
+/// This is the ingest half of the composer's placeholder design: the buffer
 /// holds a path-bearing text line (which survives editing, history and session
-/// reload for free), and the bytes are only read here, once, on the way to the
-/// wire.
+/// reload for free), and the bytes are read here, once, as the message is
+/// built.
 ///
-/// `vision` gates the whole operation. Only a *known* `Unsupported` refuses:
-/// most routes report `Unknown` because models.dev has no modality data for
-/// them, and treating unknown as "no" would make the feature unusable on
-/// exactly the self-hosted routes that need it most. Unknown attaches and lets
-/// the provider be the authority.
+/// Only *permanent* failures are decided here — a file that is missing,
+/// oversized, or not an image will still be all of those things next turn, so
+/// baking the verdict into history costs nothing. Whether the *model* can see
+/// images is deliberately not decided here; that is contingent on the active
+/// route and is re-decided per request by
+/// [`strip_images_when_unsupported`].
+///
+/// Each image is bracketed by text tags naming its path. Without them a turn
+/// carrying three screenshots gives the model three anonymous images in a row
+/// and no way to say which is which.
 ///
 /// Never returns an error: a turn with one bad attachment should still be
 /// sent, with the failure stated in-band rather than swallowed.
 #[must_use]
-pub fn expand_attachment_blocks(
-    text: &str,
-    vision: SupportState,
-    model: &str,
-) -> ExpandedAttachments {
+pub fn expand_attachment_blocks(text: &str) -> ExpandedAttachments {
     let references = crate::tui::file_mention::media_attachment_references(text);
     let mut out = ExpandedAttachments::default();
     for reference in references {
@@ -313,22 +318,68 @@ pub fn expand_attachment_blocks(
             // existed.
             continue;
         }
-        if vision == SupportState::Unsupported {
-            out.notices.push(
-                ImageAttachError::ModelCannotSeeImages {
-                    path: reference.path.clone(),
-                    model: model.to_string(),
-                }
-                .to_string(),
-            );
-            continue;
-        }
         match attach_image_from_path(Path::new(&reference.path)) {
-            Ok(image) => out.blocks.push(image.content_block()),
+            Ok(image) => {
+                out.blocks
+                    .push(tag_block(&format!("<image path=\"{}\">", reference.path)));
+                out.blocks.push(image.content_block());
+                out.blocks.push(tag_block("</image>"));
+            }
             Err(error) => out.notices.push(error.to_string()),
         }
     }
     out
+}
+
+fn tag_block(text: &str) -> ContentBlock {
+    ContentBlock::Text {
+        text: text.to_string(),
+        cache_control: None,
+    }
+}
+
+/// Replace every image in a request with text when the route cannot see them.
+///
+/// Capability is a property of the *route*, not of the attachment, and the
+/// route changes freely mid-session. Deciding this when the message is built
+/// would burn the answer into history: attach a screenshot while a text-only
+/// model is selected, switch to a vision model, and the image would be gone
+/// for good. So history always keeps the real image and each outbound request
+/// is normalized against the model it is actually going to.
+///
+/// Only a known `Unsupported` strips. Most routes report `Unknown` because
+/// models.dev has no modality data for them, and treating unknown as "no"
+/// would make the feature dead on arrival for exactly the self-hosted and
+/// custom routes that most need it — so `Unknown` sends the image and lets the
+/// provider be the authority.
+///
+/// The image is replaced in place rather than removed, so the model is told
+/// why it is looking at a gap instead of being left to invent one.
+pub fn strip_images_when_unsupported(
+    messages: &mut [crate::models::Message],
+    vision: SupportState,
+    model: &str,
+) -> usize {
+    if vision != SupportState::Unsupported {
+        return 0;
+    }
+    let mut stripped = 0;
+    for message in messages.iter_mut() {
+        for block in &mut message.content {
+            if matches!(block, ContentBlock::ImageUrl { .. }) {
+                *block = ContentBlock::Text {
+                    text: format!(
+                        "[image content omitted: the active model ({model}) does \
+                         not accept image input. Switch to a vision-capable \
+                         model with /model to see it.]"
+                    ),
+                    cache_control: None,
+                };
+                stripped += 1;
+            }
+        }
+    }
+    stripped
 }
 
 /// Render dropped-attachment notices as a block the model will read.
@@ -493,6 +544,23 @@ mod tests {
         assert!(!is_remote_image_url("file:///tmp/a.png"));
     }
 
+    fn message_with_image(url: &str) -> crate::models::Message {
+        crate::models::Message {
+            role: "user".to_string(),
+            content: vec![
+                ContentBlock::ImageUrl {
+                    image_url: ImageUrlContent {
+                        url: url.to_string(),
+                    },
+                },
+                ContentBlock::Text {
+                    text: "what is this?".to_string(),
+                    cache_control: None,
+                },
+            ],
+        }
+    }
+
     fn write_png(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, PNG_1X1).expect("write fixture");
@@ -505,16 +573,31 @@ mod tests {
         let path = write_png(dir.path(), "shot.png");
         let text = format!("look at this\n[Attached image: {}]", path.display());
 
-        let expanded = expand_attachment_blocks(&text, SupportState::Supported, "gpt-4o");
+        let expanded = expand_attachment_blocks(&text);
 
-        assert_eq!(expanded.blocks.len(), 1, "{expanded:?}");
         assert!(expanded.notices.is_empty(), "{expanded:?}");
+        // Bracketed: open tag naming the path, the image, close tag.
+        assert_eq!(expanded.blocks.len(), 3, "{expanded:?}");
         match &expanded.blocks[0] {
+            ContentBlock::Text { text, .. } => {
+                assert!(text.starts_with("<image path=\""), "{text}");
+                assert!(text.contains("shot.png"), "{text}");
+            }
+            other => panic!("expected an opening tag, got {other:?}"),
+        }
+        match &expanded.blocks[1] {
             ContentBlock::ImageUrl { image_url } => {
                 assert!(image_url.url.starts_with("data:image/png;base64,"));
             }
             other => panic!("expected an image block, got {other:?}"),
         }
+        assert_eq!(
+            expanded.blocks[2],
+            ContentBlock::Text {
+                text: "</image>".to_string(),
+                cache_control: None
+            }
+        );
     }
 
     #[test]
@@ -529,59 +612,134 @@ mod tests {
             second.display()
         );
 
-        let expanded = expand_attachment_blocks(&text, SupportState::Unknown, "local-model");
+        let expanded = expand_attachment_blocks(&text);
 
         let media: Vec<_> = expanded
             .blocks
             .iter()
-            .map(|block| match block {
-                ContentBlock::ImageUrl { image_url } => parse_data_url(&image_url.url)
-                    .expect("data url")
-                    .0
-                    .to_string(),
-                other => panic!("expected image, got {other:?}"),
+            .filter_map(|block| match block {
+                ContentBlock::ImageUrl { image_url } => Some(
+                    parse_data_url(&image_url.url)
+                        .expect("data url")
+                        .0
+                        .to_string(),
+                ),
+                _ => None,
             })
             .collect();
         assert_eq!(media, vec!["image/png", "image/jpeg"]);
+
+        // Each image carries its own path tag, so the model can tell two
+        // screenshots in one turn apart.
+        let tags: Vec<_> = expanded
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text, .. } if text.starts_with("<image path=") => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tags.len(), 2, "{tags:?}");
+        assert!(tags[0].contains("one.png"), "{tags:?}");
+        assert!(tags[1].contains("two.png"), "{tags:?}");
     }
 
     #[test]
-    fn unknown_vision_support_still_attaches() {
-        // Most routes report Unknown. Refusing on Unknown would make the
-        // feature dead on arrival for self-hosted and custom providers.
+    fn ingest_does_not_consult_model_capability() {
+        // Capability is a route property and is re-decided per request. If
+        // ingest started gating on it, attaching under a text-only model would
+        // destroy the image for the rest of the session.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_png(dir.path(), "shot.png");
         let text = format!("[Attached image: {}]", path.display());
 
-        let expanded = expand_attachment_blocks(&text, SupportState::Unknown, "mystery");
+        let expanded = expand_attachment_blocks(&text);
 
-        assert_eq!(expanded.blocks.len(), 1);
+        assert_eq!(expanded.blocks.len(), 3);
         assert!(expanded.notices.is_empty());
     }
 
     #[test]
-    fn a_model_without_vision_gets_an_explicit_notice_and_no_block() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = write_png(dir.path(), "shot.png");
-        let text = format!("[Attached image: {}]", path.display());
+    fn a_blind_route_gets_text_in_place_of_every_image() {
+        let mut messages = vec![
+            message_with_image("data:image/png;base64,QUJD"),
+            crate::models::Message {
+                role: "assistant".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "sure".to_string(),
+                    cache_control: None,
+                }],
+            },
+        ];
 
-        let expanded = expand_attachment_blocks(&text, SupportState::Unsupported, "deepseek-chat");
-
-        assert!(
-            expanded.blocks.is_empty(),
-            "a blind model must not receive an image block"
+        let stripped = strip_images_when_unsupported(
+            &mut messages,
+            SupportState::Unsupported,
+            "deepseek-chat",
         );
-        assert_eq!(expanded.notices.len(), 1);
-        let notice = &expanded.notices[0];
-        assert!(notice.contains("deepseek-chat"), "{notice}");
-        assert!(notice.contains("/model"), "{notice}");
+
+        assert_eq!(stripped, 1);
+        assert!(
+            !messages[0]
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ImageUrl { .. })),
+            "no image may survive to a route that cannot read one"
+        );
+        match &messages[0].content[0] {
+            ContentBlock::Text { text, .. } => {
+                assert!(text.contains("deepseek-chat"), "{text}");
+                assert!(text.contains("/model"), "{text}");
+                assert!(text.contains("omitted"), "{text}");
+            }
+            other => panic!("expected replacement text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_supported_or_unknown_route_keeps_its_images() {
+        // Unknown is the common case: models.dev has no modality data for most
+        // routes. Stripping there would make the feature dead on arrival for
+        // self-hosted and custom providers.
+        for vision in [SupportState::Supported, SupportState::Unknown] {
+            let mut messages = vec![message_with_image("data:image/png;base64,QUJD")];
+
+            let stripped = strip_images_when_unsupported(&mut messages, vision, "some-model");
+
+            assert_eq!(stripped, 0, "{vision:?} must not strip");
+            assert!(
+                messages[0]
+                    .content
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::ImageUrl { .. })),
+                "{vision:?} must keep the image"
+            );
+        }
+    }
+
+    #[test]
+    fn stripping_replaces_every_image_across_every_message() {
+        let mut messages = vec![
+            message_with_image("data:image/png;base64,AAAA"),
+            message_with_image("data:image/jpeg;base64,BBBB"),
+        ];
+
+        let stripped =
+            strip_images_when_unsupported(&mut messages, SupportState::Unsupported, "blind");
+
+        assert_eq!(
+            stripped, 2,
+            "a per-message early return would miss the second"
+        );
     }
 
     #[test]
     fn a_missing_file_becomes_a_notice_not_a_dropped_turn() {
         let text = "[Attached image: /nonexistent/definitely-not-here.png]";
 
-        let expanded = expand_attachment_blocks(text, SupportState::Supported, "gpt-4o");
+        let expanded = expand_attachment_blocks(text);
 
         assert!(expanded.blocks.is_empty());
         assert_eq!(expanded.notices.len(), 1);
@@ -601,9 +759,9 @@ mod tests {
             good.display()
         );
 
-        let expanded = expand_attachment_blocks(&text, SupportState::Supported, "gpt-4o");
+        let expanded = expand_attachment_blocks(&text);
 
-        assert_eq!(expanded.blocks.len(), 1);
+        assert_eq!(expanded.blocks.len(), 3);
         assert_eq!(expanded.notices.len(), 1);
     }
 
@@ -611,7 +769,7 @@ mod tests {
     fn video_attachments_are_left_as_text() {
         let text = "[Attached video: /tmp/clip.mp4]";
 
-        let expanded = expand_attachment_blocks(text, SupportState::Supported, "gpt-4o");
+        let expanded = expand_attachment_blocks(text);
 
         assert!(expanded.blocks.is_empty(), "{expanded:?}");
         assert!(expanded.notices.is_empty(), "{expanded:?}");
@@ -619,8 +777,7 @@ mod tests {
 
     #[test]
     fn text_with_no_attachments_produces_nothing() {
-        let expanded =
-            expand_attachment_blocks("just a normal question", SupportState::Supported, "gpt-4o");
+        let expanded = expand_attachment_blocks("just a normal question");
         assert!(expanded.blocks.is_empty());
         assert!(expanded.notices.is_empty());
     }
