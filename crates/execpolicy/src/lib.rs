@@ -1,4 +1,5 @@
 pub mod bash_arity;
+pub mod shell_expand;
 
 use std::collections::HashSet;
 
@@ -444,14 +445,16 @@ impl ExecPolicyEngine {
         // Deny rules match positional tokens at a word boundary: the command
         // must equal the rule or continue past it, so "rm" blocks "rm -rf /"
         // but NOT "rmdir" or "rmview". See `denied_prefix_matches`.
-        let segments = command_segments(ctx.command);
+        let deny_targets = deny_scan_targets(ctx.command);
         if let Some(rule) = denied_prefixes.iter().find(|rule| {
-            // Match the whole command OR any chained segment. Matching is
-            // flag-aware: a global flag inserted before the subcommand
-            // (`git -c foo=bar push`) must not defeat a `git push` rule.
-            std::iter::once(ctx.command.to_string())
-                .chain(segments.iter().cloned())
-                .any(|hay| denied_prefix_matches(rule, &hay))
+            // Match the whole command OR any command the shell would actually
+            // run for it — chained segments, command-substitution bodies, and
+            // wrapper payloads alike. Matching is also flag-aware: a global
+            // flag inserted before the subcommand (`git -c foo=bar push`) must
+            // not defeat a `git push` rule.
+            deny_targets
+                .iter()
+                .any(|hay| denied_prefix_matches(rule, hay))
         }) {
             return Ok(ExecPolicyDecision {
                 allow: false,
@@ -481,28 +484,29 @@ impl ExecPolicyEngine {
         };
         let is_trusted = trusted_rule.is_some();
 
-        // Segment-aware typed Deny: a Deny ask-rule matching ANY chained
-        // segment must block, mirroring the denied-prefix fix above.
-        if command_is_chained(ctx.command) {
-            for seg in &segments {
-                let mut seg_ctx = ctx.clone();
-                seg_ctx.command = seg.as_str();
-                if let Some(rule) = self.matching_ask_rule(&seg_ctx)
-                    && rule.action == PermissionAction::Deny
-                {
-                    return Ok(ExecPolicyDecision {
-                        allow: false,
-                        requires_approval: false,
-                        matched_rule: Some(rule.label()),
-                        matched_action: Some(PermissionAction::Deny),
-                        requirement: ExecApprovalRequirement::Forbidden {
-                            reason: format!(
-                                "Permission rule '{}' explicitly denies a chained segment of this invocation.",
-                                rule.label()
-                            ),
-                        },
-                    });
-                }
+        // Segment-aware typed Deny: a Deny ask-rule matching ANY command the
+        // shell would run must block, mirroring the denied-prefix scan above.
+        // The invocation as typed is skipped here — it is evaluated on its own
+        // just below, and gets a message that does not call it a segment.
+        let raw_command = ctx.command.trim();
+        for target in deny_targets.iter().filter(|t| t.as_str() != raw_command) {
+            let mut seg_ctx = ctx.clone();
+            seg_ctx.command = target.as_str();
+            if let Some(rule) = self.matching_ask_rule(&seg_ctx)
+                && rule.action == PermissionAction::Deny
+            {
+                return Ok(ExecPolicyDecision {
+                    allow: false,
+                    requires_approval: false,
+                    matched_rule: Some(rule.label()),
+                    matched_action: Some(PermissionAction::Deny),
+                    requirement: ExecApprovalRequirement::Forbidden {
+                        reason: format!(
+                            "Permission rule '{}' explicitly denies a chained segment of this invocation.",
+                            rule.label()
+                        ),
+                    },
+                });
             }
         }
 
@@ -642,6 +646,34 @@ impl ExecPolicyEngine {
             requirement,
         })
     }
+}
+
+/// Every command line a deny rule must be checked against for `command`.
+///
+/// A deny rule has to hold against what the shell *executes*, not against the
+/// string the model typed. Those differ whenever quoting, command substitution,
+/// or a wrapper is involved: `` `rm -rf /` ``, `rm -rf "/"`, `bash -c 'rm -rf /'`
+/// and `sudo rm -rf /` all run `rm -rf /` while sharing almost no text with it.
+/// Chasing that with one string pattern per metacharacter is a losing game — a
+/// new quoting form is a new bypass — so `shell_expand` word-splits the command
+/// the way a shell would and hands back the real command lines.
+///
+/// The naive [`command_segments`] split is unioned in rather than replaced: it
+/// over-splits (it ignores quoting), and for deny matching over-splitting is
+/// the safe direction, so keeping it costs nothing and cannot regress a rule
+/// that used to fire.
+fn deny_scan_targets(command: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut targets = Vec::new();
+    for target in std::iter::once(command.trim().to_string())
+        .chain(command_segments(command))
+        .chain(shell_expand::expanded_commands(command))
+    {
+        if !target.is_empty() && seen.insert(target.clone()) {
+            targets.push(target);
+        }
+    }
+    targets
 }
 
 /// Split a shell command into its top-level segments on the chaining/pipe
@@ -1073,6 +1105,153 @@ mod tests {
                     ExecApprovalRequirement::Forbidden { .. }
                 ),
                 "{command}"
+            );
+        }
+    }
+
+    /// #security: a deny rule must hold against what the shell *runs*, not
+    /// against the text as typed. Each row is a way of spelling `rm -rf /` that
+    /// a shell executes; under `Never` a miss here runs with no prompt at all.
+    ///
+    /// The first two groups (`&` chains, `(`/`{` wrapping) were closed
+    /// previously; the rest were reachable until the command was word-split the
+    /// way a shell would split it.
+    #[test]
+    fn denied_prefix_survives_every_shell_spelling_of_the_command() {
+        let engine = ExecPolicyEngine::new(vec![], vec!["rm -rf /".to_string()]);
+        let cases: &[(&str, &str)] = &[
+            ("plain", "rm -rf /"),
+            ("and chain", "ls && rm -rf /"),
+            ("or chain", "ls || rm -rf /"),
+            ("semicolon chain", "true; rm -rf /"),
+            ("pipe chain", "cat x | rm -rf /"),
+            ("single ampersand", "ls & rm -rf /"),
+            ("newline separator", "ls\nrm -rf /"),
+            ("subshell group", "(rm -rf /)"),
+            ("brace group", "{ rm -rf /; }"),
+            ("dollar-paren substitution", "$(rm -rf /)"),
+            ("backtick substitution", "`rm -rf /`"),
+            ("backticks as an argument", "echo `rm -rf /`"),
+            ("backticks inside double quotes", "echo \"`rm -rf /`\""),
+            ("substitution in an assignment", "x=$(rm -rf /)"),
+            ("substitution in a redirect target", "ls > `rm -rf /`"),
+            ("nested substitution", "echo $(echo `rm -rf /`)"),
+            ("process substitution", "diff <(rm -rf /) b"),
+            ("parameter-expansion default", "echo ${x:-$(rm -rf /)}"),
+            ("double-quoted operand", "rm -rf \"/\""),
+            ("single-quoted operand", "rm -rf '/'"),
+            ("quoted command word", "\"rm\" -rf /"),
+            ("quote split mid-token", "rm -r\"f\" /"),
+            ("backslash-escaped operand", "rm -rf \\/"),
+            ("eval with a quoted payload", "eval 'rm -rf /'"),
+            ("eval with a bare payload", "eval rm -rf /"),
+            ("bash -c payload", "bash -c 'rm -rf /'"),
+            ("sh -c payload", "sh -c \"rm -rf /\""),
+            ("combined short flags", "sh -lc 'rm -rf /'"),
+            ("absolute shell path", "/bin/bash -c 'rm -rf /'"),
+            ("sudo passthrough", "sudo rm -rf /"),
+            ("sudo with a flag value", "sudo -u root rm -rf /"),
+            ("env passthrough", "env rm -rf /"),
+            ("nohup passthrough", "nohup rm -rf /"),
+            ("timeout with its operand", "timeout 5 rm -rf /"),
+            ("xargs passthrough", "xargs rm -rf /"),
+            ("wrapper around a shell payload", "sudo bash -c 'rm -rf /'"),
+            ("here-string feeding a chain", "cat <<< text; rm -rf /"),
+            ("leading env assignment", "FOO=bar rm -rf /"),
+        ];
+
+        let mut evaded = Vec::new();
+        for (label, command) in cases {
+            let decision = engine.check(ctx(command, AskForApproval::Never)).unwrap();
+            let forbidden = !decision.allow
+                && matches!(
+                    decision.requirement,
+                    ExecApprovalRequirement::Forbidden { .. }
+                );
+            if !forbidden {
+                evaded.push(format!("{label}: {command:?} -> {decision:?}"));
+            }
+        }
+        assert!(
+            evaded.is_empty(),
+            "denied prefix bypassed by:\n{}",
+            evaded.join("\n")
+        );
+    }
+
+    /// The other half of the fix: closing the evasion class must not turn every
+    /// command that merely *contains* a shell metacharacter into a denial.
+    /// These all run something harmless and must stay approvable.
+    #[test]
+    fn shell_metacharacters_in_harmless_positions_stay_allowed() {
+        let engine = ExecPolicyEngine::new(
+            vec!["echo".to_string(), "git".to_string()],
+            vec!["rm -rf /".to_string(), "npm publish".to_string()],
+        );
+        let cases: &[(&str, &str)] = &[
+            // A substitution whose body is not a denied command.
+            (
+                "substitution of a benign command",
+                "echo \"built at $(date)\"",
+            ),
+            ("backticks around a benign command", "echo `date`"),
+            // Single quotes are literal — this prints the text, runs nothing.
+            ("denied text inside single quotes", "echo '`rm -rf /`'"),
+            (
+                "denied text as a literal argument",
+                "grep -r 'npm publish' .",
+            ),
+            // Single-quoted, deliberately: backticks inside DOUBLE quotes are
+            // live command substitution, and the deny table above asserts that
+            // form is blocked.
+            (
+                "denied text in a commit message",
+                "git commit -m 'document `rm -rf /` in the README'",
+            ),
+            // Escaped operators do not start a new command.
+            ("escaped semicolon", "find . -name '*.rs' -print \\;"),
+            // Deny rules stay anchored: a denied word as an operand is not a
+            // denied command.
+            ("denied word as an operand", "ls && echo npm publish"),
+            ("word-boundary neighbour", "rmdir /tmp/scratch"),
+        ];
+
+        let mut over_denied = Vec::new();
+        for (label, command) in cases {
+            let decision = engine
+                .check(ctx(command, AskForApproval::UnlessTrusted))
+                .unwrap();
+            if !decision.allow {
+                over_denied.push(format!("{label}: {command:?} -> {decision:?}"));
+            }
+        }
+        assert!(
+            over_denied.is_empty(),
+            "legitimate commands wrongly denied:\n{}",
+            over_denied.join("\n")
+        );
+    }
+
+    #[test]
+    fn typed_deny_rule_also_covers_substitution_and_wrapper_payloads() {
+        // The typed-rule path is a second deny gate; it must see the same set
+        // of commands as the denied-prefix path.
+        let mut rule = ToolAskRule::exec_shell("rm -rf /");
+        rule.action = PermissionAction::Deny;
+        let engine = ExecPolicyEngine::with_rulesets(vec![
+            Ruleset::user(vec![], vec![]).with_ask_rules(vec![rule]),
+        ]);
+        for command in [
+            "`rm -rf /`",
+            "echo $(rm -rf /)",
+            "bash -c 'rm -rf /'",
+            "sudo rm -rf /",
+            "rm -rf \"/\"",
+        ] {
+            let decision = engine.check(ctx(command, AskForApproval::Never)).unwrap();
+            assert!(
+                !decision.allow,
+                "typed deny rule bypassed by {command:?}: {decision:?}"
             );
         }
     }
