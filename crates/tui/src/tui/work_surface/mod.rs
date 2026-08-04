@@ -624,7 +624,7 @@ mod tests {
         for top_height in [2_u16, 3] {
             let mut app = app();
             app.work_surface.placement = WorkSurfacePlacement::Top;
-            app.work_surface.panel = super::RailPanel::Pinned;
+            app.work_surface.panel = super::RailPanel::Agents;
             app.work_surface.top_height = top_height;
             app.composer_border = true;
             let budget = working_budget(&app, 40);
@@ -1170,6 +1170,10 @@ mod tests {
                 let mut app = app();
                 app.work_surface.placement = placement;
                 app.work_surface.panel = panel;
+                // This test is about placement, not about the empty state. An
+                // empty Pinned panel deliberately renders nothing, so give the
+                // work summary content or Top would have no title to find.
+                app.hunt.quarry = Some("ship the release".to_string());
                 let area = ratatui::layout::Rect::new(0, 0, 100, 24);
 
                 // Render coverage, not yield coverage: a 24-row terminal with

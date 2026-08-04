@@ -88,7 +88,7 @@ pub(crate) struct SidebarWorkSummary {
 }
 
 impl SidebarWorkSummary {
-    fn has_useful_content(&self) -> bool {
+    pub(crate) fn has_useful_content(&self) -> bool {
         self.goal_objective
             .as_deref()
             .is_some_and(|s| !s.trim().is_empty())

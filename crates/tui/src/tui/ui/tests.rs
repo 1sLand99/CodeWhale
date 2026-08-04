@@ -20579,7 +20579,9 @@ fn has_idle_whale(rendered: &str) -> bool {
 
 #[test]
 fn rail_strip_yields_its_rows_so_the_idle_whale_survives_at_24_rows() {
-    let panel = crate::tui::work_surface::RailPanel::Pinned;
+    // Agents, not Pinned: an empty Pinned panel now collapses on its own, so it
+    // cannot exercise the row budget. Agents still holds its strip while idle.
+    let panel = crate::tui::work_surface::RailPanel::Agents;
     // Below the threshold the always-on panel strip yields entirely and the
     // ocean keeps its full height. 24 rows is the release-evidence size the
     // rail regression took the whale away from.
@@ -20687,7 +20689,8 @@ fn rail_strip_and_whale_swap_at_the_ambient_width() {
     // water. Unlike the height axis — where the same rule would make the
     // strip vanish as you drag the very axis it is measured in — this fires
     // on a deliberate horizontal resize with a visible payoff.
-    let panel = crate::tui::work_surface::RailPanel::Pinned;
+    // Agents for the same reason as above: Pinned self-collapses while idle.
+    let panel = crate::tui::work_surface::RailPanel::Agents;
     let width_floor = crate::tui::underwater::AMBIENT_MIN_CHAT_WIDTH;
     let rows = 24_u16;
 

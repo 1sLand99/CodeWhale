@@ -51,11 +51,25 @@ pub fn height(app: &mut App, width: u16, terminal_height: u16, rail_budget: u16)
         collapse_strip(app);
         return 0;
     }
-    // Non-Tasks panels always own a strip once selected: the user asked for
-    // the panel, so an empty panel collapses to a hint line, not a vanished
-    // rail. It still yields when the transcript has no rows to give.
+    // Non-Tasks panels own a strip once selected — but only when they have
+    // something to say. The old rule assumed "the user asked for the panel",
+    // which was false for everyone: the settings migration folded the default
+    // `sidebar_focus = "auto"` into `rail_panel = "pinned"`, so any user with a
+    // settings.toml was handed this panel without choosing it. Four rows
+    // spending themselves on the words "No active work" is density without
+    // meaning, and it costs the transcript real estate the operator did want.
+    //
+    // Tasks has always collapsed to zero on an empty projection. This makes
+    // Pinned behave the same way, which is the honest reading of the rule: an
+    // empty panel is not a panel. It reappears the instant there is work.
     if app.work_surface.panel != RailPanel::Tasks {
         if app.work_surface.effective_placement != WorkSurfacePlacement::Top {
+            return 0;
+        }
+        if app.work_surface.panel == RailPanel::Pinned
+            && !crate::tui::sidebar::sidebar_work_summary(app).has_useful_content()
+        {
+            collapse_strip(app);
             return 0;
         }
         // What the panel is actually asking for: its design height, or less
