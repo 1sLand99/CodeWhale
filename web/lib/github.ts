@@ -136,6 +136,19 @@ function firstTimer(association?: string): boolean {
 }
 
 /**
+ * GitHub marks app accounts with a `[bot]` suffix on the login — its own
+ * verdict, not our inference. The wire exists to put the people behind the
+ * repository on the front page; dependency bumps and automated closes spend
+ * slots that belong to them, so bot-authored issues and pulls stay off. A
+ * published release is news no matter who pushed the button, so it keeps its
+ * slot — with a bot publisher's byline dropped instead
+ * (`author === ""` renders no by-line in components/ticker.tsx).
+ */
+function isBot(login: string): boolean {
+  return login.endsWith("[bot]");
+}
+
+/**
  * The repository's recent life: issues, pull requests, and releases.
  *
  * Three cached GitHub calls, no per-item follow-ups. Merge state, the
@@ -168,6 +181,7 @@ export async function fetchFeed(token?: string, limit = 30): Promise<FeedItem[]>
 
   for (const it of issues) {
     if (it.pull_request) continue; // GH issues endpoint returns PRs too
+    if (isBot(it.user.login)) continue; // automated maintenance, not contributor life
     items.push({
       kind: "issue",
       number: it.number,
@@ -187,6 +201,7 @@ export async function fetchFeed(token?: string, limit = 30): Promise<FeedItem[]>
   }
 
   for (const pr of pulls) {
+    if (isBot(pr.user.login)) continue; // automated maintenance, not contributor life
     let state: FeedItem["state"] = pr.state;
     let eventAt = pr.created_at;
     if (pr.merged_at) {
@@ -218,6 +233,9 @@ export async function fetchFeed(token?: string, limit = 30): Promise<FeedItem[]>
   for (const rel of releases) {
     if (rel.draft) continue; // an unpublished draft is not news
     const publishedAt = rel.published_at ?? rel.created_at;
+    // A bot-published release keeps its slot but not its byline.
+    const publisher =
+      rel.author && !isBot(rel.author.login) ? rel.author.login : "";
     items.push({
       kind: "release",
       number: 0,
@@ -225,8 +243,8 @@ export async function fetchFeed(token?: string, limit = 30): Promise<FeedItem[]>
       title: rel.name?.trim() || rel.tag_name,
       url: rel.html_url,
       state: "published",
-      author: rel.author?.login ?? "",
-      authorAvatar: rel.author?.avatar_url ?? "",
+      author: publisher,
+      authorAvatar: publisher ? rel.author?.avatar_url ?? "" : "",
       createdAt: rel.created_at,
       updatedAt: publishedAt,
       eventAt: publishedAt,

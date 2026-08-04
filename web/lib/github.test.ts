@@ -306,6 +306,111 @@ describe("fetchFeed", () => {
   });
 });
 
+describe("fetchFeed — bot authors", () => {
+  // The wire is contributor-forward: GitHub's own `[bot]` login marker keeps
+  // automated maintenance off the strip, while a bot-published release keeps
+  // its slot and drops its byline.
+  const ISSUES = [
+    {
+      number: 101,
+      title: "Automated close sweep",
+      html_url: "https://github.com/Hmbown/CodeWhale/issues/101",
+      state: "closed",
+      user: { login: "github-actions[bot]", avatar_url: "https://avatars/bot1" },
+      created_at: "2026-06-01T09:00:00Z",
+      updated_at: "2026-06-01T11:00:00Z",
+      closed_at: "2026-06-01T10:30:00Z",
+      comments: 0,
+      labels: [],
+      author_association: "NONE",
+    },
+    {
+      number: 102,
+      title: "Real report",
+      html_url: "https://github.com/Hmbown/CodeWhale/issues/102",
+      state: "open",
+      user: { login: "vFONGv", avatar_url: "https://avatars/h1" },
+      created_at: "2026-06-01T08:00:00Z",
+      updated_at: "2026-06-01T08:00:00Z",
+      comments: 0,
+      labels: [],
+      author_association: "FIRST_TIME_CONTRIBUTOR",
+    },
+  ];
+
+  const PULLS = [
+    {
+      number: 103,
+      title: "chore(deps): bump serde from 1.0.219 to 1.0.220",
+      html_url: "https://github.com/Hmbown/CodeWhale/pull/103",
+      state: "closed",
+      user: { login: "dependabot[bot]", avatar_url: "https://avatars/bot2" },
+      created_at: "2026-05-31T09:00:00Z",
+      updated_at: "2026-06-01T07:00:00Z",
+      merged_at: "2026-06-01T07:00:00Z",
+      comments: 0,
+      labels: [],
+      author_association: "CONTRIBUTOR",
+    },
+    {
+      number: 104,
+      title: "fix(tui): keep the whale rail steady",
+      html_url: "https://github.com/Hmbown/CodeWhale/pull/104",
+      state: "closed",
+      user: { login: "bistack", avatar_url: "https://avatars/h2" },
+      created_at: "2026-05-30T09:00:00Z",
+      updated_at: "2026-06-01T06:00:00Z",
+      merged_at: "2026-06-01T06:00:00Z",
+      comments: 1,
+      labels: [],
+      author_association: "CONTRIBUTOR",
+    },
+  ];
+
+  const RELEASES = [
+    {
+      tag_name: "v0.9.4",
+      name: "v0.9.4",
+      html_url: "https://github.com/Hmbown/CodeWhale/releases/tag/v0.9.4",
+      created_at: "2026-05-28T09:00:00Z",
+      published_at: "2026-05-28T12:00:00Z",
+      author: { login: "release-train[bot]", avatar_url: "https://avatars/bot3" },
+    },
+  ];
+
+  beforeEach(() => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.includes("/issues?")) return json(ISSUES);
+        if (url.includes("/pulls?")) return json(PULLS);
+        if (url.includes("/releases?")) return json(RELEASES);
+        return new Response("{}", { status: 404 });
+      }),
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps bot-authored issues and pulls off the contributor wire", async () => {
+    const feed = await fetchFeed(undefined, 10);
+    expect(feed.some((f) => f.author === "github-actions[bot]")).toBe(false);
+    expect(feed.some((f) => f.author === "dependabot[bot]")).toBe(false);
+    expect(feed.some((f) => f.number === 102 && f.kind === "issue")).toBe(true);
+    expect(feed.some((f) => f.number === 104 && f.kind === "pull")).toBe(true);
+  });
+
+  it("keeps a bot-published release in view, minus its byline", async () => {
+    const feed = await fetchFeed(undefined, 10);
+    const release = feed.find((f) => f.kind === "release");
+    expect(release?.tag).toBe("v0.9.4");
+    expect(release?.author).toBe("");
+    expect(release?.authorAvatar).toBe("");
+  });
+});
+
 // ── lastPageFromLink (via re-export test) ──────────────────────────────
 
 describe("lastPageFromLink", () => {
