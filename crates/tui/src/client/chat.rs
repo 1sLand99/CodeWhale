@@ -5225,10 +5225,7 @@ mod alias_thinking_detection_tests {
             "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/",
         ] {
             assert!(
-                super::is_exact_modelstudio_chat_route(
-                    ApiProvider::ModelstudioTokenPlan,
-                    base_url
-                ),
+                super::is_exact_modelstudio_chat_route(ApiProvider::ModelstudioTokenPlan, base_url),
                 "{base_url}"
             );
             let mut body = json!({});

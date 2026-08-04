@@ -716,7 +716,7 @@ fn render_line_window(
                 "\n[TRUNCATED] Line {shown_first} alone exceeds 16KB; showing its head + tail. No `start_line`/`max_lines` window can reveal the middle of one line — use File action=\"search_content\" to find what you need inside it, or Bash (e.g. `cut -c` on that line) to slice by column.\n"
             ));
         } else {
-            let narrower = ((shown_last - shown_first + 1) / 2).max(1);
+            let narrower = (shown_last - shown_first).div_ceil(2).max(1);
             output.push_str(&format!(
                 "\n[TRUNCATED] The selected range exceeded 16KB; showing head + tail of lines {shown_first}-{shown_last}. Re-read narrower windows to see the middle, e.g. start_line={shown_first} max_lines={narrower}, then advance start_line.\n"
             ));

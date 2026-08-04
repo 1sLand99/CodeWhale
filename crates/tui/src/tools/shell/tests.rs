@@ -2435,10 +2435,7 @@ async fn wrongly_typed_stdin_cwd_and_task_id_are_refused_not_dropped() {
     assert!(!marker.exists(), "the command must not have run");
 
     let error = BashTool::new("Bash")
-        .execute(
-            json!({ "command": "pwd", "cwd": 123 }),
-            &context,
-        )
+        .execute(json!({ "command": "pwd", "cwd": 123 }), &context)
         .await
         .expect_err("non-string cwd must be refused, never defaulted");
     assert!(error.to_string().contains("'cwd'"), "{error}");
