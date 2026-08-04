@@ -136,7 +136,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
           rustup target add --toolchain stable x86_64-unknown-linux-musl
-          cargo build --release --locked --target x86_64-unknown-linux-musl -p codewhale-cli -p codewhale-tui
+          cargo build --profile dist --locked --target x86_64-unknown-linux-musl -p codewhale-cli -p codewhale-tui
       - name: Configure Android NDK linker
         if: matrix.target == 'aarch64-linux-android' && runner.os == 'Linux'
         shell: bash
@@ -186,7 +186,7 @@ jobs:
       - name: Build
         if: matrix.target != 'x86_64-unknown-linux-musl'
         shell: bash
-        run: cargo build --release --locked --target ${{ matrix.target }} -p codewhale-cli -p codewhale-tui
+        run: cargo build --profile dist --locked --target ${{ matrix.target }} -p codewhale-cli -p codewhale-tui
       - name: Smoke binaries on matching native runners
         if: >-
           matrix.target != 'aarch64-linux-android' &&
@@ -194,7 +194,7 @@ jobs:
           (startsWith(matrix.target, 'aarch64-') && runner.arch == 'ARM64'))
         shell: bash
         run: |
-          bin_dir="target/${{ matrix.target }}/release"
+          bin_dir="target/${{ matrix.target }}/dist"
           "${bin_dir}/${{ matrix.cli_binary }}" --version
           "${bin_dir}/${{ matrix.shim_binary }}" --version
           "${bin_dir}/${{ matrix.tui_binary }}" --version
@@ -204,7 +204,7 @@ jobs:
           stage_binary() {
             local binary="$1"
             local artifact="$2"
-            local bin_path="target/${{ matrix.target }}/release/${binary}"
+            local bin_path="target/${{ matrix.target }}/dist/${binary}"
             if [[ ! -f "${bin_path}" ]]; then
               echo "Binary not at ${bin_path}; searching target/ for ${binary}:" >&2
               find target -name "${binary}" -type f

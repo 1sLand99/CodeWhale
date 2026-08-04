@@ -67,12 +67,25 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1.11", features = ["v4"] }
 mimalloc = { version = "0.1", default-features = false }
 
+# The everyday `--release` gate (AGENTS.md pre-push build): optimized but
+# fast to produce. Shipping artifacts use `--profile dist` below — fat LTO on
+# a 680k-line crate belongs in release CI, not in every contributor's loop
+# (#5246; community-reported 8–16 minute local release builds, #4991).
 [profile.release]
-lto = true
+lto = "thin"
 strip = true
+codegen-units = 16
+
+# Shipping profile: exactly the optimization the released binaries have
+# always had. Every workflow that uploads a binary to users builds with
+# `--profile dist` and collects from `target/**/dist/`.
 # NOTE: no `panic = "abort"` here — the TUI's panic supervision
 # (catch_unwind/spawn_supervised) needs unwinding so one panicking tool call
 # or task fails gracefully instead of aborting the whole session.
+[profile.dist]
+inherits = "release"
+lto = true
+strip = true
 codegen-units = 1
 
 # Patch unicode-width so that width() uses CJK tables when the cjk feature
