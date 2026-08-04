@@ -41,7 +41,11 @@ pub(super) fn is_tool_search_tool(name: &str) -> bool {
     )
 }
 
-pub(super) const DEFAULT_ACTIVE_NATIVE_TOOLS: &[&str] = &[
+// Crate-visible rather than `pub(super)` so the hook gate's classifier test can
+// assert it still recognises every default-active name. Without that anchor the
+// test pins hardcoded strings and stays green through a tool rename, while the
+// gate silently reclassifies the renamed tool as unknown.
+pub(crate) const DEFAULT_ACTIVE_NATIVE_TOOLS: &[&str] = &[
     // #4625: the model-facing shell tool is `Bash`; legacy `exec_shell*`
     // names are hidden compat aliases and must not be default-active.
     "Bash",

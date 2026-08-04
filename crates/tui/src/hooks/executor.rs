@@ -5588,6 +5588,48 @@ command = "echo project"
     fn tool_category_classifies_the_names_the_registry_actually_registers() {
         use super::tool_category_for;
 
+        // Anchor to the real catalog. Everything below this pins hardcoded
+        // names, which would stay green through a tool rename while the gate
+        // quietly reclassified the renamed tool. `DEFAULT_ACTIVE_NATIVE_TOOLS`
+        // is the list the engine actually puts on the wire, so if a name here
+        // stops being a name the product ships, this fails first.
+        //
+        // Note the fallback is "other", not "safe" — asserting against "safe"
+        // here would never fire. This table is checked in both directions, so
+        // a rename fails on the missing entry and a classifier change fails on
+        // the mismatched category.
+        const EXPECTED: &[(&str, &str)] = &[
+            ("Bash", "shell"),
+            ("Run", "shell"),
+            ("File", "file_write"),
+            // Action-less Git is not inherently a write; the action arms below
+            // cover the read verbs. The rest are conversational surfaces that
+            // touch nothing a hook needs to gate.
+            ("Git", "other"),
+            ("agent", "other"),
+            ("remember", "other"),
+            ("tasks", "other"),
+            ("work_update", "other"),
+        ];
+        for name in crate::core::engine::tool_catalog::DEFAULT_ACTIVE_NATIVE_TOOLS {
+            let expected = EXPECTED.iter().find(|(n, _)| n == name).map(|(_, c)| *c);
+            assert_eq!(
+                Some(tool_category_for(name, None)),
+                expected,
+                "default-active tool {name:?} is not covered by this test's \
+                 table. It was renamed or added without updating the hook \
+                 gate's classifier, so the gate now sees a shipped tool it \
+                 does not recognise."
+            );
+        }
+        for (name, _) in EXPECTED {
+            assert!(
+                crate::core::engine::tool_catalog::DEFAULT_ACTIVE_NATIVE_TOOLS.contains(name),
+                "{name:?} is pinned here but is no longer default-active; drop \
+                 it so this table keeps describing what actually ships."
+            );
+        }
+
         // The shell surface.
         assert_eq!(tool_category_for("Bash", None), "shell");
         // Retained: shell.rs stamps this for the shell_env event.

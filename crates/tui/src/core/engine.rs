@@ -6019,7 +6019,7 @@ mod read_repeat_guard;
 mod streaming;
 mod stuck_guard;
 mod token_estimate_cache;
-mod tool_catalog;
+pub(crate) mod tool_catalog;
 mod tool_execution;
 mod tool_preparation;
 mod tool_setup;
