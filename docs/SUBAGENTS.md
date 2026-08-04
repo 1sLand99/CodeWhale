@@ -25,10 +25,18 @@ continuation handle instead of leaving the parent to infer what happened. For
 work that must survive process restarts, sleep, or remote execution, prefer
 Fleet or a Workflow-backed fleet run.
 
-Sub-agents inherit the parent's tool registry by default, but child agents are
-leaf workers: they do not receive `agent` or nested lifecycle tools. `agent`
-launches detached background work: cancelling the parent turn stops the parent
-wait path, but it does not kill already-opened child runs.
+Sub-agents inherit the parent's tool registry by default, and that includes
+`agent` itself: children are built with `with_full_agent_surface_options`
+(`crates/tui/src/tools/subagent/mod.rs:12164`) so they can recurse. `agent` is
+filtered out of a child's catalog only when the depth budget is spent —
+`can_spawn_child = !runtime.would_exceed_depth()` (`mod.rs:12145`), enforced at
+`mod.rs:12324` and `:12469`. With the default depth of 3
+(`DEFAULT_SPAWN_DEPTH`, `crates/config/src/lib.rs:1671`) a child can spawn
+grandchildren. The removed `agent_open`/`agent_eval`/`agent_close` lifecycle
+tools are gone from every registry, parent and child alike.
+
+`agent` launches detached background work: cancelling the parent turn stops the
+parent wait path, but it does not kill already-opened child runs.
 
 This doc covers the role taxonomy and current compatibility controls. The active
 orchestration surface is `agent`; see the sub-agent guidance in
@@ -116,10 +124,12 @@ To-do: with many workers behind one card there is no truthful place to hang a
 single ledger. A child To-do appears only when the runtime already represents
 that child as its own delegate card.
 
-The durable task/Fleet ledger still owns lifecycle state. Use
-`update_plan` only for conversational strategy that helps a parent or later
-worker understand the approach; it is not a second Work ledger and never
-becomes Work grounding on its own.
+The durable task/Fleet ledger still owns lifecycle state. `update_plan` is no
+longer reachable by a model: `model_visible()` returns `false`
+(`crates/tui/src/tools/plan.rs:408-413`), so it is filtered out of the API tool
+list and never appears to a child. It survives only to replay older transcripts.
+Strategy that used to go there now goes in the response body, and lifecycle
+state goes in `work_update`.
 
 ## Worktree isolation
 
@@ -214,7 +224,7 @@ OUTPUT: VERDICT, EVIDENCE, GAPS, NEXT.
   tour. The role name to use is `scout`.
 - **`planner`** — when the parent has an objective but no executable
   decomposition. Planners write artifacts (`work_update` items for the ledger,
-  `update_plan` notes for strategy) but don't carry them out.
+  strategy in the response body) but don't carry them out.
 - **`reviewer`** — when there's already a change and the parent wants
   it graded. Reviewers don't patch — they describe the fix in the
   finding so the parent can dispatch a builder if the verdict
@@ -326,10 +336,17 @@ provider's resolved fanout, depth, and timeout profile.
 ## Token budget governor
 
 Set `[subagents].token_budget` to give each root `agent` run an aggregate
-token ceiling shared by that child and all of its descendants. A child can also
-start a new scoped budget with the model-facing `agent` tool's
-`token_budget` field (the `max_tokens` alias is accepted for Workflow-shaped
-callers). When no budget is configured or supplied, behavior is unchanged.
+token ceiling shared by that child and all of its descendants. When no budget
+is configured, behavior is unchanged.
+
+`token_budget` is **not** a field on the model-facing `agent` schema, and its
+absence is deliberate — `crates/tui/src/tools/subagent/tests.rs:4260-4263`
+asserts it, on the grounds that "ad-hoc children should inherit the generous
+runtime budget; exposing an optional cap invites accidental micromanagement."
+The parser still accepts the key (plus the `tokenBudget`/`max_tokens` aliases,
+`mod.rs:10620`) so Workflow-shaped callers that construct the call themselves
+can scope a budget, but the model is never told the field exists. Configure it
+through `[subagents].token_budget` instead.
 
 Provider-reported input and output tokens are folded into the worker record as
 each child model call completes. The persisted `usage` object shows the
@@ -524,18 +541,20 @@ budget has no remaining tokens.
 
 ## Output contract
 
-Every sub-agent produces a final result string with five sections,
-in order:
+Every sub-agent ends with five Markdown headings, in this order:
 
 ```
-SUMMARY:    one paragraph; what you did and what happened
-CHANGES:    files modified, with one-line descriptions; "None." if read-only
-EVIDENCE:   path:line-range citations and key findings; one bullet each
-RISKS:      what could go wrong / what the parent should double-check
-BLOCKERS:   what stopped you; "None." if you finished cleanly
+### SUMMARY    one paragraph; what you did and what happened
+### EVIDENCE   path:line-range citations and key findings; one bullet each
+### CHANGES    files modified, with one-line descriptions; "None." if read-only
+### RISKS      what could go wrong / what the parent should double-check
+### BLOCKERS   what stopped you; "None." if you finished cleanly
 ```
 
-The exact format lives in `crates/tui/src/prompts/text.rs` (`SUBAGENT_OUTPUT_FORMAT`).
+They are `### HEADING` lines, not `HEADING:` labels, and `EVIDENCE` comes
+before `CHANGES`. The exact format lives in `crates/tui/src/prompts/text.rs`
+(`SUBAGENT_OUTPUT_FORMAT`, :414-422) and `crates/tui/src/prompts.rs:3222`
+asserts every heading against it.
 The parent reads `EVIDENCE` as a working set for the next turn, so
 scouts and reviewers should be precise here.
 
@@ -550,7 +569,7 @@ sessions, or a verifier that learns "this test is flaky".
 `remember` takes a `scope` of `global` or `workspace`
 (`crates/tui/src/tools/remember.rs:79-108`) and writes through
 `NativeMemoryStore` to `~/.codewhale/memory/global/MEMORY.md` or
-`~/.codewhale/memory/workspaces/<id>/MEMORY.md`. Writes do not go through the
+`~/.codewhale/memory/workspace/<id>/MEMORY.md`. Writes do not go through the
 standard write-approval flow. The legacy single-file `memory.md` path was
 removed in v0.9.4 (remember.rs:165); see `docs/MEMORY.md` for the full layout.
 
