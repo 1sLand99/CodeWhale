@@ -85,11 +85,11 @@
     "shortcuts": {
       "mode": {
         "chord": "Tab",
-        "when": "composer idle"
+        "when": "composer empty"
       },
       "permissionPosture": {
         "chord": "Shift+Tab",
-        "when": "composer idle"
+        "when": "always (suppressed only under a non-Config modal)"
       }
     },
     "sources": [

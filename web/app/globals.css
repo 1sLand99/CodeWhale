@@ -683,21 +683,6 @@ a.body-link {
 }
 a.body-link:hover { background-size: 100% 6px; color: var(--ink); }
 
-/* ---------- mermaid container ----------
-   Mermaid renders its own SVG; we just give it room to breathe and a
-   horizontal scroll on phones so the diagram never overflows the viewport. */
-.mermaid-frame {
-  max-width: 100%;
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-}
-.mermaid-frame svg {
-  display: block;
-  margin: 0 auto;
-  height: auto;
-  max-width: 100%;
-}
-
 /* ---------- mobile-only adjustments ---------- */
 @media (max-width: 640px) {
   /* Big CJK margin glyph already hidden via tailwind's `hidden lg:block`,

@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Seal } from "@/components/seal";
 import { FaqSearch } from "@/components/faq-search";
 import { buildPageMetadata } from "@/lib/page-meta";
+import { FACTS } from "@/lib/facts.generated";
 
 export async function generateMetadata({ params }: { params: Promise<{ locale: string }> }) {
   const { locale } = await params;
@@ -117,11 +118,11 @@ codewhale doctor         # full connectivity check`}
     q: "Which providers does Codewhale support?",
     a: (
       <>
-        <p className="mb-2">Codewhale ships with these built-in providers:</p>
+        <p className="mb-2">Codewhale ships with {FACTS.providers.length} built-in provider routes:</p>
         <ul className="list-disc pl-5 space-y-1 text-sm text-ink-soft mb-3">
           <li><strong>DeepSeek</strong> — bundled default with a native API route, reasoning streaming, cache metrics, and thinking effort control.</li>
           <li><strong>OpenRouter</strong> — unified API for DeepSeek models and other open-model routes.</li>
-          <li><strong>OpenAI-compatible</strong>, <strong>NVIDIA NIM</strong>, <strong>AtlasCloud</strong>, <strong>Wanjie Ark</strong>, <strong>Volcengine Ark</strong>, <strong>Xiaomi MiMo</strong>, <strong>Novita</strong>, <strong>Fireworks</strong>, <strong>SiliconFlow</strong>, <strong>SiliconFlow CN</strong>, <strong>Arcee AI</strong>, <strong>Moonshot/Kimi</strong>, <strong>Hugging Face</strong>, <strong>DeepInfra</strong>, <strong>Together AI</strong>, <strong>Z.ai</strong>, <strong>StepFun</strong>, <strong>MiniMax</strong>, <strong>OpenAI Codex</strong>, <strong>Anthropic</strong>, <strong>SGLang</strong>, <strong>vLLM</strong>, <strong>Ollama</strong></li>
+          <li><strong>{FACTS.providers.length - 2} more routes</strong> — including OpenAI-compatible, Anthropic, OpenAI Codex, xAI, Moonshot/Kimi, Z.ai, MiniMax, StepFun, Volcengine Ark, Baidu Qianfan, Model Studio, NVIDIA NIM, Fireworks AI, Together AI, DeepInfra, SiliconFlow, Novita AI, Hugging Face, Arcee AI, AtlasCloud, and the keyless local endpoints SGLang, vLLM, and Ollama. <Link href="/models" className="body-link">The full list is generated from the provider registry</Link>.</li>
         </ul>
         <p>
           Set the corresponding env var (e.g. <code className="inline">OPENROUTER_API_KEY</code>) and your provider in <code className="inline">~/.codewhale/config.toml</code>.
@@ -473,11 +474,11 @@ codewhale doctor         # 完整连接检查`}
     q: "Codewhale 支持哪些提供商？",
     a: (
       <>
-        <p className="mb-2">Codewhale 内建以下提供商：</p>
+        <p className="mb-2">Codewhale 内建 {FACTS.providers.length} 条提供商路由：</p>
         <ul className="list-disc pl-5 space-y-1 text-sm text-ink-soft mb-3">
           <li><strong>DeepSeek</strong> — 内置默认原生 API 路由，支持推理流、缓存指标和思考力度控制。</li>
           <li><strong>OpenRouter</strong> — 统一 API，可访问 DeepSeek 和其他开放模型路由。</li>
-          <li><strong>OpenAI 兼容</strong>、<strong>NVIDIA NIM</strong>、<strong>AtlasCloud</strong>、<strong>Wanjie Ark</strong>、<strong>Volcengine Ark</strong>、<strong>Xiaomi MiMo</strong>、<strong>Novita</strong>、<strong>Fireworks</strong>、<strong>SiliconFlow</strong>、<strong>SiliconFlow CN</strong>、<strong>Arcee AI</strong>、<strong>Moonshot/Kimi</strong>、<strong>Hugging Face</strong>、<strong>DeepInfra</strong>、<strong>Together AI</strong>、<strong>Z.ai</strong>、<strong>StepFun</strong>、<strong>MiniMax</strong>、<strong>OpenAI Codex</strong>、<strong>Anthropic</strong>、<strong>SGLang</strong>、<strong>vLLM</strong>、<strong>Ollama</strong></li>
+          <li><strong>另外 {FACTS.providers.length - 2} 条路由</strong>——包括 OpenAI 兼容、Anthropic、OpenAI Codex、xAI、Moonshot/Kimi、Z.ai、MiniMax、StepFun、Volcengine Ark、百度千帆、Model Studio、NVIDIA NIM、Fireworks、Together AI、DeepInfra、SiliconFlow、Novita、Hugging Face、Arcee AI、AtlasCloud，以及无需密钥的本地端点 SGLang、vLLM 和 Ollama。<Link href="/models" className="body-link">完整列表由提供商注册表生成</Link>。</li>
         </ul>
         <p>
           设置对应的环境变量（如 <code className="inline">OPENROUTER_API_KEY</code>）并在 <code className="inline">~/.codewhale/config.toml</code> 中配置你的提供商。

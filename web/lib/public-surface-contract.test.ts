@@ -359,18 +359,28 @@ done
 
     expect(matrix.control.modes).toEqual(["Plan", "Act", "Operate"]);
     expect(matrix.control.permissionPostures).toEqual(["Ask", "Auto-Review", "Full Access"]);
+    // Tab is gated on the composer being EMPTY, not idle
+    // (crates/tui/src/tui/ui.rs:6978 `if !app.input.is_empty() { continue; }`
+    // immediately before `app.cycle_mode()`); Shift+Tab has no composer
+    // precondition at all (ui.rs:6363-6367 gates only on the modal stack).
     expect(matrix.control.shortcuts).toEqual({
-      mode: { chord: "Tab", when: "composer idle" },
-      permissionPosture: { chord: "Shift+Tab", when: "composer idle" },
+      mode: { chord: "Tab", when: "composer empty" },
+      permissionPosture: {
+        chord: "Shift+Tab",
+        when: "always (suppressed only under a non-Config modal)",
+      },
     });
     for (const label of [...matrix.control.modes, ...matrix.control.permissionPostures]) {
       expect(modes).toContain(label);
       expect(homepage).toContain(label);
     }
-    expect(modes).toContain("when the composer is");
-    expect(keys).toContain("When the composer is idle");
+    expect(modes).toContain("when the composer is empty");
+    expect(keys).toContain("When the composer is empty, cycle TUI mode");
     expect(keys).toContain("`Shift+Tab`");
-    expect(readme).toContain("When the composer is idle");
+    // The README must not re-teach the idle precondition in any language.
+    expect(keys).not.toContain("When the composer is idle");
+    expect(readme).toContain("when the composer is empty");
+    expect(readme).not.toContain("composer is idle");
     expect(`${readme}\n${modes}\n${homepage}\n${docsMap}`).not.toContain("approval posture");
     expect(matrixText).not.toContain('"approvalPostures"');
 

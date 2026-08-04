@@ -36,8 +36,8 @@ export const DOC_TOPICS: DocTopic[] = [
     slug: "install",
     label: { en: "Install", zh: "安装" },
     description: {
-      en: "npm, Cargo, Homebrew, Docker, Nix, Scoop, CNB mirror, and platform-specific notes.",
-      zh: "npm、Cargo、Homebrew、Docker、Nix、Scoop、CNB 镜像及平台说明。",
+      en: "npm, Cargo, Homebrew, Docker, prebuilt binaries, CNB mirror, and where config lives.",
+      zh: "npm、Cargo、Homebrew、Docker、预编译二进制、CNB 镜像，以及配置文件位置。",
     },
     repoSource: "docs/INSTALL.md",
     hasPage: true,

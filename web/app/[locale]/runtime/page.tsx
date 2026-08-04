@@ -82,9 +82,9 @@ export default async function RuntimePage({ params }: { params: Promise<{ locale
         </div>
         <h1 className="font-display tracking-crisp mb-6">
           {isZh ? (
-            <>Runtime & <span className="font-cjk text-indigo text-5xl ml-2">集成 Integrations</span></>
+            <>运行时与集成<span className="font-cjk text-indigo text-5xl ml-2">Runtime &amp; Integrations</span></>
           ) : (
-            <>Runtime & <span className="font-cjk text-indigo text-5xl ml-2">集成 Integrations</span></>
+            <>Runtime &amp; Integrations<span className="font-cjk text-indigo text-5xl ml-2">运行时与集成</span></>
           )}
         </h1>
 

@@ -97,9 +97,11 @@ one registry.
 web/
 ├── app/
 │   ├── globals.css             ocean portal, docs layout, type, and shared surfaces
-│   ├── [locale]/               en / zh — every page is bilingual
+│   ├── [locale]/               10 routed locales; zh has native page bodies,
+│   │                           the rest fall back to the English body
 │   │   ├── layout.tsx          root + locale layout: html shell, fonts, nav, footer
-│   │   ├── page.tsx            home — hero, dispatch, stats, how-it-works, join
+│   │   ├── page.tsx            home — hero, ticker, proof, decides, workflow,
+│   │   │                       start, boundaries, surfaces, install band, community
 │   │   ├── install/page.tsx    per-OS install with auto-detection
 │   │   ├── docs/page.tsx       modes / tools / approval / config / mcp / providers
 │   │   ├── faq/page.tsx        frequently asked questions
@@ -119,9 +121,8 @@ web/
 │   ├── footer.tsx              dense 5-column footer
 │   ├── whale.tsx               shared Codewhale mark
 │   ├── ticker.tsx              animated live activity strip
-│   ├── stat-grid.tsx           tabular repo stats row
 │   ├── feed-card.tsx           one issue/PR card
-│   ├── locale-switcher.tsx     EN ↔ ZH toggle
+│   ├── locale-switcher.tsx     N-locale dropdown with partial badges
 │   └── install-*.tsx           install page blocks (binary, code block, tiles)
 ├── lib/
 │   ├── types.ts                shared types

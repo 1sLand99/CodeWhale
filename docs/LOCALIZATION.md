@@ -38,23 +38,23 @@ only at exact raw key parity with it, enforced by
 `crates/tui/src/localization.rs`. See `crates/tui/locales/AGENTS.md` for the
 authoring contract.
 
-| Locale | File | Keys vs `en.json` (1248) | Status | Notes |
+| Locale | File | Keys vs `en.json` (1299) | Status | Notes |
 |--------|------|--------------------------|--------|-------|
-| English | `en.json` | 1248/1248 | **shipped** | Reference pack. |
-| Japanese | `ja.json` | 1248/1248 | **shipped** | Complete. |
-| Simplified Chinese | `zh-Hans.json` | 1248/1248 | **shipped** | Complete. |
-| Traditional Chinese | `zh-Hant.json` | 499/1248 | **partial** | Setup core only; missing keys fall back to English at runtime. Deliberate scope per #4057. |
-| Brazilian Portuguese | `pt-BR.json` | 1248/1248 | **shipped** | Complete. |
-| Latin American Spanish | `es-419.json` | 1248/1248 | **shipped** | Complete. Note the website tracks `es` — the shipped TUI pack is Latin American Spanish, not `es-ES`. |
-| Vietnamese | `vi.json` | 1248/1248 | **shipped** | Complete. |
-| Korean | `ko.json` | 1248/1248 | **shipped** | Complete. |
-| Catalan | `ca.json` | 1248/1248 | **shipped** | Complete (#4749/#4788). Awaiting native-speaker review. |
-| German | `de.json` | 1248/1248 | **shipped** | Complete (#4788). Awaiting native-speaker review. |
-| French | `fr.json` | 1248/1248 | **shipped** | Complete (#4788). Awaiting native-speaker review. |
-| Indonesian | `id.json` | 1248/1248 | **shipped** | Complete (#4789). Awaiting native-speaker review. |
-| Hindi | `hi.json` | 1248/1248 | **shipped** | Complete (#4790). Devanagari shaping spike: `docs/evidence/v092-devanagari-terminal-shaping.md` — code-level guarantees only; terminal visual QA and native review still open. |
-| Russian | `ru.json` | 1248/1248 | **shipped** | Complete (#3092). Cyrillic script fixtures guard against mixed-language copy. Awaiting native-speaker review. |
-| Ukrainian | `uk.json` | 1248/1248 | **shipped** | Complete (#4791). Cyrillic script fixtures keep it distinct from Russian (no ы/э/ъ; і/ї/є/ґ present). Awaiting native-speaker review. |
+| English | `en.json` | 1299/1299 | **shipped** | Reference pack. |
+| Japanese | `ja.json` | 1299/1299 | **shipped** | Complete. |
+| Simplified Chinese | `zh-Hans.json` | 1299/1299 | **shipped** | Complete. |
+| Traditional Chinese | `zh-Hant.json` | 1299/1299 | **partial** | Key-complete — nothing falls back at runtime. Still declared partial in `PARTIAL_PACKS` per #4057; promoting it out is an open decision. |
+| Brazilian Portuguese | `pt-BR.json` | 1299/1299 | **shipped** | Complete. |
+| Latin American Spanish | `es-419.json` | 1299/1299 | **shipped** | Complete. Note the website tracks `es` — the shipped TUI pack is Latin American Spanish, not `es-ES`. |
+| Vietnamese | `vi.json` | 1299/1299 | **shipped** | Complete. |
+| Korean | `ko.json` | 1299/1299 | **shipped** | Complete. |
+| Catalan | `ca.json` | 1299/1299 | **shipped** | Complete (#4749/#4788). Awaiting native-speaker review. |
+| German | `de.json` | 1299/1299 | **shipped** | Complete (#4788). Awaiting native-speaker review. |
+| French | `fr.json` | 1299/1299 | **shipped** | Complete (#4788). Awaiting native-speaker review. |
+| Indonesian | `id.json` | 1299/1299 | **shipped** | Complete (#4789). Awaiting native-speaker review. |
+| Hindi | `hi.json` | 1299/1299 | **shipped** | Complete (#4790). Devanagari shaping spike: `docs/evidence/v092-devanagari-terminal-shaping.md` — code-level guarantees only; terminal visual QA and native review still open. |
+| Russian | `ru.json` | 1299/1299 | **shipped** | Complete (#3092). Cyrillic script fixtures guard against mixed-language copy. Awaiting native-speaker review. |
+| Ukrainian | `uk.json` | 1299/1299 | **shipped** | Complete (#4791). Cyrillic script fixtures keep it distinct from Russian (no ы/э/ъ; і/ї/є/ґ present). Awaiting native-speaker review. |
 
 ## Website locales
 
@@ -76,7 +76,7 @@ locale, Chinese included.** `web/app/[locale]/page.tsx`,
 `getChrome(locale)`. `web/lib/i18n/dictionaries/zh/` now exists (it used to
 be inline TSX), and nav/footer link sets are generated once in
 `web/lib/i18n/links.ts` so every locale gets the identical route shape.
-Reference shape: **`ChromeDict` 51 keys, `HomeDict` 60 keys.** Bilingual
+Reference shape: **`ChromeDict` 52 keys, `HomeDict` 62 keys.** Bilingual
 secondary nav labels, the masthead seal and issue line, the ticker live
 label, and the per-locale `Intl` date tag are dictionary values — no locale
 renders another language's script by accident.
@@ -232,7 +232,7 @@ in the same wave.
   review-capacity constraint, which neither clears.
 
 **Cost/demand evidence behind the decision:** a complete TUI pack is
-1,153 keys (~8–12k words) plus an ongoing obligation to retranslate every
+1,299 keys (~8–12k words) plus an ongoing obligation to retranslate every
 changed English string in lockstep — the parity gate makes silent drift a
 CI failure, so an unmaintained pack is worse than none. No community
 member has requested gl or eu (no issues, no PRs, no translations offered),

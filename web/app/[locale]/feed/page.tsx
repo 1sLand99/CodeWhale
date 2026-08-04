@@ -111,7 +111,7 @@ export default async function FeedPage({ params }: { params: Promise<{ locale: s
           <section className="mx-auto max-w-[1400px] px-6 pt-12 pb-8">
             <div className="flex items-baseline gap-4 mb-3">
               <Seal char="动" />
-              <div className="eyebrow">Section 03 · 动态</div>
+              <div className="eyebrow">Section 03 · Activity</div>
             </div>
             <h1 className="font-display tracking-crisp">
               Activity <span className="font-cjk text-indigo text-5xl ml-2">动态</span>

@@ -27,6 +27,7 @@ export default async function SubagentsPage({ params }: { params: Promise<{ loca
         { name: "reviewer", detail: "只读审查并按严重度打分——“审一遍这个 PR 的 bug”。" },
         { name: "builder", detail: "以最小改动落地一个明确的变更；可写、可用 shell。" },
         { name: "verifier", detail: "运行测试和校验并汇报结果，不写代码。" },
+        { name: "consultant", detail: "只读的高推理力度顾问，用于判断类问题和设计评审。" },
         { name: "custom", detail: "手工指定狭窄的工具白名单，用于锁定的派发。" },
       ]
     : [
@@ -36,6 +37,7 @@ export default async function SubagentsPage({ params }: { params: Promise<{ loca
         { name: "reviewer", detail: "Read-and-grade with severity scores — “audit this PR for bugs.”" },
         { name: "builder", detail: "Land a specific change with minimal edits; writes and shell allowed." },
         { name: "verifier", detail: "Run tests and validation gates and report the outcome; no code edits." },
+        { name: "consultant", detail: "Read-only high-reasoning counsel for judgement calls and design critique." },
         { name: "custom", detail: "An explicit narrow tool allowlist for locked-down dispatch." },
       ];
 
