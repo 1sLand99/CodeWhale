@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::commands;
-use crate::config::{Config, StatusItem, normalize_model_name_for_provider, validate_route};
+use crate::config::{
+    Config, StatusItem, normalize_custom_model_id, normalize_model_name_for_provider,
+    validate_route,
+};
 use crate::localization::{normalize_configured_locale, resolve_locale};
 use crate::settings::Settings;
 use crate::tui::app::{App, AppMode, ComposerDensity, ReasoningEffort, TranscriptSpacing};
@@ -812,12 +815,12 @@ fn validate_document(doc: &ConfigUiDocument, app: &App, config: &Config) -> Resu
             doc.runtime.provider
         );
     }
-    validate_and_normalize_model(app.api_provider, &doc.runtime.model)?;
+    validate_and_normalize_model(config, app.api_provider, &doc.runtime.model)?;
     for (provider_id, model) in &doc.settings.provider_models {
         let identity = config
             .resolve_provider_identity(provider_id)
             .map_err(anyhow::Error::msg)?;
-        validate_and_normalize_model(identity.provider, model)
+        validate_and_normalize_model(config, identity.provider, model)
             .map_err(|err| anyhow::anyhow!("invalid provider_models.{provider_id} value: {err}"))?;
     }
     if doc.config.mcp_config_path.trim().is_empty() {
@@ -845,15 +848,57 @@ fn theme_setting_for_document(doc: &ConfigUiDocument) -> Result<String> {
         .map_err(anyhow::Error::msg)
 }
 
+/// Validate and normalize a model against the provider's *effective* route.
+///
+/// A custom DeepSeek base URL owns its own model namespace, so non-DeepSeek ids
+/// must be accepted here the same way request-time
+/// [`wire_model_for_provider_route`] preserves them. The previous provider-only
+/// gate rejected those saves even though the live session could use them.
 fn validate_and_normalize_model(
+    config: &Config,
     provider: crate::config::ApiProvider,
     model: &str,
 ) -> Result<String> {
     let model = model.trim();
-    validate_route(provider, model).map_err(anyhow::Error::msg)?;
+    if model.is_empty() {
+        bail!(
+            "invalid model '{model}' for provider '{}'",
+            provider.as_str()
+        );
+    }
     if model.eq_ignore_ascii_case("auto") {
+        // Still run the provider gate so empty/unknown providers cannot sneak
+        // an `auto` through without the same checks as `/model auto`.
+        validate_route(provider, model).map_err(anyhow::Error::msg)?;
         return Ok("auto".to_string());
     }
+
+    // OpenCode Go is protocol-bound (Chat Completions only) even when its base
+    // URL is overridden — never open the custom-endpoint passthrough for it.
+    if provider == crate::config::ApiProvider::OpencodeGo {
+        validate_route(provider, model).map_err(anyhow::Error::msg)?;
+        return normalize_model_name_for_provider(provider, model).ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid model '{model}' for provider '{}'",
+                provider.as_str()
+            )
+        });
+    }
+
+    // Custom / self-hosted endpoints own their model id namespace. Match the
+    // request path (`wire_model_for_provider_route`) so saving `/config` on a
+    // custom deepseek gateway does not reject a non-DeepSeek wire id the
+    // session is already running.
+    if config.provider_uses_custom_endpoint(provider) {
+        return normalize_custom_model_id(model).ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid model '{model}' for provider '{}'",
+                provider.as_str()
+            )
+        });
+    }
+
+    validate_route(provider, model).map_err(anyhow::Error::msg)?;
     normalize_model_name_for_provider(provider, model).ok_or_else(|| {
         anyhow::anyhow!(
             "invalid model '{model}' for provider '{}'",
@@ -1971,6 +2016,57 @@ zai = "GLM-5.2"
         );
         assert_eq!(app.api_provider, ApiProvider::Zai);
         assert_eq!(app.model, "GLM-5.2");
+    }
+
+    #[test]
+    fn custom_deepseek_endpoint_accepts_non_deepseek_model_on_save() {
+        // Provider-only validation used to reject any non-DeepSeek id even when
+        // the active deepseek route pointed at a custom OpenAI-compatible
+        // gateway that owns its own model namespace.
+        let mut config = Config {
+            provider: Some("deepseek".to_string()),
+            base_url: Some("https://tenant-gateway.example.test/v1".to_string()),
+            default_text_model: Some("anthropic/private-model".to_string()),
+            ..Config::default()
+        };
+        let mut app = app();
+        app.set_provider_identity(ApiProvider::Deepseek, "deepseek");
+        app.set_model_selection("anthropic/private-model".to_string());
+        // Mirror a live custom-route session: the endpoint owns model ids.
+        app.active_route_base_url = "https://tenant-gateway.example.test/v1".to_string();
+        app.model_ids_passthrough = true;
+        let mut doc = build_document(&app, &config).expect("document");
+        doc.settings.provider_models.clear();
+        doc.runtime.model = "org/custom-router-id".to_string();
+
+        let outcome = apply_document(doc, &mut app, &mut config, false)
+            .expect("custom deepseek endpoint must accept non-DeepSeek wire ids");
+
+        assert!(outcome.changed);
+        assert_eq!(app.model, "org/custom-router-id");
+    }
+
+    #[test]
+    fn official_deepseek_endpoint_still_rejects_non_deepseek_model_on_save() {
+        let mut config = Config {
+            provider: Some("deepseek".to_string()),
+            ..Config::default()
+        };
+        let mut app = app();
+        app.set_provider_identity(ApiProvider::Deepseek, "deepseek");
+        app.set_model_selection("deepseek-v4-pro".to_string());
+        let mut doc = build_document(&app, &config).expect("document");
+        doc.settings.provider_models.clear();
+        doc.runtime.model = "org/custom-router-id".to_string();
+
+        let error = apply_document(doc, &mut app, &mut config, false)
+            .expect_err("official deepseek endpoint must reject non-DeepSeek ids");
+
+        assert!(
+            error.to_string().contains("org/custom-router-id"),
+            "error should name the rejected model, got: {error}"
+        );
+        assert_eq!(app.model, "deepseek-v4-pro");
     }
 
     #[test]

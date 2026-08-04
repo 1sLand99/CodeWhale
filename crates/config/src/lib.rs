@@ -3054,9 +3054,17 @@ impl ConfigToml {
         let root_deepseek_api_key = (provider == ProviderKind::Deepseek)
             .then(|| self.api_key.clone())
             .flatten();
-        let root_deepseek_base_url = (provider == ProviderKind::Deepseek)
-            .then(|| self.base_url.clone())
-            .flatten();
+        // Root `base_url` is the legacy DeepSeek field, but Xiaomi MiMo and
+        // OpenAI Codex also honour it when the per-provider table has no
+        // endpoint of its own. Silently ignoring a configured root URL while
+        // also dropping the root model made both routes unusable from a
+        // minimal top-level config.
+        let root_base_url = matches!(
+            provider,
+            ProviderKind::Deepseek | ProviderKind::XiaomiMimo | ProviderKind::OpenaiCodex
+        )
+        .then(|| self.base_url.clone())
+        .flatten();
         let auth_mode = cli
             .auth_mode
             .clone()
@@ -3066,7 +3074,7 @@ impl ConfigToml {
         let from_file = provider_cfg.api_key.clone().or(root_deepseek_api_key);
         let cli_base_url = cli.base_url.clone();
         let env_base_url = env.base_url_for(provider);
-        let file_base_url = provider_cfg.base_url.clone().or(root_deepseek_base_url);
+        let file_base_url = provider_cfg.base_url.clone().or(root_base_url);
         let base_url_from_file =
             cli_base_url.is_none() && env_base_url.is_none() && file_base_url.is_some();
         let configured_base_url = cli_base_url.or(env_base_url).or(file_base_url);
@@ -3789,9 +3797,13 @@ pub fn known_foreign_model_owner(
 
 fn normalize_model_for_provider(provider: ProviderKind, model: &str) -> String {
     if matches!(provider, ProviderKind::OpencodeGo) {
+        // Canonicalize known Chat Completions ids. Unknown / Messages-only ids
+        // must never be rewritten to the provider default — substituting a
+        // different model is worse than letting the route layer reject the
+        // request by the name the user actually configured.
         return opencode_go_chat_model_id(model)
-            .unwrap_or(DEFAULT_OPENCODE_GO_MODEL)
-            .to_string();
+            .map(str::to_string)
+            .unwrap_or_else(|| model.trim().to_string());
     }
     if matches!(provider, ProviderKind::XiaomiMimo)
         && let Some(canonical) = canonical_xiaomi_mimo_model_id(model)

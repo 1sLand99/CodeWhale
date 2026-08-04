@@ -6243,10 +6243,13 @@ model = "opencode-go/glm-5.2"
             "{messages_only} must not pass the runtime request gate"
         );
         assert!(validate_route(ApiProvider::OpencodeGo, messages_only).is_err());
+        // Never substitute a different model. Keep the caller's spelling so
+        // validate_route / the route resolver can reject by name. A base URL
+        // override still cannot promote a Messages-only id onto Chat Completions.
         assert_eq!(
             wire_model_for_provider(ApiProvider::OpencodeGo, messages_only),
-            DEFAULT_OPENCODE_GO_MODEL,
-            "the infallible wire helper must fail closed to the Chat default"
+            messages_only,
+            "must not silently rewrite {messages_only} to the Chat default"
         );
         assert_eq!(
             wire_model_for_provider_route(
@@ -6254,8 +6257,8 @@ model = "opencode-go/glm-5.2"
                 "https://go-gateway.example/v1",
                 messages_only,
             ),
-            DEFAULT_OPENCODE_GO_MODEL,
-            "a base URL override must not bypass the Chat-only wire cutline"
+            messages_only,
+            "a base URL override must not rewrite or re-admit {messages_only}"
         );
     }
 
@@ -6956,7 +6959,29 @@ fn xiaomi_mimo_provider_uses_documented_defaults() -> Result<()> {
 }
 
 #[test]
-fn xiaomi_mimo_provider_ignores_non_mimo_root_default_model() -> Result<()> {
+fn xiaomi_mimo_provider_honours_root_default_model_and_base_url() -> Result<()> {
+    let config = Config {
+        provider: Some("xiaomi-mimo".to_string()),
+        base_url: Some("https://token-plan-cn.xiaomimimo.com/v1".to_string()),
+        default_text_model: Some("mimo-v2.5".to_string()),
+        ..Default::default()
+    };
+
+    config.validate()?;
+    assert_eq!(config.api_provider(), ApiProvider::XiaomiMimo);
+    assert_eq!(config.default_model(), "mimo-v2.5");
+    assert_eq!(
+        config.deepseek_base_url(),
+        "https://token-plan-cn.xiaomimimo.com/v1"
+    );
+    Ok(())
+}
+
+#[test]
+fn xiaomi_mimo_provider_drops_stale_deepseek_root_default_model() -> Result<()> {
+    // A leftover DeepSeek id after a provider switch must not be forwarded to
+    // Xiaomi. Fall back to the MiMo seed default instead of substituting a
+    // different *configured* model.
     let config = Config {
         provider: Some("xiaomi-mimo".to_string()),
         default_text_model: Some(DEFAULT_OPENROUTER_MODEL.to_string()),
@@ -6966,6 +6991,25 @@ fn xiaomi_mimo_provider_ignores_non_mimo_root_default_model() -> Result<()> {
     config.validate()?;
     assert_eq!(config.api_provider(), ApiProvider::XiaomiMimo);
     assert_eq!(config.default_model(), DEFAULT_XIAOMI_MIMO_MODEL);
+    Ok(())
+}
+
+#[test]
+fn openai_codex_provider_honours_root_default_model_and_base_url() -> Result<()> {
+    let config = Config {
+        provider: Some("openai-codex".to_string()),
+        base_url: Some("https://chatgpt.example.test/backend-api".to_string()),
+        default_text_model: Some("gpt-5.5".to_string()),
+        ..Default::default()
+    };
+
+    config.validate()?;
+    assert_eq!(config.api_provider(), ApiProvider::OpenaiCodex);
+    assert_eq!(config.default_model(), "gpt-5.5");
+    assert_eq!(
+        config.deepseek_base_url(),
+        "https://chatgpt.example.test/backend-api"
+    );
     Ok(())
 }
 

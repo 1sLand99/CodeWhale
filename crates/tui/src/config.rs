@@ -1309,9 +1309,13 @@ pub fn wire_model_for_provider(provider: ApiProvider, model: &str) -> String {
         return trimmed.to_string();
     }
     if provider == ApiProvider::OpencodeGo {
+        // Canonicalize known Chat Completions ids only. Never substitute a
+        // different model for an unknown/Messages-only id — that silently
+        // changes the request. Keep the caller's spelling so validate_route /
+        // the route resolver can reject it by name.
         return opencode_go_chat_model_id(trimmed)
-            .unwrap_or(DEFAULT_OPENCODE_GO_MODEL)
-            .to_string();
+            .map(str::to_string)
+            .unwrap_or_else(|| trimmed.to_string());
     }
     if matches!(provider, ApiProvider::XiaomiMimo) {
         return normalize_model_name_for_provider(provider, trimmed)
@@ -4111,7 +4115,13 @@ impl Config {
             return;
         }
         let provider = self.api_provider();
-        if matches!(provider, ApiProvider::Deepseek | ApiProvider::DeepseekCN) {
+        if matches!(
+            provider,
+            ApiProvider::Deepseek
+                | ApiProvider::DeepseekCN
+                | ApiProvider::XiaomiMimo
+                | ApiProvider::OpenaiCodex
+        ) {
             return;
         }
         if matches!(provider, ApiProvider::NvidiaNim)
@@ -5082,23 +5092,6 @@ impl Config {
                 return model.to_string();
             }
         }
-        // The Codex Responses backend only serves its own model family, and a
-        // global `default_text_model` is constrained to DeepSeek IDs or "auto"
-        // by validation — so it can never name a Codex-compatible model. Fall
-        // back to the Codex default here instead of letting a DeepSeek default
-        // leak through and be rejected by the backend. An explicit
-        // `[providers.openai_codex] model` is honored by the block above.
-        if provider == ApiProvider::OpenaiCodex {
-            // Prefer the live Codex roster head over the static seed so a
-            // provider switch lands on the current flagship model instead of
-            // a stale constant (#5034). Missing/stale/invalid rosters keep
-            // the seed default.
-            if let Some(preferred) = crate::codex_model_cache::model_roster().preferred_model_id() {
-                return preferred.to_string();
-            }
-            return DEFAULT_OPENAI_CODEX_MODEL.to_string();
-        }
-
         let moonshot_config = (provider == ApiProvider::Moonshot)
             .then(|| self.provider_config())
             .flatten();
@@ -5117,15 +5110,6 @@ impl Config {
         {
             return "auto".to_string();
         }
-        if provider == ApiProvider::XiaomiMimo
-            && let Some(model) = self.default_text_model.as_deref()
-            && let Some(canonical) = canonical_xiaomi_mimo_model_id(model)
-        {
-            return canonical.to_string();
-        }
-        if provider == ApiProvider::XiaomiMimo {
-            return DEFAULT_XIAOMI_MIMO_MODEL.to_string();
-        }
         // A root DeepSeek-family default must not leak onto a vendor-locked
         // official endpoint that can never serve it (the provider then
         // rejects every request, e.g. `deepseek-v4-pro` on api.x.ai). Custom
@@ -5139,14 +5123,36 @@ impl Config {
                 )
                 && normalize_model_name(model).is_some()
         };
+        // Xiaomi MiMo: honour a root `default_text_model` that names a MiMo id
+        // (canonical aliases or a custom account id). Do not silently drop it
+        // for the provider seed default.
+        if provider == ApiProvider::XiaomiMimo
+            && let Some(model) = self.default_text_model.as_deref()
+        {
+            if let Some(canonical) = canonical_xiaomi_mimo_model_id(model) {
+                return canonical.to_string();
+            }
+            // Non-empty root value that is not a known foreign DeepSeek id is
+            // a deliberate custom MiMo choice — apply it. A stale DeepSeek id
+            // still falls through to the provider default below rather than
+            // being forwarded to Xiaomi's endpoint.
+            let trimmed = model.trim();
+            if !trimmed.is_empty() && normalize_model_name(trimmed).is_none() {
+                return trimmed.to_string();
+            }
+        }
         if let Some(model) = self.default_text_model.as_deref()
             && (provider_passes_model_through(provider)
                 || self.active_provider_preserves_custom_base_url_model())
             && !foreign_root_default(model)
+            // Xiaomi was handled above so a stale DeepSeek root id does not
+            // pass through merely because the provider is pass-through.
+            && provider != ApiProvider::XiaomiMimo
         {
             return model.trim().to_string();
         }
         if let Some(model) = self.default_text_model.as_deref()
+            && provider != ApiProvider::XiaomiMimo
             && !root_deepseek_model_is_foreign_to_direct_provider(provider, model)
             && let Some(normalized) = normalize_model_name_for_provider(provider, model)
             // A wire-slug translation (e.g. the Moonshot map) resolves the
@@ -5178,7 +5184,19 @@ impl Config {
             ApiProvider::Deepinfra => DEFAULT_DEEPINFRA_MODEL,
             ApiProvider::Together => DEFAULT_TOGETHER_MODEL,
             ApiProvider::Qianfan => DEFAULT_QIANFAN_MODEL,
-            ApiProvider::OpenaiCodex => DEFAULT_OPENAI_CODEX_MODEL,
+            // Prefer the live Codex roster head over the static seed so a
+            // provider switch lands on the current flagship model instead of
+            // a stale constant (#5034). Missing/stale/invalid rosters keep
+            // the seed default. An explicit root `default_text_model` that is
+            // not a foreign DeepSeek id is honoured above this fallback.
+            ApiProvider::OpenaiCodex => {
+                if let Some(preferred) =
+                    crate::codex_model_cache::model_roster().preferred_model_id()
+                {
+                    return preferred.to_string();
+                }
+                DEFAULT_OPENAI_CODEX_MODEL
+            }
             ApiProvider::Openmodel => DEFAULT_OPENMODEL_MODEL,
             ApiProvider::Zai => DEFAULT_ZAI_MODEL,
             ApiProvider::Stepfun => DEFAULT_STEPFUN_MODEL,
@@ -5256,12 +5274,20 @@ impl Config {
                 entry.base_url.clone()
             })
         };
-        // Root `base_url` is normally the legacy DeepSeek field. NvidiaNim has
-        // a back-compat sniff (integrate.api.nvidia.com), and the literal
-        // `provider = "custom"` legacy shape retains its root endpoint. Named
-        // custom providers always read their own `[providers.<name>]` table.
+        // Root `base_url` is normally the legacy DeepSeek field. Xiaomi MiMo
+        // and OpenAI Codex also read it when their table has no endpoint.
+        // NvidiaNim has a back-compat sniff (integrate.api.nvidia.com), and the
+        // literal `provider = "custom"` legacy shape retains its root endpoint.
+        // Named custom providers always read their own `[providers.<name>]`
+        // table.
         let root_base = match provider {
             ApiProvider::Deepseek | ApiProvider::DeepseekCN => {
+                self.route_owned_root_base_url(provider, identity)
+            }
+            // Xiaomi MiMo and OpenAI Codex honour a root `base_url` when the
+            // per-provider table has none — otherwise a minimal top-level
+            // config silently fell back to the official host.
+            ApiProvider::XiaomiMimo | ApiProvider::OpenaiCodex => {
                 self.route_owned_root_base_url(provider, identity)
             }
             ApiProvider::DeepseekAnthropic => None,
@@ -5274,7 +5300,6 @@ impl Config {
             | ApiProvider::Atlascloud
             | ApiProvider::WanjieArk
             | ApiProvider::Openrouter
-            | ApiProvider::XiaomiMimo
             | ApiProvider::Novita
             | ApiProvider::Fireworks
             | ApiProvider::Siliconflow
@@ -5289,7 +5314,6 @@ impl Config {
             | ApiProvider::Deepinfra
             | ApiProvider::Together
             | ApiProvider::Qianfan
-            | ApiProvider::OpenaiCodex
             | ApiProvider::Zai
             | ApiProvider::Stepfun
             | ApiProvider::Minimax
@@ -5550,13 +5574,17 @@ impl Config {
     /// The legacy root field is read through
     /// [`Config::route_owned_root_base_url`] so an environment write addressed
     /// to one identity is not mistaken for the sibling identity's configured
-    /// endpoint.
+    /// endpoint. DeepSeek, Xiaomi MiMo, and OpenAI Codex all honour root
+    /// `base_url` when their per-provider table has none.
     fn configured_base_url_for_provider(&self, provider: ApiProvider) -> Option<String> {
         let identity = self.provider_identity_for(provider);
         let provider_base = self
             .provider_config_string_with_runtime_fallback(provider, |entry| entry.base_url.clone());
         match provider {
-            ApiProvider::Deepseek | ApiProvider::DeepseekCN => {
+            ApiProvider::Deepseek
+            | ApiProvider::DeepseekCN
+            | ApiProvider::XiaomiMimo
+            | ApiProvider::OpenaiCodex => {
                 provider_base.or_else(|| self.route_owned_root_base_url(provider, &identity))
             }
             ApiProvider::NvidiaNim => provider_base.or_else(|| {

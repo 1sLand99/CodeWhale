@@ -4511,8 +4511,9 @@ model = "opencode-go/glm-5.2"
     }
 
     // The Go roster also includes Messages-only models. Even a custom base URL
-    // cannot make one safe for this Chat Completions provider; resolution falls
-    // back to the provider default instead of sending an incompatible request.
+    // cannot make one safe for this Chat Completions provider. Resolution must
+    // keep the configured id (so diagnostics name it) rather than silently
+    // substituting the Chat Completions default; the route layer rejects it.
     unsafe {
         std::env::set_var("OPENCODE_GO_BASE_URL", "https://go-gateway.example/v1");
         std::env::set_var("OPENCODE_GO_MODEL", "minimax-m3");
@@ -4521,7 +4522,7 @@ model = "opencode-go/glm-5.2"
     assert!(opencode_go_chat_model_id("qwen3.7-max").is_none());
     let resolved = config.resolve_runtime_options(&CliRuntimeOverrides::default());
     assert_eq!(resolved.base_url, "https://go-gateway.example/v1");
-    assert_eq!(resolved.model, DEFAULT_OPENCODE_GO_MODEL);
+    assert_eq!(resolved.model, "minimax-m3");
     assert_eq!(resolved.api_key, None);
 }
 

@@ -7,7 +7,7 @@ use crate::config::{
     MAX_STREAM_CHUNK_TIMEOUT_SECS, MAX_SUBAGENT_API_TIMEOUT_SECS,
     MAX_SUBAGENT_HEARTBEAT_TIMEOUT_SECS, MAX_SUBAGENTS, MIN_STREAM_CHUNK_TIMEOUT_SECS,
     MIN_SUBAGENT_API_TIMEOUT_SECS, MIN_SUBAGENT_HEARTBEAT_TIMEOUT_SECS, SubagentsConfig,
-    XIAOMI_MIMO_PAY_AS_YOU_GO_BASE_URL, clear_active_provider_api_key,
+    XIAOMI_MIMO_PAY_AS_YOU_GO_BASE_URL, clear_active_provider_api_key, normalize_custom_model_id,
     normalize_model_name_for_provider, validate_route,
 };
 use crate::config_persistence::{
@@ -1448,16 +1448,41 @@ pub fn set_config_value(app: &mut App, key: &str, value: &str, persist: bool) ->
                     AppAction::UpdateCompaction(app.compaction_config()),
                 );
             }
-            // Clear auto mode when a specific model is set
-            let Some(model) = normalize_model_name_for_provider(app.api_provider, value) else {
-                return CommandResult::error(format!(
-                    "Invalid model '{value}' for provider {}.",
-                    app.api_provider.as_str()
-                ));
+            // Route-aware: a custom DeepSeek (or other) endpoint owns its model
+            // namespace. Provider-only normalization would reject a non-DeepSeek
+            // id that the live session is already allowed to use via `/model`.
+            // OpenCode Go stays protocol-strict even on a custom host.
+            let model = if app.api_provider == ApiProvider::OpencodeGo {
+                let Some(model) = normalize_model_name_for_provider(app.api_provider, value) else {
+                    return CommandResult::error(format!(
+                        "Invalid model '{value}' for provider {}.",
+                        app.api_provider.as_str()
+                    ));
+                };
+                if let Err(reason) = validate_route(app.api_provider, &model) {
+                    return CommandResult::error(reason);
+                }
+                model
+            } else if app.accepts_custom_model_ids() {
+                let Some(model) = normalize_custom_model_id(value) else {
+                    return CommandResult::error(format!(
+                        "Invalid model '{value}' for provider {}.",
+                        app.api_provider.as_str()
+                    ));
+                };
+                model
+            } else {
+                let Some(model) = normalize_model_name_for_provider(app.api_provider, value) else {
+                    return CommandResult::error(format!(
+                        "Invalid model '{value}' for provider {}.",
+                        app.api_provider.as_str()
+                    ));
+                };
+                if let Err(reason) = validate_route(app.api_provider, &model) {
+                    return CommandResult::error(reason);
+                }
+                model
             };
-            if let Err(reason) = validate_route(app.api_provider, &model) {
-                return CommandResult::error(reason);
-            }
             app.set_model_selection(model.clone());
             app.update_model_compaction_budget();
             app.session.last_prompt_tokens = None;
