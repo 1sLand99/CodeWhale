@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:4d02e29bfb3a -->
+<!-- source: README.md sha256:a7f294018f28 -->
 # Codewhale
 
 Sebuah coding agent sumber terbuka untuk terminal Anda — bawa model pilihan Anda sendiri.
@@ -9,7 +9,7 @@ Berikan penyedia, model, dan tugas: Codewhale akan membaca kode Anda, mengedit b
 
 Kami selalu membuka kesempatan bagi para kontributor dan cara untuk terus berkembang. Jika model atau penyedia yang Anda gunakan belum tersedia, atau ada hal yang tidak berjalan semestinya, memberi tahu kami adalah salah satu kontribusi paling berharga yang bisa Anda lakukan — lihat [Kontribusi](#kontribusi).
 
-[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md) · [Discord](https://discord.gg/37gfS3ksug)
+[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Русский](README.ru.md) · [Українська](README.uk.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md) · [Discord](https://discord.gg/37gfS3ksug)
 
 [![CI](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml/badge.svg)](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/codewhale-cli?label=crates.io)](https://crates.io/crates/codewhale-cli)
@@ -38,7 +38,7 @@ codewhale web                            # local browser client on 127.0.0.1
 
 Autentikasi penyedia dan autentikasi akun Codewhale merupakan dua hal yang terpisah. `codewhale auth` mengonfigurasi model yang digunakan oleh runtime lokal. `codewhale account login` membuka browser sistem, menyelesaikan alur perangkat (device flow) di `app.codewhale.net`, lalu menyimpan sesi yang dihasilkan ke dalam credential manager OS. Gunakan `codewhale account status`, `codewhale account logout`, dan `codewhale account keys` untuk memeriksa profil yang sedang masuk atau mengelola kredensial BYOK berlingkup akun; prefiks kompatibilitas `codewhale cloud` tetap diterima. Token dan nilai kunci penyedia tidak pernah ditampilkan.
 
-Di dalam TUI: `/model` mengganti penyedia dan model sekaligus, `/fleet` menjalankan tim pekerja (workers), dan `/restore` membatalkan satu langkah (turn). Saat composer dalam keadaan diam (idle), `Tab` beralih antar mode Plan / Act / Operate dan `Shift+Tab` beralih antar postur izin Ask / Auto-Review / Full Access. `!` menjalankan perintah shell melalui alur persetujuan normal.
+Di dalam TUI: `/model` mengganti penyedia dan model sekaligus, `/fleet` menjalankan tim pekerja (workers), `/undo` membatalkan langkah (turn) terakhir, dan `/restore <N>` mengembalikan workspace ke snapshot sebelumnya (`/restore` tanpa argumen hanya menampilkan daftarnya). Saat composer kosong, `Tab` beralih antar mode Plan / Act / Operate; bila composer berisi teks, `Tab` justru melengkapi perintah slash dan sebutan `@`. `Shift+Tab` beralih antar postur izin Ask / Auto-Review / Full Access kapan saja. `!` menjalankan perintah shell melalui alur persetujuan normal.
 
 ## Fitur & Kapabilitas
 
@@ -52,6 +52,8 @@ Di dalam TUI: `/model` mengganti penyedia dan model sekaligus, `/fleet` menjalan
 - [docs/FLEET.id.md](docs/FLEET.id.md) ([English](docs/FLEET.md)) — fleet, ledger, dan kelanjutan sesi (resume)
 - [docs/WORKFLOW_EXPERIMENTAL_SEARCH.md](docs/WORKFLOW_EXPERIMENTAL_SEARCH.md) — pencarian eksperimental yang dibekukan dan netral terhadap penyedia di dalam Workflow
 - [docs/CONFIGURATION.id.md](docs/CONFIGURATION.id.md) ([English](docs/CONFIGURATION.md)) — `config.toml`, hooks, dan konstitusi
+- [docs/AUTHORIZATION_ORDER.md](docs/AUTHORIZATION_ORDER.md) — bagaimana mode, hooks, aturan izin, batas keamanan, hukum repositori, persetujuan, dan sandbox saling menyusun
+- [docs/HOOKS.md](docs/HOOKS.md) — sebelas event hook siklus hidup TUI, payload-nya, dan tiga di antaranya yang dapat mengarahkan sebuah turn (`codewhale exec` dan subperintah CLI tidak memicu hooks)
 - [docs/WEB.id.md](docs/WEB.id.md) ([English](docs/WEB.md)) — klien browser berbasis loopback-only dan batas autentikasi sekali pakainya
 - [docs/LOCALIZATION.id.md](docs/LOCALIZATION.id.md) ([English](docs/LOCALIZATION.md)) — matriks lokalisasi & panduan terjemahan
 

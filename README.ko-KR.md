@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:4d02e29bfb3a -->
+<!-- source: README.md sha256:a7f294018f28 -->
 # Codewhale
 
 터미널에서 쓰는 오픈소스 코딩 에이전트 — 모델은 당신이 가져옵니다.
@@ -38,7 +38,7 @@ codewhale web                            # local browser client on 127.0.0.1
 
 프로바이더 인증과 Codewhale 계정 인증은 별개입니다. `codewhale auth`는 로컬 런타임이 사용하는 모델을 구성합니다. `codewhale account login`은 시스템 브라우저를 열어 `app.codewhale.net`에서 디바이스 플로우를 완료하고, 그 결과로 만들어진 세션을 OS 자격 증명 관리자에 저장합니다. `codewhale account status`, `codewhale account logout`, `codewhale account keys`로 로그인된 프로필을 확인하거나 계정 범위의 BYOK 자격 증명을 관리할 수 있으며, 호환용 접두어 `codewhale cloud`도 계속 사용할 수 있습니다. 토큰과 프로바이더 키 값은 절대 출력되지 않습니다.
 
-TUI 안에서: `/model`은 프로바이더와 모델을 함께 전환하고, `/fleet`은 워커 팀을 실행하며, `/restore`는 한 턴을 되돌립니다. 입력창이 유휴 상태일 때 `Tab`은 Plan / Act / Operate 모드를 순환하고, `Shift+Tab`은 Ask / Auto-Review / Full Access 권한 태세를 순환합니다. `!`는 일반 승인 경로를 거쳐 셸 명령을 실행합니다.
+TUI 안에서: `/model`은 프로바이더와 모델을 함께 전환하고, `/fleet`은 워커 팀을 실행하며, `/undo`는 직전 턴을 되돌리고, `/restore <N>`은 워크스페이스를 이전 스냅샷으로 되돌립니다(인자 없는 `/restore`는 스냅샷 목록만 보여줍니다). 입력창이 비어 있을 때 `Tab`은 Plan / Act / Operate 모드를 순환하고, 입력창에 내용이 있으면 `Tab`은 슬래시 명령과 `@` 멘션을 자동 완성합니다. `Shift+Tab`은 언제든지 Ask / Auto-Review / Full Access 권한 태세를 순환합니다. `!`는 일반 승인 경로를 거쳐 셸 명령을 실행합니다.
 
 ## 기능
 

@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:4d02e29bfb3a -->
+<!-- source: README.md sha256:a7f294018f28 -->
 # Codewhale
 
 Открытый агент для программирования в вашем терминале — модель приносите с собой.
@@ -21,7 +21,7 @@ Codewhale начинался как нативный клиент для DeepSee
 одно из самых полезных действий с вашей стороны: см.
 [Участие в проекте](#участие-в-проекте).
 
-[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Українська](README.uk.md) · [Українська](README.uk.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md) · [Discord](https://discord.gg/37gfS3ksug)
+[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja-JP.md) · [Tiếng Việt](README.vi.md) · [Bahasa Indonesia](README.id.md) · [한국어](README.ko-KR.md) · [Español](README.es-419.md) · [Português](README.pt-BR.md) · [Українська](README.uk.md) · [codewhale.net](https://codewhale.net/) · [Docs](docs) · [Changelog](CHANGELOG.md) · [Discord](https://discord.gg/37gfS3ksug)
 
 [![CI](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml/badge.svg)](https://github.com/Hmbown/CodeWhale/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/codewhale-cli?label=crates.io)](https://crates.io/crates/codewhale-cli)
@@ -62,10 +62,12 @@ codewhale web                            # local browser client on 127.0.0.1
 никогда не выводятся.
 
 В TUI: `/model` переключает провайдера и модель одновременно, `/fleet` запускает
-команду воркеров, а `/restore` отменяет ход. Когда поле ввода свободно, `Tab`
-циклически переключает режимы Plan / Act / Operate, а `Shift+Tab` — уровни прав
-Ask / Auto-Review / Full Access. `!` запускает команду оболочки через обычный
-путь подтверждения.
+команду воркеров, `/undo` отменяет последний ход, а `/restore <N>` откатывает
+рабочую копию к более раннему снимку (`/restore` без аргумента только выводит их
+список). Когда поле ввода пустое, `Tab` циклически переключает режимы Plan /
+Act / Operate; если в поле есть текст, `Tab` дополняет слэш-команды и упоминания
+`@`. `Shift+Tab` переключает уровни прав Ask / Auto-Review / Full Access в любой
+момент. `!` запускает команду оболочки через обычный путь подтверждения.
 
 ## Что он умеет
 

@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:4d02e29bfb3a -->
+<!-- source: README.md sha256:a7f294018f28 -->
 # Codewhale
 
 Un agente de programación de código abierto para tu terminal — trae tu propio modelo.
@@ -61,10 +61,13 @@ compatibilidad `codewhale cloud` sigue siendo aceptado.
 Los tokens y los valores de las keys de proveedor nunca se imprimen.
 
 En la TUI: `/model` cambia proveedor y modelo juntos, `/fleet` ejecuta un
-equipo de workers y `/restore` deshace un turno. Cuando el compositor está
-inactivo, `Tab` cicla entre Plan / Act / Operate y `Shift+Tab` cicla la postura
-de permiso Ask / Auto-Review / Full Access. `!` ejecuta un comando de shell por
-la ruta normal de aprobación.
+equipo de workers, `/undo` deshace el último turno y `/restore <N>` revierte el
+workspace a una instantánea anterior (`/restore` sin argumentos solo las
+lista). Cuando el compositor está vacío, `Tab` cicla entre Plan / Act /
+Operate; con texto escrito, `Tab` completa comandos slash y menciones `@`.
+`Shift+Tab` cicla la postura de permiso Ask / Auto-Review / Full Access en
+cualquier momento. `!` ejecuta un comando de shell por la ruta normal de
+aprobación.
 
 ## Qué hace
 

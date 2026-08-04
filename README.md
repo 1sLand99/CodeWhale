@@ -56,11 +56,13 @@ manager. Use `codewhale account status`, `codewhale account logout`, and
 account-scoped BYOK credentials; the compatibility prefix `codewhale cloud`
 remains accepted. Tokens and provider-key values are never printed.
 
-In the TUI: `/model` switches provider and model together, `/fleet` runs a
-team of workers, and `/restore` undoes a turn. When the composer is idle, `Tab`
-cycles Plan / Act / Operate and `Shift+Tab` cycles the Ask / Auto-Review / Full
-Access permission posture. `!` runs a shell command through the normal approval
-path.
+In the TUI: `/model` switches provider and model together, `/fleet` runs a team
+of workers, `/undo` reverts the last turn, and `/restore <N>` rolls the
+workspace back to an earlier snapshot (bare `/restore` lists them). `Tab`
+cycles Plan / Act / Operate when the composer is empty — with text in it, `Tab`
+completes slash commands and `@` mentions instead. `Shift+Tab` cycles the
+Ask / Auto-Review / Full Access permission posture at any time. `!` runs a
+shell command through the normal approval path.
 
 ## What it does
 

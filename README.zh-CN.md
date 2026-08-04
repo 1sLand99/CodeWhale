@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:4d02e29bfb3a -->
+<!-- source: README.md sha256:a7f294018f28 -->
 # Codewhale
 
 一个面向终端的开源编程智能体——模型由你自带。
@@ -38,7 +38,7 @@ codewhale web                            # local browser client on 127.0.0.1
 
 Provider 身份验证与 Codewhale 账户身份验证是彼此独立的。`codewhale auth` 用于配置本地运行时所使用的模型。`codewhale account login` 会打开系统浏览器,在 `app.codewhale.net` 完成设备授权流程,并将得到的会话存入操作系统的凭据管理器。使用 `codewhale account status`、`codewhale account logout` 和 `codewhale account keys` 可以查看已登录的账户信息或管理账户级的 BYOK 凭据;兼容前缀 `codewhale cloud` 仍然可用。令牌和 provider key 的值永远不会被打印出来。
 
-在 TUI 中:`/model` 同时切换 provider 和模型,`/fleet` 运行一组 worker,`/restore` 撤销某一轮。输入区空闲时,`Tab` 在 Plan / Act / Operate 之间循环切换,`Shift+Tab` 在 Ask / Auto-Review / Full Access 权限姿态之间循环切换。`!` 让 shell 命令经由正常的审批路径运行。
+在 TUI 中:`/model` 同时切换 provider 和模型,`/fleet` 运行一组 worker,`/undo` 撤销上一轮,`/restore <N>` 把工作区回滚到更早的快照(不带参数的 `/restore` 只列出快照)。输入区为空时,`Tab` 在 Plan / Act / Operate 之间循环切换;输入区有内容时,`Tab` 改为补全斜杠命令和 `@` 提及。`Shift+Tab` 在任何时候都能循环切换 Ask / Auto-Review / Full Access 权限姿态。`!` 让 shell 命令经由正常的审批路径运行。
 
 ## 功能
 

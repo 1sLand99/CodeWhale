@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:4d02e29bfb3a -->
+<!-- source: README.md sha256:a7f294018f28 -->
 # Codewhale
 
 ターミナルで動くオープンソースのコーディングエージェント — モデルはあなたが持ち込む。
@@ -38,7 +38,7 @@ codewhale web                            # local browser client on 127.0.0.1
 
 プロバイダ認証と Codewhale アカウント認証は別のものです。`codewhale auth` はローカルランタイムが使うモデルを設定します。`codewhale account login` はシステムブラウザを開き、`app.codewhale.net` でデバイスフローを完了して、得られたセッションを OS の資格情報マネージャに保存します。サインイン中のプロファイルの確認や、アカウントスコープの BYOK 資格情報の管理には `codewhale account status`、`codewhale account logout`、`codewhale account keys` を使ってください。互換プレフィックスとして `codewhale cloud` も引き続き受け付けられます。トークンやプロバイダキーの値が表示されることはありません。
 
-TUI では、`/model` がプロバイダとモデルをまとめて切り替え、`/fleet` がワーカーのチームを走らせ、`/restore` がターンを取り消します。入力欄がアイドル状態のとき、`Tab` は Plan / Act / Operate を順に切り替え、`Shift+Tab` は Ask / Auto-Review / Full Access の権限スタンスを順に切り替えます。`!` は Shell コマンドを通常の承認経路で実行します。
+TUI では、`/model` がプロバイダとモデルをまとめて切り替え、`/fleet` がワーカーのチームを走らせ、`/undo` が直前のターンを取り消し、`/restore <N>` がワークスペースを以前のスナップショットへ巻き戻します(引数なしの `/restore` は一覧を表示するだけです)。入力欄が空のとき、`Tab` は Plan / Act / Operate を順に切り替えます。入力欄に文字があるときの `Tab` はスラッシュコマンドと `@` メンションの補完になります。`Shift+Tab` はいつでも Ask / Auto-Review / Full Access の権限スタンスを順に切り替えます。`!` は Shell コマンドを通常の承認経路で実行します。
 
 ## できること
 

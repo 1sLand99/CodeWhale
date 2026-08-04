@@ -1,4 +1,4 @@
-<!-- source: README.md sha256:4d02e29bfb3a -->
+<!-- source: README.md sha256:a7f294018f28 -->
 # Codewhale
 
 Một coding agent mã nguồn mở cho terminal của bạn — mang theo model của riêng bạn.
@@ -59,10 +59,12 @@ xác thực BYOK gắn với tài khoản; tiền tố tương thích `codewhale
 được chấp nhận. Token và giá trị key của provider không bao giờ được in ra.
 
 Trong TUI: `/model` đổi provider và model cùng lúc, `/fleet` chạy một đội
-worker, và `/restore` hoàn tác một lượt. Khi vùng soạn thảo đang rảnh, `Tab`
-chuyển vòng qua Plan / Act / Operate và `Shift+Tab` chuyển vòng qua tư thế
-quyền Ask / Auto-Review / Full Access. `!` chạy một lệnh shell qua đường phê
-duyệt bình thường.
+worker, `/undo` hoàn tác lượt gần nhất, và `/restore <N>` đưa workspace về một
+ảnh chụp trước đó (`/restore` không tham số chỉ liệt kê chúng). Khi vùng soạn
+thảo trống, `Tab` chuyển vòng qua Plan / Act / Operate; khi vùng soạn thảo có
+chữ, `Tab` lại hoàn tất lệnh slash và nhắc `@`. `Shift+Tab` chuyển vòng qua tư
+thế quyền Ask / Auto-Review / Full Access bất cứ lúc nào. `!` chạy một lệnh
+shell qua đường phê duyệt bình thường.
 
 ## Tính năng
 
