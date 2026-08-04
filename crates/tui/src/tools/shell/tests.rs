@@ -2369,6 +2369,204 @@ async fn unknown_bash_action_is_refused_instead_of_running_the_command() {
     assert!(!marker.exists(), "the command must not have run");
 }
 
+/// The same hole one type down. `and_then(as_str).unwrap_or("run")` read a
+/// non-string `action` as absent and fell through to the branch that executes
+/// arbitrary code, so `Bash{action: 3, command: "…"}` ran the command. `File`,
+/// `Git`, `Web`, and `Run` all refuse a non-string action; the tool that runs
+/// shell commands must not be the lenient one.
+#[tokio::test]
+async fn non_string_bash_action_is_refused_instead_of_running_the_command() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path().to_path_buf());
+
+    for action in [json!(3), json!(true), json!(["run"]), json!({"run": true})] {
+        let marker = workspace.path().join(format!("marker-{action}"));
+        let error = BashTool::new("Bash")
+            .execute(
+                json!({
+                    "action": action,
+                    "command": format!("touch {}", marker.display()),
+                }),
+                &context,
+            )
+            .await
+            .expect_err("a non-string action must be refused");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("'action'"),
+            "must name the parameter: {message}"
+        );
+        assert!(
+            message.contains("must be a string"),
+            "must name the expected type: {message}"
+        );
+        assert!(!marker.exists(), "the command must not have run: {action}");
+    }
+}
+
+/// `null` is the wire spelling of absence, and `action` documents a `run`
+/// default — so the strictness above must not swallow the default.
+#[tokio::test]
+async fn absent_or_null_bash_action_still_defaults_to_run() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path().to_path_buf());
+
+    for input in [
+        json!({"command": "echo defaulted"}),
+        json!({"action": null, "command": "echo defaulted"}),
+    ] {
+        let result = BashTool::new("Bash")
+            .execute(input.clone(), &context)
+            .await
+            .unwrap_or_else(|err| panic!("{input} must still run: {err}"));
+        assert!(result.success, "{input}: {}", result.content);
+        assert!(result.content.contains("defaulted"), "{}", result.content);
+    }
+}
+
+/// Negative case for the strictness above: every legitimate action still
+/// dispatches to its own handler rather than the action refusal. `wait`,
+/// `interact`, and `cancel` are checked by the error they raise *after*
+/// dispatch (a missing/unknown task), which only their own handlers produce.
+#[tokio::test]
+async fn every_valid_bash_action_still_dispatches() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path().to_path_buf());
+    let tool = BashTool::new("Bash");
+
+    let ran = tool
+        .execute(
+            json!({"action": "run", "command": "echo dispatched"}),
+            &context,
+        )
+        .await
+        .expect("action=run must dispatch");
+    assert!(ran.success, "{}", ran.content);
+
+    for input in [
+        json!({"action": "wait", "task_id": "no-such-task"}),
+        json!({"action": "interact", "task_id": "no-such-task", "stdin": "y\n"}),
+        json!({"action": "cancel", "task_id": "no-such-task"}),
+    ] {
+        let outcome = tool.execute(input.clone(), &context).await;
+        let message = match outcome {
+            Ok(result) => result.content,
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            !message.contains("Unknown Bash action") && !message.contains("must be a string"),
+            "{input} must reach its own handler, got: {message}"
+        );
+    }
+
+    // `cancel` with `all` needs no task at all and must stay a success.
+    let cancelled = tool
+        .execute(json!({"action": "cancel", "all": true}), &context)
+        .await
+        .expect("action=cancel all=true must dispatch");
+    assert!(cancelled.success, "{}", cancelled.content);
+}
+
+/// The stdin aliases were real but undocumented: a model that wrote `input`
+/// or `data` got them honoured with nothing in the schema saying so, and a
+/// maintainer reading the schema would have removed them as dead. Advertise
+/// them, and hold every spelling to the same behavior.
+#[tokio::test]
+async fn every_advertised_stdin_spelling_reaches_the_command() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path().to_path_buf());
+    let schema = BashTool::new("Bash").input_schema();
+
+    for spelling in ["stdin", "input", "data"] {
+        assert!(
+            schema["properties"][spelling].is_object(),
+            "`{spelling}` is honoured at runtime and must be advertised"
+        );
+        let result = BashTool::new("Bash")
+            .execute(
+                json!({"command": "cat", spelling: "PIPED_THROUGH_ALIAS\n"}),
+                &context,
+            )
+            .await
+            .unwrap_or_else(|err| panic!("`{spelling}` must deliver stdin: {err}"));
+        assert!(
+            result.content.contains("PIPED_THROUGH_ALIAS"),
+            "`{spelling}` did not reach the command: {}",
+            result.content
+        );
+    }
+
+    // `id` is the same undocumented shape one parameter over.
+    assert!(
+        schema["properties"]["id"].is_object(),
+        "`id` is accepted for `task_id` at runtime and must be advertised"
+    );
+    assert!(
+        schema["properties"]["task_id"]["description"]
+            .as_str()
+            .is_some_and(|text| text.contains("`id`")),
+        "task_id must name its alias"
+    );
+}
+
+/// The schema declared no `required` key at all, so `Bash{}` — no command, no
+/// task — was schema-valid for the tool that runs shell commands. What is
+/// required is per-action, so it is spelled as root `anyOf` required groups,
+/// the same shape `finance` and `apply_patch` already use.
+#[test]
+fn bash_schema_declares_what_each_action_requires() {
+    let schema = BashTool::new("Bash").input_schema();
+    let groups: Vec<Vec<String>> = schema["anyOf"]
+        .as_array()
+        .expect("root anyOf required groups")
+        .iter()
+        .map(|group| {
+            group["required"]
+                .as_array()
+                .expect("required group")
+                .iter()
+                .map(|name| name.as_str().expect("required name").to_string())
+                .collect()
+        })
+        .collect();
+
+    for expected in [["command"], ["task_id"], ["id"], ["all"]] {
+        assert!(
+            groups.iter().any(|group| group.as_slice() == expected),
+            "missing required group {expected:?} in {groups:?}"
+        );
+    }
+    // A required name the same schema does not advertise would be
+    // unsatisfiable: the model could not learn what to send.
+    for group in &groups {
+        for name in group {
+            assert!(
+                schema["properties"][name].is_object(),
+                "`{name}` is required but not advertised"
+            );
+        }
+    }
+}
+
+/// A root `anyOf` is not portable to every provider, so prove the fallback
+/// the sanitizer promises: Responses/xAI drop root composition, and the
+/// constraint has to survive as a description note rather than vanishing.
+#[test]
+fn bash_required_groups_survive_a_provider_that_drops_root_composition() {
+    let mut schema = BashTool::new("Bash").input_schema();
+    let note = crate::tools::schema_sanitize::sanitize_for_responses(&mut schema)
+        .expect("dropped required groups must be restated for the model");
+
+    assert!(note.contains("At least one"), "{note}");
+    for name in ["`command`", "`task_id`", "`id`", "`all`"] {
+        assert!(note.contains(name), "note must name {name}: {note}");
+    }
+    assert_eq!(schema["type"], "object");
+    assert!(schema.get("anyOf").is_none(), "root anyOf must be removed");
+    assert!(schema["properties"]["command"].is_object());
+}
+
 /// Every hint in this file has to name a tool the model can actually call.
 /// `exec_shell` / `exec_shell_wait` were retired in v0.9.3.
 #[test]

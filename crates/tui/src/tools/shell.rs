@@ -2459,7 +2459,7 @@ use crate::features::Feature;
 use crate::tools::cargo_failure_summary::summarize_cargo_failure;
 use crate::tools::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
-    optional_bool, optional_u64, required_str,
+    optional_bool, optional_str, optional_u64, required_str,
 };
 use async_trait::async_trait;
 use serde_json::json;
@@ -2951,7 +2951,15 @@ impl ToolSpec for BashTool {
                 },
                 "stdin": {
                     "type": "string",
-                    "description": "Stdin data to send (action=run: before waiting; action=interact: to the background task)"
+                    "description": "Stdin data to send (action=run: before waiting; action=interact: to the background task). Also accepted as `input` or `data` — send only one."
+                },
+                "input": {
+                    "type": "string",
+                    "description": "Alias for `stdin`."
+                },
+                "data": {
+                    "type": "string",
+                    "description": "Alias for `stdin`."
                 },
                 "cwd": {
                     "type": "string",
@@ -2967,7 +2975,11 @@ impl ToolSpec for BashTool {
                 },
                 "task_id": {
                     "type": "string",
-                    "description": "Task ID for action=wait/interact/cancel"
+                    "description": "Task ID for action=wait/interact/cancel. Also accepted as `id`."
+                },
+                "id": {
+                    "type": "string",
+                    "description": "Alias for `task_id`."
                 },
                 "wait": {
                     "type": "boolean",
@@ -2981,7 +2993,28 @@ impl ToolSpec for BashTool {
                     "type": "boolean",
                     "description": "Cancel all running background tasks (action=cancel)"
                 }
-            }
+            },
+            // The schema used to declare nothing required at all, so
+            // `Bash{}` was schema-valid for the tool that runs shell
+            // commands. What is required is per-action and cannot be spelled
+            // as a flat `required` list: `run` needs `command`,
+            // `wait`/`interact`/`cancel` need `task_id` (or its `id` alias),
+            // and `cancel` needs `all` instead when cancelling everything.
+            // A root `anyOf` of `required` groups is how this repo already
+            // spells that (`finance`, `apply_patch`), and `schema_sanitize`
+            // knows the shape: providers that reject root composition get the
+            // groups merged and the constraint restated as a description note
+            // (`root_composition_constraint_note`). The cost is that
+            // `strict_schema_supported` rejects a root `anyOf`, so `Bash`
+            // opts out of DeepSeek strict mode — as `finance` already does on
+            // the same default agent surface, which turns strict mode off for
+            // the whole tool set regardless.
+            "anyOf": [
+                { "required": ["command"] },
+                { "required": ["task_id"] },
+                { "required": ["id"] },
+                { "required": ["all"] }
+            ]
         })
     }
 
@@ -3022,12 +3055,18 @@ impl ToolSpec for BashTool {
         input: serde_json::Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let action = self.forced_action.unwrap_or_else(|| {
-            input
-                .get("action")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("run")
-        });
+        // `and_then(as_str).unwrap_or("run")` treated *any* non-string
+        // `action` as absent and fell through to the branch that runs
+        // arbitrary code: `Bash{action: 3, command: "…"}` executed the
+        // command. Every sibling family refuses a non-string action
+        // (`canonical_action::required_action`), and `Bash` cannot be the
+        // lenient one. `optional_str` is the type-strictness lane's extractor:
+        // absent or `null` takes the documented `run` default, anything else
+        // is a `type_mismatch` naming the field and the type it needed.
+        let action = match self.forced_action {
+            Some(forced) => forced,
+            None => optional_str(&input, "action")?.unwrap_or("run"),
+        };
         match action {
             "wait" => return self.execute_wait(&input, context).await,
             "interact" => return self.execute_interact(&input, context).await,
