@@ -1242,20 +1242,39 @@ where
 
 // === Utility Functions ===
 
+/// The longest a `Retry-After` value is ever believed. A server (or a proxy
+/// in front of it) can send an arbitrarily large delay; without a ceiling a
+/// single `Retry-After: 86400` would wedge the turn for a day. One hour is
+/// well past any legitimate rate-limit window.
+const RETRY_AFTER_MAX: Duration = Duration::from_secs(3600);
+
 /// Parses the Retry-After header value into a Duration.
 ///
 /// Supports both:
 /// - Seconds as integer: "120" -> 120 seconds
 /// - HTTP-date format: "Wed, 21 Oct 2015 07:28:00 GMT" (not implemented, returns None)
+///
+/// The value is server-controlled, so this never panics and never returns an
+/// unbounded delay: negative / NaN / infinite / absurd floats are rejected
+/// (`Duration::from_secs_f64` panics on a negative — a remote-triggerable
+/// crash before this guard), and any result is clamped to [`RETRY_AFTER_MAX`].
 pub fn parse_retry_after(value: &str) -> Option<Duration> {
     // Try parsing as seconds
     if let Ok(seconds) = value.parse::<u64>() {
-        return Some(Duration::from_secs(seconds));
+        return Some(Duration::from_secs(seconds).min(RETRY_AFTER_MAX));
     }
 
-    // Try parsing as float seconds
-    if let Ok(seconds) = value.parse::<f64>() {
-        return Some(Duration::from_secs_f64(seconds));
+    // Try parsing as float seconds. Only a finite, non-negative value is a
+    // meaningful delay; everything else (`-5`, `nan`, `inf`) is "no usable
+    // hint". Clamp to the ceiling BEFORE `from_secs_f64` so an out-of-range
+    // float can never reach its overflow-panic path, while keeping the
+    // sub-second precision a legitimate `1.5` carries.
+    if let Ok(seconds) = value.parse::<f64>()
+        && seconds.is_finite()
+        && seconds >= 0.0
+    {
+        let clamped = seconds.min(RETRY_AFTER_MAX.as_secs_f64());
+        return Some(Duration::from_secs_f64(clamped));
     }
 
     // HTTP-date format not supported yet
@@ -1586,12 +1605,35 @@ mod tests {
         assert_eq!(parse_retry_after("120"), Some(Duration::from_secs(120)));
         assert_eq!(parse_retry_after("0"), Some(Duration::from_secs(0)));
 
-        // Float seconds
+        // Float seconds keep sub-second precision
         assert_eq!(parse_retry_after("1.5"), Some(Duration::from_secs_f64(1.5)));
 
         // Invalid
         assert_eq!(parse_retry_after("invalid"), None);
         assert_eq!(parse_retry_after(""), None);
+    }
+
+    /// A `Retry-After` value is server-controlled. Malformed floats used to
+    /// reach `Duration::from_secs_f64`, which panics on a negative — a
+    /// remote-triggerable crash in the request path (2026-08-04 review).
+    #[test]
+    fn parse_retry_after_never_panics_and_is_bounded_on_hostile_input() {
+        // None of these may panic.
+        assert_eq!(parse_retry_after("-5"), None, "negative is not a delay");
+        assert_eq!(parse_retry_after("nan"), None);
+        assert_eq!(parse_retry_after("inf"), None);
+        assert_eq!(parse_retry_after("-inf"), None);
+        // Absurdly large values clamp to the ceiling rather than overflowing
+        // or wedging the turn for a day.
+        assert_eq!(parse_retry_after("1e300"), Some(RETRY_AFTER_MAX));
+        assert_eq!(parse_retry_after("86400"), Some(RETRY_AFTER_MAX));
+        assert_eq!(
+            parse_retry_after("999999999999"),
+            Some(RETRY_AFTER_MAX),
+            "integer path is clamped too"
+        );
+        // A normal value still passes through untouched.
+        assert_eq!(parse_retry_after("30"), Some(Duration::from_secs(30)));
     }
 
     #[test]
