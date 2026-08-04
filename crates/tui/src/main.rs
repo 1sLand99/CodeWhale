@@ -206,7 +206,7 @@ struct Cli {
     #[arg(long, hide = true)]
     yolo: bool,
 
-    /// Maximum number of concurrent sub-agents (1-20)
+    /// Maximum number of concurrent sub-agents (1-128; default 64)
     #[arg(long)]
     max_subagents: Option<usize>,
 

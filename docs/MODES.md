@@ -204,8 +204,11 @@ When terminal height is constrained, the status area compacts first so header/ch
 By default, file tools are restricted to the `--workspace` directory. Enable trust mode to allow file access outside the workspace:
 
 ```text
-/trust
+/trust on
 ```
+
+Bare `/trust` (like `/trust status`) only *reports* the current setting — it
+does not enable anything. Use `/trust off` to restrict access again.
 
 Full Access enables trust mode automatically.
 
