@@ -14,12 +14,11 @@
 //! in `../prompts.rs`):
 //!
 //!   1. Constitution (binding core: `BASE_PROMPT` + language/output law)
-//!   2. Personality overlays
+//!   2. Personality overlay (`CALM_PERSONALITY` — one overlay, not a set)
 //!   3. Mode deltas
 //!   4. Approval-policy overlays
 //!   5. Runtime templates (compaction relay, goal continuation, memory,
 //!      core execution, sub-agent output contract)
-//!   6. Legacy compatibility prompt
 //!
 //! Edit prompt text here directly. Content and ordering invariants are
 //! guarded by the test suite in `../prompts.rs` (constitution structure,

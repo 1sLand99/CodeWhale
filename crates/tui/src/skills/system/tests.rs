@@ -48,7 +48,20 @@ fn bundled_integration_skills_use_current_codewhale_commands_and_paths() {
     assert!(SKILL_CREATOR_BODY.contains("<workspace>/.codewhale/skills"));
     assert!(SKILL_CREATOR_BODY.contains("~/.codewhale/skills"));
     assert!(SKILL_INSTALLER_BODY.contains("~/.codewhale/skills"));
-    assert!(PDF_BODY.contains("built-in `read_file` tool"));
+    // Bundled skills must name live tools. `read_file` is retired and cannot
+    // dispatch (crates/tui/src/tools/registry.rs:2067).
+    assert!(PDF_BODY.contains("built-in `File` tool (`action: \"read\"`)"));
+    for (name, body) in [
+        ("pdf", PDF_BODY),
+        ("help", HELP_BODY),
+        ("delegate", DELEGATE_BODY),
+        ("best-of-n", BEST_OF_N_BODY),
+    ] {
+        assert!(
+            !body.contains("read_file") && !body.contains("exec_shell"),
+            "{name} must not teach a retired tool name"
+        );
+    }
 }
 
 /// #4227 (requested by @JayBeest): the contributor sync/gate/digest skill

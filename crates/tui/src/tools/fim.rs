@@ -1,8 +1,10 @@
 //! FIM (Fill-in-the-Middle) edit tool.
 //!
-//! Reads a file, finds `prefix_anchor` and `suffix_anchor`, calls the
-//! DeepSeek `/beta/completions` FIM endpoint, and writes the generated
-//! middle content back into the file.
+//! Reads a file, finds `prefix_anchor` and `suffix_anchor`, calls the active
+//! route's `/beta/completions` FIM endpoint, and writes the generated middle
+//! content back into the file. The URL is built from the session's own base URL
+//! (`crates/tui/src/client.rs:3484`), so this works on any ChatCompletions
+//! provider — it is not DeepSeek-specific.
 
 use std::fs;
 
@@ -28,7 +30,9 @@ pub struct FimEditResult {
     pub message: String,
 }
 
-/// Tool for performing Fill-in-the-Middle edits via the DeepSeek FIM API.
+/// Tool for performing Fill-in-the-Middle edits via the active route's FIM API.
+/// (`DeepSeekClient` is the historical name of the shared provider client; it is
+/// not a DeepSeek-only type.)
 pub struct FimEditTool {
     pub client: Option<DeepSeekClient>,
     pub model: String,
@@ -65,7 +69,8 @@ impl ToolSpec for FimEditTool {
         "Edit a file using Fill-in-the-Middle (FIM) completion. Provide a file path, \
          prefix_anchor (text that appears before the section to replace), and \
          suffix_anchor (text that appears after the section to replace). The tool \
-         calls DeepSeek's FIM endpoint to generate replacement content."
+         calls the active route's fill-in-the-middle completion endpoint to \
+         generate replacement content."
     }
 
     fn input_schema(&self) -> Value {

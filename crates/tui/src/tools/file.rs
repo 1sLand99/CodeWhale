@@ -1,4 +1,8 @@
-//! File system tools: `read_file`, `write_file`, `edit_file`, `list_dir`
+//! File system tools. These structs are the internal handlers behind the single
+//! model-facing `File` tool; their `name()` values (`read_file`, `write_file`,
+//! `edit_file`, `list_dir`, …) are dispatch keys inside `file_tool.rs` and are
+//! NOT registered or advertised — see `crates/tui/src/tools/registry.rs:2066`.
+//! Model-facing text must name `File` plus an `action`, never these.
 //!
 //! These tools provide safe file system operations within the workspace,
 //! with path validation to prevent escaping the workspace boundary.
@@ -97,7 +101,7 @@ impl ToolSpec for ReadFileTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read a UTF-8 file from the workspace. Use this instead of `cat`, `head`, `tail`, or `sed -n '..p'` in `Bash` — it's faster, sandbox-aware, and skips the approval prompt. Plain text is returned as-is and records the file snapshot required before `edit_file` will make a narrow in-place edit. CodeWhale config files and file-backed credential stores cannot be read with this tool; use `codewhale config list` or `codewhale auth status` for safe inspection. PDFs are text-extracted when the optional `pdftotext` executable (Poppler) is installed. Image screenshots are OCR-extracted when local OCR is available. Cannot read other non-PDF binaries.\n\nFor large files, use `start_line` and `max_lines` to read in chunks. By default, returns at most 200 lines (~16KB). If `truncated=\"true\"` in the response, use `next_start_line` to continue reading. For PDFs, use `pages` instead — `start_line`/`max_lines` only apply to text files."
+        "Read a UTF-8 file from the workspace. Use this instead of `cat`, `head`, `tail`, or `sed -n '..p'` in `Bash` — it's faster, sandbox-aware, and skips the approval prompt. Plain text is returned as-is and records the file snapshot required before `edit` will make a narrow in-place edit. CodeWhale config files and file-backed credential stores cannot be read with this tool; use `codewhale config list` or `codewhale auth status` for safe inspection. PDFs are text-extracted when the optional `pdftotext` executable (Poppler) is installed. Image screenshots are OCR-extracted when local OCR is available. Cannot read other non-PDF binaries.\n\nFor large files, use `start_line` and `max_lines` to read in chunks. By default, returns at most 200 lines (~16KB). If `truncated=\"true\"` in the response, use `next_start_line` to continue reading. For PDFs, use `pages` instead — `start_line`/`max_lines` only apply to text files."
     }
 
     fn input_schema(&self) -> Value {
@@ -138,7 +142,7 @@ impl ToolSpec for ReadFileTool {
         let file_path = context.resolve_path(path_str)?;
         if is_codewhale_credential_path(&file_path) {
             return Err(ToolError::permission_denied(
-                "read_file cannot expose CodeWhale configuration or credential-store files; use `codewhale config list` or `codewhale auth status` for safe inspection",
+                "File `read` cannot expose CodeWhale configuration or credential-store files; use `codewhale config list` or `codewhale auth status` for safe inspection",
             ));
         }
         let pages = optional_str(&input, "pages");
@@ -386,7 +390,7 @@ fn render_line_window(
     let mut output = format!("<file {attrs}>\n{shown_content}");
     if truncated_by_lines {
         output.push_str(&format!(
-            "\n[TRUNCATED] Showing lines {shown_first}-{shown_last} of {total_lines}. To continue, call read_file with path=\"{path_str}\" start_line={next_start} max_lines={max_lines}\n"
+            "\n[TRUNCATED] Showing lines {shown_first}-{shown_last} of {total_lines}. To continue, call File with action=\"read\" path=\"{path_str}\" start_line={next_start} max_lines={max_lines}\n"
         ));
     }
     if truncated_by_bytes {
@@ -674,7 +678,7 @@ impl ToolSpec for EditFileTool {
     }
 
     fn description(&self) -> &'static str {
-        "Replace text in a single file via exact search/replace after the file has been read with `read_file` in this session. Use this instead of `sed -i` in `Bash` for one unambiguous in-place edit. `search` must match exactly one location by default; when no exact match is found the tool retries with leading-whitespace-tolerant fuzzy matching automatically. The optional `fuzz` parameter is accepted for backward compatibility and is no longer needed. Returns a compact unified diff, not the full file. For structural, multi-block, or cross-file changes, use `apply_patch` or `write_file` instead."
+        "Replace text in a single file via exact search/replace after the file has been read with File `read` in this session. Use this instead of `sed -i` in `Bash` for one unambiguous in-place edit. `search` must match exactly one location by default; when no exact match is found the tool retries with leading-whitespace-tolerant fuzzy matching automatically. The optional `fuzz` parameter is accepted for backward compatibility and is no longer needed. Returns a compact unified diff, not the full file. For structural, multi-block, or cross-file changes, use File `patch` or `write` instead."
     }
 
     fn input_schema(&self) -> Value {
@@ -728,7 +732,7 @@ impl ToolSpec for EditFileTool {
             let char_count = search.chars().count();
             let line_count = search.lines().count();
             return Err(ToolError::invalid_input(format!(
-                "search and replace are identical ({char_count} chars, {line_count} lines), so no change is possible. This usually means `replace` was copied verbatim from `search` instead of carrying the intended edits. Recovery: re-read the file with read_file, then retry with a `replace` that is genuinely different from `search`; for large multi-line rewrites prefer apply_patch with a unified diff."
+                "search and replace are identical ({char_count} chars, {line_count} lines), so no change is possible. This usually means `replace` was copied verbatim from `search` instead of carrying the intended edits. Recovery: re-read the file with File action=\"read\", then retry with a `replace` that is genuinely different from `search`; for large multi-line rewrites prefer apply_patch with a unified diff."
             )));
         }
         if search.is_empty() {
@@ -791,7 +795,7 @@ impl ToolSpec for EditFileTool {
                             // missed; show the first lines of the search text
                             // so it can compare against the file's contents.
                             return Err(ToolError::execution_failed(format!(
-                                "Search string not found in {}. The search text starts with:\n{}\nRecovery: call read_file with path=\"{path_str}\" to inspect the current contents, then retry with a search string copied from the file.",
+                                "Search string not found in {}. The search text starts with:\n{}\nRecovery: call File with action=\"read\" path=\"{path_str}\" to inspect the current contents, then retry with a search string copied from the file.",
                                 file_path.display(),
                                 preview_search_for_error(search),
                             )));
@@ -799,7 +803,7 @@ impl ToolSpec for EditFileTool {
                         [(start, end)] => ((*start, *end), Some("punctuation")),
                         _ => {
                             return Err(ToolError::execution_failed(format!(
-                                "edit_file search is non-unique after punctuation normalization: matched {} locations in {}. Recovery: call read_file with path=\"{path_str}\" and retry with surrounding lines that make the search unique.",
+                                "File `edit` search is non-unique after punctuation normalization: matched {} locations in {}. Recovery: call File with action=\"read\" path=\"{path_str}\" and retry with surrounding lines that make the search unique.",
                                 punct_matches.len(),
                                 file_path.display()
                             )));
@@ -808,7 +812,7 @@ impl ToolSpec for EditFileTool {
                 }
                 _ => {
                     return Err(ToolError::execution_failed(format!(
-                        "edit_file search is non-unique after indentation normalization: matched {} locations in {}. Recovery: call read_file with path=\"{path_str}\" and retry with surrounding lines that make the search unique.",
+                        "File `edit` search is non-unique after indentation normalization: matched {} locations in {}. Recovery: call File with action=\"read\" path=\"{path_str}\" and retry with surrounding lines that make the search unique.",
                         indent_matches.len(),
                         file_path.display()
                     )));
@@ -816,8 +820,8 @@ impl ToolSpec for EditFileTool {
             }
         } else if exact_count > 1 {
             return Err(ToolError::execution_failed(format!(
-                "edit_file search is non-unique: matched {} locations in {}. \
-                 Recovery: call read_file with path=\"{path_str}\" and retry with surrounding lines that make the search unique.",
+                "File `edit` search is non-unique: matched {} locations in {}. \
+                 Recovery: call File with action=\"read\" path=\"{path_str}\" and retry with surrounding lines that make the search unique.",
                 exact_count,
                 file_path.display()
             )));

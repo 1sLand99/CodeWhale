@@ -462,7 +462,6 @@ fn repository_maintenance_helpers_stay_out_of_the_end_user_starter_pack() {
         "gh-file-issue",
         "gh-compile-issues",
         "gh-assign-issues",
-        "gh-plan-issues",
         "gh-find-prs",
         "gh-treasure-hunt",
         "gh-close-issues",

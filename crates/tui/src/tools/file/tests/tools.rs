@@ -355,8 +355,9 @@ async fn read_file_streamed_range_on_large_file_matches_windowed_contract() {
     assert!(result.content.contains("  1509│ line 1509"));
     assert!(!result.content.contains("  1510│"));
     assert!(result.content.contains(
-            "[TRUNCATED] Showing lines 1500-1509 of 2000. To continue, call read_file with path=\"large.txt\" start_line=1510 max_lines=10"
+            "[TRUNCATED] Showing lines 1500-1509 of 2000. To continue, call File with action=\"read\" path=\"large.txt\" start_line=1510 max_lines=10"
         ));
+    assert!(!result.content.contains("read_file"), "{}", result.content);
 
     // Default window (no range) on the same large file starts at line 1.
     let default_window = tool
@@ -1113,7 +1114,13 @@ async fn edit_file_rejects_non_unique_exact_match() {
     let message = err.to_string();
     assert!(message.contains("non-unique"), "{message}");
     assert!(message.contains("matched 2"), "{message}");
-    assert!(message.contains("read_file"), "{message}");
+    // Recovery text must name the live surface. `read_file` is retired and
+    // cannot dispatch (crates/tui/src/tools/registry.rs:2067).
+    assert!(
+        message.contains("call File with action=\"read\""),
+        "{message}"
+    );
+    assert!(!message.contains("read_file"), "{message}");
 
     let unchanged = fs::read_to_string(&test_file).expect("read");
     assert_eq!(unchanged, "hello world hello");
@@ -1361,7 +1368,8 @@ async fn test_edit_file_not_found() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(err.to_string().contains("not found"));
-    assert!(err.to_string().contains("read_file"));
+    assert!(err.to_string().contains("call File with action=\"read\""));
+    assert!(!err.to_string().contains("read_file"));
 }
 
 #[tokio::test]

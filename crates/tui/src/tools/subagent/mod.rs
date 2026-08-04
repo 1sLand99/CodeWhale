@@ -6661,7 +6661,7 @@ impl ToolSpec for AgentTool {
     fn description(&self) -> &'static str {
         concat!(
             "Start one focused background worker and return immediately with its agent_id; a prompt is enough for a read-only role. ",
-            "Use multiple starts for independent parallel tasks. Prefer type=implementer for write work and type=verifier (or run_verifiers) after writes settle — dispatch is not completion. ",
+            "Use multiple starts for independent parallel tasks. Prefer type=builder for write work and type=verifier (or the Run tool with action=\"verifiers\") after writes settle — dispatch is not completion. ",
             "For parallel write work use worktree=true so children do not collide in the parent checkout. ",
             "Add a Fleet profile, role, or explicit limits only when they improve the task. ",
             "Coordinate through this same tool: action=message queues a note without waking the child; action=followup delivers queued notes and wakes a running child for its next user-provenance turn; action=interrupt stops the current child turn while preserving its checkpoint; action=wait only observes. ",

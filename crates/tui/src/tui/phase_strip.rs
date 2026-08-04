@@ -5,8 +5,10 @@
 //! (working / waiting / approval / failed / done) render **above** the
 //! composer, while idle and typing keep a quiet phase line beneath it.
 //!
-//! Classic shell keeps the legacy footer-below-composer order; this module
-//! only decides Ocean placement and paints the one-line band.
+//! This module only decides Ocean placement and paints the one-line band. The
+//! Classic shell it used to defer to was removed in 0.9.4 — see the migration
+//! shim note at `crates/tui/src/tui/ocean.rs:35` — so there is no
+//! footer-below-composer fallback path left.
 
 use std::borrow::Cow;
 
