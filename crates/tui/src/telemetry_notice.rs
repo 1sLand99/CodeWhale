@@ -33,6 +33,24 @@ pub fn prompt_if_due(skip_onboarding: bool, config_path: Option<std::path::PathB
     if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
         return false;
     }
+    // Read what the config file and the environment already say *before*
+    // asking. The notice used to consult neither, so it ran on a machine whose
+    // operator had declared `CODEWHALE_TELEMETRY=0` and whose config file
+    // already said `telemetry = false`, and a `y` rewrote that `false` to
+    // `true`.
+    let store = match codewhale_config::ConfigStore::load(config_path.clone()) {
+        Ok(store) => store,
+        Err(error) => {
+            // A config we cannot read is a config we must not write. No notice
+            // means no decision, which is the off state, which is the default.
+            tracing::debug!("telemetry notice skipped; config unreadable: {error}");
+            return false;
+        }
+    };
+    let resolved = store
+        .config
+        .resolve_runtime_options(&codewhale_config::CliRuntimeOverrides::default());
+
     let mut state = match SetupState::load() {
         Ok(Some(state)) => state,
         // A missing record is a first run, which is exactly when the notice is
@@ -44,7 +62,12 @@ pub fn prompt_if_due(skip_onboarding: bool, config_path: Option<std::path::PathB
             return false;
         }
     };
-    if !state.needs_telemetry_notice(TELEMETRY_NOTICE_VERSION) {
+    let gate = NoticeGate {
+        needs_notice: state.needs_telemetry_notice(TELEMETRY_NOTICE_VERSION),
+        persisted_off: resolved.telemetry_explicit_off,
+        floor_in_force: codewhale_config::telemetry_floor_in_force(),
+    };
+    if !gate.may_ask() {
         return false;
     }
 
@@ -79,10 +102,50 @@ pub fn prompt_if_due(skip_onboarding: bool, config_path: Option<std::path::PathB
     opt_in
 }
 
+/// Everything that decides whether the question may be *put*, as opposed to how
+/// it is answered.
+///
+/// Being asked is not collection, but it is not free either: the answer is
+/// written to two durable registers, one of which may already hold the
+/// opposite. A question whose "yes" would reverse a decision somebody already
+/// made, or would be overridden by this environment anyway, is a question with
+/// no honest answer — so it is not asked.
+struct NoticeGate {
+    /// No decision recorded for the current notice version.
+    needs_notice: bool,
+    /// `telemetry = false` is in the config file. This is the persistent
+    /// opt-out the notice itself advertises; asking again and writing `true`
+    /// over it is exactly the reversal the notice promises not to perform.
+    persisted_off: bool,
+    /// An environment-level kill switch is in force. The operator has already
+    /// answered for this machine, and a `y` here could not take effect on this
+    /// run — but it would take effect on every later run that does not inherit
+    /// the variable.
+    floor_in_force: bool,
+}
+
+impl NoticeGate {
+    fn may_ask(&self) -> bool {
+        self.needs_notice && !self.persisted_off && !self.floor_in_force
+    }
+}
+
 /// Set `telemetry = true` in the same config file this process was launched
 /// with.
+///
+/// Re-reads the file rather than reusing the copy the gate was computed from:
+/// this is the only write in the feature that can turn collection *on*, so it
+/// re-establishes the invariant against the bytes on disk at the moment of the
+/// write, not against a snapshot taken before the user was even asked.
 fn write_config_opt_in(config_path: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     let mut store = codewhale_config::ConfigStore::load(config_path)?;
+    let resolved = store
+        .config
+        .resolve_runtime_options(&codewhale_config::CliRuntimeOverrides::default());
+    anyhow::ensure!(
+        !resolved.telemetry_explicit_off,
+        "the config file says telemetry = false; the first-run notice never reverses a persistent opt-out"
+    );
     store.config.set_value("telemetry", "true")?;
     store.save()
 }
@@ -170,6 +233,72 @@ mod tests {
         assert!(
             !rendered.contains("anonymized"),
             "the notice must not imply anonymization it does not perform"
+        );
+    }
+
+    fn gate(needs_notice: bool, persisted_off: bool, floor_in_force: bool) -> NoticeGate {
+        NoticeGate {
+            needs_notice,
+            persisted_off,
+            floor_in_force,
+        }
+    }
+
+    #[test]
+    fn the_notice_is_not_put_to_someone_who_has_already_answered_it_durably() {
+        // Regression: the gate consulted only the setup-state record, so on a
+        // machine with `CODEWHALE_TELEMETRY=0` exported and `telemetry = false`
+        // in the config file the notice rendered anyway — and `y` rewrote that
+        // `false` to `true`, reversing a persistent opt-out with no warning.
+        assert!(gate(true, false, false).may_ask(), "an ordinary first run");
+        assert!(
+            !gate(true, true, false).may_ask(),
+            "a persisted `telemetry = false` is an answer; do not ask again"
+        );
+        assert!(
+            !gate(true, false, true).may_ask(),
+            "an environment kill switch is an answer for this machine"
+        );
+        assert!(!gate(true, true, true).may_ask());
+        // And the original condition still governs: an answered notice is not
+        // re-asked for any reason.
+        for persisted_off in [false, true] {
+            for floor_in_force in [false, true] {
+                assert!(!gate(false, persisted_off, floor_in_force).may_ask());
+            }
+        }
+    }
+
+    #[test]
+    fn opting_in_never_reverses_a_persisted_opt_out() {
+        // Belt and braces behind the gate: this is the one write in the whole
+        // feature that can turn collection on, so it re-establishes the
+        // invariant against the bytes on disk at the moment of the write.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "telemetry = false\n").expect("seed config");
+
+        let error = write_config_opt_in(Some(path.clone()))
+            .expect_err("a persisted opt-out must not be overwritten");
+        assert!(
+            error.to_string().contains("never reverses"),
+            "unexpected error: {error}"
+        );
+        let after = std::fs::read_to_string(&path).expect("read back");
+        assert!(
+            after.contains("telemetry = false"),
+            "the file was rewritten: {after}"
+        );
+
+        // A file that has never said anything is writable, which is the
+        // ordinary opt-in path.
+        let fresh = dir.path().join("fresh.toml");
+        std::fs::write(&fresh, "").expect("seed fresh config");
+        write_config_opt_in(Some(fresh.clone())).expect("a fresh config accepts the opt-in");
+        assert!(
+            std::fs::read_to_string(&fresh)
+                .expect("read back")
+                .contains("telemetry = true")
         );
     }
 
