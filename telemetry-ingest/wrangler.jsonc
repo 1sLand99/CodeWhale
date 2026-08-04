@@ -1,0 +1,60 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "codewhale-telemetry-ingest",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-04-01",
+
+  // Write-only ingest. One POST route, no assets, no KV, no D1, no queues, no
+  // cron. Nothing here reads back what was written; querying is the SQL API,
+  // authenticated with the owner's token, out of band. See README.md.
+
+  // Workers Analytics Engine is the only storage. The dataset is created
+  // implicitly on the first successful `writeDataPoint`, so there is no
+  // resource to provision ahead of the deploy.
+  "analytics_engine_datasets": [
+    {
+      "binding": "TELEMETRY",
+      "dataset": "codewhale_telemetry"
+    }
+  ],
+
+  // Per-install rate limiting. Keyed on `install_id` from the validated batch
+  // body — never on a network address. 20 POSTs per 60s is generous against the
+  // client's two flush points per session (a startup drain at most once every
+  // six hours, and one bounded attempt at shutdown).
+  "ratelimits": [
+    {
+      "name": "RATE_LIMITER",
+      "namespace_id": "1001",
+      "simple": {
+        "limit": 20,
+        "period": 60
+      }
+    }
+  ],
+
+  // Invocation logs are OFF deliberately. Cloudflare describes them as
+  // "enriched with information available to Cloudflare in the context of the
+  // invocation", which is exactly the class of automatic per-request record
+  // this service promises not to keep. Nothing in `src/` logs anything either.
+  // `enabled` stays true so the owner can turn a specific, payload-free metric
+  // on later without a config archaeology dig.
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "invocation_logs": false
+    }
+  }
+
+  // ROUTE — the owner's step, not an agent's. Deploying with no route publishes
+  // only to `*.workers.dev`. To put it on a custom hostname, uncomment and set
+  // the DNS record first:
+  //
+  // "routes": [
+  //   { "pattern": "telemetry.codewhale.net", "custom_domain": true }
+  // ]
+  //
+  // Nothing is aimed at this endpoint until `telemetry_endpoint` is set, which
+  // is unset in the shipped default and stays that way until the owner deploys
+  // and verifies. See README.md, "Deploy".
+}
