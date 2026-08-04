@@ -27,7 +27,9 @@ published history, retag a shipped release, or force-push a shared ref);
 contributor credit carries onto the rewrite; the do-not-delete guardrail below
 still binds; and don't rewrite to avoid understanding.
 
-Longer form: `docs/AGENT_ETHOS.md`.
+The four bullets above are the authoritative statement of this rule. Don't
+restate them elsewhere — link here. (`docs/AGENT_ETHOS.md` is about stewardship
+and workflow, not about this; it is not a longer form of this section.)
 
 ## Build and test
 
