@@ -1280,17 +1280,37 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1100));
         }
         // A wide gap so git's whole-second commit timestamps land the cut
-        // unambiguously between the old and new pairs.
-        std::thread::sleep(Duration::from_secs(5));
+        // unambiguously between the old and new pairs. The margins are
+        // deliberately generous: this test runs under full-suite parallelism
+        // where a sleep can overrun, and the cut is wall-clock. At prune time
+        // the newest pair is ~0-1.2s old against a 6s cutoff, and the old
+        // pair is ~9s old — ~5s of slack in both directions.
+        std::thread::sleep(Duration::from_secs(8));
         for i in 0..2 {
             std::fs::write(repo.work_tree().join("f.txt"), format!("new{i}")).unwrap();
             repo.snapshot(&format!("new:{i}")).unwrap();
-            std::thread::sleep(Duration::from_millis(1100));
+            if i == 0 {
+                std::thread::sleep(Duration::from_millis(1100));
+            }
         }
-        assert_eq!(repo.list(usize::MAX).unwrap().len(), 4);
+        let before = repo.list(usize::MAX).unwrap();
+        assert_eq!(before.len(), 4);
+        // Guard the fixture itself: if load skewed the timestamps so the cut
+        // would not fall between the pairs, say so instead of failing later
+        // with a confusing count mismatch.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert!(
+            now - before[0].timestamp < 6 && now - before[2].timestamp > 6,
+            "fixture ages unusable for a 6s cut (newest {}s, oldest-surviving-pair {}s)",
+            now - before[0].timestamp,
+            now - before[2].timestamp
+        );
 
-        // Cut 3s back: the two old snapshots (≥5s old) drop, the two new ones survive.
-        let removed = repo.prune_older_than(Duration::from_secs(3)).unwrap();
+        // Cut 6s back: the two old snapshots drop, the two new ones survive.
+        let removed = repo.prune_older_than(Duration::from_secs(6)).unwrap();
         assert_eq!(removed, 2, "only the old tail should be removed");
 
         let remaining = repo.list(usize::MAX).unwrap();
