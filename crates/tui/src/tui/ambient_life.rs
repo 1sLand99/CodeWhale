@@ -8,10 +8,15 @@
 //!
 //! Motion language (shared with the rest of the shell): every mark can lerp
 //! between the water and its ink at a time-varying brightness. Fish carry a
-//! travelling sin² wave, jellyfish a slow floor-bounded pulse that opens and
-//! closes the dome while the tentacles trail it by ~350 ms, bubbles an
+//! travelling sin² wave, jellyfish a slow band-bounded pulse that opens and
+//! closes the dome while the tentacles trail it by ~0.6 s, bubbles an
 //! occasional raised-cosine glint. Phases are wall-clock keyed and entity
 //! periods deliberately never match, so nothing strobes in sync.
+//!
+//! The jellyfish is a *visitor*, not scenery: one at most, present for roughly
+//! a fifth of a ~5-minute cycle and dimmer than everything around it. See the
+//! `JELLY_VISIT_*` constants for the rarity knobs and why they are set where
+//! they are.
 //!
 //! Fish swim on a wrap-around path: they exit one edge and re-enter the
 //! other still facing their travel direction, so facing always equals
@@ -26,7 +31,9 @@
 //! under the silhouette — which does change with token throughput — so it is
 //! bounded by [`JELLY_MAX_TEXT_DODGE_COLS`].
 //!
-//! Under reduced motion, entities remain visible but static.
+//! Under reduced motion there is no ambient life at all: `ocean::life_presence`
+//! returns 0 and [`paint_marks`] returns before writing a cell. Marks are still
+//! *built* (the budget counters stay honest), just never painted.
 //!
 //! `render_ambient_life` returns per-frame budget counters
 //! ([`AmbientFrameStats`]): marks built always splits exactly into painted +
@@ -93,10 +100,13 @@ impl LifeDensity {
 
     #[must_use]
     fn jellyfish_count(self) -> usize {
+        // At most one jellyfish in the water at a time, at every tier. Two
+        // put a pulsing silhouette in *both* side lanes, which is what made
+        // them read as resident scenery instead of a passing visitor. The
+        // rarity knob that matters is the visit duty cycle
+        // ([`JELLY_VISIT_CYCLE_SLOTS`]), not the population.
         match self {
-            Self::Sparse => 1,
-            Self::Normal => 2,
-            Self::Rich => 2,
+            Self::Sparse | Self::Normal | Self::Rich => 1,
         }
     }
 
@@ -160,8 +170,8 @@ pub struct AmbientFrameStats {
     pub cells_written: u32,
 }
 
-/// Hard upper bound on marks built in one frame: 7 fish + 2 jellyfish × 5
-/// parts (2 dome rows + 3 tentacles) + 2 bubbles + 2 whale-cameo cells = 21,
+/// Hard upper bound on marks built in one frame: 7 fish + 1 jellyfish × 5
+/// parts (2 dome rows + 3 tentacles) + 2 bubbles + 2 whale-cameo cells = 16,
 /// plus headroom. This is a test-gate ceiling asserted against
 /// [`AmbientFrameStats::marks_built`], not a runtime clamp: the population is
 /// bounded by construction, and this constant is what fails the build if a
@@ -353,22 +363,27 @@ fn build_frame_marks(
         let x = lane_x
             .saturating_add(wobble)
             .min(area.width.saturating_sub(dome_w + 1));
-        let rise_rows = u128::from(area.height.saturating_sub(4).max(1));
-        let rise_period = 8_600u128.saturating_add((j as u128) * 1_400);
-        let risen = ((t.saturating_add(phase) / rise_period) % rise_rows) as u16;
+        // A visit is a short, slow rise near the floor followed by a long
+        // absence: the jelly climbs [`JELLY_VISIT_ROWS`] rows and then spends
+        // the rest of the cycle out of sight. Rows are discrete cells, so the
+        // per-row dwell stays long — a jellyfish should read as drifting, not
+        // as stepping.
+        let rise_period = JELLY_RISE_ROW_MS.saturating_add((j as u128) * JELLY_RISE_ROW_STAGGER_MS);
+        let slot = (t.saturating_add(phase) / rise_period) % JELLY_VISIT_CYCLE_SLOTS;
+        if slot >= u128::from(JELLY_VISIT_ROWS) {
+            continue; // still down in the dark between visits
+        }
+        let risen = slot as u16;
         let y = area.height.saturating_sub(3).saturating_sub(risen);
         if y == 0 || in_band(y) {
             continue;
         }
-        let dome_brightness = JELLY_BRIGHTNESS_FLOOR
-            + (1.0 - JELLY_BRIGHTNESS_FLOOR) * wave01(t, JELLY_PULSE_MS, phase);
-        let tentacle_brightness = JELLY_BRIGHTNESS_FLOOR
-            + (1.0 - JELLY_BRIGHTNESS_FLOOR)
-                * wave01(
-                    t.saturating_sub(JELLY_TENTACLE_LAG_MS),
-                    JELLY_PULSE_MS,
-                    phase,
-                );
+        let dome_brightness = jelly_glow(wave01(t, JELLY_PULSE_MS, phase));
+        let tentacle_brightness = jelly_glow(wave01(
+            t.saturating_sub(JELLY_TENTACLE_LAG_MS),
+            JELLY_PULSE_MS,
+            phase,
+        ));
         // The dome opens/closes on the same clock as its glow; the parked
         // pose holds the half-pulsed (contracted) frame.
         let pulse_frame = usize::from(wave01(t, JELLY_PULSE_MS, phase) > 0.5);
@@ -390,7 +405,10 @@ fn build_frame_marks(
                 y: row,
                 glyph,
                 jellyfish: Some(j),
-                depth: Depth::Midground,
+                // Background ink, same as the tentacles: the dome used to sit
+                // a layer nearer than everything else in the side lanes,
+                // which is most of why it drew the eye.
+                depth: Depth::Background,
                 style_mod: None,
                 brightness: Some(dome_brightness),
             });
@@ -558,14 +576,56 @@ const JELLY_TENTACLE_FRAMES: &[&str] = &["|", "/", "|", "\\"];
 /// the single moment a left-hand candidate overtakes a right-hand one.
 const JELLY_MAX_TEXT_DODGE_COLS: u16 = 3;
 
-const JELLY_PULSE_MS: u128 = 2_900;
-/// The tentacles repeat the dome pulse this much later.
-const JELLY_TENTACLE_LAG_MS: u128 = 350;
+// --- Jellyfish rarity ------------------------------------------------------
+// The jellyfish is the loudest thing in the water: a five-cell silhouette that
+// changes glyph as it pulses, parked in a side lane. Before v0.9.4 it was also
+// permanently resident, which is the combination that made it obnoxious rather
+// than incidental. Everything below is one knob with one stated intent, so the
+// balance can be retuned without re-deriving it from the motion code.
+
+/// Wall-clock milliseconds a jellyfish spends on each row of its rise
+/// (~9.4 s). A row step is a discrete one-cell jump, so the dwell has to stay
+/// long or the rise reads as stepping rather than drifting.
+const JELLY_RISE_ROW_MS: u128 = 9_400;
+/// Per-jelly rise-rate stagger, so two jellyfish (should a tier ever want
+/// them again) can never step in lockstep.
+const JELLY_RISE_ROW_STAGGER_MS: u128 = 1_400;
+/// Rows climbed in a single visit — about 56 s of presence.
+const JELLY_VISIT_ROWS: u16 = 6;
+/// Row-slots in one full visit cycle. Slots at or past [`JELLY_VISIT_ROWS`]
+/// are spent out of sight, and that gap is *the* rarity knob: at 32 slots the
+/// cycle is ~5 min and a jellyfish is present under a fifth of the time —
+/// occasionally noticed, never resident. Raise it to make them rarer; lower
+/// it to bring them back. It must stay `> JELLY_VISIT_ROWS` or the jelly
+/// becomes permanent again.
+const JELLY_VISIT_CYCLE_SLOTS: u128 = 32;
+
+// --- Jellyfish motion and glow ---------------------------------------------
+
+/// Dome pulse period. Slow on purpose: a pulse fast enough to notice in
+/// peripheral vision is a pulse that interrupts reading.
+const JELLY_PULSE_MS: u128 = 5_200;
+/// The tentacles repeat the dome pulse this much later. Held at ~12% of
+/// [`JELLY_PULSE_MS`] — the lag is what sells "jellyfish", so it scales with
+/// the pulse rather than staying an absolute number.
+const JELLY_TENTACLE_LAG_MS: u128 = 620;
 /// Wall-clock milliseconds per tentacle sway frame.
-const JELLY_TENTACLE_SWAY_MS: u128 = 1_400;
+const JELLY_TENTACLE_SWAY_MS: u128 = 2_600;
 /// Per-column sway phase offset, so adjacent tentacles never move in sync.
-const JELLY_TENTACLE_PHASE_STEP_MS: u128 = 450;
-const JELLY_BRIGHTNESS_FLOOR: f32 = 0.35;
+/// Keep this a non-divisor of [`JELLY_TENTACLE_SWAY_MS`] or the trio strobes.
+const JELLY_TENTACLE_PHASE_STEP_MS: u128 = 700;
+/// Dimmest point of the pulse: still legible against the water, no lower.
+const JELLY_BRIGHTNESS_FLOOR: f32 = 0.28;
+/// Brightest point of the pulse. Deliberately well short of full ink — the
+/// jellyfish used to swing floor-to-1.0, and that swing (not its presence)
+/// is what pulled the eye off the transcript.
+const JELLY_BRIGHTNESS_CEIL: f32 = 0.62;
+
+/// Map a `[0, 1]` pulse onto the jellyfish's shallow glow band.
+#[must_use]
+fn jelly_glow(pulse: f32) -> f32 {
+    JELLY_BRIGHTNESS_FLOOR + (JELLY_BRIGHTNESS_CEIL - JELLY_BRIGHTNESS_FLOOR) * pulse
+}
 
 /// Bubbles stay mostly steady with occasional glints, not a constant wave.
 const BUBBLE_BRIGHTNESS_FLOOR: f32 = 0.55;

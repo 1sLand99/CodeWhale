@@ -107,11 +107,18 @@ impl ChatWidget {
             .then(|| crate::tui::ocean::OceanRamp::for_theme(&app.ui_theme))
             .flatten();
         let ambient_inks = Some(crate::tui::ocean::ambient_inks(&app.ui_theme));
-        let completion_elapsed_ms = (!app.low_motion && app.fancy_animations)
+        // The completion breath is authored decorative motion, so it rides the
+        // same motion gate as everything else in the water. Both the column's
+        // settle flourish and ambient life's presence read this one clock:
+        // presence needs the settle tail past the breath, the column does not.
+        let completion_life_clock = app
+            .motion_policy()
+            .allows_decorative()
             .then_some(())
             .and(app.ocean_completion_started_at)
-            .map(|started| started.elapsed().as_millis())
-            .filter(|elapsed| *elapsed < 800);
+            .map(|started| started.elapsed().as_millis());
+        let completion_elapsed_ms = completion_life_clock
+            .filter(|elapsed| *elapsed < crate::tui::ocean::COMPLETION_BREATH_MS);
         let render_empty_state = should_render_empty_state(app);
         let phase = ShellPhase::from_app(app);
         // Keep the water alive while a turn is doing work, even after the
@@ -128,9 +135,14 @@ impl ChatWidget {
         // Life presence eases the animated/static boundary as a pure function
         // of the monotonic clocks (see ocean::life_presence): bursty fast
         // streams ramp in, quiet waits settle out, never a hard snap.
+        //
+        // This deliberately takes the *gated* completion clock. Reading
+        // `app.ocean_completion_started_at` raw here let the completion branch
+        // of `life_presence` short-circuit the `!animated` check, so a
+        // reduced-motion session got ~1.4 s of full ambient life after every
+        // successful turn — precisely while the user was reading the result.
         let life_presence = crate::tui::ocean::life_presence(
-            app.ocean_completion_started_at
-                .map(|started| started.elapsed().as_millis()),
+            completion_life_clock,
             app.turn_started_at
                 .map(|started| started.elapsed().as_millis()),
             ocean_animated,
@@ -5947,6 +5959,37 @@ mod tests {
         assert!(!widget.ocean_animated);
         assert!(!widget.ambient_life);
         assert!(!should_render_empty_state(&app));
+    }
+
+    #[test]
+    fn reduced_motion_gets_no_ambient_life_through_the_completion_breath() {
+        // The completion branch of `life_presence` runs before its `!animated`
+        // check, so feeding it an ungated clock flashed a full field of fish
+        // and jellyfish for ~1.4 s after every successful turn even with
+        // `low_motion = true`. Reduced motion means reduced motion.
+        for (low_motion, fancy_animations) in [(true, true), (false, false)] {
+            let mut app = create_test_app();
+            app.low_motion = low_motion;
+            app.fancy_animations = fancy_animations;
+            app.ocean_completion_started_at = Some(Instant::now());
+
+            let widget = ChatWidget::new(&mut app, Rect::new(0, 0, 100, 20));
+
+            assert_eq!(
+                widget.life_presence_fixed, 0,
+                "low_motion={low_motion} fancy={fancy_animations} leaked ambient life"
+            );
+        }
+
+        let mut full = create_test_app();
+        full.low_motion = false;
+        full.fancy_animations = true;
+        full.ocean_completion_started_at = Some(Instant::now());
+        let widget = ChatWidget::new(&mut full, Rect::new(0, 0, 100, 20));
+        assert!(
+            widget.life_presence_fixed > 0,
+            "full motion should still get the completion breath"
+        );
     }
 
     #[test]
