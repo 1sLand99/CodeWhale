@@ -202,8 +202,10 @@ The interactive TUI has a few stable regions:
 - Transcript: the conversation, tool calls, command output summaries, and
   model responses.
 - Composer: where you type prompts, slash commands, and file mentions.
-- Sidebar: contextual panels for work state, tasks, agents, or related
-  session information.
+- Work bar: the strip above the transcript (or an optional side rail) that
+  holds the active goal, the to-do list, and sub-agents. Rows stay for the
+  whole session — finished work reads as done rather than disappearing — and
+  clicking a row (or pressing `Enter` on it) opens its detail.
 - Status and footer areas: live activity, queued follow-ups, and short command
   hints.
 
@@ -224,9 +226,9 @@ The composer accepts normal prompts and slash commands. Type `/` to discover
 available commands. Use file mentions when you want the model to focus on a
 specific file or directory instead of searching broadly.
 
-The sidebar is useful when a turn spans multiple steps. It can keep goals,
-agent state, and contextual information visible while the transcript continues
-to grow.
+The work bar is useful when a turn spans multiple steps. It keeps the goal,
+the to-do list, and agent state visible while the transcript continues to
+grow — including after the work settles, so you can still open what happened.
 
 Keyboard shortcuts vary by context, terminal, and platform. This guide avoids
 duplicating the full shortcut catalog so it does not drift from the TUI.

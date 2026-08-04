@@ -160,10 +160,10 @@ The short public vocabulary is:
   may finish separately; dispatch is never presented as completion.
 
 UI guidance: keep the main transcript calm. A Workflow run should appear as a
-compact progress card plus Work/Agents sidebar rows with phase names, worker
-counts, receipts, and nested indentation for child workers. Use the whale mark
-sparingly as an active header/status signal; avoid repeating emoji-heavy rows
-for every worker.
+compact progress card plus work-bar rows (the strip above the transcript, or
+a side rail) with phase names, worker counts, receipts, and nested
+indentation for child workers. Use the whale mark sparingly as an active
+header/status signal; avoid repeating emoji-heavy rows for every worker.
 
 ## Exact Fleets and the Reasoning Router
 

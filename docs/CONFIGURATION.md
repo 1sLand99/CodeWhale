@@ -1466,11 +1466,23 @@ Common settings keys:
 - `paste_burst_detection` (on/off, default on): fallback rapid-key paste
   detection for terminals that do not emit bracketed-paste events. This is
   independent of terminal bracketed-paste mode.
-- `work_surface_placement` (`top`, `left`, or `right`; default `top`): places
-  Ocean's Tasks / To-do / Workers surface above the transcript or in a side
-  rail. Side choices fall back to the top layout on narrow terminals and in
-  Classic without changing the saved Ocean preference. Set it live with
-  `/config work_surface_placement right --save` (or `left` / `top`).
+- `work_surface_placement` (`top`, `left`, `right`, or `off`; default `top`):
+  places the work bar — Tasks / To-do / Workers — above the transcript (the
+  default top bar), in a side rail, or hides it entirely (`off`). Side
+  choices fall back to the top layout on narrow terminals without changing
+  the saved preference. Set it live with
+  `/config work_surface_placement right --save` (or `left` / `top` / `off`).
+- `rail_panel` (`tasks`, `agents`, `context`, `pinned`; default `tasks`, alias
+  key `rail`): which panel the work bar shows. Panel selection is orthogonal
+  to placement. `tasks` is the full live work list (to-dos, then sub-agents);
+  `agents` narrows to the sub-agent rows; `pinned` shows the goal plus the
+  to-do checklist; `context` is a read-only session-facts list. In every
+  panel except `context`, rows are selectable and clickable and open their
+  detail surface. `Alt+!`/`Alt+@`/`Alt+#`/`Alt+$` switch panels live.
+- `work_surface_top_height` (2–16) and `work_surface_side_width` (26–80):
+  ceilings for the top strip's height and a side rail's width. Both are
+  normally persisted by dragging the divider rather than edited by hand; the
+  strip still auto-fits its content below the ceiling.
 - `focus_texture` (`off`, `scrim`, or `grain`; default `off`): focus-context
   texture for modal views. `scrim` dims the already-rendered background
   outside the focused modal toward the theme surface; `grain` sprinkles
@@ -1524,16 +1536,16 @@ Common settings keys:
 - `launch_screen` (`on`/`off`; default `off`): show the pre-session New/
   Resume/Worktree menu. With it off, Codewhale enters a new session directly;
   resume remains available in-session.
-- `sidebar_focus` (`pinned`, `auto`, `tasks`, `agents`, `context`, `hidden`; default
-  `pinned`): selects the right sidebar focus. `pinned` keeps the right sidebar
-  visible when the terminal is wide enough and composes Work, Tasks, Agents,
-  and optional Context as they have live content. `auto` uses the same composed
-  panels but collapses while idle. Saving
-  `/sidebar auto --save` records an explicit auto-collapse opt-in so upgraded
-  settings files that only captured the old default can migrate back to `pinned`.
-  `hidden` disables the right sidebar entirely so raw terminal selection cannot
-  cross from the transcript into sidebar borders. Legacy `plan` and `todos`
-  values, plus the old `work` name, are accepted and normalized to `pinned`.
+- `sidebar_focus` (legacy, migration-only): the classic right sidebar this key
+  configured was removed in the 0.9.4 rail unification. The key is still read
+  once so old settings carry forward, then folds into the live keys:
+  `pinned`/`work`/`plan`/`todos` become `rail_panel = "pinned"`,
+  `agents`/`subagents` become `rail_panel = "agents"`, `context`/`session`
+  become `rail_panel = "context"`, `tasks`/`auto` (the old default) become the
+  `tasks` panel, `sessions` enables `sessions_rail`, and `hidden` turns the
+  work bar off via `work_surface_placement = "off"`. An explicit `rail_panel`
+  in the file always wins over the migrated value. Configure the work bar with
+  `rail_panel` and `work_surface_placement`, not this key.
 - `sessions_rail` (`on`/`off`; default `off`): show the persistent Sessions
   rail in the sidebar panel stack. Rows list this workspace's recent
   non-archived sessions, newest first, with the active one marked; activating a

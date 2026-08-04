@@ -14,13 +14,17 @@ the legacy god files.
 `ui.rs` and `mouse_ui.rs` are adapters: they forward terminal events and apply
 typed actions. They must not regain per-surface state or rendering rules.
 
-## Rollback contract
+## Rollback contract (historical — Classic is gone)
 
-Classic treatment remains the compatibility shell until Ocean passes the full
-size/state/device matrix. Reverting Ocean should require changing the shell
-composition call sites, not reconstructing code removed from `sidebar.rs`.
+Classic and its sidebar were deleted in `1b07e2cbc` (0.9.4 rail
+unification), after the gates below were satisfied. This section is kept as
+a record of that decision, not as live guidance: there is no Classic shell
+to roll back to, and "restore old behavior" must never mean resurrecting
+`sidebar.rs`. Panel logic lives in `work_surface/panels.rs` and the row
+machinery in `work_surface/render/`; the remaining `tui::sidebar` line
+builders are `pub(crate)` helpers being wound down.
 
-Do not delete Classic or its sidebar until all of these are true:
+The original gates, for provenance:
 
 1. `40x12`, `60x16`, `80x24`, `100x32`, and `140x40` pass keyboard and mouse
    interaction checks.
@@ -29,6 +33,3 @@ Do not delete Classic or its sidebar until all of these are true:
 4. A release build is installed through `scripts/release/install-dogfood.sh`,
    and its commit/SHA receipt matches the running binary.
 5. Hunter accepts the live candidate.
-
-After those gates, remove compatibility modules in a dedicated cleanup change;
-do not mix their deletion with feature implementation.

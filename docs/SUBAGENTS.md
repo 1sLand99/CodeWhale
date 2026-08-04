@@ -485,9 +485,12 @@ Each `SubAgentManager` instance assigns itself a fresh `session_boot_id` on
 construction. Every new session stamps the agent with that id; the workspace
 state file records it for restart recovery.
 
-Sidebar/status projections focus on current-session agents by default.
+Work-bar/status projections focus on current-session agents by default.
 Prior-session agents that are not still running are treated as archived records
-so the model does not mistake stale work for live work.
+so the model does not mistake stale work for live work. This is a
+*prior-session* rule only: agents that finished in the CURRENT session keep
+their work-bar rows for the rest of the session (quiet completion), and their
+details still open from those rows.
 
 Records that loaded from a pre-#405 persisted state file (no
 `session_boot_id` field) classify as prior-session because the

@@ -26,8 +26,8 @@ Global key chords are not yet user-configurable — tracked for a future release
 | `Ctrl-Shift-E` / `Cmd-Shift-E` | Toggle the file-tree sidebar                          |
 | `Alt-G` / `Alt-Shift-G` | Scroll transcript to top / bottom when the composer is empty |
 | `Alt-1`-`Alt-8`      | Dispatch Hotbar slots 1-8 when no modal or inline picker is open |
-| `Alt-!` / `Alt-@` / `Alt-#` / `Alt-$` / `Alt-0` | Focus Pinned / Tasks / Agents / Context / Auto sidebar |
-| `Ctrl-Alt-0`         | Hide/show the pinned sidebar                                    |
+| `Alt-!` / `Alt-@` / `Alt-#` / `Alt-$` | Select the work-bar panel: Tasks / Agents / Context / Pinned |
+| `Ctrl-Alt-0`         | Toggle the work bar off / back to the top placement             |
 | `Alt-L`              | Open the pager for the last message (composer empty)             |
 | `Alt-P` / `Alt-A` / `Alt-Y` | Jump to Plan / Act / Operate mode (alternative to `Tab` cycling) |
 | `Ctrl-X` (Activity sidebar) | Cancel all running background shell jobs                  |
@@ -157,15 +157,19 @@ terminal and are intentionally separate from Codewhale's `Ctrl-C` selection
 binding. Over SSH, Codewhale sends copy requests back through OSC 52, or via
 tmux's `load-buffer -w` path when running inside tmux.
 
-## Sidebar (when sidebar has focus)
+## Work bar (after `Alt-W` claims focus)
 
 | Chord                | Action                                              |
 |----------------------|-----------------------------------------------------|
-| `↑` / `↓` / `j` / `k`| Move selection                                     |
-| `Enter`              | Activate the selected item (open / focus / cancel) |
-| `Tab`                | Cycle to next sidebar panel (Work → Tasks → Agents → Context) |
-| `Ctrl-X`             | Cancel all running background shell jobs when the Tasks panel is focused |
-| `Esc`                | Return focus to composer                           |
+| `↑` / `↓`            | Move selection                                     |
+| `Home` / `End`       | Jump to the first / last row                       |
+| `PageUp` / `PageDown`| Move selection a viewport at a time                |
+| `Enter`              | Open the selected row's world (work inspector / agent details); on an already-open row, close it |
+| `Esc`                | Close the open detail, else return focus to the composer |
+| any printable key    | Return focus to the composer (typing always wins)  |
+
+Mouse parity: clicking any work-bar row does what `Enter` does, in every
+panel and placement. `Alt-!`/`Alt-@`/`Alt-#`/`Alt-$` switch panels.
 
 ## Slash-command palette (after `Ctrl-K` or typing `/`)
 
