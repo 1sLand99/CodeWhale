@@ -9004,7 +9004,7 @@ fn persisted_advisory_assignment_roles_replay_and_repersist_as_consultant() {
 /// helpers (depth, cancellation, child_runtime). Doesn't construct a real
 /// HTTP client — calls that hit `runtime.client` would fail, but the
 /// helpers we test here don't.
-fn stub_runtime() -> SubAgentRuntime {
+pub(crate) fn stub_runtime() -> SubAgentRuntime {
     use tokio_util::sync::CancellationToken;
 
     let workspace = std::env::temp_dir().join("codewhale-test-stub");
@@ -13929,5 +13929,172 @@ fn the_launched_authority_is_the_one_the_spawn_boundary_accepts() {
     assert!(
         verify_fleet_authority_input(&other.fingerprint(), &input).is_err(),
         "one member's receipt must not authorize another member's child"
+    );
+}
+// -- resume-from-checkpoint tests (checkpoint-based continuation) --
+
+#[tokio::test]
+async fn resume_from_checkpoint_spawns_seeded_agent_with_checkpoint_context() {
+    let tmp = tempdir().unwrap();
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    let (agent_id, _handle) = {
+        let mut guard = manager.write().await;
+        guard.insert_test_interrupted_continuable_agent(
+            "paused_child",
+            tmp.path(),
+            vec![Message {
+                role: "user".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "prior work".to_string(),
+                    cache_control: None,
+                }],
+            }],
+        )
+    };
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+    // Deliberately leave the caller's workspace as the stub default (a temp
+    // dir different from the interrupted child's) so the workspace-restore
+    // behavior is actually exercised.
+    assert_ne!(
+        runtime.context.workspace,
+        tmp.path().to_path_buf(),
+        "test setup must use distinct workspaces"
+    );
+
+    let resumed = {
+        let mut guard = manager.write().await;
+        guard
+            .resume_from_checkpoint(Arc::clone(&manager), runtime, &agent_id, "please continue")
+            .expect("resume ok")
+    };
+    assert_ne!(
+        resumed.agent_id, agent_id,
+        "resume runs under a new agent id"
+    );
+
+    let guard = manager.read().await;
+    let agent = guard
+        .agents
+        .get(&resumed.agent_id)
+        .expect("resumed agent record");
+    assert!(agent.prompt.contains("RESUMED SESSION"), "{}", agent.prompt);
+    assert!(agent.prompt.contains("prior work"), "{}", agent.prompt);
+    assert!(agent.prompt.contains("please continue"), "{}", agent.prompt);
+    // The resumed loop runs in the interrupted child's workspace, not the
+    // caller's (worktree/cwd children must not resume in the wrong directory).
+    assert_eq!(
+        agent.workspace,
+        tmp.path(),
+        "resumed agent must keep the interrupted child's workspace"
+    );
+
+    // The prior terminal record stays immutable.
+    let prior = guard.agents.get(&agent_id).expect("prior record");
+    assert!(matches!(prior.status, SubAgentStatus::Interrupted(_)));
+}
+
+#[tokio::test]
+async fn resume_from_checkpoint_is_idempotent_across_repeated_followups() {
+    let tmp = tempdir().unwrap();
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    let (agent_id, _handle) = {
+        let mut guard = manager.write().await;
+        guard.insert_test_interrupted_continuable_agent(
+            "paused_child",
+            tmp.path(),
+            vec![Message {
+                role: "user".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "prior work".to_string(),
+                    cache_control: None,
+                }],
+            }],
+        )
+    };
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+
+    let first = {
+        let mut guard = manager.write().await;
+        guard
+            .resume_from_checkpoint(Arc::clone(&manager), runtime.clone(), &agent_id, "continue")
+            .expect("first resume ok")
+    };
+    let second = {
+        let mut guard = manager.write().await;
+        guard
+            .resume_from_checkpoint(Arc::clone(&manager), runtime, &agent_id, "continue again")
+            .expect("second resume ok")
+    };
+    assert_eq!(
+        first.agent_id, second.agent_id,
+        "a repeated resume must return the existing resumed target, not spawn a duplicate loop"
+    );
+
+    // The second follow-up must not be silently dropped: it is forwarded to
+    // the already-resumed target (delivered if it is still live, queued
+    // otherwise).
+    let guard = manager.read().await;
+    let delivered_or_queued = guard.child_was_woken(&first.agent_id)
+        || guard.queued_mail_depth(&first.agent_id).unwrap_or(0) >= 1;
+    assert!(
+        delivered_or_queued,
+        "a repeated followup must reach the resumed target"
+    );
+}
+
+#[tokio::test]
+async fn resume_from_checkpoint_rejects_non_interrupted_agents() {
+    let tmp = tempdir().unwrap();
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    let agent_id = {
+        let mut guard = manager.write().await;
+        guard.insert_test_running_agent("running_child", tmp.path())
+    };
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+
+    let result = {
+        let mut guard = manager.write().await;
+        guard.resume_from_checkpoint(Arc::clone(&manager), runtime, &agent_id, "nope")
+    };
+    let err = result.expect_err("non-interrupted agents must fail closed");
+    assert!(
+        err.to_string().contains("only interrupted children"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn resume_from_checkpoint_rejects_missing_continuable_checkpoint() {
+    let tmp = tempdir().unwrap();
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 4);
+    let agent_id = {
+        let mut guard = manager.write().await;
+        // Interrupted, but without a continuable checkpoint tail.
+        guard.insert_test_running_agent("interrupted_no_cp", tmp.path());
+        let id = guard
+            .agents
+            .iter()
+            .find(|(_, agent)| agent.session_name == "interrupted_no_cp")
+            .map(|(id, _)| id.clone())
+            .expect("agent id");
+        if let Some(agent) = guard.agents.get_mut(&id) {
+            agent.status = SubAgentStatus::Interrupted("no checkpoint".to_string());
+        }
+        id
+    };
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+
+    let result = {
+        let mut guard = manager.write().await;
+        guard.resume_from_checkpoint(Arc::clone(&manager), runtime, &agent_id, "nope")
+    };
+    let err = result.expect_err("agents without a continuable checkpoint must fail closed");
+    assert!(
+        err.to_string().contains("no continuable checkpoint"),
+        "{err}"
     );
 }
