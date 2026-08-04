@@ -9,6 +9,7 @@
 //! model id and effort tier.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::{
@@ -241,6 +242,10 @@ struct ModelPickerRow {
     hint: String,
     metadata: EffectivePickerMetadata,
     selectable: bool,
+    /// Why this route cannot be attempted, kept structured so the scannable
+    /// row can show the reason without re-parsing the prose `hint`. `None`
+    /// whenever the route is attemptable.
+    blocked_reason: Option<String>,
     /// Whether this provider/model pair belongs in the conservative ordinary
     /// chooser. Explicit catalog views ignore this flag.
     enabled: bool,
@@ -729,7 +734,7 @@ impl ModelPickerView {
         area: Rect,
         buf: &mut Buffer,
         title: &str,
-        rows: Vec<(String, String)>,
+        rows: Vec<PaneRow>,
         state: PaneRenderState,
     ) {
         let visible_height = usize::from(area.height.saturating_sub(1));
@@ -773,8 +778,13 @@ impl ModelPickerView {
             ..area
         };
 
+        // Column widths are measured over the rows actually on screen, so the
+        // route column lands at one predictable offset for the whole page
+        // instead of drifting with whatever long id happens to be scrolled in.
+        let columns = ModelRowColumns::for_page(&rows[start.min(rows.len())..end.min(rows.len())]);
+
         let mut lines = Vec::with_capacity(end.saturating_sub(start));
-        for (idx, (label, hint)) in rows.iter().enumerate().skip(start).take(end - start) {
+        for (idx, row) in rows.iter().enumerate().skip(start).take(end - start) {
             let row_y = inner.y.saturating_add(lines.len() as u16);
             self.row_hitboxes.borrow_mut().push((
                 Rect::new(inner.x, row_y, inner.width, 1),
@@ -789,10 +799,19 @@ impl ModelPickerView {
                     .visible_model_rows()
                     .get(idx)
                     .is_some_and(|row| !row.selectable);
+            // Marker precedence: a locked route first (it is the reason Enter
+            // will not work), then the keyboard cursor, then the route this
+            // session is already on. `CURRENT` is the charter's "current human
+            // choice" mark, so "which one am I on?" is answered by shape rather
+            // than by a second accent colour.
             let marker = if locked {
                 "🔒"
+            } else if is_selected {
+                crate::tui::glyphs::SELECTION
+            } else if row.active {
+                crate::tui::glyphs::CURRENT
             } else {
-                crate::tui::glyphs::selection_marker(is_selected)
+                " "
             };
             let label_style = if is_selected && !locked {
                 menu_style::selected_row_style()
@@ -811,10 +830,10 @@ impl ModelPickerView {
                 Style::default().fg(palette::TEXT_MUTED)
             };
             let spans = picker_row_spans(
-                label,
-                hint,
+                row,
                 marker,
                 usize::from(inner.width),
+                columns,
                 label_style,
                 hint_style,
             );
@@ -850,35 +869,312 @@ fn visible_row_window(selected: usize, total: usize, viewport_height: usize) -> 
     (start, start + visible)
 }
 
+/// Widest Thinking row plus its marker: `max  (extra-high reasoning)`.
+const EFFORT_PANE_WIDTH: u16 = 30;
+
+/// Give the model list the width the Thinking pane cannot use.
+///
+/// The generic list/detail split caps the list at 52 columns and hands the
+/// remainder to the detail pane. Thinking rows are a fixed, short vocabulary,
+/// so on a wide terminal most of the row went to a pane with nothing to put
+/// there while the model rows — which carry the id, route and metadata that
+/// tell near-identical routes apart — were squeezed into half a screen.
+fn widen_model_pane(layout: ListDetailLayout) -> ListDetailLayout {
+    if layout.stacked {
+        return layout;
+    }
+    let gap = layout
+        .detail
+        .x
+        .saturating_sub(layout.list.x.saturating_add(layout.list.width));
+    let total = layout.list.width + gap + layout.detail.width;
+    let detail_width = layout.detail.width.min(EFFORT_PANE_WIDTH);
+    let list_width = total.saturating_sub(gap + detail_width);
+    ListDetailLayout {
+        list: Rect {
+            width: list_width,
+            ..layout.list
+        },
+        detail: Rect {
+            x: layout.list.x + list_width + gap,
+            width: detail_width,
+            ..layout.detail
+        },
+        stacked: false,
+    }
+}
+
+/// One rendered row in either picker pane, split into the columns the row is
+/// laid out from.
+///
+/// Model rows fill all three: the wire id (`primary`), the route identity that
+/// separates same-named models on different endpoints (`route`), and the facts
+/// that actually vary between neighbouring rows (`meta`). Thinking-effort rows
+/// leave `route` empty and keep their descriptive `meta`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PaneRow {
+    primary: String,
+    route: String,
+    /// Metadata as separable units. Kept as a list so a squeezed column sheds
+    /// whole facts instead of rendering half a word.
+    meta: Vec<String>,
+    /// The route this session is already on.
+    active: bool,
+}
+
+impl PaneRow {
+    fn effort(primary: String, meta: String) -> Self {
+        Self {
+            primary,
+            route: String::new(),
+            meta: if meta.is_empty() {
+                Vec::new()
+            } else {
+                vec![meta]
+            },
+            active: false,
+        }
+    }
+
+    fn meta_width(&self) -> usize {
+        unicode_width::UnicodeWidthStr::width(self.meta.join(" · ").as_str())
+    }
+}
+
+/// Per-page column offsets for a picker pane.
+///
+/// Rows used to render as `label  (one long parenthesised hint)`, which meant
+/// the hint was dropped whole whenever it did not fit — and at every real
+/// terminal width it never fit, so a dozen DeepSeek routes all rendered as
+/// nothing but their near-identical ids. Fixed columns fix that: each field
+/// gets a measured share of the row and is truncated on its own, so the
+/// distinguishing token is always on screen at a predictable offset.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ModelRowColumns {
+    primary: usize,
+    route: usize,
+    meta: usize,
+}
+
+/// Width reserved for the marker glyph itself. The lock is a two-column emoji
+/// while `▸` and `●` are one, so the cell is padded to the widest of them —
+/// otherwise a single locked row shifts every column on its line by one.
+const MARKER_CELL_WIDTH: usize = 2;
+/// ` ▸  ` — one leading space, the marker cell, one trailing space.
+const ROW_PREFIX_WIDTH: usize = MARKER_CELL_WIDTH + 2;
+/// Blank cells between two columns.
+const COLUMN_GAP: usize = 2;
+/// Below this a route column tells the user nothing, so the space goes to the
+/// id instead.
+const MIN_ROUTE_WIDTH: usize = 6;
+/// Below this the metadata column cannot hold even a context-window token.
+const MIN_META_WIDTH: usize = 4;
+
+impl ModelRowColumns {
+    /// Measure the natural width each column wants, over the rows on screen.
+    fn for_page(rows: &[PaneRow]) -> Self {
+        let widest = |pick: fn(&PaneRow) -> usize| rows.iter().map(pick).max().unwrap_or(0);
+        Self {
+            primary: widest(|row| unicode_width::UnicodeWidthStr::width(row.primary.as_str())),
+            route: widest(|row| unicode_width::UnicodeWidthStr::width(row.route.as_str())),
+            meta: widest(PaneRow::meta_width),
+        }
+    }
+
+    /// Fit the measured widths into the width actually available.
+    ///
+    /// When everything fits, every column keeps its natural width. When it does
+    /// not, the scarce space is divided rather than handed to whichever column
+    /// comes first: the id used to take everything and the metadata was dropped
+    /// whole, which is precisely how a dozen near-identical routes ended up
+    /// rendering as nothing but their shared prefix.
+    fn resolve(self, width: usize) -> Self {
+        let available = width.saturating_sub(ROW_PREFIX_WIDTH);
+        if available == 0 {
+            return Self::default();
+        }
+        let gaps = COLUMN_GAP * (usize::from(self.route > 0) + usize::from(self.meta > 0));
+        let content = available.saturating_sub(gaps);
+        if content == 0 {
+            return Self {
+                primary: available,
+                route: 0,
+                meta: 0,
+            };
+        }
+        if self.primary + self.route + self.meta <= content {
+            return self;
+        }
+        // With no route column there is nothing to protect from a long id, so
+        // the id keeps its natural width and the trailing metadata yields — a
+        // clipped model id is worse than a hidden hint.
+        if self.route == 0 {
+            let primary = self.primary.min(content);
+            let meta = self.meta.min(content.saturating_sub(primary));
+            return Self {
+                primary,
+                route: 0,
+                meta: if meta < MIN_META_WIDTH { 0 } else { meta },
+            };
+        }
+
+        // Floors first, so no column that has something to say disappears
+        // entirely; then each takes the smaller of its natural width and its
+        // share. Metadata is the densest per column and gets the tightest cap.
+        let mut meta = if self.meta == 0 {
+            0
+        } else {
+            self.meta
+                .min((content / 4).max(MIN_META_WIDTH.min(content)))
+        };
+        let after_meta = content.saturating_sub(meta);
+        let mut route = if self.route == 0 {
+            0
+        } else {
+            self.route
+                .min((after_meta / 3).max(MIN_ROUTE_WIDTH.min(after_meta)))
+        };
+        let mut primary = after_meta.saturating_sub(route);
+
+        // The id's share is whatever the other two did not take, which can
+        // exceed the longest id on the page. Hand that surplus back rather than
+        // padding blank space next to a metadata column that is shedding facts.
+        if primary > self.primary {
+            let mut slack = primary - self.primary;
+            primary = self.primary;
+            for (column, natural) in [(&mut meta, self.meta), (&mut route, self.route)] {
+                let gain = slack.min(natural.saturating_sub(*column));
+                *column += gain;
+                slack -= gain;
+            }
+            primary += slack;
+        }
+
+        Self {
+            primary,
+            route,
+            meta,
+        }
+    }
+}
+
+/// Truncate an identifier from the middle, keeping both ends.
+///
+/// Model ids and route names share their heads and differ in their tails:
+/// `deepseek-ai/DeepSeek-V4-Pro` and `deepseek-ai/DeepSeek-V4-Flash` are
+/// identical for twenty characters and only separate at the very end. Clipping
+/// the tail therefore deletes the one token that tells them apart — both rows
+/// render as `deepseek-ai/DeepSee...`. Keeping a slice of each end costs one
+/// column for the ellipsis and preserves the variant.
+fn fit_identifier(text: &str, width: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+    if UnicodeWidthStr::width(text) <= width {
+        return text.to_string();
+    }
+    // Too narrow to seat a head, an ellipsis and a meaningful tail; fall back
+    // to the plain head-first form rather than emit punctuation soup.
+    if width < 8 {
+        return fit_text(text, width);
+    }
+
+    let budget = width - 1;
+    // The tail is the discriminating end, so it gets the larger share.
+    let tail_budget = (budget * 3) / 5;
+    let head_budget = budget - tail_budget;
+
+    let mut head = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + ch_width > head_budget {
+            break;
+        }
+        used += ch_width;
+        head.push(ch);
+    }
+
+    let mut tail: Vec<char> = Vec::new();
+    let mut used = 0usize;
+    for ch in text.chars().rev() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + ch_width > tail_budget {
+            break;
+        }
+        used += ch_width;
+        tail.push(ch);
+    }
+    tail.reverse();
+
+    let mut out = head;
+    out.push('…');
+    out.extend(tail);
+    out
+}
+
+/// Lay a row out into aligned, individually-truncated columns.
+///
+/// Colour vocabulary is deliberately two-valued: `label_style` for the row's
+/// primary content and `hint_style` for every secondary column. Selection is
+/// the only thing that changes a row's colour.
 fn picker_row_spans<'a>(
-    label: &'a str,
-    hint: &'a str,
+    row: &'a PaneRow,
     marker: &'static str,
     width: usize,
+    columns: ModelRowColumns,
     label_style: Style,
     hint_style: Style,
 ) -> Vec<Span<'a>> {
-    let prefix_width = 3;
-    let label_width = width.saturating_sub(prefix_width);
-    let label = fit_text(label, label_width);
+    use unicode_width::UnicodeWidthStr;
+
+    let columns = columns.resolve(width);
+    let marker_pad = MARKER_CELL_WIDTH.saturating_sub(UnicodeWidthStr::width(marker));
     let mut spans = vec![
         Span::styled(" ", label_style),
         Span::styled(marker, label_style),
-        Span::styled(" ", label_style),
-        Span::styled(label, label_style),
+        Span::styled(" ".repeat(marker_pad + 1), label_style),
     ];
+    let mut used = ROW_PREFIX_WIDTH;
 
-    if !hint.is_empty() {
-        let hint_text = format!("  ({hint})");
-        let used = prefix_width
-            + unicode_width::UnicodeWidthStr::width(
-                spans
-                    .last()
-                    .map(|span| span.content.as_ref())
-                    .unwrap_or_default(),
-            );
-        if used + unicode_width::UnicodeWidthStr::width(hint_text.as_str()) <= width {
-            spans.push(Span::styled(hint_text, hint_style));
+    let primary = fit_identifier(&row.primary, columns.primary.max(1));
+    used += UnicodeWidthStr::width(primary.as_str());
+    spans.push(Span::styled(primary, label_style));
+
+    // Pad to the column edge only when something follows; a trailing run of
+    // spaces would otherwise extend the selected row's highlight past its text.
+    let pad_to = |spans: &mut Vec<Span<'a>>, used: &mut usize, target: usize| {
+        if *used < target {
+            spans.push(Span::styled(" ".repeat(target - *used), label_style));
+            *used = target;
+        }
+    };
+
+    if columns.route > 0 && !row.route.is_empty() {
+        pad_to(&mut spans, &mut used, ROW_PREFIX_WIDTH + columns.primary);
+        spans.push(Span::styled(" ".repeat(COLUMN_GAP), label_style));
+        used += COLUMN_GAP;
+        let route = fit_identifier(&row.route, columns.route);
+        used += UnicodeWidthStr::width(route.as_str());
+        spans.push(Span::styled(route, hint_style));
+    }
+
+    if !row.meta.is_empty() {
+        let column_edge = if columns.route > 0 && !row.route.is_empty() {
+            ROW_PREFIX_WIDTH + columns.primary + COLUMN_GAP + columns.route
+        } else {
+            ROW_PREFIX_WIDTH + columns.primary
+        };
+        // Take the smaller of the column's share and the physical remainder, so
+        // a row that ended early cannot overrun the pane.
+        let remaining = width
+            .saturating_sub(column_edge)
+            .saturating_sub(COLUMN_GAP)
+            .min(columns.meta.max(MIN_META_WIDTH));
+        let meta = fit_meta_chips(&row.meta, remaining);
+        if !meta.is_empty() {
+            pad_to(&mut spans, &mut used, column_edge);
+            spans.push(Span::styled(" ".repeat(COLUMN_GAP), label_style));
+            spans.push(Span::styled(meta, hint_style));
         }
     }
 
@@ -1051,6 +1347,7 @@ fn picker_model_rows_for_app(app: &App, config: &Config) -> Vec<ModelPickerRow> 
             ),
             metadata,
             selectable: false,
+            blocked_reason: Some("stale pin".to_string()),
             enabled: true,
         });
     }
@@ -1119,11 +1416,20 @@ fn push_provider_model_rows(
         let metadata =
             effective_picker_metadata_with_codex(config, Some(provider), &id, codex_metadata);
         let mut hint = render_picker_model_hint(&id, Some(provider), &metadata, codex_freshness);
-        hint = format!("{} · {hint}", readiness_label);
+        hint = format!("{readiness_label} · {hint}");
         if provider != active_provider {
             hint = format!("switch route · {hint}");
         }
-        push_model_row(rows, id.clone(), Some(provider), hint, metadata, selectable);
+        let blocked_reason = (!selectable).then(|| readiness_label.to_string());
+        push_model_row(
+            rows,
+            id.clone(),
+            Some(provider),
+            hint,
+            metadata,
+            selectable,
+            blocked_reason,
+        );
     }
 }
 
@@ -1135,13 +1441,16 @@ fn push_auto_model_row(rows: &mut Vec<ModelPickerRow>, app: &App, config: &Confi
         &app.provider_health,
     );
     let metadata = effective_picker_metadata(config, None, "auto");
+    let selectable = readiness.can_attempt();
+    let blocked_reason = (!selectable).then(|| readiness.label().to_string());
     push_model_row(
         rows,
         "auto".to_string(),
         None,
         format!("{} · {hint}", readiness.label()),
         metadata,
-        readiness.can_attempt(),
+        selectable,
+        blocked_reason,
     );
 }
 
@@ -1303,6 +1612,7 @@ fn push_model_row(
     hint: String,
     metadata: EffectivePickerMetadata,
     selectable: bool,
+    blocked_reason: Option<String>,
 ) {
     if rows
         .iter()
@@ -1317,6 +1627,7 @@ fn push_model_row(
         hint,
         metadata,
         selectable,
+        blocked_reason,
         enabled: false,
     });
 }
@@ -1381,12 +1692,115 @@ fn normalize_picker_search_text(text: &str) -> String {
         .join(" ")
 }
 
-fn model_row_label(row: &ModelPickerRow, initial_provider: ApiProvider) -> String {
-    match row.provider {
-        Some(provider) if provider != initial_provider => {
-            format!("{} · {}", provider.display_name(), row.id)
+/// Route-identity labels for a set of rows, disambiguated where two providers
+/// answer to the same display name.
+///
+/// `Deepseek` and `DeepseekAnthropic` are both spelled "DeepSeek", so a picker
+/// listing both showed two rows of literally identical text for two genuinely
+/// different endpoints. When a display name is not unique among the rows on
+/// offer, the provider's own id — the `[providers.<id>]` key the user would
+/// edit — supplies the discriminator, with the leading run it already shares
+/// with the display name removed so the suffix is the part that differs.
+fn route_labels_for_rows(rows: &[&ModelPickerRow]) -> BTreeMap<&'static str, String> {
+    let mut by_display: BTreeMap<&'static str, Vec<ApiProvider>> = BTreeMap::new();
+    for provider in rows.iter().filter_map(|row| row.provider) {
+        let bucket = by_display.entry(provider.display_name()).or_default();
+        if !bucket.contains(&provider) {
+            bucket.push(provider);
         }
-        _ => row.id.clone(),
+    }
+    let mut labels = BTreeMap::new();
+    for (display, providers) in by_display {
+        let ambiguous = providers.len() > 1;
+        for provider in providers {
+            let label = match ambiguous.then(|| route_discriminator(display, provider.as_str())) {
+                Some(Some(suffix)) => format!("{display} {suffix}"),
+                // The canonical route — the one whose id is just the display
+                // name — keeps the bare name; provider ids are unique, so at
+                // most one member of a group can land here and the labels stay
+                // distinct.
+                Some(None) | None => display.to_string(),
+            };
+            labels.insert(provider.as_str(), label);
+        }
+    }
+    labels
+}
+
+/// The part of a provider id that is not already carried by its display name.
+fn route_discriminator(display: &str, provider_id: &str) -> Option<String> {
+    let squash = |text: &str| -> String {
+        text.chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect::<String>()
+    };
+    let display_key = squash(display).to_ascii_lowercase();
+    let id_key = squash(provider_id).to_ascii_lowercase();
+    if display_key.is_empty() || !id_key.starts_with(&display_key) {
+        return None;
+    }
+    // Walk the raw id until the display name's alphanumerics are consumed; what
+    // remains is the endpoint-specific tail (`-anthropic`, `-CN`, …).
+    let mut consumed = 0usize;
+    let mut tail = provider_id;
+    for (offset, ch) in provider_id.char_indices() {
+        if consumed == display_key.len() {
+            tail = &provider_id[offset..];
+            break;
+        }
+        if ch.is_alphanumeric() {
+            consumed += 1;
+        }
+        tail = &provider_id[offset + ch.len_utf8()..];
+    }
+    let tail = tail.trim_matches(|c: char| !c.is_alphanumeric());
+    (!tail.is_empty()).then(|| tail.to_string())
+}
+
+/// The handful of facts that actually differ between neighbouring model rows,
+/// in the order they earn their space.
+///
+/// Everything the old prose hint carried but that reads the same on nearly
+/// every row — `tools`, `no vision`, `price unknown`, `bundled` — is dropped
+/// here: a token repeated on forty rows cannot tell them apart, and it is what
+/// pushed the differentiating tokens off the end of the line. Facts the
+/// registry does not know are omitted rather than guessed.
+fn model_row_meta_chips(row: &ModelPickerRow) -> Vec<String> {
+    let mut chips = Vec::new();
+    if let Some(context_window) = row.metadata.context_window {
+        chips.push(format_picker_context_window(u64::from(context_window)));
+    }
+    chips.push(
+        if row.metadata.reasoning {
+            "reasoning"
+        } else {
+            "no reasoning"
+        }
+        .to_string(),
+    );
+    if let Some(reason) = row.blocked_reason.as_deref() {
+        chips.push(reason.to_string());
+    }
+    chips
+}
+
+/// Join metadata chips, dropping the lowest-priority ones until the result
+/// fits. Truncating mid-chip would render a half-word fact, so whole chips are
+/// shed instead.
+fn fit_meta_chips(chips: &[String], width: usize) -> String {
+    for take in (1..=chips.len()).rev() {
+        let joined = chips[..take].join(" · ");
+        if unicode_width::UnicodeWidthStr::width(joined.as_str()) <= width {
+            return joined;
+        }
+    }
+    // A single chip that still does not fit is prose (an `auto` explanation or
+    // an effort description) rather than a fact token, so it is truncated
+    // instead of dropped — but only when the column can hold something worth
+    // reading.
+    match chips.first() {
+        Some(first) if width >= MIN_META_WIDTH => fit_text(first, width),
+        _ => String::new(),
     }
 }
 
@@ -2122,30 +2536,48 @@ impl ModelPickerView {
         ])
         .render(shell[0], buf);
 
-        let layout = ListDetailLayout::split(shell[1], 24);
+        let layout = widen_model_pane(ListDetailLayout::split(shell[1], 24));
 
-        let mut model_rows: Vec<(String, String)> = self
-            .visible_model_rows()
+        let visible = self.visible_model_rows();
+        let route_labels = route_labels_for_rows(&visible);
+        let mut model_rows: Vec<PaneRow> = visible
             .iter()
             .map(|row| {
-                (
-                    model_row_label(row, self.initial_provider),
-                    row.hint.clone(),
-                )
+                let active = row.id == self.initial_model
+                    && (row.provider.is_none() || row.provider == Some(self.initial_provider));
+                match row.provider {
+                    // `auto` is not a catalog offering; it keeps its explanatory
+                    // prose, which now has the whole row to be truncated into
+                    // instead of being dropped for not fitting.
+                    None => PaneRow {
+                        primary: row.id.clone(),
+                        route: String::new(),
+                        meta: vec![row.hint.clone()],
+                        active,
+                    },
+                    Some(provider) => PaneRow {
+                        primary: row.id.clone(),
+                        route: route_labels
+                            .get(provider.as_str())
+                            .cloned()
+                            .unwrap_or_else(|| provider.display_name().to_string()),
+                        meta: model_row_meta_chips(row),
+                        active,
+                    },
+                }
             })
             .collect();
         if let Some((model, provider)) = self.custom_model_row() {
-            let label = if self.query.trim().is_empty() {
-                model
-            } else {
-                format!("{} · {}", provider.display_name(), model)
-            };
-            let hint = if self.query.trim().is_empty() {
-                "current (custom)".to_string()
-            } else {
-                "custom route".to_string()
-            };
-            model_rows.push((label, hint));
+            model_rows.push(PaneRow {
+                primary: model,
+                route: provider.display_name().to_string(),
+                meta: vec![if self.query.trim().is_empty() {
+                    "current (custom)".to_string()
+                } else {
+                    "custom route".to_string()
+                }],
+                active: false,
+            });
         }
         let model_title = if self.query.trim().is_empty() {
             format!("Model · {}", self.view.title_label())
@@ -2169,7 +2601,7 @@ impl ModelPickerView {
         let selected_effort_idx = self
             .selected_effort_idx
             .min(current_efforts.len().saturating_sub(1));
-        let effort_rows: Vec<(String, String)> = current_efforts
+        let effort_rows: Vec<PaneRow> = current_efforts
             .iter()
             .map(|effort| {
                 let label = effort
@@ -2189,7 +2621,7 @@ impl ModelPickerView {
                         }
                     }
                 };
-                (label, hint)
+                PaneRow::effort(label, hint)
             })
             .collect();
         self.render_pane(
@@ -2443,6 +2875,176 @@ mod tests {
     fn row_containing(buf: &Buffer, area: Rect, needle: &str) -> Option<u16> {
         (area.y..area.y.saturating_add(area.height))
             .find(|&y| buffer_row_text(buf, area, y).contains(needle))
+    }
+
+    /// Every rendered model row in the pane, trimmed, in screen order.
+    fn rendered_model_rows(view: &ModelPickerView, width: u16, height: u16) -> Vec<String> {
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        view.render(area, &mut buf);
+        let mut rows = Vec::new();
+        for (rect, pane, _) in view.row_hitboxes.borrow().iter() {
+            if *pane == Pane::Model {
+                rows.push(buffer_row_text(&buf, *rect, rect.y).trim_end().to_string());
+            }
+        }
+        rows
+    }
+
+    /// The owner-facing bar for this surface: scanning the list must separate
+    /// the DeepSeek family without leaving the picker.
+    ///
+    /// Rows used to be `label  (hint)` where the hint was dropped whole when it
+    /// did not fit — and it never fit, so a dozen DeepSeek routes rendered as
+    /// nothing but their near-identical ids. This asserts the two failure modes
+    /// that produced: rows that are byte-identical to each other, and rows that
+    /// carry no metadata at all.
+    #[test]
+    fn deepseek_rows_render_distinguishably() {
+        let (app, mut config, _lock) = create_test_app();
+        config.api_key = Some("deepseek-picker-test-key".to_string());
+        let mut view = ModelPickerView::new(&app, &config);
+        view.view = ModelListView::Catalog;
+        type_model_query(&mut view, "deepseek");
+
+        for (width, height) in [(120_u16, 40_u16), (100, 30), (80, 24)] {
+            let rows = rendered_model_rows(&view, width, height);
+            assert!(
+                rows.len() > 2,
+                "{width}x{height}: expected a populated DeepSeek list, got {rows:?}"
+            );
+
+            // 1. No two visible rows may render as the same string.
+            let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+            for row in &rows {
+                *seen.entry(row.as_str()).or_default() += 1;
+            }
+            let collisions: Vec<_> = seen
+                .iter()
+                .filter(|(_, count)| **count > 1)
+                .map(|(row, count)| format!("{count}x {row:?}"))
+                .collect();
+            assert!(
+                collisions.is_empty(),
+                "{width}x{height}: rows must be distinguishable, found duplicates: {collisions:?}"
+            );
+
+            // 2. Every DeepSeek row must carry differentiating metadata beyond
+            //    the model id — a context window and its reasoning stance.
+            for row in rows
+                .iter()
+                .filter(|row| row.to_lowercase().contains("deepseek"))
+            {
+                assert!(
+                    row.contains("reasoning"),
+                    "{width}x{height}: row lost its reasoning stance: {row:?}"
+                );
+                assert!(
+                    row.contains('M') || row.contains('K'),
+                    "{width}x{height}: row lost its context window: {row:?}"
+                );
+            }
+        }
+    }
+
+    /// Two providers may legitimately share a display name (`deepseek` and
+    /// `deepseek-anthropic` are both spelled "DeepSeek"). The picker must not
+    /// print two identical route labels for two different endpoints.
+    #[test]
+    fn same_named_deepseek_providers_get_distinct_route_labels() {
+        let rows = [
+            ModelPickerRow {
+                id: "deepseek-v4-pro".to_string(),
+                provider: Some(ApiProvider::Deepseek),
+                provider_identity: None,
+                hint: String::new(),
+                metadata: EffectivePickerMetadata::default(),
+                selectable: true,
+                blocked_reason: None,
+                enabled: true,
+            },
+            ModelPickerRow {
+                id: "deepseek-v4-pro".to_string(),
+                provider: Some(ApiProvider::DeepseekAnthropic),
+                provider_identity: None,
+                hint: String::new(),
+                metadata: EffectivePickerMetadata::default(),
+                selectable: true,
+                blocked_reason: None,
+                enabled: true,
+            },
+        ];
+        assert_eq!(
+            ApiProvider::Deepseek.display_name(),
+            ApiProvider::DeepseekAnthropic.display_name(),
+            "this test is only meaningful while the display names actually collide"
+        );
+
+        let borrowed: Vec<&ModelPickerRow> = rows.iter().collect();
+        let labels = route_labels_for_rows(&borrowed);
+        let direct = labels.get("deepseek").expect("direct route label");
+        let anthropic = labels
+            .get("deepseek-anthropic")
+            .expect("anthropic-dialect route label");
+        assert_ne!(
+            direct, anthropic,
+            "colliding display names must be disambiguated"
+        );
+        assert_eq!(anthropic, "DeepSeek anthropic");
+    }
+
+    /// A single provider needs no disambiguation noise.
+    #[test]
+    fn unique_route_labels_stay_bare_display_names() {
+        let row = ModelPickerRow {
+            id: "deepseek-v4-pro".to_string(),
+            provider: Some(ApiProvider::Deepseek),
+            provider_identity: None,
+            hint: String::new(),
+            metadata: EffectivePickerMetadata::default(),
+            selectable: true,
+            blocked_reason: None,
+            enabled: true,
+        };
+        let borrowed = vec![&row];
+        let labels = route_labels_for_rows(&borrowed);
+        assert_eq!(labels.get("deepseek").map(String::as_str), Some("DeepSeek"));
+    }
+
+    /// Metadata sheds whole chips rather than rendering a half-word fact.
+    #[test]
+    fn meta_chips_shed_whole_units_under_pressure() {
+        let chips = vec![
+            "1M".to_string(),
+            "reasoning".to_string(),
+            "missing key".to_string(),
+        ];
+        assert_eq!(fit_meta_chips(&chips, 40), "1M · reasoning · missing key");
+        assert_eq!(fit_meta_chips(&chips, 20), "1M · reasoning");
+        assert_eq!(fit_meta_chips(&chips, 5), "1M");
+        // Below the minimum useful column nothing is rendered at all.
+        assert_eq!(fit_meta_chips(&chips, 1), "");
+    }
+
+    /// A model whose context window the registry does not know must render a
+    /// blank column, never an invented number.
+    #[test]
+    fn unknown_context_window_is_omitted_not_guessed() {
+        let row = ModelPickerRow {
+            id: "some-unlisted-model".to_string(),
+            provider: Some(ApiProvider::Deepseek),
+            provider_identity: None,
+            hint: String::new(),
+            metadata: EffectivePickerMetadata {
+                context_window: None,
+                reasoning: true,
+                ..EffectivePickerMetadata::default()
+            },
+            selectable: true,
+            blocked_reason: None,
+            enabled: true,
+        };
+        assert_eq!(model_row_meta_chips(&row), vec!["reasoning".to_string()]);
     }
 
     #[test]
@@ -3040,13 +3642,15 @@ mod tests {
                     && row.id == crate::config::DEFAULT_OPENROUTER_MODEL
             })
             .expect("saved OpenRouter choice should migrate into the ordinary list");
+        // The id owns the first column and the route its own second column, so
+        // a cross-provider choice is no longer a single prefixed string.
+        assert_eq!(saved.id, crate::config::DEFAULT_OPENROUTER_MODEL);
+        let rows = view.visible_model_rows();
         assert_eq!(
-            model_row_label(saved, app.api_provider),
-            format!(
-                "{} · {}",
-                crate::config::ApiProvider::Openrouter.display_name(),
-                crate::config::DEFAULT_OPENROUTER_MODEL
-            )
+            route_labels_for_rows(&rows)
+                .get("openrouter")
+                .map(String::as_str),
+            Some(crate::config::ApiProvider::Openrouter.display_name())
         );
     }
 
@@ -3835,6 +4439,7 @@ mod tests {
             hint: "switch route · reasoning".to_string(),
             metadata: EffectivePickerMetadata::default(),
             selectable: true,
+            blocked_reason: None,
             enabled: true,
         }
     }
@@ -3896,6 +4501,7 @@ mod tests {
             hint: String::new(),
             metadata: EffectivePickerMetadata::default(),
             selectable: true,
+            blocked_reason: None,
             enabled: true,
         };
         assert!(model_row_matches_query(
@@ -4107,11 +4713,15 @@ mod tests {
 
     #[test]
     fn narrow_picker_rows_hide_hint_before_clipping_model_id() {
+        let row = PaneRow::effort(
+            "minimax/minimax-m3".to_string(),
+            "1M multimodal".to_string(),
+        );
         let spans = picker_row_spans(
-            "minimax/minimax-m3",
-            "1M multimodal",
+            &row,
             "▸",
             24,
+            ModelRowColumns::for_page(std::slice::from_ref(&row)),
             Style::default(),
             Style::default(),
         );
@@ -5011,8 +5621,8 @@ mod tests {
         // leaves 1 row after the hairline title). The scrollable-title branch
         // must render a single position (`Model 2/3`), not a degenerate `2-2/3`
         // range (#3995).
-        let rows: Vec<(String, String)> = (1..=3)
-            .map(|n| (format!("model-{n}"), String::new()))
+        let rows: Vec<PaneRow> = (1..=3)
+            .map(|n| PaneRow::effort(format!("model-{n}"), String::new()))
             .collect();
         let area = Rect::new(0, 0, 40, 2);
         let mut buf = Buffer::empty(area);
@@ -5046,8 +5656,8 @@ mod tests {
 
         // Four rows in a pane tall enough for two inner rows (height 3). The
         // visible window spans two rows, so the title keeps a real range.
-        let rows: Vec<(String, String)> = (1..=4)
-            .map(|n| (format!("model-{n}"), String::new()))
+        let rows: Vec<PaneRow> = (1..=4)
+            .map(|n| PaneRow::effort(format!("model-{n}"), String::new()))
             .collect();
         let area = Rect::new(0, 0, 40, 3);
         let mut buf = Buffer::empty(area);
