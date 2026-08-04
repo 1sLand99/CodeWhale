@@ -391,9 +391,10 @@ mod tests {
 
         let seq = String::from_utf8_lossy(&out);
         assert!(
-            seq.contains("\x1b[?1007h"),
-            "external editor resume must restore alternate-scroll mode: {seq:?}"
+            !seq.contains("\x1b[?1007h"),
+            "must not enable alternate-scroll"
         );
+        assert!(seq.contains("\x1b[?1007l"), "must reset alternate-scroll");
         assert!(
             seq.contains("\x1b[?1004h"),
             "external editor resume must restore focus events: {seq:?}"
