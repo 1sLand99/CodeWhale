@@ -32,17 +32,18 @@ fn effective_placement(configured: WorkSurfacePlacement, host_width: u16) -> Wor
     }
 }
 
-/// A non-Tasks panel is a title row plus three content rows. Below that it is
-/// a heading over one truncated line — chrome, not information — so it
-/// collapses rather than degrades.
-const PANEL_STRIP_HEIGHT: u16 = 4;
-
 /// Responsive work-surface height.
 ///
 /// `rail_budget` is the caller's answer to "how many rows can the transcript
 /// actually spare this frame" — terminal height minus fixed chrome minus the
 /// transcript's own floor. See [`crate::tui::ui::rail_row_budget`]. The rail
 /// takes spare rows; it never takes rows the transcript needs.
+///
+/// Every Top panel auto-fits its content the same way: content rows + optional
+/// goal title + the divider, capped by `top_height` and ambient room. A
+/// two-item checklist is two rows; eight agents grow to show eight. The only
+/// Top title is an active goal — never panel chrome ("Pinned"). Side rails
+/// keep a muted panel name because a full-height column needs naming.
 pub fn height(app: &mut App, width: u16, terminal_height: u16, rail_budget: u16) -> u16 {
     app.work_surface.effective_placement = effective_placement(app.work_surface.placement, width);
     // Off hides the rail outright: no strip, no side reservation, no stale
@@ -51,62 +52,74 @@ pub fn height(app: &mut App, width: u16, terminal_height: u16, rail_budget: u16)
         collapse_strip(app);
         return 0;
     }
-    // Non-Tasks panels own a strip once selected — but only when they have
-    // something to say. The old rule assumed "the user asked for the panel",
-    // which was false for everyone: the settings migration folded the default
-    // `sidebar_focus = "auto"` into `rail_panel = "pinned"`, so any user with a
-    // settings.toml was handed this panel without choosing it. Four rows
-    // spending themselves on the words "No active work" is density without
-    // meaning, and it costs the transcript real estate the operator did want.
-    //
-    // Tasks has always collapsed to zero on an empty projection. This makes
-    // Pinned behave the same way, which is the honest reading of the rule: an
-    // empty panel is not a panel. It reappears the instant there is work.
+    // Non-Tasks panels on Top auto-fit like Tasks. Empty projections collapse
+    // to zero — an empty panel is not a panel. Side placements reserve via
+    // `split_chat` and take no top strip.
     if app.work_surface.panel != RailPanel::Tasks {
         if app.work_surface.effective_placement != WorkSurfacePlacement::Top {
             return 0;
         }
-        if app.work_surface.panel == RailPanel::Pinned
-            && !crate::tui::sidebar::sidebar_work_summary(app).has_useful_content()
-        {
+        if !super::panels::panel_has_useful_content(app, app.work_surface.panel) {
             collapse_strip(app);
             return 0;
         }
-        // What the panel is actually asking for: its design height, or less
-        // if the user set a shorter strip. `top_height` is a preference, not
-        // a budget — a user who drags the divider to its 2-row minimum wants
-        // a 2-row strip, and that preference persists to settings.toml.
-        let desired = PANEL_STRIP_HEIGHT.min(
-            app.work_surface
-                .top_height
-                .max(super::model::TOP_HEIGHT_MIN),
+        let cap = top_cap(app, terminal_height, rail_budget);
+        if cap < super::model::TOP_HEIGHT_MIN {
+            collapse_strip(app);
+            return 0;
+        }
+        let goal_rows = u16::from(top_goal_title(app).is_some());
+        let content_width = usize::from(width.saturating_sub(2).max(1));
+        // When the goal is the strip title, omit it from Pinned body rows so
+        // height and paint agree.
+        let content_rows = super::panels::panel_content_row_count(
+            app,
+            app.work_surface.panel,
+            content_width,
+            goal_rows > 0,
         );
-        // The collapse cliff is charged against the *ambient* ceilings only —
-        // never against `desired`. Folding the user's own height in here
-        // would delete the panel at every terminal size for anyone who asked
-        // for a short one, which is the opposite of honouring the request.
-        if ambient_cap(terminal_height, rail_budget) < desired {
+        if content_rows == 0 && goal_rows == 0 {
             collapse_strip(app);
             return 0;
         }
-        return desired;
+        let desired = u16::try_from(content_rows)
+            .unwrap_or(u16::MAX)
+            .saturating_add(goal_rows)
+            .saturating_add(1); // divider
+        return desired.clamp(super::model::TOP_HEIGHT_MIN, cap);
     }
+
     let rows = project_visible(app);
+    let goal_rows = u16::from(
+        app.work_surface.effective_placement == WorkSurfacePlacement::Top
+            && top_goal_title(app).is_some(),
+    );
     if rows.is_empty() {
-        collapse_strip(app);
-        app.work_surface.latest_rows.clear();
-        app.work_surface.visible_rows = 0;
-        app.work_surface.total_rows = 0;
-        app.work_surface.scroll_offset = 0;
-        return 0;
+        // A live goal alone still deserves a strip: title + divider.
+        if goal_rows == 0 {
+            collapse_strip(app);
+            app.work_surface.latest_rows.clear();
+            app.work_surface.visible_rows = 0;
+            app.work_surface.total_rows = 0;
+            app.work_surface.scroll_offset = 0;
+            return 0;
+        }
+        if app.work_surface.effective_placement != WorkSurfacePlacement::Top {
+            return 0;
+        }
+        let cap = top_cap(app, terminal_height, rail_budget);
+        if cap < super::model::TOP_HEIGHT_MIN {
+            collapse_strip(app);
+            return 0;
+        }
+        return (goal_rows.saturating_add(1)).clamp(super::model::TOP_HEIGHT_MIN, cap);
     }
     if app.work_surface.effective_placement != WorkSurfacePlacement::Top {
         return 0;
     }
     // The strip auto-fits its content: the literal selectable list plus the
-    // pinned progress receipt and the divider row, bounded by `top_cap`. So a
-    // two-step plan takes two rows while an eight-step plan grows to show all
-    // eight — never a fixed-height band of blank water.
+    // optional goal title, the pinned progress receipt, and the divider row,
+    // bounded by `top_cap`.
     let cap = top_cap(app, terminal_height, rail_budget);
     if cap < super::model::TOP_HEIGHT_MIN {
         collapse_strip(app);
@@ -117,6 +130,7 @@ pub fn height(app: &mut App, width: u16, terminal_height: u16, rail_budget: u16)
     let desired = u16::try_from(selectable)
         .unwrap_or(u16::MAX)
         .saturating_add(progress)
+        .saturating_add(goal_rows)
         .saturating_add(1);
     desired.clamp(super::model::TOP_HEIGHT_MIN, cap)
 }
@@ -168,6 +182,14 @@ fn collapse_strip(app: &mut App) {
 /// Split the transcript slot for a side rail. Top placement consumes its own
 /// vertical row before this point, so it returns the chat area unchanged.
 ///
+/// Placement and auto-fit are orthogonal but share one rule: **empty work is
+/// not a rail**. Top expresses that as `height() == 0`. Left/Right express it
+/// here — no column is reserved when the selected panel has nothing to say.
+/// When there *is* content, the rail takes the full chat height at the
+/// configured `side_width` (width is the ceiling, the way `top_height` is the
+/// ceiling on Top). Narrow terminals that cannot fit the rail fall back to
+/// Top, where height auto-fit takes over.
+///
 /// `min_chat_width` is the column-axis twin of `height`'s `rail_budget`: the
 /// columns the transcript must keep. When the idle ocean is on screen that is
 /// the ambient floor, and a rail that cannot fit beside it hides rather than
@@ -175,10 +197,12 @@ fn collapse_strip(app: &mut App) {
 pub fn split_chat(app: &mut App, area: Rect, min_chat_width: u16) -> (Rect, Option<Rect>) {
     let placement = effective_placement(app.work_surface.placement, area.width);
     app.work_surface.effective_placement = placement;
-    if placement == WorkSurfacePlacement::Top
-        || placement == WorkSurfacePlacement::Off
-        || (app.work_surface.panel == RailPanel::Tasks && app.work_surface.latest_rows.is_empty())
-    {
+    if placement == WorkSurfacePlacement::Top || placement == WorkSurfacePlacement::Off {
+        return (area, None);
+    }
+    // Same empty-collapse rule as Top: a panel with nothing to show does not
+    // spend columns on a blank (or "No agents") column.
+    if !side_rail_has_content(app) {
         return (area, None);
     }
 
@@ -189,6 +213,9 @@ pub fn split_chat(app: &mut App, area: Rect, min_chat_width: u16) -> (Rect, Opti
         .clamp(super::model::SIDE_WIDTH_MIN, super::model::SIDE_WIDTH_MAX)
         .min(area.width.saturating_sub(min_chat_width));
     if rail_width < super::model::SIDE_WIDTH_MIN {
+        // Too narrow for a side column — fall back to Top. The caller will
+        // re-ask height() with effective_placement Top so content auto-fits
+        // as a strip instead of vanishing.
         app.work_surface.effective_placement = WorkSurfacePlacement::Top;
         return (area, None);
     }
@@ -218,6 +245,14 @@ pub fn split_chat(app: &mut App, area: Rect, min_chat_width: u16) -> (Rect, Opti
             }),
         ),
         WorkSurfacePlacement::Top | WorkSurfacePlacement::Off => (area, None),
+    }
+}
+
+/// Whether a Left/Right rail should reserve columns this frame.
+fn side_rail_has_content(app: &mut App) -> bool {
+    match app.work_surface.panel {
+        RailPanel::Tasks => !project_visible(app).is_empty(),
+        panel => super::panels::panel_has_useful_content(app, panel),
     }
 }
 
@@ -276,21 +311,27 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         HashMap::new()
     };
     let ordinal_width = todo_ordinals.len().max(1).to_string().len();
+    let goal_title = (placement == WorkSurfacePlacement::Top)
+        .then(|| top_goal_title(app))
+        .flatten();
     let todo_progress = (placement == WorkSurfacePlacement::Top)
         .then(|| top_todo_progress(app, &rows))
         .flatten();
-    // At the minimum two-row surface, preserve the one usable content row and
-    // the divider. Taller surfaces pin the authoritative progress receipt
-    // above the scrollable/selectable rows.
-    let progress_height = u16::from(todo_progress.is_some() && body_area.height >= 2);
-    let list_height = body_area.height.saturating_sub(progress_height);
+    // Pin goal title, then progress receipt, above the scrollable rows.
+    // At the minimum two-row surface keep one usable content row + divider.
+    let goal_height = u16::from(goal_title.is_some() && body_area.height >= 1);
+    let progress_height = u16::from(
+        todo_progress.is_some() && body_area.height.saturating_sub(goal_height) >= 2,
+    );
+    let header_height = goal_height.saturating_add(progress_height);
+    let list_height = body_area.height.saturating_sub(header_height);
     let body_height = usize::from(list_height);
     let overflow = rows.len() > body_height;
     let inset = u16::from(body_area.width >= 60);
     let rail_width = u16::from(overflow);
     let content_area = Rect {
         x: body_area.x.saturating_add(inset),
-        y: body_area.y.saturating_add(progress_height),
+        y: body_area.y.saturating_add(header_height),
         width: body_area
             .width
             .saturating_sub(inset.saturating_mul(2))
@@ -311,6 +352,22 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         .style(Style::default().bg(app.ui_theme.surface_bg))
         .render(area, frame.buffer_mut());
 
+    if let Some((goal_text, goal_style)) = goal_title.filter(|_| goal_height > 0) {
+        let goal_text = truncate_line_to_width(&goal_text, usize::from(content_area.width));
+        Paragraph::new(Line::from(Span::styled(
+            goal_text,
+            goal_style.bg(app.ui_theme.surface_bg),
+        )))
+        .render(
+            Rect {
+                y: body_area.y,
+                height: 1,
+                ..content_area
+            },
+            frame.buffer_mut(),
+        );
+    }
+
     if let Some(progress) = todo_progress.filter(|_| progress_height > 0) {
         let progress = truncate_line_to_width(&progress, usize::from(content_area.width));
         Paragraph::new(Line::from(Span::styled(
@@ -322,7 +379,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         )))
         .render(
             Rect {
-                y: body_area.y,
+                y: body_area.y.saturating_add(goal_height),
                 height: 1,
                 ..content_area
             },
@@ -433,11 +490,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     });
 }
 
-/// Render a non-Tasks rail panel (Agents / Context / Pinned) as a titled
-/// line list in the same body area and with the same divider and scrollbar
-/// the Tasks list would use. Row interactivity (hitboxes, selection,
-/// click actions) is Tasks-only for now; panels scroll via the shared
-/// `scroll_offset`.
+/// Render a non-Tasks rail panel (Agents / Context / Pinned) as a line list
+/// in the same body area and with the same divider and scrollbar the Tasks
+/// list would use. Row interactivity (hitboxes, selection, click actions)
+/// is Tasks-only for now; panels scroll via the shared `scroll_offset`.
 fn render_panel(frame: &mut Frame, area: Rect, body_area: Rect, app: &mut App) {
     let panel = app.work_surface.panel;
     let placement = app.work_surface.effective_placement;
@@ -446,25 +502,54 @@ fn render_panel(frame: &mut Frame, area: Rect, body_area: Rect, app: &mut App) {
         .style(Style::default().bg(app.ui_theme.surface_bg))
         .render(area, frame.buffer_mut());
 
-    // Title row.
-    Paragraph::new(Line::from(Span::styled(
-        truncate_line_to_width(panel.title(), usize::from(body_area.width).max(1)),
-        Style::default()
-            .fg(app.ui_theme.accent_primary)
-            .bg(app.ui_theme.surface_bg)
-            .add_modifier(Modifier::BOLD),
-    )))
-    .render(
-        Rect {
-            height: 1,
-            ..body_area
-        },
-        frame.buffer_mut(),
+    // Title row policy:
+    // - Top: only an active goal (`Goal: …`). Never panel chrome ("Pinned").
+    // - Left/Right: muted panel name — a full-height column needs naming.
+    let goal = (placement == WorkSurfacePlacement::Top)
+        .then(|| top_goal_title(app))
+        .flatten();
+    let side_panel_title = matches!(
+        placement,
+        WorkSurfacePlacement::Left | WorkSurfacePlacement::Right
     );
 
+    let title_rows = if let Some((goal_text, goal_style)) = goal.as_ref() {
+        let goal_text =
+            truncate_line_to_width(goal_text, usize::from(body_area.width).max(1));
+        Paragraph::new(Line::from(Span::styled(
+            goal_text,
+            goal_style.bg(app.ui_theme.surface_bg),
+        )))
+        .render(
+            Rect {
+                height: 1,
+                ..body_area
+            },
+            frame.buffer_mut(),
+        );
+        1_u16
+    } else if side_panel_title {
+        Paragraph::new(Line::from(Span::styled(
+            truncate_line_to_width(panel.title(), usize::from(body_area.width).max(1)),
+            Style::default()
+                .fg(app.ui_theme.text_muted)
+                .bg(app.ui_theme.surface_bg),
+        )))
+        .render(
+            Rect {
+                height: 1,
+                ..body_area
+            },
+            frame.buffer_mut(),
+        );
+        1_u16
+    } else {
+        0
+    };
+
     let content_area = Rect {
-        y: body_area.y.saturating_add(1),
-        height: body_area.height.saturating_sub(1),
+        y: body_area.y.saturating_add(title_rows),
+        height: body_area.height.saturating_sub(title_rows),
         ..body_area
     };
     let body_height = usize::from(content_area.height);
@@ -473,6 +558,7 @@ fn render_panel(frame: &mut Frame, area: Rect, body_area: Rect, app: &mut App) {
         panel,
         usize::from(content_area.width),
         body_height.max(1),
+        goal.is_some(),
     )
     .unwrap_or_default();
 
@@ -511,6 +597,33 @@ fn render_panel(frame: &mut Frame, area: Rect, body_area: Rect, app: &mut App) {
     app.work_surface.selected = None;
     app.work_surface.opened = None;
     app.work_surface.hovered = None;
+}
+
+/// Active goal as the Top strip's only title. Uses the same
+/// paused/active/terminal resolution as the ocean header chip so a goal set
+/// via `create_goal` is either visible everywhere or nowhere. Returns
+/// `None` when no live goal exists — Top then paints no title row at all.
+fn top_goal_title(app: &App) -> Option<(String, Style)> {
+    let (objective, paused) = crate::tui::footer_ui::active_goal_chip_state(app)?;
+    let flat = objective.trim().replace(['\n', '\r'], " ");
+    if flat.is_empty() {
+        return None;
+    }
+    let text = if paused {
+        format!("Goal (paused): {flat}")
+    } else {
+        format!("Goal: {flat}")
+    };
+    let style = if paused {
+        Style::default()
+            .fg(app.ui_theme.warning)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(app.ui_theme.status_working)
+            .add_modifier(Modifier::BOLD)
+    };
+    Some((text, style))
 }
 
 fn todo_ordinals(rows: &[WorkRow]) -> HashMap<String, usize> {

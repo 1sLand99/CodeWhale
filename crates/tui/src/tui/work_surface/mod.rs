@@ -10,18 +10,33 @@
 //! Two settings are orthogonal and are routinely mixed up:
 //!
 //! - **placement** — where it renders. `Top` (default) | `Left` | `Right` |
-//!   `Off`. Top height comes from `work_surface_top_height` (2..=16), which
-//!   drag-resizing the divider persists to `settings.toml`.
+//!   `Off`. Drag-resizing the divider persists `work_surface_top_height`
+//!   (2..=16) or `work_surface_side_width` (26..=80) to `settings.toml`.
 //! - **panel** — what it shows. [`RailPanel`]: `Tasks` (default) | `Agents` |
 //!   `Context` | `Pinned`, from the `rail_panel` setting. The legacy
 //!   `sidebar_focus` key migrates into it.
 //!
 //! So the word "Pinned" on screen is a PANEL name, not a state.
 //!
+//! ## Auto-fit by placement
+//!
+//! Placement changes *which axis is the ceiling*, not the content rule:
+//!
+//! | Placement | Ceiling | Auto-fit | Empty |
+//! |---|---|---|---|
+//! | `Top` | `top_height` (rows) | content rows + divider, clamped to ceiling | `height() == 0` |
+//! | `Left`/`Right` | `side_width` (cols) | full chat height at that width | no column reserved |
+//! | `Off` | — | — | nothing |
+//!
+//! Shared rules: content drives size; the setting is a ceiling, never padding;
+//! empty work is not a rail. Top never paints a chrome panel title (a checklist
+//! reads as a checklist). Side rails keep a muted title because a full-height
+//! column among other chrome needs naming. Narrow hosts that cannot fit a side
+//! column fall back to Top, where height auto-fit takes over.
+//!
 //! Height is decided once per frame by [`render::height`]; the row budget it is
 //! given comes from `crate::tui::ui::rail_row_budget`, which is its only
-//! production caller. An empty panel returns 0 rows rather than rendering a
-//! title over nothing.
+//! production caller.
 //!
 //! Placement, scrolling, selection, and pager ownership remain local to this
 //! component. Every visible work row derives from the active-session graph.
@@ -639,24 +654,169 @@ mod tests {
         }
     }
 
-    /// The collapse cliff belongs to the terminal, not to the user. A short
-    /// `top_height` is a request, and honouring it costs the transcript
-    /// nothing: the budget is what protects the transcript's floor.
+    /// `top_height` is a ceiling, not a fixed size. A short ceiling must still
+    /// render (not collapse), and content longer than the ceiling is clamped
+    /// to it rather than padded with blank water.
     #[test]
-    fn a_short_top_height_is_honoured_rather_than_collapsed() {
-        for top_height in [2_u16, 3] {
-            let mut app = app();
-            app.work_surface.placement = WorkSurfacePlacement::Top;
-            app.work_surface.panel = super::RailPanel::Agents;
-            app.work_surface.top_height = top_height;
-            app.composer_border = true;
-            let budget = working_budget(&app, 40);
-            assert_eq!(
-                super::height(&mut app, 100, 40, budget),
-                top_height,
-                "a {top_height}-row strip was asked for and must be what renders"
-            );
-        }
+    fn a_short_top_height_caps_content_rather_than_collapsing() {
+        let mut capped = app();
+        capped.work_surface.placement = WorkSurfacePlacement::Top;
+        capped.work_surface.panel = super::RailPanel::Pinned;
+        capped.work_surface.top_height = 2;
+        capped.composer_border = true;
+        // Goal + several checklist rows: content wants more than 2, the cap wins.
+        capped.hunt.quarry = Some("ship the release".to_string());
+        add_todos(&mut capped, 6);
+        let budget = working_budget(&capped, 40);
+        assert_eq!(
+            super::height(&mut capped, 100, 40, budget),
+            2,
+            "short top_height is a cap the strip must fit under, not a cliff"
+        );
+
+        // Content shorter than the cap shrinks: a single goal line + divider
+        // is 2 rows, not a padded 8-row band.
+        let mut short = app();
+        short.work_surface.placement = WorkSurfacePlacement::Top;
+        short.work_surface.panel = super::RailPanel::Pinned;
+        short.work_surface.top_height = 8;
+        short.hunt.quarry = Some("one goal only".to_string());
+        let budget = working_budget(&short, 40);
+        let h = super::height(&mut short, 100, 40, budget);
+        assert!(
+            (2..=4).contains(&h),
+            "short content auto-fits under the cap, got {h}"
+        );
+    }
+
+    /// Non-Tasks Top panels auto-fit the same way Tasks always did: content
+    /// rows + divider, never a fixed four-row chrome band. An active goal
+    /// adds exactly one title row (not a panel name).
+    #[test]
+    fn top_panel_auto_fits_content_like_tasks() {
+        let mut pinned = app();
+        pinned.work_surface.placement = WorkSurfacePlacement::Top;
+        pinned.work_surface.panel = super::RailPanel::Pinned;
+        pinned.work_surface.top_height = 12;
+        pinned.hunt.quarry = Some("goal".to_string());
+        add_todos(&mut pinned, 3);
+        let budget = working_budget(&pinned, 40);
+        let h = super::height(&mut pinned, 100, 40, budget);
+        // goal title + 3 checklist + divider ≈ 5; must not be the old fixed 4,
+        // and must not pad out to the 12-row cap.
+        assert!(
+            h >= 4 && h <= 8,
+            "Pinned should auto-fit checklist content, got {h}"
+        );
+
+        // Empty Pinned collapses entirely.
+        let mut empty = app();
+        empty.work_surface.placement = WorkSurfacePlacement::Top;
+        empty.work_surface.panel = super::RailPanel::Pinned;
+        empty.work_surface.top_height = 12;
+        assert_eq!(
+            super::height(&mut empty, 100, 40, AMPLE_BUDGET),
+            0,
+            "empty Pinned is not a panel"
+        );
+
+        // Empty Agents collapses too (no "No agents" chrome strip).
+        let mut agents = app();
+        agents.work_surface.placement = WorkSurfacePlacement::Top;
+        agents.work_surface.panel = super::RailPanel::Agents;
+        agents.work_surface.top_height = 12;
+        assert_eq!(
+            super::height(&mut agents, 100, 40, AMPLE_BUDGET),
+            0,
+            "empty Agents is not a panel"
+        );
+    }
+
+    /// Top titles only when a live goal is set — never the panel name.
+    #[test]
+    fn top_title_is_goal_only_never_panel_chrome() {
+        // With a goal: title is "Goal: …".
+        let mut with_goal = app();
+        with_goal.work_surface.placement = WorkSurfacePlacement::Top;
+        with_goal.work_surface.panel = super::RailPanel::Pinned;
+        with_goal.work_surface.top_height = 8;
+        with_goal.hunt.quarry = Some("ship 0.9.4".to_string());
+        let text = render_text(&mut with_goal, 80, 8);
+        assert!(
+            text.contains("Goal: ship 0.9.4"),
+            "active goal must be the Top title: {text:?}"
+        );
+        assert!(
+            !text.contains("Pinned"),
+            "panel name is not a Top title: {text:?}"
+        );
+
+        // Without a goal, only checklist: no Goal title, no Pinned chrome.
+        let mut no_goal = app();
+        no_goal.work_surface.placement = WorkSurfacePlacement::Top;
+        no_goal.work_surface.panel = super::RailPanel::Pinned;
+        no_goal.work_surface.top_height = 8;
+        add_todos(&mut no_goal, 2);
+        let text = render_text(&mut no_goal, 80, 6);
+        assert!(
+            !text.contains("Goal:"),
+            "no live goal → no Goal title: {text:?}"
+        );
+        assert!(
+            !text.contains("Pinned"),
+            "panel name is never a Top title: {text:?}"
+        );
+    }
+
+    /// Tasks with only a goal (no todos/agents) still shows a strip.
+    #[test]
+    fn top_tasks_goal_alone_still_renders_a_strip() {
+        let mut app = app();
+        app.work_surface.placement = WorkSurfacePlacement::Top;
+        app.work_surface.panel = super::RailPanel::Tasks;
+        app.work_surface.top_height = 8;
+        app.hunt.quarry = Some("only a goal".to_string());
+        let budget = working_budget(&app, 40);
+        let h = super::height(&mut app, 100, 40, budget);
+        assert!(
+            h >= 2,
+            "goal alone must reserve title + divider, got {h}"
+        );
+        let text = render_text(&mut app, 80, h);
+        assert!(
+            text.contains("Goal: only a goal"),
+            "goal-alone strip must paint the title: {text:?}"
+        );
+    }
+
+    /// Side rails share the empty-collapse rule: no content → no column.
+    /// Width stays the configured ceiling when content exists.
+    #[test]
+    fn side_rail_collapses_when_empty_and_reserves_when_contentful() {
+        let area = ratatui::layout::Rect::new(0, 0, 120, 32);
+
+        // Empty Pinned: no side column.
+        let mut empty = app();
+        empty.work_surface.placement = WorkSurfacePlacement::Right;
+        empty.work_surface.panel = super::RailPanel::Pinned;
+        empty.work_surface.side_width = 30;
+        assert_eq!(
+            super::split_chat(&mut empty, area, 0),
+            (area, None),
+            "empty Pinned must not reserve a side column"
+        );
+
+        // Contentful Pinned: full-height column at configured width.
+        let mut full = app();
+        full.work_surface.placement = WorkSurfacePlacement::Right;
+        full.work_surface.panel = super::RailPanel::Pinned;
+        full.work_surface.side_width = 30;
+        full.hunt.quarry = Some("ship it".to_string());
+        let (chat, rail) = super::split_chat(&mut full, area, 0);
+        let rail = rail.expect("contentful Pinned reserves a side rail");
+        assert_eq!(rail.width, 30);
+        assert_eq!(chat.width, area.width - 30);
+        assert_eq!(rail.height, area.height);
     }
 
     #[test]
@@ -1176,8 +1336,8 @@ mod tests {
 
     /// Render-level smoke coverage for the ported rail panels — reinstates
     /// the sidebar render smoke tests removed with the classic shell
-    /// (739616787). Every non-Tasks panel must render its title in every
-    /// placement the rail supports.
+    /// (739616787). Placement decides chrome: side rails keep a muted panel
+    /// title; Top never spends a row on one (content is self-evident).
     #[test]
     fn rail_panels_render_in_all_placements() {
         for panel in [
@@ -1193,10 +1353,19 @@ mod tests {
                 let mut app = app();
                 app.work_surface.placement = placement;
                 app.work_surface.panel = panel;
-                // This test is about placement, not about the empty state. An
-                // empty Pinned panel deliberately renders nothing, so give the
-                // work summary content or Top would have no title to find.
+                // Content so empty-collapse does not hide the panel. Agents
+                // needs a cached worker; Pinned needs a goal; Context always
+                // has session facts.
                 app.hunt.quarry = Some("ship the release".to_string());
+                if panel == super::RailPanel::Agents {
+                    app.subagent_cache.push(cached_worker(
+                        "agent-a",
+                        "explore",
+                        Some("scout"),
+                        None,
+                        SubAgentStatus::Running,
+                    ));
+                }
                 let area = ratatui::layout::Rect::new(0, 0, 100, 24);
 
                 // Render coverage, not yield coverage: a 24-row terminal with
@@ -1222,10 +1391,45 @@ mod tests {
                     })
                     .expect("draw");
                 let text = terminal_text(&terminal);
-                assert!(
-                    text.contains(panel.title()),
-                    "{panel:?} in {placement:?} should render its title; got: {text}"
-                );
+                match placement {
+                    super::WorkSurfacePlacement::Top => {
+                        assert!(
+                            strip > 0,
+                            "{panel:?} on Top should auto-fit a content strip; got height 0"
+                        );
+                        // Panel chrome ("Pinned"/"Agents") never on Top.
+                        // An active goal *is* a title — and this fixture sets one.
+                        assert!(
+                            !text.contains(panel.title())
+                                || panel.title() == "Context" && text.contains("Context"),
+                            "{panel:?} on Top must not spend a row on panel chrome; got: {text}"
+                        );
+                        if panel != super::RailPanel::Context {
+                            assert!(
+                                !text
+                                    .split_whitespace()
+                                    .any(|tok| tok == panel.title()),
+                                "{panel:?} on Top must not print the panel name as chrome; got: {text}"
+                            );
+                        }
+                        // Goal title when a live goal is set.
+                        assert!(
+                            text.contains("Goal:") && text.contains("ship the release"),
+                            "Top with an active goal must title with Goal: …; got: {text}"
+                        );
+                    }
+                    super::WorkSurfacePlacement::Left | super::WorkSurfacePlacement::Right => {
+                        assert!(
+                            rail.is_some() || strip > 0,
+                            "{panel:?} in {placement:?} should reserve a rail"
+                        );
+                        assert!(
+                            text.contains(panel.title()),
+                            "{panel:?} in {placement:?} should render its muted title; got: {text}"
+                        );
+                    }
+                    super::WorkSurfacePlacement::Off => {}
+                }
             }
         }
     }

@@ -1,9 +1,16 @@
 //! Non-Tasks rail panels, ported from the legacy classic-shell sidebar
 //! during the 0.9.4 rail unification (spec step 2). Agents, Context, and
-//! Pinned render as titled line lists inside the one work-surface rail, in
+//! Pinned render as line lists inside the one work-surface rail, in
 //! whatever placement the user picked; panel selection is orthogonal to
 //! placement. The Tasks panel is *not* here — it renders through the
 //! row/hitbox machinery in `render.rs`.
+//!
+//! On Top placement the strip auto-fits its content the way Tasks always
+//! did (and the way GrokBuild's tasks pane does): a two-agent fan-out is
+//! two rows, not a fixed four-row band with a chrome title. The only Top
+//! title is an active **goal** (not panel names like "Pinned"). Side rails
+//! keep a muted panel label because a column among other chrome needs
+//! naming.
 //!
 //! The line builders themselves still live in `tui::sidebar` (they are
 //! `pub(crate)` there) while the sidebar module is wound down; the rail is
@@ -12,18 +19,27 @@
 use ratatui::text::Line;
 
 use crate::tui::app::App;
-use crate::tui::sidebar::{self, SidebarSubagentSummary};
+use crate::tui::sidebar::{self, SidebarSubagentSummary, WorkPanelOpts};
 use crate::tui::subagent_routing::active_fanout_counts;
 
 use super::model::RailPanel;
 
+/// Cap used when measuring natural content height so a pathological
+/// checklist cannot allocate unbounded lines during layout. The strip's
+/// real cap (`top_cap`) still clamps the visible window.
+const NATURAL_HEIGHT_PROBE: usize = 64;
+
 /// Display lines for a non-Tasks rail panel, or `None` for Tasks (which the
 /// caller renders through the row machinery instead).
+///
+/// `omit_goal_objective` is set on Top when the goal is already the strip
+/// title, so Pinned does not repeat `Goal: …` in the body.
 pub(crate) fn panel_lines(
     app: &mut App,
     panel: RailPanel,
     content_width: usize,
     max_rows: usize,
+    omit_goal_objective: bool,
 ) -> Option<Vec<Line<'static>>> {
     let content_width = content_width.max(1);
     let max_rows = max_rows.max(1);
@@ -31,8 +47,57 @@ pub(crate) fn panel_lines(
         RailPanel::Tasks => None,
         RailPanel::Agents => Some(agents_panel_lines(app, content_width, max_rows)),
         RailPanel::Context => Some(sidebar::context_panel_lines(app, content_width)),
-        RailPanel::Pinned => Some(pinned_panel_lines(app, content_width, max_rows)),
+        RailPanel::Pinned => Some(pinned_panel_lines(
+            app,
+            content_width,
+            max_rows,
+            omit_goal_objective,
+        )),
     }
+}
+
+/// Whether a non-Tasks panel has anything worth spending a top-strip row on.
+/// Empty projections collapse to zero the way Tasks does — an empty panel is
+/// not a panel. Context always has session facts, so it always has content.
+pub(crate) fn panel_has_useful_content(app: &mut App, panel: RailPanel) -> bool {
+    match panel {
+        RailPanel::Tasks => true,
+        RailPanel::Pinned => sidebar::sidebar_work_summary(app).has_useful_content(),
+        RailPanel::Agents => agents_have_useful_content(app),
+        RailPanel::Context => true,
+    }
+}
+
+/// Natural content row count for height auto-fit. Does not include the
+/// divider row or the optional Top goal title that `height()` adds.
+pub(crate) fn panel_content_row_count(
+    app: &mut App,
+    panel: RailPanel,
+    content_width: usize,
+    omit_goal_objective: bool,
+) -> usize {
+    panel_lines(
+        app,
+        panel,
+        content_width,
+        NATURAL_HEIGHT_PROBE,
+        omit_goal_objective,
+    )
+    .map(|lines| lines.len())
+    .unwrap_or(0)
+}
+
+fn agents_have_useful_content(app: &App) -> bool {
+    if !app.subagent_cache.is_empty() {
+        return true;
+    }
+    if !app.agent_progress.is_empty() {
+        return true;
+    }
+    if active_fanout_counts(app).is_some_and(|(_, total)| total > 0) {
+        return true;
+    }
+    sidebar::foreground_rlm_running(app)
 }
 
 /// Agents panel: cached sub-agents plus progress-only and fanout signals.
@@ -87,13 +152,19 @@ fn agents_panel_lines(app: &App, content_width: usize, max_rows: usize) -> Vec<L
 
 /// Pinned panel: the durable work summary (goal + checklist) the legacy
 /// sidebar showed in Pinned focus.
-fn pinned_panel_lines(app: &mut App, content_width: usize, max_rows: usize) -> Vec<Line<'static>> {
+fn pinned_panel_lines(
+    app: &mut App,
+    content_width: usize,
+    max_rows: usize,
+    omit_goal_objective: bool,
+) -> Vec<Line<'static>> {
     let summary = sidebar::sidebar_work_summary(app);
-    sidebar::work_panel_lines(
+    sidebar::work_panel_lines_with_opts(
         &summary,
         content_width,
         max_rows,
         app.ui_theme.mode,
         &app.ui_theme,
+        WorkPanelOpts { omit_goal_objective },
     )
 }

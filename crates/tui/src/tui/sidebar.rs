@@ -165,10 +165,44 @@ pub(crate) fn work_panel_lines(
     palette_mode: palette::PaletteMode,
     ui_theme: &palette::UiTheme,
 ) -> Vec<Line<'static>> {
+    work_panel_lines_with_opts(
+        summary,
+        content_width,
+        max_rows,
+        palette_mode,
+        ui_theme,
+        WorkPanelOpts::default(),
+    )
+}
+
+/// Options for the Pinned work panel body.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct WorkPanelOpts {
+    /// When true, skip the primary `Goal: …` objective line. Used on Top
+    /// placement where that line is already the strip title — repeating it
+    /// in the body wastes a scarce row.
+    pub omit_goal_objective: bool,
+}
+
+pub(crate) fn work_panel_lines_with_opts(
+    summary: &SidebarWorkSummary,
+    content_width: usize,
+    max_rows: usize,
+    palette_mode: palette::PaletteMode,
+    ui_theme: &palette::UiTheme,
+    opts: WorkPanelOpts,
+) -> Vec<Line<'static>> {
     let _ = palette_mode;
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(max_rows.max(4));
 
-    push_work_goal_lines(summary, content_width, max_rows, &mut lines, ui_theme);
+    push_work_goal_lines(
+        summary,
+        content_width,
+        max_rows,
+        &mut lines,
+        ui_theme,
+        opts.omit_goal_objective,
+    );
 
     if summary.state_updating && lines.len() < max_rows {
         lines.push(Line::from(Span::styled(
@@ -206,6 +240,7 @@ fn push_work_goal_lines(
     max_rows: usize,
     lines: &mut Vec<Line<'static>>,
     theme: &palette::UiTheme,
+    omit_objective: bool,
 ) {
     let Some(objective) = summary.goal_objective.as_deref() else {
         return;
@@ -214,39 +249,41 @@ fn push_work_goal_lines(
         return;
     }
 
-    let icon = if summary.goal_completed {
-        crate::tui::glyphs::DONE
-    } else if summary.workflow_paused {
-        crate::tui::glyphs::PAUSED
-    } else {
-        crate::tui::glyphs::ATTENTION
-    };
-    let status_style = if summary.goal_completed {
-        Style::default()
-            .fg(theme.success)
-            .add_modifier(ratatui::style::Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(theme.warning)
-            .add_modifier(ratatui::style::Modifier::BOLD)
-    };
-    // Show the full goal objective — this is goal mode's primary status
-    // surface. Prefix with "Goal:" so the compact row is clearly labelled
-    // as a goal-mode objective, not a generic session title.
-    let label = if let Some(indicator) = summary.pause_indicator.as_deref() {
-        format!("Goal: {objective} {indicator}")
-    } else {
-        format!("Goal: {objective}")
-    };
+    if !omit_objective {
+        let icon = if summary.goal_completed {
+            crate::tui::glyphs::DONE
+        } else if summary.workflow_paused {
+            crate::tui::glyphs::PAUSED
+        } else {
+            crate::tui::glyphs::ATTENTION
+        };
+        let status_style = if summary.goal_completed {
+            Style::default()
+                .fg(theme.success)
+                .add_modifier(ratatui::style::Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(theme.warning)
+                .add_modifier(ratatui::style::Modifier::BOLD)
+        };
+        // Show the full goal objective — this is goal mode's primary status
+        // surface. Prefix with "Goal:" so the compact row is clearly labelled
+        // as a goal-mode objective, not a generic session title.
+        let label = if let Some(indicator) = summary.pause_indicator.as_deref() {
+            format!("Goal: {objective} {indicator}")
+        } else {
+            format!("Goal: {objective}")
+        };
 
-    lines.push(Line::from(Span::styled(
-        format!(
-            "{} {}",
-            icon,
-            truncate_line_to_width(&label, content_width.saturating_sub(2).max(1))
-        ),
-        status_style,
-    )));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{} {}",
+                icon,
+                truncate_line_to_width(&label, content_width.saturating_sub(2).max(1))
+            ),
+            status_style,
+        )));
+    }
 
     // Elapsed time
     if let Some(started) = summary.goal_started_at
