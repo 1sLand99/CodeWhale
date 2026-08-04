@@ -3313,19 +3313,35 @@ impl ConfigToml {
             .or(env.telemetry)
             .or(self.telemetry)
             .unwrap_or(false);
-        // Off is sticky: an explicit env "off", or an env value we could not
-        // parse, forces off regardless of CLI flag or config file. A kill
-        // switch that a later flag can re-enable is not a kill switch, and a
-        // typo in `CODEWHALE_TELEMETRY` must never resolve to "on".
-        let telemetry =
-            telemetry_allowed && env.telemetry != Some(false) && !env.telemetry_env_invalid;
-        // Distinguish "the user said no" from "nobody said anything". Only the
-        // former is an answer; the unset default must never be read as one.
-        let telemetry_explicit_off = cli.telemetry == Some(false)
-            || env.telemetry == Some(false)
-            || (cli.telemetry.is_none()
-                && env.telemetry.is_none()
-                && self.telemetry == Some(false));
+        // `telemetry = false` written to the config file is the off switch the
+        // first-run notice and `docs/TELEMETRY.md` both advertise as the
+        // *persistent* one, so it is a floor and not merely the last term of a
+        // precedence chain. Before this it lost to `--telemetry true`, and the
+        // dispatcher then laundered that per-run flag into the child's
+        // `CODEWHALE_TELEMETRY`, where it also outranked the child's own copy
+        // of the same file: any wrapper script, alias, or agent harness that
+        // passed the flag silently re-enabled a user who had turned telemetry
+        // off. Re-enabling is `codewhale config set telemetry true`, which is
+        // the same durable register the off was written in.
+        let telemetry_persisted_off = self.telemetry == Some(false);
+        // Off is sticky: an explicit env "off", an env value we could not
+        // parse, or a floor declared by the dispatcher forces off regardless of
+        // CLI flag or config file. A kill switch that a later flag can
+        // re-enable is not a kill switch, and a typo in `CODEWHALE_TELEMETRY`
+        // must never resolve to "on".
+        let telemetry = telemetry_allowed
+            && env.telemetry != Some(false)
+            && !env.telemetry_env_invalid
+            && !env.telemetry_floor
+            && !telemetry_persisted_off;
+        // Only a *persisted* off is an answer. `--telemetry false` and
+        // `CODEWHALE_TELEMETRY=0` are run-scoped kill switches: they must stop
+        // this run without deleting the identity and buffered events of a user
+        // who never revoked consent — the dispatcher forwards a resolved
+        // `false` on every ordinary run, so treating an environment "off" as an
+        // answer would also make the default state indistinguishable from a
+        // revocation.
+        let telemetry_explicit_off = telemetry_persisted_off;
         let telemetry_endpoint = env
             .telemetry_endpoint
             .clone()
@@ -3376,6 +3392,39 @@ fn merge_project_provider_config(target: &mut ProviderConfigToml, source: &Provi
     if source.model.is_some() {
         target.model = source.model.clone();
     }
+}
+
+/// The dispatcher's statement to the TUI child about *why* telemetry is off.
+///
+/// Private to the `codewhale` → `codewhale-tui` hop, in the same spirit as
+/// `DEEPSEEK_API_KEY_SOURCE`. Set to `1`/`0` on every delegated run.
+pub const TELEMETRY_FLOOR_ENV: &str = "CODEWHALE_TELEMETRY_FLOOR";
+
+/// Whether an environment-level kill switch forces telemetry off here.
+///
+/// A floor is *not* the same as "telemetry resolved to false": off is the
+/// default, and the dispatcher forwards a resolved `CODEWHALE_TELEMETRY=false`
+/// on every ordinary run, so a child reading only that value cannot tell an
+/// operator's declared kill switch from the shipped default. That distinction
+/// matters exactly once — the first-run notice must not ask a question whose
+/// answer this environment overrides — so the dispatcher states it outright in
+/// [`TELEMETRY_FLOOR_ENV`] and the child believes the statement.
+///
+/// With no statement (a directly launched `codewhale-tui`) the raw environment
+/// is read instead, where an explicit "off" or an unreadable value is a floor.
+#[must_use]
+pub fn telemetry_floor_in_force() -> bool {
+    if let Ok(raw) = std::env::var(TELEMETRY_FLOOR_ENV)
+        && let Ok(declared) = parse_bool(&raw)
+    {
+        return declared;
+    }
+    let Ok(raw) =
+        std::env::var("CODEWHALE_TELEMETRY").or_else(|_| std::env::var("DEEPSEEK_TELEMETRY"))
+    else {
+        return false;
+    };
+    !matches!(parse_bool(&raw), Ok(true))
 }
 
 #[must_use]
@@ -4692,13 +4741,16 @@ pub struct ResolvedRuntimeOptions {
     pub output_mode: Option<String>,
     pub log_level: Option<String>,
     pub telemetry: bool,
-    /// A human explicitly turned telemetry off — via `--telemetry false`,
-    /// `CODEWHALE_TELEMETRY=0`, or `telemetry = false` in the config file.
+    /// A human wrote `telemetry = false` into the config file.
     ///
-    /// This is *not* the same as [`Self::telemetry`] being `false`, which is
-    /// also the value when nobody has said anything at all. Consumers that
-    /// treat an answer differently from a default must read this flag rather
-    /// than infer intent from the resolved boolean.
+    /// This is the *persistent* opt-out, and it is deliberately narrower than
+    /// "telemetry resolved to false". `false` is also the value when nobody has
+    /// said anything at all, and it is what the dispatcher forwards to the TUI
+    /// on every ordinary run; a consumer that reads those as a revocation would
+    /// destroy the identity and buffered events of a consenting user who merely
+    /// set `CODEWHALE_TELEMETRY=0` for one command. Run-scoped kill switches
+    /// (`--telemetry false`, the environment variable) stop the run and leave
+    /// every byte on disk alone; only this flag authorizes the wipe.
     pub telemetry_explicit_off: bool,
     /// Where a telemetry batch would be sent, if telemetry were on.
     ///
@@ -6366,6 +6418,11 @@ struct EnvRuntimeOverrides {
     /// resolve to "on", so this forces telemetry off the same way an explicit
     /// `false` does.
     telemetry_env_invalid: bool,
+    /// An environment-level kill switch is in force for this process.
+    ///
+    /// See [`telemetry_floor_in_force`] for what sets it and why the dispatcher
+    /// has to state it rather than let the child infer it.
+    telemetry_floor: bool,
     /// `CODEWHALE_TELEMETRY_ENDPOINT`/`DEEPSEEK_TELEMETRY_ENDPOINT`. Overrides
     /// the config file. A workspace `.env` cannot reach this — the dotenv
     /// allowlist admits only built-in provider credential names.
@@ -6438,6 +6495,7 @@ impl EnvRuntimeOverrides {
     fn load() -> Self {
         let (provider, provider_source) = Self::load_provider();
         let (telemetry, telemetry_env_invalid) = Self::load_telemetry();
+        let telemetry_floor = telemetry_floor_in_force();
         Self {
             provider,
             provider_source,
@@ -6494,6 +6552,7 @@ impl EnvRuntimeOverrides {
                 .ok(),
             telemetry,
             telemetry_env_invalid,
+            telemetry_floor,
             telemetry_endpoint: std::env::var("CODEWHALE_TELEMETRY_ENDPOINT")
                 .or_else(|_| std::env::var("DEEPSEEK_TELEMETRY_ENDPOINT"))
                 .ok()

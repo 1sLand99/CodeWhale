@@ -7918,6 +7918,7 @@ max_spawn_depth = 1
 struct TelemetryEnvGuard {
     codewhale: Option<OsString>,
     deepseek: Option<OsString>,
+    floor: Option<OsString>,
     _lock: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -7927,12 +7928,14 @@ impl TelemetryEnvGuard {
         let guard = Self {
             codewhale: env::var_os("CODEWHALE_TELEMETRY"),
             deepseek: env::var_os("DEEPSEEK_TELEMETRY"),
+            floor: env::var_os(TELEMETRY_FLOOR_ENV),
             _lock: lock,
         };
         // Safety: test-only environment mutation guarded by the module mutex.
         unsafe {
             env::remove_var("CODEWHALE_TELEMETRY");
             env::remove_var("DEEPSEEK_TELEMETRY");
+            env::remove_var(TELEMETRY_FLOOR_ENV);
         }
         guard
     }
@@ -7941,6 +7944,22 @@ impl TelemetryEnvGuard {
         // Safety: test-only environment mutation guarded by the module mutex.
         unsafe {
             env::set_var("CODEWHALE_TELEMETRY", value);
+        }
+    }
+
+    fn set_floor(&self, value: &str) {
+        // Safety: test-only environment mutation guarded by the module mutex.
+        unsafe {
+            env::set_var(TELEMETRY_FLOOR_ENV, value);
+        }
+    }
+
+    fn clear(&self) {
+        // Safety: test-only environment mutation guarded by the module mutex.
+        unsafe {
+            env::remove_var("CODEWHALE_TELEMETRY");
+            env::remove_var("DEEPSEEK_TELEMETRY");
+            env::remove_var(TELEMETRY_FLOOR_ENV);
         }
     }
 }
@@ -7956,6 +7975,10 @@ impl Drop for TelemetryEnvGuard {
             match self.deepseek.take() {
                 Some(value) => env::set_var("DEEPSEEK_TELEMETRY", value),
                 None => env::remove_var("DEEPSEEK_TELEMETRY"),
+            }
+            match self.floor.take() {
+                Some(value) => env::set_var(TELEMETRY_FLOOR_ENV, value),
+                None => env::remove_var(TELEMETRY_FLOOR_ENV),
             }
         }
     }
@@ -7980,7 +8003,117 @@ fn env_telemetry_off_is_a_floor_over_cli_on() {
     // `--telemetry true` must not be able to climb back over an explicit
     // `CODEWHALE_TELEMETRY=0`. Off is a floor, not one more precedence rung.
     assert!(!resolved.telemetry);
+    // …but the environment is a run-scoped switch, not a revocation. See
+    // `a_run_scoped_off_is_a_kill_switch_and_not_a_revocation`.
+    assert!(!resolved.telemetry_explicit_off);
+}
+
+#[test]
+fn persisted_telemetry_off_is_a_floor_over_cli_on() {
+    // Regression: `--telemetry true` used to beat `telemetry = false` in the
+    // config file, and the dispatcher then forwarded the resolved `true` as
+    // `CODEWHALE_TELEMETRY=true`, which also outranked the child's own copy of
+    // that file. Any wrapper script, alias, or agent harness passing the flag
+    // silently re-enabled a user who had turned telemetry off through the one
+    // switch the first-run notice advertises as permanent.
+    let guard = TelemetryEnvGuard::take();
+
+    let config = ConfigToml {
+        telemetry: Some(false),
+        ..ConfigToml::default()
+    };
+    let cli = CliRuntimeOverrides {
+        telemetry: Some(true),
+        ..CliRuntimeOverrides::default()
+    };
+
+    let resolved = config.resolve_runtime_options(&cli);
+    assert!(!resolved.telemetry);
+    // And it stays an answer, so the run re-asserts the tombstone.
     assert!(resolved.telemetry_explicit_off);
+
+    // An environment "on" loses to it as well: re-enabling is writing the
+    // durable register the off was written in.
+    guard.set("1");
+    let resolved = config.resolve_runtime_options(&CliRuntimeOverrides::default());
+    assert!(!resolved.telemetry);
+    assert!(resolved.telemetry_explicit_off);
+}
+
+#[test]
+fn a_run_scoped_off_is_a_kill_switch_and_not_a_revocation() {
+    // Regression: an explicit `CODEWHALE_TELEMETRY=0` marked the run as an
+    // *answer*, so the telemetry crate took its destructive opt-out branch —
+    // deleting the install id and truncating the user's own dry-run records —
+    // on a recipe the runtime docs prescribe for one command. Worse, the
+    // dispatcher forwards a resolved `false` on every ordinary run, so the
+    // shipped default was indistinguishable from a revocation.
+    let guard = TelemetryEnvGuard::take();
+
+    for value in ["0", "false", "off", "disabled", "no"] {
+        guard.set(value);
+        let config = ConfigToml {
+            telemetry: Some(true),
+            ..ConfigToml::default()
+        };
+        let resolved = config.resolve_runtime_options(&CliRuntimeOverrides::default());
+        assert!(!resolved.telemetry, "{value} must stop the run");
+        assert!(
+            !resolved.telemetry_explicit_off,
+            "{value} must not read as a revocation"
+        );
+    }
+
+    // The same for the per-run flag, with the environment back to silent.
+    guard.clear();
+    let cli = CliRuntimeOverrides {
+        telemetry: Some(false),
+        ..CliRuntimeOverrides::default()
+    };
+    let resolved = ConfigToml {
+        telemetry: Some(true),
+        ..ConfigToml::default()
+    }
+    .resolve_runtime_options(&cli);
+    assert!(!resolved.telemetry);
+    assert!(!resolved.telemetry_explicit_off);
+}
+
+#[test]
+fn the_dispatcher_states_the_floor_rather_than_letting_the_child_infer_it() {
+    // The child cannot tell an operator's declared kill switch from the
+    // shipped default: both arrive as `CODEWHALE_TELEMETRY=false`. So the
+    // dispatcher states it, and the statement outranks the inference — which
+    // is what lets the first-run notice refuse to ask under a real floor while
+    // still asking on an ordinary first run.
+    let guard = TelemetryEnvGuard::take();
+    assert!(!telemetry_floor_in_force());
+
+    guard.set("0");
+    assert!(telemetry_floor_in_force());
+
+    // A forwarded resolved `false` with the dispatcher saying "no floor" is
+    // the ordinary first run.
+    guard.set("false");
+    guard.set_floor("0");
+    assert!(!telemetry_floor_in_force());
+
+    // A declared floor holds even where the value alone would not show it.
+    guard.set("true");
+    guard.set_floor("1");
+    assert!(telemetry_floor_in_force());
+    let resolved = ConfigToml {
+        telemetry: Some(true),
+        ..ConfigToml::default()
+    }
+    .resolve_runtime_options(&CliRuntimeOverrides::default());
+    assert!(!resolved.telemetry);
+
+    // An unreadable value is a floor: a typo in a kill switch never resolves
+    // to "on".
+    guard.clear();
+    guard.set("maybe");
+    assert!(telemetry_floor_in_force());
 }
 
 #[test]
@@ -8039,24 +8172,25 @@ fn telemetry_explicit_off_distinguishes_an_answer_from_the_default() {
     assert!(!resolved.telemetry);
     assert!(resolved.telemetry_explicit_off);
 
-    // A CLI `--telemetry true` overrides the file's `false`, so the file is no
-    // longer the answer and telemetry is on.
+    // A CLI `--telemetry true` does not override the file's `false`: the
+    // persistent switch is a floor, and the answer stands.
     let cli = CliRuntimeOverrides {
         telemetry: Some(true),
         ..CliRuntimeOverrides::default()
     };
     let resolved = config.resolve_runtime_options(&cli);
-    assert!(resolved.telemetry);
-    assert!(!resolved.telemetry_explicit_off);
+    assert!(!resolved.telemetry);
+    assert!(resolved.telemetry_explicit_off);
 
-    // A CLI `--telemetry false` is an answer.
+    // A CLI `--telemetry false` stops the run without being an answer: it is
+    // scoped to the run, and a run-scoped switch must not delete state.
     let cli = CliRuntimeOverrides {
         telemetry: Some(false),
         ..CliRuntimeOverrides::default()
     };
     let resolved = ConfigToml::default().resolve_runtime_options(&cli);
     assert!(!resolved.telemetry);
-    assert!(resolved.telemetry_explicit_off);
+    assert!(!resolved.telemetry_explicit_off);
 }
 
 #[test]
