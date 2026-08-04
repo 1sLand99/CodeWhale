@@ -29,7 +29,10 @@ use schema::{canonical_schema, legacy_action_schema};
 // that nothing in the production surface above names.
 #[cfg(test)]
 use serde_json::json;
-#[cfg(test)]
+// Unix-only like the recorder helper that returns it (`install_recording_gh`)
+// — on Windows the test binary compiles without them, and an ungated import
+// fails `-D warnings`.
+#[cfg(all(test, unix))]
 use std::path::PathBuf;
 
 /// Actions the Plan-mode read-only surface exposes.
