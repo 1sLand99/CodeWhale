@@ -131,7 +131,9 @@ pub fn height(app: &mut App, width: u16, terminal_height: u16, rail_budget: u16)
         .iter()
         .filter(|row| row.selectable || row.id.0.starts_with("section:"))
         .count();
-    let progress = u16::from(top_todo_progress(app, &rows).is_some());
+    let progress = u16::from(
+        top_todo_progress(app, &rows).is_some() && !progress_shares_goal_row(width, goal_rows > 0),
+    );
     let desired = u16::try_from(list_rows)
         .unwrap_or(u16::MAX)
         .saturating_add(progress)
@@ -325,8 +327,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     // Pin goal title, then progress receipt, above the scrollable rows.
     // At the minimum two-row surface keep one usable content row + divider.
     let goal_height = u16::from(goal_title.is_some() && body_area.height >= 1);
-    let progress_height =
-        u16::from(todo_progress.is_some() && body_area.height.saturating_sub(goal_height) >= 2);
+    let fold_progress = progress_shares_goal_row(body_area.width, goal_height > 0);
+    let progress_height = u16::from(
+        todo_progress.is_some()
+            && !fold_progress
+            && body_area.height.saturating_sub(goal_height) >= 2,
+    );
     let header_height = goal_height.saturating_add(progress_height);
     let list_height = body_area.height.saturating_sub(header_height);
     let body_height = usize::from(list_height);
@@ -357,12 +363,30 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         .render(area, frame.buffer_mut());
 
     if let Some((goal_text, goal_style)) = goal_title.filter(|_| goal_height > 0) {
-        let goal_text = truncate_line_to_width(&goal_text, usize::from(content_area.width));
-        Paragraph::new(Line::from(Span::styled(
-            goal_text,
+        let full_width = usize::from(content_area.width);
+        // Wide strips carry the receipt right-aligned on the goal row rather
+        // than spending a second row announcing a count.
+        let receipt = todo_progress.as_deref().filter(|_| fold_progress);
+        let reserved = receipt
+            .map(|text| UnicodeWidthStr::width(text).saturating_add(2))
+            .unwrap_or(0);
+        let goal_text = truncate_line_to_width(&goal_text, full_width.saturating_sub(reserved));
+        let mut spans = vec![Span::styled(
+            goal_text.clone(),
             goal_style.bg(app.ui_theme.surface_bg),
-        )))
-        .render(
+        )];
+        if let Some(receipt) = receipt {
+            let gap = full_width
+                .saturating_sub(UnicodeWidthStr::width(goal_text.as_str()))
+                .saturating_sub(UnicodeWidthStr::width(receipt));
+            spans.push(Span::styled(
+                format!("{}{receipt}", " ".repeat(gap)),
+                Style::default()
+                    .fg(app.ui_theme.text_muted)
+                    .bg(app.ui_theme.surface_bg),
+            ));
+        }
+        Paragraph::new(Line::from(spans)).render(
             Rect {
                 y: body_area.y,
                 height: 1,
@@ -374,12 +398,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
 
     if let Some(progress) = todo_progress.filter(|_| progress_height > 0) {
         let progress = truncate_line_to_width(&progress, usize::from(content_area.width));
+        // Muted, not accent: accent_primary means "selected" everywhere else
+        // in the strip, and spending it on a static count makes the actual
+        // selection hard to find.
         Paragraph::new(Line::from(Span::styled(
             progress,
             Style::default()
-                .fg(app.ui_theme.accent_primary)
-                .bg(app.ui_theme.surface_bg)
-                .add_modifier(Modifier::BOLD),
+                .fg(app.ui_theme.text_muted)
+                .bg(app.ui_theme.surface_bg),
         )))
         .render(
             Rect {
@@ -635,6 +661,20 @@ fn todo_ordinals(rows: &[WorkRow]) -> HashMap<String, usize> {
         .enumerate()
         .map(|(index, row)| (row.id.0.clone(), index.saturating_add(1)))
         .collect()
+}
+
+/// Below this width the goal title and the receipt cannot both stay readable
+/// on one row, so the receipt keeps its own row.
+const PROGRESS_FOLD_MIN_WIDTH: u16 = 72;
+
+/// Whether the to-do receipt rides on the goal-title row instead of claiming
+/// a row of its own.
+///
+/// [`height`] and [`render`] must agree on this or the strip paints into a row
+/// it did not reserve, so the rule is a pure function of the strip width and
+/// whether there is a goal title to share with.
+fn progress_shares_goal_row(width: u16, has_goal_title: bool) -> bool {
+    has_goal_title && width >= PROGRESS_FOLD_MIN_WIDTH
 }
 
 fn top_todo_progress(app: &App, rows: &[WorkRow]) -> Option<String> {
