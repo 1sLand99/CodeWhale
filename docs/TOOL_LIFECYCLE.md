@@ -13,8 +13,23 @@ describes *what will be done* and the invariants any future diet PR must hold.
   Legacy subagent-name cleanup + guardrail tests in this policy rebase on #2684.
 - PR **#2685** — git-history active + RLM/field errors.
 
-All file:line citations are against the verified tree at the current Codewhale
-checkout as of v0.8.52/0.8.53.
+**What actually happened, so you can read the rest as history:** the "hidden
+compatibility" plan below was *not* what shipped. The v0.9.x cutover **removed**
+almost every alias this document promises to keep dispatchable. `exec_wait`,
+`exec_interact`, all `checklist_*` and all `todo_*` are gone from the registry
+and hard-error if called; only `tts`/`speech` survives as this document
+describes, and `apply_patch` as the single replay-only alias.
+[`TOOL_SURFACE.md`](TOOL_SURFACE.md) has the shipped contract and the tests that
+pin it. Read §4 and §8 below as a rejected proposal, not as a guarantee.
+
+**All file:line citations here were correct at v0.8.52/0.8.53 and are now
+expired.** They have not been rewritten, because renumbering a historical
+record makes it look current. Symbols this document cites that no longer exist
+at all include `ARCEE_FIRST_TURN_NATIVE_TOOLS` and `apply_provider_tool_policy`
+(both removed by `1bfcced43c`, "fix(engine): remove Arcee tool catalog
+exception"), and the planned `HIDDEN_COMPATIBILITY_TOOLS` / `DEPRECATED_ALIASES`
+sets, which were never written. Resolve any symbol here against the tree before
+acting on it.
 
 ---
 
@@ -225,8 +240,14 @@ A per-`ToolSpec` `lifecycle: Lifecycle` field was rejected for three reasons:
 
 ## 4. Deprecation manifest (the #2681 acceptance-criteria table)
 
-This is the authoritative manifest. Columns are the #2681 AC columns. No entry
-is "removed" in 0.8.53; replay is supported for everything listed.
+This was the proposed manifest. Columns are the #2681 AC columns. No entry was
+"removed" in 0.8.53; replay was to be supported for everything listed.
+
+> **Superseded.** Ten of the eleven rows below were removed rather than kept
+> hidden-compatible. `exec_wait` and `exec_interact` are asserted absent at
+> `registry.rs:2290-2331`; `checklist_*` and `todo_*` at `registry.rs:1476-1490`
+> ("must no longer be callable"). Only `tts` is still dispatchable. The
+> `replay_supported = Yes` column is false for everything except `tts`.
 
 | Alias | Replacement (canonical) | Lifecycle state | first_deprecated_version | planned_removal_version | replay_supported |
 |---|---|---|---|---|---|
@@ -314,7 +335,7 @@ else or an explicit budget bump in this doc.
 | **Shell interact** | `exec_shell_interact` | `exec_interact` → hidden-compat | Same `ShellInteractTool` (`registry.rs:527,530`) |
 | **Work progress / checklist / todo** | `work_update` | `checklist_write/add/update/list`, `todo_write/add/update/list` → hidden-compat | Same `TodoWriteTool`; compatibility names replay old transcripts only |
 | **Speech / tts** | `speech` | `tts` → hidden-compat | Same `SpeechTool` (`registry.rs:787-792`) |
-| **Subagent lifecycle** | `agent` | old lifecycle names and tool-agent lane removed | Single async launcher; child agents are leaf workers |
+| **Subagent lifecycle** | `agent` | old lifecycle names and tool-agent lane removed | Single async launcher. (The "child agents are leaf workers" note here did not ship — see §7.) |
 | **Edit family** | `apply_patch`, `edit_file`, `write_file`, `fim_edit` | none — **all distinct niches** | NOT touched (per #2681 non-goals); doc-only canonical guidance |
 | **Search family** | `grep_files` (content), `file_search` (filename), `project_map` (structure) | none — **distinct niches** | NOT touched; no FTS5/BM25/semantic index exists today |
 
@@ -343,8 +364,12 @@ tools.
   transcript handle.
 - Child results arrive as completion events. The parent should keep working
   instead of polling a lifecycle tool.
-- Child tool catalogs exclude subagent lifecycle tools, so children are leaf
-  workers and cannot recursively summon more agents.
+- Child tool catalogs exclude the removed subagent *lifecycle* tools.
+  (**Not as shipped:** this bullet originally continued "so children are leaf
+  workers and cannot recursively summon more agents." That is not what landed.
+  Children receive `agent` and can recurse to the configured depth — see
+  `with_full_agent_surface_options` and `can_spawn_child` in
+  `tools/subagent/mod.rs`, and [`SUBAGENTS.md`](SUBAGENTS.md).)
 - Detailed inspection goes through `handle_read` on the returned transcript
   handle.
 
@@ -374,7 +399,14 @@ byte-stability invariant (`tool_catalog.rs:169-196`) is binding:
 5. **Hidden/deprecated tools are excluded *before* the head is built**, so their
    removal is the only head change — they do not appear in the prefix at all.
 
-### Old-transcript replay guarantee
+### Old-transcript replay guarantee (not adopted)
+
+The guarantee below was proposed, not shipped. Of the names it calls out by
+hand, only `tts` is still dispatchable; `exec_wait`, `exec_interact`, and every
+`todo_*` were removed outright. Replaying an old transcript that calls one of
+those does *not* produce the same result it always did — it fails as an unknown
+tool. The shipped replay surface is a single alias, `apply_patch`; see
+[`TOOL_SURFACE.md`](TOOL_SURFACE.md).
 
 > For every name in the deprecation manifest with `replay_supported = Yes`, the
 > tool stays **registered and dispatchable with identical behavior**. Replaying
