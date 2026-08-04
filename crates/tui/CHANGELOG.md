@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Sub-agent dispatch no longer aborts the process. The Tokio runtime was built
+  by `#[tokio::main]`, leaving every worker thread on the 2 MiB default while
+  only the owner thread received the explicit 16 MiB stack — and the engine runs
+  on a worker. A debug-build `agent` dispatch exceeded that stack and raised
+  SIGABRT, which is not a panic and so could not be caught; the process died
+  mid-spawn with no child request ever issued. Release builds were unaffected.
+- Fleet profiles that pin a provider no longer leak a bare model id onto the
+  session route. `model_overrides` exported each role's model while dropping its
+  provider, so a scout pinned to another provider's model was dispatched against
+  the active client and denied at the wire — visible as an instant auth failure
+  on the first sub-agent of a fan-out.
+- The rail's Pinned panel no longer spends four rows saying "No active work".
+  An empty panel now collapses like the Tasks panel always has, and the settings
+  migration no longer folds the default `sidebar_focus = "auto"` into a pinned
+  always-on strip, which had silently handed that panel to every user who had a
+  settings file at all.
+- The rail strip yields its rows to the transcript when the terminal cannot
+  seat both, so the idle ocean survives at 24 rows instead of being evicted.
+- `code_execution` and `js_execution` no longer describe themselves to the model
+  as sandboxed. Both are ordinary local subprocesses with no seccomp, jail, or
+  container (PR #5221 by @h3c-hexin and @asto18089).
+- Model Studio reasoning controls now fail closed on the host rather than on the
+  provider enum, so a custom `base_url` no longer receives Alibaba-specific
+  `enable_thinking` fields, and `qwen3.8-max` is no longer sent a thinking
+  switch it does not accept (PR #5233 by @Inference1, closing #5203).
+- `config.example.toml` no longer claims Shift+Tab cycles the reasoning tier.
+  Shift+Tab cycles the permission posture; Ctrl+T cycles reasoning
+  (found by @vFONGv, PR #5229).
+
 - Alibaba Model Studio reasoning controls are now route- and model-scoped
   instead of provider-wide (#5203, harvested from #5233 by
   [@Inference1](https://github.com/Inference1)). Codewhale sends
@@ -125,7 +154,13 @@ terminal width, and Windows installation.
 - Duplicate and drifting per-turn metadata has been removed in favor of
   runtime-owned authority, and large inline account and skill tests now live in
   owned test seams.
-- Updated Ratatui to 0.30.2, globset to 0.4.19, clap-complete to 4.6.8,
+- Pinned Ratatui to 0.30.0 and ratatui-core to 0.1.0. ratatui-core 0.1.1+
+  makes `Terminal::clear()` issue a blocking cursor-position report that
+  raced the TUI input loop and could kill first launch; both pins are
+  load-bearing, because 0.30.0 declares `ratatui-core ^0.1` and would
+  otherwise resolve forward on its own (PR #5192 by @bistack; upstream
+  ratatui/ratatui#2640).
+- Updated globset to 0.4.19, clap-complete to 4.6.8,
   futures-util to 0.3.33, libc to 0.2.189, actions/stale to 11.0.0, and
   docker/login-action to 4.5.2. The locked graph also includes the
   event-listener 5.4.2 fix for RUSTSEC-2026-0221.
