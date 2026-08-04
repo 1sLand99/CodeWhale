@@ -158,6 +158,11 @@ pub(crate) fn sidebar_work_summary(app: &mut App) -> SidebarWorkSummary {
     summary
 }
 
+/// Default-options shorthand for [`work_panel_lines_with_opts`].
+///
+/// Production callers all pass real [`WorkPanelOpts`] since the goal title
+/// moved to the strip, so this only survives to keep the tests readable.
+#[cfg(test)]
 pub(crate) fn work_panel_lines(
     summary: &SidebarWorkSummary,
     content_width: usize,

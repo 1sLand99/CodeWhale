@@ -705,7 +705,7 @@ mod tests {
         // goal title + 3 checklist + divider ≈ 5; must not be the old fixed 4,
         // and must not pad out to the 12-row cap.
         assert!(
-            h >= 4 && h <= 8,
+            (4..=8).contains(&h),
             "Pinned should auto-fit checklist content, got {h}"
         );
 
