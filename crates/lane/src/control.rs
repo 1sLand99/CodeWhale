@@ -2154,13 +2154,36 @@ fn redact_token(token: &str) -> String {
             }
         }
     }
-    if SECRET_VALUE_PREFIXES
-        .iter()
-        .any(|prefix| token.starts_with(prefix) && token.len() > prefix.len())
-    {
+    // Case-insensitive: a provider that spells its key `SK-live-…` leaks
+    // under an exact-case match (2026-08-04 audit).
+    let lowered_token = token.to_ascii_lowercase();
+    if SECRET_VALUE_PREFIXES.iter().any(|prefix| {
+        let lowered_prefix = prefix.to_ascii_lowercase();
+        lowered_token.starts_with(&lowered_prefix) && token.len() > prefix.len()
+    }) {
         return REDACTED.to_string();
     }
     redact_path_str(token)
+}
+
+/// Authentication scheme words that carry their secret in the NEXT
+/// whitespace-separated token.
+///
+/// `Authorization: Bearer <jwt>` used to leak the JWT in full: the bare
+/// `Bearer` token failed the `len() > prefix.len()` guard (it IS the prefix),
+/// and the JWT after it matches no prefix and no `key=value` hint. Every
+/// operator-visible `ControlReceipt` string goes through this sanitizer, so
+/// that was a live credential leak into transcripts, `--json` payloads, and
+/// screenshots (2026-08-04 audit).
+const SECRET_SCHEME_WORDS: &[&str] = &["bearer", "basic", "token", "apikey", "api_key"];
+
+/// Whether this token is a bare auth scheme word, meaning the token after it
+/// is the secret.
+fn is_secret_scheme_word(token: &str) -> bool {
+    let trimmed = token.trim_end_matches([':', ',', ';']);
+    SECRET_SCHEME_WORDS
+        .iter()
+        .any(|word| trimmed.eq_ignore_ascii_case(word))
 }
 
 fn truncate_chars(value: &str, max: usize) -> String {
@@ -2192,12 +2215,20 @@ pub fn sanitize_line(input: &str) -> String {
         .min(MAX_PRESERVED_INDENT);
     let mut out = " ".repeat(indent);
     let mut first = true;
+    // `Bearer <jwt>` splits into two tokens and the secret is the second one,
+    // so a scheme word arms redaction of whatever follows it.
+    let mut redact_next = false;
     for token in input.split_whitespace() {
         if first {
             first = false;
         } else {
             out.push(' ');
         }
+        if std::mem::take(&mut redact_next) {
+            out.push_str(REDACTED);
+            continue;
+        }
+        redact_next = is_secret_scheme_word(token);
         out.push_str(&redact_token(token));
     }
     if first {
@@ -3296,5 +3327,42 @@ mod tests {
                 "a path boundary is a separator, not a string prefix"
             );
         }
+    }
+
+    /// 2026-08-04 audit: `Authorization: Bearer <jwt>` leaked the JWT in
+    /// full. The bare `Bearer` token failed the `len() > prefix.len()` guard
+    /// (it IS the prefix) and the JWT after it matched nothing. Every
+    /// operator-visible ControlReceipt string goes through this sanitizer.
+    #[test]
+    fn bearer_and_case_variant_secrets_do_not_survive_sanitization() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl";
+
+        let line = sanitize_line(&format!("request failed: Authorization: Bearer {jwt}"));
+        assert!(!line.contains(jwt), "bearer JWT leaked: {line}");
+
+        // Lowercase scheme, and a trailing comma after the scheme word.
+        let line = sanitize_line(&format!("hdr bearer {jwt}"));
+        assert!(!line.contains(jwt), "lowercase bearer leaked: {line}");
+        let line = sanitize_line(&format!("token, {jwt}"));
+        assert!(
+            !line.contains(jwt),
+            "scheme word with punctuation leaked: {line}"
+        );
+
+        // Case-insensitive value prefixes.
+        for secret in [
+            "SK-live-abc123def456",
+            "sk-live-abc123def456",
+            "GHP_abcdef123456",
+        ] {
+            let line = sanitize_line(&format!("using {secret} now"));
+            assert!(!line.contains(secret), "prefixed secret leaked: {line}");
+        }
+
+        // Ordinary prose must survive: the scheme word only arms the NEXT
+        // token, and only when it is a bare scheme word.
+        let line = sanitize_line("the bearer of this token is unknown");
+        assert!(line.contains("the bearer"), "over-redacted prose: {line}");
+        assert!(line.contains("unknown"), "over-redacted prose: {line}");
     }
 }
