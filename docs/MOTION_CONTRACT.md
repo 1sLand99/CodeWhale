@@ -7,7 +7,7 @@ Central motion policy for the underwater TUI lives in
 
 | Mode | Decorative ambient | Status spinner | Streaming |
 |------|--------------------|----------------|-----------|
-| `Full` | yes | animated braille | steady ~30 FPS display clock; catch-up is STAGED, not live — see note below |
+| `Full` | yes | animated braille | steady ~60 FPS display clock (16 ms); catch-up is STAGED, not live — see note below |
 | `Reduced` | no | static calm glyph | **same** display clock — not a slow typewriter; no catch-up bursts |
 | `Still` | no | static chevron | state-change redraws; stream still coalesces on the display clock |
 
@@ -48,3 +48,11 @@ Full-motion catch-up never actually fires and Full/Reduced stream at the same
 steady clock. Do not describe catch-up as live behavior until the real queue
 depth/oldest-age metrics are fed in at the `ui.rs` drain sites
 (TUI-DOG-017 follow-up).
+
+A second, unrelated "adaptive chunking" policy (`streaming/chunking.rs`, plus a
+`LineBuffer` newline gate) was deleted in v0.9.4: it could only ever decide
+"drain everything available", and both `LineBuffer` constructors bypassed the
+gate. A commit beat now unconditionally flushes everything received since the
+previous beat. Newline-boundary safety for partial code fences is owned by the
+incremental markdown parser (`ParseState::commit_complete_lines`), which is
+where it is actually in force.

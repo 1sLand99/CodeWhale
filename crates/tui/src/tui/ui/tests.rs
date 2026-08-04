@@ -10379,7 +10379,7 @@ fn local_cancel_marks_late_stream_events_for_suppression() {
     app.turn_started_at = Some(Instant::now());
     app.runtime_turn_id = Some("turn_cancel_me".to_string());
     app.runtime_turn_status = Some("in_progress".to_string());
-    app.streaming_state.start_text(0, None);
+    app.streaming_state.start_text(0);
     crate::retry_status::start(2, Duration::from_secs(3), "network error");
 
     mark_active_turn_cancelled_locally(&mut app);
@@ -10677,7 +10677,7 @@ fn issue_2739_esc_cancel_preserves_session_messages_before_clear() {
     app.turn_started_at = Some(Instant::now());
     app.runtime_turn_id = Some("turn_esc_me".to_string());
     app.runtime_turn_status = Some("in_progress".to_string());
-    app.streaming_state.start_text(0, None);
+    app.streaming_state.start_text(0);
 
     // Esc/Ctrl+C/approval abort all flow through mark_active_turn_cancelled_locally,
     // which snapshots before clearing turn state.
@@ -16717,7 +16717,7 @@ fn engine_error_finalizes_active_thinking_block() {
     let mut app = create_test_app();
     let entry_idx = crate::tui::streaming_thinking::ensure_active_entry(&mut app);
     app.thinking_started_at = Some(Instant::now());
-    app.streaming_state.start_thinking(0, None);
+    app.streaming_state.start_thinking(0);
     app.streaming_state.push_content(0, "partial reasoning");
 
     apply_engine_error_to_app(
@@ -16757,7 +16757,7 @@ fn message_complete_drain_preserves_thinking_when_thinking_complete_lost() {
 
     let _ = crate::tui::streaming_thinking::ensure_active_entry(&mut app);
     app.thinking_started_at = Some(Instant::now());
-    app.streaming_state.start_thinking(0, None);
+    app.streaming_state.start_thinking(0);
     app.streaming_state.push_content(0, "deep reasoning text");
     let _ = app.streaming_state.commit_text(0);
     app.reasoning_buffer.push_str("deep reasoning text");

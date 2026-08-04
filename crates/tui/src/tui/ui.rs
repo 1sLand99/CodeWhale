@@ -3369,7 +3369,7 @@ async fn run_event_loop(
                         current_streaming_text.clear();
                         app.streaming_output_token_estimate = 0;
                         app.streaming_state.reset();
-                        app.streaming_state.start_text(0, None);
+                        app.streaming_state.start_text(0);
                         app.streaming_message_index = None;
                         stream_display_clock.reset();
                     }
@@ -5339,13 +5339,11 @@ async fn run_event_loop(
         // window, leave `needs_redraw = true` and shorten the poll timeout
         // so the loop wakes up exactly when drawing is allowed.
 
-        // Central motion contract: frame cap, stream catch-up, and chunking
-        // all read from MotionPolicy so reduced motion stays semantically calm
-        // (not a slow typewriter) and Full motion keeps the steady display clock.
+        // Central motion contract: frame cap and stream catch-up both read
+        // from MotionPolicy so reduced motion stays semantically calm (not a
+        // slow typewriter) and Full motion keeps the steady display clock.
         let motion_policy = app.motion_policy();
         frame_rate_limiter.set_low_motion(motion_policy.uses_constrained_frame_rate());
-        app.streaming_state
-            .set_low_motion(motion_policy.as_low_motion());
         stream_display_clock.set_allow_catch_up(motion_policy.allows_catch_up_bursts());
 
         // Content-driven cadence: atmosphere rate when only ocean life moves;
@@ -9115,7 +9113,7 @@ fn commit_streaming_display_tick(
         }
     }
 
-    if app.streaming_state.has_pending_chunker_lines(0) {
+    if app.streaming_state.has_pending_stream_text(0) {
         stream_display_clock.note_delta(now);
     }
 

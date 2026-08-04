@@ -223,7 +223,7 @@ pub(super) fn start_block(app: &mut App) -> bool {
     app.reasoning_header = None;
     app.thinking_started_at = Some(Instant::now());
     app.streaming_state.reset();
-    app.streaming_state.start_thinking(0, None);
+    app.streaming_state.start_thinking(0);
     let _ = ensure_active_entry(app);
     finalized_previous
 }
