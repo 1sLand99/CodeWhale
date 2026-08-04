@@ -61,6 +61,8 @@ const STALE_TMP_PACK_AGE: Duration = Duration::from_secs(60 * 60);
 /// long-running or high-churn sessions (#1112).
 const MAX_SNAPSHOT_SIZE_MB: u64 = 500;
 
+const BYTES_PER_MB: u64 = 1024 * 1024;
+
 /// Grace margin below `MAX_SNAPSHOT_SIZE_MB` used as the prune target
 /// so the repo doesn't hit the limit again one snapshot later.
 const PRUNE_TARGET_MB: u64 = 400;
@@ -346,44 +348,15 @@ impl SnapshotRepo {
     ) -> io::Result<SnapshotId> {
         // Guard against disk blowup (#1112): if the snapshot directory has
         // grown beyond the limit, prune aggressively before adding more.
-        if let Ok(current_mb) = dir_size_mb(&self.git_dir)
-            && current_mb > MAX_SNAPSHOT_SIZE_MB
-        {
-            tracing::warn!(
-                target: "snapshot",
-                current_mb,
-                limit_mb = MAX_SNAPSHOT_SIZE_MB,
-                "snapshot storage approaching limit — pruning aggressively"
-            );
-            // Walk backward from a 1-second retention to zero until
-            // we're under the target, or until there's nothing left.
-            let mut age = Duration::from_secs(1);
-            for _ in 0..10 {
-                let _ = self.prune_older_than(age);
-                if let Ok(new_size) = dir_size_mb(&self.git_dir)
-                    && new_size <= PRUNE_TARGET_MB
-                {
-                    tracing::info!(
-                        target: "snapshot",
-                        new_size_mb = new_size,
-                        "pruned snapshot storage back under limit"
-                    );
-                    break;
-                }
-                age = age.saturating_sub(Duration::from_millis(100));
-            }
-            // Fallback: if even 0-second pruning didn't help (shouldn't
-            // happen but belt-and-suspenders), nuke the refs so the next
-            // snapshot starts a fresh history.
-            if let Ok(final_size) = dir_size_mb(&self.git_dir)
-                && final_size > MAX_SNAPSHOT_SIZE_MB
-            {
-                tracing::warn!(
-                    target: "snapshot",
-                    "snapshot storage still over limit after pruning; wiping history"
-                );
-                let _ = self.prune_older_than(Duration::ZERO);
-                let _ = self.prune_unreachable_objects();
+        // When the prune actually destroys restore points the user is told
+        // once per workspace — losing undo history to a log line is the S5
+        // failure mode (2026-08-04 snapshot hunt).
+        if let Ok(removed) = self.prune_size_pressure(
+            MAX_SNAPSHOT_SIZE_MB * BYTES_PER_MB,
+            PRUNE_TARGET_MB * BYTES_PER_MB,
+        ) {
+            if removed > 0 {
+                notify_snapshot_history_pruned_once(&self.work_tree, removed);
             }
         }
         // Stage every tracked + untracked path the workspace exposes.
@@ -479,12 +452,81 @@ impl SnapshotRepo {
         }
         (Some(sid.to_string()), plain.to_string())
     }
+    /// Size-pressure prune (#1112): if the side repo exceeds `max_bytes`,
+    /// walk backward from a 1-second retention toward zero until the store is
+    /// at or under `target_bytes`, escalating to a full wipe when nothing
+    /// else helps. Returns the total number of snapshots destroyed, so the
+    /// caller can tell the user their undo history shrank (S5 — the wipe was
+    /// previously announced only by a `tracing::warn`).
+    fn prune_size_pressure(&self, max_bytes: u64, target_bytes: u64) -> io::Result<usize> {
+        let current_bytes = dir_size_bytes(&self.git_dir)?;
+        if current_bytes <= max_bytes {
+            return Ok(0);
+        }
+        tracing::warn!(
+            target: "snapshot",
+            current_mb = current_bytes / BYTES_PER_MB,
+            limit_mb = max_bytes / BYTES_PER_MB,
+            "snapshot storage approaching limit — pruning aggressively"
+        );
+        let mut removed_total: usize = 0;
+        // Walk backward from a 1-second retention to zero until
+        // we're under the target, or until there's nothing left.
+        let mut age = Duration::from_secs(1);
+        for _ in 0..10 {
+            if let Ok(removed) = self.prune_older_than(age) {
+                removed_total = removed_total.saturating_add(removed);
+            }
+            if let Ok(new_size) = dir_size_bytes(&self.git_dir)
+                && new_size <= target_bytes
+            {
+                tracing::info!(
+                    target: "snapshot",
+                    new_size_mb = new_size / BYTES_PER_MB,
+                    "pruned snapshot storage back under limit"
+                );
+                break;
+            }
+            age = age.saturating_sub(Duration::from_millis(100));
+        }
+        // Fallback: if even 0-second pruning didn't help (shouldn't
+        // happen but belt-and-suspenders), nuke the refs so the next
+        // snapshot starts a fresh history.
+        if let Ok(final_size) = dir_size_bytes(&self.git_dir)
+            && final_size > max_bytes
+        {
+            tracing::warn!(
+                target: "snapshot",
+                "snapshot storage still over limit after pruning; wiping history"
+            );
+            if let Ok(removed) = self.prune_older_than(Duration::ZERO) {
+                removed_total = removed_total.saturating_add(removed);
+            }
+            let _ = self.prune_unreachable_objects();
+        }
+        Ok(removed_total)
+    }
+
     /// Restore the workspace to the state at `id`.
     ///
     /// Uses `git checkout <sha> -- :/` which checks out every path in the
     /// snapshot tree relative to the workspace root. We do NOT touch the
     /// user's own `.git` — snapshots only contain working-tree files.
     pub fn restore(&self, id: &SnapshotId) -> io::Result<()> {
+        // Restore is the one destructive operation with no undo of its own.
+        // Capture the pre-restore state first so the restore itself can be
+        // reversed (2026-08-04 snapshot hunt: makes several other findings
+        // recoverable instead of final). The `pre-restore:` prefix is
+        // deliberately not a `/undo` or `revert_turn` candidate label, so the
+        // safety net never changes snapshot selection. Best-effort: a failed
+        // safety snapshot must never block the restore the user asked for.
+        let target_short = &id.as_str()[..id.as_str().len().min(12)];
+        if let Err(e) = self.snapshot_with_session(&format!("pre-restore:{target_short}"), None) {
+            tracing::warn!(
+                target: "snapshot",
+                "pre-restore safety snapshot failed (restore will proceed): {e}"
+            );
+        }
         let current_paths = self.tree_paths("HEAD")?;
         let target_paths = self.tree_paths(id.as_str())?;
         let checkout = run_git(
@@ -832,8 +874,8 @@ fn write_builtin_excludes(git_dir: &Path) -> io::Result<()> {
     std::fs::write(info_dir.join("exclude"), BUILTIN_EXCLUDES)
 }
 
-/// Recursively compute the total size of a directory in megabytes.
-fn dir_size_mb(root: &Path) -> io::Result<u64> {
+/// Recursively compute the total size of a directory in bytes.
+fn dir_size_bytes(root: &Path) -> io::Result<u64> {
     fn walk(dir: &Path, total: &mut u64) -> io::Result<()> {
         if !dir.is_dir() {
             return Ok(());
@@ -855,7 +897,44 @@ fn dir_size_mb(root: &Path) -> io::Result<u64> {
     }
     let mut total: u64 = 0;
     walk(root, &mut total)?;
-    Ok(total / (1024 * 1024))
+    Ok(total)
+}
+
+/// One prominent notice per workspace per process when the size-pressure
+/// prune destroys restore points — silent loss of undo history is the S5
+/// failure mode (2026-08-04 snapshot hunt). The stderr print is deliberate:
+/// headless/CLI stderr is the user surface for once-per-workspace snapshot
+/// warnings, matching `maybe_notify_snapshots_disabled_once` in
+/// `core/turn.rs`.
+#[allow(clippy::print_stderr)]
+fn notify_snapshot_history_pruned_once(workspace: &Path, removed: usize) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static NOTIFIED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let key = workspace.to_string_lossy().into_owned();
+    let set = NOTIFIED.get_or_init(|| Mutex::new(HashSet::new()));
+    let Ok(mut guard) = set.lock() else {
+        return;
+    };
+    if !guard.insert(key) {
+        return;
+    }
+    drop(guard);
+    eprint!("{}", snapshot_history_pruned_message(workspace, removed));
+}
+
+/// Build the user-visible notice for a size-pressure prune. Kept pure and
+/// separate from the emit/dedup shell so the content is unit-testable.
+fn snapshot_history_pruned_message(workspace: &Path, removed: usize) -> String {
+    format!(
+        "warning: snapshot/undo history for {} was pruned to stay under the {} MB snapshot storage cap.
+  {} snapshot(s) were removed and can no longer be restored.
+  The cap bounds the undo side-repo's disk use; high-churn or large workspaces hit it sooner.
+",
+        workspace.display(),
+        MAX_SNAPSHOT_SIZE_MB,
+        removed
+    )
 }
 
 fn cleanup_stale_pack_temps(git_dir: &Path, stale_age: Duration) -> io::Result<usize> {
@@ -1155,6 +1234,44 @@ mod tests {
         repo.restore(&id).expect("restore");
         assert!(original.exists());
         assert!(!added.exists(), "restore must remove tracked added files");
+    }
+
+    #[test]
+    fn restore_takes_a_pre_restore_safety_snapshot_that_round_trips() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        let f = repo.work_tree().join("file.txt");
+
+        std::fs::write(&f, b"v1").unwrap();
+        let id1 = repo.snapshot("pre-turn:1").expect("snapshot v1");
+
+        std::fs::write(&f, b"v2").unwrap();
+        repo.snapshot("post-turn:1").expect("snapshot v2");
+
+        repo.restore(&id1).expect("restore to v1");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "v1");
+
+        // The restore must have captured the pre-restore state (v2) under a
+        // `pre-restore:` label naming its target, so the destructive op is
+        // itself reversible (2026-08-04 snapshot hunt).
+        let snapshots = repo.list(usize::MAX).expect("list");
+        let safety = snapshots
+            .iter()
+            .find(|s| s.label.starts_with("pre-restore:"))
+            .expect("a pre-restore safety snapshot must exist");
+        assert!(
+            safety.label.ends_with(&id1.as_str()[..12]),
+            "safety label should name the restore target: {}",
+            safety.label
+        );
+
+        repo.restore(&safety.id)
+            .expect("restore the safety snapshot");
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap(),
+            "v2",
+            "the safety snapshot must bring back the pre-restore state"
+        );
     }
 
     #[test]
@@ -1554,22 +1671,26 @@ mod tests {
     }
 
     #[test]
-    fn dir_size_mb_measures_directory_bytes() {
+    fn dir_size_bytes_measures_directory_bytes() {
         let tmp = tempdir().unwrap();
         let dir = tmp.path().join("sizedir");
         std::fs::create_dir_all(dir.join("sub")).unwrap();
-        // 3 bytes per file — well under 1 MB.
+        // 3 bytes per file.
         std::fs::write(dir.join("a.txt"), b"abc").unwrap();
         std::fs::write(dir.join("sub/b.txt"), b"xyz").unwrap();
 
-        let size = dir_size_mb(&dir).expect("dir_size_mb");
-        assert_eq!(size, 0, "6 bytes should be 0 MB");
+        let size = dir_size_bytes(&dir).expect("dir_size_bytes");
+        assert_eq!(size, 6, "two 3-byte files should measure 6 bytes");
 
         // Write 2 MB of data.
         let big = dir.join("big.bin");
         std::fs::write(&big, vec![0u8; 2 * 1024 * 1024]).unwrap();
-        let size = dir_size_mb(&dir).expect("dir_size_mb after big write");
-        assert_eq!(size, 2, "expected 2 MB after writing 2 MB file");
+        let size = dir_size_bytes(&dir).expect("dir_size_bytes after big write");
+        assert_eq!(
+            size,
+            2 * 1024 * 1024 + 6,
+            "expected 2 MB + 6 bytes after writing a 2 MB file"
+        );
     }
 
     /// Regression: snapshot size cap (#1112). When the snapshot dir grows,
@@ -1586,6 +1707,50 @@ mod tests {
         std::fs::write(repo.work_tree().join("f.txt"), b"hello").unwrap();
         let id = repo.snapshot("pre-turn:1").expect("snapshot under cap");
         assert_eq!(id.as_str().len(), 40);
+    }
+
+    #[test]
+    fn prune_size_pressure_counts_and_removes_history_when_over_limit() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        for i in 0..3 {
+            std::fs::write(repo.work_tree().join("f.txt"), format!("v{i}")).unwrap();
+            repo.snapshot(&format!("pre-turn:{i}")).expect("snapshot");
+        }
+        assert_eq!(repo.list(usize::MAX).unwrap().len(), 3);
+        // A zero byte limit makes any non-empty side repo "over limit", so the
+        // prune must run and report exactly what it destroyed. This is the S5
+        // wipe path; the count is what the user-visible notice is built from.
+        let removed = repo.prune_size_pressure(0, 0).expect("prune_size_pressure");
+        assert_eq!(removed, 3, "every snapshot must be reported as removed");
+        assert!(
+            repo.list(usize::MAX).unwrap().is_empty(),
+            "history should be empty after the forced wipe"
+        );
+    }
+
+    #[test]
+    fn prune_size_pressure_is_a_noop_under_the_limit() {
+        let tmp = tempdir().unwrap();
+        let (repo, _home) = make_repo(tmp.path());
+        std::fs::write(repo.work_tree().join("f.txt"), b"v0").unwrap();
+        repo.snapshot("pre-turn:0").expect("snapshot");
+        let removed = repo
+            .prune_size_pressure(u64::MAX, u64::MAX)
+            .expect("prune_size_pressure");
+        assert_eq!(removed, 0, "under the limit nothing may be removed");
+        assert_eq!(repo.list(usize::MAX).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn snapshot_history_pruned_message_names_workspace_count_and_cap() {
+        let msg = snapshot_history_pruned_message(Path::new("/tmp/ws"), 7);
+        assert!(msg.contains("/tmp/ws"), "message must name the workspace");
+        assert!(msg.contains("7"), "message must state the removed count");
+        assert!(
+            msg.contains(&MAX_SNAPSHOT_SIZE_MB.to_string()),
+            "message must state the storage cap"
+        );
     }
 
     #[test]
