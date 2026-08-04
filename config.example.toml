@@ -140,6 +140,11 @@ skills_dir = "~/.codewhale/skills"
 mcp_config_path = "~/.codewhale/mcp.json"
 notes_path = "~/.codewhale/notes.txt"
 
+# Anchors the native memory store. The filename itself is not written: under
+# the Native backend (the only backend) the store is re-rooted to
+# `<parent-of-this-path>/memory/global/MEMORY.md`. With the default below that
+# resolves to `~/.codewhale/memory/global/MEMORY.md` (plus workspace-scoped
+# files and a rebuildable SQLite FTS5 index). See docs/MEMORY.md.
 memory_path = "~/.codewhale/memory.md"
 
 # instructions = ["./AGENTS.md", "~/.codewhale/global.md"]
@@ -156,11 +161,10 @@ memory_path = "~/.codewhale/memory.md"
 # (`instructions = []`) clears the user list for the current repo.
 
 # ─────────────────────────────────────────────────────────────────────────────────
-# User memory (#489) — opt-in. When enabled, the TUI reads memory_path on
-# startup and injects its contents into the system prompt as a
-# <user_memory> block, intercepts `# foo` typed in the composer to append
-# the line as a timestamped bullet, and registers a `remember` tool the
-# model can call to add durable notes itself.
+# User memory (#489) — opt-in. When enabled, the TUI loads the native store
+# derived from memory_path (see above), injects a bounded recall block into
+# the system prompt, intercepts `# foo` in the composer, and registers the
+# `remember` / `memory_search` / `memory_get` tools.
 # ─────────────────────────────────────────────────────────────────────────────────
 [memory]
 # enabled = true            # turn the feature on (default: false)

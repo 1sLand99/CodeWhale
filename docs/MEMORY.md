@@ -40,7 +40,8 @@ Restart the TUI after toggling. Disabling is the same in reverse.
 ## Layout
 
 The store lives under a `memory/` directory next to where the legacy
-`memory_path` would have pointed — by default `~/.codewhale/memory/`:
+`memory_path` anchor points — by default `memory_path = "~/.codewhale/memory.md"`
+re-roots to `~/.codewhale/memory/`:
 
 ```text
 ~/.codewhale/memory/
@@ -51,8 +52,11 @@ The store lives under a `memory/` directory next to where the legacy
 
 Markdown is the durable source of truth; `index.db` is a disposable
 full-text cache (`/memory reindex` rebuilds it). A configured
-`memory_path` is re-rooted into this layout: whatever file you point
-at, its parent gains the `memory/global/MEMORY.md` tree.
+`memory_path` is an **anchor only**: the filename is discarded and its
+parent gains the `memory/global/MEMORY.md` tree. Do not set
+`memory_path` to the native layout path itself — that double-nests the
+tree. The shipped example keeps `~/.codewhale/memory.md` so the store
+lands at `~/.codewhale/memory/global/MEMORY.md`.
 
 ## What gets injected
 

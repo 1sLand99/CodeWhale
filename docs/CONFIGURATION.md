@@ -1785,12 +1785,14 @@ If you are upgrading from older releases:
   enables `# foo` quick-capture in the composer, surfaces the `/memory`
   slash command, and registers the `remember` tool. The same toggle is
   available via `DEEPSEEK_MEMORY=on`.
-- `memory_path` (string, optional): anchors the native memory store. When
-  memory is enabled the store lives in a `memory/` directory beside this
-  path (`memory/global/MEMORY.md` plus workspace-scoped files and a
-  rebuildable SQLite FTS5 index) — see [`MEMORY.md`](MEMORY.md) for the
-  full feature surface (`# foo` composer prefix, `/memory` slash command,
-  `remember` tool, opt-in toggle).
+- `memory_path` (string, optional): anchors the native memory store. The
+  configured filename is **not** the file that is written. Under the Native
+  backend (the only backend) the store is re-rooted to
+  `<parent-of-memory_path>/memory/global/MEMORY.md` — so the default
+  `~/.codewhale/memory.md` yields `~/.codewhale/memory/global/MEMORY.md`
+  (plus workspace-scoped files and a rebuildable SQLite FTS5 index). See
+  [`MEMORY.md`](MEMORY.md) for the full feature surface (`# foo` composer
+  prefix, `/memory` slash command, `remember` tool, opt-in toggle).
 - `snapshots.*` (optional): side-git workspace snapshots for file rollback:
   - `[snapshots].enabled` (bool, default `true`)
   - `[snapshots].max_age_days` (int, default `7`)
@@ -1882,6 +1884,8 @@ User memory is split across one top-level path setting and one opt-in
 toggle table:
 
 ```toml
+# Anchors the store only — actual writes go to
+# ~/.codewhale/memory/global/MEMORY.md (see MEMORY.md).
 memory_path = "~/.codewhale/memory.md"
 
 [memory]
@@ -1892,7 +1896,12 @@ Notes:
 
 - `memory_path` stays at the top level beside `notes_path` and
   `skills_dir`; it is not nested under `[memory]`.
-- `DEEPSEEK_MEMORY_PATH` overrides the file path from the environment.
+- The configured path is an **anchor**: its parent directory gains
+  `memory/global/MEMORY.md`, workspace-scoped files, and `index.db`.
+  Pointing `memory_path` at the native layout path itself would double-nest
+  (`…/memory/global/memory/global/MEMORY.md`); keep the legacy-style
+  anchor filename.
+- `DEEPSEEK_MEMORY_PATH` overrides the anchor path from the environment.
 - `DEEPSEEK_MEMORY=on` (also `1`, `true`, `yes`, `y`, or `enabled`)
   flips the feature on without editing `config.toml`.
 - The feature is inert when disabled: no file is injected, `# foo`
