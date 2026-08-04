@@ -8,6 +8,7 @@
 //! This replaces vague "what should I do?" prompts with a structured choice
 //! surface — acceptance criterion from the v0.8.43 truth-surface tracker.
 
+use crate::localization::truncate_to_width;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -212,17 +213,30 @@ impl Renderable for DecisionCard {
     }
 }
 
-fn truncate_to_width(s: &str, max_width: usize) -> String {
-    if max_width == 0 {
-        return String::new();
+#[cfg(test)]
+mod tests {
+    use super::truncate_to_width;
+    use unicode_width::UnicodeWidthStr;
+
+    /// 2026-08-04: this file carried its own `truncate_to_width` that counted
+    /// CHARS, not display columns, so wide text overflowed the card border —
+    /// `"数据库迁移任务结果"` at width 7 kept 6 chars, which render as 12
+    /// columns. It now uses the width-aware localization truncator.
+    #[test]
+    fn wide_text_never_exceeds_the_card_width() {
+        for width in [1usize, 4, 7, 12, 20] {
+            for sample in [
+                "数据库迁移任务结果",
+                "ASCII question that is quite long indeed",
+                "mixed 混合 text 内容",
+            ] {
+                let out = truncate_to_width(sample, width);
+                assert!(
+                    out.width() <= width,
+                    "width {width}: {out:?} renders {} columns",
+                    out.width()
+                );
+            }
+        }
     }
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max_width {
-        return s.to_string();
-    }
-    if max_width <= 1 {
-        return "…".to_string();
-    }
-    let truncated: String = chars.into_iter().take(max_width - 1).collect();
-    format!("{truncated}…")
 }

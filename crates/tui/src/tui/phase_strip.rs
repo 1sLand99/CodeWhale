@@ -10,6 +10,7 @@
 //! shim note at `crates/tui/src/tui/ocean.rs:35` — so there is no
 //! footer-below-composer fallback path left.
 
+use crate::localization::truncate_to_width;
 use std::borrow::Cow;
 
 use ratatui::{
@@ -66,30 +67,6 @@ pub fn height() -> u16 {
 
 fn span_width(spans: &[Span<'_>]) -> usize {
     spans.iter().map(|span| span.content.width()).sum()
-}
-
-fn truncate_to_width(text: &str, width: usize) -> String {
-    if text.width() <= width {
-        return text.to_string();
-    }
-    if width == 0 {
-        return String::new();
-    }
-    if width <= 3 {
-        return ".".repeat(width);
-    }
-    let mut result = String::new();
-    let mut used = 0;
-    for ch in text.chars() {
-        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + ch_width + 1 > width {
-            break;
-        }
-        result.push(ch);
-        used += ch_width;
-    }
-    result.push('…');
-    result
 }
 
 /// Compact working detail for the phase band: `×N` for tools or `1m 15s`
