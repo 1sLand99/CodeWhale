@@ -1,5 +1,14 @@
 //! Process-wide retry-state surface (#499).
 //!
+//! Read-side caveat (0.9.4): the renderer this module was written for was
+//! the legacy footer's retry banner, which went with `FooterWidget`. The
+//! *producer* — `client::send_with_retry` — is still live and still records
+//! every retry, and `client`'s own tests read it back through [`snapshot`].
+//! The read surface below therefore carries `#[allow(dead_code)]` rather
+//! than being deleted: removing it would mean changing `start`/`failed`'s
+//! signatures at their live call sites in `client.rs`. Give the banner a
+//! renderer, or delete the producer too — but not half of it.
+//!
 //! The HTTP retry path in `client::send_with_retry` already times its
 //! waits and knows the error category. This module gives the TUI a way
 //! to observe that state — `start`, `succeeded`, and `failed` flip a
@@ -20,6 +29,7 @@ use std::time::{Duration, Instant};
 /// next request will fire — the UI subtracts `Instant::now()` from it
 /// to render a live countdown.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // written by client::send_with_retry; see the read-side caveat above
 pub struct RetryBanner {
     /// 1-indexed retry attempt number (the first retry is attempt 1).
     pub attempt: u32,
@@ -36,12 +46,13 @@ pub enum RetryState {
     #[default]
     Idle,
     /// A request is sleeping before retrying. Show countdown banner.
-    Active(RetryBanner),
+    Active(#[allow(dead_code)] RetryBanner),
     /// All retries exhausted; show failure row until the next turn
     /// starts. `since` records when the row was set so a future polish
     /// pass can age it out automatically; today the engine clears it on
     /// `TurnStarted`.
     Failed {
+        #[allow(dead_code)]
         reason: String,
         #[allow(dead_code)]
         since: Instant,
@@ -53,6 +64,7 @@ impl RetryState {
     /// not active. Saturates at zero — the renderer should treat any
     /// negative remaining as "firing now".
     #[must_use]
+    #[allow(dead_code)] // no renderer since the legacy footer banner went
     pub fn seconds_remaining(&self) -> Option<u64> {
         match self {
             Self::Active(banner) => Some(
@@ -135,6 +147,7 @@ fn with_rate_limit<R>(f: impl FnOnce(&mut Option<Instant>) -> R) -> R {
 
 /// Public read snapshot for renderers.
 #[must_use]
+#[allow(dead_code)] // read by client.rs's retry tests; no production renderer today
 pub fn snapshot() -> RetryState {
     with_state(|state| state.clone())
 }

@@ -120,8 +120,15 @@ pub struct BalanceResponse {
 /// Per-currency balance entry from the balance API.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct BalanceInfo {
+    // Wire fields of the live `GET /user/balance` response deserialized in
+    // `tui::ui::fetch_deepseek_balance` and parked in `App::balance_cell`.
+    // Nothing renders them today — the footer balance chip went with the
+    // legacy FooterWidget — so `dead_code` cannot see the producer. Kept
+    // because they are the API contract, matching the sibling fields below.
+    #[allow(dead_code)]
     pub currency: String,
     #[serde(default)]
+    #[allow(dead_code)]
     pub total_balance: String,
     #[serde(default)]
     #[allow(dead_code)]
