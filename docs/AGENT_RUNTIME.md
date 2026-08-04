@@ -116,6 +116,12 @@ delegation levels. Sub-agents and fleet workers share **one** axis, sourced from
 - `MAX_SPAWN_DEPTH_CEILING = 8` — the opt-in cap that every configured value
   (fleet `max_spawn_depth`, `agent`'s `max_depth`) clamps to.
 
+Note the parser and the advertised schema do not agree on `agent`'s `max_depth`:
+the parser clamps to 8 (`tools/subagent/mod.rs:10601-10617`) while the JSON
+schema the model is shown declares `"maximum": 3` (`mod.rs:6845-6848`). A model
+therefore cannot request a depth the runtime would honour. Tracked here as a
+code discrepancy, not a doc one.
+
 The root worker always runs even at budget 0; the budget gates *child*
 delegation. The default affords at least three nested levels.
 
@@ -204,8 +210,10 @@ remaining work belongs to later releases:
 5. **TTC_DESIGN implementation** — approved and now unblocked after v0.9.0.
 6. **HarnessProfile completion** — the status/UX display lane
    (`docs/rfcs/HARNESS_PROFILE_CUTLINE.md`).
-7. **File decomposition, re-scoped** — `ui.rs` (~13.6k lines) and `main.rs`
-   (~12.1k) are the current offenders (`docs/rfcs/FILE_DECOMPOSITION_0_9_0.md`).
+7. **File decomposition, re-scoped** — `ui.rs` (~19.1k lines) and `main.rs`
+   (~17.6k) are the current offenders (`docs/rfcs/FILE_DECOMPOSITION_0_9_0.md`,
+   whose own ~13.6k/~12.1k figures are the 0.9.0-era snapshot). Both have grown
+   since; measure before quoting.
 
 Explicitly deferred by their own documents: external workflow memory (boundary
 only), automatic harness evolution, hosted workrooms, `constitution_modules`

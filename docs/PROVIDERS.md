@@ -6,7 +6,12 @@ limited to provider IDs, config keys, auth paths, base URLs, model resolution,
 and capability metadata that the code already knows about.
 
 DeepSeek remains the default provider, but every entry in `ProviderKind::ALL`
-and `PROVIDER_REGISTRY` is a first-class selectable provider route. Hosted
+is a first-class selectable provider route. `ALL` is the catalog/picker
+surface — one identity per vendor. Dual-wire dialect kinds (`*Anthropic`, e.g.
+`deepseek-anthropic`) and the Model Studio plan variants stay on the enum for
+serde and `provider_for_kind` but are deliberately **not** catalog rows:
+a plan is `mode`/`base_url` and a dialect is `wire = openai|anthropic` on the
+primary provider config (`crates/config/src/provider_kind.rs:186-197`). Hosted
 routes, generic OpenAI-compatible endpoints, the OpenAI Codex/ChatGPT route,
 native Anthropic, and local runtimes all run the same terminal harness against
 the selected provider/model/base URL.
@@ -26,14 +31,19 @@ Sources to keep in sync:
 
 ## Provider Selection
 
-The canonical provider IDs are:
+The canonical provider IDs are the 36 entries of `ProviderKind::ALL`
+(`crates/config/src/provider_kind.rs:198-234`), in that order:
 
-`deepseek`, `deepseek-anthropic`, `nvidia-nim`, `openai`, `atlascloud`,
-`wanjie-ark`, `volcengine`, `openrouter`, `xiaomi-mimo`, `novita`, `fireworks`,
-`siliconflow`, `arcee`, `siliconflow-CN`, `moonshot`, `sglang`, `vllm`,
-`ollama`, `huggingface`, `together`, `qianfan`, `openai-codex`, `anthropic`,
-`openmodel`, `zai`, `stepfun`, `minimax`, `deepinfra`, `sakana`, `longcat`,
-`opencode-go`, `opencode-zen`, `meta`, `telecomjs`, and `xai`.
+`deepseek`, `nvidia-nim`, `openai`, `atlascloud`, `wanjie-ark`, `volcengine`,
+`openrouter`, `xiaomi-mimo`, `novita`, `fireworks`, `siliconflow`, `arcee`,
+`siliconflow-CN`, `moonshot`, `sglang`, `vllm`, `ollama`, `huggingface`,
+`together`, `qianfan`, `openai-codex`, `anthropic`, `openmodel`, `zai`,
+`stepfun`, `minimax`, `deepinfra`, `sakana`, `longcat`, `opencode-go`,
+`opencode-zen`, `meta`, `xai`, `telecomjs`, `modelstudio-token-plan`, and
+`custom`.
+
+`deepseek-anthropic` is *not* on this list — it is a wire dialect of
+`deepseek`, reached with `wire = "anthropic"`, not a separate route to select.
 
 Use any of these surfaces to select a provider:
 
