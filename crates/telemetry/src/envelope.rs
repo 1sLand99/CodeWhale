@@ -49,14 +49,21 @@ pub struct TelemetryState {
     pub last_flush: Option<String>,
 }
 
-/// Read the install id, minting a fresh one if it is missing, unreadable, or
-/// older than [`ROTATION_DAYS`].
+/// Read the install id, minting a fresh one if it is missing, unreadable,
+/// **not a UUID**, or older than [`ROTATION_DAYS`].
+///
+/// The UUID check is not a formatting nicety. `install_id` is the one
+/// envelope field read verbatim off disk into a batch, so without it the file
+/// is a free-form string slot on the wire for anything that can write
+/// `$CODEWHALE_HOME/telemetry/install_id.json`. Minting a fresh random id is
+/// always the safe direction — the cost is one rotation, and the docs already
+/// say no count derived from `install_id` is a user count.
 pub fn read_or_create_install_id(root: &Path) -> Result<InstallId> {
     let path = buffer::install_id_path(root);
     let existing = std::fs::read_to_string(&path)
         .ok()
         .and_then(|body| serde_json::from_str::<InstallId>(&body).ok())
-        .filter(|record| !record.install_id.trim().is_empty())
+        .filter(|record| uuid::Uuid::parse_str(record.install_id.trim()).is_ok())
         .filter(|record| !is_expired(&record.rotated_at));
     if let Some(record) = existing {
         return Ok(record);
@@ -186,16 +193,16 @@ pub fn current_tty() -> bool {
 /// registry dependency yields
 /// `/Users/<builder>/.cargo/registry/src/…/ratatui-0.29.0/src/…` — the build
 /// machine's username, shipped from every user's binary.
+/// The allowlist itself lives in [`crate::event::is_reduced_panic_site`], and
+/// this function is defined as "the candidate if the predicate accepts it".
+/// Two copies of one charset would drift, and the drain path re-checks the
+/// predicate against events read back off disk — a reducer that could emit
+/// something the checker rejects would silently delete real panics.
 #[must_use]
 pub fn reduce_panic_site(file: &str, line: u32, column: u32) -> String {
-    let normalized = file.replace('\\', "/");
-    if normalized.starts_with("crates/")
-        && normalized.ends_with(".rs")
-        && normalized
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'/' | b'.' | b'-'))
-    {
-        format!("{normalized}:{line}:{column}")
+    let candidate = format!("{}:{line}:{column}", file.replace('\\', "/"));
+    if crate::event::is_reduced_panic_site(&candidate) {
+        candidate
     } else {
         "<dep>".to_string()
     }

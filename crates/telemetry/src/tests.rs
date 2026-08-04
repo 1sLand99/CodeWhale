@@ -155,50 +155,17 @@ pub(crate) fn string_leaves(value: &Value) -> Vec<(String, String)> {
     out
 }
 
-fn is_app_version(value: &str) -> bool {
-    let (core, pre) = match value.split_once('-') {
-        Some((core, pre)) => (core, Some(pre)),
-        None => (value, None),
-    };
-    let parts: Vec<&str> = core.split('.').collect();
-    if parts.len() != 3
-        || !parts
-            .iter()
-            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
-    {
-        return false;
-    }
-    match pre {
-        None => true,
-        Some(pre) => !pre.is_empty() && pre.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.'),
-    }
-}
+// The version and panic-site rules are the shipped predicates, not local
+// copies. A test that re-implements the rule it is checking passes against a
+// binary that enforces nothing — which is exactly what
+// `a_hostile_buffer_line_never_reaches_a_batch` found the first time.
+use crate::event::{is_reduced_panic_site, is_release_version_string as is_app_version};
 
 fn is_short_sha(value: &str) -> bool {
     value.len() == 12
         && value
             .bytes()
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-}
-
-fn is_panic_site(value: &str) -> bool {
-    if value == "<dep>" {
-        return true;
-    }
-    let Some((file, rest)) = value.split_once(".rs:") else {
-        return false;
-    };
-    let Some((line, column)) = rest.split_once(':') else {
-        return false;
-    };
-    file.starts_with("crates/")
-        && file
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'/' | b'.' | b'-'))
-        && !line.is_empty()
-        && line.bytes().all(|b| b.is_ascii_digit())
-        && !column.is_empty()
-        && column.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Every closed-enum string this schema may ever emit.
@@ -242,7 +209,7 @@ fn every_payload_field_is_bounded() {
             "git_sha" => is_short_sha(&value),
             "sent_at" => value.ends_with('Z') && value.len() == 20,
             "install_id" => uuid::Uuid::parse_str(&value).is_ok(),
-            p if p.ends_with(".site") => is_panic_site(&value),
+            p if p.ends_with(".site") => is_reduced_panic_site(&value),
             p if p.ends_with(".previous_version") => is_app_version(&value),
             _ => enums.contains(&value),
         };
@@ -375,6 +342,106 @@ fn panic_site_is_the_only_field_that_may_carry_a_path() {
             "a non-exempt leaf carries a path: {path} = {value:?}"
         );
     }
+}
+
+// ------------------------------------------- the drain path is a boundary --
+
+/// The buffer is a **deserializer input**, not an internal channel.
+///
+/// Every bound above is a property of how this process *builds* an event.
+/// `flush` re-reads `buffer.jsonl` and hands the lines to `serde`, and any
+/// process running as the user can append to that file — including a `Bash`
+/// tool call the session made on the model's behalf, since `$CODEWHALE_HOME`
+/// is a predictable path. Before `Event::is_bounded` existed, an appended
+/// `{"event":"panic","site":"…/Users/victim/secret-repo"}` was POSTed verbatim
+/// to the configured endpoint under the user's install id; the process-level
+/// proof of that is `a_hostile_buffer_line_never_reaches_a_batch` in
+/// `crates/tui/tests/telemetry_contract.rs`.
+#[test]
+fn hostile_buffer_lines_are_dropped_before_they_reach_a_batch() {
+    let hostile = [
+        // A path, which is the class `panic_site` is the sole exemption for.
+        r#"{"event":"panic","site":"/Users/victim/src/secret-repo/main.rs"}"#,
+        // A whole prompt in the one field that is allowed to look like text.
+        r#"{"event":"panic","site":"rewrite the auth module for acme-corp"}"#,
+        // A frame outside the `crates/` allowlist, spelled to look inside it.
+        r#"{"event":"panic","site":"../vendor/crates/foo/src/lib.rs:1:1"}"#,
+        // `previous_version` is read back from `state.json`, never validated
+        // at the point it is written.
+        r#"{"event":"install_or_upgrade","kind":"upgrade","previous_version":"/Users/victim/.ssh/id_ed25519"}"#,
+        // A customer's `[providers.<name>]` table key — the exact string
+        // `record_provider` takes a `ProviderKind` by value to avoid.
+        r#"{"event":"session_end","duration_bucket":"lt_1m","exit_class":"clean","cold_start_bucket":null,"providers":["acme_internal_gateway"],"counters":{"turns":0,"tool_calls":0,"fleet_dispatch":0,"workflow_run":0,"subagent_spawn":0,"mcp_server_connected":0,"memory_search":0,"approval_modal_shown":0,"approval_auto_allowed":0,"command_palette_open":0},"errors":{"auth_preflight_failed":0,"provider_http_4xx":0,"provider_http_5xx":0,"tool_denied_by_policy":0,"tool_timeout":0,"network_error":0},"turn_wall":{"lt_5s":0,"5_30s":0,"30_120s":0,"gte_120s":0}}"#,
+    ];
+    for line in hostile {
+        let event = serde_json::from_str::<Event>(line)
+            .unwrap_or_else(|error| panic!("the fixture must be parseable: {error}\n{line}"));
+        assert!(
+            !event.is_bounded(),
+            "an out-of-bounds event passed the drain check: {line}"
+        );
+        let parsed = crate::actor::parse_events(&[line.to_string()]);
+        assert!(
+            parsed.is_empty(),
+            "a hostile buffer line survived the drain: {line}"
+        );
+    }
+}
+
+/// The drain check must not delete real telemetry. Everything this process
+/// legitimately records has to survive a round trip through the buffer.
+#[test]
+fn every_legitimately_recorded_event_survives_the_drain() {
+    let lines: Vec<String> = every_event()
+        .iter()
+        .map(|event| serde_json::to_string(event).expect("serialize"))
+        .collect();
+    assert_eq!(
+        crate::actor::parse_events(&lines).len(),
+        lines.len(),
+        "the drain check dropped an event this process builds itself"
+    );
+
+    // Dialect kinds (`deepseek-anthropic`, the Model Studio plan variants) are
+    // absent from `ProviderKind::ALL`, which is the 36-row *catalog* subset,
+    // but `ApiProvider::kind()` yields them for real routes. Narrowing the
+    // provider bound to the catalog would drop those users' `session_end`.
+    for kind in [
+        codewhale_config::ProviderKind::DeepseekAnthropic,
+        codewhale_config::ProviderKind::MinimaxAnthropic,
+        codewhale_config::ProviderKind::Custom,
+    ] {
+        assert!(
+            crate::event::is_known_provider_id(kind.as_str()),
+            "a real routed provider is not a legal `providers` entry: {}",
+            kind.as_str()
+        );
+    }
+}
+
+/// `install_id` is the one envelope field read verbatim off disk into a batch.
+#[test]
+fn a_non_uuid_install_id_on_disk_is_replaced_rather_than_sent() {
+    let home = temp_home();
+    let root = root_of(&home);
+    buffer::ensure_dir(&root).expect("create telemetry root");
+    std::fs::write(
+        buffer::install_id_path(&root),
+        serde_json::json!({
+            "schema_version": 1,
+            "install_id": "/Users/victim/src/secret-repo",
+            "rotated_at": envelope::now_rfc3339(),
+        })
+        .to_string(),
+    )
+    .expect("plant a hostile install id");
+
+    let record = envelope::read_or_create_install_id(&root).expect("read install id");
+    assert!(
+        uuid::Uuid::parse_str(&record.install_id).is_ok(),
+        "a non-UUID install id was carried onto the wire: {:?}",
+        record.install_id
+    );
 }
 
 // ------------------------------------------------------------- panic sites --

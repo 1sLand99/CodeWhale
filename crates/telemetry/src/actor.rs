@@ -209,8 +209,16 @@ fn flush(context: &Context) -> FlushOutcome {
 }
 
 /// Parse drained lines into events, capped at [`BATCH_MAX_EVENTS`] and
-/// [`BATCH_MAX_BYTES`], skipping anything that does not parse.
-fn parse_events(lines: &[String]) -> Vec<Event> {
+/// [`BATCH_MAX_BYTES`], skipping anything that does not parse **or does not
+/// satisfy its declared string bounds**.
+///
+/// The bound re-check is the point. Everything upstream of here builds events
+/// from closed enums, `u32`s, and two reducers — but this function is a
+/// deserializer, and its input is a file on disk that any process running as
+/// the user can append to. `Event::is_bounded` is what stops
+/// `{"event":"panic","site":"<anything at all>"}` from becoming a first-party
+/// POST under the user's install id.
+pub(crate) fn parse_events(lines: &[String]) -> Vec<Event> {
     let mut events = Vec::new();
     let mut bytes = 0usize;
     for line in lines {
@@ -218,6 +226,10 @@ fn parse_events(lines: &[String]) -> Vec<Event> {
             break;
         }
         if let Ok(event) = serde_json::from_str::<Event>(line) {
+            if !event.is_bounded() {
+                tracing::debug!("telemetry dropped an out-of-bounds buffered event");
+                continue;
+            }
             bytes += line.len();
             events.push(event);
         }

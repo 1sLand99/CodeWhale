@@ -7,7 +7,16 @@
 //! what makes "aggregates and events, never content" a property the compiler
 //! and the test suite can enforce rather than a promise.
 //!
-//! Two standing rules for anyone extending this file:
+//! Bounded is not the same as *built bounded*. These types are also a
+//! **deserialization target**: `flush` reads `buffer.jsonl` back off disk and
+//! hands the lines to `serde`, which will fill `site`, `previous_version`, and
+//! `providers` with any string the file contains. Anything running as the user
+//! can append to that file, `$CODEWHALE_HOME` is a predictable path, and this
+//! product executes model-authored shell commands. [`Event::is_bounded`] is
+//! therefore checked on the drain path, and it is the reason the guarantee
+//! above survives contact with the filesystem.
+//!
+//! Three standing rules for anyone extending this file:
 //!
 //! 1. **Never `#[derive(Serialize)]` over an existing state type.**
 //!    `codewhale_state::Thread` carries `git_sha`, `git_branch`,
@@ -16,6 +25,9 @@
 //!    built from scratch with explicit fields.
 //! 2. **Bump [`SCHEMA_VERSION`] on any field add, remove, or retype**, and
 //!    never reuse a number. The golden snapshot test fails until you do.
+//! 3. **A new string field needs a clause in [`Event::is_bounded`]**, not just
+//!    a doc comment naming its rule. A rule only the constructor honours is a
+//!    rule the drain path does not have.
 
 use serde::{Deserialize, Serialize};
 
@@ -566,6 +578,100 @@ impl Event {
             Self::Panic { .. } => "panic",
         }
     }
+
+    /// Whether every string this event carries is inside its declared bound.
+    ///
+    /// The bounds above are enforced by the *constructors* — `Counters` is a
+    /// struct of `u32`s, `providers` comes from `ProviderKind::as_str()`, and
+    /// `site` comes from [`crate::reduce_panic_site`]. That holds only for an
+    /// event this process built. Events are also **read back from
+    /// `buffer.jsonl` and deserialized** before a batch is assembled, and
+    /// `serde` will happily fill `site`, `previous_version`, and `providers`
+    /// with any string the file contains. Anything running as this user can
+    /// append a line to that file — including a `Bash` tool call this session
+    /// made on the model's behalf — so the drain path must re-establish the
+    /// bound rather than inherit it.
+    ///
+    /// Failing this check drops the event. It is never *sanitized*: a payload
+    /// that the schema cannot account for is not made safe by editing it.
+    #[must_use]
+    pub fn is_bounded(&self) -> bool {
+        match self {
+            Self::SessionStart { .. } => true,
+            Self::InstallOrUpgrade {
+                previous_version, ..
+            } => previous_version
+                .as_deref()
+                .is_none_or(is_release_version_string),
+            Self::SessionEnd { providers, .. } => {
+                providers.iter().all(|name| is_known_provider_id(name))
+            }
+            Self::Panic { site } => is_reduced_panic_site(site),
+        }
+    }
+}
+
+/// Whether `value` is a release version this schema may carry.
+///
+/// `^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$` — the rule already written on
+/// [`Batch::app_version`], applied to `previous_version` as well because that
+/// field is read back from `state.json` rather than built in this process.
+#[must_use]
+pub fn is_release_version_string(value: &str) -> bool {
+    let (core, pre) = match value.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (value, None),
+    };
+    let parts: Vec<&str> = core.split('.').collect();
+    if parts.len() != 3
+        || !parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return false;
+    }
+    match pre {
+        None => true,
+        Some(pre) => !pre.is_empty() && pre.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.'),
+    }
+}
+
+/// Whether `value` is in the output space of [`crate::reduce_panic_site`]:
+/// the literal `<dep>`, or `crates/…​.rs:<line>:<column>` over the allowlist
+/// charset.
+#[must_use]
+pub fn is_reduced_panic_site(value: &str) -> bool {
+    if value == "<dep>" {
+        return true;
+    }
+    let Some((file, rest)) = value.split_once(".rs:") else {
+        return false;
+    };
+    let Some((line, column)) = rest.split_once(':') else {
+        return false;
+    };
+    file.starts_with("crates/")
+        && file
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'/' | b'.' | b'-'))
+        && !line.is_empty()
+        && line.bytes().all(|b| b.is_ascii_digit())
+        && !column.is_empty()
+        && column.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Whether `value` is a provider id this build knows.
+///
+/// Checked against the **full** provider registry, not
+/// `ProviderKind::all()`: that constant is the 36-row *catalog* subset, and
+/// `ApiProvider::kind()` legitimately yields dialect kinds
+/// (`deepseek-anthropic`, the Model Studio plan variants) that are absent from
+/// it. Narrowing to the catalog would silently drop a real user's route.
+#[must_use]
+pub fn is_known_provider_id(value: &str) -> bool {
+    codewhale_config::provider::all_providers()
+        .iter()
+        .any(|provider| provider.id() == value)
 }
 
 /// The POST body. One per flush.
