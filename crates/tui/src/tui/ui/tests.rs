@@ -19983,7 +19983,11 @@ fn a_user_who_asks_for_a_short_strip_keeps_it_at_every_terminal_size() {
     // collapse cliff: a 4-row threshold charged against a 2-row *request*
     // deletes the panel outright, at every size, for a user who explicitly
     // asked for it.
-    let panel = crate::tui::work_surface::RailPanel::Pinned;
+    //
+    // Agents, not Pinned: an empty Pinned panel collapses on its own now, so it
+    // would report 0 at every size for a reason that has nothing to do with the
+    // height preference this test is about.
+    let panel = crate::tui::work_surface::RailPanel::Agents;
     for top_height in [2_u16, 3] {
         let mut seen = false;
         for rows in 20_u16..=40 {
