@@ -140,6 +140,11 @@ pub(super) struct AgentRowFacts {
     /// renderer falls back to this when a nickname is too wide for the
     /// identity column — a name is shown whole or not at all.
     pub role_label: String,
+    /// The status word (`running`, `completed`, `failed`, …) painted as its
+    /// own column. The glyph carries the same fact for scanning; the word is
+    /// what makes the row legible without memorizing glyph vocabulary
+    /// (owner regression report, 2026-08-04).
+    pub status: String,
     /// What the agent was sent to do.
     pub objective: String,
     /// Wall-clock seconds, frozen once the agent is observed terminal so a
@@ -529,6 +534,13 @@ pub(super) fn project(app: &mut App) -> Vec<WorkRow> {
 /// to-dos first, then current sub-agents. Tool operations, coordination
 /// receipts, file activity, and generic graph headings never enter this list.
 ///
+/// "Persistent" is a lifetime promise, not decoration: to-do and sub-agent
+/// rows survive their own completion and stay on the surface for the rest of
+/// the session — a completed-only list is still a list, and the strip is a
+/// standing register of the session's work (GrokBuild's tasks pane), not a
+/// live-only view. Completion is quiet (glyph, tone, frozen receipt), never
+/// an eviction. `ordered_rows` enforces the same rule for side placements.
+///
 /// On Top, the list is GrokBuild-shaped without losing CodeWhale identity:
 /// selectable to-dos, then a `▾ Subagents N` group header (when any workers
 /// are present), then the workers. To-do density still uses the pinned
@@ -539,19 +551,7 @@ pub(super) fn project_visible(app: &mut App) -> Vec<WorkRow> {
         return rows;
     }
 
-    let todo_ids = app
-        .work_surface
-        .cached_graph
-        .as_ref()
-        .map(|snapshot| {
-            snapshot
-                .nodes
-                .iter()
-                .filter(|node| node.kind == NodeKind::PlanStep)
-                .map(|node| format!("graph:{}", node.id.as_str()))
-                .collect::<HashSet<_>>()
-        })
-        .unwrap_or_default();
+    let todo_ids = plan_step_row_ids(app);
     let mut todos = Vec::new();
     let mut agents = Vec::new();
     for row in rows {
@@ -560,15 +560,6 @@ pub(super) fn project_visible(app: &mut App) -> Vec<WorkRow> {
         } else if row.id.0.starts_with("worker:") {
             agents.push(row);
         }
-    }
-
-    let has_live_item = todos
-        .iter()
-        .chain(agents.iter())
-        .any(|row| !matches!(row.tone, WorkTone::Success));
-    if !has_live_item {
-        app.work_surface.latest_rows.clear();
-        return Vec::new();
     }
 
     let mut out = Vec::with_capacity(todos.len() + agents.len() + 1);
@@ -584,6 +575,86 @@ pub(super) fn project_visible(app: &mut App) -> Vec<WorkRow> {
     }
     app.work_surface.latest_rows = out.clone();
     out
+}
+
+/// Row ids of the plan-step (to-do) nodes in the cached graph.
+fn plan_step_row_ids(app: &App) -> HashSet<String> {
+    app.work_surface
+        .cached_graph
+        .as_ref()
+        .map(|snapshot| {
+            snapshot
+                .nodes
+                .iter()
+                .filter(|node| node.kind == NodeKind::PlanStep)
+                .map(|node| format!("graph:{}", node.id.as_str()))
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default()
+}
+
+/// Rows for the selected rail panel, routed through the same row/hitbox
+/// machinery regardless of panel: every work row a user can see is a door
+/// (`crates/tui/AGENTS.md`, "rows are objects"), whichever panel it appears
+/// in.
+///
+/// - `Tasks` — the full live projection ([`project_visible`]).
+/// - `Agents` — the sub-agent rows only, under the `▾ Subagents N` header.
+/// - `Pinned` — the goal plus the plan-step to-dos, without the workers.
+/// - `Context` — empty: session facts are a line list, not work rows, and
+///   render outside the row machinery.
+pub(super) fn visible_rows_for_panel(app: &mut App) -> Vec<WorkRow> {
+    match app.work_surface.panel {
+        RailPanel::Tasks => project_visible(app),
+        RailPanel::Agents => {
+            let rows = project(app);
+            let agents: Vec<WorkRow> = rows
+                .into_iter()
+                .filter(|row| row.id.0.starts_with("worker:"))
+                .collect();
+            let mut out = Vec::with_capacity(agents.len() + 1);
+            if !agents.is_empty() {
+                out.push(section_heading(
+                    "agents",
+                    &format!("Subagents {}", agents.len()),
+                    "",
+                ));
+                out.extend(agents);
+            }
+            app.work_surface.latest_rows = out.clone();
+            out
+        }
+        RailPanel::Pinned => {
+            let rows = project(app);
+            let todo_ids = plan_step_row_ids(app);
+            let todos: Vec<WorkRow> = rows
+                .into_iter()
+                .filter(|row| todo_ids.contains(&row.id.0))
+                .collect();
+            let mut out = Vec::with_capacity(todos.len() + 1);
+            // On Top the goal is already the strip title; a side column
+            // repeats it as its first row so the durable goal home survives
+            // in every placement.
+            if app.work_surface.effective_placement != WorkSurfacePlacement::Top
+                && let Some((objective, paused)) =
+                    crate::tui::footer_ui::active_goal_chip_state(app)
+            {
+                let flat = objective.trim().replace(['\n', '\r'], " ");
+                if !flat.is_empty() {
+                    let label = if paused {
+                        format!("Goal (paused): {flat}")
+                    } else {
+                        format!("Goal: {flat}")
+                    };
+                    out.push(section_heading("goal", &label, ""));
+                }
+            }
+            out.extend(todos);
+            app.work_surface.latest_rows = out.clone();
+            out
+        }
+        RailPanel::Context => Vec::new(),
+    }
 }
 
 /// Classify the current session against this process's session-instance
@@ -881,8 +952,14 @@ fn ordered_rows(
 
     // Live chrome policy:
     // - actionable: heading + (optional) single activity receipt
-    // - recent-only: heading briefly, then empty
+    // - recent-only: transient receipts collapse after the TTL / next user
+    //   turn (#4688), but settled to-dos and sub-agents are DURABLE — they
+    //   keep their rows for the session. Quiet completion, not eviction
+    //   (owner regression report, 2026-08-04).
     // - empty: no heading
+    let is_durable =
+        |item: &RankedWorkRow| item.is_plan_step || item.row.id.0.starts_with("worker:");
+    let has_durable = ranked.iter().any(is_durable);
     if ranked.is_empty() && source_state.is_none() {
         return Vec::new();
     }
@@ -894,7 +971,8 @@ fn ordered_rows(
             Vec::new()
         };
     }
-    if actionable == 0 && surface.recent_only_suppressed {
+    let suppress_transient_recent = actionable == 0 && surface.recent_only_suppressed;
+    if suppress_transient_recent && !has_durable {
         return Vec::new();
     }
 
@@ -904,6 +982,9 @@ fn ordered_rows(
     let mut live = vec![section_heading("work", &heading_label, &detail)];
     for item in ranked {
         if item.row.id.0 == "activity:aggregate" && !show_activity {
+            continue;
+        }
+        if suppress_transient_recent && !is_durable(&item) {
             continue;
         }
         live.push(item.row);
@@ -1240,6 +1321,7 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                             // Stamped by `order_agent_seeds`, which is where
                             // the indent and child count become known.
                             role_label: String::new(),
+                            status: status.to_string(),
                             objective,
                             elapsed_secs: Some(
                                 agent_elapsed_ms(app, &agent.agent_id, agent.duration_ms) / 1_000,
@@ -1315,10 +1397,13 @@ fn agent_rows(app: &App) -> Vec<RankedWorkRow> {
                             }),
                             agent: Some(AgentRowFacts {
                                 role_label: String::new(),
+                                status: status.to_string(),
                                 // No manager snapshot yet, so there is no
                                 // assignment to quote: the live activity line
                                 // is the honest answer to "what is it doing".
-                                objective: facts.join(" · "),
+                                // The status word itself is the status
+                                // column's job, so it is not repeated here.
+                                objective: facts[1..].join(" · "),
                                 // Neither a duration nor a usage envelope has
                                 // been seen for this id. Both render as
                                 // nothing rather than as `0s` / `0 tokens`.
@@ -1794,16 +1879,15 @@ fn graph_node_row(snapshot: &WorkGraphSnapshot, node: &WorkNode) -> WorkRow {
     };
     let state = state_label(node);
     let kind = kind_label(node.kind);
-    // To-do rows are self-evidently plan steps — the strip's checkbox marks
-    // already say so, so the "plan step" kind label is pure noise there. A
-    // ready step shows no detail at all; other states show just the state.
-    // Non-step nodes keep the state · kind pair.
+    // A to-do row always carries its status word in the detail column, using
+    // the same vocabulary as `/task digest` (pending / in progress /
+    // completed / cancelled). Only the redundant `· plan step` KIND suffix is
+    // dropped — the strip's checkbox marks already say the row is a plan
+    // step, but they do not say its state in words, and dropping the state
+    // itself was the 0.9.4 regression (a pending to-do rendered no label at
+    // all). Non-step nodes keep the state · kind pair.
     let detail = if node.kind == NodeKind::PlanStep {
-        if node.state == NodeState::Ready {
-            String::new()
-        } else {
-            state.to_string()
-        }
+        todo_state_label(node).to_string()
     } else {
         format!("{state} · {kind}")
     };
@@ -1825,6 +1909,17 @@ fn graph_node_row(snapshot: &WorkGraphSnapshot, node: &WorkNode) -> WorkRow {
             stop_action: stop_action.map(Box::new),
         }),
         agent: None,
+    }
+}
+
+/// Status word for a plan-step (to-do) row, aligned with the four-state
+/// To-do vocabulary the `/task digest` text surface uses. Graph-only states
+/// keep their graph names.
+fn todo_state_label(node: &WorkNode) -> &'static str {
+    match node.state {
+        NodeState::Ready => "pending",
+        NodeState::Initializing | NodeState::Active => "in progress",
+        _ => state_label(node),
     }
 }
 

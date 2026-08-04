@@ -19967,6 +19967,15 @@ mod work_surface {
         );
         agent.nickname = Some(AGENT_MARK.to_string());
         app.subagent_cache.push(agent);
+        // A fan-out, not a single worker: the yield tests need the panel's
+        // natural height (heading + rows + divider) to sit above the
+        // TOP_HEIGHT_MIN clamp, or "the strip yielded rows" becomes
+        // unobservable now that the Agents panel row projection is more
+        // compact than the old line list.
+        app.subagent_cache.push(make_subagent(
+            "agent_rail_probe_b",
+            crate::tools::subagent::SubAgentStatus::Running,
+        ));
         assert!(
             should_render_empty_state(&app),
             "the Agents fixture must leave the session idle — the ocean it is \

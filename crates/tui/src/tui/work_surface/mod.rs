@@ -30,9 +30,29 @@
 //!
 //! Shared rules: content drives size; the setting is a ceiling, never padding;
 //! empty work is not a rail. Top never paints a chrome panel title (a checklist
-//! reads as a checklist). Side rails keep a muted title because a full-height
-//! column among other chrome needs naming. Narrow hosts that cannot fit a side
+//! reads as a checklist); side rails are named by their content's own heading
+//! row (`Work · …`, `▾ Subagents N`, `Goal: …`) except Context, which keeps a
+//! muted panel title over its fact list. Narrow hosts that cannot fit a side
 //! column fall back to Top, where height auto-fit takes over.
+//!
+//! ## Row lifetime
+//!
+//! The strip is a standing register of this session's work, not a live-only
+//! view. A to-do or sub-agent row appears when the work exists and stays for
+//! the rest of the session after it settles — completion is quiet (glyph,
+//! tone, frozen receipt), never an eviction, and the active goal title
+//! outlives the work under it. Only transient receipts (aggregated file
+//! activity, settled operations) expire on the #4688/#4690 lifetimes.
+//! Auto-fit and the row budget decide how many rows are *visible* at once;
+//! they never decide membership.
+//!
+//! ## Rows are objects — in every panel
+//!
+//! Tasks, Agents, and Pinned all render through one row/hitbox pipeline:
+//! every visible work row is selectable, hoverable, and clickable, and its
+//! primary action opens the row's world (agent details / work inspector).
+//! Keyboard Enter and mouse click dispatch identically. Context is the one
+//! line-list panel; it holds facts, not rows.
 //!
 //! Height is decided once per frame by [`render::height`]; the row budget it is
 //! given comes from `crate::tui::ui::rail_row_budget`, which is its only
@@ -1232,7 +1252,7 @@ mod tests {
 
         assert_eq!(
             fleet_row(&rows),
-            " ▸ general-purpose  Streaming dead-code removal                           \
+            " ▸ general-purpose  running  Streaming dead-code removal                  \
 12m 33s · ↓ 111.9k tokens"
         );
         // The group header the strip already had stays put.
@@ -1335,21 +1355,27 @@ mod tests {
 
     #[test]
     fn fleet_row_drops_tokens_then_elapsed_then_type_as_the_surface_narrows() {
-        // Settled degradation order. The objective is the last thing to go and
-        // every column truncates rather than wrapping.
+        // Settled degradation order: tokens first, then elapsed, then the
+        // type and status columns together. The objective is the last thing
+        // to go and every column truncates rather than wrapping. The status
+        // word outlives the whole receipt — a fleet row that cannot say its
+        // state in words has lost the fact the strip exists to show.
         let mut app = fleet_app(Some(111_900));
-        let medium = fleet_row(&render_rows(&mut app, 62, 4));
+        let medium = fleet_row(&render_rows(&mut app, 72, 4));
         assert!(medium.contains("12m 33s"), "{medium}");
         assert!(!medium.contains("tokens"), "{medium}");
         assert!(medium.contains("general-purpose"), "{medium}");
+        assert!(medium.contains("running"), "{medium}");
 
-        let narrow = fleet_row(&render_rows(&mut app, 44, 4));
+        let narrow = fleet_row(&render_rows(&mut app, 56, 4));
         assert!(!narrow.contains("tokens"), "{narrow}");
         assert!(!narrow.contains("12m 33s"), "{narrow}");
         assert!(narrow.contains("general-purpose"), "{narrow}");
+        assert!(narrow.contains("running"), "{narrow}");
 
         let tight = fleet_row(&render_rows(&mut app, 28, 4));
         assert!(!tight.contains("general-purpose"), "{tight}");
+        assert!(!tight.contains("running"), "{tight}");
         assert!(tight.contains("Streaming"), "{tight}");
 
         for line in [&medium, &narrow, &tight] {
@@ -1699,8 +1725,10 @@ mod tests {
 
     /// Render-level smoke coverage for the ported rail panels — reinstates
     /// the sidebar render smoke tests removed with the classic shell
-    /// (739616787). Placement decides chrome: side rails keep a muted panel
-    /// title; Top never spends a row on one (content is self-evident).
+    /// (739616787). Top never spends a row on panel chrome (content is
+    /// self-evident). Side rails are named by their content's own heading
+    /// row (`▾ Subagents N`, `Goal: …`); Context is the one line-list panel
+    /// and keeps its muted panel title.
     #[test]
     fn rail_panels_render_in_all_placements() {
         for panel in [
@@ -1784,10 +1812,36 @@ mod tests {
                             rail.is_some() || strip > 0,
                             "{panel:?} in {placement:?} should reserve a rail"
                         );
-                        assert!(
-                            text.contains(panel.title()),
-                            "{panel:?} in {placement:?} should render its muted title; got: {text}"
-                        );
+                        // Work-row panels are named by their content heading;
+                        // only the Context fact list keeps a panel title.
+                        match panel {
+                            super::RailPanel::Agents => {
+                                assert!(
+                                    text.contains("Subagents 1"),
+                                    "{panel:?} in {placement:?} should render its \
+                                     Subagents heading; got: {text}"
+                                );
+                                assert!(
+                                    !app.work_surface.hitboxes.is_empty(),
+                                    "{panel:?} in {placement:?} must record hitboxes — \
+                                     every work row is a door"
+                                );
+                            }
+                            super::RailPanel::Pinned => {
+                                assert!(
+                                    text.contains("Goal: ship the release"),
+                                    "{panel:?} in {placement:?} should render the goal \
+                                     heading; got: {text}"
+                                );
+                            }
+                            _ => {
+                                assert!(
+                                    text.contains(panel.title()),
+                                    "{panel:?} in {placement:?} should render its muted \
+                                     title; got: {text}"
+                                );
+                            }
+                        }
                     }
                     super::WorkSurfacePlacement::Off => {}
                 }
@@ -2557,8 +2611,200 @@ mod tests {
         let open = row.primary_action.clone();
 
         assert!(super::interaction::activate_primary(&mut app, &row.id, open.clone()).is_some());
+        // The action's pager is on screen, so the second activation is a
+        // toggle-close.
+        app.view_stack.push(crate::tui::pager::PagerView::from_text(
+            "Work · test".to_string(),
+            "body",
+            40,
+        ));
         assert!(super::interaction::activate_primary(&mut app, &row.id, open).is_none());
         assert!(app.work_surface.opened.is_none());
         assert_eq!(app.work_surface.selected.as_ref(), Some(&row.id));
+    }
+
+    #[test]
+    fn a_click_after_the_pager_closed_itself_reopens_instead_of_going_dead() {
+        // q/Esc inside the pager pops it without clearing `opened`. The next
+        // click on that row must reopen its world, not be swallowed by a
+        // stale toggle (owner regression report, 2026-08-04).
+        let mut app = app();
+        add_todos(&mut app, 1);
+        let row = super::model::project(&mut app)
+            .into_iter()
+            .find(|row| row.selectable)
+            .expect("work row");
+        let open = row.primary_action.clone();
+
+        assert!(super::interaction::activate_primary(&mut app, &row.id, open.clone()).is_some());
+        // The pager was closed from inside itself; `opened` is now stale.
+        assert_eq!(app.work_surface.opened.as_ref(), Some(&row.id));
+        assert!(app.view_stack.is_empty());
+
+        let reopened = super::interaction::activate_primary(&mut app, &row.id, open);
+        assert!(
+            reopened.is_some(),
+            "a stale opened owner must not swallow the next activation"
+        );
+        assert_eq!(app.work_surface.opened.as_ref(), Some(&row.id));
+    }
+
+    /// The 2026-08-04 owner regression: the strip is a standing register of
+    /// the session's work. Settled to-dos and finished sub-agents keep their
+    /// rows across the recent-only TTL and across new user turns — quiet
+    /// completion, not eviction — and the strip keeps its height.
+    #[test]
+    fn settled_todos_and_workers_stay_after_ttl_and_user_turns() {
+        let mut app = app();
+        app.current_session_id = Some(SESSION.to_string());
+        {
+            let mut todos = app.todos.try_lock().expect("todos");
+            todos.add("ship the fix".to_string(), TodoStatus::Completed);
+            todos.add("verify the fix".to_string(), TodoStatus::Completed);
+        }
+        app.subagent_cache.push(cached_worker(
+            "agent-settled",
+            "builder",
+            None,
+            None,
+            SubAgentStatus::Completed,
+        ));
+
+        app.work_surface.set_presentation_now_ms(0);
+        let first = super::model::project_visible(&mut app);
+        assert!(
+            first.iter().any(|row| row.id.0.starts_with("graph:")),
+            "settled to-dos must be listed: {first:?}"
+        );
+        assert!(
+            first.iter().any(|row| row.id.0.starts_with("worker:")),
+            "finished workers must be listed: {first:?}"
+        );
+
+        app.work_surface
+            .set_presentation_now_ms(super::model::RECENT_ONLY_TTL_MS + 1);
+        app.work_surface.note_user_turn_or_new_operation();
+        let later = super::model::project_visible(&mut app);
+        assert!(
+            later.iter().any(|row| row.id.0.starts_with("graph:")),
+            "a settled to-do must survive the TTL and the next user turn: {later:?}"
+        );
+        assert!(
+            later.iter().any(|row| row.id.0.starts_with("worker:")),
+            "a finished worker must survive the TTL and the next user turn: {later:?}"
+        );
+        assert!(
+            super::height(&mut app, 100, 40, AMPLE_BUDGET) > 0,
+            "the strip must keep its height while it holds settled work"
+        );
+    }
+
+    /// A to-do row says its state in words, in the `/task digest` vocabulary.
+    /// Dropping the words (2011b9b11 conflated them with the redundant kind
+    /// label) was half of owner regression A1.
+    #[test]
+    fn todo_rows_carry_their_status_words() {
+        let mut app = app();
+        add_todos(&mut app, 3);
+        let rows = super::model::project(&mut app);
+        let todo_details: Vec<&str> = rows
+            .iter()
+            .filter(|row| row.id.0.starts_with("graph:"))
+            .map(|row| row.detail.as_str())
+            .collect();
+        assert!(
+            todo_details.contains(&"in progress"),
+            "the active step says so in words: {todo_details:?}"
+        );
+        assert!(
+            todo_details.contains(&"pending"),
+            "a pending step is labeled, not blank: {todo_details:?}"
+        );
+
+        // And the words are painted, not just projected.
+        let text = render_text(&mut app, 100, 6);
+        assert!(text.contains("in progress"), "{text}");
+        assert!(text.contains("pending"), "{text}");
+    }
+
+    /// Acceptance for owner regression A2: an agent row is a door in the
+    /// Agents panel too, and a FINISHED agent's world still opens — the
+    /// panel is a standing register, not a live-only view.
+    #[test]
+    fn agents_panel_click_opens_details_even_for_finished_agents() {
+        let mut app = app();
+        app.work_surface.panel = super::RailPanel::Agents;
+        app.current_session_id = Some(SESSION.to_string());
+        app.subagent_cache.push(cached_worker(
+            "agent-finished",
+            "builder",
+            None,
+            None,
+            SubAgentStatus::Completed,
+        ));
+
+        let _ = render_text(&mut app, 100, 6);
+        let row_y = app
+            .work_surface
+            .hitboxes
+            .iter()
+            .find(|hit| hit.id.0 == "worker:agent-finished")
+            .expect("finished agent row must keep a hitbox in the Agents panel")
+            .row_y;
+        let action = super::handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 2,
+                row: row_y,
+                modifiers: KeyModifiers::NONE,
+            },
+        )
+        .action
+        .expect("click on a finished agent row must dispatch its primary action");
+        assert_eq!(
+            action,
+            SidebarRowAction::OpenAgentDetail {
+                agent_id: "agent-finished".to_string()
+            }
+        );
+        crate::tui::mouse_ui::apply_sidebar_row_action(&mut app, action);
+        assert!(
+            !app.view_stack.is_empty(),
+            "the finished agent's details must actually open"
+        );
+    }
+
+    /// Acceptance for owner regression A1: to-do rows are doors in the
+    /// Pinned panel too — clicking one opens the work inspector.
+    #[test]
+    fn pinned_panel_todo_rows_stay_clickable() {
+        let mut app = app();
+        app.work_surface.panel = super::RailPanel::Pinned;
+        add_todos(&mut app, 2);
+
+        let _ = render_text(&mut app, 100, 6);
+        let hit = app
+            .work_surface
+            .hitboxes
+            .iter()
+            .find(|hit| hit.id.0.starts_with("graph:"))
+            .expect("Pinned panel to-do rows must keep hitboxes")
+            .clone();
+        let action = super::handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 2,
+                row: hit.row_y,
+                modifiers: KeyModifiers::NONE,
+            },
+        )
+        .action
+        .expect("click on a Pinned to-do row must dispatch its primary action");
+        assert!(
+            matches!(action, SidebarRowAction::InspectWork { .. }),
+            "a to-do row opens the work inspector: {action:?}"
+        );
     }
 }

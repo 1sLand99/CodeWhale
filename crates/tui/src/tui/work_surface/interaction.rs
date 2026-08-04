@@ -40,8 +40,15 @@ pub fn activate_primary(
     primary: Option<SidebarRowAction>,
 ) -> Option<SidebarRowAction> {
     if app.work_surface.opened.as_ref() == Some(row_id) {
+        // Toggle-close only while the detail is actually on screen. When the
+        // pager closed itself (q/Esc inside it), `opened` is a stale owner —
+        // swallowing the click here would make the row look dead, so fall
+        // through and reopen instead.
+        let detail_on_screen = app.view_stack.top_kind() == Some(ModalKind::Pager);
         close_opened(app);
-        return None;
+        if detail_on_screen {
+            return None;
+        }
     }
     app.work_surface.selected = Some(row_id.clone());
     let action = primary?;
@@ -95,8 +102,21 @@ mod tests {
         };
         assert!(activate_primary(&mut app, &row, Some(open.clone())).is_some());
         assert_eq!(app.work_surface.opened.as_ref(), Some(&row));
-        assert!(activate_primary(&mut app, &row, Some(open)).is_none());
+        // With the detail pager on screen, the second activation toggles it
+        // closed; with no pager on screen (it closed itself), the activation
+        // reopens instead of going dead.
+        app.view_stack.push(crate::tui::pager::PagerView::from_text(
+            "Agent".to_string(),
+            "body",
+            40,
+        ));
+        assert!(activate_primary(&mut app, &row, Some(open.clone())).is_none());
         assert!(app.work_surface.opened.is_none());
+        assert!(activate_primary(&mut app, &row, Some(open.clone())).is_some());
+        assert_eq!(app.work_surface.opened.as_ref(), Some(&row));
+        // Pager already gone (closed from inside): reopen, don't swallow.
+        assert!(activate_primary(&mut app, &row, Some(open)).is_some());
+        assert_eq!(app.work_surface.opened.as_ref(), Some(&row));
     }
 
     #[test]

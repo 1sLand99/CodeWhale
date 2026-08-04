@@ -1166,6 +1166,353 @@ fn work_surface_real_rows_own_click_wheel_and_resize() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Owner-reported (2026-08-04): "you cannot click a work-bar row AT ALL".
+/// The bare-session click test above passes, so this probe reproduces the
+/// dogfood shape it does not cover: an active goal title occupying the
+/// strip's header row, then a real SGR click on a to-do row. The click must
+/// open the row's world (the Work inspector pager), not just move focus.
+#[test]
+fn work_surface_rows_stay_clickable_under_a_goal_title() -> anyhow::Result<()> {
+    let _guard = qa_pty_test_lock();
+    let ws = make_sealed_workspace()?;
+    std::fs::write(
+        ws.home().join(".deepseek").join("config.toml"),
+        "[retry]\nenabled = false\n\n[notifications]\nmethod = \"off\"\ncompletion_sound = \"off\"\n",
+    )?;
+    let session_path = ws.workspace().join("goal-click-session.json");
+    let todos = (0..6)
+        .map(|index| {
+            serde_json::json!({
+                "id": index + 1,
+                "content": format!("todo-goal-{index:02}"),
+                "status": if index == 0 { "in_progress" } else { "pending" }
+            })
+        })
+        .collect::<Vec<_>>();
+    std::fs::write(
+        &session_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "metadata": {
+                "id": "pty-goal-click",
+                "title": "Goal-title click probe",
+                "created_at": "2026-08-04T00:00:00Z",
+                "updated_at": "2026-08-04T00:00:00Z",
+                "message_count": 0,
+                "total_tokens": 0,
+                "model": "deepseek-v4-pro",
+                "model_provider": "deepseek",
+                "workspace": ws.workspace(),
+                "mode": "agent",
+                "cost": {},
+                "cumulative_turn_secs": 0
+            },
+            "messages": [],
+            "system_prompt": null,
+            "work_state": {
+                "todos": {"items": todos, "completion_pct": 0, "in_progress_id": 1},
+                "plan": {"objective": "", "items": []}
+            }
+        }))?,
+    )?;
+
+    let mut h = Harness::builder(Harness::cargo_bin("codewhale-tui"))
+        .cwd(ws.workspace())
+        .clear_env()
+        .seal_home(ws.home())
+        .env("DEEPSEEK_API_KEY", "ci-test-key-not-real")
+        .env("DEEPSEEK_BASE_URL", "http://127.0.0.1:1")
+        .env("NO_ANIMATIONS", "1")
+        .env("RUST_LOG", "warn")
+        .args([
+            "--workspace",
+            ws.workspace().to_str().expect("utf-8 workspace path"),
+            "--no-project-config",
+            "--skip-onboarding",
+            "--mouse-capture",
+            "--yolo",
+        ])
+        .size(40, 140)
+        .spawn()?;
+    enter_launch_session(&mut h)?;
+    h.send(keys::key::text(&format!(
+        "/load {}",
+        session_path.to_string_lossy()
+    )))?;
+    h.wait_for_idle(Duration::from_millis(150), Duration::from_secs(2))?;
+    h.send(keys::key::enter())?;
+    h.wait_for_text("todo-goal-00", KEY_TIMEOUT)?;
+
+    // Declare a goal: the strip now pins `Goal: …` above the rows, which is
+    // the header-offset condition the bare click test never exercises. The
+    // /goal command also fires a turn; the refused base URL fails it fast.
+    h.send(keys::key::text("/goal click-probe objective"))?;
+    h.wait_for_idle(Duration::from_millis(150), Duration::from_secs(2))?;
+    h.send(keys::key::enter())?;
+    h.wait_for_text("Goal:", KEY_TIMEOUT)?;
+    h.wait_for_idle(Duration::from_millis(300), Duration::from_secs(5))?;
+
+    let target = "todo-goal-03";
+    let (row, col) = h.frame().find_text(target).expect("rendered to-do row");
+    h.send(keys::mouse::click(row, col))?;
+    h.wait_for_text("q/Esc close", KEY_TIMEOUT)?;
+    h.wait_for_text(target, KEY_TIMEOUT)?;
+
+    let _ = h.shutdown();
+    Ok(())
+}
+
+/// A loopback SSE fixture that streams one content chunk, then deliberately
+/// holds the connection open before finishing, so a PTY scenario can interact
+/// with the TUI while a turn is genuinely live (`is_loading == true`).
+fn spawn_slow_stream_fixture(
+    hold: Duration,
+) -> anyhow::Result<(String, std::thread::JoinHandle<()>)> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let address = listener.local_addr()?;
+    let handle = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut served = 0usize;
+        while served < 3 && Instant::now() < deadline {
+            let Ok((mut stream, _)) = listener.accept() else {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut request = [0u8; 64 * 1024];
+            let _ = stream.read(&mut request);
+            let first = format!(
+                "data: {}\n\n",
+                serde_json::json!({
+                    "id":"chatcmpl-slow",
+                    "object":"chat.completion.chunk",
+                    "model":"deepseek-v4-flash",
+                    "choices":[{"index":0,"delta":{"content":"SLOW-STREAM-HOLD"},"finish_reason":null}]
+                })
+            );
+            let rest = [
+                format!(
+                    "data: {}\n\n",
+                    serde_json::json!({
+                        "id":"chatcmpl-slow",
+                        "object":"chat.completion.chunk",
+                        "model":"deepseek-v4-flash",
+                        "choices":[{"index":0,"delta":{},"finish_reason":"stop"}],
+                        "usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}
+                    })
+                ),
+                "data: [DONE]\n\n".to_string(),
+            ]
+            .join("");
+            // No Content-Length: the reader must see the first chunk while
+            // the turn is still open, then the tail after the hold.
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{first}"
+                )
+                .as_bytes(),
+            );
+            let _ = stream.flush();
+            if served == 0 {
+                std::thread::sleep(hold);
+            }
+            let _ = stream.write_all(rest.as_bytes());
+            let _ = stream.flush();
+            served += 1;
+        }
+    });
+    Ok((format!("http://{address}"), handle))
+}
+
+/// Second owner-repro probe: click a to-do row while a turn is actively
+/// streaming. The bare and goal-title probes both pass idle; dogfood clicks
+/// happen mid-run, so pin the live-turn path too.
+#[test]
+fn work_surface_rows_stay_clickable_during_a_live_turn() -> anyhow::Result<()> {
+    let _guard = qa_pty_test_lock();
+    let ws = make_sealed_workspace()?;
+    std::fs::write(
+        ws.home().join(".deepseek").join("config.toml"),
+        "[retry]\nenabled = false\n\n[notifications]\nmethod = \"off\"\ncompletion_sound = \"off\"\n",
+    )?;
+    let session_path = ws.workspace().join("live-click-session.json");
+    let todos = (0..6)
+        .map(|index| {
+            serde_json::json!({
+                "id": index + 1,
+                "content": format!("todo-live-{index:02}"),
+                "status": if index == 0 { "in_progress" } else { "pending" }
+            })
+        })
+        .collect::<Vec<_>>();
+    std::fs::write(
+        &session_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "metadata": {
+                "id": "pty-live-click",
+                "title": "Live-turn click probe",
+                "created_at": "2026-08-04T00:00:00Z",
+                "updated_at": "2026-08-04T00:00:00Z",
+                "message_count": 0,
+                "total_tokens": 0,
+                "model": "deepseek-v4-pro",
+                "model_provider": "deepseek",
+                "workspace": ws.workspace(),
+                "mode": "agent",
+                "cost": {},
+                "cumulative_turn_secs": 0
+            },
+            "messages": [],
+            "system_prompt": null,
+            "work_state": {
+                "todos": {"items": todos, "completion_pct": 0, "in_progress_id": 1},
+                "plan": {"objective": "", "items": []}
+            }
+        }))?,
+    )?;
+
+    let (base_url, server) = spawn_slow_stream_fixture(Duration::from_secs(6))?;
+    let mut h = Harness::builder(Harness::cargo_bin("codewhale-tui"))
+        .cwd(ws.workspace())
+        .clear_env()
+        .seal_home(ws.home())
+        .env("DEEPSEEK_API_KEY", "ci-test-key-not-real")
+        .env("DEEPSEEK_BASE_URL", &base_url)
+        .env("NO_ANIMATIONS", "1")
+        .env("RUST_LOG", "warn")
+        .args([
+            "--workspace",
+            ws.workspace().to_str().expect("utf-8 workspace path"),
+            "--no-project-config",
+            "--skip-onboarding",
+            "--mouse-capture",
+            "--yolo",
+        ])
+        .size(40, 140)
+        .spawn()?;
+    enter_launch_session(&mut h)?;
+    h.send(keys::key::text(&format!(
+        "/load {}",
+        session_path.to_string_lossy()
+    )))?;
+    h.wait_for_idle(Duration::from_millis(150), Duration::from_secs(2))?;
+    h.send(keys::key::enter())?;
+    h.wait_for_text("todo-live-00", KEY_TIMEOUT)?;
+
+    // Start a turn; the fixture streams one chunk then holds ~6s.
+    h.send(keys::key::text("hold the stream open"))?;
+    h.wait_for_idle(Duration::from_millis(150), Duration::from_secs(2))?;
+    h.send(keys::key::enter())?;
+    h.wait_for_text("SLOW-STREAM-HOLD", Duration::from_secs(10))?;
+
+    // Mid-stream: the turn is live. Click a to-do row and require its world
+    // to open, exactly as it must when idle.
+    let target = "todo-live-03";
+    let (row, col) = h.frame().find_text(target).expect("rendered to-do row");
+    h.send(keys::mouse::click(row, col))?;
+    h.wait_for_text("q/Esc close", KEY_TIMEOUT)?;
+
+    let _ = h.shutdown();
+    drop(server);
+    Ok(())
+}
+
+/// Third owner-repro probe: a user whose settings select a non-Tasks rail
+/// panel (the classic sidebar_focus migration lands many upgraders on
+/// Pinned) must still be able to click a to-do row and have its world open.
+/// Before the 2026-08-04 fix, non-Tasks panels wiped every hitbox — clicks
+/// did nothing at all, which is exactly what the owner reported.
+#[test]
+fn pinned_panel_rows_stay_clickable_in_a_real_pty() -> anyhow::Result<()> {
+    let _guard = qa_pty_test_lock();
+    let ws = make_sealed_workspace()?;
+    std::fs::write(
+        ws.home().join(".deepseek").join("config.toml"),
+        "[retry]\nenabled = false\n\n[notifications]\nmethod = \"off\"\ncompletion_sound = \"off\"\n",
+    )?;
+    let settings_dir = ws.home().join(".codewhale");
+    std::fs::create_dir_all(&settings_dir)?;
+    std::fs::write(
+        settings_dir.join("settings.toml"),
+        "rail_panel = \"pinned\"\n",
+    )?;
+
+    let session_path = ws.workspace().join("pinned-click-session.json");
+    let todos = (0..5)
+        .map(|index| {
+            serde_json::json!({
+                "id": index + 1,
+                "content": format!("todo-pinned-{index:02}"),
+                "status": if index == 0 { "in_progress" } else { "pending" }
+            })
+        })
+        .collect::<Vec<_>>();
+    std::fs::write(
+        &session_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "metadata": {
+                "id": "pty-pinned-click",
+                "title": "Pinned-panel click probe",
+                "created_at": "2026-08-04T00:00:00Z",
+                "updated_at": "2026-08-04T00:00:00Z",
+                "message_count": 0,
+                "total_tokens": 0,
+                "model": "deepseek-v4-pro",
+                "model_provider": "deepseek",
+                "workspace": ws.workspace(),
+                "mode": "agent",
+                "cost": {},
+                "cumulative_turn_secs": 0
+            },
+            "messages": [],
+            "system_prompt": null,
+            "work_state": {
+                "todos": {"items": todos, "completion_pct": 0, "in_progress_id": 1},
+                "plan": {"objective": "", "items": []}
+            }
+        }))?,
+    )?;
+
+    let mut h = Harness::builder(Harness::cargo_bin("codewhale-tui"))
+        .cwd(ws.workspace())
+        .clear_env()
+        .seal_home(ws.home())
+        .env("DEEPSEEK_API_KEY", "ci-test-key-not-real")
+        .env("DEEPSEEK_BASE_URL", "http://127.0.0.1:1")
+        .env("NO_ANIMATIONS", "1")
+        .env("RUST_LOG", "warn")
+        .args([
+            "--workspace",
+            ws.workspace().to_str().expect("utf-8 workspace path"),
+            "--no-project-config",
+            "--skip-onboarding",
+            "--mouse-capture",
+            "--yolo",
+        ])
+        .size(40, 140)
+        .spawn()?;
+    enter_launch_session(&mut h)?;
+    h.send(keys::key::text(&format!(
+        "/load {}",
+        session_path.to_string_lossy()
+    )))?;
+    h.wait_for_idle(Duration::from_millis(150), Duration::from_secs(2))?;
+    h.send(keys::key::enter())?;
+    h.wait_for_text("todo-pinned-00", KEY_TIMEOUT)?;
+
+    let target = "todo-pinned-02";
+    let (row, col) = h.frame().find_text(target).expect("rendered to-do row");
+    h.send(keys::mouse::click(row, col))?;
+    h.wait_for_text("q/Esc close", KEY_TIMEOUT)?;
+    h.wait_for_text(target, KEY_TIMEOUT)?;
+
+    let _ = h.shutdown();
+    Ok(())
+}
+
 #[test]
 fn real_coordination_details_use_typed_persisted_receipts_in_a_unix_pty() -> anyhow::Result<()> {
     let _guard = qa_pty_test_lock();

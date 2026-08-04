@@ -47,6 +47,11 @@ const AGENT_ROW_TIERS: [AgentRowTier; 4] = [
 pub(super) struct AgentRowText {
     /// Agent-type column, padded to the shared width. Empty once dropped.
     pub(super) role: String,
+    /// Status word column (`running`, `completed`, …), padded to the shared
+    /// width. Dropped only with the identity column: a fleet row that cannot
+    /// say its state in words has lost the fact the owner asked for back
+    /// (2026-08-04 regression report).
+    pub(super) status: String,
     pub(super) objective: String,
     /// `12m 33s · ↓ 111.9k tokens`. Empty once dropped.
     pub(super) receipt: String,
@@ -122,6 +127,16 @@ pub(super) fn agent_identity_column(rows: &[&WorkRow], cap: usize) -> usize {
         .unwrap_or(0)
 }
 
+/// Shared width of the status-word column across the rows painted this frame.
+/// Statuses come from a fixed vocabulary, so no cap is needed.
+pub(super) fn agent_status_column(rows: &[&WorkRow]) -> usize {
+    rows.iter()
+        .filter_map(|row| row.agent.as_ref())
+        .map(|facts| UnicodeWidthStr::width(facts.status.as_str()))
+        .max()
+        .unwrap_or(0)
+}
+
 /// Fit one sub-agent row into `width`, dropping optional columns in
 /// [`AGENT_ROW_TIERS`] order until the objective has room to say something.
 /// Every column truncates; nothing ever wraps.
@@ -130,6 +145,7 @@ pub(super) fn layout_agent_row(
     prefix_width: usize,
     identity: &str,
     identity_column: usize,
+    status_column: usize,
     facts: &AgentRowFacts,
 ) -> AgentRowText {
     for tier in AGENT_ROW_TIERS {
@@ -142,10 +158,24 @@ pub(super) fn layout_agent_row(
             let pad = identity_column.saturating_sub(UnicodeWidthStr::width(identity));
             format!("{identity}{}", " ".repeat(pad))
         };
+        // The status word degrades with the identity: it survives the loss of
+        // tokens and elapsed, and yields only when the row is down to the
+        // objective alone.
+        let status = if tier == AgentRowTier::ObjectiveOnly || status_column == 0 {
+            String::new()
+        } else {
+            let pad = status_column.saturating_sub(UnicodeWidthStr::width(facts.status.as_str()));
+            format!("{}{}", facts.status, " ".repeat(pad))
+        };
         let role_cost = if role.is_empty() {
             0
         } else {
             UnicodeWidthStr::width(role.as_str()).saturating_add(AGENT_ROLE_GUTTER)
+        };
+        let status_cost = if status.is_empty() {
+            0
+        } else {
+            UnicodeWidthStr::width(status.as_str()).saturating_add(AGENT_ROLE_GUTTER)
         };
         let receipt_cost = if receipt.is_empty() {
             0
@@ -155,6 +185,7 @@ pub(super) fn layout_agent_row(
         let budget = width
             .saturating_sub(prefix_width)
             .saturating_sub(role_cost)
+            .saturating_sub(status_cost)
             .saturating_sub(receipt_cost);
         if budget < AGENT_OBJECTIVE_MIN && tier != AgentRowTier::ObjectiveOnly {
             continue;
@@ -163,10 +194,12 @@ pub(super) fn layout_agent_row(
         let gap = width
             .saturating_sub(prefix_width)
             .saturating_sub(role_cost)
+            .saturating_sub(status_cost)
             .saturating_sub(UnicodeWidthStr::width(objective.as_str()))
             .saturating_sub(UnicodeWidthStr::width(receipt.as_str()));
         return AgentRowText {
             role,
+            status,
             objective,
             receipt,
             gap,

@@ -24,7 +24,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   An empty panel now collapses like the Tasks panel always has, and the settings
   migration no longer folds the default `sidebar_focus = "auto"` into a pinned
   always-on strip, which had silently handed that panel to every user who had a
-  settings file at all.
+  settings file at all. (An *empty* panel collapses; a panel holding settled
+  to-dos or finished workers is not empty — see the standing-register entry
+  below.)
+- The work bar is a standing register again: settled to-dos and finished
+  sub-agents keep their rows for the rest of the session instead of being
+  evicted four seconds after the work settles (or on the next user turn), the
+  active goal title stays up with them, to-do rows say their state in words
+  (pending / in progress / completed / cancelled), and sub-agent rows carry a
+  status-word column next to the type. Every work row is a door in every rail
+  panel and placement: to-dos and sub-agents in the Agents and Pinned panels
+  now route through the same row machinery as Tasks, so click and Enter open
+  the row's world (work inspector / agent details — finished agents included)
+  instead of doing nothing. A click after the detail pager closed itself
+  reopens the detail rather than being swallowed by a stale toggle.
 - The rail strip yields its rows to the transcript when the terminal cannot
   seat both, so the idle ocean survives at 24 rows instead of being evicted.
 - `code_execution` and `js_execution` no longer describe themselves to the model

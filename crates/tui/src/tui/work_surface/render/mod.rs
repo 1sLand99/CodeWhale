@@ -26,7 +26,7 @@ use crate::tui::app::{App, SidebarHoverRow, SidebarHoverSection};
 use crate::tui::ui_text::truncate_line_to_width;
 
 use super::model::{
-    RailPanel, WorkHitbox, WorkRow, WorkSurfacePlacement, WorkTone, project_visible,
+    RailPanel, WorkHitbox, WorkRow, WorkSurfacePlacement, WorkTone, visible_rows_for_panel,
 };
 
 mod layout;
@@ -36,7 +36,7 @@ pub use layout::{height, split_chat};
 
 use rows::{
     AGENT_ROLE_GUTTER, AgentRowTier, agent_identity, agent_identity_cap, agent_identity_column,
-    agent_receipt, agent_row_styles, layout_agent_row, row_style,
+    agent_receipt, agent_row_styles, agent_status_column, layout_agent_row, row_style,
 };
 
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -74,14 +74,17 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         WorkSurfacePlacement::Off => unreachable!("off placement returned above"),
     };
 
-    // Non-Tasks panels render as a titled line list and skip the row
-    // machinery (hitboxes, selection, todo ordinals) entirely.
-    if app.work_surface.panel != RailPanel::Tasks {
+    // Context is the one panel that is not a work-row surface: session facts
+    // render as a titled line list with nothing to click. Every other panel
+    // (Tasks, Agents, Pinned) routes through the row machinery below, so its
+    // rows keep hitboxes, selection, and primary actions — a work row is a
+    // door in every panel, not only in Tasks.
+    if app.work_surface.panel == RailPanel::Context {
         render_panel(frame, area, body_area, app);
         return;
     }
 
-    let mut rows = project_visible(app);
+    let mut rows = visible_rows_for_panel(app);
     if placement == WorkSurfacePlacement::Top {
         // Literal work list only: selectable to-dos/agents plus the
         // GrokBuild-style `▾ Subagents N` group header. Generic graph chrome
@@ -206,6 +209,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     let visible = rows.iter().skip(start).take(list_rows).collect::<Vec<_>>();
     let identity_cap = agent_identity_cap(usize::from(content_area.width));
     let identity_column = agent_identity_column(&visible, identity_cap);
+    let status_column = agent_status_column(&visible);
     let mut lines = Vec::with_capacity(visible.len().saturating_add(1));
     let mut hover_rows = Vec::new();
     let mut hitboxes = Vec::new();
@@ -245,13 +249,20 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
                 UnicodeWidthStr::width(prefix.as_str()),
                 agent_identity(row, identity_cap),
                 identity_column,
+                status_column,
                 facts,
             );
             let (normal, muted) = agent_row_styles(app, selected, hovered, opened);
             let display = format!(
-                "{prefix}{}{}{}{}{}",
+                "{prefix}{}{}{}{}{}{}{}",
                 laid_out.role,
                 if laid_out.role.is_empty() {
+                    String::new()
+                } else {
+                    " ".repeat(AGENT_ROLE_GUTTER)
+                },
+                laid_out.status,
+                if laid_out.status.is_empty() {
                     String::new()
                 } else {
                     " ".repeat(AGENT_ROLE_GUTTER)
@@ -264,6 +275,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             if !laid_out.role.is_empty() {
                 spans.push(Span::styled(
                     format!("{}{}", laid_out.role, " ".repeat(AGENT_ROLE_GUTTER)),
+                    muted,
+                ));
+            }
+            if !laid_out.status.is_empty() {
+                spans.push(Span::styled(
+                    format!("{}{}", laid_out.status, " ".repeat(AGENT_ROLE_GUTTER)),
                     muted,
                 ));
             }
@@ -386,10 +403,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     });
 }
 
-/// Render a non-Tasks rail panel (Agents / Context / Pinned) as a line list
-/// in the same body area and with the same divider and scrollbar the Tasks
-/// list would use. Row interactivity (hitboxes, selection, click actions)
-/// is Tasks-only for now; panels scroll via the shared `scroll_offset`.
+/// Render the Context panel as a titled line list in the same body area and
+/// with the same divider and scrollbar the row surface would use. Context is
+/// the only panel that renders here: its lines are session facts, not work
+/// rows, so there is nothing to click and no hitboxes to record. Every panel
+/// that shows work rows (Tasks, Agents, Pinned) goes through the row/hitbox
+/// machinery in [`render`] instead.
 fn render_panel(frame: &mut Frame, area: Rect, body_area: Rect, app: &mut App) {
     let panel = app.work_surface.panel;
     let placement = app.work_surface.effective_placement;

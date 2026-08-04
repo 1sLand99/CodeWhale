@@ -5,7 +5,7 @@ use crate::tui::app::{App, SidebarRowAction};
 use super::interaction::{activate_primary, claim_focus, close_opened, release_focus};
 use super::model::{
     SIDE_WIDTH_MAX, SIDE_WIDTH_MIN, TOP_HEIGHT_MAX, TOP_HEIGHT_MIN, WorkRow, WorkRowId,
-    WorkSurfacePlacement, project_visible,
+    WorkSurfacePlacement, visible_rows_for_panel,
 };
 
 #[derive(Debug, Default)]
@@ -19,7 +19,9 @@ pub struct MouseOutcome {
 /// a local stop arm / open detail first). Plain printable input always returns
 /// ownership to the composer instead of becoming a hidden panel shortcut.
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Option<Option<SidebarRowAction>> {
-    let rows = project_visible(app);
+    // Keyboard and mouse share one row source per panel: Enter on the
+    // selected row must open the same world a click would.
+    let rows = visible_rows_for_panel(app);
     if rows.is_empty() {
         return None;
     }

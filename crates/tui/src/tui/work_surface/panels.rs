@@ -1,20 +1,22 @@
-//! Non-Tasks rail panels, ported from the legacy classic-shell sidebar
-//! during the 0.9.4 rail unification (spec step 2). Agents, Context, and
-//! Pinned render as line lists inside the one work-surface rail, in
-//! whatever placement the user picked; panel selection is orthogonal to
-//! placement. The Tasks panel is *not* here — it renders through the
-//! row/hitbox machinery in `render.rs`.
+//! Line-list rail panels, ported from the legacy classic-shell sidebar
+//! during the 0.9.4 rail unification (spec step 2). Only **Context** still
+//! renders this way: its lines are session facts, not work rows, so there
+//! is nothing to click. Tasks, Agents, and Pinned all render through the
+//! row/hitbox machinery in `render.rs` — a work row is a selectable,
+//! clickable object in every panel, and a panel is just a subset of the one
+//! work list.
 //!
 //! On Top placement the strip auto-fits its content the way Tasks always
 //! did (and the way GrokBuild's tasks pane does): a two-agent fan-out is
-//! two rows, not a fixed four-row band with a chrome title. The only Top
-//! title is an active **goal** (not panel names like "Pinned"). Side rails
-//! keep a muted panel label because a column among other chrome needs
-//! naming.
+//! two rows, not a fixed four-row band with a chrome title. Auto-fit
+//! governs HEIGHT only, never membership — a settled to-do or finished
+//! sub-agent still occupies a row (quiet completion, not eviction). The
+//! only Top title is an active **goal** (not panel names like "Pinned").
 //!
 //! The line builders themselves still live in `tui::sidebar` (they are
-//! `pub(crate)` there) while the sidebar module is wound down; the rail is
-//! their only production caller now.
+//! `pub(crate)` there) while the sidebar module is wound down. The Agents
+//! and Pinned arms below are retained for that wind-down but are no longer
+//! reachable from the rail, which routes those panels through rows.
 
 use ratatui::text::Line;
 

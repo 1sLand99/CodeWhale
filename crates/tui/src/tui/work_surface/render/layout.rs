@@ -4,7 +4,9 @@
 use ratatui::layout::Rect;
 
 use crate::tui::app::App;
-use crate::tui::work_surface::model::{self, RailPanel, WorkSurfacePlacement, project_visible};
+use crate::tui::work_surface::model::{
+    self, RailPanel, WorkSurfacePlacement, visible_rows_for_panel,
+};
 use crate::tui::work_surface::panels;
 
 use super::{progress_shares_goal_row, top_goal_title, top_todo_progress};
@@ -43,10 +45,12 @@ pub fn height(app: &mut App, width: u16, terminal_height: u16, rail_budget: u16)
         collapse_strip(app);
         return 0;
     }
-    // Non-Tasks panels on Top auto-fit like Tasks. Empty projections collapse
-    // to zero — an empty panel is not a panel. Side placements reserve via
-    // `split_chat` and take no top strip.
-    if app.work_surface.panel != RailPanel::Tasks {
+    // The Context fact list on Top auto-fits like the row surface. Empty
+    // projections collapse to zero — an empty panel is not a panel. (Auto-fit
+    // governs HEIGHT only; membership is the model's business, and a settled
+    // to-do or finished sub-agent still occupies a row.) Side placements
+    // reserve via `split_chat` and take no top strip.
+    if app.work_surface.panel == RailPanel::Context {
         if app.work_surface.effective_placement != WorkSurfacePlacement::Top {
             return 0;
         }
@@ -80,7 +84,7 @@ pub fn height(app: &mut App, width: u16, terminal_height: u16, rail_budget: u16)
         return desired.clamp(model::TOP_HEIGHT_MIN, cap);
     }
 
-    let rows = project_visible(app);
+    let rows = visible_rows_for_panel(app);
     let goal_rows = u16::from(
         app.work_surface.effective_placement == WorkSurfacePlacement::Top
             && top_goal_title(app).is_some(),
@@ -249,7 +253,7 @@ pub fn split_chat(app: &mut App, area: Rect, min_chat_width: u16) -> (Rect, Opti
 /// Whether a Left/Right rail should reserve columns this frame.
 fn side_rail_has_content(app: &mut App) -> bool {
     match app.work_surface.panel {
-        RailPanel::Tasks => !project_visible(app).is_empty(),
-        panel => panels::panel_has_useful_content(app, panel),
+        RailPanel::Context => panels::panel_has_useful_content(app, RailPanel::Context),
+        _ => !visible_rows_for_panel(app).is_empty(),
     }
 }
