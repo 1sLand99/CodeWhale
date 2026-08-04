@@ -385,10 +385,10 @@ impl ToolSpec for ApplyPatchTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
-        let fuzz = optional_u64(&input, "fuzz", DEFAULT_FUZZ as u64).min(MAX_FUZZ as u64);
+        let fuzz = optional_u64(&input, "fuzz", DEFAULT_FUZZ as u64)?.min(MAX_FUZZ as u64);
         let fuzz = usize::try_from(fuzz).unwrap_or(DEFAULT_FUZZ);
         let normalized = normalize_apply_patch_input(&input)?;
-        let create_if_missing = optional_bool(&input, "create_if_missing", false);
+        let create_if_missing = optional_bool(&input, "create_if_missing", false)?;
         let preflight = preflight_apply_patch_plan(&input, normalized)?;
 
         if let NormalizedApplyPatchInput::Replacement {
@@ -494,7 +494,7 @@ fn preflight_apply_patch_plan(
     input: &Value,
     normalized: NormalizedApplyPatchInput<'_>,
 ) -> Result<ApplyPatchPreflightPlan, ToolError> {
-    let create_if_missing = optional_bool(input, "create_if_missing", false);
+    let create_if_missing = optional_bool(input, "create_if_missing", false)?;
 
     if let NormalizedApplyPatchInput::Replacement {
         entries,
@@ -510,7 +510,7 @@ fn preflight_apply_patch_plan(
     let NormalizedApplyPatchInput::Patch(patch_text) = normalized else {
         unreachable!("replacement input returned before patch parsing")
     };
-    let path_override = optional_str(input, "path");
+    let path_override = optional_str(input, "path")?;
     let patch_shape = inspect_patch_shape(patch_text);
     validate_patch_shape(&patch_shape, path_override)?;
     let header_path_mismatch =

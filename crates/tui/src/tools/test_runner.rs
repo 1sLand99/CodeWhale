@@ -73,8 +73,8 @@ impl ToolSpec for RunTestsTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
-        let all_features = optional_bool(&input, "all_features", false);
-        let extra_args = optional_str(&input, "args")
+        let all_features = optional_bool(&input, "all_features", false)?;
+        let extra_args = optional_str(&input, "args")?
             .map(str::trim)
             .filter(|s| !s.is_empty());
 

@@ -87,12 +87,12 @@ impl ToolSpec for GitLogTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
-        let git_ctx = resolve_git_context(context, optional_str(&input, "path"))?;
+        let git_ctx = resolve_git_context(context, optional_str(&input, "path")?)?;
         let max_count =
-            optional_u64(&input, "max_count", DEFAULT_LOG_MAX_COUNT).clamp(1, MAX_LOG_MAX_COUNT);
-        let author = optional_str(&input, "author").map(ToOwned::to_owned);
-        let since = optional_str(&input, "since").map(ToOwned::to_owned);
-        let until = optional_str(&input, "until").map(ToOwned::to_owned);
+            optional_u64(&input, "max_count", DEFAULT_LOG_MAX_COUNT)?.clamp(1, MAX_LOG_MAX_COUNT);
+        let author = optional_str(&input, "author")?.map(ToOwned::to_owned);
+        let since = optional_str(&input, "since")?.map(ToOwned::to_owned);
+        let until = optional_str(&input, "until")?.map(ToOwned::to_owned);
 
         let mut args = vec![
             "log".to_string(),
@@ -213,10 +213,10 @@ impl ToolSpec for GitShowTool {
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         let rev = required_str(&input, "rev")?;
         validate_git_rev(rev)?;
-        let git_ctx = resolve_git_context(context, optional_str(&input, "path"))?;
-        let patch = optional_bool(&input, "patch", true);
-        let stat = optional_bool(&input, "stat", true);
-        let unified = optional_u64(&input, "unified", DEFAULT_UNIFIED).min(MAX_UNIFIED);
+        let git_ctx = resolve_git_context(context, optional_str(&input, "path")?)?;
+        let patch = optional_bool(&input, "patch", true)?;
+        let stat = optional_bool(&input, "stat", true)?;
+        let unified = optional_u64(&input, "unified", DEFAULT_UNIFIED)?.min(MAX_UNIFIED);
 
         let mut args = vec![
             "show".to_string(),
@@ -351,13 +351,13 @@ impl ToolSpec for GitBlameTool {
             ToolError::invalid_input(format!("Path has no parent directory: {path_str}"))
         })?;
         let pathspec = pathspec_from(working_dir, &resolved_path);
-        let rev = optional_str(&input, "rev").unwrap_or("HEAD");
+        let rev = optional_str(&input, "rev")?.unwrap_or("HEAD");
         validate_git_rev(rev)?;
-        let start_line = optional_u64(&input, "start_line", DEFAULT_BLAME_START_LINE).max(1);
-        let max_lines = optional_u64(&input, "max_lines", DEFAULT_BLAME_MAX_LINES)
+        let start_line = optional_u64(&input, "start_line", DEFAULT_BLAME_START_LINE)?.max(1);
+        let max_lines = optional_u64(&input, "max_lines", DEFAULT_BLAME_MAX_LINES)?
             .clamp(1, MAX_BLAME_MAX_LINES);
         let end_line = start_line.saturating_add(max_lines.saturating_sub(1));
-        let porcelain = optional_bool(&input, "porcelain", false);
+        let porcelain = optional_bool(&input, "porcelain", false)?;
 
         let mut args = vec![
             "blame".to_string(),

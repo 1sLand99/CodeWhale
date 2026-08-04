@@ -93,7 +93,7 @@ impl ToolSpec for AgentsListTool {
             .get("include_archived")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let agent_ref = parse_agent_ref(&input);
+        let agent_ref = parse_agent_ref(&input)?;
 
         let mut manager = self.manager.write().await;
         manager.cleanup(COMPLETED_AGENT_RETENTION);
@@ -182,7 +182,7 @@ impl ToolSpec for AgentsMessageTool {
 
     async fn execute(&self, input: Value, _context: &ToolContext) -> Result<ToolResult, ToolError> {
         let agent_ref =
-            parse_agent_ref(&input).ok_or_else(|| ToolError::missing_field("agent_id"))?;
+            parse_agent_ref(&input)?.ok_or_else(|| ToolError::missing_field("agent_id"))?;
         let message = input
             .get("message")
             .or_else(|| input.get("text"))
@@ -287,7 +287,7 @@ impl ToolSpec for AgentsFollowupTool {
 
     async fn execute(&self, input: Value, _context: &ToolContext) -> Result<ToolResult, ToolError> {
         let agent_ref =
-            parse_agent_ref(&input).ok_or_else(|| ToolError::missing_field("agent_id"))?;
+            parse_agent_ref(&input)?.ok_or_else(|| ToolError::missing_field("agent_id"))?;
         let message = input
             .get("message")
             .or_else(|| input.get("text"))
@@ -403,7 +403,7 @@ impl ToolSpec for AgentsInterruptTool {
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         let agent_ref =
-            parse_agent_ref(&input).ok_or_else(|| ToolError::missing_field("agent_id"))?;
+            parse_agent_ref(&input)?.ok_or_else(|| ToolError::missing_field("agent_id"))?;
         let reason = input
             .get("reason")
             .and_then(Value::as_str)
@@ -568,7 +568,7 @@ async fn wait_for_all_children(
         .unwrap_or(COORD_WAIT_DEFAULT_TIMEOUT_SECS)
         .clamp(COORD_WAIT_MIN_TIMEOUT_SECS, COORD_WAIT_MAX_TIMEOUT_SECS);
     let timeout = Duration::from_secs(timeout_secs);
-    let agent_ref = parse_agent_ref(input);
+    let agent_ref = parse_agent_ref(input)?;
 
     // Resolve the watch set up front so a bad reference fails immediately
     // rather than blocking for the whole timeout.
@@ -721,7 +721,7 @@ async fn wait_for_activity(
         .unwrap_or(COORD_WAIT_DEFAULT_TIMEOUT_SECS)
         .clamp(COORD_WAIT_MIN_TIMEOUT_SECS, COORD_WAIT_MAX_TIMEOUT_SECS);
     let timeout = Duration::from_secs(timeout_secs);
-    let agent_ref = parse_agent_ref(input);
+    let agent_ref = parse_agent_ref(input)?;
 
     let (watched, baseline): (Vec<String>, Vec<(String, u64)>) = {
         let manager = manager.read().await;

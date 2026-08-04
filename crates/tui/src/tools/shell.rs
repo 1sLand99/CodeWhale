@@ -3059,11 +3059,11 @@ impl ToolSpec for BashTool {
             }
             ShellPolicy::ReadOnly | ShellPolicy::Full => {}
         }
-        let timeout_ms = optional_u64(&input, "timeout_ms", 120_000).min(600_000);
-        let background = optional_bool(&input, "background", false);
-        let interactive = optional_bool(&input, "interactive", false);
-        let combined_output = optional_bool(&input, "combined_output", false);
-        let tty = optional_bool(&input, "tty", false) || (combined_output && background);
+        let timeout_ms = optional_u64(&input, "timeout_ms", 120_000)?.min(600_000);
+        let background = optional_bool(&input, "background", false)?;
+        let interactive = optional_bool(&input, "interactive", false)?;
+        let combined_output = optional_bool(&input, "combined_output", false)?;
+        let tty = optional_bool(&input, "tty", false)? || (combined_output && background);
         let stdin_data = input
             .get("stdin")
             .or_else(|| input.get("input"))
@@ -3563,8 +3563,8 @@ impl BashTool {
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let task_id = required_task_id(input)?;
-        let wait = optional_bool(input, "wait", false);
-        let timeout_ms = optional_u64(input, "timeout_ms", 30_000);
+        let wait = optional_bool(input, "wait", false)?;
+        let timeout_ms = optional_u64(input, "timeout_ms", 30_000)?;
 
         let (delta, wait_canceled) = if wait {
             wait_for_shell_delta_cancellable(context, task_id, timeout_ms).await?
@@ -3604,8 +3604,8 @@ impl BashTool {
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let task_id = required_task_id(input)?;
-        let close_stdin = optional_bool(input, "close_stdin", false);
-        let timeout_ms = optional_u64(input, "timeout_ms", 1_000);
+        let close_stdin = optional_bool(input, "close_stdin", false)?;
+        let timeout_ms = optional_u64(input, "timeout_ms", 1_000)?;
         let interaction_input = input
             .get("input")
             .or_else(|| input.get("stdin"))
@@ -3676,7 +3676,7 @@ impl BashTool {
         input: &serde_json::Value,
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let cancel_all = optional_bool(input, "all", false);
+        let cancel_all = optional_bool(input, "all", false)?;
         let mut manager = context
             .shell_manager
             .lock()

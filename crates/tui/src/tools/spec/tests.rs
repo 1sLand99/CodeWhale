@@ -347,9 +347,17 @@ fn test_required_str() {
 
 #[test]
 fn test_optional_str() {
-    let input = json!({"name": "test"});
-    assert_eq!(optional_str(&input, "name"), Some("test"));
-    assert_eq!(optional_str(&input, "missing"), None);
+    let input = json!({"name": "test", "count": 7});
+    assert_eq!(optional_str(&input, "name").unwrap(), Some("test"));
+    assert_eq!(optional_str(&input, "missing").unwrap(), None);
+    // An explicit null is the wire spelling of "absent", not a type error.
+    assert_eq!(optional_str(&json!({"name": null}), "name").unwrap(), None);
+    let err = optional_str(&input, "count").expect_err("a number is not a string");
+    let err = err.to_string();
+    assert!(
+        err.contains("count") && err.contains("number") && err.contains("string"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -362,15 +370,38 @@ fn test_required_u64() {
 #[test]
 fn test_optional_u64() {
     let input = json!({"count": 42});
-    assert_eq!(optional_u64(&input, "count", 0), 42);
-    assert_eq!(optional_u64(&input, "missing", 100), 100);
+    assert_eq!(optional_u64(&input, "count", 0).unwrap(), 42);
+    assert_eq!(optional_u64(&input, "missing", 100).unwrap(), 100);
+    assert_eq!(
+        optional_u64(&json!({"count": null}), "count", 9).unwrap(),
+        9
+    );
+    // A stringy number keeps its default today only because the harness
+    // never noticed; it must be an error instead.
+    for bad in [json!("42"), json!(-1), json!(2.5), json!([42])] {
+        let err = optional_u64(&json!({"count": bad}), "count", 100)
+            .expect_err("a non-integer must not fall back to the default")
+            .to_string();
+        assert!(
+            err.contains("count") && err.contains("non-negative integer"),
+            "{err}"
+        );
+    }
 }
 
 #[test]
 fn test_optional_bool() {
     let input = json!({"flag": true});
-    assert!(optional_bool(&input, "flag", false));
-    assert!(!optional_bool(&input, "missing", false));
+    assert!(optional_bool(&input, "flag", false).unwrap());
+    assert!(!optional_bool(&input, "missing", false).unwrap());
+    assert!(optional_bool(&json!({"flag": null}), "flag", true).unwrap());
+    // The whole point: "true" must never become the default `false`.
+    for bad in [json!("true"), json!("false"), json!(1), json!(0), json!([])] {
+        let err = optional_bool(&json!({"flag": bad}), "flag", false)
+            .expect_err("a non-boolean must not fall back to the default")
+            .to_string();
+        assert!(err.contains("flag") && err.contains("boolean"), "{err}");
+    }
 }
 
 #[test]

@@ -159,10 +159,10 @@ impl ToolSpec for FetchUrlTool {
 
         let format = Format::parse(input.get("format").and_then(Value::as_str))?;
         let max_bytes =
-            usize::try_from(optional_u64(&input, "max_bytes", DEFAULT_MAX_BYTES as u64))
+            usize::try_from(optional_u64(&input, "max_bytes", DEFAULT_MAX_BYTES as u64)?)
                 .unwrap_or(HARD_MAX_BYTES)
                 .clamp(1, HARD_MAX_BYTES);
-        let timeout_ms = optional_u64(&input, "timeout_ms", DEFAULT_TIMEOUT.as_millis() as u64)
+        let timeout_ms = optional_u64(&input, "timeout_ms", DEFAULT_TIMEOUT.as_millis() as u64)?
             .clamp(1, HARD_MAX_TIMEOUT.as_millis() as u64);
         let requested_fields = parse_fields(&input)?;
         let fetched = fetch(

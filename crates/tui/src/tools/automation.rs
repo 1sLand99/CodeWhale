@@ -296,7 +296,7 @@ impl AutomationTool {
                 .into_iter()
                 .map(PathBuf::from)
                 .collect(),
-            mode: optional_str(input, "mode").map(ToString::to_string),
+            mode: optional_str(input, "mode")?.map(ToString::to_string),
             allow_shell: optional_bool_value(input, "allow_shell"),
             trust_mode: optional_bool_value(input, "trust_mode"),
             auto_approve: optional_bool_value(input, "auto_approve"),
@@ -333,7 +333,7 @@ impl AutomationTool {
         let mut automations = manager
             .list_automations()
             .map_err(|e| ToolError::execution_failed(e.to_string()))?;
-        automations.truncate(optional_u64(input, "limit", 50).clamp(1, 100) as usize);
+        automations.truncate(optional_u64(input, "limit", 50)?.clamp(1, 100) as usize);
         ToolResult::json(&automations).map_err(|e| ToolError::execution_failed(e.to_string()))
     }
 
@@ -370,13 +370,13 @@ impl AutomationTool {
             .as_ref()
             .ok_or_else(|| ToolError::not_available("AutomationManager is not attached"))?;
         let manager = manager.lock().await;
-        let status = optional_str(input, "status")
+        let status = optional_str(input, "status")?
             .map(parse_automation_status)
             .transpose()?;
         let req = UpdateAutomationRequest {
-            name: optional_str(input, "name").map(ToString::to_string),
-            prompt: optional_str(input, "prompt").map(ToString::to_string),
-            rrule: optional_str(input, "rrule").map(ToString::to_string),
+            name: optional_str(input, "name")?.map(ToString::to_string),
+            prompt: optional_str(input, "prompt")?.map(ToString::to_string),
+            rrule: optional_str(input, "rrule")?.map(ToString::to_string),
             cwds: if input.get("cwds").is_some() {
                 Some(
                     string_array(input, "cwds")?
@@ -387,7 +387,7 @@ impl AutomationTool {
             } else {
                 None
             },
-            mode: optional_str(input, "mode").map(ToString::to_string),
+            mode: optional_str(input, "mode")?.map(ToString::to_string),
             allow_shell: optional_bool_value(input, "allow_shell"),
             trust_mode: optional_bool_value(input, "trust_mode"),
             auto_approve: optional_bool_value(input, "auto_approve"),
@@ -551,7 +551,7 @@ fn parse_automation_status(value: &str) -> Result<AutomationStatus, ToolError> {
 }
 
 fn optional_delivery_mode(input: &Value) -> Result<Option<AutomationDeliveryMode>, ToolError> {
-    match optional_str(input, "delivery_mode") {
+    match optional_str(input, "delivery_mode")? {
         None => Ok(None),
         Some("task") => Ok(Some(AutomationDeliveryMode::Task)),
         Some("watcher") => Ok(Some(AutomationDeliveryMode::Watcher)),

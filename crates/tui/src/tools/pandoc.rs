@@ -110,7 +110,7 @@ impl ToolSpec for PandocConvertTool {
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         let source_path_str = required_str(&input, "source_path")?;
         let target_format = required_str(&input, "target_format")?.trim().to_lowercase();
-        let output_path_str = optional_str(&input, "output_path");
+        let output_path_str = optional_str(&input, "output_path")?;
 
         if !SUPPORTED_TARGET_FORMATS.contains(&target_format.as_str()) {
             return Err(ToolError::invalid_input(format!(

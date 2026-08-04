@@ -480,11 +480,11 @@ impl ToolSpec for ReviewTool {
             return Err(ToolError::invalid_input("target cannot be empty"));
         }
 
-        let kind = optional_str(&input, "kind").map(|s| s.trim().to_ascii_lowercase());
-        let base = optional_str(&input, "base").map(|s| s.trim().to_string());
-        let staged = optional_bool(&input, "staged", false);
+        let kind = optional_str(&input, "kind")?.map(|s| s.trim().to_ascii_lowercase());
+        let base = optional_str(&input, "base")?.map(|s| s.trim().to_string());
+        let staged = optional_bool(&input, "staged", false)?;
         let max_chars =
-            usize::try_from(optional_u64(&input, "max_chars", DEFAULT_MAX_CHARS as u64))
+            usize::try_from(optional_u64(&input, "max_chars", DEFAULT_MAX_CHARS as u64)?)
                 .unwrap_or(DEFAULT_MAX_CHARS)
                 .clamp(1, MAX_MAX_CHARS);
 

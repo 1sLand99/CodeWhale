@@ -105,12 +105,12 @@ impl ToolSpec for GrepFilesTool {
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         let pattern_str = required_str(&input, "pattern")?;
-        let path_str = optional_str(&input, "path").unwrap_or(".");
-        let context_lines = usize::try_from(optional_u64(&input, "context_lines", 2))
+        let path_str = optional_str(&input, "path")?.unwrap_or(".");
+        let context_lines = usize::try_from(optional_u64(&input, "context_lines", 2)?)
             .unwrap_or(usize::MAX)
             .min(1000);
-        let case_insensitive = optional_bool(&input, "case_insensitive", false);
-        let max_results = usize::try_from(optional_u64(&input, "max_results", MAX_RESULTS as u64))
+        let case_insensitive = optional_bool(&input, "case_insensitive", false)?;
+        let max_results = usize::try_from(optional_u64(&input, "max_results", MAX_RESULTS as u64)?)
             .unwrap_or(MAX_RESULTS);
 
         // Parse include patterns
@@ -674,6 +674,47 @@ mod tests {
 
         assert!(description.contains("skips common non-code directories"));
         assert!(!description.contains("respects `.gitignore`"));
+    }
+
+    /// Representative of the ~150 shared `optional_*` call sites outside the
+    /// three that motivated the change: a wrong type is refused by name, an
+    /// absent or null field still takes its default.
+    #[tokio::test]
+    async fn grep_refuses_mistyped_optional_parameters_by_name() {
+        let tmp = tempdir().expect("tempdir");
+        fs::write(tmp.path().join("a.txt"), "needle\n").expect("write");
+        let ctx = ToolContext::new(tmp.path());
+
+        for (field, input) in [
+            (
+                "max_results",
+                json!({"pattern": "needle", "max_results": "10"}),
+            ),
+            (
+                "case_insensitive",
+                json!({"pattern": "needle", "case_insensitive": "true"}),
+            ),
+            (
+                "context_lines",
+                json!({"pattern": "needle", "context_lines": 2.5}),
+            ),
+            ("path", json!({"pattern": "needle", "path": ["."]})),
+        ] {
+            let err = GrepFilesTool
+                .execute(input, &ctx)
+                .await
+                .expect_err("a mistyped optional parameter must be refused");
+            let err = err.to_string();
+            assert!(err.contains(field), "error must name '{field}': {err}");
+        }
+
+        GrepFilesTool
+            .execute(
+                json!({"pattern": "needle", "max_results": Value::Null, "path": Value::Null}),
+                &ctx,
+            )
+            .await
+            .expect("explicit nulls read as absent");
     }
 
     #[test]

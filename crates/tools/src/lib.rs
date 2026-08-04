@@ -171,6 +171,56 @@ impl ToolResult {
     }
 }
 
+/// Name the JSON type of a value the way a tool schema would spell it.
+#[must_use]
+pub fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// Render a value for an error message, truncated so a huge payload cannot
+/// swamp the transcript.
+#[must_use]
+pub fn value_preview(value: &Value) -> String {
+    let preview = value.to_string();
+    if preview.chars().count() > 120 {
+        preview.chars().take(117).collect::<String>() + "..."
+    } else {
+        preview
+    }
+}
+
+/// The one error every type mismatch on a tool parameter produces.
+///
+/// Names the parameter, the type that arrived, and the type the schema
+/// declares, plus the offending value — everything the caller needs to fix
+/// the call on the next turn without another round trip.
+#[must_use]
+pub fn type_mismatch(field: &str, value: &Value, expected: &str) -> ToolError {
+    ToolError::invalid_input(format!(
+        "field '{field}' must be {expected}; got {}. Received: {}",
+        json_type_name(value),
+        value_preview(value)
+    ))
+}
+
+/// Whether a value counts as "the caller did not supply this field".
+///
+/// JSON `null` is the wire spelling of absence, so an optional field set to
+/// `null` takes its default rather than erroring. This is the *only*
+/// tolerance in the optional extractors, and it is uniform across all of
+/// them: `null` means no value, and no value is exactly what a default is
+/// for. Every other type mismatch is an error.
+fn is_absent(value: Option<&Value>) -> bool {
+    matches!(value, None | Some(Value::Null))
+}
+
 /// Helper to extract a required string field from JSON input.
 pub fn required_str<'a>(input: &'a Value, field: &str) -> std::result::Result<&'a str, ToolError> {
     if let Some(value) = input.get(field) {
@@ -178,22 +228,7 @@ pub fn required_str<'a>(input: &'a Value, field: &str) -> std::result::Result<&'
             return Ok(string_value);
         }
 
-        let json_type = match value {
-            Value::Null => "null",
-            Value::Bool(_) => "boolean",
-            Value::Number(_) => "number",
-            Value::String(_) => "string",
-            Value::Array(_) => "array",
-            Value::Object(_) => "object",
-        };
-        let mut preview = value.to_string();
-        if preview.chars().count() > 120 {
-            preview = preview.chars().take(117).collect::<String>() + "...";
-        }
-
-        return Err(ToolError::invalid_input(format!(
-            "field '{field}' must be a string; got {json_type}. Received: {preview}"
-        )));
+        return Err(type_mismatch(field, value, "a string"));
     }
 
     // When the field is missing, list the fields the caller *did*
@@ -214,9 +249,22 @@ pub fn required_str<'a>(input: &'a Value, field: &str) -> std::result::Result<&'
 }
 
 /// Helper to extract an optional string field from JSON input.
-#[must_use]
-pub fn optional_str<'a>(input: &'a Value, field: &str) -> Option<&'a str> {
-    input.get(field).and_then(Value::as_str)
+///
+/// A wrong type is an error, never a silent `None`. See [`type_mismatch`]
+/// for why nothing is coerced.
+pub fn optional_str<'a>(
+    input: &'a Value,
+    field: &str,
+) -> std::result::Result<Option<&'a str>, ToolError> {
+    let value = input.get(field);
+    if is_absent(value) {
+        return Ok(None);
+    }
+    let value = value.expect("is_absent covers the None case");
+    value
+        .as_str()
+        .map(Some)
+        .ok_or_else(|| type_mismatch(field, value, "a string"))
 }
 
 /// Helper to extract a required u64 field from JSON input.
@@ -228,15 +276,57 @@ pub fn required_u64(input: &Value, field: &str) -> std::result::Result<u64, Tool
 }
 
 /// Helper to extract an optional u64 field with default.
-#[must_use]
-pub fn optional_u64(input: &Value, field: &str, default: u64) -> u64 {
-    input.get(field).and_then(Value::as_u64).unwrap_or(default)
+///
+/// A wrong type is an error, never a silent fall back to `default`.
+pub fn optional_u64(
+    input: &Value,
+    field: &str,
+    default: u64,
+) -> std::result::Result<u64, ToolError> {
+    let value = input.get(field);
+    if is_absent(value) {
+        return Ok(default);
+    }
+    let value = value.expect("is_absent covers the None case");
+    value
+        .as_u64()
+        .ok_or_else(|| type_mismatch(field, value, "a non-negative integer"))
 }
 
 /// Helper to extract an optional bool field with default.
-#[must_use]
-pub fn optional_bool(input: &Value, field: &str, default: bool) -> bool {
-    input.get(field).and_then(Value::as_bool).unwrap_or(default)
+///
+/// A wrong type is an error, never a silent fall back to `default`. In
+/// particular the string `"true"` is refused rather than coerced: the
+/// default this used to fall back to is frequently the *opposite* of what
+/// the caller asked for, and some of those defaults gate irreversible
+/// actions.
+pub fn optional_bool(
+    input: &Value,
+    field: &str,
+    default: bool,
+) -> std::result::Result<bool, ToolError> {
+    Ok(optional_bool_opt(input, field)?.unwrap_or(default))
+}
+
+/// Helper to extract an optional bool that has no default.
+///
+/// `None` means the caller did not supply the field; a wrong type is an
+/// error. Use this where "unset" is itself meaningful — an authority
+/// declaration that is dropped instead of read is a restriction that
+/// silently evaporates.
+pub fn optional_bool_opt(
+    input: &Value,
+    field: &str,
+) -> std::result::Result<Option<bool>, ToolError> {
+    let value = input.get(field);
+    if is_absent(value) {
+        return Ok(None);
+    }
+    let value = value.expect("is_absent covers the None case");
+    value
+        .as_bool()
+        .map(Some)
+        .ok_or_else(|| type_mismatch(field, value, "a boolean"))
 }
 
 /// Descriptor that describes a tool available in the registry.
@@ -582,16 +672,65 @@ mod tests {
     fn helper_extractors_validate_shape() {
         let input = json!({"name": "demo", "count": 7, "enabled": true});
         assert_eq!(required_str(&input, "name").expect("name"), "demo");
-        assert_eq!(optional_str(&input, "name"), Some("demo"));
-        assert_eq!(optional_str(&input, "missing"), None);
-        assert_eq!(optional_str(&input, "count"), None);
-        assert_eq!(optional_str(&json!({"name": null}), "name"), None);
-        assert_eq!(optional_u64(&input, "count", 0), 7);
-        assert!(optional_bool(&input, "enabled", false));
+        assert_eq!(optional_str(&input, "name").unwrap(), Some("demo"));
+        assert_eq!(optional_str(&input, "missing").unwrap(), None);
+        assert_eq!(optional_str(&json!({"name": null}), "name").unwrap(), None);
+        assert_eq!(optional_u64(&input, "count", 0).unwrap(), 7);
+        assert!(optional_bool(&input, "enabled", false).unwrap());
         assert!(matches!(
             required_u64(&input, "name"),
             Err(ToolError::MissingField { .. })
         ));
+    }
+
+    /// The rule, stated once: an optional parameter of the wrong JSON type is
+    /// an error that names the parameter, what arrived, and what was wanted.
+    /// `null` alone means "absent" and takes the default.
+    #[test]
+    fn optional_extractors_refuse_type_mismatches_instead_of_defaulting() {
+        // The shipping bug: a stringy "true" became the default `false`,
+        // which for `dry_run` is the opposite of what the caller asked and
+        // gates an irreversible action.
+        let err = optional_bool(&json!({"dry_run": "true"}), "dry_run", false)
+            .expect_err("a stringy bool must not become the default")
+            .to_string();
+        assert!(err.contains("dry_run"), "{err}");
+        assert!(err.contains("must be a boolean"), "{err}");
+        assert!(err.contains("got string"), "{err}");
+        assert!(err.contains("\"true\""), "{err}");
+
+        for bad in [json!("true"), json!(1), json!(0), json!([]), json!({})] {
+            assert!(
+                optional_bool(&json!({"flag": bad}), "flag", false).is_err(),
+                "optional_bool accepted {bad}"
+            );
+        }
+        for bad in [json!("7"), json!(-1), json!(1.5), json!(true), json!([7])] {
+            assert!(
+                optional_u64(&json!({"n": bad}), "n", 42).is_err(),
+                "optional_u64 accepted {bad}"
+            );
+        }
+        for bad in [json!(7), json!(true), json!(["a"]), json!({"a": 1})] {
+            assert!(
+                optional_str(&json!({"s": bad}), "s").is_err(),
+                "optional_str accepted {bad}"
+            );
+        }
+
+        // `null` is the wire spelling of absence, uniformly across all three.
+        assert!(optional_bool(&json!({"flag": null}), "flag", true).unwrap());
+        assert_eq!(optional_u64(&json!({"n": null}), "n", 42).unwrap(), 42);
+        assert_eq!(optional_str(&json!({"s": null}), "s").unwrap(), None);
+    }
+
+    #[test]
+    fn type_mismatch_truncates_a_huge_offending_value() {
+        let big = Value::String("x".repeat(500));
+        let err = type_mismatch("body", &big, "a boolean").to_string();
+        assert!(err.contains("body"), "{err}");
+        assert!(err.ends_with("..."), "{err}");
+        assert!(err.chars().count() < 250, "{err}");
     }
 
     #[test]

@@ -590,8 +590,10 @@ fn session_name(input: &serde_json::Value, required: bool) -> Result<&str, ToolE
 }
 
 #[cfg(unix)]
-fn timeout_secs(input: &serde_json::Value, key: &str) -> Duration {
-    Duration::from_secs(optional_u64(input, key, DEFAULT_TIMEOUT_SECS).clamp(1, MAX_TIMEOUT_SECS))
+fn timeout_secs(input: &serde_json::Value, key: &str) -> Result<Duration, ToolError> {
+    Ok(Duration::from_secs(
+        optional_u64(input, key, DEFAULT_TIMEOUT_SECS)?.clamp(1, MAX_TIMEOUT_SECS),
+    ))
 }
 
 fn shell_allowed(context: &ToolContext) -> Result<(), ToolError> {
@@ -651,7 +653,7 @@ impl ToolSpec for TerminalRunTool {
             let name = session_name(&input, false)?.to_string();
             let session =
                 get_or_create(&name, &context.workspace).map_err(ToolError::execution_failed)?;
-            let timeout = timeout_secs(&input, "timeout_secs");
+            let timeout = timeout_secs(&input, "timeout_secs")?;
             return tokio::task::spawn_blocking(move || {
                 {
                     let mut session = session.lock().map_err(|_| {
@@ -697,7 +699,7 @@ impl ToolSpec for TerminalSendTool {
             let name = session_name(&input, true)?.to_string();
             let text = required_str(&input, "text")?.as_bytes().to_vec();
             let session = find(&name, &context.workspace).map_err(ToolError::execution_failed)?;
-            let wait = Duration::from_millis(optional_u64(&input, "wait_ms", 250).min(60_000));
+            let wait = Duration::from_millis(optional_u64(&input, "wait_ms", 250)?.min(60_000));
             return tokio::task::spawn_blocking(move || {
                 let mut session = session
                     .lock()
@@ -738,7 +740,7 @@ impl ToolSpec for TerminalWaitTool {
         {
             let name = session_name(&input, true)?.to_string();
             let session = find(&name, &context.workspace).map_err(ToolError::execution_failed)?;
-            let timeout = timeout_secs(&input, "timeout_secs");
+            let timeout = timeout_secs(&input, "timeout_secs")?;
             return tokio::task::spawn_blocking(move || {
                 let (done, timed_out) = wait_shared_session(&session, timeout)?;
                 let mut session = session

@@ -114,14 +114,14 @@ impl ToolSpec for WaitForDevServerTool {
 }
 
 fn parse_request(input: &Value) -> Result<ReadinessRequest, ToolError> {
-    let host = normalize_loopback_host(optional_str(input, "host").unwrap_or(DEFAULT_HOST))?;
+    let host = normalize_loopback_host(optional_str(input, "host")?.unwrap_or(DEFAULT_HOST))?;
     let port = parse_port(input)?;
     let url = parse_healthcheck_url(input, port)?;
     let timeout = Duration::from_millis(
-        optional_u64(input, "timeout_ms", DEFAULT_TIMEOUT_MS).min(HARD_MAX_TIMEOUT_MS),
+        optional_u64(input, "timeout_ms", DEFAULT_TIMEOUT_MS)?.min(HARD_MAX_TIMEOUT_MS),
     );
     let poll_interval = Duration::from_millis(
-        optional_u64(input, "poll_interval_ms", DEFAULT_POLL_INTERVAL_MS)
+        optional_u64(input, "poll_interval_ms", DEFAULT_POLL_INTERVAL_MS)?
             .clamp(MIN_POLL_INTERVAL_MS, MAX_POLL_INTERVAL_MS),
     );
 
@@ -169,7 +169,7 @@ fn normalize_loopback_host(host: &str) -> Result<String, ToolError> {
 }
 
 fn parse_healthcheck_url(input: &Value, port: u16) -> Result<Option<reqwest::Url>, ToolError> {
-    let Some(url) = optional_str(input, "url")
+    let Some(url) = optional_str(input, "url")?
         .map(str::trim)
         .filter(|url| !url.is_empty())
     else {

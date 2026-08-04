@@ -246,7 +246,7 @@ impl ToolSpec for ReadFileTool {
                 "File `read` cannot expose CodeWhale configuration or credential-store files; use `codewhale config list` or `codewhale auth status` for safe inspection",
             ));
         }
-        let pages = optional_str(&input, "pages");
+        let pages = optional_str(&input, "pages")?;
 
         if let Some(result) = read_pdf_if_detected(
             &file_path,
@@ -873,7 +873,7 @@ impl ToolSpec for EditFileTool {
         let path_str = required_str(&input, "path")?;
         let search = required_str(&input, "search")?;
         let replace = required_str(&input, "replace")?;
-        let _fuzz = optional_bool(&input, "fuzz", false);
+        let _fuzz = optional_bool(&input, "fuzz", false)?;
 
         if search == replace {
             // #5003 — long-text edits repeatedly failed here because the model
@@ -1534,7 +1534,7 @@ impl ToolSpec for ListDirTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
-        let path_str = optional_str(&input, "path").unwrap_or(".");
+        let path_str = optional_str(&input, "path")?.unwrap_or(".");
         let dir_path = context.resolve_path(path_str)?;
 
         let entries =

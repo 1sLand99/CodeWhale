@@ -469,15 +469,15 @@ impl ToolSpec for WebRunTool {
                 if query.is_empty() {
                     continue;
                 }
-                let recency = optional_u64(search, "recency", 0);
+                let recency = optional_u64(search, "recency", 0)?;
                 let max_results = usize::try_from(optional_u64(
                     search,
                     "max_results",
                     response_length.max_results() as u64,
-                ))
+                )?)
                 .unwrap_or(response_length.max_results())
                 .clamp(1, usize::from(MAX_SEARCH_RESULTS));
-                let timeout_ms = optional_u64(search, "timeout_ms", DEFAULT_SEARCH_TIMEOUT_MS)
+                let timeout_ms = optional_u64(search, "timeout_ms", DEFAULT_SEARCH_TIMEOUT_MS)?
                     .min(MAX_SEARCH_TIMEOUT_MS);
 
                 let domains = search
@@ -538,15 +538,15 @@ impl ToolSpec for WebRunTool {
                 if query.is_empty() {
                     continue;
                 }
-                let recency = optional_u64(image, "recency", 0);
+                let recency = optional_u64(image, "recency", 0)?;
                 let max_results = usize::try_from(optional_u64(
                     image,
                     "max_results",
                     response_length.max_results() as u64,
-                ))
+                )?)
                 .unwrap_or(response_length.max_results())
                 .clamp(1, usize::from(MAX_SEARCH_RESULTS));
-                let timeout_ms = optional_u64(image, "timeout_ms", DEFAULT_SEARCH_TIMEOUT_MS)
+                let timeout_ms = optional_u64(image, "timeout_ms", DEFAULT_SEARCH_TIMEOUT_MS)?
                     .min(MAX_SEARCH_TIMEOUT_MS);
 
                 let domains = image
@@ -605,7 +605,7 @@ impl ToolSpec for WebRunTool {
             let mut views = Vec::new();
             for open in opens {
                 let ref_id = required_str(open, "ref_id")?.to_string();
-                let lineno = optional_u64(open, "lineno", 1).max(1) as usize;
+                let lineno = optional_u64(open, "lineno", 1)?.max(1) as usize;
 
                 let page = resolve_or_fetch_page(&ref_id, DEFAULT_OPEN_TIMEOUT_MS, context).await?;
                 view_counter += 1;
@@ -624,7 +624,7 @@ impl ToolSpec for WebRunTool {
             let mut views = Vec::new();
             for click in clicks {
                 let ref_id = required_str(click, "ref_id")?.to_string();
-                let link_id = optional_u64(click, "id", 0) as usize;
+                let link_id = optional_u64(click, "id", 0)? as usize;
                 if link_id == 0 {
                     return Err(ToolError::invalid_input("click.id must be >= 1"));
                 }
@@ -670,7 +670,7 @@ impl ToolSpec for WebRunTool {
             let mut screenshots = Vec::new();
             for shot in shots {
                 let ref_id = required_str(shot, "ref_id")?.to_string();
-                let pageno = optional_u64(shot, "pageno", 0) as usize;
+                let pageno = optional_u64(shot, "pageno", 0)? as usize;
                 let page = get_page(&context.state_namespace, &ref_id).ok_or_else(|| {
                     ToolError::invalid_input(format!("Unknown ref_id '{ref_id}'"))
                 })?;

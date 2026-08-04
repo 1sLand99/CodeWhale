@@ -274,7 +274,7 @@ impl GithubTool {
     ) -> Result<ToolResult, ToolError> {
         ensure_github_repo(context)?;
         let number = required_u64(input, "number")?;
-        let include_comments = optional_bool(input, "include_comments", true);
+        let include_comments = optional_bool(input, "include_comments", true)?;
         let fields = if include_comments {
             "number,title,state,author,labels,assignees,milestone,body,comments,url,createdAt,updatedAt"
         } else {
@@ -314,7 +314,7 @@ impl GithubTool {
             ],
         )?;
         let mut shaped = shape_large_text(context, raw, "pr_body", BODY_ARTIFACT_THRESHOLD)?;
-        if optional_bool(input, "include_diff", false) {
+        if optional_bool(input, "include_diff", false)? {
             let diff = run_gh_text(context, &["pr", "diff", &number_s, "--patch"])?;
             let diff_ref =
                 write_artifact_if_needed(context, "pr_diff", &diff, DIFF_ARTIFACT_THRESHOLD)?;
@@ -346,7 +346,7 @@ impl GithubTool {
         let target = required_str(input, "target")?;
         let number = required_u64(input, "number")?;
         let body = required_str(input, "body")?;
-        if optional_bool(input, "dry_run", false) {
+        if optional_bool(input, "dry_run", false)? {
             return Ok(ToolResult::success(format!(
                 "Dry run: would comment on {target} #{number}."
             )));
@@ -475,7 +475,7 @@ fn close_github_thread(
     target: GithubCloseTarget,
 ) -> Result<ToolResult, ToolError> {
     validate_evidence(&input, true)?;
-    if !optional_bool(&input, "allow_dirty", false) {
+    if !optional_bool(&input, "allow_dirty", false)? {
         let status = git_status_porcelain(context)?;
         if !status.trim().is_empty() {
             return Ok(ToolResult::error(format!(
@@ -486,7 +486,7 @@ fn close_github_thread(
         }
     }
     let number = required_u64(&input, "number")?;
-    if optional_bool(&input, "dry_run", false) {
+    if optional_bool(&input, "dry_run", false)? {
         return Ok(ToolResult::success(format!(
             "Dry run: would close {} #{number}.",
             target.display()
@@ -494,7 +494,7 @@ fn close_github_thread(
     }
     let subcmd = target.cli_subcommand();
     let number_s = number.to_string();
-    if let Some(comment) = optional_str(&input, "comment") {
+    if let Some(comment) = optional_str(&input, "comment")? {
         run_gh_text(context, &[subcmd, "comment", &number_s, "--body", comment])?;
     }
     let close_args: Vec<&str> = match target {
@@ -511,7 +511,7 @@ fn close_github_thread(
             target.summary_subject()
         ),
         None,
-        optional_str(&input, "comment")
+        optional_str(&input, "comment")?
             .and_then(|comment| {
                 write_artifact_if_needed(
                     context,
@@ -940,5 +940,111 @@ mod tests {
             .resolve_action(&json!({"action": "close_pr"}))
             .expect_err("read-only surface must reject write actions");
         assert!(err.to_string().contains("invalid action"));
+    }
+
+    /// Install a `gh` stand-in that appends its argv to `log` and succeeds.
+    ///
+    /// The close path must never reach a real `gh`, so the recorder both
+    /// proves what was attempted and keeps the test from touching GitHub.
+    fn install_recording_gh(dir: &std::path::Path, log: &std::path::Path) -> PathBuf {
+        let bin = dir.join("gh-recorder.sh");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexit 0\n",
+                log.display()
+            ),
+        )
+        .expect("write recorder");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod recorder");
+        }
+        bin
+    }
+
+    fn close_input_with_dry_run(dry_run: Value) -> Value {
+        json!({
+            "number": 424_242,
+            "allow_dirty": true,
+            "dry_run": dry_run,
+            "acceptance_criteria": ["done"],
+            "evidence": {
+                "files_changed": ["src/lib.rs"],
+                "tests_run": ["cargo test"],
+                "final_status": "green"
+            }
+        })
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn stringy_dry_run_never_closes_the_thread() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let log = tmp.path().join("gh-calls.log");
+        let bin = install_recording_gh(tmp.path(), &log);
+        let ctx = ToolContext::new(tmp.path());
+
+        let _env = crate::test_support::lock_test_env();
+        // SAFETY: serialized behind the process-wide test env lock.
+        unsafe {
+            std::env::set_var("CODEWHALE_GH_BIN", &bin);
+        }
+        let result = close_github_thread(
+            close_input_with_dry_run(json!("true")),
+            &ctx,
+            GithubCloseTarget::Issue,
+        );
+        // SAFETY: same lock; restores the process environment.
+        unsafe {
+            std::env::remove_var("CODEWHALE_GH_BIN");
+        }
+
+        let invocations = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            invocations.is_empty(),
+            "a stringy dry_run must not invoke gh at all; got: {invocations}"
+        );
+        let err = result.expect_err("dry_run must not be silently coerced to its default");
+        let err = err.to_string();
+        assert!(err.contains("dry_run"), "error must name the field: {err}");
+        assert!(
+            err.contains("boolean") && err.contains("string"),
+            "error must name expected and received types: {err}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_dry_run_bool_still_short_circuits() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let log = tmp.path().join("gh-calls.log");
+        let bin = install_recording_gh(tmp.path(), &log);
+        let ctx = ToolContext::new(tmp.path());
+
+        let _env = crate::test_support::lock_test_env();
+        // SAFETY: serialized behind the process-wide test env lock.
+        unsafe {
+            std::env::set_var("CODEWHALE_GH_BIN", &bin);
+        }
+        let result = close_github_thread(
+            close_input_with_dry_run(json!(true)),
+            &ctx,
+            GithubCloseTarget::Issue,
+        );
+        // SAFETY: same lock; restores the process environment.
+        unsafe {
+            std::env::remove_var("CODEWHALE_GH_BIN");
+        }
+
+        let result = result.expect("a real bool dry_run stays a dry run");
+        assert!(result.success);
+        assert!(result.content.contains("Dry run"), "{}", result.content);
+        assert!(
+            std::fs::read_to_string(&log).unwrap_or_default().is_empty(),
+            "dry run must not invoke gh"
+        );
     }
 }

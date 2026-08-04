@@ -1134,7 +1134,7 @@ pub(super) fn execute_tool_search(
     let match_kind = match tool_name {
         LEGACY_TOOL_SEARCH_REGEX_NAME => "regex",
         LEGACY_TOOL_SEARCH_BM25_NAME => "bm25",
-        _ => optional_str(input, "match").unwrap_or("bm25"),
+        _ => optional_str(input, "match")?.unwrap_or("bm25"),
     };
     if !matches!(match_kind, "bm25" | "regex") {
         return Err(ToolError::invalid_input(format!(
@@ -1145,7 +1145,7 @@ pub(super) fn execute_tool_search(
         input,
         "max_results",
         TOOL_SEARCH_DEFAULT_MAX_RESULTS as u64,
-    ))
+    )?)
     .unwrap_or(TOOL_SEARCH_DEFAULT_MAX_RESULTS)
     .clamp(1, TOOL_SEARCH_MAX_RESULTS_LIMIT);
     let discovered = if match_kind == "regex" {

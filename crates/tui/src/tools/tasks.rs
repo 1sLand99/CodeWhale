@@ -19,7 +19,7 @@ use crate::task_manager::{
 use crate::tools::shell::BashTool;
 use crate::tools::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
-    optional_bool, optional_str, optional_u64, required_str,
+    optional_bool, optional_bool_opt, optional_str, optional_u64, required_str,
 };
 use crate::work_graph::{
     CancelOutcome, OperationIntent, OperationObservation, OperationOwnerSnapshot, OwnerState,
@@ -444,18 +444,20 @@ impl TasksTool {
             .task_manager
             .as_ref()
             .ok_or_else(|| ToolError::not_available("TaskManager is not attached"))?;
-        let workspace = optional_str(input, "workspace")
+        let workspace = optional_str(input, "workspace")?
             .map(PathBuf::from)
             .unwrap_or_else(|| context.workspace.clone());
         let prompt = required_str(input, "prompt")?.to_string();
         let req = NewTaskRequest {
             prompt: prompt.clone(),
-            model: optional_str(input, "model").map(ToString::to_string),
+            model: optional_str(input, "model")?.map(ToString::to_string),
             workspace: Some(workspace),
-            mode: optional_str(input, "mode").map(ToString::to_string),
-            allow_shell: input.get("allow_shell").and_then(Value::as_bool),
-            trust_mode: input.get("trust_mode").and_then(Value::as_bool),
-            auto_approve: input.get("auto_approve").and_then(Value::as_bool),
+            mode: optional_str(input, "mode")?.map(ToString::to_string),
+            // Authority declarations: read strictly. A malformed value that
+            // silently reads as "unset" is a restriction that evaporates.
+            allow_shell: optional_bool_opt(input, "allow_shell")?,
+            trust_mode: optional_bool_opt(input, "trust_mode")?,
+            auto_approve: optional_bool_opt(input, "auto_approve")?,
             owner_session_id: Some(context.state_namespace.clone()),
         };
         let task_id = crate::task_manager::TaskManager::new_task_id();
@@ -506,7 +508,7 @@ impl TasksTool {
             .task_manager
             .as_ref()
             .ok_or_else(|| ToolError::not_available("TaskManager is not attached"))?;
-        let limit = optional_u64(input, "limit", 20).clamp(1, 100) as usize;
+        let limit = optional_u64(input, "limit", 20)?.clamp(1, 100) as usize;
         let tasks = manager.list_tasks(Some(limit)).await;
         ToolResult::json(&json!({
             "summary": format!("{} durable task(s)", tasks.len()),
@@ -585,9 +587,9 @@ impl TasksTool {
     ) -> Result<ToolResult, ToolError> {
         let gate = required_str(input, "gate")?.to_string();
         let command = required_str(input, "command")?.to_string();
-        let timeout_ms = optional_u64(input, "timeout_ms", DEFAULT_GATE_TIMEOUT_MS)
+        let timeout_ms = optional_u64(input, "timeout_ms", DEFAULT_GATE_TIMEOUT_MS)?
             .clamp(1_000, MAX_GATE_TIMEOUT_MS);
-        let cwd = resolve_cwd(context, optional_str(input, "cwd"))?;
+        let cwd = resolve_cwd(context, optional_str(input, "cwd")?)?;
 
         let safety = analyze_command(&command);
         if !context.auto_approve && matches!(safety.level, SafetyLevel::Dangerous) {
@@ -718,11 +720,11 @@ impl TasksTool {
         let patch_path = write_task_artifact_for(context, &task_id, "attempt_patch", &diff).await?;
         let attempt = TaskAttemptRecord {
             id: format!("attempt_{}", &Uuid::new_v4().to_string()[..8]),
-            attempt_group_id: optional_str(input, "attempt_group_id")
+            attempt_group_id: optional_str(input, "attempt_group_id")?
                 .map(ToString::to_string)
                 .unwrap_or_else(|| format!("attempt_group_{}", &Uuid::new_v4().to_string()[..8])),
-            attempt_index: optional_u64(input, "attempt_index", 1).max(1) as u32,
-            attempt_count: optional_u64(input, "attempt_count", 1).max(1) as u32,
+            attempt_index: optional_u64(input, "attempt_index", 1)?.max(1) as u32,
+            attempt_count: optional_u64(input, "attempt_count", 1)?.max(1) as u32,
             base_ref: branch.clone(),
             base_sha,
             head_ref: branch,
@@ -887,17 +889,17 @@ impl ToolSpec for TaskShellStartTool {
         let mut shell_input = json!({
             "command": required_str(&input, "command")?,
             "background": true,
-            "timeout_ms": optional_u64(&input, "timeout_ms", DEFAULT_GATE_TIMEOUT_MS)
+            "timeout_ms": optional_u64(&input, "timeout_ms", DEFAULT_GATE_TIMEOUT_MS)?
                 .clamp(1_000, MAX_GATE_TIMEOUT_MS),
         });
-        if let Some(cwd) = optional_str(&input, "cwd") {
+        if let Some(cwd) = optional_str(&input, "cwd")? {
             let cwd = resolve_cwd(context, Some(cwd))?;
             shell_input["cwd"] = json!(cwd);
         }
-        if let Some(stdin) = optional_str(&input, "stdin") {
+        if let Some(stdin) = optional_str(&input, "stdin")? {
             shell_input["stdin"] = json!(stdin);
         }
-        if optional_bool(&input, "tty", false) {
+        if optional_bool(&input, "tty", false)? {
             shell_input["tty"] = json!(true);
         }
         let mut result = BashTool::new("Bash").execute(shell_input, context).await?;
@@ -946,7 +948,7 @@ impl ToolSpec for TaskShellWaitTool {
         let result = BashTool::alias("exec_shell_wait", "wait")
             .execute(input.clone(), context)
             .await?;
-        let Some(gate) = optional_str(&input, "gate") else {
+        let Some(gate) = optional_str(&input, "gate")? else {
             return Ok(result);
         };
         let status = result
@@ -970,7 +972,7 @@ impl ToolSpec for TaskShellWaitTool {
             .and_then(|m| m.get("duration_ms"))
             .and_then(Value::as_u64)
             .unwrap_or_default();
-        let command = optional_str(&input, "command").unwrap_or("(background shell)");
+        let command = optional_str(&input, "command")?.unwrap_or("(background shell)");
         let log_path = write_runtime_artifact(context, "background_gate", &result.content).await?;
         let gate_status = if exit_code == Some(0) {
             "passed"
@@ -1162,7 +1164,7 @@ fn task_id_from_input_or_context(
     input: &Value,
     context: &ToolContext,
 ) -> Result<String, ToolError> {
-    optional_str(input, "task_id")
+    optional_str(input, "task_id")?
         .map(ToString::to_string)
         .or_else(|| context.runtime.active_task_id.clone())
         .ok_or_else(|| {

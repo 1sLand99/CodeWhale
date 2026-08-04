@@ -737,7 +737,7 @@ enum WorkflowAction {
 }
 
 fn parse_workflow_action(input: &Value) -> Result<WorkflowAction, ToolError> {
-    let Some(action) = optional_str(input, "action") else {
+    let Some(action) = optional_str(input, "action")? else {
         return Ok(WorkflowAction::Start);
     };
     match action.trim().to_ascii_lowercase().as_str() {
@@ -851,8 +851,12 @@ impl ToolSpec for WorkflowTool {
     }
 
     fn starts_detached_for(&self, input: &Value) -> bool {
+        // A scheduling hint, not an authority decision, and this trait method
+        // cannot report an error. A malformed `wait` reads as "not detached"
+        // so the call stays in the foreground; `execute` then refuses it with
+        // the named-parameter error rather than running anything.
         matches!(parse_workflow_action(input), Ok(WorkflowAction::Start))
-            && !optional_bool(input, "wait", false)
+            && !optional_bool(input, "wait", false).unwrap_or(true)
     }
 
     fn supports_parallel_for(&self, input: &Value) -> bool {
@@ -875,7 +879,7 @@ impl ToolSpec for WorkflowTool {
         codewhale_telemetry::session_counters().bump(codewhale_telemetry::Counter::WorkflowRun);
         match action {
             WorkflowAction::Start => {
-                let wait = optional_bool(&input, "wait", false);
+                let wait = optional_bool(&input, "wait", false)?;
                 start_workflow(
                     input,
                     context,
@@ -967,9 +971,9 @@ async fn start_workflow(
 ) -> Result<ToolResult, ToolError> {
     let source = workflow_source(&input, context)?;
     let args = input.get("args").cloned().unwrap_or(Value::Null);
-    let token_budget = optional_u64(&input, "token_budget", 0);
+    let token_budget = optional_u64(&input, "token_budget", 0)?;
     let token_budget = (token_budget > 0).then_some(token_budget);
-    let verify_on_complete = optional_bool(&input, "verify", false);
+    let verify_on_complete = optional_bool(&input, "verify", false)?;
     let fleet = workflow_fleet_binding(&input, context, runtime.api_config.as_deref())?;
     let run_id = format!("workflow_{}", &Uuid::new_v4().to_string()[..8]);
     let gate_specs = source
@@ -1155,7 +1159,7 @@ fn status_workflow(
     input: Value,
     state: Arc<WorkflowWorkspaceState>,
 ) -> Result<ToolResult, ToolError> {
-    if let Some(run_id) = optional_str(&input, "run_id") {
+    if let Some(run_id) = optional_str(&input, "run_id")? {
         return workflow_result_for(run_id, state);
     }
     let mut summaries = {
@@ -1179,7 +1183,7 @@ async fn cancel_workflow(
     state: Arc<WorkflowWorkspaceState>,
 ) -> Result<ToolResult, ToolError> {
     let run_id =
-        optional_str(&input, "run_id").ok_or_else(|| ToolError::missing_field("run_id"))?;
+        optional_str(&input, "run_id")?.ok_or_else(|| ToolError::missing_field("run_id"))?;
     let controller = {
         let mut controllers_guard = lock_mutex(&state.controllers)?;
         controllers_guard.remove(run_id)
@@ -1244,16 +1248,18 @@ async fn cancel_workflow(
     workflow_result_for(run_id, state)
 }
 
-fn workflow_fleet_name(input: &Value) -> Option<String> {
-    optional_str(input, "fleet")
-        .or_else(|| {
-            input
-                .get("args")
-                .and_then(|args| optional_str(args, "fleet"))
-        })
+fn workflow_fleet_name(input: &Value) -> Result<Option<String>, ToolError> {
+    let named = match optional_str(input, "fleet")? {
+        Some(name) => Some(name),
+        None => match input.get("args") {
+            Some(args) => optional_str(args, "fleet")?,
+            None => None,
+        },
+    };
+    Ok(named
         .map(str::trim)
         .filter(|name| !name.is_empty())
-        .map(str::to_string)
+        .map(str::to_string))
 }
 
 /// How a Workflow run is bound to a named Fleet.
@@ -1302,7 +1308,7 @@ fn workflow_fleet_binding(
     context: &ToolContext,
     api_config: Option<&crate::config::Config>,
 ) -> Result<WorkflowFleetBinding, ToolError> {
-    let Some(name) = workflow_fleet_name(input) else {
+    let Some(name) = workflow_fleet_name(input)? else {
         return Ok(WorkflowFleetBinding::None);
     };
     let roots = crate::fleet::exact::fleet_search_roots(&context.workspace);
@@ -2115,10 +2121,15 @@ struct WorkflowSource {
 }
 
 fn workflow_source(input: &Value, context: &ToolContext) -> Result<WorkflowSource, ToolError> {
-    let script = optional_str(input, "script")
-        .or_else(|| optional_str(input, "source"))
-        .map(str::to_string);
-    let source_path = optional_str(input, "source_path").or_else(|| optional_str(input, "path"));
+    let script = match optional_str(input, "script")? {
+        Some(script) => Some(script),
+        None => optional_str(input, "source")?,
+    }
+    .map(str::to_string);
+    let source_path = match optional_str(input, "source_path")? {
+        Some(path) => Some(path),
+        None => optional_str(input, "path")?,
+    };
     let plan = input.get("plan").filter(|value| !value.is_null());
 
     let provided = [

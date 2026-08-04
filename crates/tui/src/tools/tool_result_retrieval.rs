@@ -117,12 +117,12 @@ impl ToolSpec for RetrieveToolResultTool {
             return Err(ToolError::invalid_input("ref cannot be empty"));
         }
 
-        let mode = optional_str(&input, "mode")
+        let mode = optional_str(&input, "mode")?
             .unwrap_or("summary")
             .trim()
             .to_ascii_lowercase();
         let max_bytes = clamp_u64(
-            optional_u64(&input, "max_bytes", DEFAULT_MAX_BYTES as u64),
+            optional_u64(&input, "max_bytes", DEFAULT_MAX_BYTES as u64)?,
             1,
             HARD_MAX_BYTES,
         );
@@ -194,9 +194,9 @@ impl ToolSpec for RetrieveToolResultTool {
 
         let lines: Vec<&str> = content.lines().collect();
         let payload = match mode.as_str() {
-            "summary" => build_summary_payload(reference, &content, &lines, &input, max_bytes),
-            "head" => build_head_tail_payload(reference, "head", &lines, &input, max_bytes),
-            "tail" => build_head_tail_payload(reference, "tail", &lines, &input, max_bytes),
+            "summary" => build_summary_payload(reference, &content, &lines, &input, max_bytes)?,
+            "head" => build_head_tail_payload(reference, "head", &lines, &input, max_bytes)?,
+            "tail" => build_head_tail_payload(reference, "tail", &lines, &input, max_bytes)?,
             "lines" => build_lines_payload(reference, &lines, &input, max_bytes)?,
             "query" => build_query_payload(reference, &lines, &input, max_bytes)?,
             other => {
@@ -495,9 +495,9 @@ fn build_summary_payload(
     lines: &[&str],
     input: &Value,
     max_bytes: usize,
-) -> Value {
+) -> Result<Value, ToolError> {
     let max_matches = clamp_u64(
-        optional_u64(input, "max_matches", DEFAULT_MAX_MATCHES as u64),
+        optional_u64(input, "max_matches", DEFAULT_MAX_MATCHES as u64)?,
         1,
         HARD_MAX_MATCHES,
     );
@@ -522,7 +522,7 @@ fn build_summary_payload(
         max_bytes / 2,
     );
 
-    json!({
+    Ok(json!({
         "ref": reference,
         "mode": "summary",
         "total_bytes": content.len(),
@@ -532,7 +532,7 @@ fn build_summary_payload(
         "head": head,
         "tail": tail,
         "hint": "Use mode=head, tail, lines, or query to retrieve a narrower slice."
-    })
+    }))
 }
 
 fn build_head_tail_payload(
@@ -541,9 +541,9 @@ fn build_head_tail_payload(
     lines: &[&str],
     input: &Value,
     max_bytes: usize,
-) -> Value {
+) -> Result<Value, ToolError> {
     let count = clamp_u64(
-        optional_u64(input, "line_count", DEFAULT_LINE_COUNT as u64),
+        optional_u64(input, "line_count", DEFAULT_LINE_COUNT as u64)?,
         1,
         HARD_LINE_COUNT,
     );
@@ -565,13 +565,13 @@ fn build_head_tail_payload(
     };
     let excerpt = render_numbered_lines(selected.iter().copied(), max_bytes);
 
-    json!({
+    Ok(json!({
         "ref": reference,
         "mode": mode,
         "total_lines": lines.len(),
         "line_count": count,
         "excerpt": excerpt,
-    })
+    }))
 }
 
 fn build_lines_payload(
@@ -612,18 +612,18 @@ fn build_query_payload(
     input: &Value,
     max_bytes: usize,
 ) -> Result<Value, ToolError> {
-    let query = optional_str(input, "query")
+    let query = optional_str(input, "query")?
         .map(str::trim)
         .filter(|q| !q.is_empty())
         .ok_or_else(|| ToolError::invalid_input("query is required when mode=query"))?;
     let query_lower = query.to_lowercase();
     let max_matches = clamp_u64(
-        optional_u64(input, "max_matches", DEFAULT_MAX_MATCHES as u64),
+        optional_u64(input, "max_matches", DEFAULT_MAX_MATCHES as u64)?,
         1,
         HARD_MAX_MATCHES,
     );
     let context_lines = clamp_u64(
-        optional_u64(input, "context_lines", DEFAULT_CONTEXT_LINES as u64),
+        optional_u64(input, "context_lines", DEFAULT_CONTEXT_LINES as u64)?,
         0,
         HARD_CONTEXT_LINES,
     );
@@ -677,7 +677,7 @@ fn parse_line_selector(input: &Value) -> Result<(usize, usize), ToolError> {
         return validate_line_range(start as usize, end as usize);
     }
 
-    let spec = optional_str(input, "lines")
+    let spec = optional_str(input, "lines")?
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {

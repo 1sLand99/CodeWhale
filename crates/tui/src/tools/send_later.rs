@@ -244,7 +244,7 @@ async fn execute_schedule(input: &Value, context: &ToolContext) -> Result<ToolRe
     let automations = SendLaterTool::automations_from_context(context)?;
 
     let delay_minutes = input.get("delay_minutes").and_then(Value::as_u64);
-    let fire_at_str = optional_str(input, "fire_at");
+    let fire_at_str = optional_str(input, "fire_at")?;
     let message = input
         .get("message")
         .and_then(Value::as_str)
@@ -287,19 +287,18 @@ async fn execute_schedule(input: &Value, context: &ToolContext) -> Result<ToolRe
         })?,
     };
 
-    let workspace: Option<PathBuf> =
-        optional_str(input, "workspace")
-            .map(PathBuf::from)
-            .or_else(|| {
-                let ws = &context.workspace;
-                if ws == std::path::Path::new(".") {
-                    None
-                } else {
-                    Some(ws.clone())
-                }
-            });
+    let workspace: Option<PathBuf> = optional_str(input, "workspace")?
+        .map(PathBuf::from)
+        .or_else(|| {
+            let ws = &context.workspace;
+            if ws == std::path::Path::new(".") {
+                None
+            } else {
+                Some(ws.clone())
+            }
+        });
 
-    let parent_trigger_id = optional_str(input, "parent_trigger_id").map(String::from);
+    let parent_trigger_id = optional_str(input, "parent_trigger_id")?.map(String::from);
 
     let req = CreateDelayedTriggerRequest {
         fire_at,
@@ -328,8 +327,8 @@ async fn execute_schedule(input: &Value, context: &ToolContext) -> Result<ToolRe
 async fn execute_list(input: &Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
     let automations = SendLaterTool::automations_from_context(context)?;
 
-    let limit = Some(optional_u64(input, "limit", 50) as usize);
-    let status_filter = optional_str(input, "status")
+    let limit = Some(optional_u64(input, "limit", 50)? as usize);
+    let status_filter = optional_str(input, "status")?
         .map(parse_trigger_status)
         .transpose()
         .map_err(ToolError::invalid_input)?;

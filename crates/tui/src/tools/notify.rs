@@ -77,7 +77,7 @@ impl ToolSpec for NotifyTool {
 
     async fn execute(&self, input: Value, _ctx: &ToolContext) -> Result<ToolResult, ToolError> {
         let title_raw = required_str(&input, "title")?;
-        let body_raw = optional_str(&input, "body").unwrap_or("");
+        let body_raw = optional_str(&input, "body")?.unwrap_or("");
 
         // Char-bounded truncation (not byte-bounded) so we don't slice
         // through a multi-byte sequence and emit invalid UTF-8 to the

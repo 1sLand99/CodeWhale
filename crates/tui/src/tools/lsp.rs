@@ -76,7 +76,7 @@ impl ToolSpec for LspTool {
             .get("character")
             .and_then(|v| v.as_u64())
             .map(|n| n as u32);
-        let query = optional_str(&input, "query");
+        let query = optional_str(&input, "query")?;
 
         let manager = context.lsp_manager.as_ref().ok_or_else(|| {
             ToolError::execution_failed(

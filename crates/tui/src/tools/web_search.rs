@@ -179,7 +179,7 @@ impl ToolSpec for WebSearchTool {
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         let query = search_query_from_input(&input)?;
-        let timeout_ms = optional_u64(&input, "timeout_ms", DEFAULT_SEARCH_TIMEOUT_MS)
+        let timeout_ms = optional_u64(&input, "timeout_ms", DEFAULT_SEARCH_TIMEOUT_MS)?
             .min(MAX_SEARCH_TIMEOUT_MS);
         let response = execute_search(query, timeout_ms, context).await?;
         ToolResult::json(&response).map_err(|error| ToolError::execution_failed(error.to_string()))

@@ -6588,7 +6588,7 @@ enum AgentToolAction {
 }
 
 fn parse_agent_tool_action(input: &Value) -> Result<AgentToolAction, ToolError> {
-    let Some(action) = optional_input_str(input, &["action", "op"]) else {
+    let Some(action) = optional_input_str(input, &["action", "op"])? else {
         return Ok(AgentToolAction::Start);
     };
     match action.trim().to_ascii_lowercase().as_str() {
@@ -6606,11 +6606,13 @@ fn parse_agent_tool_action(input: &Value) -> Result<AgentToolAction, ToolError> 
     }
 }
 
-fn parse_agent_ref(input: &Value) -> Option<String> {
-    optional_input_str(input, &["agent_id", "id", "session_name", "name"])
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
+fn parse_agent_ref(input: &Value) -> Result<Option<String>, ToolError> {
+    Ok(
+        optional_input_str(input, &["agent_id", "id", "session_name", "name"])?
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+    )
 }
 
 /// #5186: whether an `agent action=start` call asks for exactly a canonical
@@ -6623,11 +6625,24 @@ fn parse_agent_ref(input: &Value) -> Option<String> {
 /// (defaults to `worker`), an unparseable or roster role, a `profile`
 /// reference, a conflicting type/role pair, or an explicit write authority.
 fn start_requests_read_only_role(input: &Value) -> bool {
-    if optional_input_str(input, &["profile", "fleet_profile", "roster_profile"]).is_some() {
+    // A parameter this function cannot even read is not proof of anything,
+    // so a type error fails closed into the approval modal. `execute` then
+    // refuses the call outright with the named-parameter error.
+    let read = |keys: &[&str]| optional_input_str(input, keys).map(|v| v.map(str::to_string));
+    let Ok(profile) = read(&["profile", "fleet_profile", "roster_profile"]) else {
+        return false;
+    };
+    if profile.is_some() {
         return false;
     }
-    let type_input = optional_input_str(input, &["type", "agent_type", "agent_name"]);
-    let role_input = optional_input_str(input, &["role", "agent_role"]);
+    let Ok(type_input) = read(&["type", "agent_type", "agent_name"]) else {
+        return false;
+    };
+    let Ok(role_input) = read(&["role", "agent_role"]) else {
+        return false;
+    };
+    let type_input = type_input.as_deref();
+    let role_input = role_input.as_deref();
     let parsed_type = type_input.and_then(FleetRole::from_str);
     let parsed_role = role_input.and_then(FleetRole::from_str);
     let role = match (parsed_type, parsed_role) {
@@ -6638,8 +6653,10 @@ fn start_requests_read_only_role(input: &Value) -> bool {
         (None, Some(from_role)) if type_input.is_none() => from_role,
         _ => return false,
     };
-    if optional_input_str(input, &["write_authority", "writeAuthority"])
-        .is_some_and(|authority| !authority.trim().eq_ignore_ascii_case("read_only"))
+    let Ok(write_authority) = read(&["write_authority", "writeAuthority"]) else {
+        return false;
+    };
+    if write_authority.is_some_and(|authority| !authority.trim().eq_ignore_ascii_case("read_only"))
     {
         return false;
     }
@@ -7024,9 +7041,9 @@ async fn inspect_agent_from_input(
     inspect_memo: Option<&Arc<std::sync::Mutex<HashMap<String, PeekMemo>>>>,
 ) -> Result<ToolResult, ToolError> {
     let include_archived =
-        parse_optional_bool(input, &["include_archived", "includeArchived"]).unwrap_or(false);
+        parse_optional_bool(input, &["include_archived", "includeArchived"])?.unwrap_or(false);
 
-    if let Some(agent_ref) = parse_agent_ref(input) {
+    if let Some(agent_ref) = parse_agent_ref(input)? {
         let (snapshot, worker_record, evicted_ids) = {
             touch_running_shell_owners(&manager, &context.execution.shell_manager).await;
             let mut manager = manager.write().await;
@@ -7205,7 +7222,7 @@ async fn cancel_agent_from_input(
     manager: SharedSubAgentManager,
     context: &ToolContext,
 ) -> Result<ToolResult, ToolError> {
-    let agent_ref = parse_agent_ref(input).ok_or_else(|| ToolError::missing_field("agent_id"))?;
+    let agent_ref = parse_agent_ref(input)?.ok_or_else(|| ToolError::missing_field("agent_id"))?;
     let (snapshot, worker_record) = {
         let mut manager = manager.write().await;
         let snapshot = manager
@@ -7261,17 +7278,14 @@ async fn wait_for_subagents_from_input(
     manager: SharedSubAgentManager,
     context: &ToolContext,
 ) -> Result<ToolResult, ToolError> {
-    let timeout_secs = input
-        .get("timeout_secs")
-        .or_else(|| input.get("timeout"))
-        .and_then(Value::as_u64)
+    let timeout_secs = parse_optional_u64(input, &["timeout_secs", "timeout"])?
         .unwrap_or(SUBAGENT_WAIT_DEFAULT_TIMEOUT_SECS)
         .clamp(
             SUBAGENT_WAIT_MIN_TIMEOUT_SECS,
             SUBAGENT_WAIT_MAX_TIMEOUT_SECS,
         );
     let timeout = Duration::from_secs(timeout_secs);
-    let agent_ref = parse_agent_ref(input);
+    let agent_ref = parse_agent_ref(input)?;
 
     // Resolve the watch set up front so a bad reference fails immediately
     // instead of blocking for the full timeout.
@@ -10252,11 +10266,76 @@ async fn run_subagent(
     })
 }
 
-fn optional_input_str<'a>(input: &'a Value, keys: &[&str]) -> Option<&'a str> {
-    keys.iter()
-        .filter_map(|key| input.get(*key).and_then(Value::as_str))
-        .map(str::trim)
-        .find(|value| !value.is_empty())
+/// First non-empty string among `keys`, refusing a wrong type.
+///
+/// A key that is absent, `null`, or an empty/blank string falls through to
+/// the next spelling exactly as before. Anything else present under one of
+/// these names is a type error naming the parameter: silently dropping a
+/// value the caller supplied is how a declared restriction evaporates.
+fn optional_input_str<'a>(input: &'a Value, keys: &[&str]) -> Result<Option<&'a str>, ToolError> {
+    for key in keys {
+        let Some(value) = input.get(*key) else {
+            continue;
+        };
+        if value.is_null() {
+            continue;
+        }
+        let text = value
+            .as_str()
+            .ok_or_else(|| codewhale_tools::type_mismatch(key, value, "a string"))?;
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        return Ok(Some(trimmed));
+    }
+    Ok(None)
+}
+
+/// First present value among `keys`, treating `null` as absent.
+fn aliased_value<'a, 'k>(input: &'a Value, keys: &'k [&'k str]) -> Option<(&'k str, &'a Value)> {
+    keys.iter().find_map(|key| {
+        input
+            .get(*key)
+            .filter(|value| !value.is_null())
+            .map(|value| (*key, value))
+    })
+}
+
+/// Optional aliased u64, refusing a wrong type instead of dropping it.
+fn parse_optional_u64(input: &Value, keys: &[&str]) -> Result<Option<u64>, ToolError> {
+    let Some((key, value)) = aliased_value(input, keys) else {
+        return Ok(None);
+    };
+    value
+        .as_u64()
+        .map(Some)
+        .ok_or_else(|| codewhale_tools::type_mismatch(key, value, "a non-negative integer"))
+}
+
+/// Optional array of tool names, refusing a wrong type instead of dropping it.
+///
+/// A deny-list handed over as a bare string used to vanish without a word,
+/// which silently *widened* the child's authority. Entries are trimmed and
+/// de-duplicated; blanks are dropped.
+fn parse_tool_name_list(input: &Value, key: &str) -> Result<Option<Vec<String>>, ToolError> {
+    let Some(value) = input.get(key).filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let array = value
+        .as_array()
+        .ok_or_else(|| codewhale_tools::type_mismatch(key, value, "an array of tool names"))?;
+    let mut tools: Vec<String> = Vec::new();
+    for item in array {
+        let tool = item
+            .as_str()
+            .ok_or_else(|| codewhale_tools::type_mismatch(&format!("{key}[]"), item, "a string"))?;
+        let trimmed = tool.trim();
+        if !trimmed.is_empty() && !tools.iter().any(|existing| existing == trimmed) {
+            tools.push(trimmed.to_string());
+        }
+    }
+    Ok(Some(tools))
 }
 
 fn parse_text_or_items(
@@ -10265,7 +10344,7 @@ fn parse_text_or_items(
     items_key: &str,
     required_field: &str,
 ) -> Result<String, ToolError> {
-    let text = optional_input_str(input, text_keys).map(str::to_string);
+    let text = optional_input_str(input, text_keys)?.map(str::to_string);
     let items = parse_items_text(input, items_key)?;
     match (text, items) {
         (Some(_), Some(_)) => Err(ToolError::invalid_input(format!(
@@ -10377,12 +10456,12 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
     )?;
     let dependencies = parse_bounded_strings(input, "dependencies", 8)?;
     let acceptance = parse_bounded_strings(input, "acceptance", 8)?;
-    let session_name = optional_input_str(input, &["name", "session_name"])
+    let session_name = optional_input_str(input, &["name", "session_name"])?
         .map(validate_session_name)
         .transpose()?;
 
-    let type_input = optional_input_str(input, &["type", "agent_type", "agent_name"]);
-    let role_input = optional_input_str(input, &["role", "agent_role"]);
+    let type_input = optional_input_str(input, &["type", "agent_type", "agent_name"])?;
+    let role_input = optional_input_str(input, &["role", "agent_role"])?;
 
     let parsed_type = type_input
         .map(|kind| {
@@ -10435,7 +10514,7 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
             .map(str::to_string)
     });
 
-    let mut profile = optional_input_str(input, &["profile", "fleet_profile", "roster_profile"])
+    let mut profile = optional_input_str(input, &["profile", "fleet_profile", "roster_profile"])?
         .map(validate_profile_name)
         .transpose()?;
     // When the caller declared a non-type Fleet role, use it as the profile
@@ -10447,26 +10526,12 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         profile = fleet_role_token.clone();
     }
 
-    let allowed_tools = input
-        .get("allowed_tools")
-        .and_then(|v| v.as_array())
-        .map(|items| {
-            let mut tools = Vec::new();
-            for item in items {
-                if let Some(tool) = item.as_str() {
-                    let trimmed = tool.trim();
-                    if !trimmed.is_empty() && !tools.iter().any(|existing| existing == trimmed) {
-                        tools.push(trimmed.to_string());
-                    }
-                }
-            }
-            tools
-        });
+    let allowed_tools = parse_tool_name_list(input, "allowed_tools")?;
 
     let cwd = parse_optional_cwd(input)?;
     let worktree = parse_optional_worktree_request(input)?;
     let model = parse_optional_subagent_model(input, "model")?;
-    let explicit_model_strength = optional_input_str(input, &["model_strength", "modelStrength"])
+    let explicit_model_strength = optional_input_str(input, &["model_strength", "modelStrength"])?
         .map(SubAgentModelStrength::parse)
         .transpose()?;
     let model_strength_explicit = explicit_model_strength.is_some();
@@ -10475,23 +10540,15 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
     // a saved Fleet profile, or a concrete model override.
     let model_strength = explicit_model_strength.unwrap_or(SubAgentModelStrength::Same);
     let explicit_thinking =
-        optional_input_str(input, &["thinking", "reasoning_effort", "reasoningEffort"])
+        optional_input_str(input, &["thinking", "reasoning_effort", "reasoningEffort"])?
             .map(SubAgentThinking::parse)
             .transpose()?;
     let thinking_explicit = explicit_thinking.is_some();
     let thinking = explicit_thinking.unwrap_or(SubAgentThinking::Inherit);
-    let resident_file = input
-        .get("resident_file")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .filter(|s| !s.trim().is_empty());
+    let resident_file = optional_input_str(input, &["resident_file"])?.map(str::to_string);
     let fork_context =
-        parse_optional_bool(input, &["fork_context", "forkContext", "inherit_context"]);
-    let max_depth = input
-        .get("max_depth")
-        .or_else(|| input.get("maxDepth"))
-        .or_else(|| input.get("max_spawn_depth"))
-        .and_then(Value::as_u64)
+        parse_optional_bool(input, &["fork_context", "forkContext", "inherit_context"])?;
+    let max_depth = parse_optional_u64(input, &["max_depth", "maxDepth", "max_spawn_depth"])?
         .map(|depth| {
             let ceiling = codewhale_config::MAX_SPAWN_DEPTH_CEILING;
             u32::try_from(depth)
@@ -10511,18 +10568,11 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         .transpose()?;
     let token_budget =
         parse_optional_positive_u64(input, &["token_budget", "tokenBudget", "max_tokens"])?;
-    let max_steps = input
-        .get("max_steps")
-        .or_else(|| input.get("maxSteps"))
-        .and_then(Value::as_u64)
-        .map(|steps| {
-            u32::try_from(steps.min(u64::from(MAX_SUBAGENT_STEPS)))
-                .expect("max_steps is clamped before conversion")
-        });
-    let wall_time = input
-        .get("wall_time_secs")
-        .or_else(|| input.get("wallTimeSecs"))
-        .and_then(Value::as_u64)
+    let max_steps = parse_optional_u64(input, &["max_steps", "maxSteps"])?.map(|steps| {
+        u32::try_from(steps.min(u64::from(MAX_SUBAGENT_STEPS)))
+            .expect("max_steps is clamped before conversion")
+    });
+    let wall_time = parse_optional_u64(input, &["wall_time_secs", "wallTimeSecs"])?
         .map(|seconds| Duration::from_secs(seconds.clamp(1, MAX_CHILD_WALL_TIME.as_secs())));
 
     // #4042: optional caller-supplied tool deny-list (unioned with the parent's
@@ -10531,7 +10581,7 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
     let inherit_disallowed_tools = parse_optional_bool(
         input,
         &["inherit_disallowed_tools", "inheritDisallowedTools"],
-    )
+    )?
     .unwrap_or(true);
 
     // Deliberate delegation contract: when `deliberate=true`, require the
@@ -10540,13 +10590,13 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
     // parsed and ENFORCED whenever present (deliberate or not): declaring
     // authority the runtime ignores would be a false affordance
     // (TUI-DOG-017).
-    let deliberate = parse_optional_bool(input, &["deliberate"]).unwrap_or(false);
-    let workspace_policy_str = optional_input_str(input, &["workspace_policy", "workspacePolicy"]);
-    let expected_artifact = optional_input_str(input, &["expected_artifact", "expectedArtifact"])
+    let deliberate = parse_optional_bool(input, &["deliberate"])?.unwrap_or(false);
+    let workspace_policy_str = optional_input_str(input, &["workspace_policy", "workspacePolicy"])?;
+    let expected_artifact = optional_input_str(input, &["expected_artifact", "expectedArtifact"])?
         .map(str::trim)
         .filter(|artifact| !artifact.is_empty())
         .map(str::to_string);
-    let write_authority_str = optional_input_str(input, &["write_authority", "writeAuthority"]);
+    let write_authority_str = optional_input_str(input, &["write_authority", "writeAuthority"])?;
     if deliberate {
         let has_type = agent_type_explicit || profile.is_some();
         let mut missing = Vec::new();
@@ -10622,7 +10672,7 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
     let write_roots = parse_coordination_paths(input, "write_roots")?;
     let exact_files = parse_coordination_paths(input, "exact_files")?;
     let coordination_contracts = parse_bounded_strings(input, "coordination_contracts", 16)?;
-    let resume_from = optional_input_str(input, &["resume_from", "resumeFrom"])
+    let resume_from = optional_input_str(input, &["resume_from", "resumeFrom"])?
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
@@ -11279,11 +11329,18 @@ fn child_max_spawn_depth_for_spawn(
     }
 }
 
-fn parse_optional_bool(input: &Value, names: &[&str]) -> Option<bool> {
-    names
-        .iter()
-        .find_map(|name| input.get(*name))
-        .and_then(Value::as_bool)
+/// Optional aliased boolean, refusing a wrong type instead of dropping it.
+///
+/// `{"deliberate": "true"}` used to coerce to the default `false` and skip
+/// the whole deliberate-delegation contract in silence.
+fn parse_optional_bool(input: &Value, names: &[&str]) -> Result<Option<bool>, ToolError> {
+    let Some((name, value)) = aliased_value(input, names) else {
+        return Ok(None);
+    };
+    value
+        .as_bool()
+        .map(Some)
+        .ok_or_else(|| codewhale_tools::type_mismatch(name, value, "a boolean"))
 }
 
 /// Parse an optional caller-supplied `disallowed_tools` array (#4042). Mirrors
@@ -11291,24 +11348,7 @@ fn parse_optional_bool(input: &Value, names: &[&str]) -> Option<bool> {
 /// `None` when the key is absent or yields no usable entries so the union merge
 /// in `spawn_subagent_from_input` only runs when there is something to add.
 fn parse_disallowed_tools(input: &Value) -> Result<Option<Vec<String>>, ToolError> {
-    let Some(array) = input.get("disallowed_tools").and_then(Value::as_array) else {
-        return Ok(None);
-    };
-    let mut tools = Vec::new();
-    for item in array {
-        let Some(tool) = item.as_str() else {
-            continue;
-        };
-        let trimmed = tool.trim();
-        if !trimmed.is_empty() && !tools.iter().any(|existing: &String| existing == trimmed) {
-            tools.push(trimmed.to_string());
-        }
-    }
-    if tools.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(tools))
-    }
+    Ok(parse_tool_name_list(input, "disallowed_tools")?.filter(|tools| !tools.is_empty()))
 }
 
 fn parse_optional_positive_u64(input: &Value, names: &[&str]) -> Result<Option<u64>, ToolError> {
@@ -11710,8 +11750,8 @@ fn parse_optional_worktree_request(
     input: &Value,
 ) -> Result<Option<SubAgentWorktreeRequest>, ToolError> {
     let worktree_flag =
-        parse_optional_bool_strict(input, &["worktree", "isolate_worktree", "isolateWorktree"])?;
-    let isolation = optional_input_str(input, &["isolation"])
+        parse_optional_bool(input, &["worktree", "isolate_worktree", "isolateWorktree"])?;
+    let isolation = optional_input_str(input, &["isolation"])?
         .map(|value| value.trim().to_ascii_lowercase().replace(['_', '-'], ""));
     let isolation_wants_worktree = match isolation.as_deref() {
         None | Some("") | Some("none") | Some("shared") => false,
@@ -11732,7 +11772,7 @@ fn parse_optional_worktree_request(
             "branchName",
             "branch",
         ],
-    )
+    )?
     .map(str::to_string);
     let path = optional_input_str(
         input,
@@ -11742,12 +11782,12 @@ fn parse_optional_worktree_request(
             "worktree_dir",
             "worktreeDir",
         ],
-    )
+    )?
     .map(PathBuf::from);
     let base_ref = optional_input_str(
         input,
         &["worktree_base", "worktreeBase", "base_ref", "baseRef"],
-    )
+    )?
     .map(str::to_string);
 
     let has_worktree_details = branch.is_some() || path.is_some() || base_ref.is_some();
@@ -11765,18 +11805,6 @@ fn parse_optional_worktree_request(
     } else {
         Ok(None)
     }
-}
-
-fn parse_optional_bool_strict(input: &Value, names: &[&str]) -> Result<Option<bool>, ToolError> {
-    for name in names {
-        let Some(value) = input.get(*name) else {
-            continue;
-        };
-        return value.as_bool().map(Some).ok_or_else(|| {
-            ToolError::invalid_input(format!("{name} must be a boolean when provided"))
-        });
-    }
-    Ok(None)
 }
 
 /// Resolve a user-supplied role/agent_role value to a canonical role string.

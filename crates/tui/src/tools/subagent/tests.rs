@@ -2262,6 +2262,98 @@ fn agent_description_explains_background_child_and_transcript_handle() {
 }
 
 #[test]
+fn stringy_deliberate_is_refused_not_dropped() {
+    // A stringy "true" used to coerce to the default `false`, which skipped
+    // the whole deliberate-delegation contract without a word.
+    let err = parse_spawn_request(&json!({
+        "prompt": "do a thing",
+        "deliberate": "true",
+    }))
+    .expect_err("a non-boolean deliberate must be refused")
+    .to_string();
+    assert!(err.contains("deliberate"), "{err}");
+    assert!(
+        err.contains("boolean") && err.contains("string"),
+        "error must name expected and received types: {err}"
+    );
+}
+
+#[test]
+fn bare_string_disallowed_tools_is_refused_not_dropped() {
+    // A restriction the harness silently drops is worse than one never
+    // offered: it widens the child's authority without telling anyone.
+    let err = parse_spawn_request(&json!({
+        "prompt": "do a thing",
+        "disallowed_tools": "Bash",
+    }))
+    .expect_err("a non-array disallowed_tools must be refused")
+    .to_string();
+    assert!(err.contains("disallowed_tools"), "{err}");
+    assert!(
+        err.contains("array") && err.contains("string"),
+        "error must name expected and received types: {err}"
+    );
+
+    let ok = parse_spawn_request(&json!({
+        "prompt": "do a thing",
+        "disallowed_tools": ["Bash", "  Bash  ", ""],
+    }))
+    .expect("a real array still parses");
+    assert_eq!(
+        ok.disallowed_tools,
+        Some(vec!["Bash".to_string()]),
+        "trimming and de-duplication survive the strict parse"
+    );
+}
+
+#[test]
+fn spawn_parameters_refuse_type_mismatches_by_name() {
+    // A representative sample across the parameter kinds the spawn parser
+    // reads: string, aliased integer, boolean, and array-of-strings. One
+    // rule, one shape of error, no per-parameter exceptions.
+    for (field, input) in [
+        ("type", json!({"prompt": "p", "type": 3})),
+        ("max_depth", json!({"prompt": "p", "max_depth": "3"})),
+        ("maxSteps", json!({"prompt": "p", "maxSteps": 12.5})),
+        (
+            "wall_time_secs",
+            json!({"prompt": "p", "wall_time_secs": "60"}),
+        ),
+        ("worktree", json!({"prompt": "p", "worktree": "true"})),
+        (
+            "inherit_disallowed_tools",
+            json!({"prompt": "p", "inherit_disallowed_tools": 1}),
+        ),
+        (
+            "allowed_tools",
+            json!({"prompt": "p", "allowed_tools": "read_file"}),
+        ),
+        (
+            "disallowed_tools[]",
+            json!({"prompt": "p", "disallowed_tools": ["Bash", 7]}),
+        ),
+        (
+            "resident_file",
+            json!({"prompt": "p", "resident_file": ["notes.md"]}),
+        ),
+    ] {
+        let err = parse_spawn_request(&input)
+            .expect_err("a type mismatch must not be dropped")
+            .to_string();
+        assert!(err.contains(field), "error must name '{field}': {err}");
+    }
+
+    // `null` still means "the caller did not supply this".
+    parse_spawn_request(&json!({
+        "prompt": "p",
+        "deliberate": null,
+        "disallowed_tools": null,
+        "max_depth": null,
+    }))
+    .expect("explicit nulls read as absent");
+}
+
+#[test]
 fn deliberate_spawn_requires_delegation_fields() {
     let missing = parse_spawn_request(&json!({
         "prompt": "do a thing",

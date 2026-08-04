@@ -241,18 +241,20 @@ impl ToolSpec for FinanceTool {
     }
 
     async fn execute(&self, input: Value, _context: &ToolContext) -> Result<ToolResult, ToolError> {
-        let raw_ticker = optional_str(&input, "ticker")
-            .or_else(|| optional_str(&input, "symbol"))
-            .ok_or_else(|| ToolError::missing_field("ticker"))?
-            .trim();
+        let raw_ticker = match optional_str(&input, "ticker")? {
+            Some(ticker) => Some(ticker),
+            None => optional_str(&input, "symbol")?,
+        }
+        .ok_or_else(|| ToolError::missing_field("ticker"))?
+        .trim();
         if raw_ticker.is_empty() {
             return Err(ToolError::invalid_input("ticker cannot be empty"));
         }
 
-        let type_hint = optional_str(&input, "type").map(str::trim);
-        let _market_hint = optional_str(&input, "market").map(str::trim);
+        let type_hint = optional_str(&input, "type")?.map(str::trim);
+        let _market_hint = optional_str(&input, "market")?.map(str::trim);
         let timeout_ms =
-            optional_u64(&input, "timeout_ms", DEFAULT_TIMEOUT_MS).clamp(100, MAX_TIMEOUT_MS);
+            optional_u64(&input, "timeout_ms", DEFAULT_TIMEOUT_MS)?.clamp(100, MAX_TIMEOUT_MS);
 
         let request = normalize_request(raw_ticker, type_hint);
         let timeout = Duration::from_millis(timeout_ms);

@@ -90,9 +90,9 @@ impl ToolSpec for ValidateDataTool {
     }
 
     async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
-        let path = optional_str(&input, "path");
-        let content = optional_str(&input, "content");
-        let requested_format = DataFormat::from_input(optional_str(&input, "format"))?;
+        let path = optional_str(&input, "path")?;
+        let content = optional_str(&input, "content")?;
+        let requested_format = DataFormat::from_input(optional_str(&input, "format")?)?;
 
         let (source_name, raw_content, extension) = load_input_source(path, content, context)?;
         match requested_format {

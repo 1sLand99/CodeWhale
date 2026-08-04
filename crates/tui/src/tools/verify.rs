@@ -392,20 +392,20 @@ self-check of whether what you just did is actually correct and complete."
         if claim.is_empty() {
             return Err(ToolError::invalid_input("claim cannot be empty"));
         }
-        let requirement = optional_str(&input, "requirement")
+        let requirement = optional_str(&input, "requirement")?
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        let focus = optional_str(&input, "focus")
+        let focus = optional_str(&input, "focus")?
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        let base = optional_str(&input, "base")
+        let base = optional_str(&input, "base")?
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
 
-        let scope = optional_str(&input, "scope").unwrap_or("diff").trim();
+        let scope = optional_str(&input, "scope")?.unwrap_or("diff").trim();
         let staged = match scope {
             "diff" | "" => false,
             "staged" => true,
