@@ -513,10 +513,15 @@ fn push_tool_row(out: &mut String, locale: Locale, location: &str, detail: &Tool
 }
 
 fn short_tool_id(id: &str) -> String {
-    if id.len() <= 8 {
-        id.to_string()
+    // Slice by characters, not bytes: a tool id from a gateway can contain
+    // multibyte characters, and `&id[..8]` panics on a byte index that lands
+    // mid-codepoint (2026-08-04 review).
+    let mut chars = id.chars();
+    let head: String = chars.by_ref().take(8).collect();
+    if chars.next().is_some() {
+        format!("{head}...")
     } else {
-        format!("{}...", &id[..8])
+        head
     }
 }
 
@@ -776,6 +781,18 @@ impl ModalView for ContextInspectorView {
 mod tests {
     use super::*;
     use crate::config::Config;
+
+    #[test]
+    fn short_tool_id_never_panics_on_multibyte() {
+        // ASCII short/long behave as before.
+        assert_eq!(short_tool_id("abc"), "abc");
+        assert_eq!(short_tool_id("0123456789"), "01234567...");
+        // A multibyte id must truncate on a char boundary, not panic.
+        // 10 chars → first 8 kept, then the ellipsis.
+        assert_eq!(short_tool_id("日本語のツールid名"), "日本語のツールi...");
+        assert_eq!(short_tool_id("café"), "café");
+    }
+
     use crate::models::{ContentBlock, Message};
     use crate::session_manager::SessionContextReference;
     use crate::tui::app::TuiOptions;

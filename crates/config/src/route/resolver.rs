@@ -567,11 +567,53 @@ fn host_of_authority(rest: &str) -> &str {
 /// Whether `host` is an IPv4/IPv6/name loopback address.
 fn is_loopback_host(host: &str) -> bool {
     let host = host.trim().trim_matches(|c| c == '[' || c == ']');
-    host.eq_ignore_ascii_case("localhost")
-        || host == "127.0.0.1"
-        || host == "::1"
-        // Any 127.0.0.0/8 address is loopback.
-        || host
-            .strip_prefix("127.")
-            .is_some_and(|_| host.split('.').count() == 4)
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    // Parse real addresses rather than pattern-matching a `127.` prefix: the
+    // old `strip_prefix("127.") && 4 dot-parts` check classified
+    // `127.evil.example.com` as loopback (2026-08-04 review), which would let
+    // a hostile hostname inherit local-trust routing. `Ipv4Addr::is_loopback`
+    // is exactly the 127.0.0.0/8 block; `Ipv6Addr::is_loopback` is `::1`.
+    if let Ok(v4) = host.parse::<std::net::Ipv4Addr>() {
+        return v4.is_loopback();
+    }
+    if let Ok(v6) = host.parse::<std::net::Ipv6Addr>() {
+        return v6.is_loopback();
+    }
+    false
+}
+
+#[cfg(test)]
+mod loopback_tests {
+    use super::{endpoint_uses_insecure_http, is_loopback_host};
+
+    #[test]
+    fn loopback_matches_only_real_loopback_addresses() {
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host("LocalHost"));
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("127.1.2.3")); // all of 127.0.0.0/8
+        assert!(is_loopback_host("::1"));
+        assert!(is_loopback_host("[::1]"));
+
+        // The 2026-08-04 regression: a hostile hostname that merely starts
+        // with `127.` and has four dot-parts must NOT be trusted as local.
+        assert!(!is_loopback_host("127.evil.example.com"));
+        assert!(!is_loopback_host("127.0.0.1.evil.com"));
+        assert!(!is_loopback_host("notlocalhost"));
+        assert!(!is_loopback_host("10.0.0.1"));
+        assert!(!is_loopback_host("localhost.evil.com"));
+    }
+
+    #[test]
+    fn insecure_http_flags_a_hostile_127_lookalike() {
+        // loopback stays exempt (local runtimes use plain http)
+        assert!(!endpoint_uses_insecure_http("http://127.0.0.1:11434/v1"));
+        assert!(!endpoint_uses_insecure_http("http://localhost:8000/v1"));
+        // a real remote host dressed up as 127.* is insecure http
+        assert!(endpoint_uses_insecure_http(
+            "http://127.evil.example.com/v1"
+        ));
+    }
 }
