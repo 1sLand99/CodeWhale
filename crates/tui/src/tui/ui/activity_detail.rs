@@ -11,35 +11,8 @@ use crate::snapshot::SnapshotRepo;
 use crate::tui::app::App;
 use crate::tui::footer_ui::one_line_summary;
 use crate::tui::history::{HistoryCell, ToolCell, ToolStatus};
-use crate::tui::key_shortcuts;
 use crate::tui::pager::PagerView;
 use crate::tui::ui_text::{history_cell_to_text, truncate_line_to_width};
-
-/// Resolve the activity cell the user is most likely asking about.
-///
-/// Used by the Space fold/unfold gesture and detail footer hints. It prefers
-/// an explicitly selected activity cell, then a live activity in the current
-/// turn, then the most recent meaningful activity across history + active
-/// cells. Tool activity is intentionally rendered through the compact live
-/// view so the Activity Detail pager does not become an accidental raw-output
-/// dump; `v` remains the direct full tool-detail surface.
-///
-fn activity_target_cell_index(app: &App) -> Option<usize> {
-    if let Some(selected) = selected_transcript_cell_index(app)
-        && app
-            .cell_at_virtual_index(selected)
-            .is_some_and(is_meaningful_activity_cell)
-    {
-        return Some(selected);
-    }
-
-    current_activity_cell_index(app).or_else(|| {
-        (0..app.virtual_cell_count()).rev().find(|&idx| {
-            app.cell_at_virtual_index(idx)
-                .is_some_and(is_meaningful_activity_cell)
-        })
-    })
-}
 
 fn selected_transcript_cell_index(app: &App) -> Option<usize> {
     app.viewport
@@ -53,46 +26,6 @@ fn selected_transcript_cell_index(app: &App) -> Option<usize> {
                 .and_then(|meta| meta.cell_line())
                 .map(|(cell_index, _)| app.original_cell_index_for_rendered(cell_index))
         })
-}
-
-fn current_activity_cell_index(app: &App) -> Option<usize> {
-    let active = app.active_cell.as_ref()?;
-    let base = app.history.len();
-    for desired_rank in [0, 1, 2] {
-        if let Some((entry_idx, _)) = active
-            .entries()
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, cell)| activity_cell_rank(cell) == Some(desired_rank))
-        {
-            return Some(base + entry_idx);
-        }
-    }
-    None
-}
-
-fn is_meaningful_activity_cell(cell: &HistoryCell) -> bool {
-    activity_cell_rank(cell).is_some()
-}
-
-fn activity_cell_rank(cell: &HistoryCell) -> Option<u8> {
-    match cell {
-        HistoryCell::Thinking {
-            streaming: true, ..
-        } => Some(0),
-        HistoryCell::Tool(tool) => match tool_status_for_activity(tool) {
-            Some(ToolStatus::Running) => Some(0),
-            Some(ToolStatus::Failed) => Some(1),
-            Some(ToolStatus::Hydrated) => Some(2),
-            Some(ToolStatus::Success) => Some(2),
-            None => Some(2),
-        },
-        HistoryCell::SubAgent(_) => Some(0),
-        HistoryCell::Error { .. } => Some(1),
-        HistoryCell::Thinking { .. } => Some(2),
-        _ => None,
-    }
 }
 
 /// Open the full recorded-reasoning detail pager for the selected thinking
@@ -611,64 +544,6 @@ pub(super) fn detail_target_cell_index(app: &App) -> Option<usize> {
         app.viewport.transcript_cache.line_meta(),
     )
     .or_else(|| app.history.len().checked_sub(1))
-}
-
-pub(crate) fn selected_detail_footer_label(app: &App) -> Option<String> {
-    if app.viewport.transcript_selection.is_active() {
-        return None;
-    }
-    let cell_index = activity_footer_target_cell_index(app)?;
-    let cell = app.cell_at_virtual_index(cell_index)?;
-    let label = truncate_line_to_width(&activity_cell_label(app, cell_index, cell), 30);
-    let detail_hint = if app.cell_has_detail_target(cell_index) {
-        let noun = if matches!(cell, HistoryCell::SubAgent(_)) {
-            "details"
-        } else {
-            "raw details"
-        };
-        format!(
-            " · {}",
-            key_shortcuts::tool_details_shortcut_action_hint(noun)
-        )
-    } else {
-        String::new()
-    };
-    if matches!(cell, HistoryCell::Thinking { .. }) {
-        Some(format!(
-            "{} Reasoning detail · {label}{detail_hint}",
-            key_shortcuts::reasoning_detail_shortcut_label()
-        ))
-    } else {
-        Some(format!(
-            "{} Turn Inspector · {label}{detail_hint}",
-            key_shortcuts::turn_inspector_shortcut_label()
-        ))
-    }
-}
-
-fn activity_footer_target_cell_index(app: &App) -> Option<usize> {
-    let line_meta = app.viewport.transcript_cache.line_meta();
-    let start = app
-        .viewport
-        .last_transcript_top
-        .min(line_meta.len().saturating_sub(1));
-    let end = start
-        .saturating_add(app.viewport.last_transcript_visible.max(1))
-        .min(line_meta.len());
-    for meta in line_meta.iter().take(end).skip(start) {
-        let Some((cell_index, _)) = meta.cell_line() else {
-            continue;
-        };
-        let cell_index = app.original_cell_index_for_rendered(cell_index);
-        if app
-            .cell_at_virtual_index(cell_index)
-            .is_some_and(is_meaningful_activity_cell)
-        {
-            return Some(cell_index);
-        }
-    }
-
-    activity_target_cell_index(app)
 }
 
 pub(crate) fn detail_target_label(app: &App, cell_index: usize) -> Option<String> {

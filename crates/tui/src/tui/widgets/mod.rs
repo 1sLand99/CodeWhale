@@ -1,4 +1,3 @@
-mod footer;
 mod header;
 // Some helpers (`shift`, `ctrl_alt`, `is_press`, etc.) are part of the
 // public surface for issue #93's help overlay and future call sites; allow
@@ -12,10 +11,6 @@ mod renderable;
 pub mod tool_card;
 pub mod workflow_panel;
 
-pub use footer::{
-    FooterProps, FooterToast, FooterWidget, footer_agents_chip, footer_shell_label_chip,
-    footer_working_label,
-};
 pub use header::header_status_indicator_frame;
 pub use renderable::Renderable;
 
@@ -476,7 +471,7 @@ impl ChatWidget {
         } else {
             app.viewport.transcript_cache.lines()[top..end].to_vec()
         };
-        let mut line_links = if total_lines == 0 {
+        let line_links = if total_lines == 0 {
             vec![Vec::new()]
         } else {
             app.viewport.transcript_cache.line_links()[top..end].to_vec()

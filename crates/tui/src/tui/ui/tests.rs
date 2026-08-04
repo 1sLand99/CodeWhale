@@ -7,16 +7,13 @@ use crate::config::{
 use crate::config_ui::{self, WebConfigSession, WebConfigSessionEvent};
 use crate::core::engine::mock_engine_handle;
 use crate::tui::active_cell::ActiveCell;
-use crate::tui::app::{ReasoningEffort, SidebarHoverRow, SidebarHoverSection, ToolDetailRecord};
+use crate::tui::app::{ReasoningEffort, ToolDetailRecord};
 use crate::tui::file_mention::{
     apply_mention_menu_selection, find_file_mention_completions, partial_file_mention_at_cursor,
     try_autocomplete_file_mention, user_request_with_file_mentions, visible_mention_menu_entries,
 };
 use crate::tui::footer_ui::{
-    active_tool_status_label, footer_auxiliary_spans, footer_balance_spans, footer_cache_spans,
-    footer_session_tokens_spans, footer_state_label, footer_status_line_spans,
     format_context_budget, format_token_count_compact, friendly_subagent_progress,
-    render_footer_from,
 };
 use crate::tui::history::{
     ExecCell, ExecSource, GenericToolCell, HistoryCell, SubAgentCell, ToolCell, ToolStatus,
@@ -34,7 +31,6 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use unicode_width::UnicodeWidthStr;
 
 use crate::tui::selection::{SelectionAutoscroll, TranscriptSelectionPoint};
 use tempfile::TempDir;
@@ -4992,53 +4988,6 @@ fn backtrack_prefill_rehydrates_attachment_rows() {
 }
 
 #[test]
-fn active_tool_status_label_summarizes_live_tool_group() {
-    let mut app = create_test_app();
-    app.turn_started_at = Some(Instant::now() - Duration::from_secs(5));
-    let mut active = ActiveCell::new();
-    active.push_tool(
-        "exec-1",
-        HistoryCell::Tool(ToolCell::Exec(ExecCell {
-            command: "cargo test --workspace --all-features".to_string(),
-            status: ToolStatus::Running,
-            output: None,
-            live_output: None,
-            shell_task_id: None,
-            owner_agent_id: None,
-            owner_agent_name: None,
-            started_at: app.turn_started_at,
-            duration_ms: None,
-            stale_elapsed_since_output_ms: None,
-            source: ExecSource::Assistant,
-            interaction: None,
-            output_summary: None,
-        })),
-    );
-    active.push_tool(
-        "tool-2",
-        HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
-            name: "grep_files".to_string(),
-            status: ToolStatus::Success,
-            input_summary: Some("pattern: TODO".to_string()),
-            output: Some("done".to_string()),
-            prompts: None,
-            spillover_path: None,
-            output_summary: None,
-            is_diff: false,
-        })),
-    );
-    app.active_cell = Some(active);
-
-    let label = active_tool_status_label(&app, true).expect("status label");
-
-    assert!(label.contains("cargo test"));
-    assert!(label.contains("1 active"));
-    assert!(label.contains("1 done"));
-    assert!(label.contains(crate::tui::key_shortcuts::tool_details_shortcut_label().as_ref()));
-    assert!(label.contains("opens details"));
-}
-
-#[test]
 fn refresh_shell_exec_live_output_finalizes_restored_missing_shell_job() {
     let mut app = create_test_app();
     app.push_history_cell(HistoryCell::Tool(ToolCell::Exec(ExecCell {
@@ -5378,66 +5327,6 @@ fn shell_live_output_update_skips_finalized_exec_cell() {
     );
 
     assert!(shell_exec_live_update(&app, 0, &jobs).is_none());
-}
-
-#[test]
-fn active_tool_status_label_strips_shell_wrappers_from_ci_polling() {
-    let mut app = create_test_app();
-    app.turn_started_at = Some(Instant::now() - Duration::from_secs(5));
-    let mut active = ActiveCell::new();
-    active.push_tool(
-        "exec-1",
-        HistoryCell::Tool(ToolCell::Exec(ExecCell {
-            command: "cd /tmp/repo && sleep 15 && gh pr checks 1611 --repo Hmbown/CodeWhale"
-                .to_string(),
-            status: ToolStatus::Running,
-            output: None,
-            live_output: None,
-            shell_task_id: None,
-            owner_agent_id: None,
-            owner_agent_name: None,
-            started_at: app.turn_started_at,
-            duration_ms: None,
-            stale_elapsed_since_output_ms: None,
-            source: ExecSource::Assistant,
-            interaction: None,
-            output_summary: None,
-        })),
-    );
-    app.active_cell = Some(active);
-
-    let label = active_tool_status_label(&app, true).expect("status label");
-
-    assert!(label.contains("gh pr checks 1611"), "label: {label}");
-    assert!(!label.contains("cd /tmp"), "label: {label}");
-    assert!(!label.contains("sleep 15"), "label: {label}");
-}
-
-#[test]
-fn active_tool_status_label_counts_foreground_rlm_work() {
-    let mut app = create_test_app();
-    app.turn_started_at = Some(Instant::now() - Duration::from_secs(5));
-    let mut active = ActiveCell::new();
-    active.push_tool(
-        "rlm-1",
-        HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
-            name: "rlm".to_string(),
-            status: ToolStatus::Running,
-            input_summary: Some("task: compare projects".to_string()),
-            output: None,
-            prompts: None,
-            spillover_path: None,
-            output_summary: None,
-            is_diff: false,
-        })),
-    );
-    app.active_cell = Some(active);
-
-    let label = active_tool_status_label(&app, true).expect("status label");
-
-    assert!(label.contains("rlm"), "label: {label}");
-    assert!(!label.contains("tool rlm"), "label: {label}");
-    assert!(label.contains("1 active"), "label: {label}");
 }
 
 #[test]
@@ -8774,13 +8663,6 @@ fn init_git_repo() -> TempDir {
     dir
 }
 
-fn spans_text(spans: &[Span<'_>]) -> String {
-    spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect::<String>()
-}
-
 #[test]
 fn ctrl_alt_4_selects_pinned_rail_panel_without_switching_modes() {
     let mut app = create_test_app();
@@ -9755,22 +9637,6 @@ fn fanout_interrupted_mailbox_drops_running_count() {
 }
 
 #[test]
-fn stall_reason_provider_wait_includes_route_and_idle_budget() {
-    let mut app = create_test_app();
-    app.is_loading = true;
-    app.stream_chunk_timeout_secs = 300;
-    // Set idle to 65s so it exceeds the 60s threshold (#3189).
-    app.turn_started_at = Some(Instant::now() - Duration::from_secs(70));
-    app.turn_last_activity_at = Some(Instant::now() - Duration::from_secs(65));
-
-    let reason = crate::tui::footer_ui::stall_reason(&app).expect("stalled turn has a reason");
-    assert!(reason.contains("waiting for model"), "{reason}");
-    // idle >= 60s, so the counter appears, but < 75% budget (225s) so no budget detail.
-    assert!(reason.contains("1m 05s"), "{reason}");
-    assert!(!reason.contains("/5m 00s"), "{reason}");
-}
-
-#[test]
 fn reconcile_syncs_stale_running_cards_with_interrupted_snapshots() {
     let mut app = create_test_app();
     app.pending_subagent_dispatch = Some("rlm".to_string());
@@ -9812,49 +9678,6 @@ fn reconcile_syncs_stale_running_cards_with_interrupted_snapshots() {
 }
 
 #[test]
-fn stall_reason_provider_wait_reports_zero_running_for_planned_fanout() {
-    let mut app = create_test_app();
-    app.is_loading = true;
-    app.turn_started_at = Some(Instant::now() - Duration::from_secs(45));
-
-    // A fanout plan exists (card seeded with pending workers) but no child
-    // agent has launched yet: the reason must say 0 running explicitly.
-    let card = crate::tui::widgets::agent_card::FanoutCard::new("rlm")
-        .with_workers(["task:a", "task:b", "task:c", "task:d"]);
-    app.history
-        .push(HistoryCell::SubAgent(SubAgentCell::Fanout(card)));
-    app.history_revisions.push(0);
-    app.last_fanout_card_index = Some(app.history.len() - 1);
-
-    let reason = crate::tui::footer_ui::stall_reason(&app).expect("stalled turn has a reason");
-    assert!(reason.contains("fanout 0/4"), "{reason}");
-
-    // Once a worker is actually running the marker disappears.
-    if let Some(HistoryCell::SubAgent(SubAgentCell::Fanout(card))) = app
-        .last_fanout_card_index
-        .and_then(|idx| app.history.get_mut(idx))
-    {
-        card.upsert_worker(
-            "task:a",
-            crate::tui::widgets::agent_card::AgentLifecycle::Running,
-        );
-    }
-    let reason = crate::tui::footer_ui::stall_reason(&app).expect("stalled turn has a reason");
-    assert!(!reason.contains("fanout 0/4"), "{reason}");
-}
-
-#[test]
-fn stall_reason_provider_wait_flags_pending_dispatch() {
-    let mut app = create_test_app();
-    app.is_loading = true;
-    app.turn_started_at = Some(Instant::now() - Duration::from_secs(31));
-    app.pending_subagent_dispatch = Some("agent".to_string());
-
-    let reason = crate::tui::footer_ui::stall_reason(&app).expect("stalled turn has a reason");
-    assert!(reason.contains("dispatch pending"), "{reason}");
-}
-
-#[test]
 fn provider_wait_incident_logs_once_per_turn() {
     let mut app = create_test_app();
     app.is_loading = true;
@@ -9888,69 +9711,9 @@ fn format_token_count_compact_formats_units() {
 }
 
 #[test]
-fn footer_session_tokens_chip_uses_single_compact_total() {
-    let mut app = create_test_app();
-    app.session.total_input_tokens = 900_000;
-    app.session.total_cache_hit_tokens = 700_000;
-    app.session.total_cache_miss_tokens = 200_000;
-    app.session.total_output_tokens = 600_000;
-
-    let text = spans_text(&footer_session_tokens_spans(&app));
-
-    assert_eq!(text, "tok 1.5M");
-    assert!(!text.contains(" cch "));
-    assert!(!text.contains(" out"));
-}
-
-#[test]
-fn footer_session_tokens_chip_shows_token_count_without_throughput() {
-    // Throughput display ("out ~12/s live") was removed — the token count
-    // is enough. See commit history for rationale.
-    let mut app = create_test_app();
-    app.is_loading = true;
-    app.turn_started_at = Some(Instant::now() - Duration::from_secs(10));
-    app.streaming_output_token_estimate = 125;
-
-    let text = spans_text(&footer_session_tokens_spans(&app));
-
-    // No tokens accumulated yet (only streaming estimate), so chip is empty.
-    assert_eq!(text, "");
-}
-
-#[test]
-fn footer_session_tokens_chip_shows_compact_total() {
-    let mut app = create_test_app();
-    app.session.total_input_tokens = 1_000;
-    app.session.total_output_tokens = 240;
-    app.session.last_output_throughput =
-        crate::resource_telemetry::TokenThroughput::new(240, Duration::from_secs(12));
-
-    let text = spans_text(&footer_session_tokens_spans(&app));
-
-    // Token count shown; throughput NOT appended.
-    assert_eq!(text, "tok 1.2k");
-    assert!(!text.contains("out"));
-    assert!(!text.contains("/s"));
-}
-
-#[test]
 fn format_context_budget_caps_overflow_display() {
     assert_eq!(format_context_budget(5_000, 128_000), "5.0k/128.0k");
     assert_eq!(format_context_budget(250_000, 128_000), ">128.0k/128.0k");
-}
-
-#[test]
-fn footer_state_label_shows_idle_ready_and_prefers_compacting() {
-    // Header ● Live owns coarse busy state during streaming turns.
-    let mut app = create_test_app();
-    assert_eq!(footer_state_label(&app).0, "idle");
-
-    app.is_loading = true;
-    assert_eq!(footer_state_label(&app).0, "ready");
-    assert_ne!(footer_state_label(&app).0, "thinking");
-
-    app.is_compacting = true;
-    assert!(footer_state_label(&app).0.starts_with("compacting"));
 }
 
 #[test]
@@ -10266,162 +10029,6 @@ fn slow_external_url_command() -> Command {
     let mut command = Command::new("cmd");
     command.args(["/C", "ping -n 2 127.0.0.1 >NUL"]);
     command
-}
-
-#[test]
-fn footer_status_line_spans_show_model_idle_and_active() {
-    let mut app = create_test_app();
-    app.model = "deepseek-v4-flash".to_string();
-
-    let idle = spans_text(&footer_status_line_spans(&app, 60));
-    assert!(idle.contains("deepseek-v4-flash"));
-    assert!(idle.contains("\u{00B7}"));
-    assert!(idle.contains("idle"));
-    assert!(!idle.contains("act"));
-    assert!(!idle.contains("agent"));
-
-    // Header ● Live owns coarse busy state; footer defers to action detail.
-    app.is_loading = true;
-    let active = spans_text(&footer_status_line_spans(&app, 60));
-    assert!(active.contains("deepseek-v4-flash"));
-    assert!(
-        !active.contains("busy"),
-        "footer must not repeat coarse busy when header streams: {active}"
-    );
-    assert!(
-        !active.contains("thinking"),
-        "footer must not show a `thinking` text label while loading"
-    );
-}
-
-#[test]
-fn footer_status_line_spans_truncate_long_model_names() {
-    let mut app = create_test_app();
-    app.model = "deepseek-v4-pro-with-an-extremely-long-model-name".to_string();
-    app.is_loading = true;
-
-    let line = spans_text(&footer_status_line_spans(&app, 40));
-    assert!(line.contains("..."));
-    assert!(UnicodeWidthStr::width(line.as_str()) <= 40);
-}
-
-#[test]
-fn footer_auxiliary_spans_show_cache_when_compact() {
-    let mut app = create_test_app();
-    app.is_loading = true;
-    app.session.last_prompt_tokens = Some(48_000);
-    app.session.last_prompt_cache_hit_tokens = Some(36_000);
-    app.session.last_prompt_cache_miss_tokens = Some(12_000);
-    app.session.session_cost = 12.34;
-
-    let compact = spans_text(&footer_auxiliary_spans(&app, 48));
-    assert!(compact.contains("Cache: 75.0% hit"));
-    assert!(!compact.contains('$'));
-}
-
-#[test]
-fn footer_auxiliary_spans_show_cache_unavailable_when_provider_omits_cache_fields() {
-    let mut app = create_test_app();
-    app.session.last_prompt_tokens = Some(48_000);
-    app.session.last_completion_tokens = Some(2_000);
-
-    let roomy = spans_text(&footer_auxiliary_spans(&app, 72));
-
-    assert!(roomy.contains("Cache: unavailable"));
-}
-
-#[test]
-fn footer_auxiliary_spans_show_cache_and_cost_when_roomy() {
-    let mut app = create_test_app();
-    app.session.last_prompt_tokens = Some(48_000);
-    app.session.last_prompt_cache_hit_tokens = Some(36_000);
-    app.session.last_prompt_cache_miss_tokens = Some(12_000);
-    app.session.session_cost = 12.34;
-
-    let roomy = spans_text(&footer_auxiliary_spans(&app, 72));
-    assert!(roomy.contains("Cache: 75.0% hit | hit 36000 | miss 12000"));
-    assert!(roomy.contains("$12.34"));
-    assert!(
-        !roomy.contains("ctx"),
-        "context % removed from footer — shown in header only"
-    );
-}
-
-#[test]
-fn footer_cache_low_hit_with_stable_prefix_is_not_error_colored() {
-    let mut app = create_test_app();
-    app.session.last_prompt_tokens = Some(10_000);
-    app.session.last_prompt_cache_hit_tokens = Some(500);
-    app.session.last_prompt_cache_miss_tokens = Some(9_500);
-    app.prefix_stability_pct = Some(100);
-    app.prefix_change_count = 0;
-
-    let spans = footer_cache_spans(&app);
-
-    assert_eq!(spans_text(&spans), "Cache: 5.0% hit | hit 500 | miss 9500");
-    assert_eq!(spans[0].style.fg, Some(palette::TEXT_MUTED));
-}
-
-#[test]
-fn footer_cache_low_hit_with_prefix_churn_stays_error_colored() {
-    let mut app = create_test_app();
-    app.session.last_prompt_tokens = Some(10_000);
-    app.session.last_prompt_cache_hit_tokens = Some(500);
-    app.session.last_prompt_cache_miss_tokens = Some(9_500);
-    app.prefix_stability_pct = Some(80);
-    app.prefix_change_count = 2;
-
-    let spans = footer_cache_spans(&app);
-
-    assert_eq!(spans[0].style.fg, Some(palette::STATUS_ERROR));
-}
-
-#[test]
-fn footer_auxiliary_spans_show_tiny_positive_cost_when_roomy() {
-    let mut app = create_test_app();
-    app.session.session_cost = 0.00005;
-
-    let roomy = spans_text(&footer_auxiliary_spans(&app, 32));
-    assert!(roomy.contains("<$0.0001"));
-}
-
-#[test]
-fn footer_auxiliary_spans_use_configured_cost_currency() {
-    let mut app = create_test_app();
-    app.cost_currency = crate::pricing::CostCurrency::Cny;
-    app.session.session_cost_cny = 2.5;
-
-    let roomy = spans_text(&footer_auxiliary_spans(&app, 32));
-    assert!(roomy.contains("¥2.50"));
-    assert!(!roomy.contains('$'));
-}
-
-#[test]
-fn footer_auxiliary_spans_show_reasoning_replay_chip() {
-    // Issue #30: when a thinking-mode tool-calling turn replays prior
-    // reasoning_content, the footer surfaces the approximate input-token
-    // cost so users can see why their context filled up.
-    let mut app = create_test_app();
-    app.session.last_prompt_tokens = Some(48_000);
-    app.session.last_reasoning_replay_tokens = Some(8_200);
-
-    let spans = footer_auxiliary_spans(&app, 64);
-    let text = spans_text(&spans);
-    assert!(
-        text.contains("rsn 8.2k"),
-        "expected replay chip, got {text:?}"
-    );
-}
-
-#[test]
-fn footer_auxiliary_spans_hide_reasoning_replay_when_zero() {
-    let mut app = create_test_app();
-    app.session.last_prompt_tokens = Some(48_000);
-    app.session.last_reasoning_replay_tokens = Some(0);
-
-    let spans = footer_auxiliary_spans(&app, 64);
-    let text = spans_text(&spans);
-    assert!(!text.contains("rsn"), "zero replay must not render chip");
 }
 
 #[test]
@@ -12794,134 +12401,6 @@ fn pop_pager_body(app: &mut App) -> String {
         .downcast_mut::<PagerView>()
         .expect("top view should be pager");
     pager.body_text()
-}
-
-#[test]
-fn detail_target_prefers_visible_tool_card() {
-    let mut app = create_test_app();
-    app.history = vec![
-        HistoryCell::User {
-            content: "hello".to_string(),
-        },
-        HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
-            name: "file_search".to_string(),
-            status: ToolStatus::Success,
-            input_summary: Some("query: foo".to_string()),
-            output: Some("done".to_string()),
-            prompts: None,
-            spillover_path: None,
-            output_summary: None,
-            is_diff: false,
-        })),
-        HistoryCell::Assistant {
-            content: "ok".to_string(),
-            streaming: false,
-        },
-        HistoryCell::Tool(ToolCell::Generic(GenericToolCell {
-            name: "exec_shell".to_string(),
-            status: ToolStatus::Success,
-            input_summary: Some("command: ls".to_string()),
-            output: Some("...".to_string()),
-            prompts: None,
-            spillover_path: None,
-            output_summary: None,
-            is_diff: false,
-        })),
-    ];
-    app.tool_details_by_cell.insert(
-        1,
-        ToolDetailRecord {
-            tool_id: "search-1".to_string(),
-            tool_name: "file_search".to_string(),
-            input: serde_json::json!({"query": "foo"}),
-            output: Some("done".to_string()),
-        },
-    );
-    app.tool_details_by_cell.insert(
-        3,
-        ToolDetailRecord {
-            tool_id: "exec-1".to_string(),
-            tool_name: "exec_shell".to_string(),
-            input: serde_json::json!({"command": "ls"}),
-            output: Some("...".to_string()),
-        },
-    );
-    app.resync_history_revisions();
-    let revisions = app.history_revisions.clone();
-    app.viewport.transcript_cache.ensure(
-        &app.history,
-        &revisions,
-        100,
-        app.transcript_render_options(),
-    );
-    app.viewport.last_transcript_top = first_line_for_cell(&app, 1);
-    app.viewport.last_transcript_visible = 6;
-
-    assert_eq!(detail_target_cell_index(&app), Some(1));
-    let expected = format!(
-        "{} Turn Inspector · find · {}",
-        crate::tui::key_shortcuts::turn_inspector_shortcut_label(),
-        crate::tui::key_shortcuts::tool_details_shortcut_action_hint("raw details")
-    );
-    assert_eq!(
-        selected_detail_footer_label(&app).as_deref(),
-        Some(expected.as_str())
-    );
-}
-
-#[test]
-fn activity_footer_hint_surfaces_visible_thinking_without_raw_tool_hint() {
-    let mut app = create_test_app();
-    app.history = vec![HistoryCell::Thinking {
-        content: "visible reasoning".to_string(),
-        streaming: false,
-        duration_secs: Some(1.4),
-    }];
-    app.resync_history_revisions();
-    let revisions = app.history_revisions.clone();
-    app.viewport.transcript_cache.ensure(
-        &app.history,
-        &revisions,
-        100,
-        app.transcript_render_options(),
-    );
-    app.viewport.last_transcript_top = first_line_for_cell(&app, 0);
-    app.viewport.last_transcript_visible = 4;
-
-    assert_eq!(
-        selected_detail_footer_label(&app).as_deref(),
-        Some("Ctrl+O Reasoning detail · thinking")
-    );
-}
-
-#[test]
-fn activity_footer_hint_uses_details_for_subagent_cards() {
-    let mut app = create_test_app();
-    app.history = vec![HistoryCell::SubAgent(
-        crate::tui::history::SubAgentCell::Delegate(
-            crate::tui::widgets::agent_card::DelegateCard::new("agent_123", "general"),
-        ),
-    )];
-    app.resync_history_revisions();
-    let revisions = app.history_revisions.clone();
-    app.viewport.transcript_cache.ensure(
-        &app.history,
-        &revisions,
-        100,
-        app.transcript_render_options(),
-    );
-    app.viewport.last_transcript_top = first_line_for_cell(&app, 0);
-    app.viewport.last_transcript_visible = 4;
-
-    let expected = format!(
-        "{} Turn Inspector · sub-agent · {}",
-        crate::tui::key_shortcuts::turn_inspector_shortcut_label(),
-        crate::tui::key_shortcuts::tool_details_shortcut_action_hint("details")
-    );
-    assert_eq!(
-        selected_detail_footer_label(&app).as_deref(),
-        Some(expected.as_str())
-    );
 }
 
 #[test]
@@ -18429,20 +17908,6 @@ fn build_pending_input_preview_includes_current_context_chips() {
 }
 
 #[test]
-fn render_footer_from_with_default_items_leaves_header_owned_facts_out() {
-    // Header owns model and mode; footer shows cost/status only.
-    let mut app = create_test_app();
-    app.session.session_cost = 0.00005;
-    let items = crate::config::StatusItem::default_footer();
-    let props = render_footer_from(&app, &items, None);
-    assert!(props.mode_label.is_empty(), "footer should not repeat mode");
-    assert!(props.model.is_empty(), "footer should not repeat model");
-    // Tiny but real costs should render instead of disappearing as "$0.00".
-    assert!(!props.cost.is_empty());
-    assert_eq!(spans_text(&props.cost), "<$0.0001");
-}
-
-#[test]
 fn default_footer_excludes_provider_specific_diagnostic_chips() {
     let items = crate::config::StatusItem::default_footer();
 
@@ -18464,226 +17929,7 @@ fn default_footer_excludes_provider_specific_diagnostic_chips() {
     );
 }
 
-#[test]
-fn render_footer_from_prefix_stability_item_renders_cache_slot_chip() {
-    let mut app = create_test_app();
-    app.prefix_stability_pct = Some(100);
-    app.prefix_change_count = 0;
-
-    let props = render_footer_from(&app, &[crate::config::StatusItem::PrefixStability], None);
-
-    assert_eq!(spans_text(&props.cache), "cache prefix 100%");
-}
-
-#[test]
-fn render_footer_from_preserves_prefix_then_cache_order() {
-    let mut app = create_test_app();
-    app.prefix_stability_pct = Some(100);
-    app.prefix_change_count = 0;
-    app.session.last_prompt_tokens = Some(10_000);
-    app.session.last_prompt_cache_hit_tokens = Some(9_000);
-    app.session.last_prompt_cache_miss_tokens = Some(1_000);
-
-    let props = render_footer_from(
-        &app,
-        &[
-            crate::config::StatusItem::PrefixStability,
-            crate::config::StatusItem::Cache,
-        ],
-        None,
-    );
-
-    assert!(spans_text(&props.cache).starts_with("cache prefix 100%  Cache: 90.0% hit"));
-}
-
-#[test]
-fn render_footer_from_with_empty_items_blanks_every_segment() {
-    // A user who toggles every chip OFF should get a bare footer (no model
-    // text, no cost, no auxiliary chips). This is the explicit-empty case.
-    let mut app = create_test_app();
-    app.session.session_cost = 1.5;
-    let props = render_footer_from(&app, &[], None);
-    assert_eq!(props.mode_label, "");
-    assert!(props.model.is_empty());
-    assert!(props.cost.is_empty());
-    assert!(props.agents.is_empty());
-    assert!(props.cache.is_empty());
-}
-
-#[test]
-fn render_footer_from_surfaces_background_shell_even_without_tasks_panel() {
-    let mut app = create_test_app();
-    app.task_panel = vec![crate::tui::app::TaskPanelEntry {
-        id: "shell_abc".to_string(),
-        status: "running".to_string(),
-        prompt_summary: "shell: cargo test -p codewhale-tui".to_string(),
-        duration_ms: Some(5_000),
-        kind: crate::tui::app::TaskPanelEntryKind::Background,
-        stale: false,
-        elapsed_since_output_ms: None,
-        owner_agent_id: None,
-        owner_agent_name: None,
-        current_tool: None,
-        role: None,
-        files_touched: 0,
-    }];
-
-    let props = render_footer_from(&app, &[], None);
-    let shell = spans_text(&props.cache);
-    assert!(shell.contains("shell bg:"), "{shell}");
-    assert!(shell.contains("cargo test"), "{shell}");
-}
-
-#[test]
-fn render_footer_from_drops_only_unselected_clusters() {
-    // Toggling Cost off but keeping the rest should hide cost only.
-    let mut app = create_test_app();
-    app.session.session_cost = 0.42;
-    let items: Vec<crate::config::StatusItem> = crate::config::StatusItem::default_footer()
-        .into_iter()
-        .filter(|item| *item != crate::config::StatusItem::Cost)
-        .collect();
-    let props = render_footer_from(&app, &items, None);
-    assert!(props.mode_label.is_empty());
-    assert!(props.model.is_empty(), "footer should not repeat model");
-    assert!(
-        props.cost.is_empty(),
-        "cost cluster should be empty when Cost is disabled"
-    );
-}
-
-#[test]
-fn render_footer_from_git_branch_item_renders_workspace_branch() {
-    let repo = init_git_repo();
-    let checkout = Command::new("git")
-        .args(["checkout", "-b", "feature/statusline"])
-        .current_dir(repo.path())
-        .output()
-        .expect("git checkout should run");
-    assert!(
-        checkout.status.success(),
-        "git checkout failed: {}",
-        String::from_utf8_lossy(&checkout.stderr)
-    );
-
-    let mut app = create_test_app();
-    app.workspace = repo.path().to_path_buf();
-    crate::tui::workspace_context::refresh_if_needed(&mut app, Instant::now(), true);
-
-    let props = render_footer_from(&app, &[crate::config::StatusItem::GitBranch], None);
-    // #3188: the chip now leads with the workspace repo identity, then the
-    // branch. The temp repo basename is random, so assert the stable shape:
-    // a `Repo:` prefix joined to the actual branch via " @ ".
-    let chip = spans_text(&props.cache);
-    assert!(
-        chip.starts_with("Repo: "),
-        "chip should name the repo: {chip:?}"
-    );
-    assert!(
-        chip.ends_with(" @ feature/statusline"),
-        "chip should show the current branch: {chip:?}"
-    );
-}
-
 // ── Balance footer chip tests ─────────────────────────────────────
-
-#[test]
-fn footer_balance_spans_empty_when_cell_is_none() {
-    let app = create_test_app();
-    let spans = footer_balance_spans(&app);
-    assert!(spans.is_empty());
-}
-
-#[test]
-fn footer_balance_spans_empty_when_balance_is_zero() {
-    let app = create_test_app();
-    let info = crate::pricing::BalanceInfo {
-        currency: "USD".into(),
-        total_balance: "0".into(),
-        ..Default::default()
-    };
-    *app.balance_cell.lock().unwrap() = Some(info);
-    let spans = footer_balance_spans(&app);
-    assert!(spans.is_empty());
-}
-
-#[test]
-fn footer_balance_spans_formats_cny() {
-    let app = create_test_app();
-    let info = crate::pricing::BalanceInfo {
-        currency: "CNY".into(),
-        total_balance: "123.45".into(),
-        ..Default::default()
-    };
-    *app.balance_cell.lock().unwrap() = Some(info);
-    let spans = footer_balance_spans(&app);
-    assert_eq!(spans_text(&spans), "balance ¥123.5");
-}
-
-#[test]
-fn footer_balance_spans_formats_usd() {
-    let app = create_test_app();
-    let info = crate::pricing::BalanceInfo {
-        currency: "USD".into(),
-        total_balance: "0.50".into(),
-        ..Default::default()
-    };
-    *app.balance_cell.lock().unwrap() = Some(info);
-    let spans = footer_balance_spans(&app);
-    assert_eq!(spans_text(&spans), "balance $0.50");
-}
-
-#[test]
-fn footer_balance_spans_rounds_large_amount() {
-    let app = create_test_app();
-    let info = crate::pricing::BalanceInfo {
-        currency: "USD".into(),
-        total_balance: "1234.56".into(),
-        ..Default::default()
-    };
-    *app.balance_cell.lock().unwrap() = Some(info);
-    let spans = footer_balance_spans(&app);
-    assert_eq!(spans_text(&spans), "balance $1235");
-}
-
-#[test]
-fn footer_balance_spans_treats_unknown_currency_as_usd() {
-    let app = create_test_app();
-    let info = crate::pricing::BalanceInfo {
-        currency: "EUR".into(),
-        total_balance: "10.00".into(),
-        ..Default::default()
-    };
-    *app.balance_cell.lock().unwrap() = Some(info);
-    let spans = footer_balance_spans(&app);
-    assert_eq!(spans_text(&spans), "balance $10.0");
-}
-
-#[test]
-fn render_footer_from_with_balance_item_shows_balance() {
-    let app = create_test_app();
-    let info = crate::pricing::BalanceInfo {
-        currency: "USD".into(),
-        total_balance: "42.50".into(),
-        ..Default::default()
-    };
-    *app.balance_cell.lock().unwrap() = Some(info);
-    let props = render_footer_from(&app, &[crate::config::StatusItem::Balance], None);
-    assert_eq!(spans_text(&props.balance), "balance $42.5");
-}
-
-#[test]
-fn render_footer_from_without_balance_item_hides_balance() {
-    let app = create_test_app();
-    let info = crate::pricing::BalanceInfo {
-        currency: "USD".into(),
-        total_balance: "99.99".into(),
-        ..Default::default()
-    };
-    *app.balance_cell.lock().unwrap() = Some(info);
-    let props = render_footer_from(&app, &[], None);
-    assert!(spans_text(&props.balance).is_empty());
-}
 
 #[test]
 fn should_fetch_deepseek_balance_requires_balance_status_item() {
@@ -18707,36 +17953,6 @@ fn should_fetch_deepseek_balance_requires_deepseek_provider() {
 
     app.api_provider = ApiProvider::DeepseekCN;
     assert!(should_fetch_deepseek_balance(&app));
-}
-
-#[test]
-fn default_footer_renders_workspace_branch_when_available() {
-    let repo = init_git_repo();
-    let checkout = Command::new("git")
-        .args(["checkout", "-b", "feature/default-branch-chip"])
-        .current_dir(repo.path())
-        .output()
-        .expect("git checkout should run");
-    assert!(
-        checkout.status.success(),
-        "git checkout failed: {}",
-        String::from_utf8_lossy(&checkout.stderr)
-    );
-
-    let mut app = create_test_app();
-    app.workspace = repo.path().to_path_buf();
-    crate::tui::workspace_context::refresh_if_needed(&mut app, Instant::now(), true);
-
-    let props = render_footer_from(&app, &crate::config::StatusItem::default_footer(), None);
-    let cache = spans_text(&props.cache);
-    assert!(
-        cache.contains("feature/default-branch-chip"),
-        "default footer should include the current git branch: {cache:?}"
-    );
-    assert!(
-        cache.contains("Repo: "),
-        "default footer should name the repo identity (#3188): {cache:?}"
-    );
 }
 
 /// Regression for issue #244: visible session spend must not decrease.

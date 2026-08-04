@@ -1617,13 +1617,14 @@ fn subscription_route_hides_stale_session_dollars_in_footer() {
     app.accrue_session_cost_estimate(CostEstimate::usd_only(12.34));
     app.billing_presentation =
         crate::route_billing::BillingPresentation::Subscription("Codex OAuth quota");
-    // Stale unaudited dollars must never render on a plan route; the footer
-    // shows the plan-aware usage line instead of money or silence.
-    let spans = crate::tui::footer_ui::footer_cost_spans(&app);
-    let rendered = spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect::<String>();
+    // Stale unaudited dollars must never render on a plan route; the usage
+    // chip carries the plan-aware line instead of money or silence.
+    let chip = app.cumulative_usage_chip();
+    assert!(
+        !matches!(chip, crate::route_billing::UsageChip::Money(_)),
+        "{chip:?}"
+    );
+    let rendered = crate::route_billing::format_usage_chip(&chip).unwrap_or_default();
     assert!(!rendered.contains('$'), "{rendered}");
     assert!(rendered.contains("Codex OAuth quota"), "{rendered}");
 }
@@ -1653,7 +1654,10 @@ fn provider_switch_keeps_audited_cumulative_spend_visible() {
         app.cumulative_usage_chip(),
         crate::route_billing::UsageChip::Money(_)
     ));
-    assert!(!crate::tui::footer_ui::footer_cost_spans(&app).is_empty());
+    assert!(
+        crate::route_billing::format_usage_chip(&app.cumulative_usage_chip())
+            .is_some_and(|label| !label.is_empty())
+    );
 
     let unknown = crate::pricing::audit_turn_cost_for_route_at(
         ApiProvider::Openai,

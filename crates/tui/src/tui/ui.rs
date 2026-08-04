@@ -162,8 +162,7 @@ use super::widgets::{ChatWidget, ComposerWidget, Renderable};
 // `crate::tui::ui::{...}` importers (mouse_ui, footer_ui) keep resolving, and
 // import the ui-internal entry points used from this file's own body.
 pub(crate) use self::activity_detail::{
-    copy_cell_to_clipboard, detail_target_label, open_details_pager_for_cell,
-    selected_detail_footer_label, turn_handoff_markdown,
+    copy_cell_to_clipboard, detail_target_label, open_details_pager_for_cell, turn_handoff_markdown,
 };
 use self::activity_detail::{
     copy_focused_cell, detail_target_cell_index, extract_reasoning_header,
